@@ -8,7 +8,7 @@ import Animated from "react-native-reanimated";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { useStrike } from "../../theme/motion";
-import { rowHeight, space } from "../../theme/tokens";
+import { radii, rowHeight, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 
 export interface KeyValueRowProps {
@@ -70,7 +70,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     gap: space.space12,
   },
-  pressable: { borderWidth: 2, borderRadius: 8 },
+  pressable: { borderWidth: 2, borderRadius: radii.radius8 },
   // A long value (e.g. a full server hostname) otherwise refuses to shrink — RN's Text
   // defaults to flexShrink: 0, so `space-between` collapses to zero gap and the label and
   // value render touching, with numberOfLines={1} never getting a chance to ellipsize.

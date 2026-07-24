@@ -1,4 +1,4 @@
-// DESIGN_SYSTEM.md §6 Containers — Screen: safe-area, bg1, gutter, optional
+// DESIGN_SYSTEM.md §6 Containers — Screen: safe-area, bg0, gutter, optional
 // scroll + keyboard-avoid. ONE per route.
 import React from "react";
 import {
@@ -11,10 +11,9 @@ import {
   type ViewStyle,
 } from "react-native";
 import { type Edge, SafeAreaView } from "react-native-safe-area-context";
-import { LinearGradient } from "expo-linear-gradient";
 
 import { useTokens } from "../../theme/ThemeProvider";
-import { gutter, type ColorTokens } from "../../theme/tokens";
+import { gutter } from "../../theme/tokens";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
 export interface ScreenProps {
@@ -34,7 +33,9 @@ export interface ScreenProps {
 
 /**
  * §3: screen gutter 16 (compact) / 24 (medium+), via useBreakpoint(). §6: safe-area,
- * bg1, optional scroll + keyboard-avoid — one instance per route.
+ * bg0, optional scroll + keyboard-avoid — one instance per route. Machined drops the
+ * old ambient "forge wash" gradient entirely (thermal identity retired) — the screen
+ * is just its flat background color now.
  */
 export function Screen({
   children,
@@ -64,8 +65,7 @@ export function Screen({
   );
 
   return (
-    <SafeAreaView style={[styles.flex, { backgroundColor: tokens.bg1 }, style]} edges={edges}>
-      <ForgeWash tokens={tokens} />
+    <SafeAreaView style={[styles.flex, { backgroundColor: tokens.bg0 }, style]} edges={edges}>
       {keyboardAvoiding ? (
         <KeyboardAvoidingView
           style={styles.flex}
@@ -81,61 +81,11 @@ export function Screen({
   );
 }
 
-/**
- * DESIGN_ELEVATION.md Move 1 — the ONE subtle top ambient ember wash, implemented
- * once here (never per-card). Web: real CSS radial-gradient via `forgeWash`.
- * Native: a top-anchored `expo-linear-gradient` approximation (radial gradients
- * aren't supported natively), tinted with the theme's accent at the same low
- * alpha the token spec calls for (5% dark / 4% light).
- */
-function ForgeWash({ tokens }: { tokens: ColorTokens }) {
-  if (Platform.OS === "web") {
-    return (
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          { backgroundImage: tokens.forgeWash, pointerEvents: "none" } as object,
-        ]}
-      />
-    );
-  }
-
-  return (
-    // Native views do not clip absolutely positioned children by default. The wash starts
-    // above its Screen (`top: -80`) to soften the gradient, so without this local clipping
-    // layer it escapes into earlier siblings such as the session header. Web uses an
-    // absolute-fill CSS background and never takes this path.
-    <View pointerEvents="none" style={styles.washClip}>
-      <LinearGradient
-        colors={[tokens.accent, tokens.accentTransparent]}
-        start={{ x: 0.5, y: 0 }}
-        end={{ x: 0.5, y: 1 }}
-        style={[styles.nativeWash, { opacity: tokens.forgeWashOpacity }]}
-      />
-    </View>
-  );
-}
-
 // Web-only: stops this scroll surface's rubber-band from chaining into a page-level
 // bounce (RN has no typed `overscrollBehavior`, RN-web passes unknown style keys through
-// to the underlying DOM node — same escape hatch `forgeWash`'s `backgroundImage` uses above).
+// to the underlying DOM node).
 const webScrollContain = { overscrollBehavior: "contain" };
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  washClip: {
-    position: "absolute",
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    overflow: "hidden",
-  },
-  nativeWash: {
-    position: "absolute",
-    top: -80,
-    left: "-20%",
-    right: "-20%",
-    height: 420,
-  },
 });

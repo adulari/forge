@@ -17,13 +17,13 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { HostDot } from "../components/anywhere/HostDot";
 import { Button } from "../components/ds/Button";
-import { Checkbox } from "../components/ds/Checkbox";
 import { IconButton } from "../components/ds/IconButton";
 import { ListRow } from "../components/ds/ListRow";
 import { Screen } from "../components/ds/Screen";
 import { SectionHeader } from "../components/ds/SectionHeader";
 import { Segmented } from "../components/ds/Segmented";
 import { Sheet } from "../components/ds/Sheet";
+import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
 import { ModelPicker } from "../components/session/ModelPicker";
 import { ProjectPicker } from "../components/session/ProjectPicker";
@@ -37,7 +37,7 @@ import { lastProjectStorageKey } from "../lib/projectSelection";
 import { useCreateSession, useProjects } from "../lib/queries";
 import { getSecureItem, setSecureItem } from "../lib/secureStore";
 import { useTheme, useTokens } from "../theme/ThemeProvider";
-import { depthDark, depthLight, gutter, radii, shadowStyle, space } from "../theme/tokens";
+import { depthDark, depthLight, gutter, hexToRgba, radii, shadowStyle, space } from "../theme/tokens";
 import { type as typeScale, webInputTextStyle } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
 
@@ -291,17 +291,21 @@ export default function NewSessionScreen() {
         <Text style={[typeScale.sub, { color: tokens.ink3 }]}>{TEMPER_HINT[temper]}</Text>
       </View>
       <View style={styles.worktreeRow}>
-        <Checkbox value={worktree} onValueChange={setWorktree} accessibilityLabel="Isolated git worktree" />
+        <Switch value={worktree} onValueChange={setWorktree} accessibilityLabel="Isolated git worktree" />
         <Text style={[typeScale.body, styles.worktreeLabel, { color: tokens.ink }]}>Isolated git worktree</Text>
         <Text style={[typeScale.meta, { color: tokens.ink4 }]}>recommended</Text>
       </View>
       {showHostPicker && hostChoice.kind === "anywhere" ? (
         isOfflineHostQueue ? (
-          // Design mobile.dc.html "AW Forge a Task", line 950 — queue-privacy footnote,
-          // shown only for the offline-host queue path.
-          <Text style={[typeScale.meta, styles.hostNote, { color: tokens.ink4 }]}>
-            Prompt, path and title are encrypted in the queue. The relay sees size, kind and timestamps only.
-          </Text>
+          // M New Session L183 — warn-tinted callout, shown only for the offline-host
+          // queue path (this is also what flips the footer CTA to "Queue remote job").
+          <View style={[styles.offlineCallout, { borderColor: hexToRgba(tokens.warn, 0.3) }]}>
+            <Text style={[typeScale.meta, { color: tokens.warn, lineHeight: 16 }]}>
+              {hostChoice.kind === "anywhere" ? hostChoice.host.name : "This host"} is offline — this becomes
+              &ldquo;Queue remote job&rdquo;; it starts when the host returns. Prompt, path and title are
+              encrypted in the queue.
+            </Text>
+          </View>
         ) : (
           // Real session creation isn't routed to a chosen Anywhere host yet
           // (CreateSessionRequest has no host/transport param) — an online host still
@@ -469,6 +473,7 @@ const styles = StyleSheet.create({
   defaultHostDot: { width: 7, height: 7, borderRadius: 3.5 },
   hostSheetContent: { paddingHorizontal: space.space16, paddingBottom: space.space32, gap: space.space12 },
   hostNote: { paddingTop: space.space8 },
+  offlineCallout: { marginTop: space.space8, borderWidth: 1, borderRadius: radii.radius4, padding: space.space12 },
   modalRoot: { flex: 1, alignItems: "center", justifyContent: "flex-start", paddingTop: 110, padding: space.space24 },
   modalCard: { width: MODAL_WIDTH, maxWidth: "100%", borderWidth: 1, padding: space.space24 },
   modalHeaderRow: { flexDirection: "row", alignItems: "center" },

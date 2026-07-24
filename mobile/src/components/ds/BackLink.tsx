@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import { Pressable, StyleSheet, Text } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
-import { space, tapTarget } from "../../theme/tokens";
+import { radii, space, tapTarget } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 
 export function BackLink({ label = "Settings", onPress }: { label?: string; onPress?: () => void }) {
@@ -19,5 +19,5 @@ export function BackLink({ label = "Settings", onPress }: { label?: string; onPr
 }
 
 const styles = StyleSheet.create({
-  button: { alignSelf: "flex-start", minHeight: tapTarget, flexDirection: "row", alignItems: "center", gap: space.space4, paddingRight: space.space12, borderWidth: 2, borderRadius: 8 },
+  button: { alignSelf: "flex-start", minHeight: tapTarget, flexDirection: "row", alignItems: "center", gap: space.space4, paddingRight: space.space12, borderWidth: 2, borderRadius: radii.radius8 },
 });

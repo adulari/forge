@@ -1,10 +1,11 @@
-// DESIGN_SYSTEM.md §1 (Color) + §3 (space/shape/depth), verbatim.
-// This is the ONLY file in src/theme allowed to contain raw hex color literals —
-// every other theme module imports tokens from here instead of inlining hex.
+// mobile/redesign/DESIGN_SYSTEM.md §1 (Color) + §3 (space/shape/depth), verbatim.
+// Machined — supersedes Emberline. This is the ONLY file in src/theme allowed to
+// contain raw hex color literals — every other theme module imports tokens from
+// here instead of inlining hex.
 import { Platform } from "react-native";
 
 // ---------------------------------------------------------------------------
-// §1.1 Ember scale (brand, shared by both themes)
+// §1.1 Ember scale (brand accent ramp, shared by both themes)
 // ---------------------------------------------------------------------------
 
 export interface EmberScale {
@@ -19,14 +20,14 @@ export interface EmberScale {
 }
 
 const emberScale: EmberScale = {
-  ember100: "#FFE9D2",
-  ember200: "#FFCE9E",
-  ember300: "#FFAF66",
-  ember400: "#FF913C",
-  ember500: "#F5761A",
-  ember600: "#C75D10",
-  ember700: "#9C480C",
-  ember900: "#4A2206",
+  ember100: "#FFE7D3",
+  ember200: "#FFC9A0",
+  ember300: "#FFA96B",
+  ember400: "#FF8A3D",
+  ember500: "#F07A2E",
+  ember600: "#C4601F",
+  ember700: "#964916",
+  ember900: "#45210A",
 };
 
 // ---------------------------------------------------------------------------
@@ -61,27 +62,32 @@ export interface ColorTokens {
   ember: EmberScale;
   /** Accent with zero alpha for native gradients (avoids transparent-black interpolation). */
   accentTransparent: string;
-  /** Native approximation opacity for the top ambient ember wash. */
+  /** Native approximation opacity for the top ambient ember wash. Machined retires the
+   * thermal identity — always 0; kept so `Screen`'s old call sites still type-check. */
   forgeWashOpacity: number;
-  /** Move 1 (thermal identity) — HeatEdge gradient start (ember400). */
+  /** Retired (Machined) — was HeatEdge's running-state gradient start. `HeatEdge` now
+   * renders null; kept so the token still resolves for any lingering references. */
   heatEdgeFrom: string;
-  /** Move 1 (thermal identity) — HeatEdge gradient end (ember500). */
+  /** Retired (Machined) — was HeatEdge's running-state gradient end. */
   heatEdgeTo: string;
-  /** Move 1 — HeatEdge outward glow shadow color (ember-tinted, low alpha). */
+  /** Retired (Machined) — was HeatEdge's outward glow shadow color. Zero-alpha. */
   heatGlow: string;
-  /** Move 1 — StatusDot busy-state radial halo behind the dot. */
+  /** Retired (Machined) — was StatusDot's busy-state radial halo. Zero-alpha; StatusDot
+   * is now a flat dot with no halo. */
   dotGlow: string;
-  /** Move 1 — Screen's single top ambient ember wash (web CSS radial-gradient string). */
+  /** Retired (Machined) — was Screen's single top ambient wash (web CSS radial-gradient
+   * string). Zero-alpha; `Screen` no longer renders this. */
   forgeWash: string;
-  /** Hearth — de-boxed list row separator (§ "De-boxed lists"): a translucent hairline,
-   * NOT the solid `border` used on card edges. */
+  /** De-boxed list row separator: a translucent hairline, NOT the solid `border` used on
+   * card edges. */
   hairline: string;
-  /** Hearth — HeatEdge "waiting" gradient start (a pending decision, not just running). */
+  /** Retired (Machined) — was HeatEdge's "waiting" gradient start (a pending decision,
+   * not just running). */
   waitingEdgeFrom: string;
-  /** Hearth — HeatEdge "waiting" gradient end. */
+  /** Retired (Machined) — was HeatEdge's "waiting" gradient end. */
   waitingEdgeTo: string;
-  /** Hearth — HeatEdge "waiting" glow shadow color. Zero-alpha on light (the paper theme's
-   * waiting edge carries no glow — see "Fleet · Light" / "Chat · Light" screens). */
+  /** Retired (Machined) — was HeatEdge's "waiting" glow shadow color. Zero-alpha on both
+   * themes now that the thermal edge is gone. */
   waitingGlow: string;
   /** Keyboard focus-visible ring (web) — low-alpha accent so tabbing reads as a quiet
    * hairline, never a solid box. */
@@ -89,91 +95,83 @@ export interface ColorTokens {
 }
 
 export const darkTokens: ColorTokens = {
-  bg0: "#0B0B10",
-  bg1: "#131318",
-  bg2: "#1B1B22",
-  bg3: "#24242D",
-  borderStrong: "#34343E",
-  border: "#26262E",
-  ink: "#E9E9EF",
-  ink2: "#A9A9B6",
-  ink3: "#6E6E7A",
-  ink4: "#4A4A55",
-  accent: emberScale.ember400,
-  accentPressed: emberScale.ember500,
-  onAccent: "#1B1B22",
-  success: "#7DD394",
-  danger: "#F0716E",
-  warn: "#EDBD52",
-  info: "#4FD0D9",
-  successBg: "#12291A",
-  dangerBg: "#2E1516",
-  warnBg: "#33270F",
-  warnBgInk: "#FFD9A8",
-  selection: "#2E2415",
-  overlayScrim: "rgba(8,8,12,0.6)",
-  accentTransparent: "rgba(255,145,60,0)",
-  forgeWashOpacity: 0.05,
+  bg0: "#09090B",
+  bg1: "#0D0D11",
+  bg2: "#0E0E12",
+  bg3: "#101015",
+  borderStrong: "rgba(244,244,246,0.14)",
+  border: "rgba(244,244,246,0.09)",
+  ink: "#F4F4F6",
+  ink2: "#9A9AA6",
+  ink3: "#5F5F6B",
+  ink4: "#45454F",
+  accent: "#FF8A3D",
+  accentPressed: "#F07A2E",
+  onAccent: "#1A0E04",
+  success: "#5FB97D",
+  danger: "#E5605C",
+  warn: "#D9A94E",
+  info: "#7E9CB8",
+  successBg: "#0F1D14",
+  dangerBg: "#211012",
+  warnBg: "#201808",
+  warnBgInk: "#EFD9AC",
+  selection: "rgba(255,138,61,0.14)",
+  overlayScrim: "rgba(5,5,6,0.6)",
+  accentTransparent: "rgba(255,138,61,0)",
+  forgeWashOpacity: 0,
   ember: emberScale,
   heatEdgeFrom: emberScale.ember400,
   heatEdgeTo: emberScale.ember500,
-  heatGlow: "rgba(255,145,60,0.22)",
-  dotGlow: "rgba(255,145,60,0.18)",
-  forgeWash: "radial-gradient(1100px 420px at 50% -8%, rgba(255,145,60,0.05), transparent 62%)",
-  hairline: "rgba(38,38,46,0.6)",
-  waitingEdgeFrom: "#F0716E",
+  heatGlow: "rgba(255,138,61,0)",
+  dotGlow: "rgba(255,138,61,0)",
+  forgeWash: "radial-gradient(1100px 420px at 50% -8%, rgba(255,138,61,0), transparent 62%)",
+  hairline: "rgba(244,244,246,0.07)",
+  waitingEdgeFrom: "#E5605C",
   waitingEdgeTo: "#C24845",
-  waitingGlow: "rgba(240,113,110,0.25)",
-  focusRing: "rgba(255,145,60,0.45)",
+  waitingGlow: "rgba(229,96,92,0)",
+  focusRing: "rgba(255,138,61,0.4)",
 };
 
 export const lightTokens: ColorTokens = {
-  bg0: "#F1EEE8",
-  bg1: "#FAF8F4",
+  bg0: "#F5F4F1",
+  bg1: "#EFEDE8",
   bg2: "#FFFFFF",
-  bg3: "#F3F0EA",
-  borderStrong: "#D6D2C8",
-  border: "#E7E3DA",
-  ink: "#211F1B",
-  ink2: "#57544C",
-  ink3: "#8B8779",
-  ink4: "#B4B0A3",
-  accent: emberScale.ember600,
-  accentPressed: emberScale.ember700,
+  bg3: "#F7F6F3",
+  borderStrong: "rgba(0,0,0,0.22)",
+  border: "rgba(0,0,0,0.12)",
+  ink: "#1C1B19",
+  ink2: "#6E6A61",
+  ink3: "#8A867D",
+  ink4: "#B0ACA2",
+  accent: "#D96A1E",
+  accentPressed: "#C25C15",
   onAccent: "#FFFFFF",
-  success: "#1E8A47",
-  danger: "#C93835",
-  warn: "#9A6E0C",
-  info: "#0E7C86",
-  // Hearth handoff value (was #E4F4E7) — "Fleet · Light" / "Chat · Light" screens.
-  successBg: "#E4F3E7",
-  dangerBg: "#FBE7E5",
-  warnBg: "#F7EED3",
+  success: "#4C8A60",
+  danger: "#C44A42",
+  warn: "#9A7A2E",
+  info: "#5B7C94",
+  successBg: "#E6F0E8",
+  dangerBg: "#F8E6E3",
+  warnBg: "#F5EDD8",
   // §1.3 has no ink override for warnBg — the default `ink` already reads fine
   // on the paper-toned warnBg, unlike dark's near-black warnBg.
-  warnBgInk: "#211F1B",
-  selection: "#F6E7D2",
-  overlayScrim: "rgba(30,26,20,0.35)",
-  accentTransparent: "rgba(199,93,16,0)",
-  forgeWashOpacity: 0.04,
+  warnBgInk: "#1C1B19",
+  selection: "#F6E3D2",
+  overlayScrim: "rgba(28,27,25,0.35)",
+  accentTransparent: "rgba(217,106,30,0)",
+  forgeWashOpacity: 0,
   ember: emberScale,
   heatEdgeFrom: emberScale.ember400,
   heatEdgeTo: emberScale.ember500,
-  // Hearth light: the "Fleet · Light" prototype paints the running edge with no outward glow
-  // (paper surfaces carry no ambient ember light) — zero-alpha keeps the gradient only.
-  heatGlow: "rgba(199,93,16,0)",
-  dotGlow: "rgba(199,93,16,0.16)",
-  forgeWash: "radial-gradient(1100px 420px at 50% -8%, rgba(199,93,16,0.04), transparent 62%)",
-  // Hearth "hairline" is already exactly this theme's `border` value — the light palette
-  // never needed the dark theme's translucency trick (paper hairlines are already subtle).
-  hairline: "#E7E3DA",
-  // Hearth "Fleet · Light" / "Chat · Light": the waiting edge reuses this theme's own
-  // danger scale (not the dark-fixed #F0716E — the light palette re-derives every
-  // semantic color, see HANDOFF.md's separate Light token block) and carries no glow.
-  waitingEdgeFrom: "#C93835",
-  waitingEdgeTo: "#9C2D2A",
-  waitingGlow: "rgba(201,56,53,0)",
-  focusRing: "rgba(199,93,16,0.45)",
+  heatGlow: "rgba(217,106,30,0)",
+  dotGlow: "rgba(217,106,30,0)",
+  forgeWash: "radial-gradient(1100px 420px at 50% -8%, rgba(217,106,30,0), transparent 62%)",
+  hairline: "rgba(0,0,0,0.09)",
+  waitingEdgeFrom: "#C44A42",
+  waitingEdgeTo: "#A63832",
+  waitingGlow: "rgba(196,74,66,0)",
+  focusRing: "rgba(217,106,30,0.4)",
 };
 
 // ---------------------------------------------------------------------------
@@ -248,21 +246,24 @@ export interface RadiiScale {
   radius12: number;
   radius16: number;
   radiusPill: number;
-  /** Hearth — Segmented track (outer). Distinct from `radius8`/`radius12`: Segmented is the
+  /** Segmented track (outer). Distinct from `radius8`/`radius12`: Segmented is the
    * one control with its own outer/inner pair, not the general button/card scale. */
   radiusSegmentOuter: number;
-  /** Hearth — Segmented thumb (inner). */
+  /** Segmented thumb (inner). */
   radiusSegmentInner: number;
 }
 
+// Machined compresses the whole radius scale toward the 3-4px "machined" range —
+// key names are historical (tied to the old pixel values) and no longer describe
+// their own numbers; treat them as opaque scale steps, not px==name.
 export const radii: RadiiScale = {
-  radius4: 4,
-  radius8: 8,
-  radius12: 12,
-  radius16: 16,
+  radius4: 3,
+  radius8: 4,
+  radius12: 4,
+  radius16: 6,
   radiusPill: 999,
-  radiusSegmentOuter: 10,
-  radiusSegmentInner: 7,
+  radiusSegmentOuter: 4,
+  radiusSegmentInner: 2,
 };
 
 export interface ShadowStyle {
@@ -301,14 +302,16 @@ export const depthLight: DepthTokens = {
   },
   raised: {
     shadowColor: "#1E1A14",
-    shadowOpacity: 0.06,
+    shadowOpacity: 0.03,
     shadowRadius: 16,
     shadowOffset: { width: 0, height: 2 },
     elevation: 4,
   },
 };
 
-function hexToRgba(hex: string, alpha: number): string {
+/** Exported for ds/ components that need a tinted-alpha variant of a semantic hex token
+ * (e.g. Button's danger-tinted outline border) without hardcoding a raw color literal. */
+export function hexToRgba(hex: string, alpha: number): string {
   const h = hex.replace("#", "");
   const r = parseInt(h.substring(0, 2), 16);
   const g = parseInt(h.substring(2, 4), 16);

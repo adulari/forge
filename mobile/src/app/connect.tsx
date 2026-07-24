@@ -321,15 +321,17 @@ export default function ConnectScreen() {
       ) : null}
 
       <View style={[styles.qrWrap, !isCompact && styles.qrWrapWide]}>
-        <QRScan onScanned={onScanned} enabled={scanEnabled} paused={busy} />
-        <Pressable
+        {/* D/M Connect: "Scan QR code" is the primary CTA (not a text link) — the camera-off
+            privacy note ("Camera stays off until you choose to scan.") already renders inside
+            QRScan itself while `enabled` is false, so it isn't duplicated here. */}
+        <Button
+          label={scanEnabled ? "Stop scanning" : "Scan QR code"}
+          variant={scanEnabled ? "secondary" : "primary"}
           onPress={() => setScanEnabled((enabled) => !enabled)}
-          accessibilityRole="button"
+          fullWidth
           accessibilityLabel={scanEnabled ? "Stop scanning" : "Scan QR code"}
-          style={styles.scanLink}
-        >
-          <Text style={[typeScale.bodyBold, { color: tokens.accent }]}>{scanEnabled ? "Stop scanning" : "Scan QR code"}</Text>
-        </Pressable>
+        />
+        <QRScan onScanned={onScanned} enabled={scanEnabled} paused={busy} />
       </View>
 
       <View style={[styles.urlBlock, !isCompact && styles.urlBlockWide]}>
@@ -459,7 +461,6 @@ const styles = StyleSheet.create({
   autoBlock: { gap: space.space8, maxWidth: 480, width: "100%" },
   qrWrap: { alignItems: "center", gap: space.space12, width: "100%" },
   qrWrapWide: { maxWidth: 480 },
-  scanLink: { minHeight: 44, alignItems: "center", justifyContent: "center", paddingHorizontal: space.space16 },
   urlBlock: { gap: space.space4, width: "100%" },
   urlBlockWide: { maxWidth: 480 },
   connectButton: { marginTop: space.space8 },

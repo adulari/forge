@@ -1,6 +1,6 @@
 // T3.4 — Agents segment: `snapshot.subagents` as a de-boxed hairline list (FEATURES.md §1.2
-// `subagents` -> Agents segment; Hearth core rule 1 — a running agent carries the accent
-// HeatEdge instead of living in its own Card, see AgentRow.tsx).
+// `subagents` -> Agents segment; Hearth core rule 1 — a running agent carries its accent
+// StatusDot instead of living in its own Card, see AgentRow.tsx).
 import { Bot, WifiOff } from "lucide-react-native";
 import React, { useCallback } from "react";
 import { StyleSheet, View } from "react-native";

@@ -12,7 +12,6 @@ import { useEmberdot } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, tapTarget } from "../../theme/tokens";
 import { formatCost, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
-import { HeatEdge } from "../ds/HeatEdge";
 import { extractJson, isFailed } from "./format";
 import { StructuredOutput } from "./StructuredOutput";
 
@@ -91,8 +90,12 @@ export function AgentDrill({
       ) : agent.last ? (
         <>
           <SectionLabel>{agent.done ? "result" : "live"}</SectionLabel>
-          <View style={[styles.tailBox, { backgroundColor: tokens.bg0, borderColor: tokens.border }]}>
-            {failed ? <HeatEdge state="waiting" /> : null}
+          <View
+            style={[
+              styles.tailBox,
+              { backgroundColor: tokens.bg0, borderColor: failed ? tokens.danger : tokens.border },
+            ]}
+          >
             <Text style={[styles.tail, { color: failed ? tokens.danger : tokens.ink2 }]}>{agent.last}</Text>
           </View>
         </>

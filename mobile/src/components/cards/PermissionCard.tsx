@@ -2,7 +2,7 @@
 // body; DiffCard embedded when `diff.pending`; Allow/Deny bar.
 // DESIGN_ELEVATION.md Move 1: a pending permission is "live" by construction
 // (it only renders while `permission_prompt` is non-null) — it always carries
-// the subtle HeatEdge accent, never a hard box.
+// the subtle danger-tinted border accent, never a hard box.
 //
 // ARCHITECTURE.md §3 prompt_seq discipline: Allow/Deny echo the snapshot's
 // `prompt_seq`. Buttons disable after the first tap and never retry — the next
@@ -10,7 +10,7 @@
 // parent has usually stopped rendering this card entirely (permission_prompt
 // went null).
 import React, { useEffect, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import Animated, { FadeOut, useAnimatedStyle, useReducedMotion, withTiming } from "react-native-reanimated";
 
 import { Button } from "../ds/Button";
@@ -22,7 +22,7 @@ import { useHotkey } from "../../lib/shortcuts";
 import { type Diff, type RemoteInput } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
+import { hexToRgba, space } from "../../theme/tokens";
 import { formatRelativeTime, type as typeScale } from "../../theme/typography";
 import { DiffCard } from "../review/DiffCard";
 
@@ -147,10 +147,10 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
 
   return (
     <Animated.View exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
-      <Card variant="feature" heatEdge="waiting">
+      <Card variant="feature" style={{ borderColor: hexToRgba(tokens.danger, 0.35) }}>
         <Animated.View style={dim}>
           <Text style={[typeScale.section, styles.header, { color: tokens.danger }]}>
-            {`permission · waiting ${formatRelativeTime(waitingSince, now)}`}
+            {`permission · ${formatRelativeTime(waitingSince, now)}`}
           </Text>
 
           <Text style={[typeScale.body, { color: tokens.ink }, styles.prompt]}>{prompt}</Text>
@@ -162,23 +162,28 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
           ) : null}
 
           {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
-          <View style={styles.actions}>
-            <Button
-              label="Allow"
-              variant="allow"
-              onPress={() => respond(true)}
-              disabled={locked}
-              icon={committed === "allow" ? <CommitIcon kind="check" color={tokens.onAccent} /> : undefined}
-              style={styles.allowBtn}
-            />
-            <Button
-              label="Deny"
-              variant="danger"
-              onPress={() => respond(false)}
-              disabled={locked}
-              icon={committed === "deny" ? <CommitIcon kind="x" color={tokens.onAccent} /> : undefined}
-              style={styles.denyBtn}
-            />
+          <View style={styles.actionsRow}>
+            <View style={styles.actions}>
+              <Button
+                label="Allow"
+                variant="allow"
+                onPress={() => respond(true)}
+                disabled={locked}
+                icon={committed === "allow" ? <CommitIcon kind="check" color={tokens.onAccent} /> : undefined}
+                style={styles.allowBtn}
+              />
+              <Button
+                label="Deny"
+                variant="danger"
+                onPress={() => respond(false)}
+                disabled={locked}
+                icon={committed === "deny" ? <CommitIcon kind="x" color={tokens.onAccent} /> : undefined}
+                style={styles.denyBtn}
+              />
+            </View>
+            {Platform.OS === "web" ? (
+              <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>y · n</Text>
+            ) : null}
           </View>
           <Pressable
             onPress={onAlwaysAllow}
@@ -199,7 +204,8 @@ const styles = StyleSheet.create({
   header: { letterSpacing: 0.6, marginBottom: space.space8 },
   prompt: { marginBottom: space.space12 },
   diffSlot: { marginBottom: space.space12 },
-  actions: { flexDirection: "row", gap: space.space8 },
+  actionsRow: { flexDirection: "row", alignItems: "center", gap: space.space12 },
+  actions: { flex: 1, flexDirection: "row", gap: space.space8 },
   allowBtn: { flex: 1.4 },
   denyBtn: { flex: 1 },
   // Not wired to any daemon protocol yet (see onAlwaysAllow) — visually reads as

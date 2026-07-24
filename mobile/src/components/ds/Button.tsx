@@ -1,17 +1,17 @@
 // DESIGN_SYSTEM.md §6 Button — variants primary/secondary/ghost/danger/allow.
 // States: D default · P pressed (Strike) · F focused (2px accent ring) ·
 // L loading (spinner-in-place, label persists at 0.6) · X disabled (0.4, no Strike).
-// Hearth core rule 4 (fixed semantic map, never swapped): "allow" is a filled
-// success button with `successBg` ink (not the generic `onAccent`); "danger" is the
-// outlined "deny" look — transparent fill, `borderStrong` border, `danger` ink.
-// Radius 10-12 (Hearth radii scale) for every variant.
+// Fixed semantic map (never swapped): "allow" is a filled success button with
+// `successBg` ink (not the generic `onAccent`); "danger" is the outlined "deny"
+// look — transparent fill, danger-tinted border, `danger` ink.
+// Radius 4 (Machined radii scale) for every variant.
 import React, { useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import Animated from "react-native-reanimated";
 
 import { useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii, space, tapTarget } from "../../theme/tokens";
+import { hexToRgba, radii, space, tapTarget } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "allow";
@@ -58,18 +58,21 @@ export function Button({
       ink = tokens.onAccent;
       break;
     case "secondary":
-      bg = tokens.bg3;
+      // Machined: transparent + hairline border, not a filled bg3 surface.
+      bg = "transparent";
       ink = tokens.ink;
+      border = tokens.border;
       break;
     case "ghost":
       bg = hovered ? tokens.bg3 : "transparent";
       ink = tokens.ink2;
       break;
     case "danger":
-      // Hearth "Deny": outlined, never a filled red button.
+      // "Deny": outlined, never a filled red button. Border is danger-tinted (35% alpha),
+      // not the neutral borderStrong — Machined's danger-tinted-outline convention.
       bg = "transparent";
       ink = tokens.danger;
-      border = tokens.borderStrong;
+      border = hexToRgba(tokens.danger, 0.35);
       break;
     case "allow":
       // Hearth "Allow": success fill with successBg ink, not the generic onAccent.

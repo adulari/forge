@@ -54,9 +54,9 @@ export function StatusStrip(props: StatusStripProps) {
   const strike = useStrike();
   const { isCompact } = useBreakpoint();
   const [visible, setVisible] = useState(false);
-  const left = props.transport
-    ? `${props.transport.hostName} · ${props.transport.transport} · ${formatCwd(props.cwd)} · ${props.model}`
-    : `${formatCwd(props.cwd)} · ${props.model}`;
+  const leftPrefix = props.transport
+    ? `${props.transport.hostName} · ${props.transport.transport} · ${formatCwd(props.cwd)}`
+    : formatCwd(props.cwd);
   const ctxPct =
     props.contextLimit != null && props.contextLimit > 0
       ? Math.min(100, Math.round((props.contextTokens / props.contextLimit) * 100))
@@ -75,7 +75,11 @@ export function StatusStrip(props: StatusStripProps) {
           hitSlop={{ top: 10, bottom: 10 }}
         >
           <Text style={[typeScale.monoMeta, tabularNums, styles.left, { color: tokens.ink3 }]} numberOfLines={1}>
-            {left}
+            {leftPrefix}
+            {props.worktree ? (
+              <Text style={{ color: tokens.accent }}>{` · ⑂ ${props.worktree}`}</Text>
+            ) : null}
+            {` · ${props.model}`}
           </Text>
           <View style={styles.right}>
             {props.reconnecting ? <Text style={[typeScale.monoMeta, { color: tokens.warn }]} numberOfLines={1}>{"reconnecting… · "}</Text> : null}

@@ -22,6 +22,64 @@ const THEME_COLOR = darkTokens.bg1;
 // BoundedList) is what actually stops rubber-band, `overscroll-behavior: none` here is
 // the page-level backstop.
 const GLOBAL_WEB_CSS = `
+/* Machined — supersedes Emberline: Geist (UI) + Geist Mono (technical text)
+   replace Inter as the bundled web sans. Static weights only (no variable font
+   published upstream yet), one @font-face per weight sharing the "Geist" family
+   so \`font-weight\` in type.ts selects the right cut. Inter stays bundled as the
+   sans fallback (sansFamilyFor's CSS stack: "Geist, Inter, system-ui, sans-serif"). */
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/Geist-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/Geist-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/Geist-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/Geist-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+/* Geist Mono: each weight is its own distinct family name (matches monoFamily in
+   typography.ts / the native expo-font PostScript names) rather than one family
+   varied by font-weight — mono text always sets fontFamily explicitly, never
+   relies on font-weight matching. */
+@font-face {
+  font-family: "GeistMono-Regular";
+  src: url("/fonts/GeistMono-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "GeistMono-Medium";
+  src: url("/fonts/GeistMono-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "GeistMono-SemiBold";
+  src: url("/fonts/GeistMono-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
 @font-face {
   font-family: "Inter";
   src: url("/fonts/InterVariable.woff2") format("woff2");
@@ -37,20 +95,34 @@ const GLOBAL_WEB_CSS = `
   font-display: swap;
 }
 /* react-native-web's Text default is the invalid family "System" — alias it to the
-   bundled Inter so every Text that never set an explicit fontFamily still gets the
+   bundled Geist so every Text that never set an explicit fontFamily still gets the
    app sans instead of the browser's fallback (DejaVu/Times on Linux). */
 @font-face {
   font-family: "System";
-  src: url("/fonts/InterVariable.woff2") format("woff2");
-  font-weight: 100 900;
+  src: url("/fonts/Geist-Regular.ttf") format("truetype");
+  font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
   font-family: "System";
-  src: url("/fonts/InterVariable-Italic.woff2") format("woff2");
-  font-weight: 100 900;
-  font-style: italic;
+  src: url("/fonts/Geist-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "System";
+  src: url("/fonts/Geist-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "System";
+  src: url("/fonts/Geist-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
   font-display: swap;
 }
 html { font-feature-settings: "calt" 1, "cv05" 1; }

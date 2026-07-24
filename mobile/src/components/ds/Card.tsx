@@ -1,28 +1,25 @@
-// DESIGN_SYSTEM.md §6 Containers — Card is Hearth's one elevated container, the
-// "decision card" (core rule 2): bg2, 1px border, radius 16, optional 2px left
-// HeatEdge. Dark theme carries no shadow (hairlines only); light theme gets the
-// paper card shadow (`depthLight.raised`, already spec'd to HANDOFF's "card shadow").
+// DESIGN_SYSTEM.md §6 Containers — Card is Machined's one elevated container:
+// bg2, 1px border, radius 4. No shadow on either theme: Machined reads depth
+// through hairlines, not elevation — only Sheet/overlay surfaces still carry
+// `depth.sheet`. Machined retired the thermal (HeatEdge) identity entirely —
+// a live/waiting card reads through its border tint + StatusDot, not a glow.
 import React from "react";
 import { StyleSheet, View, type ViewProps } from "react-native";
 
-import { useTheme } from "../../theme/ThemeProvider";
-import { cardPadding, depthDark, depthLight, radii, shadowStyle } from "../../theme/tokens";
-import { HeatEdge, type HeatEdgeProps } from "./HeatEdge";
+import { useTokens } from "../../theme/ThemeProvider";
+import { cardPadding, radii } from "../../theme/tokens";
 
 export interface CardProps extends ViewProps {
-  /** Both variants render at Hearth's single card radius (16) — kept for source compat
+  /** Both variants render at Machined's single card radius (4) — kept for source compat
    * with existing call sites that still pass "feature" for plan/diff/permission cards. */
   variant?: "default" | "feature";
   /** Set false to opt out of the default 12x14 card padding (§3) for custom internal layout. */
   padded?: boolean;
-  /** Left HeatEdge — omit (or false) for an idle card, "busy"/"waiting" for a live one. */
-  heatEdge?: HeatEdgeProps["state"];
 }
 
-export function Card({ variant = "default", padded = true, heatEdge = false, style, children, ...rest }: CardProps) {
-  void variant; // both variants resolve to radius16 under Hearth; see the prop doc above.
-  const { scheme, tokens } = useTheme();
-  const depth = scheme === "dark" ? depthDark : depthLight;
+export function Card({ variant = "default", padded = true, style, children, ...rest }: CardProps) {
+  void variant; // both variants resolve to radius4 under Machined; see the prop doc above.
+  const tokens = useTokens();
   return (
     <View
       style={[
@@ -30,16 +27,13 @@ export function Card({ variant = "default", padded = true, heatEdge = false, sty
         {
           backgroundColor: tokens.bg2,
           borderColor: tokens.border,
-          borderRadius: radii.radius16,
+          borderRadius: radii.radius4,
         },
-        depth.raised ? shadowStyle(depth.raised) : undefined,
         padded && styles.padded,
-        heatEdge && styles.heatEdgeInset,
         style,
       ]}
       {...rest}
     >
-      {heatEdge ? <HeatEdge state={heatEdge} /> : null}
       {children}
     </View>
   );
@@ -48,5 +42,4 @@ export function Card({ variant = "default", padded = true, heatEdge = false, sty
 const styles = StyleSheet.create({
   base: { borderWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
   padded: { paddingHorizontal: cardPadding.x, paddingVertical: cardPadding.y },
-  heatEdgeInset: { paddingLeft: cardPadding.x + 2 },
 });

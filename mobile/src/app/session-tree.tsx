@@ -1,26 +1,29 @@
-// Hearth Session Tree — de-boxed branch timeline (core rule 1): forks + their ancestry
-// as an indented left-rule tree, NOT a Card per node. `SessionTreeRow` is a plain REST
-// ancestry query, so live status / worktree / model are joined from `useSessions()`
-// (real, not fabricated) — the busy session lights its path with the ember HeatEdge and
-// an Emberdot; everything else is a static ink dot. Two-column on medium+ (tree left,
-// selected-node detail right) per the desktop prototype; single column stacks on compact.
+// Machined Session Tree — de-boxed branch timeline: forks + their ancestry as an indented
+// left-rule tree, NOT a Card per node (main line gets an accent dot, forks a border-left
+// connector). `SessionTreeRow` is a plain REST ancestry query, so live status / worktree /
+// model are joined from `useSessions()` (real, not fabricated). Two-column on medium+ (tree
+// left, selected-node detail right) per the desktop prototype; single column stacks on
+// compact. "Merge back" wires the real `useMergeSession()` mutation (same one `SessionCard`
+// uses) for any forked node with a worktree; "Diff" from the design frame has no backing
+// endpoint (no cross-session diff REST route exists), so it is omitted rather than faked.
 import { router } from "expo-router";
-import { ExternalLink, GitBranch } from "lucide-react-native";
-import React, { useMemo, useState } from "react";
+import { ExternalLink, GitBranch, GitMerge } from "lucide-react-native";
+import React, { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BackLink } from "../components/ds/BackLink";
 import { Button } from "../components/ds/Button";
 import { Card } from "../components/ds/Card";
+import { ConfirmDialog } from "../components/ds/ConfirmDialog";
 import { EmptyState } from "../components/ds/EmptyState";
-import { HeatEdge } from "../components/ds/HeatEdge";
 import { Screen } from "../components/ds/Screen";
 import { StatusDot } from "../components/ds/StatusDot";
+import { useToast } from "../components/ds/ToastHost";
 import { ForkSheet } from "../components/session/ForkSheet";
-import { type SessionRow, type SessionTreeRow } from "../lib/api";
+import { ApiError, type SessionRow, type SessionTreeRow } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { useSessions, useSessionTree } from "../lib/queries";
+import { useMergeSession, useSessions, useSessionTree } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space, type ColorTokens } from "../theme/tokens";
 import { formatCost, formatRelativeTime, monoFamily, tabularNums, type as typeScale } from "../theme/typography";
@@ -82,10 +85,27 @@ function livePath(nodes: SessionTreeRow[], live: Map<string, LiveState>): Set<st
 
 export default function SessionTreeScreen() {
   const tokens = useTokens();
+  const toast = useToast();
   const { baseUrl } = useAuth();
   const query = useSessionTree();
   const sessions = useSessions();
+  const merge = useMergeSession();
   const { isCompact } = useBreakpoint();
+  const [mergeTarget, setMergeTarget] = useState<string | null>(null);
+
+  const runMerge = useCallback(
+    (id: string) => {
+      merge.mutate(id, {
+        onSuccess: (res) => toast.show(`merged branch ${res.branch}`, { tone: "success" }),
+        onError: (err) => toast.show(err instanceof ApiError ? err.message : "merge failed", { tone: "danger" }),
+      });
+    },
+    [merge, toast],
+  );
+  const confirmMerge = useCallback(() => {
+    if (mergeTarget) runMerge(mergeTarget);
+    setMergeTarget(null);
+  }, [mergeTarget, runMerge]);
 
   const nodes = useMemo(() => query.data ?? [], [query.data]);
   const rows = useMemo(() => flattenTree(nodes), [nodes]);
@@ -152,7 +172,7 @@ export default function SessionTreeScreen() {
                         isSelected && !isCompact ? { backgroundColor: tokens.selection } : null,
                       ]}
                     >
-                      {live ? <HeatEdge state={live} /> : depth === 0 && onPath ? <View style={[styles.rootRule, { backgroundColor: tokens.borderStrong }]} /> : null}
+                      {depth === 0 && onPath ? <View style={[styles.rootRule, { backgroundColor: tokens.accent }]} /> : null}
                       <Pressable
                         onPress={() => (isCompact ? openNode(node.id) : setSelectedId(node.id))}
                         accessibilityRole="button"
@@ -179,6 +199,9 @@ export default function SessionTreeScreen() {
                         <View style={styles.inlineActions}>
                           <Pressable onPress={() => openNode(node.id)} accessibilityRole="button" accessibilityLabel={`Open ${titleFor(node)}`} hitSlop={8}><Text style={[typeScale.meta, { color: tokens.accent }]}>Open</Text></Pressable>
                           <Pressable onPress={() => setForkTarget(node.id)} accessibilityRole="button" accessibilityLabel={`Fork from ${titleFor(node)}`} hitSlop={8}><Text style={[typeScale.meta, { color: tokens.ink2 }]}>Fork here</Text></Pressable>
+                          {isFork && session?.worktree ? (
+                            <Pressable onPress={() => setMergeTarget(node.id)} accessibilityRole="button" accessibilityLabel={`Merge ${titleFor(node)} back`} hitSlop={8}><Text style={[typeScale.meta, { color: tokens.ink2 }]}>Merge back</Text></Pressable>
+                          ) : null}
                         </View>
                       ) : null}
                       {index < rows.length - 1 ? <View style={[styles.separator, { backgroundColor: tokens.hairline }]} /> : null}
@@ -208,8 +231,10 @@ export default function SessionTreeScreen() {
                 live={liveById.get(selectedRow.node.id) ?? null}
                 session={sessionById.get(selectedRow.node.id) ?? null}
                 tokens={tokens}
+                merging={merge.isPending && mergeTarget === selectedRow.node.id}
                 onOpen={() => openNode(selectedRow.node.id)}
                 onFork={() => setForkTarget(selectedRow.node.id)}
+                onMerge={() => setMergeTarget(selectedRow.node.id)}
               />
             </View>
           ) : null}
@@ -217,18 +242,29 @@ export default function SessionTreeScreen() {
       </Screen>
 
       {forkTarget ? <ForkSheet visible onClose={() => setForkTarget(null)} sessionId={forkTarget} /> : null}
+      <ConfirmDialog
+        visible={mergeTarget != null}
+        title="Merge this fork back?"
+        message="Merges the fork's worktree branch into its parent. This can't be undone from here."
+        confirmLabel="Merge back"
+        cancelLabel="Cancel"
+        onConfirm={confirmMerge}
+        onCancel={() => setMergeTarget(null)}
+      />
     </DesktopDrillDown>
   );
 }
 
-function NodeDetail({ node, orphaned, live, session, tokens, onOpen, onFork }: {
+function NodeDetail({ node, orphaned, live, session, tokens, merging, onOpen, onFork, onMerge }: {
   node: SessionTreeRow;
   orphaned: boolean;
   live: LiveState;
   session: SessionRow | null;
   tokens: ColorTokens;
+  merging: boolean;
   onOpen: () => void;
   onFork: () => void;
+  onMerge: () => void;
 }) {
   const isFork = node.forked_from != null && !orphaned;
   const relation = orphaned ? "original parent unavailable" : isFork ? `forked at message ${node.forked_at_seq ?? "—"}` : "session root";
@@ -252,6 +288,16 @@ function NodeDetail({ node, orphaned, live, session, tokens, onOpen, onFork }: {
       <View style={styles.detailActions}>
         <Button label="Open session" onPress={onOpen} fullWidth icon={<ExternalLink size={16} strokeWidth={2} color={tokens.bg2} />} />
         <Button label="Fork from here" variant="secondary" onPress={onFork} fullWidth icon={<GitBranch size={16} strokeWidth={2} color={tokens.accent} />} />
+        {isFork && session?.worktree ? (
+          <Button
+            label="Merge back"
+            variant="secondary"
+            onPress={onMerge}
+            loading={merging}
+            fullWidth
+            icon={<GitMerge size={16} strokeWidth={2} color={tokens.accent} />}
+          />
+        ) : null}
       </View>
     </View>
   );

@@ -2,3 +2,4 @@
 // the plain `useHotkeys.ts` no-op everywhere else) via the bare specifier below.
 export * from "./useHotkeys";
 export * from "./useGlobalShortcuts";
+export * from "./useShellHotkeys";

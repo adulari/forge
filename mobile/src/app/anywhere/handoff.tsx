@@ -12,7 +12,32 @@ import { useAnywhere } from "../../lib/AnywhereProvider";
 import { cancelCapsule, capsuleStatus, handoffOutcome, handoffRecovery, pendingCapsules, type CapsuleStatus, type HandoffOutcome, type PendingCapsule } from "../../lib/anywhereHandoff";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
-import { type } from "../../theme/typography";
+import { monoFamily, type } from "../../theme/typography";
+
+// Maps the real capsule lifecycle onto the comp's packaged → uploaded → verifying →
+// apply&import checklist (mobile.dc.html "AW Transport Handoff" lines 537-545) —
+// a presentation-only relabeling of CapsuleStatus.state, not new data.
+const STAGE_ORDER: CapsuleStatus["state"][] = ["reserved", "ready", "claimed", "acknowledged"];
+const STAGE_LABEL: Record<CapsuleStatus["state"], string> = {
+  reserved: "Capsule packaged",
+  ready: "Uploaded · sealed",
+  claimed: "Destination verifying",
+  acknowledged: "Apply & import — complete",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+function stageChecklist(status: CapsuleStatus, tokens: ReturnType<typeof useTokens>) {
+  if (status.state === "failed" || status.state === "cancelled") {
+    return [{ label: STAGE_LABEL[status.state], color: tokens.danger, glyph: "✗" }];
+  }
+  const currentIndex = STAGE_ORDER.indexOf(status.state);
+  return STAGE_ORDER.map((stage, index) => ({
+    label: STAGE_LABEL[stage],
+    color: index < currentIndex ? tokens.success : index === currentIndex ? tokens.accent : tokens.ink3,
+    glyph: index < currentIndex ? "✓" : index === currentIndex ? "●" : "○",
+  }));
+}
 
 export default function AnywhereHandoffScreen() {
   const anywhere = useAnywhere(); const tokens = useTokens();
@@ -31,10 +56,11 @@ export default function AnywhereHandoffScreen() {
     <Button label="Find pending capsules" variant="secondary" loading={busy} disabled={!destination || source === destination} onPress={() => void find()} fullWidth />
     {pending.map((capsule) => <Card key={capsule.capsule_id} style={styles.card}><Text style={[type.bodyBold, { color: tokens.ink }]}>Pending from {name(anywhere.hosts, capsule.source_host_id)}</Text><Text style={[type.meta, { color: tokens.ink3 }]}>Expires {new Date(capsule.expires_at_ms).toLocaleString()} · encrypted {formatBytes(capsule.ciphertext_bytes)}</Text><Button label="Track this handoff" variant="ghost" onPress={() => { setCapsuleId(capsule.capsule_id); setOutcome("pending"); }} /></Card>)}
     <Card style={styles.card}><Input label="Capsule id" value={capsuleId} onChangeText={setCapsuleId} autoCapitalize="none" autoCorrect={false} /><View style={styles.actions}><Button label="Refresh status" variant="secondary" loading={busy} disabled={!/^[0-9a-f]{32}$/.test(capsuleId)} onPress={() => void refresh()} style={styles.grow} /><Button label="Cancel safely" variant="danger" disabled={!status || !["reserved", "ready", "claimed"].includes(status.state)} onPress={() => void cancel()} style={styles.grow} /></View></Card>
+    {status ? <Card style={styles.card}>{stageChecklist(status, tokens).map((stage) => <Text key={stage.label} style={[type.monoMeta, styles.stageLine, { color: stage.color }]}>{`${stage.glyph} ${stage.label}`}</Text>)}</Card> : null}
     {outcome ? <Card variant={outcome === "accepted" ? "feature" : "default"} style={styles.card}><View style={styles.row}><Text style={[type.heading, styles.grow, { color: tokens.ink }]}>Handoff {outcome}</Text><Badge label={outcome} tone={outcome === "accepted" ? "success" : outcome === "failed" || outcome === "indeterminate" ? "warn" : "neutral"} /></View><Text style={[type.sub, { color: tokens.ink2 }]}>{handoffRecovery(outcome)}</Text></Card> : null}
     <Text style={[type.meta, { color: tokens.ink3 }]}>Starting a capsule remains a host-side action because only the host can pause tools, inspect Git safety, and export the workspace without exposing plaintext to this controller.</Text>
   </Screen>;
 }
 function name(hosts: { id: string; name: string }[], id: string): string { return hosts.find((host) => host.id === id)?.name ?? id.slice(0, 8); }
 function formatBytes(bytes: number): string { return bytes < 1024 ** 2 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`; }
-const styles = StyleSheet.create({ content: { paddingTop: space.space24, paddingBottom: space.space32, gap: space.space16 }, card: { gap: space.space8 }, actions: { flexDirection: "row", gap: space.space8 }, row: { flexDirection: "row", alignItems: "center", gap: space.space8 }, grow: { flex: 1 } });
+const styles = StyleSheet.create({ content: { paddingTop: space.space24, paddingBottom: space.space32, gap: space.space16 }, card: { gap: space.space8 }, actions: { flexDirection: "row", gap: space.space8 }, row: { flexDirection: "row", alignItems: "center", gap: space.space8 }, grow: { flex: 1 }, stageLine: { fontFamily: monoFamily.regular } });

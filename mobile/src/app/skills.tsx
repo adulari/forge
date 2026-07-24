@@ -27,7 +27,7 @@ import { useToast } from "../components/ds/ToastHost";
 import { type SkillRow } from "../lib/api";
 import { useSkills } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
-import { type ColorTokens, radii, space, tapTarget } from "../theme/tokens";
+import { type ColorTokens, hexToRgba, radii, space, tapTarget } from "../theme/tokens";
 import { monoFamily, type } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
 import { SettingsShell } from "./(tabs)/settings";
@@ -35,24 +35,12 @@ import { SettingsShell } from "./(tabs)/settings";
 type Scope = SkillRow["scope"];
 const SCOPE_ORDER: Scope[] = ["project", "builtin", "user"];
 
-// Derive a translucent surface from a token hex — the PROJECT source badge is info-toned
-// and there is no `infoBg` token (only successBg/dangerBg/warnBg), so it is tinted here
-// from tokens.info exactly as the prototype's rgba(79,208,217,.12) chip. Token-derived,
-// never a raw literal.
-function tint(hex: string, alpha: number): string {
-  const h = hex.replace("#", "");
-  const r = parseInt(h.slice(0, 2), 16);
-  const g = parseInt(h.slice(2, 4), 16);
-  const b = parseInt(h.slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
 function scopeColors(scope: Scope, tokens: ColorTokens): { bg: string; ink: string } {
   switch (scope) {
     case "builtin":
       return { bg: tokens.selection, ink: tokens.accent };
     case "project":
-      return { bg: tint(tokens.info, 0.12), ink: tokens.info };
+      return { bg: hexToRgba(tokens.info, 0.12), ink: tokens.info };
     case "user":
     default:
       return { bg: tokens.bg3, ink: tokens.ink2 };
@@ -267,7 +255,7 @@ const styles = StyleSheet.create({
   topline: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   name: { flex: 1, fontSize: 14, fontFamily: monoFamily.bold },
   sourceBadge: { borderRadius: radii.radiusPill, paddingHorizontal: space.space8, paddingVertical: 2 },
-  sourceBadgeText: { fontSize: 10, fontWeight: "700", letterSpacing: 0.3 },
+  sourceBadgeText: { fontSize: 10, fontWeight: "700", letterSpacing: 0.3, fontFamily: monoFamily.bold },
   slashPill: { minHeight: 26, justifyContent: "center", borderRadius: radii.radiusPill, paddingHorizontal: 11 },
   slashText: { fontSize: 11, fontFamily: monoFamily.regular },
   chevron: { width: tapTarget, height: tapTarget, alignItems: "center", justifyContent: "center", marginVertical: -space.space8, marginRight: -space.space8 },

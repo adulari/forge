@@ -107,9 +107,15 @@ export default function ShareViewerScreen() {
                 replay ready
               </Text>
             </View>
+            <View style={styles.scrubRow}>
+              <Text style={[type.meta, { color: tokens.ink4 }]}>▶</Text>
+              <View style={[styles.scrubTrack, { backgroundColor: tokens.border }]}>
+                <View style={[styles.scrubFill, { backgroundColor: tokens.ink2 }]} />
+              </View>
+              <Text style={[type.monoMeta, { color: tokens.ink4 }]}>timeline scrubbing only</Text>
+            </View>
             <Text style={[type.meta, styles.note, { color: tokens.ink4 }]}>
-              Timeline scrubbing only. No composer, no live session control, no browsing beyond
-              this replay.
+              No composer, no live session control, no browsing beyond this replay.
             </Text>
           </View>
         </View>
@@ -143,6 +149,9 @@ const styles = StyleSheet.create({
   toolCallRow: { flexDirection: "row", alignItems: "center", gap: space.space8, marginTop: space.space8 },
   toolCallGlyph: { width: 16, height: 16, borderRadius: radii.radius8, alignItems: "center", justifyContent: "center" },
   toolCallText: { flex: 1 },
+  scrubRow: { flexDirection: "row", alignItems: "center", gap: space.space8, marginTop: space.space12 },
+  scrubTrack: { flex: 1, height: 3, borderRadius: 2, overflow: "hidden" },
+  scrubFill: { width: "62%", height: "100%", borderRadius: 2 },
   note: { marginTop: space.space12 },
   errorRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingVertical: 11 },
   errorText: { flex: 1 },

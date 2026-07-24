@@ -14,6 +14,8 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 
+const CLI_SNIPPET = "$ forge anywhere enable --name atlas";
+
 export default function FirstHostScreen() {
   const anywhere = useAnywhere();
   const tokens = useTokens();
@@ -25,6 +27,15 @@ export default function FirstHostScreen() {
     if (!isTauri) return;
     void import("@tauri-apps/api/core").then(({ invoke }) => invoke<string>("system_host_name")).then(setName).catch(() => undefined);
   }, []);
+
+  // Non-Tauri (web/mobile) platforms can't run a host themselves — poll for a host
+  // connecting from elsewhere (e.g. `forge anywhere enable` on a computer) so the
+  // "waiting" state below reflects real presence, not a static placeholder.
+  useEffect(() => {
+    if (isTauri || anywhere.phase !== "ready") return;
+    const timer = setInterval(() => void anywhere.refresh(), 5000);
+    return () => clearInterval(timer);
+  }, [anywhere, anywhere.phase]);
 
   const prepare = useCallback(async () => {
     setBusy(true);
@@ -52,7 +63,28 @@ export default function FirstHostScreen() {
 
   if (anywhere.phase !== "ready") return <Redirect href="/anywhere" />;
 
-  if (!isTauri) return <Screen scroll contentContainerStyle={styles.screen}><View style={styles.shell}><BackLink label="Forge Anywhere" /><Text style={[typeScale.title, styles.title, { color: tokens.ink }]}>Activate a host</Text><Text style={[typeScale.body, styles.subtitle, { color: tokens.ink2 }]}>{Platform.OS === "web" ? "A browser can control Forge Anywhere, but a host needs Forge Desktop running on the computer." : "Mobile can approve and control hosts, but it cannot run one. Open Forge Desktop on the computer you want to use."}</Text></View></Screen>;
+  if (!isTauri) return <Screen scroll contentContainerStyle={styles.screen}><View style={styles.shell}>
+    <BackLink label="Forge Anywhere" />
+    <Text style={[typeScale.title, styles.title, { color: tokens.ink }]}>Connect your first host</Text>
+    <Text style={[typeScale.body, styles.subtitle, { color: tokens.ink2 }]}>{Platform.OS === "web" ? "A browser can control Forge Anywhere, but a host needs Forge Desktop running on the computer." : "Mobile can approve and control hosts, but it cannot run one. Open Forge Desktop on the computer you want to use."}</Text>
+    <Text style={[typeScale.sub, styles.cliLead, { color: tokens.ink2 }]}>On the machine that runs Forge, enable Anywhere:</Text>
+    <View style={[styles.cliCard, { backgroundColor: tokens.bg1, borderColor: tokens.border }]}>
+      <Text selectable style={[typeScale.code, { color: tokens.ink }]}>{CLI_SNIPPET}</Text>
+    </View>
+    <Text style={[typeScale.monoMeta, styles.cliNote, { color: tokens.ink3 }]}>
+      Pick any name — rename anytime from Host details; identity never changes.
+    </Text>
+    <View style={[styles.waitingRow, { borderColor: tokens.border }]}>
+      <View style={[styles.waitingDot, { backgroundColor: tokens.warn }]} />
+      <Text style={[typeScale.sub, styles.waitingText, { color: tokens.ink2 }]}>
+        {anywhere.hosts.length ? "A host is connected." : "Waiting for a host to connect…"}
+      </Text>
+    </View>
+    <View style={styles.fallbackRow}>
+      <Button label="Use Direct meanwhile" variant="ghost" onPress={() => router.push("/")} style={styles.fallbackAction} />
+      <Button label="Pair another device" variant="ghost" onPress={() => router.push("/anywhere/pair")} style={styles.fallbackAction} />
+    </View>
+  </View></Screen>;
 
   const approval = anywhere.localHostApproval;
   return <Screen scroll keyboardAvoiding contentContainerStyle={styles.screen}><View style={styles.shell}>
@@ -79,4 +111,12 @@ const styles = StyleSheet.create({
   form: { marginTop: space.space24, gap: space.space12 }, promise: { flexDirection: "row", alignItems: "flex-start", gap: space.space8 }, promiseCopy: { flex: 1 }, action: { marginTop: space.space4 },
   safety: { borderWidth: 1, borderRadius: radii.radius12, padding: space.space16, gap: space.space8 }, safetyHeader: { flexDirection: "row", alignItems: "center", gap: space.space8 }, code: { fontFamily: monoFamily.bold, fontSize: 27, lineHeight: 35, letterSpacing: 2.2 },
   actions: { flexDirection: "row", flexWrap: "wrap", gap: space.space8 }, flex: { flexGrow: 1, flexBasis: 190 },
+  cliLead: { marginTop: space.space20 },
+  cliCard: { marginTop: space.space8, borderWidth: 1, borderRadius: radii.radius8, padding: space.space12 },
+  cliNote: { marginTop: space.space8, lineHeight: 16 },
+  waitingRow: { marginTop: space.space16, minHeight: 44, flexDirection: "row", alignItems: "center", gap: space.space8, borderWidth: 1, borderRadius: radii.radius8, paddingHorizontal: space.space12 },
+  waitingDot: { width: 6, height: 6, borderRadius: 3 },
+  waitingText: { flex: 1 },
+  fallbackRow: { marginTop: space.space12, flexDirection: "row", flexWrap: "wrap", gap: space.space8 },
+  fallbackAction: { flexGrow: 1, flexBasis: 160 },
 });

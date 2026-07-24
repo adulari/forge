@@ -116,7 +116,7 @@ function FeaturedPlanCard({ plan }: { plan: PlanRow }) {
   };
 
   return (
-    <Card heatEdge="waiting" style={styles.featured}>
+    <Card style={styles.featured}>
       <View style={styles.featuredHeader}>
         <View style={[styles.dash, { backgroundColor: tokens.accent }]} />
         <Text style={[type.section, { color: tokens.accent }]}>Plan</Text>

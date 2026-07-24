@@ -1,13 +1,13 @@
-// Hearth flat tab strip (Session Chat/Tasks/Agents/Review) — type-first text tabs on a
-// hairline baseline: active = ink + 2px ember underline, inactive = ink3, optional mono
+// Machined flat tab strip (Session Chat/Tasks/Agents/Review) — type-first text tabs on a
+// hairline baseline: active = ink + 2px accent underline, inactive = ink2, optional mono
 // count suffix or waiting dot. Distinct from Segmented (the pill control stays for true
-// value pickers like temper/appearance); these are navigation tabs.
+// value pickers like temper/appearance); these are navigation tabs, never a pill/fill.
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
-import { monoFamily, tabularNums } from "../../theme/typography";
+import { monoFamily, sansFamilyFor, tabularNums } from "../../theme/typography";
 
 export interface TabStripOption<T extends string> {
   value: T;
@@ -44,7 +44,7 @@ export function TabStrip<T extends string>({ options, value, onChange, testID }:
             hitSlop={{ top: 8, bottom: 8 }}
           >
             <View style={styles.labelRow}>
-              <Text style={[styles.label, { color: active ? tokens.ink : tokens.ink3 }]}>{option.label}</Text>
+              <Text style={[styles.label, { color: active ? tokens.ink : tokens.ink2 }]}>{option.label}</Text>
               {option.badge != null ? (
                 <Text style={[styles.badge, tabularNums, { color: tokens.ink4 }]}>{option.badge}</Text>
               ) : null}
@@ -66,7 +66,7 @@ const styles = StyleSheet.create({
   },
   tab: { position: "relative", paddingBottom: 10 },
   labelRow: { flexDirection: "row", alignItems: "center", gap: space.space4 },
-  label: { fontSize: 12.5, fontWeight: "600", letterSpacing: 0.4 },
+  label: { fontSize: 12.5, fontWeight: "600", letterSpacing: 0.4, fontFamily: sansFamilyFor(600) },
   badge: { fontFamily: monoFamily.regular, fontSize: 11 },
   dot: { width: 5, height: 5, borderRadius: 3 },
   underline: { position: "absolute", left: 0, right: 0, bottom: 0, height: 2 },

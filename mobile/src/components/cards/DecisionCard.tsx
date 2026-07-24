@@ -1,5 +1,6 @@
 // Hearth core rule 2 ("One container only: the decision card") — the elevated preview for
-// a session that needs a human: bg2/border/radius16 Card with a waiting HeatEdge, the live
+// a session that needs a human: bg2/border/radius16 Card with a danger-tinted border (Machined
+// retired HeatEdge — the urgency signal is the tint + StatusDot, not a glow), the live
 // permission/question text (a short-lived socket attach, same pattern as FloorTile/
 // DecisionPeek), and Respond (open the session)/Peek (answer inline via the existing
 // DecisionPeek sheet) actions. Used by Fleet's needs-you rows and every Inbox row.
@@ -13,7 +14,7 @@ import { useAuth } from "../../lib/auth";
 import { useSessionSocket } from "../../lib/ws";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
+import { hexToRgba, space } from "../../theme/tokens";
 import { formatCwd, monoFamily, type as typeScale } from "../../theme/typography";
 import { Badge } from "../ds/Badge";
 import { Button } from "../ds/Button";
@@ -38,7 +39,7 @@ function DecisionCardBase({ row, index, onPeek }: DecisionCardProps) {
 
   return (
     <Animated.View style={[entrance, styles.wrap]}>
-      <Card heatEdge="waiting">
+      <Card style={{ borderColor: hexToRgba(tokens.danger, 0.35) }}>
         <View style={styles.headerRow}>
           <StatusDot state="waiting" />
           <Text style={[typeScale.headingBold, styles.title, { color: tokens.ink }]} numberOfLines={1}>

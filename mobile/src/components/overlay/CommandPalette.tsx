@@ -19,6 +19,7 @@ import {
   Archive,
   BellDot,
   Check,
+  Clock,
   Eye,
   Flame,
   History,
@@ -27,6 +28,7 @@ import {
   QrCode,
   Search,
   Settings2,
+  Sparkles,
   SunMedium,
   Wand2,
 } from "lucide-react-native";
@@ -48,6 +50,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  type TextStyle,
   useWindowDimensions,
   View,
 } from "react-native";
@@ -66,13 +69,13 @@ import { entitlementBadge, hostStateText } from "../../lib/anywhere/format";
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { useAuth } from "../../lib/auth";
 import { haptics } from "../../lib/haptics";
-import { useArchiveSession, useSessions } from "../../lib/queries";
-import { usePaletteHotkey } from "../../lib/shortcuts";
+import { useArchiveSession, useCreateSession, usePastSessions, useSessions } from "../../lib/queries";
+import { usePaletteHotkey, useThreadSearchHotkey } from "../../lib/shortcuts";
 import { useSessionSocket } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, space, type StatusDotState } from "../../theme/tokens";
-import { type as typeScale } from "../../theme/typography";
+import { formatCwd, formatRelativeTime, monoFamily, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 import { HostDot } from "../anywhere/HostDot";
 import { DecisionPeek } from "../cards/DecisionPeek";
@@ -85,13 +88,25 @@ import { SectionHeader } from "../ds/SectionHeader";
 import { Sheet } from "../ds/Sheet";
 import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
+import { SchedulesPanel } from "../shell/SchedulesPanel";
+import { WhatsNewPanel } from "../shell/WhatsNewPanel";
 
 import { BUILTIN_COMMANDS, useSkillCommands } from "../../lib/commands";
 import { mergeCommandSources } from "../../lib/commandSources";
 const TRANSIENT_SEND_TIMEOUT_MS = 5000;
-const PANEL_WIDTH = 580;
+// D/W Palette (docs/design/machined INVENTORY.md): centered panel 620-660px.
+const PANEL_WIDTH = 620;
 const ICON_SIZE = 18;
 const ICON_STROKE = 1.75;
+
+/** D Palette footer breadcrumb (`Fleet · Inbox • · History · Settings`) — a clickable
+ * tab-bar equivalent for wide layouts that have no tab bar of their own. */
+const BREADCRUMB_ROUTES: { href: "/" | "/inbox" | "/history" | "/settings"; label: string }[] = [
+  { href: "/", label: "Fleet" },
+  { href: "/inbox", label: "Inbox" },
+  { href: "/history", label: "History" },
+  { href: "/settings", label: "Settings" },
+];
 
 /** Prototype's mono keycap hint (`esc`, `⌘N`) — bordered, ink4, monoMeta. Web/desktop only;
  * keyboard hints have no meaning on a touch sheet. */
@@ -137,9 +152,15 @@ const GROUP_ORDER: PaletteGroupKey[] = ["sessions", "actions", "anywhere", "navi
 // PaletteHost / usePalette — open-state provider, mounted once at the app root.
 // ---------------------------------------------------------------------------
 
+/** `"search"` is the ⌘P thread-search mode (D Thread Search / M... — INVENTORY.md):
+ * same panel chrome, but the result list is session/history matches only, with the
+ * query term highlighted, instead of the default Sessions/Actions/Anywhere/Go-to
+ * groups. */
+export type PaletteMode = "default" | "search";
+
 interface PaletteContextValue {
   isOpen: boolean;
-  open: () => void;
+  open: (mode?: PaletteMode) => void;
   close: () => void;
 }
 
@@ -153,19 +174,24 @@ export function usePalette(): PaletteContextValue {
 
 export function PaletteHost({ children }: { children: React.ReactNode }) {
   const [isOpen, setIsOpen] = useState(false);
-  const open = useCallback(() => setIsOpen(true), []);
+  const [mode, setMode] = useState<PaletteMode>("default");
+  const open = useCallback((m: PaletteMode = "default") => {
+    setMode(m);
+    setIsOpen(true);
+  }, []);
   const close = useCallback(() => setIsOpen(false), []);
 
   // Native has no keyboard shortcut path (useHotkeys.ts is a no-op) — the palette opens there
   // via a header IconButton that a later task wires through `usePalette().open`.
-  usePaletteHotkey(open);
+  usePaletteHotkey(() => open("default"));
+  useThreadSearchHotkey(() => open("search"));
 
   const value = useMemo<PaletteContextValue>(() => ({ isOpen, open, close }), [isOpen, open, close]);
 
   return (
     <PaletteContext.Provider value={value}>
       {children}
-      <CommandPalette visible={isOpen} onClose={close} />
+      <CommandPalette visible={isOpen} mode={mode} onClose={close} />
     </PaletteContext.Provider>
   );
 }
@@ -176,10 +202,11 @@ export function PaletteHost({ children }: { children: React.ReactNode }) {
 
 export interface CommandPaletteProps {
   visible: boolean;
+  mode?: PaletteMode;
   onClose: () => void;
 }
 
-export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
+export function CommandPalette({ visible, mode = "default", onClose }: CommandPaletteProps) {
   const tokens = useTokens();
   const { scheme, setScheme } = useTheme();
   const { isCompact } = useBreakpoint();
@@ -212,6 +239,8 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
+  const [whatsNewVisible, setWhatsNewVisible] = useState(false);
+  const [schedulesVisible, setSchedulesVisible] = useState(false);
 
   const activeSessionId = useMemo(() => activeSessionIdFromPathname(pathname), [pathname]);
 
@@ -366,6 +395,30 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
       },
     });
 
+    items.push({
+      id: "action:whats-new",
+      group: "actions",
+      title: "What's New",
+      keywords: "whats new changelog release notes updates",
+      leading: <Sparkles size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+      onSelect: () => {
+        close();
+        setWhatsNewVisible(true);
+      },
+    });
+
+    items.push({
+      id: "action:schedules",
+      group: "actions",
+      title: "Schedules",
+      keywords: "schedules recurring cron scheduled runs",
+      leading: <Clock size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+      onSelect: () => {
+        close();
+        setSchedulesVisible(true);
+      },
+    });
+
     const allCommands = mergeCommandSources(BUILTIN_COMMANDS, skillCommands);
     for (const cmd of allCommands) {
       items.push({
@@ -492,9 +545,63 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
     return items;
   }, [anywhereSignedIn, anywhereHosts, anywhereAccount, tokens, close]);
 
+  // -------------------------------------------------------------------------
+  // Thread search (⌘P) — reuses the SAME session/history data the Fleet and
+  // History screens already query; no new endpoint. Live sessions resume the
+  // existing session route directly; past sessions "resume" the same way
+  // History's row press does — `useCreateSession` at that cwd, then open it.
+  // -------------------------------------------------------------------------
+  const createSession = useCreateSession();
+  const pastSessionsQuery = usePastSessions();
+  const pastRows = useMemo(() => pastSessionsQuery.data?.pages.flat() ?? [], [pastSessionsQuery.data]);
+
+  const threadItems = useMemo<PaletteItem[]>(() => {
+    if (mode !== "search") return [];
+    const live: PaletteItem[] = (sessions ?? []).map((s) => {
+      const title = s.title || `session ${s.id.slice(0, 8)}`;
+      const state: StatusDotState = s.waiting ? "waiting" : s.busy ? "busy" : "idle";
+      const status = s.waiting ? "needs you" : s.busy ? "forging" : formatRelativeTime(s.last_activity * 1000);
+      return {
+        id: `thread:live:${s.id}`,
+        group: "sessions",
+        title,
+        subtitle: `${formatCwd(s.cwd)} · ${status}`,
+        keywords: `${title} ${s.cwd}`,
+        leading: <StatusDot state={state} />,
+        onSelect: () => {
+          close();
+          router.push(`/session/${s.id}`);
+        },
+      };
+    });
+    const past: PaletteItem[] = pastRows.map((p) => {
+      const title = p.title || `session ${p.id.slice(0, 8)}`;
+      const age = formatRelativeTime(p.last_activity * 1000);
+      return {
+        id: `thread:past:${p.id}`,
+        group: "sessions",
+        title,
+        subtitle: p.preview ? `${formatCwd(p.cwd)} · ${age} — ${p.preview}` : `${formatCwd(p.cwd)} · ${age}`,
+        keywords: `${title} ${p.cwd} ${p.preview ?? ""}`,
+        leading: <StatusDot state="done" />,
+        onSelect: () => {
+          close();
+          createSession.mutate(
+            { cwd: p.cwd, title: p.title || undefined },
+            { onSuccess: (res) => router.push(`/session/${res.id}`) },
+          );
+        },
+      };
+    });
+    return [...live, ...past];
+  }, [mode, sessions, pastRows, close, createSession]);
+
   const allItems = useMemo(
-    () => [...sessionItems, ...actionItems, ...anywhereItems, ...navigationItems],
-    [sessionItems, actionItems, anywhereItems, navigationItems],
+    () =>
+      mode === "search"
+        ? threadItems
+        : [...sessionItems, ...actionItems, ...anywhereItems, ...navigationItems],
+    [mode, threadItems, sessionItems, actionItems, anywhereItems, navigationItems],
   );
 
   const q = query.trim().toLowerCase();
@@ -625,6 +732,8 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
   const panelMaxHeight = windowHeight * 0.7;
 
   const hasResults = filteredItems.length > 0;
+  const isSearchMode = mode === "search";
+  const waitingBadge = (sessions ?? []).some((s) => s.waiting);
 
   const body = (
     <View style={[styles.body, { paddingTop: Math.max(12, insets.top) }]}>
@@ -633,12 +742,17 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
           <SearchField
             value={query}
             onChangeText={setQuery}
-            placeholder="jump to a session, run a command…"
+            placeholder={isSearchMode ? "search sessions and history…" : "jump to a session, run a command…"}
             showCancel={false}
             autoFocus={visible}
-            accessibilityLabel="Command palette search"
+            accessibilityLabel={isSearchMode ? "Thread search" : "Command palette search"}
           />
         </View>
+        {isSearchMode && q ? (
+          <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>
+            {filteredItems.length} match{filteredItems.length === 1 ? "" : "es"}
+          </Text>
+        ) : null}
         {!isCompact ? <KeyHint label="esc" /> : null}
       </View>
       <ScrollView
@@ -647,22 +761,52 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
         keyboardShouldPersistTaps="handled"
       >
         {hasResults ? (
-          groupedItems.map(({ group, items }) =>
-            items.length > 0 ? (
-              <View key={group}>
-                <SectionHeader>{GROUP_LABELS[group]}</SectionHeader>
-                {items.map((item) => (
-                  <PaletteRow key={item.id} item={item} selected={item.id === selectedId} />
-                ))}
-              </View>
-            ) : null,
+          isSearchMode ? (
+            filteredItems.map((item) => (
+              <ThreadRow key={item.id} item={item} query={q} selected={item.id === selectedId} />
+            ))
+          ) : (
+            groupedItems.map(({ group, items }) =>
+              items.length > 0 ? (
+                <View key={group}>
+                  <SectionHeader>{GROUP_LABELS[group]}</SectionHeader>
+                  {items.map((item) => (
+                    <PaletteRow key={item.id} item={item} selected={item.id === selectedId} />
+                  ))}
+                </View>
+              ) : null,
+            )
           )
         ) : (
-          <EmptyState icon={Search} message="no matches for that search" />
+          <EmptyState icon={Search} message={isSearchMode ? "no matching sessions" : "no matches for that search"} />
         )}
         {!isCompact && hasResults ? (
           <View style={[styles.footerRow, { borderTopColor: tokens.border }]}>
             <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>↑↓ navigate · ↵ select</Text>
+            <View style={styles.footerBreadcrumb}>
+              {BREADCRUMB_ROUTES.map((r, i) => {
+                const active =
+                  r.href === "/" ? pathname === "/" || pathname.startsWith("/session") : pathname.startsWith(r.href);
+                return (
+                  <React.Fragment key={r.href}>
+                    {i > 0 ? <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}> · </Text> : null}
+                    <Pressable
+                      onPress={() => {
+                        close();
+                        router.push(r.href);
+                      }}
+                      accessibilityRole="link"
+                      accessibilityLabel={r.label}
+                    >
+                      <Text style={[typeScale.monoMeta, { color: active ? tokens.ink2 : tokens.ink4 }]}>
+                        {r.label}
+                        {r.href === "/inbox" && waitingBadge ? " •" : ""}
+                      </Text>
+                    </Pressable>
+                  </React.Fragment>
+                );
+              })}
+            </View>
           </View>
         ) : null}
       </ScrollView>
@@ -676,6 +820,13 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
       onClose={() => setPeekSessionId(null)}
     />
   );
+  const paletteReachablePanels = (
+    <>
+      {decisionPeek}
+      <WhatsNewPanel visible={whatsNewVisible} onClose={() => setWhatsNewVisible(false)} />
+      <SchedulesPanel visible={schedulesVisible} onClose={() => setSchedulesVisible(false)} />
+    </>
+  );
 
   if (isCompact) {
     return (
@@ -683,7 +834,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
         <Sheet visible={visible} onClose={close} maxHeightRatio={1} accessibilityLabel="Command palette">
           {body}
         </Sheet>
-        {decisionPeek}
+        {paletteReachablePanels}
       </>
     );
   }
@@ -723,8 +874,55 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
           </View>
         </Modal>
       ) : null}
-      {decisionPeek}
+      {paletteReachablePanels}
     </>
+  );
+}
+
+/** Thread search's one required visual: the matched substring rendered in accent
+ * color in place, inside an otherwise plain string. `ds/ListRow`'s `title`/`subtitle`
+ * only take plain strings, so this mode uses its own row (below) instead of ListRow. */
+function HighlightText({ text, query, style }: { text: string; query: string; style: TextStyle | TextStyle[] }) {
+  const tokens = useTokens();
+  const idx = query ? text.toLowerCase().indexOf(query.toLowerCase()) : -1;
+  if (idx < 0) {
+    return (
+      <Text style={style} numberOfLines={1}>
+        {text}
+      </Text>
+    );
+  }
+  return (
+    <Text style={style} numberOfLines={1}>
+      {text.slice(0, idx)}
+      <Text style={{ color: tokens.accent }}>{text.slice(idx, idx + query.length)}</Text>
+      {text.slice(idx + query.length)}
+    </Text>
+  );
+}
+
+function ThreadRow({ item, query, selected }: { item: PaletteItem; query: string; selected: boolean }) {
+  const tokens = useTokens();
+  return (
+    <Pressable
+      onPress={item.disabled ? undefined : item.onSelect}
+      disabled={item.disabled}
+      accessibilityRole="button"
+      accessibilityLabel={item.subtitle ? `${item.title}, ${item.subtitle}` : item.title}
+      style={[styles.threadRow, { backgroundColor: selected ? tokens.selection : "transparent" }]}
+    >
+      {item.leading ? <View style={styles.threadLeading}>{item.leading}</View> : null}
+      <View style={styles.threadBody}>
+        <HighlightText text={item.title} query={query} style={[typeScale.body, { color: tokens.ink }]} />
+        {item.subtitle ? (
+          <HighlightText
+            text={item.subtitle}
+            query={query}
+            style={[typeScale.monoMeta, { color: tokens.ink3, fontFamily: monoFamily.regular }]}
+          />
+        ) : null}
+      </View>
+    </Pressable>
   );
 }
 
@@ -775,10 +973,21 @@ const styles = StyleSheet.create({
   footerRow: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "flex-end",
+    justifyContent: "space-between",
     paddingHorizontal: space.space16,
     paddingTop: space.space12,
     marginTop: space.space8,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
+  footerBreadcrumb: { flexDirection: "row", alignItems: "center" },
+  threadRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space8,
+    minHeight: 44,
+    paddingHorizontal: space.space16,
+    paddingVertical: space.space4,
+  },
+  threadLeading: { alignItems: "center", justifyContent: "center" },
+  threadBody: { flex: 1, gap: 2 },
 });

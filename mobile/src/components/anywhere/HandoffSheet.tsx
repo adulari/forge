@@ -17,7 +17,6 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, tapTarget } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
 import { Button } from "../ds/Button";
-import { HeatEdge } from "../ds/HeatEdge";
 import { SectionHeader } from "../ds/SectionHeader";
 import { Sheet } from "../ds/Sheet";
 import { useToast } from "../ds/ToastHost";
@@ -143,7 +142,6 @@ export function HandoffSheet({ visible, onClose, sessionId, sessionTitle, source
 
               {plan.blockedFiles.length > 0 ? (
                 <View style={styles.blockedWrap}>
-                  <HeatEdge state="waiting" />
                   <View style={styles.blockedInner}>
                     <Text style={[typeScale.bodyBold, { color: tokens.danger }]}>
                       {`${plan.blockedFiles.length} files won't travel — nothing is dropped silently`}
@@ -341,7 +339,6 @@ function HandoffProgressView({
         </Text>
       ) : (
         <View style={styles.failureWrap}>
-          <HeatEdge state="waiting" />
           <View style={styles.failureInner}>
             <Text style={[typeScale.bodyBold, { color: tokens.danger }]}>{`Import failed on ${destHostName} · rolled back`}</Text>
             <Text style={[typeScale.sub, styles.failureBody, { color: tokens.ink2 }]}>

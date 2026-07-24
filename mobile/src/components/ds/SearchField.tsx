@@ -4,7 +4,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Search } from "lucide-react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
+import { radii, space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 import { Input, type InputProps } from "./Input";
 
@@ -89,6 +89,6 @@ const styles = StyleSheet.create({
     marginLeft: space.space12,
     minHeight: 44,
     borderWidth: 2,
-    borderRadius: 8,
+    borderRadius: radii.radius8,
   },
 });

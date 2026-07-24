@@ -15,7 +15,7 @@
 // ghost/danger/allow) — Cancel uses `variant="ghost"` today. Add a danger-ghost
 // variant to ds/Button if the red tint from DESIGN_SYSTEM.md is required.
 import React, { useEffect, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import Animated, { FadeOut, useAnimatedStyle, useReducedMotion, withTiming } from "react-native-reanimated";
 
 import { Button } from "../ds/Button";
@@ -30,8 +30,8 @@ import { type Plan, type QuestionOption, type RemoteInput } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
-import { type as typeScale } from "../../theme/typography";
-import { Send } from "lucide-react-native";
+import { tabularNums, type as typeScale } from "../../theme/typography";
+import { ChevronDown, ChevronRight, Send } from "lucide-react-native";
 
 export interface PlanCardProps {
   plan: Plan;
@@ -54,6 +54,11 @@ export function PlanCard({ plan, question, questionOptions, promptSeq, send, onQ
   // free-text row instead of resolving the prompt, so it never sets this.
   const [committed, setCommitted] = useState<"approve" | "cancel" | null>(null);
   const [queued, setQueued] = useState(false);
+  // Machined "Plan n/m" header + chevron collapse. PlanStep carries no per-step status field
+  // (no done/in-progress/queued data from the daemon), so — unlike the design comp's
+  // checkmark/pulsing-dot/circle step states — this shows a plain step count and a real
+  // collapse toggle instead of fabricating progress that isn't there.
+  const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
     setLockedSeq(null);
@@ -93,25 +98,42 @@ export function PlanCard({ plan, question, questionOptions, promptSeq, send, onQ
     <Animated.View exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
       <Card variant="feature" style={styles.card}>
         <Animated.View style={dim}>
-          <View style={styles.sectionLabel}>
+          <Pressable
+            onPress={() => setCollapsed((v) => !v)}
+            accessibilityRole="button"
+            accessibilityLabel={`${collapsed ? "expand" : "collapse"} plan`}
+            accessibilityState={{ expanded: !collapsed }}
+            style={styles.sectionLabel}
+            hitSlop={8}
+          >
             <View style={[styles.sectionDash, { backgroundColor: tokens.accent }]} />
             <Text style={[typeScale.section, { color: tokens.accent }]}>Plan</Text>
-          </View>
+            <Text style={[typeScale.monoMeta, tabularNums, styles.stepCount, { color: tokens.ink3 }]}>
+              {`${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`}
+            </Text>
+            {collapsed ? (
+              <ChevronRight size={14} strokeWidth={1.75} color={tokens.ink3} />
+            ) : (
+              <ChevronDown size={14} strokeWidth={1.75} color={tokens.ink3} />
+            )}
+          </Pressable>
           <Text style={[typeScale.heading, { color: tokens.ink }, styles.title]}>{plan.title}</Text>
 
-          <View style={styles.steps}>
-            {plan.steps.map((step, idx) => (
-              <View key={idx} style={styles.step}>
-                <Text style={[typeScale.bodyBold, { color: tokens.ink3 }, styles.stepNumber]}>{idx + 1}</Text>
-                <View style={styles.stepBody}>
-                  <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{step.title}</Text>
-                  {step.detail ? (
-                    <Text style={[typeScale.sub, { color: tokens.ink2 }, styles.stepDetail]}>{step.detail}</Text>
-                  ) : null}
+          {!collapsed ? (
+            <View style={styles.steps}>
+              {plan.steps.map((step, idx) => (
+                <View key={idx} style={styles.step}>
+                  <Text style={[typeScale.bodyBold, { color: tokens.ink3 }, styles.stepNumber]}>{idx + 1}</Text>
+                  <View style={styles.stepBody}>
+                    <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{step.title}</Text>
+                    {step.detail ? (
+                      <Text style={[typeScale.sub, { color: tokens.ink2 }, styles.stepDetail]}>{step.detail}</Text>
+                    ) : null}
+                  </View>
                 </View>
-              </View>
-            ))}
-          </View>
+              ))}
+            </View>
+          ) : null}
 
           {plan.notes ? (
             <View style={[styles.notes, { backgroundColor: tokens.warnBg }]}>
@@ -175,8 +197,9 @@ export function PlanCard({ plan, question, questionOptions, promptSeq, send, onQ
 
 const styles = StyleSheet.create({
   card: { gap: space.space8 },
-  sectionLabel: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  sectionLabel: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 24 },
   sectionDash: { width: 6, height: 2 },
+  stepCount: { flex: 1 },
   title: { marginBottom: space.space4 },
   steps: { gap: space.space12 },
   step: { flexDirection: "row", gap: space.space12 },

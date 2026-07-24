@@ -1,11 +1,12 @@
-// DESIGN_SYSTEM.md §6 Status & data: `CostMetric` — tabular numerals, success
-// color, count-up via `useCountUp` (§5.2 Gaugeflow), formatted with `formatCost`.
+// DESIGN_SYSTEM.md §6 Status & data: `CostMetric` — mono tabular numerals (a cost
+// figure — Machined technical-text rule), success color, count-up via `useCountUp`
+// (§5.2 Gaugeflow), formatted with `formatCost`.
 import React from "react";
-import { Text } from "react-native";
+import { StyleSheet, Text } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { useCountUp } from "../../theme/motion";
-import { formatCost, tabularNums, type as typeScale } from "../../theme/typography";
+import { formatCost, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 
 export interface CostMetricProps {
   valueUsd: number;
@@ -23,7 +24,7 @@ export function CostMetric({ valueUsd, variant = "meta", showZero = false }: Cos
 
   return (
     <Text
-      style={[typeScale[variant], tabularNums, { color: tokens.success }]}
+      style={[typeScale[variant], styles.mono, tabularNums, { color: tokens.success }]}
       numberOfLines={1}
       accessibilityRole="text"
       accessibilityLabel={`cost ${formatCost(valueUsd)}`}
@@ -32,3 +33,7 @@ export function CostMetric({ valueUsd, variant = "meta", showZero = false }: Cos
     </Text>
   );
 }
+
+const styles = StyleSheet.create({
+  mono: { fontFamily: monoFamily.regular },
+});

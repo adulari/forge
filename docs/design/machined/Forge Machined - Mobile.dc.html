@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#050506;color:#F4F4F6} a{color:#FF8A3D;text-decoration:none} a:hover{color:#FFB27A}</style>
+</helmet>
+<section style="padding:40px;display:flex;flex-direction:column;gap:30px;font-family:'Geist',system-ui,sans-serif">
+<div style="display:flex;flex-direction:column;gap:10px;max-width:1100px">
+  <div style="display:flex;align-items:center;gap:10px"><svg width="18" height="18" viewBox="0 0 24 24" fill="#FF8A3D"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"></path></svg><span style="font-size:22px;font-weight:700;letter-spacing:-0.02em">Forge Machined — Mobile v2 · 2a Air</span></div>
+  <div style="font-size:14px;line-height:1.65;color:#9A9AA6;text-wrap:pretty">2a "Air" applied across the full coverage: identical structure and information to v1, every size recalibrated — type floor 10.5–11px mono / 13px body, card padding +30%, wider gaps, all hit targets ≥44px. Poracode-derived patterns kept from desktop/web: one accent, hairlines not shadows, mono technical labels, usage pace dots, plan/permission card grammar. Sections: core app · session tabs + features · settings stack · Forge Anywhere · native iOS + light theme.</div>
+</div>
+
+<div style="font-size:13px;font-weight:600;letter-spacing:0.14em;color:#5F5F6B;font-family:'Geist Mono',monospace">01 · CORE — FLEET · SESSION · FLOOR · INBOX · HISTORY · NEW SESSION</div>
+<div style="display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap">
+
+<div style="width:390px;height:844px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0" data-screen-label="M Fleet">
+  <div style="height:50px;flex-shrink:0;display:flex;align-items:flex-end;justify-content:space-between;padding:0 24px 4px"><span style="font-size:14px;font-weight:600">9:41</span><span style="width:16px;height:9px;border:1px solid #5F5F6B;border-radius:2px"></span></div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center;gap:9px">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="#FF8A3D"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"></path></svg>
+    <span style="font-size:22px;font-weight:700;letter-spacing:-0.02em">Fleet</span>
+  </div>
+  <div style="padding:0 18px 12px;font-size:11px;color:#9A9AA6;font-family:'Geist Mono',monospace">1 needs you · 1 forging · $2.27 today</div>
+  <div style="display:flex;gap:8px;padding:2px 18px 12px;font-size:11px;font-family:'Geist Mono',monospace">
+    <span style="border:1px solid rgba(244,244,246,.11);border-radius:3px;padding:6px 12px">All</span><span style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:6px 12px;color:#5F5F6B">MacBook Pro</span><span style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:6px 12px;color:#5F5F6B">atlas</span><span style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:6px 12px;color:#5F5F6B">forge-mini</span>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:10px;padding:0 18px">
+    <div style="border:1px solid rgba(229,96,92,.35);border-radius:4px;background:#0E0E12;padding:15px;display:flex;flex-direction:column;gap:9px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#E5605C"></span><span style="font-size:14px;font-weight:600;flex:1">Backtest vol-mom sweep</span><span style="font-size:10.5px;color:#E5605C;font-family:'Geist Mono',monospace">12s</span></div>
+      <div style="font-size:12.5px;color:#DCDCE2;line-height:1.55">Overwrite .env.staging with the tuned sweep parameters?</div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">vectra-bot · ⑂ wt-a1b2 · codex-mini · MacBook Pro</div>
+      <div style="display:flex;gap:10px"><span style="flex:1;height:44px;border:1px solid rgba(244,244,246,.14);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600">Respond</span><span style="width:92px;height:44px;border:1px solid rgba(244,244,246,.08);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12.5px;color:#9A9AA6">Peek</span></div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:15px;display:flex;flex-direction:column;gap:7px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#FF8A3D"></span><span style="font-size:14px;font-weight:500;flex:1">Fix mesh failover ranking</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">4m</span></div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">forge · main · opus-4.8 · $1.84 · MacBook Pro</div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:15px;display:flex;flex-direction:column;gap:7px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#5FB97D"></span><span style="font-size:14px;font-weight:500;flex:1">Refactor mesh catalog loader</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">22%</span></div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">forge · ⑂ wt-cat · sonnet-5 · atlas · anywhere</div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:4px;padding:15px;display:flex;flex-direction:column;gap:7px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#33333B"></span><span style="font-size:14px;color:#9A9AA6;flex:1">Categorise June transactions</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2h</span></div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">helm · main · done · $0.01</div>
+    </div>
+  </div>
+  <div style="margin:auto 18px 14px;display:flex;flex-direction:column;gap:10px">
+    <div style="height:48px;border:1px solid rgba(244,244,246,.12);border-radius:4px;background:#0E0E12;display:flex;align-items:center;padding:0 13px;gap:9px"><span style="flex:1;font-size:13px;color:#5F5F6B">Describe a task to forge…</span><span style="width:30px;height:30px;border-radius:3px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700">↑</span></div>
+  </div>
+  <div style="border-top:1px solid rgba(244,244,246,.07);height:78px;flex-shrink:0;display:flex;align-items:flex-start;padding-top:10px;background:#0B0B0E">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF8A3D" stroke-width="1.8"><rect x="3" y="3" width="8" height="8" rx="1"></rect><rect x="13" y="3" width="8" height="8" rx="1"></rect><rect x="3" y="13" width="8" height="8" rx="1"></rect><rect x="13" y="13" width="8" height="8" rx="1"></rect></svg><span style="font-size:10.5px;font-weight:600;color:#FF8A3D">Fleet</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;position:relative"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5F5F6B" stroke-width="1.8"><path d="M3 13h4l2 3h6l2-3h4"></path><path d="M5 6h14l2 7v6H3v-6z"></path></svg><span style="font-size:10.5px;color:#5F5F6B">Inbox</span><span style="position:absolute;top:-2px;right:26px;min-width:13px;height:13px;border-radius:7px;background:#E5605C;color:#0B0B0E;font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 3px">1</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5F5F6B" stroke-width="1.8"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg><span style="font-size:10.5px;color:#5F5F6B">History</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5F5F6B" stroke-width="1.8"><path d="M4 8h16M4 16h16"></path><circle cx="9" cy="8" r="2" fill="#09090B"></circle><circle cx="15" cy="16" r="2" fill="#09090B"></circle></svg><span style="font-size:10.5px;color:#5F5F6B">Settings</span></div>
+  </div>
+</div>
+
+<div style="width:390px;height:844px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0" data-screen-label="M Session Chat">
+  <div style="height:50px;flex-shrink:0;display:flex;align-items:flex-end;justify-content:space-between;padding:0 24px 4px"><span style="font-size:14px;font-weight:600">9:41</span><span style="width:16px;height:9px;border:1px solid #5F5F6B;border-radius:2px"></span></div>
+  <div style="padding:10px 18px 0;display:flex;flex-direction:column;gap:9px">
+    <div style="display:flex;align-items:center;gap:9px"><span style="font-size:14px;color:#9A9AA6">‹</span><span style="width:6px;height:6px;border-radius:50%;background:#E5605C"></span><span style="font-size:15px;font-weight:600;flex:1">Backtest vol-mom sweep</span><span style="font-size:14px;color:#5F5F6B">⋯</span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;padding-left:23px">vectra-bot · ⑂ wt-a1b2 · codex-mini · $0.42 · 22% ctx</div>
+    <div style="display:flex;gap:16px;border-bottom:1px solid rgba(244,244,246,.07);padding:9px 0 0 2px">
+      <span style="font-size:12.5px;font-weight:600;padding-bottom:7px;border-bottom:2px solid #FF8A3D">Chat</span><span style="font-size:12.5px;color:#9A9AA6;padding-bottom:7px">Tasks 3</span><span style="font-size:12.5px;color:#9A9AA6;padding-bottom:7px">Agents 2</span><span style="font-size:12.5px;color:#9A9AA6;padding-bottom:7px">Review</span><span style="font-size:12.5px;color:#9A9AA6;padding-bottom:7px">Replay</span>
+    </div>
+  </div>
+  <div style="flex:1;padding:14px 18px;display:flex;flex-direction:column;gap:14px;overflow:hidden">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:13px 14px;font-size:13px;line-height:1.6">Run the vol-mom sweep, then write the tuned params to staging.</div>
+    <div style="font-size:13px;line-height:1.65;color:#DCDCE2;text-wrap:pretty">Sweep finished — 128 runs, best Sharpe 1.94 at lookback 34 / vol target 18%. Writing the tuned params touches a protected file, so I need your call.</div>
+    <div style="display:flex;flex-direction:column;gap:9px;font-family:'Geist Mono',monospace;font-size:11.5px">
+      <div style="display:flex;gap:10px;align-items:baseline"><span style="color:#5F5F6B">Run</span><span>scripts/sweep.py</span><span style="color:#5F5F6B">· 3m 12s</span></div>
+      <div style="display:flex;gap:10px;align-items:baseline"><span style="color:#5F5F6B">Edit</span><span>strategies/vol_mom.py</span><span style="color:#5FB97D">+38</span><span style="color:#E5605C">−9</span></div>
+      <div style="display:flex;gap:10px;align-items:baseline"><span style="color:#5F5F6B">Run</span><span>pytest</span><span style="color:#5F5F6B">· 24 passed</span></div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.12);border-radius:4px;background:#0E0E12;overflow:hidden">
+      <div style="padding:9px 12px 7px;display:flex;flex-direction:column;gap:7px"><span style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#E5605C">PERMISSION · 12S</span><span style="font-size:13px;font-weight:500">Overwrite .env.staging with the tuned parameters?</span>
+        <div style="font-family:'Geist Mono',monospace;font-size:11px;border:1px solid rgba(244,244,246,.07);border-radius:3px;background:#0B0B0E;padding:8px 10px;line-height:1.65"><div style="color:#E5605C">- VOL_TARGET=0.12</div><div style="color:#5FB97D">+ VOL_TARGET=0.18</div><div style="color:#5FB97D">+ LOOKBACK_DAYS=34</div></div>
+      </div>
+      <div style="display:flex;gap:10px;padding:8px 12px;border-top:1px solid rgba(244,244,246,.07)"><span style="flex:1;height:44px;border:1px solid rgba(244,244,246,.14);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600">Allow</span><span style="flex:1;height:44px;border:1px solid rgba(244,244,246,.08);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12.5px;color:#9A9AA6">Deny</span></div>
+    </div>
+  </div>
+  <div style="margin:0 18px 12px;border:1px solid rgba(244,244,246,.12);border-radius:4px;background:#0E0E12;flex-shrink:0">
+    <div style="padding:13px 14px 4px;font-size:12.5px;color:#5F5F6B">Reply to Forge…</div>
+    <div style="display:flex;align-items:center;gap:9px;padding:6px 9px 9px"><span style="font-size:10.5px;color:#9A9AA6;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:3px 7px">codex-mini ⌄</span><span style="font-size:12px;color:#5F5F6B">+</span><span style="font-size:12px;color:#5F5F6B">🎙</span><span style="margin-left:auto;width:30px;height:30px;border-radius:3px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700">↑</span></div>
+  </div>
+  <div style="height:22px;flex-shrink:0;display:flex;justify-content:center"><span style="width:120px;height:4px;border-radius:2px;background:#33333B;margin-top:6px"></span></div>
+</div>
+
+<div style="width:390px;height:844px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0" data-screen-label="M Floor">
+  <div style="height:50px;flex-shrink:0;display:flex;align-items:flex-end;justify-content:space-between;padding:0 24px 4px"><span style="font-size:14px;font-weight:600">9:41</span><span style="width:16px;height:9px;border:1px solid #5F5F6B;border-radius:2px"></span></div>
+  <div style="padding:12px 18px;display:flex;align-items:center;gap:9px"><span style="font-size:22px;font-weight:700;letter-spacing:-0.02em">Floor</span><span style="margin-left:auto;font-size:11px;color:#FF8A3D;font-family:'Geist Mono',monospace">2 forging · live tails</span></div>
+  <div style="display:flex;flex-direction:column;gap:10px;padding:0 18px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:15px;display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#FF8A3D"></span><span style="font-size:14px;font-weight:600;flex:1">Fix mesh failover ranking</span><span style="font-size:10.5px;color:#FF8A3D;font-family:'Geist Mono',monospace">LIVE</span></div>
+      <div style="font-size:12.5px;color:#DCDCE2;line-height:1.6">Reworked the failover comparator to break ties by capability score. Running the mesh suite now.</div>
+      <div style="font-family:'Geist Mono',monospace;font-size:11px;color:#9A9AA6;border:1px solid rgba(244,244,246,.07);border-radius:3px;background:#09090B;padding:9px 11px;line-height:1.65"><div>test-runner · sonnet-5</div><div style="color:#5FB97D">cargo test — 12 passed, running…</div></div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2/4 tasks · 64% ctx · $1.84</div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:15px;display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#FF8A3D"></span><span style="font-size:14px;font-weight:600;flex:1">Backtest vol-mom sweep</span><span style="font-size:10.5px;color:#FF8A3D;font-family:'Geist Mono',monospace">LIVE</span></div>
+      <div style="font-size:12.5px;color:#DCDCE2;line-height:1.6">Sweep finished; drafting the backtest report before the full test suite.</div>
+      <div style="border:1px solid rgba(244,244,246,.12);border-radius:3px;background:#09090B;padding:11px 12px;display:flex;flex-direction:column;gap:8px"><div style="display:flex;gap:9px;align-items:center"><span style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#E5605C">PERMISSION</span><span style="font-size:11.5px;color:#DCDCE2;font-family:'Geist Mono',monospace">run cargo test -p vectra-research</span></div><div style="display:flex;gap:9px"><span style="flex:1;height:40px;border:1px solid rgba(244,244,246,.14);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600">Allow</span><span style="flex:1;height:40px;border:1px solid rgba(244,244,246,.08);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#9A9AA6">Deny</span></div></div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">3/5 tasks · 22% ctx · $0.42 · 1 queued · atlas</div>
+    </div>
+  </div>
+  <div style="margin-top:auto;border-top:1px solid rgba(244,244,246,.07);height:78px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;background:#0B0B0E">tab bar as Fleet</div>
+</div>
+
+<div style="width:390px;height:844px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0" data-screen-label="M Inbox">
+  <div style="height:50px;flex-shrink:0;display:flex;align-items:flex-end;justify-content:space-between;padding:0 24px 4px"><span style="font-size:14px;font-weight:600">9:41</span><span style="width:16px;height:9px;border:1px solid #5F5F6B;border-radius:2px"></span></div>
+  <div style="padding:12px 18px;display:flex;align-items:center;gap:9px"><span style="font-size:22px;font-weight:700;letter-spacing:-0.02em">Inbox</span><span style="margin-left:auto;font-size:11px;color:#E5605C;font-family:'Geist Mono',monospace">1 decision waiting</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="border:1px solid rgba(244,244,246,.12);border-radius:4px;background:#0E0E12;overflow:hidden">
+      <div style="padding:14px 15px;display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;align-items:center;gap:10px"><span style="font-size:13px;font-weight:600;flex:1">Backtest vol-mom sweep</span><span style="font-size:10.5px;color:#E5605C;font-family:'Geist Mono',monospace">12s</span></div>
+        <span style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#E5605C">PERMISSION</span>
+        <div style="font-size:13px;font-weight:500">Overwrite .env.staging with the tuned sweep parameters?</div>
+        <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">vectra-bot · ⑂ wt-a1b2 · codex-mini</div>
+      </div>
+      <div style="display:flex;gap:10px;padding:9px 13px;border-top:1px solid rgba(244,244,246,.07)"><span style="flex:1;height:44px;border:1px solid rgba(244,244,246,.14);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600">Respond</span><span style="width:92px;height:44px;border:1px solid rgba(244,244,246,.08);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12.5px;color:#9A9AA6">Peek</span></div>
+    </div>
+    <div style="text-align:center;padding:26px 0;display:flex;flex-direction:column;gap:8px;align-items:center"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#33333B" stroke-width="1.8"><path d="M20 6L9 17l-5-5"></path></svg><span style="font-size:12px;color:#5F5F6B">That's everything — nothing else needs you.</span></div>
+  </div>
+  <div style="margin-top:auto;border-top:1px solid rgba(244,244,246,.07);height:78px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;background:#0B0B0E">tab bar · Inbox active</div>
+</div>
+
+<div style="width:390px;height:844px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0" data-screen-label="M History">
+  <div style="height:50px;flex-shrink:0;display:flex;align-items:flex-end;justify-content:space-between;padding:0 24px 4px"><span style="font-size:14px;font-weight:600">9:41</span><span style="width:16px;height:9px;border:1px solid #5F5F6B;border-radius:2px"></span></div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center;gap:9px"><span style="font-size:22px;font-weight:700;letter-spacing:-0.02em">History</span><span style="margin-left:auto;font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">synced 2m · 1.2/5 GB</span></div>
+  <div style="padding:0 18px 10px;display:flex;gap:10px;align-items:center">
+    <div style="flex:1;height:44px;border:1px solid rgba(244,244,246,.08);border-radius:3px;background:#0E0E12;display:flex;align-items:center;padding:0 11px;font-size:12.5px;color:#5F5F6B">search title or path…</div>
+    <span style="display:flex;gap:2px;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:2px"><span style="font-size:10.5px;font-weight:600;padding:4px 9px;background:rgba(244,244,246,.09);border-radius:2px">All</span><span style="font-size:10.5px;font-weight:600;padding:4px 9px;color:#5F5F6B">Active</span></span>
+  </div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:9px">
+    <div style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#5F5F6B">TODAY</div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:14px 15px;display:flex;flex-direction:column;gap:4px">
+      <div style="display:flex;gap:10px;align-items:center"><span style="font-size:13px;font-weight:500;flex:1">Backtest vol-mom sweep</span><span style="font-size:10.5px;color:#5FB97D;font-family:'Geist Mono',monospace">✓ synced</span></div>
+      <div style="font-size:11.5px;color:#9A9AA6;line-height:1.55">Sweep finished; tuned params await approval.</div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">vectra-bot · atlas · anywhere · 18 msgs · $0.42</div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:14px 15px;display:flex;flex-direction:column;gap:4px">
+      <div style="display:flex;gap:10px;align-items:center"><span style="font-size:13px;font-weight:500;flex:1">Refactor mesh catalog loader</span><span style="font-size:10.5px;color:#9A9AA6;font-family:'Geist Mono',monospace">↑ syncing 4</span></div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">forge · forge-mini · anywhere · 31 msgs · $1.84</div>
+    </div>
+    <div style="border:1px solid rgba(217,169,78,.3);border-radius:4px;background:#0E0E12;padding:14px 15px;display:flex;flex-direction:column;gap:4px">
+      <div style="display:flex;gap:10px;align-items:center"><span style="font-size:13px;font-weight:500;flex:1">Migrate relay config to TOML</span><span style="font-size:10.5px;color:#D9A94E;font-family:'Geist Mono',monospace">⑂ conflict kept</span></div>
+      <div style="font-size:11.5px;color:#9A9AA6;line-height:1.55">notes.md diverged on 2 devices — both versions preserved.</div>
+    </div>
+    <div style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#5F5F6B;padding-top:3px">THIS WEEK</div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:4px;padding:14px 15px;display:flex;flex-direction:column;gap:4px">
+      <div style="display:flex;gap:10px;align-items:center"><span style="font-size:13px;color:#9A9AA6;flex:1">Pricing page copy pass</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">◌ offline</span></div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">adulari-site · feat/pricing · 14 msgs · 3d</div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:4px;padding:14px 15px;display:flex;flex-direction:column;gap:4px">
+      <div style="display:flex;gap:10px;align-items:center"><span style="font-size:13px;color:#9A9AA6;flex:1">APNs relay retry with backoff</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">archived</span></div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">forge · main · 22 msgs · $1.12 · 8d</div>
+    </div>
+  </div>
+  <div style="margin-top:auto;border-top:1px solid rgba(244,244,246,.07);height:78px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;background:#0B0B0E">tab bar · History active</div>
+</div>
+
+<div style="width:390px;height:844px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0" data-screen-label="M New Session">
+  <div style="height:50px;flex-shrink:0;display:flex;align-items:flex-end;justify-content:space-between;padding:0 24px 4px"><span style="font-size:14px;font-weight:600">9:41</span><span style="width:16px;height:9px;border:1px solid #5F5F6B;border-radius:2px"></span></div>
+  <div style="padding:12px 18px;display:flex;align-items:center"><span style="font-size:22px;font-weight:700;letter-spacing:-0.02em;flex:1">Forge a task</span><span style="font-size:13px;color:#9A9AA6">Cancel</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:14px">
+    <div style="border:1px solid rgba(244,244,246,.11);border-radius:4px;background:#0E0E12;padding:15px;font-size:13px;line-height:1.6;min-height:92px">Run the vol-mom sweep on 2024–25 data and write the tuned params to staging<span style="display:inline-block;width:7px;height:14px;background:#FF8A3D;vertical-align:-2px;margin-left:2px"></span></div>
+    <div style="font-size:11px;color:#5F5F6B;line-height:1.55">Forge plans the session from your sentence — fields below only if you want control.</div>
+    <div style="display:flex;flex-direction:column;gap:9px">
+      <div style="height:48px;border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;display:flex;align-items:center;padding:0 13px;gap:9px"><span style="font-size:11px;color:#5F5F6B;width:52px">Project</span><span style="font-size:13px;flex:1">vectra-bot</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">…/Trading Bots/vectra-bot ⌄</span></div>
+      <div style="height:48px;border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;display:flex;align-items:center;padding:0 13px;gap:9px"><span style="font-size:11px;color:#5F5F6B;width:52px">Host</span><span style="font-size:13px;flex:1">atlas</span><span style="font-size:10.5px;color:#5FB97D;font-family:'Geist Mono',monospace">online · anywhere ⌄</span></div>
+      <div style="height:48px;border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;display:flex;align-items:center;padding:0 13px;gap:9px"><span style="font-size:11px;color:#5F5F6B;width:52px">Model</span><span style="font-size:13px;flex:1">Automatic</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">mesh picks ⌄</span></div>
+    </div>
+    <div style="display:flex;gap:2px;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:2px"><span style="flex:1;text-align:center;font-size:11px;font-weight:600;padding:10px 0;color:#5F5F6B">READ</span><span style="flex:1;text-align:center;font-size:11px;font-weight:600;padding:10px 0;background:rgba(244,244,246,.09);border-radius:2px">ASK</span><span style="flex:1;text-align:center;font-size:11px;font-weight:600;padding:10px 0;color:#5F5F6B">EDIT</span><span style="flex:1;text-align:center;font-size:11px;font-weight:600;padding:10px 0;color:#5F5F6B">FULL</span></div>
+    <div style="display:flex;align-items:center;gap:10px"><span style="width:30px;height:18px;border-radius:9px;background:#FF8A3D;position:relative"><span style="position:absolute;right:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#1A0E04"></span></span><span style="font-size:12.5px;color:#DCDCE2">Isolated git worktree <span style="color:#5F5F6B">recommended</span></span></div>
+    <div style="border:1px solid rgba(217,169,78,.3);border-radius:3px;padding:11px 13px;font-size:11px;color:#D9A94E;line-height:1.55">linux-box is offline — this becomes "Queue remote job"; it starts when the host returns. Prompt, path and title are encrypted in the queue.</div>
+  </div>
+  <div style="margin:auto 18px 16px"><div style="height:50px;border-radius:4px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700">Forge session on atlas</div></div>
+</div>
+
+</div>
+
+<div style="font-size:13px;font-weight:600;letter-spacing:0.14em;color:#5F5F6B;font-family:'Geist Mono',monospace">02 · SESSION TABS + FEATURES (frames share the Session header pattern)</div>
+<div style="display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap">
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M Session Tasks Agents">
+  <div style="padding:16px 18px 10px;display:flex;flex-direction:column;gap:8px"><div style="display:flex;align-items:center;gap:10px"><span style="font-size:14.5px;font-weight:600;flex:1">APNs relay fix</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">Tasks · 2/4</span></div></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:2px">
+    <div style="display:flex;align-items:center;gap:9px;min-height:46px"><span style="color:#5F5F6B;font-size:12px">✓</span><span style="font-size:13px;color:#5F5F6B;flex:1;text-decoration:line-through">Update default APNs relay endpoint</span></div>
+    <div style="display:flex;align-items:center;gap:9px;min-height:46px;background:rgba(244,244,246,.05);border-radius:3px;padding:0 8px;margin:0 -8px"><span style="width:6px;height:6px;border-radius:50%;background:#FF8A3D;margin:0 3px"></span><span style="font-size:13px;font-weight:500;flex:1">Add regression test for relay fallback</span><span style="font-size:10.5px;color:#FF8A3D;font-family:'Geist Mono',monospace">test-writer</span></div>
+    <div style="display:flex;align-items:center;gap:9px;min-height:46px"><span style="color:#33333B;font-size:12px">○</span><span style="font-size:13px;color:#9A9AA6;flex:1">Update CHANGELOG entry</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">queued</span></div>
+  </div>
+  <div style="padding:14px 18px 8px;display:flex;align-items:center"><span style="font-size:13px;font-weight:600;flex:1">Agents</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">3 of 4 running · $0.41</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:9px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:13px 14px;display:flex;flex-direction:column;gap:4px"><div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#FF8A3D"></span><span style="font-size:13px;font-weight:600;flex:1">test-runner</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">sonnet-5 · $0.14</span></div><div style="font-size:11px;color:#9A9AA6;font-family:'Geist Mono',monospace">cargo test — 12 passed, 3 running</div></div>
+    <div style="border:1px solid rgba(244,244,246,.12);border-radius:4px;background:#0E0E12;padding:13px 14px;display:flex;flex-direction:column;gap:9px"><div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#E5605C"></span><span style="font-size:13px;font-weight:600;flex:1">bench-writer</span><span style="font-size:10.5px;color:#E5605C;font-family:'Geist Mono',monospace">needs permission</span></div><div style="font-size:11px;color:#9A9AA6;font-family:'Geist Mono',monospace">run cargo bench -p forge-mesh</div><div style="display:flex;gap:9px"><span style="flex:1;height:40px;border:1px solid rgba(244,244,246,.14);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600">Allow</span><span style="flex:1;height:40px;border:1px solid rgba(244,244,246,.08);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#9A9AA6">Deny</span></div></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:4px;padding:13px 14px;display:flex;align-items:center;gap:10px"><span style="font-size:11px;color:#5FB97D">✓</span><span style="font-size:13px;color:#9A9AA6;flex:1">doc-updater</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">docs/failover.md +18 −4 · $0.02</span></div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M Session Review Replay">
+  <div style="padding:16px 18px 10px"><div style="display:flex;align-items:center;gap:10px"><span style="font-size:14.5px;font-weight:600;flex:1">APNs relay fix</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">Review · plan v2</span></div></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;overflow:hidden">
+      <div style="padding:14px 15px;display:flex;flex-direction:column;gap:9px">
+        <span style="font-size:13px;font-weight:600">Harden the APNs relay client</span>
+        <div style="font-size:12px;color:#DCDCE2;line-height:1.7">1 · Point default relay at forge.adulari.dev/relay<br>2 · Add retry backoff — 3 attempts, exponential<br>3 · Cover with regression test</div>
+        <div style="border-left:2px solid #D9A94E;padding-left:9px;font-size:11px;color:#9A9AA6;line-height:1.55">Touches the default upstream for all push notifications — verify reachability before merging.</div>
+      </div>
+      <div style="display:flex;gap:9px;padding:9px 13px;border-top:1px solid rgba(244,244,246,.07)"><span style="flex:1;height:44px;border-radius:3px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700">Approve</span><span style="flex:1;height:44px;border:1px solid rgba(244,244,246,.1);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12.5px;color:#9A9AA6">Revise</span></div>
+    </div>
+  </div>
+  <div style="padding:14px 18px 8px;display:flex;align-items:center"><span style="font-size:13px;font-weight:600;flex:1">Replay</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">scrub · share ▸</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:9px">
+    <div style="display:flex;gap:9px"><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;width:56px;flex-shrink:0">you 09:12</span><span style="font-size:12px;color:#DCDCE2;line-height:1.55">Switched the default APNs relay — make sure the client test covers it.</span></div>
+    <div style="display:flex;gap:9px"><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;width:56px;flex-shrink:0">forge 09:13</span><span style="font-size:12px;color:#DCDCE2;line-height:1.55">Updated the relay default and added a regression test. Ran cargo test — 42 passed.</span></div>
+    <div style="display:flex;align-items:center;gap:9px;padding-top:2px"><span style="font-size:11px;color:#5F5F6B">▶</span><div style="flex:1;height:3px;border-radius:2px;background:rgba(244,244,246,.08);position:relative"><div style="width:38%;height:100%;border-radius:2px;background:#9A9AA6"></div></div><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">09:13/09:41</span></div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M Workflows">
+  <div style="padding:16px 18px 10px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Workflows</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">.forge/workflows/</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="border:1px solid rgba(244,244,246,.1);border-radius:4px;background:#0E0E12;padding:14px 15px;display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="font-size:13px;font-weight:600;flex:1">release-prep</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2h · ✓ $4.86</span></div>
+      <div style="font-size:11.5px;color:#9A9AA6;line-height:1.55">Audit, fix and verify the workspace before cutting a release.</div>
+      <div style="display:flex;gap:8px;align-items:center"><span style="font-size:10.5px;font-family:'Geist Mono',monospace;border:1px solid rgba(244,244,246,.08);border-radius:2px;padding:2px 7px;color:#9A9AA6">version 2.7.0</span><span style="font-size:10.5px;font-family:'Geist Mono',monospace;border:1px solid rgba(244,244,246,.08);border-radius:2px;padding:2px 7px;color:#9A9AA6">dry_run ✗</span><span style="margin-left:auto;font-size:11.5px;font-weight:700;background:#FF8A3D;color:#1A0E04;border-radius:3px;padding:5px 12px">Run</span></div>
+      <div style="display:flex;gap:10px;font-size:10.5px;font-family:'Geist Mono',monospace;color:#5F5F6B"><span style="color:#FF8A3D">● r-8f3a21 running</span><span>✓ r-77c2b0 · 1d</span><span>✗ r-5e19aa · 3d</span></div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:14px 15px;display:flex;flex-direction:column;gap:9px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="font-size:13px;font-weight:600;flex:1">run r-8f3a21</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">12/40 agents · $4.86 · 14m</span></div>
+      <div style="height:3px;border-radius:2px;background:rgba(244,244,246,.08)"><div style="width:30%;height:100%;border-radius:2px;background:#FF8A3D"></div></div>
+      <div style="display:flex;flex-direction:column;gap:7px;font-family:'Geist Mono',monospace;font-size:10.5px">
+        <div style="display:flex;gap:10px"><span style="color:#5FB97D">✓ Audit</span><span style="color:#5F5F6B">8 agents · 2m 04s</span></div>
+        <div style="display:flex;gap:10px"><span style="color:#FF8A3D">● Fix</span><span style="color:#5F5F6B">3 running · 9 queued</span></div>
+        <div style="display:flex;gap:10px;padding-left:12px"><span style="color:#DCDCE2">fix-auth</span><span style="color:#5F5F6B">gpt-5.5 · token.rs · $0.41</span></div>
+        <div style="display:flex;gap:10px;padding-left:12px"><span style="color:#DCDCE2">fix-flaky-tests</span><span style="color:#E5605C">failed · exit 1</span><span style="color:#9A9AA6">Retry</span></div>
+        <div style="display:flex;gap:10px"><span style="color:#33333B">○ Verify</span><span style="color:#5F5F6B">queued</span></div>
+      </div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:4px;padding:14px 15px;display:flex;flex-direction:column;gap:7px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="font-size:13px;color:#9A9AA6;flex:1">result · r-77c2b0</span><span style="font-size:10.5px;color:#5FB97D;font-family:'Geist Mono',monospace">✓ $5.12 · 14m</span></div>
+      <div style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9A9AA6;line-height:1.65">{ "version":"2.7.0", "prs_opened":["#412","#413"], "checks_fixed":17 }</div>
+    </div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M Mesh Effort Duel">
+  <div style="padding:16px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Why this model</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">/mesh · turn 14</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px">
+    <div style="border:1px solid rgba(244,244,246,.1);border-radius:4px;background:#0E0E12;padding:13px 14px;display:flex;flex-direction:column;gap:7px">
+      <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap"><span style="font-size:12.5px;font-family:'Geist Mono',monospace;font-weight:600">claude-opus-4-8</span><span style="font-size:10px;font-weight:600;color:#1A0E04;background:#FF8A3D;border-radius:2px;padding:2px 6px">COMPLEX</span><span style="font-size:10px;font-weight:600;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 6px">SUBSCRIPTION</span></div>
+      <div style="font-size:11px;color:#9A9AA6;line-height:1.55">task classified complex · highest coding score in tier · quota healthy</div>
+      <div style="display:flex;gap:10px;font-size:10.5px;font-family:'Geist Mono',monospace;color:#5F5F6B"><span>coding <span style="color:#DCDCE2">76.8</span></span><span>iq <span style="color:#DCDCE2">74.2</span></span></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:4px;font-size:11px">
+      <div style="display:flex;gap:10px"><span style="font-family:'Geist Mono',monospace;color:#DCDCE2">grok-4</span><span style="margin-left:auto;color:#E5605C">rate limited · retry 10:15</span></div>
+      <div style="display:flex;gap:10px"><span style="font-family:'Geist Mono',monospace;color:#DCDCE2">gpt-5.5</span><span style="margin-left:auto;color:#D9A94E">quota 91% — reserved trivial</span></div>
+      <div style="display:flex;gap:10px"><span style="font-family:'Geist Mono',monospace;color:#DCDCE2">sonnet-5</span><span style="margin-left:auto;color:#5F5F6B">below tier threshold</span></div>
+    </div>
+  </div>
+  <div style="padding:14px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Effort</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">per-turn thinking</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px">
+    <div style="display:flex;gap:2px;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:2px"><span style="flex:1;text-align:center;font-size:10.5px;font-weight:600;padding:9px 0;color:#5F5F6B">AUTO</span><span style="flex:1;text-align:center;font-size:10.5px;font-weight:600;padding:9px 0;color:#5F5F6B">LOW</span><span style="flex:1;text-align:center;font-size:10.5px;font-weight:600;padding:9px 0;color:#5F5F6B">MED</span><span style="flex:1;text-align:center;font-size:10.5px;font-weight:600;padding:9px 0;background:rgba(244,244,246,.09);border-radius:2px">HIGH</span><span style="flex:1;text-align:center;font-size:10.5px;font-weight:600;padding:9px 0;color:#5F5F6B">XHIGH</span><span style="flex:1;text-align:center;font-size:10.5px;font-weight:600;padding:9px 0;color:#FF8A3D">WHITEHOT</span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">high — extended thinking every turn · ~$0.18/turn · whitehot — model council · ~$2.40/turn</div>
+  </div>
+  <div style="padding:14px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Duel</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">"explain the failover bug"</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:9px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:13px 14px;display:flex;flex-direction:column;gap:7px"><div style="display:flex;gap:9px"><span style="font-size:11.5px;font-family:'Geist Mono',monospace;font-weight:600">opus-4-8</span><span style="margin-left:auto;font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">$0.09 · 6.2s</span></div><div style="font-size:11.5px;color:#9A9AA6;line-height:1.55">Comparator falls back to alphabetical order before capability — an outage routes to whichever name sorts first.</div><span style="font-size:11px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:3px;padding:9px 0;text-align:center">Pick this answer</span></div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:13px 14px;display:flex;flex-direction:column;gap:7px"><div style="display:flex;gap:9px"><span style="font-size:11.5px;font-family:'Geist Mono',monospace;font-weight:600">gpt-5.5</span><span style="margin-left:auto;font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">$0.04 · 3.8s</span></div><div style="font-size:11.5px;color:#9A9AA6;line-height:1.55">Failover ranking ignores capability score on tie-break — see catalog.rs:142.</div><span style="font-size:11px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:3px;padding:9px 0;text-align:center">Pick this answer</span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">scoreboard · 24 duels — opus 62% · gpt-5.5 29%</div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M Tree Checkpoints Goal">
+  <div style="padding:16px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Session tree</span><span style="font-size:11px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:3px;padding:5px 12px">Fork…</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column">
+    <div style="display:flex;gap:9px;align-items:center;min-height:46px"><span style="width:6px;height:6px;border-radius:50%;background:#FF8A3D"></span><div style="flex:1;display:flex;flex-direction:column"><span style="font-size:12.5px;font-weight:500">main line · turn 48 <span style="font-size:10px;color:#FF8A3D;font-family:'Geist Mono',monospace">CURRENT</span></span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">a1b2c3d4</span></div></div>
+    <div style="display:flex;gap:9px;align-items:center;min-height:46px;padding-left:18px;border-left:1px solid rgba(244,244,246,.09);margin-left:2px"><span style="width:6px;height:6px;border-radius:50%;background:#9A9AA6"></span><div style="flex:1;display:flex;flex-direction:column"><span style="font-size:12.5px;color:#DCDCE2">retry-loop experiment</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">turn 42 · ⑂ wt-retry</span></div><span style="display:flex;gap:7px;font-size:10.5px;color:#9A9AA6"><span style="border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 7px">Open</span><span style="border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 7px">Merge back</span></span></div>
+    <div style="display:flex;gap:9px;align-items:center;min-height:46px;padding-left:18px;border-left:1px solid rgba(244,244,246,.09);margin-left:2px"><span style="width:6px;height:6px;border-radius:50%;background:#33333B"></span><span style="font-size:12.5px;color:#5F5F6B;flex:1">abandoned alpha ranking</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">closed</span></div>
+  </div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Checkpoints</span><span style="font-size:11px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:3px;padding:5px 12px">+ Checkpoint</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px;font-size:11.5px">
+    <div style="display:flex;gap:10px;align-items:center;min-height:40px"><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">09:38</span><span style="color:#DCDCE2;flex:1">manual · "before comparator rewrite"</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">+128 −44</span></div>
+    <div style="display:flex;gap:10px;align-items:center;min-height:40px;background:rgba(244,244,246,.05);border-radius:3px;padding:0 8px;margin:0 -8px"><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">09:31</span><span style="color:#DCDCE2;flex:1">auto · after cargo test pass</span><span style="display:flex;gap:7px;font-size:10.5px;color:#9A9AA6"><span style="border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 7px">Restore</span><span style="border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 7px">Diff</span></span></div>
+    <div style="display:flex;gap:10px;align-items:center;min-height:40px"><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">08:04</span><span style="color:#5F5F6B;flex:1">auto · session start · clean tree</span></div>
+  </div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Goal</span><span style="font-size:10.5px;color:#D9A94E;font-family:'Geist Mono',monospace">looping · iter 3 · $0.94</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px">
+    <div style="border:1px solid rgba(217,169,78,.3);border-radius:4px;background:#0E0E12;padding:13px 14px;display:flex;flex-direction:column;gap:7px"><span style="font-size:12px;color:#DCDCE2;line-height:1.55">"all mesh tests pass and failover picks by capability score"</span><div style="display:flex;gap:10px;font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace"><span>iter 1 ✗</span><span>iter 2 ✗</span><span style="color:#D9A94E">iter 3 — judge evaluating…</span><span style="margin-left:auto;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:0 8px">Stop</span></div></div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M Memory Lattice Hooks Skills Assay">
+  <div style="padding:16px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Memory</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">14 · recalled 3 this turn</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:10px;font-weight:600;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 5px">USER</span><span style="font-size:11.5px;color:#DCDCE2;flex:1;line-height:1.45">Prefers exponential backoff with jitter for retry loops</span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:10px;font-weight:600;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 5px">PROJECT</span><span style="font-size:11.5px;color:#9A9AA6;flex:1;line-height:1.45">forge-relay must stay v6-protocol compatible</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">9×</span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:10px;font-weight:600;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 5px">FEEDBACK</span><span style="font-size:11.5px;color:#9A9AA6;flex:1;line-height:1.45">"Stop adding comments to every line"</span></div>
+  </div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Lattice</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">code graph · fresh 2m</span></div>
+  <div style="padding:0 18px"><div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:13px 14px;display:flex;flex-direction:column;gap:7px"><div style="display:flex;gap:9px;align-items:center"><span style="font-size:11.5px;font-family:'Geist Mono',monospace;font-weight:600">fn rank_candidates</span><span style="font-size:10px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:0 4px">PUB</span><span style="margin-left:auto;font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">catalog.rs:142</span></div><div style="display:flex;gap:9px;font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace"><span>18 refs</span><span>4 callers</span><span>2 impls touched by pending diff</span></div></div></div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Hooks</span><span style="font-size:11px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:3px;padding:5px 12px">+ Add</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;gap:9px;align-items:center;flex-wrap:wrap"><span style="font-size:10px;font-weight:600;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 5px">POST-EDIT</span><span style="font-size:11.5px;font-family:'Geist Mono',monospace">fmt-on-edit</span><span style="font-size:10.5px;color:#5FB97D;font-family:'Geist Mono',monospace;margin-left:auto">ok · 09:39</span></div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;gap:9px;align-items:center;flex-wrap:wrap"><span style="font-size:10px;font-weight:600;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 5px">PRE-CMD</span><span style="font-size:11.5px;font-family:'Geist Mono',monospace">block-prod-deploy</span><span style="font-size:10.5px;color:#E5605C;font-family:'Geist Mono',monospace;margin-left:auto">blocked · 2d</span></div>
+  </div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Skills</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">4 available</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;gap:9px;align-items:center"><span style="font-size:11.5px;font-family:'Geist Mono',monospace">council</span><span style="font-size:10px;color:#5F5F6B;border:1px solid rgba(244,244,246,.08);border-radius:2px;padding:0 4px">BUILTIN · /council</span><span style="font-size:10.5px;color:#9A9AA6;flex:1;text-align:right">multi-perspective review</span></div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;gap:9px;align-items:center"><span style="font-size:11.5px;font-family:'Geist Mono',monospace">release-checklist</span><span style="font-size:10px;color:#5F5F6B;border:1px solid rgba(244,244,246,.08);border-radius:2px;padding:0 4px">PROJECT</span><span style="font-size:10.5px;color:#9A9AA6;flex:1;text-align:right">5 resources</span></div>
+  </div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Assay</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">relay diff · $0.31 · 1m 44s</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="border:1px solid rgba(229,96,92,.3);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;flex-direction:column;gap:4px"><div style="display:flex;gap:9px;align-items:center"><span style="font-size:10px;font-weight:700;color:#0B0B0E;background:#E5605C;border-radius:2px;padding:2px 6px">HIGH</span><span style="font-size:12px;font-weight:500;flex:1">Retry loop can hammer relay on 401</span><span style="font-size:10.5px;color:#5FB97D;font-family:'Geist Mono',monospace">3/3</span></div><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">client.rs:88</span></div>
+    <div style="border:1px solid rgba(217,169,78,.3);border-radius:3px;padding:12px 13px;display:flex;gap:9px;align-items:center"><span style="font-size:10px;font-weight:700;color:#0B0B0E;background:#D9A94E;border-radius:2px;padding:2px 6px">MED</span><span style="font-size:12px;color:#DCDCE2;flex:1">Timeout not configurable per relay</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2/3</span></div>
+  </div>
+</div>
+
+</div>
+
+<div style="font-size:13px;font-weight:600;letter-spacing:0.14em;color:#5F5F6B;font-family:'Geist Mono',monospace">03 · SETTINGS STACK — HUB · USAGE · MODELS · CONFIG · MCP · PLANS · CONNECT</div>
+<div style="display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap">
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M Settings">
+  <div style="padding:16px 18px 10px"><span style="font-size:22px;font-weight:700;letter-spacing:-0.02em">Settings</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#5F5F6B">SERVERS</div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;overflow:hidden">
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="width:6px;height:6px;border-radius:50%;background:#5FB97D"></span><span style="font-size:13px;font-weight:500;flex:1">MacBook Pro <span style="font-size:10px;color:#5F5F6B">ACTIVE</span></span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">…a1F9 · 1 waiting</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px"><span style="width:6px;height:6px;border-radius:50%;background:#5FB97D"></span><span style="font-size:13px;color:#9A9AA6;flex:1">linux-box</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">…7c2E · 0 waiting</span></div>
+    </div>
+    <div style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#5F5F6B">FORGE</div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;overflow:hidden">
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Forge Anywhere</span><span style="font-size:10.5px;font-weight:600;color:#D9A94E;border:1px solid rgba(217,169,78,.35);border-radius:2px;padding:2px 7px">TRIAL · 9D</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Usage</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">$2.27 today</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Models &amp; mesh</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">6 ready</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Plans</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2 open</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">MCP servers</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2 enabled</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Configuration</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Skills</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">4</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px"><span style="font-size:13px;flex:1">Session tree</span><span style="color:#5F5F6B">›</span></div>
+    </div>
+    <div style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#5F5F6B">APPEARANCE</div>
+    <div style="display:flex;gap:2px;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:2px"><span style="flex:1;text-align:center;font-size:10.5px;font-weight:600;padding:10px 0;color:#5F5F6B">LIGHT</span><span style="flex:1;text-align:center;font-size:10.5px;font-weight:600;padding:10px 0;background:rgba(244,244,246,.09);border-radius:2px">DARK</span><span style="flex:1;text-align:center;font-size:10.5px;font-weight:600;padding:10px 0;color:#5F5F6B">SYSTEM</span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;text-align:center;padding-top:2px">forge 2.7.1 · protocol v7</div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M Usage Models">
+  <div style="padding:16px 18px 8px;display:flex;align-items:center;gap:9px"><span style="font-size:14px;color:#9A9AA6">‹</span><span style="font-size:16px;font-weight:700;flex:1">Usage</span><span style="display:flex;gap:2px;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:2px"><span style="font-size:10.5px;font-weight:600;padding:3px 8px;background:rgba(244,244,246,.09);border-radius:2px">WEEK</span><span style="font-size:10.5px;font-weight:600;padding:3px 8px;color:#5F5F6B">SESSION</span></span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:15px;display:flex;gap:13px;align-items:center">
+      <svg width="40" height="40" viewBox="0 0 44 44"><circle cx="22" cy="22" r="18" fill="none" stroke="rgba(244,244,246,.08)" stroke-width="4"></circle><circle cx="22" cy="22" r="18" fill="none" stroke="#9A9AA6" stroke-width="4" stroke-dasharray="45.2 113.1" stroke-linecap="round" transform="rotate(-90 22 22)"></circle></svg>
+      <div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:13px;font-weight:600">40% combined subscription</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">842.6k tokens · 612.4k in · 230.2k out</span></div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:14px 15px;display:flex;flex-direction:column;gap:9px">
+      <div style="display:flex;gap:9px;align-items:center"><span style="font-size:11px">✳</span><span style="font-size:12.5px;font-weight:600;flex:1">Anthropic · Max 20x</span><span style="font-size:10.5px;color:#5F5F6B;border:1px solid rgba(244,244,246,.08);border-radius:2px;padding:0 5px">OAUTH</span></div>
+      <div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;justify-content:space-between;font-size:10.5px"><span style="color:#9A9AA6">5h window</span><span style="font-family:'Geist Mono',monospace">62% · resets Thu 3:15p</span></div><div style="height:3px;border-radius:2px;background:rgba(244,244,246,.08)"><div style="width:62%;height:100%;border-radius:2px;background:#F4F4F6"></div></div></div>
+      <div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;justify-content:space-between;font-size:10.5px"><span style="color:#9A9AA6">week</span><span style="font-family:'Geist Mono',monospace">31% · resets Mon</span></div><div style="height:3px;border-radius:2px;background:rgba(244,244,246,.08)"><div style="width:31%;height:100%;border-radius:2px;background:#F4F4F6"></div></div><div style="font-size:10.5px;color:#D9A94E">● ≈75% by reset</div></div>
+      <div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;justify-content:space-between;font-size:10.5px"><span style="color:#9A9AA6">Extra usage</span><span style="font-family:'Geist Mono',monospace">$182.65 / $250</span></div><div style="height:3px;border-radius:2px;background:rgba(244,244,246,.08)"><div style="width:73%;height:100%;border-radius:2px;background:#D9A94E"></div></div></div>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:4px;padding:10px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:10.5px;font-family:'Geist Mono',monospace;color:#9A9AA6">&gt;_</span><span style="font-size:12.5px;color:#9A9AA6;flex:1">OpenAI · Pro</span><span style="font-size:10.5px;color:#E5605C;font-family:'Geist Mono',monospace">runs out 1d 8h</span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:4px;padding:10px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:11px;color:#9A9AA6">◆</span><span style="font-size:12.5px;color:#9A9AA6;flex:1">Google · API key</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">$0.01 today</span></div>
+  </div>
+  <div style="padding:14px 18px 8px;display:flex;align-items:center;gap:9px"><span style="font-size:16px;font-weight:700;flex:1">Models &amp; mesh</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">ranked by capability</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#5F5F6B">COMPLEX</div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#5FB97D"></span><span style="font-size:12px;font-family:'Geist Mono',monospace;font-weight:600;flex:1">claude-opus-4-8</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">IQ 74.2 · code 76.8</span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#D9A94E"></span><span style="font-size:12px;font-family:'Geist Mono',monospace;color:#9A9AA6;flex:1">grok-4</span><span style="font-size:10.5px;color:#D9A94E;font-family:'Geist Mono',monospace">benched · retry 10:15</span></div>
+    <div style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#5F5F6B;padding-top:2px">STANDARD</div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#5FB97D"></span><span style="font-size:12px;font-family:'Geist Mono',monospace;color:#9A9AA6;flex:1">claude-sonnet-5</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">IQ 65.3 · code 68.1</span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#5FB97D"></span><span style="font-size:12px;font-family:'Geist Mono',monospace;color:#9A9AA6;flex:1">gemini-2.5-pro</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">IQ 61.7 · 1.0M ctx</span></div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M Config MCP Plans">
+  <div style="padding:16px 18px 8px;display:flex;align-items:center;gap:9px"><span style="font-size:16px;font-weight:700;flex:1">Configuration</span><span style="display:flex;gap:2px;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:2px"><span style="font-size:10px;font-weight:600;padding:3px 7px;background:rgba(244,244,246,.09);border-radius:2px">EVERYWHERE</span><span style="font-size:10px;font-weight:600;padding:3px 7px;color:#5F5F6B">PROJECT</span></span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="display:flex;align-items:center;gap:10px;min-height:46px"><div style="flex:1;display:flex;flex-direction:column"><span style="font-size:13px">Auto-failover</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">mesh.auto_failover · default</span></div><span style="width:30px;height:18px;border-radius:9px;background:#FF8A3D;position:relative"><span style="position:absolute;right:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#1A0E04"></span></span></div>
+    <div style="display:flex;align-items:center;gap:10px;min-height:46px"><div style="flex:1;display:flex;flex-direction:column"><span style="font-size:13px">Routing tier</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">mesh.routing_tier · project</span></div><span style="display:flex;gap:2px;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:2px"><span style="font-size:10px;font-weight:600;padding:3px 6px;color:#5F5F6B">ECO</span><span style="font-size:10px;font-weight:600;padding:3px 6px;background:rgba(244,244,246,.09);border-radius:2px">BAL</span><span style="font-size:10px;font-weight:600;padding:3px 6px;color:#5F5F6B">PREM</span></span></div>
+    <div style="display:flex;align-items:center;gap:10px;min-height:46px"><div style="flex:1;display:flex;flex-direction:column"><span style="font-size:13px">Default model</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">mesh.default_model · user</span></div><span style="font-size:11px;color:#9A9AA6;border:1px solid rgba(244,244,246,.09);border-radius:3px;padding:4px 9px">opus-4-8 ⌄</span></div>
+    <div style="display:flex;align-items:center;gap:10px;min-height:46px"><div style="flex:1;display:flex;flex-direction:column"><span style="font-size:13px">Watched paths</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">~/Documents/Repositories · ~/Projects</span></div><span style="font-size:11px;color:#9A9AA6">Edit</span></div>
+  </div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center"><span style="font-size:16px;font-weight:700;flex:1">MCP servers</span><span style="font-size:11px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:3px;padding:5px 12px">+ Add</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:12px;font-family:'Geist Mono',monospace;font-weight:600;flex:1">github</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">stdio · 1 secret ref</span><span style="width:26px;height:15px;border-radius:8px;background:#FF8A3D;position:relative"><span style="position:absolute;right:2px;top:2px;width:11px;height:11px;border-radius:50%;background:#1A0E04"></span></span></div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:12px;font-family:'Geist Mono',monospace;font-weight:600;flex:1">helm</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">http · 2 secret refs</span><span style="width:26px;height:15px;border-radius:8px;background:#FF8A3D;position:relative"><span style="position:absolute;right:2px;top:2px;width:11px;height:11px;border-radius:50%;background:#1A0E04"></span></span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:12px;font-family:'Geist Mono',monospace;color:#5F5F6B;flex:1">playwright</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">disabled</span><span style="width:26px;height:15px;border-radius:8px;background:#33333B;position:relative"><span style="position:absolute;left:2px;top:2px;width:11px;height:11px;border-radius:50%;background:#5F5F6B"></span></span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">secrets stay on the host — only variable names are saved</div>
+  </div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center"><span style="font-size:16px;font-weight:700;flex:1">Plans</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2 awaiting review</span></div>
+  <div style="padding:0 18px"><div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:13px 14px;display:flex;flex-direction:column;gap:8px"><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">forge · Fix mesh failover</span><span style="font-size:13px;font-weight:600">Point default APNs relay at forge.adulari.dev/relay</span><div style="display:flex;gap:9px"><span style="flex:1;height:40px;border-radius:3px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700">Approve</span><span style="flex:1;height:40px;border:1px solid rgba(244,244,246,.1);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#9A9AA6">Revise</span></div></div></div>
+</div>
+
+<div style="width:390px;height:844px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0" data-screen-label="M Connect">
+  <div style="height:50px;flex-shrink:0;display:flex;align-items:flex-end;justify-content:space-between;padding:0 24px 4px"><span style="font-size:14px;font-weight:600">9:41</span><span style="width:16px;height:9px;border:1px solid #5F5F6B;border-radius:2px"></span></div>
+  <div style="flex:1;display:flex;flex-direction:column;justify-content:center;padding:0 30px;gap:18px">
+    <div style="display:flex;flex-direction:column;gap:10px;align-items:center;text-align:center">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="#FF8A3D"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"></path></svg>
+      <span style="font-size:20px;font-weight:700">Forge</span>
+      <span style="font-size:12.5px;color:#9A9AA6;line-height:1.65;text-wrap:pretty">A control surface for your fleet of coding agents. Sessions stay on your machines — this app is the window.</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:9px">
+      <div style="display:flex;gap:10px;align-items:baseline"><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">1</span><span style="font-size:12px;color:#DCDCE2">run <span style="font-family:'Geist Mono',monospace;font-size:11.5px;background:rgba(244,244,246,.06);padding:2px 6px;border-radius:2px">forge serve</span> where your code lives</span></div>
+      <div style="display:flex;gap:10px;align-items:baseline"><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2</span><span style="font-size:12px;color:#DCDCE2">scan the QR it prints, or paste the connect URL</span></div>
+      <div style="display:flex;gap:10px;align-items:baseline"><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">3</span><span style="font-size:12px;color:#DCDCE2">answer, review and forge from anywhere</span></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="height:48px;border-radius:4px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700">Scan QR code</div>
+      <div style="font-size:10.5px;color:#5F5F6B;text-align:center;font-family:'Geist Mono',monospace">camera stays off until you choose to scan</div>
+      <div style="height:44px;border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;display:flex;align-items:center;padding:0 12px;font-size:11px;font-family:'Geist Mono',monospace;color:#9A9AA6">connect://192.168.1.42:7420/9f3a2b1c8e4d</div>
+      <div style="height:44px;border:1px solid rgba(244,244,246,.12);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600">Connect</div>
+      <div style="font-size:11px;color:#5F5F6B;text-align:center;padding-top:4px">or <a href="#">sign in with GitHub for Forge Anywhere</a></div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<div style="font-size:13px;font-weight:600;letter-spacing:0.14em;color:#5F5F6B;font-family:'Geist Mono',monospace">04 · FORGE ANYWHERE — HUB · CONNECT · SIGN-IN · PHRASE · HOSTS · PAIRING · TRANSPORT · HANDOFF</div>
+<div style="display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap">
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M AW Hub">
+  <div style="padding:16px 18px 8px;display:flex;align-items:center;gap:9px"><span style="font-size:14px;color:#9A9AA6">‹</span><span style="font-size:16px;font-weight:700;flex:1">Forge Anywhere</span><span style="font-size:10.5px;font-weight:600;color:#D9A94E;border:1px solid rgba(217,169,78,.35);border-radius:2px;padding:2px 7px">TRIAL · 9D</span></div>
+  <div style="padding:0 18px 10px;font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">@mkramer · relay connected · last sync 2m</div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;overflow:hidden">
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Hosts</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2 of 3 · online</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Devices</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">3 paired</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Remote jobs</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">1 running · 2 queued</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Notifications</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">on</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Encrypted storage</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">1.2 of 5 GB</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px;border-bottom:1px solid rgba(244,244,246,.06)"><span style="font-size:13px;flex:1">Billing</span><span style="font-size:10.5px;color:#D9A94E;font-family:'Geist Mono',monospace">trial · 9 days left</span><span style="color:#5F5F6B">›</span></div>
+      <div style="min-height:50px;display:flex;align-items:center;gap:9px;padding:0 13px"><span style="font-size:13px;flex:1">Account</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">@mkramer · github</span><span style="color:#5F5F6B">›</span></div>
+    </div>
+    <div style="font-size:10.5px;color:#5F5F6B;line-height:1.65;font-family:'Geist Mono',monospace">who can read your data — only your paired devices. The relay routes sealed envelopes: sizes, timestamps, kinds. Never contents.</div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M AW Connect Signin">
+  <div style="padding:16px 18px 8px"><span style="font-size:16px;font-weight:700">Connect</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:4px;background:#0E0E12;padding:14px 15px;display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#9A9AA6">DIRECT</span><span style="margin-left:auto;font-size:10.5px;color:#5FB97D;font-family:'Geist Mono',monospace">MacBook Pro · connected · lan</span></div>
+      <div style="font-size:11.5px;color:#9A9AA6;line-height:1.55">Local, LAN or your own tunnel. Free, no account.</div>
+      <span style="font-size:11.5px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:3px;padding:9px 0;text-align:center">Add a server — url · token · qr</span>
+    </div>
+    <div style="border:1px solid rgba(244,244,246,.11);border-radius:4px;background:#0E0E12;padding:14px 15px;display:flex;flex-direction:column;gap:8px">
+      <span style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#FF8A3D">ANYWHERE</span>
+      <div style="font-size:11.5px;color:#9A9AA6;line-height:1.55">Optional managed encrypted relay. Leave your desk without leaving your session.</div>
+      <div style="height:44px;border-radius:3px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700">Sign in with GitHub</div>
+      <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;text-align:center">EUR 10/month · 14-day trial, no card · one app, two transports</div>
+    </div>
+    <div style="border:1px solid rgba(229,96,92,.3);border-radius:3px;padding:11px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:11.5px;color:#DCDCE2;flex:1">Anywhere relay unreachable — Direct still works</span><span style="font-size:10.5px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 8px">Retry</span></div>
+  </div>
+  <div style="padding:14px 18px 8px"><span style="font-size:14px;font-weight:700">Sign in with GitHub</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="font-size:11.5px;color:#9A9AA6">Enter this code at github.com/login/device</div>
+    <div style="border:1px solid rgba(244,244,246,.11);border-radius:4px;background:#0E0E12;padding:13px;text-align:center;font-size:19px;font-weight:600;font-family:'Geist Mono',monospace;letter-spacing:0.14em">FQZT-XKDD</div>
+    <div style="display:flex;gap:9px"><span style="flex:1;height:44px;border:1px solid rgba(244,244,246,.12);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600">Copy code</span><span style="flex:1;height:44px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#5F5F6B;font-family:'Geist Mono',monospace">waiting… expires 12m 40s</span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;line-height:1.6">One trial per GitHub account. Nothing is uploaded yet. New account → keys are generated on this device and a recovery phrase shown once. Returning → verify with your phrase or approve from a paired device.</div>
+    <div style="display:flex;gap:10px;font-size:10.5px;color:#9A9AA6"><span style="border:1px solid rgba(244,244,246,.09);border-radius:2px;padding:2px 8px">Code expired · Get a new code</span><span style="border:1px solid rgba(244,244,246,.09);border-radius:2px;padding:2px 8px">Access denied · Start over</span></div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M AW Phrase FirstHost">
+  <div style="padding:16px 18px 6px"><span style="font-size:16px;font-weight:700">Your recovery phrase</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="font-size:11px;color:#9A9AA6;line-height:1.6">Shown once. Write these 24 words down and keep them offline. Forge support cannot recover them.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px">
+      <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:8px 10px;font-size:10.5px;font-family:'Geist Mono',monospace;color:#9A9AA6">1 ember</div><div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:8px 10px;font-size:10.5px;font-family:'Geist Mono',monospace;color:#9A9AA6">2 anvil</div><div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:8px 10px;font-size:10.5px;font-family:'Geist Mono',monospace;color:#9A9AA6">3 •••••</div>
+      <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:8px 10px;font-size:10.5px;font-family:'Geist Mono',monospace;color:#9A9AA6">4 •••••</div><div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:8px 10px;font-size:10.5px;font-family:'Geist Mono',monospace;color:#9A9AA6">5 •••••</div><div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:8px 10px;font-size:10.5px;font-family:'Geist Mono',monospace;color:#5F5F6B">… 24</div>
+    </div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">no cloud backup · no screenshots · held on paper, not in this app</div>
+    <div style="display:flex;gap:9px"><div style="flex:1;height:44px;border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;display:flex;align-items:center;padding:0 11px;font-size:11px;color:#5F5F6B">confirm word 7 — emb…</div><div style="flex:1;height:44px;border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;display:flex;align-items:center;padding:0 11px;font-size:11px;color:#5F5F6B">word 18</div></div>
+    <div style="height:46px;border-radius:4px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700">I wrote it down — continue</div>
+  </div>
+  <div style="padding:14px 18px 6px"><span style="font-size:14px;font-weight:700">Connect your first host</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:10px">
+    <div style="font-size:11.5px;color:#9A9AA6;line-height:1.6">On the machine that runs Forge, enable Anywhere:</div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0B0B0E;padding:12px 13px;font-size:11.5px;font-family:'Geist Mono',monospace;color:#DCDCE2">$ forge anywhere enable --name atlas</div>
+    <div style="font-size:10.5px;color:#5F5F6B;line-height:1.6">Pick any name — rename anytime from Host details; identity never changes. Trial starts when the first host connects — no card required.</div>
+    <div style="display:flex;gap:10px;align-items:center;border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:11px 13px"><span style="width:6px;height:6px;border-radius:50%;background:#D9A94E"></span><span style="font-size:11.5px;color:#9A9AA6;flex:1">Waiting for a host to connect…</span></div>
+    <div style="display:flex;gap:10px;font-size:10.5px;color:#9A9AA6"><span style="border:1px solid rgba(244,244,246,.09);border-radius:2px;padding:6px 12px">Use Direct meanwhile — Fleet</span><span style="border:1px solid rgba(244,244,246,.09);border-radius:2px;padding:6px 12px">Pair another device</span></div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M AW Hosts Detail Pair">
+  <div style="padding:16px 18px 8px;display:flex;align-items:center"><span style="font-size:16px;font-weight:700;flex:1">Hosts</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2 of 3 active</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:13px 14px;display:flex;gap:10px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#5FB97D"></span><span style="font-size:13px;font-weight:600;flex:1">atlas</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">online · idle · hb 8s</span><span style="color:#5F5F6B">›</span></div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:13px 14px;display:flex;gap:10px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#5FB97D"></span><span style="font-size:13px;font-weight:600;flex:1">forge-mini</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">busy · 2 sessions</span><span style="color:#5F5F6B">›</span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:13px 14px;display:flex;gap:10px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#33333B"></span><span style="font-size:13px;color:#9A9AA6;flex:1">linux-box</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">stale · 26m</span><span style="color:#5F5F6B">›</span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:13px 14px;display:flex;gap:10px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#33333B"></span><span style="font-size:13px;color:#5F5F6B;flex:1;text-decoration:line-through">old-imac</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">revoked Jul 2</span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;line-height:1.65">add: $ forge anywhere enable --name NAME · 3 active max — disable or revoke to free a slot</div>
+  </div>
+  <div style="padding:12px 18px 6px;display:flex;align-items:center;gap:10px"><span style="font-size:14px;font-weight:700">atlas</span><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#9A9AA6" stroke-width="1.8"><path d="M17 3l4 4L8 20l-5 1 1-5z"></path></svg><span style="margin-left:auto;font-size:10.5px;color:#5FB97D;font-family:'Geist Mono',monospace">online · idle</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:4px;font-size:11px">
+    <div style="display:flex;justify-content:space-between;min-height:32px;align-items:center"><span style="color:#5F5F6B">Identity</span><span style="font-family:'Geist Mono',monospace;color:#9A9AA6">SHA256:4b7d…e910 · unchanged by rename</span></div>
+    <div style="display:flex;justify-content:space-between;min-height:32px;align-items:center"><span style="color:#5F5F6B">Reachable via</span><span style="font-family:'Geist Mono',monospace;color:#9A9AA6">direct · lan and anywhere · relay</span></div>
+    <div style="display:flex;justify-content:space-between;min-height:32px;align-items:center"><span style="color:#5F5F6B">Transport for new sessions</span><span style="display:flex;gap:2px;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:2px"><span style="font-size:10px;font-weight:600;padding:2px 7px;background:rgba(244,244,246,.09);border-radius:2px">AUTO</span><span style="font-size:10px;font-weight:600;padding:2px 7px;color:#5F5F6B">DIRECT</span><span style="font-size:10px;font-weight:600;padding:2px 7px;color:#5F5F6B">ANYWHERE</span></span></div>
+  </div>
+  <div style="padding:12px 18px 6px"><span style="font-size:14px;font-weight:700">Approve new device</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:9px">
+    <div style="font-size:11px;color:#9A9AA6;line-height:1.55">Scanned from iPad Pro. Scanning alone grants nothing — review, then approve.</div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;flex-direction:column;gap:4px;font-size:11px">
+      <div style="display:flex;justify-content:space-between"><span style="color:#5F5F6B">Device</span><span style="color:#DCDCE2">iPad Pro · tablet · 9m 12s left</span></div>
+      <div style="display:flex;justify-content:space-between"><span style="color:#5F5F6B">Fingerprint</span><span style="font-family:'Geist Mono',monospace;color:#9A9AA6">SHA256:9f4e…c2a1</span></div>
+      <div style="display:flex;justify-content:space-between"><span style="color:#5F5F6B">Grants</span><span style="color:#9A9AA6">account data key, wrapped to this device</span></div>
+    </div>
+    <div style="display:flex;gap:9px"><span style="flex:1;height:44px;border-radius:3px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700">Approve</span><span style="flex:1;height:44px;border:1px solid rgba(244,244,246,.1);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12.5px;color:#E5605C">Reject</span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">states: expired (10-min window) · already used · wrong account — blocked</div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M AW Transport Handoff">
+  <div style="padding:16px 18px 6px;display:flex;flex-direction:column;gap:7px"><div style="display:flex;align-items:center;gap:10px"><span style="font-size:14px;color:#9A9AA6">‹</span><span style="font-size:14.5px;font-weight:600;flex:1">Backtest vol-mom sweep</span><span style="font-size:14px;color:#5F5F6B">⋯</span></div><div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;padding-left:22px">atlas · anywhere · quant/backtest · sonnet-5 · 22% ctx</div></div>
+  <div style="padding:6px 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#5F5F6B;padding-top:4px">STATUS STRIP VARIANTS — ONE AT A TIME</div>
+    <div style="border:1px solid rgba(217,169,78,.3);border-radius:3px;padding:11px 12px;font-size:11.5px;color:#DCDCE2;display:flex;gap:9px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#D9A94E"></span>Reconnecting to atlas via relay… retry in 3s</div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;padding:11px 12px;font-size:11.5px;color:#9A9AA6;display:flex;gap:9px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#33333B"></span>atlas is asleep — input queues until it wakes</div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;padding:11px 12px;font-size:11.5px;color:#DCDCE2;display:flex;gap:9px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#E5605C"></span><span style="flex:1">Relay unreachable · paired for Direct</span><span style="font-size:10.5px;font-weight:600;border:1px solid rgba(244,244,246,.14);border-radius:2px;padding:2px 7px">Switch to Direct</span></div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;padding:11px 12px;font-size:11.5px;color:#DCDCE2;display:flex;gap:9px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#E5605C"></span><span style="flex:1">Relay unreachable · seen on LAN, not paired</span><span style="font-size:10.5px;font-weight:600;border:1px solid rgba(244,244,246,.14);border-radius:2px;padding:2px 7px">Set up Direct</span></div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;padding:11px 12px;font-size:11.5px;color:#9A9AA6;display:flex;gap:9px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#9A9AA6"></span><span style="flex:1">Read-only — controlling on MacBook Pro</span><span style="font-size:10.5px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 7px">Take control</span></div>
+    <div style="border:1px solid rgba(217,169,78,.3);border-radius:3px;padding:11px 12px;font-size:11.5px;color:#D9A94E;display:flex;gap:9px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#D9A94E"></span><span style="flex:1">Plan is read-only — watch, not steer</span><span style="font-size:10.5px;border:1px solid rgba(217,169,78,.35);border-radius:2px;padding:2px 7px">Billing</span></div>
+  </div>
+  <div style="padding:10px 18px 6px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Hand off workspace</span><span style="font-size:11px;color:#9A9AA6">Cancel</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:9px">
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">idle at checkpoint c-41 · base 9d2f31c — if a tool call is running, Forge waits or you interrupt first</div>
+    <div style="display:flex;flex-direction:column;gap:7px">
+      <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:11px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:12px;color:#5F5F6B;flex:1">atlas</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">current — source</span></div>
+      <div style="border:1px solid rgba(244,244,246,.16);border-radius:3px;background:#101015;padding:11px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:12px;font-weight:600;flex:1">forge-mini ✓</span><span style="font-size:10.5px;color:#5FB97D;font-family:'Geist Mono',monospace">online · destination</span></div>
+      <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:11px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:12px;color:#5F5F6B;flex:1">linux-box</span><span style="font-size:10.5px;color:#D9A94E;font-family:'Geist Mono',monospace">stale — may miss capsule</span></div>
+    </div>
+    <div style="border:1px solid rgba(217,169,78,.3);border-radius:3px;padding:11px 13px;display:flex;flex-direction:column;gap:3px"><span style="font-size:11px;color:#DCDCE2">preflight — 214 files · capsule ≈ 18.2 MB encrypted</span><span style="font-size:10.5px;color:#D9A94E">3 files won't travel — .env detected secret · nothing dropped silently <span style="color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:0 6px;margin-left:4px">Review</span></span></div>
+    <div style="height:46px;border-radius:4px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700">Hand off to forge-mini</div>
+    <div style="display:flex;flex-direction:column;gap:4px;font-size:10.5px;font-family:'Geist Mono',monospace"><span style="color:#5FB97D">✓ Capsule packaged · 211 files · 18.2 MB</span><span style="color:#5FB97D">✓ Uploaded to relay · sealed · 2.4 MB/s</span><span style="color:#FF8A3D">● forge-mini verifying base 9d2f31c — isolated worktree, original untouched</span><span style="color:#5F5F6B">○ Apply &amp; import → acknowledgement — ownership moves only after this; same chat, same tabs, new host</span></div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M AW Jobs Shares Devices">
+  <div style="padding:16px 18px 8px;display:flex;align-items:center"><span style="font-size:16px;font-weight:700;flex:1">Remote jobs</span><span style="display:flex;gap:2px;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:2px"><span style="font-size:10.5px;font-weight:600;padding:6px 12px;background:rgba(244,244,246,.09);border-radius:2px">Queue</span><span style="font-size:10.5px;font-weight:600;padding:6px 12px;color:#5F5F6B">History</span></span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#FF8A3D"></span><span style="font-size:12.5px;flex:1">Fix flaky relay tests</span><span style="font-size:10.5px;color:#FF8A3D;font-family:'Geist Mono',monospace">running · atlas</span></div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;flex-direction:column;gap:8px"><div style="display:flex;gap:10px;align-items:center"><span style="width:6px;height:6px;border-radius:50%;background:#9A9AA6"></span><span style="font-size:12.5px;flex:1;white-space:nowrap">Nightly dep audit</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">waiting · linux-box</span></div><div style="display:flex;gap:7px;font-size:10.5px;color:#9A9AA6;padding-left:16px"><span style="border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 7px">Cancel</span><span style="border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 7px">Replace…</span></div></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:10.5px;color:#E5605C">✗</span><span style="font-size:12.5px;color:#9A9AA6;flex:1">Bulk-rename crates</span><span style="font-size:10.5px;color:#E5605C;font-family:'Geist Mono',monospace">failed · exit 1</span><span style="font-size:10.5px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:2px 7px">Requeue</span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace;line-height:1.65">immutable pre-claim — Replace… opens a prefilled composer · relay sees size, kind, timestamps only</div>
+  </div>
+  <div style="padding:12px 18px 6px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Share replay</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">read-only · e2e encrypted</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px">
+    <div style="display:flex;gap:8px;align-items:center"><span style="font-size:10.5px;color:#5F5F6B">expires</span><span style="display:flex;gap:2px;border:1px solid rgba(244,244,246,.08);border-radius:3px;padding:2px"><span style="font-size:10.5px;font-weight:600;padding:2px 8px;color:#5F5F6B">24h</span><span style="font-size:10.5px;font-weight:600;padding:2px 8px;background:rgba(244,244,246,.09);border-radius:2px">7d</span><span style="font-size:10.5px;font-weight:600;padding:2px 8px;color:#5F5F6B">30d</span></span><span style="margin-left:auto;font-size:11px;font-weight:700;background:#FF8A3D;color:#1A0E04;border-radius:3px;padding:4px 10px">Create link</span></div>
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:11px 12px;display:flex;gap:9px;align-items:center"><span style="font-size:10.5px;font-family:'Geist Mono',monospace;color:#DCDCE2;flex:1">forge.dev/r/8f3a…#k4v9</span><span style="font-size:10.5px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:2px;padding:1px 7px">Copy</span><span style="font-size:10.5px;color:#E5605C">Revoke</span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">key travels in the link fragment — the relay never sees it · viewed 0×</div>
+  </div>
+  <div style="padding:12px 18px 6px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Devices</span><span style="font-size:11px;color:#9A9AA6;border:1px solid rgba(244,244,246,.1);border-radius:3px;padding:5px 12px">Pair device</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="border:1px solid rgba(244,244,246,.09);border-radius:3px;background:#0E0E12;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:12.5px;font-weight:500;flex:1">iPhone 16 Pro <span style="font-size:10px;color:#5F5F6B">THIS DEVICE</span></span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">Jun 2</span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:12.5px;color:#9A9AA6;flex:1">MacBook Pro</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">4m · SHA256 on demand</span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;gap:10px;align-items:center"><span style="font-size:12.5px;color:#9A9AA6;flex:1">iPad Pro</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2d</span></div>
+    <div style="border:1px solid rgba(229,96,92,.3);border-radius:3px;padding:11px 13px;display:flex;flex-direction:column;gap:3px"><span style="font-size:11px;color:#DCDCE2;font-weight:500">Lost a device? Revoke = key rotation</span><span style="font-size:10.5px;color:#5F5F6B;line-height:1.6">Tokens &amp; host grants revoked → new key epoch → re-wrapped to remaining devices + recovery phrase → committed atomically.</span></div>
+  </div>
+</div>
+
+<div style="width:390px;background:#09090B;color:#F4F4F6;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding-bottom:18px" data-screen-label="M AW Billing Storage Account">
+  <div style="padding:16px 18px 8px;display:flex;align-items:center"><span style="font-size:16px;font-weight:700;flex:1">Billing</span><span style="font-size:10.5px;font-weight:600;color:#D9A94E;border:1px solid rgba(217,169,78,.35);border-radius:2px;padding:2px 7px">TRIALING · 9 DAYS LEFT</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:9px">
+    <div style="font-size:11px;color:#9A9AA6;line-height:1.6">Started Jul 9 when atlas first connected. No card on file. At expiry Anywhere goes read-only immediately; local Forge is unaffected.</div>
+    <div style="display:flex;gap:9px">
+      <div style="flex:1;border:1px solid rgba(244,244,246,.14);border-radius:4px;background:#0E0E12;padding:13px 14px;display:flex;flex-direction:column;gap:2px"><span style="font-size:10.5px;color:#5FB97D;font-family:'Geist Mono',monospace">2 MONTHS FREE</span><span style="font-size:14px;font-weight:700">€79 <span style="font-size:10.5px;color:#5F5F6B;font-weight:400">/yr</span></span></div>
+      <div style="flex:1;border:1px solid rgba(244,244,246,.08);border-radius:4px;padding:13px 14px;display:flex;flex-direction:column;gap:2px"><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">MONTHLY</span><span style="font-size:14px;font-weight:700;color:#9A9AA6">€10 <span style="font-size:10.5px;color:#5F5F6B;font-weight:400">/mo</span></span></div>
+    </div>
+    <div style="height:44px;border-radius:4px;background:#FF8A3D;color:#1A0E04;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700">Continue in browser — Paddle checkout</div>
+    <div style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">3 hosts · unlimited devices · 5 GB · jobs · handoff · shares</div>
+    <div style="font-size:10px;font-weight:600;letter-spacing:0.12em;color:#5F5F6B;padding-top:3px">ENTITLEMENT LIFECYCLE</div>
+    <div style="display:flex;flex-direction:column;gap:4px;font-size:10.5px;line-height:1.55">
+      <div style="display:flex;gap:9px"><span style="color:#5F5F6B;font-family:'Geist Mono',monospace;width:82px;flex-shrink:0">NOT STARTED</span><span style="color:#9A9AA6">trial begins when first host connects</span></div>
+      <div style="display:flex;gap:9px"><span style="color:#5FB97D;font-family:'Geist Mono',monospace;width:82px;flex-shrink:0">ACTIVE</span><span style="color:#9A9AA6">renews Aug 17 · cancel keeps paid-through date</span></div>
+      <div style="display:flex;gap:9px"><span style="color:#D9A94E;font-family:'Geist Mono',monospace;width:82px;flex-shrink:0">GRACE · 7D</span><span style="color:#9A9AA6">paid-plan payment failed — full access while retrying. Trial expiry skips grace.</span></div>
+      <div style="display:flex;gap:9px"><span style="color:#E5605C;font-family:'Geist Mono',monospace;width:82px;flex-shrink:0">READ-ONLY</span><span style="color:#9A9AA6">30 days — restore, download, export, delete</span></div>
+      <div style="display:flex;gap:9px"><span style="color:#5F5F6B;font-family:'Geist Mono',monospace;width:82px;flex-shrink:0">SUSPENDED</span><span style="color:#9A9AA6">then deletion per retention schedule</span></div>
+    </div>
+  </div>
+  <div style="padding:12px 18px 6px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Encrypted storage</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">1.2 of 5 GB · 24%</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:8px">
+    <div style="height:3px;border-radius:2px;background:rgba(244,244,246,.08)"><div style="width:24%;height:100%;border-radius:2px;background:#9A9AA6"></div></div>
+    <div style="font-size:10.5px;color:#5F5F6B;line-height:1.65;font-family:'Geist Mono',monospace">sealed before upload: sessions, messages, checkpoints, tool calls, memories, settings, workflows, portable files · retention — capsules 7d · revisions 30d · tombstones 90d · shares until expiry · post-subscription 90d then deleted</div>
+  </div>
+  <div style="padding:12px 18px 6px;display:flex;align-items:center"><span style="font-size:14px;font-weight:700;flex:1">Account · @mkramer</span></div>
+  <div style="padding:0 18px;display:flex;flex-direction:column;gap:7px">
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;justify-content:space-between;font-size:12px;color:#9A9AA6"><span>Sign out on this device</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">keys removed · local data stays</span></div>
+    <div style="border:1px solid rgba(244,244,246,.07);border-radius:3px;padding:12px 13px;display:flex;justify-content:space-between;font-size:12px;color:#9A9AA6"><span>Export account data</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">preparing… 62% · link 24h</span></div>
+    <div style="border:1px solid rgba(229,96,92,.3);border-radius:3px;padding:12px 13px;display:flex;justify-content:space-between;font-size:12px;color:#E5605C"><span>Delete account…</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">live in 24h · backups ≤ 30d</span></div>
+    <div style="font-size:10.5px;color:#5F5F6B;line-height:1.65;font-family:'Geist Mono',monospace">recover on a new device: GitHub sign-in + 24-word phrase — checksum verified per word · wrong phrase fails at word 19 · or approve from a paired device</div>
+  </div>
+</div>
+
+</div>
+
+<div style="font-size:13px;font-weight:600;letter-spacing:0.14em;color:#5F5F6B;font-family:'Geist Mono',monospace">05 · NATIVE iOS — LIVE ACTIVITY · DYNAMIC ISLAND · NOTIFICATIONS · WIDGET · LIGHT THEME</div>
+<div style="display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap">
+
+<div style="width:390px;background:#0B0B0E;display:flex;flex-direction:column;border:1px solid rgba(244,244,246,.1);flex-shrink:0;padding:14px;gap:14px" data-screen-label="M Native Surfaces">
+  <div style="font-size:11px;color:#5F5F6B;font-family:'Geist Mono',monospace">lock screen — live activity</div>
+  <div style="border-radius:14px;background:#101015;border:1px solid rgba(244,244,246,.1);padding:12px 14px;display:flex;flex-direction:column;gap:10px">
+    <div style="display:flex;align-items:center;gap:10px"><svg width="12" height="12" viewBox="0 0 24 24" fill="#FF8A3D"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"></path></svg><span style="font-size:12.5px;font-weight:600;flex:1">Backtest vol-mom sweep</span><span style="font-size:10.5px;color:#E5605C;font-family:'Geist Mono',monospace">NEEDS YOU · 12s</span></div>
+    <div style="font-size:12px;color:#DCDCE2">Overwrite .env.staging with the tuned parameters?</div>
+    <div style="display:flex;gap:9px"><span style="flex:1;height:40px;border:1px solid rgba(244,244,246,.14);border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#F4F4F6">Allow</span><span style="flex:1;height:40px;border:1px solid rgba(244,244,246,.08);border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#9A9AA6">Deny</span><span style="flex:1;height:40px;border:1px solid rgba(244,244,246,.08);border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#9A9AA6">Open</span></div>
+  </div>
+  <div style="border-radius:14px;background:#101015;border:1px solid rgba(244,244,246,.1);padding:10px 14px;display:flex;align-items:center;gap:9px">
+    <span style="width:4px;height:4px;border-radius:50%;background:#FF8A3D"></span><span style="font-size:12px;color:#DCDCE2;flex:1">Fix mesh failover ranking — forging 4m</span><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">2/4 · 64% · $1.84</span>
+  </div>
+  <div style="font-size:11px;color:#5F5F6B;font-family:'Geist Mono',monospace;padding-top:2px">dynamic island — compact · expanded</div>
+  <div style="display:flex;justify-content:center"><div style="width:190px;height:44px;border-radius:17px;background:#000;display:flex;align-items:center;padding:0 13px;gap:10px"><svg width="10" height="10" viewBox="0 0 24 24" fill="#FF8A3D"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"></path></svg><span style="flex:1"></span><span style="font-size:10.5px;color:#FF8A3D;font-family:'Geist Mono',monospace">2/4 · 64%</span></div></div>
+  <div style="display:flex;justify-content:center"><div style="width:330px;border-radius:22px;background:#000;padding:13px 15px;display:flex;flex-direction:column;gap:10px"><div style="display:flex;align-items:center;gap:10px"><svg width="12" height="12" viewBox="0 0 24 24" fill="#FF8A3D"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"></path></svg><span style="font-size:12px;font-weight:600;color:#F4F4F6;flex:1">Backtest vol-mom sweep</span><span style="font-size:10.5px;color:#E5605C;font-family:'Geist Mono',monospace">12s</span></div><div style="font-size:11.5px;color:#9A9AA6">Overwrite .env.staging with tuned params?</div><div style="display:flex;gap:9px"><span style="flex:1;height:30px;border-radius:15px;background:rgba(95,185,125,.18);color:#5FB97D;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600">Allow</span><span style="flex:1;height:30px;border-radius:15px;background:rgba(229,96,92,.15);color:#E5605C;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600">Deny</span></div></div></div>
+  <div style="font-size:11px;color:#5F5F6B;font-family:'Geist Mono',monospace;padding-top:2px">push — generic when Anywhere-routed (locked)</div>
+  <div style="border-radius:12px;background:#101015;border:1px solid rgba(244,244,246,.1);padding:10px 13px;display:flex;gap:9px;align-items:center"><div style="width:30px;height:30px;border-radius:6px;background:#0B0B0E;border:1px solid rgba(244,244,246,.1);display:flex;align-items:center;justify-content:center"><svg width="13" height="13" viewBox="0 0 24 24" fill="#FF8A3D"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"></path></svg></div><div style="flex:1;display:flex;flex-direction:column"><span style="font-size:12px;font-weight:600">Forge</span><span style="font-size:11px;color:#9A9AA6">Open Forge to view an update.</span></div><span style="font-size:10.5px;color:#5F5F6B;font-family:'Geist Mono',monospace">now</span></div>
+  <div style="font-size:11px;color:#5F5F6B;font-family:'Geist Mono',monospace;padding-top:2px">home screen widget — fleet glance</div>
+  <div style="width:170px;height:170px;border-radius:20px;background:#101015;border:1px solid rgba(244,244,246,.1);padding:13px;display:flex;flex-direction:column;gap:9px"><div style="display:flex;align-items:center;gap:8px"><svg width="11" height="11" viewBox="0 0 24 24" fill="#FF8A3D"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"></path></svg><span style="font-size:11px;font-weight:600;flex:1">Fleet</span><span style="font-size:10px;color:#5F5F6B;font-family:'Geist Mono',monospace">$2.27</span></div><div style="display:flex;gap:8px;align-items:center"><span style="width:4px;height:4px;border-radius:50%;background:#E5605C"></span><span style="font-size:10.5px;color:#DCDCE2;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">vol-mom sweep</span></div><div style="display:flex;gap:8px;align-items:center"><span style="width:4px;height:4px;border-radius:50%;background:#FF8A3D"></span><span style="font-size:10.5px;color:#9A9AA6;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">mesh failover</span></div><div style="display:flex;gap:8px;align-items:center"><span style="width:4px;height:4px;border-radius:50%;background:#5FB97D"></span><span style="font-size:10.5px;color:#9A9AA6;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">catalog loader</span></div><span style="margin-top:auto;font-size:10px;color:#E5605C;font-family:'Geist Mono',monospace">1 needs you</span></div>
+</div>
+
+<div style="width:390px;height:844px;background:#F5F4F1;color:#1C1B19;display:flex;flex-direction:column;border:1px solid rgba(0,0,0,.12);flex-shrink:0" data-screen-label="M Fleet Light">
+  <div style="height:50px;flex-shrink:0;display:flex;align-items:flex-end;justify-content:space-between;padding:0 24px 4px"><span style="font-size:14px;font-weight:600">9:41</span><span style="width:16px;height:9px;border:1px solid #8A867D;border-radius:2px"></span></div>
+  <div style="padding:12px 18px 8px;display:flex;align-items:center;gap:9px">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="#D96A1E"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"></path></svg>
+    <span style="font-size:22px;font-weight:700;letter-spacing:-0.02em">Fleet</span>
+  </div>
+  <div style="padding:0 18px 12px;font-size:11px;color:#6E6A61;font-family:'Geist Mono',monospace">1 needs you · 1 forging · $2.27 today</div>
+  <div style="display:flex;gap:8px;padding:2px 18px 12px;font-size:11px;font-family:'Geist Mono',monospace">
+    <span style="border:1px solid rgba(28,27,25,.2);border-radius:3px;padding:6px 12px;background:#FFF">All</span><span style="border:1px solid rgba(28,27,25,.1);border-radius:3px;padding:6px 12px;color:#8A867D">MacBook Pro</span><span style="border:1px solid rgba(28,27,25,.1);border-radius:3px;padding:6px 12px;color:#8A867D">atlas</span>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:10px;padding:0 18px">
+    <div style="border:1px solid rgba(196,74,66,.4);border-radius:4px;background:#FFFFFF;padding:15px;display:flex;flex-direction:column;gap:9px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#C44A42"></span><span style="font-size:14px;font-weight:600;flex:1">Backtest vol-mom sweep</span><span style="font-size:10.5px;color:#C44A42;font-family:'Geist Mono',monospace">12s</span></div>
+      <div style="font-size:12.5px;color:#3A3833;line-height:1.55">Overwrite .env.staging with the tuned sweep parameters?</div>
+      <div style="font-size:10.5px;color:#8A867D;font-family:'Geist Mono',monospace">vectra-bot · ⑂ wt-a1b2 · codex-mini</div>
+      <div style="display:flex;gap:10px"><span style="flex:1;height:44px;border:1px solid rgba(28,27,25,.25);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600;background:#FFF">Respond</span><span style="width:92px;height:44px;border:1px solid rgba(28,27,25,.12);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:12.5px;color:#6E6A61">Peek</span></div>
+    </div>
+    <div style="border:1px solid rgba(28,27,25,.12);border-radius:4px;background:#FFFFFF;padding:15px;display:flex;flex-direction:column;gap:7px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#D96A1E"></span><span style="font-size:14px;font-weight:500;flex:1">Fix mesh failover ranking</span><span style="font-size:10.5px;color:#8A867D;font-family:'Geist Mono',monospace">4m</span></div>
+      <div style="font-size:10.5px;color:#8A867D;font-family:'Geist Mono',monospace">forge · main · opus-4.8 · $1.84</div>
+    </div>
+    <div style="border:1px solid rgba(28,27,25,.12);border-radius:4px;background:#FFFFFF;padding:15px;display:flex;flex-direction:column;gap:7px">
+      <div style="display:flex;align-items:center;gap:10px"><span style="width:6px;height:6px;border-radius:50%;background:#4C8A60"></span><span style="font-size:14px;font-weight:500;flex:1">Refactor mesh catalog loader</span><span style="font-size:10.5px;color:#8A867D;font-family:'Geist Mono',monospace">22%</span></div>
+      <div style="font-size:10.5px;color:#8A867D;font-family:'Geist Mono',monospace">forge · ⑂ wt-cat · sonnet-5 · atlas · anywhere</div>
+    </div>
+  </div>
+  <div style="margin-top:auto;border-top:1px solid rgba(28,27,25,.1);height:78px;flex-shrink:0;display:flex;align-items:flex-start;padding-top:10px;background:#EFEDE8">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#D96A1E" stroke-width="1.8"><rect x="3" y="3" width="8" height="8" rx="1"></rect><rect x="13" y="3" width="8" height="8" rx="1"></rect><rect x="3" y="13" width="8" height="8" rx="1"></rect><rect x="13" y="13" width="8" height="8" rx="1"></rect></svg><span style="font-size:10.5px;font-weight:600;color:#D96A1E">Fleet</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8A867D" stroke-width="1.8"><path d="M3 13h4l2 3h6l2-3h4"></path><path d="M5 6h14l2 7v6H3v-6z"></path></svg><span style="font-size:10.5px;color:#8A867D">Inbox</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8A867D" stroke-width="1.8"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg><span style="font-size:10.5px;color:#8A867D">History</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8A867D" stroke-width="1.8"><path d="M4 8h16M4 16h16"></path><circle cx="9" cy="8" r="2" fill="#F5F4F1"></circle><circle cx="15" cy="16" r="2" fill="#F5F4F1"></circle></svg><span style="font-size:10.5px;color:#8A867D">Settings</span></div>
+  </div>
+</div>
+
+</div>
+</section>
+
+</x-dc>
+</body>
+</html>

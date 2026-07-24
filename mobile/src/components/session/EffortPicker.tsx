@@ -1,10 +1,10 @@
-// Hearth "Effort" — the heat-ramp control (native handoff pattern 4): a 6px thermal
-// gradient track with an ember thumb that snaps to the selected detent, mono uppercase
-// detent labels, a per-detent meaning + cost/latency line, and a session-default reset.
-// Tap/press to pick a detent (no drag) — robust across native + web — then commit.
+// Machined "Effort" (Mobile/Desktop "Mesh Effort Duel" frames): a flat segmented strip —
+// AUTO/LOW/MED/HIGH/XHIGH/WHITEHOT, WHITEHOT always painted in accent — replacing the old
+// thermal gradient ramp (Machined retires that identity, see theme/tokens.ts). Tap a segment
+// to preview it, read its meaning + cost caption below, then commit or reset to session
+// default.
 import { Flame } from "lucide-react-native";
 import React, { useEffect, useState } from "react";
-import { LinearGradient } from "expo-linear-gradient";
 import { Modal, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 
 import type { RemoteInput } from "../../lib/ws";
@@ -26,19 +26,25 @@ type Detent = "default" | EffortLevel;
 const DETENTS: readonly Detent[] = ["default", ...EFFORT_LEVELS] as const;
 
 interface DetentMeta {
+  label: string;
   meaning: string;
   cost: string;
-  /** true only for whitehot — its label always paints in warnBgInk (the white-hot ink). */
+  /** true only for whitehot — its segment label always paints in accent, selected or not. */
   whitehot?: boolean;
 }
 
 const DETENT_META: Record<Detent, DetentMeta> = {
-  default: { meaning: "let the mesh pick per task", cost: "~$0.02/turn" },
-  low: { meaning: "quick, shallow passes", cost: "~$0.03/turn" },
-  medium: { meaning: "brief thinking, fast replies", cost: "~$0.05/turn" },
-  high: { meaning: "extended thinking on every turn", cost: "~$0.18/turn · slower" },
-  xhigh: { meaning: "maximum single-model reasoning", cost: "~$0.60/turn" },
-  whitehot: { meaning: "council of frontier models argue it out", cost: "~$2.40/turn · minutes", whitehot: true },
+  default: { label: "AUTO", meaning: "let the mesh pick per task", cost: "~$0.02/turn" },
+  low: { label: "LOW", meaning: "quick, shallow passes", cost: "~$0.03/turn" },
+  medium: { label: "MED", meaning: "brief thinking, fast replies", cost: "~$0.05/turn" },
+  high: { label: "HIGH", meaning: "extended thinking on every turn", cost: "~$0.18/turn · slower" },
+  xhigh: { label: "XHIGH", meaning: "maximum single-model reasoning", cost: "~$0.60/turn" },
+  whitehot: {
+    label: "WHITEHOT",
+    meaning: "council of frontier models argue it out",
+    cost: "~$2.40/turn · minutes",
+    whitehot: true,
+  },
 };
 
 export interface EffortPickerProps {
@@ -53,10 +59,10 @@ function isEffortLevel(value: string | null | undefined): value is EffortLevel {
   return value != null && EFFORT_LEVELS.includes(value as EffortLevel);
 }
 
-function labelColor(detent: Detent, selected: boolean, tokens: ColorTokens): string {
-  if (DETENT_META[detent].whitehot) return tokens.warnBgInk;
+function segmentLabelColor(detent: Detent, selected: boolean, tokens: ColorTokens): string {
+  if (DETENT_META[detent].whitehot) return tokens.accent;
   if (selected) return tokens.accent;
-  return tokens.ink4;
+  return tokens.ink3;
 }
 
 export function EffortPicker({ effort, send, visible: controlledVisible, onClose, showTrigger = true }: EffortPickerProps) {
@@ -97,70 +103,64 @@ export function EffortPicker({ effort, send, visible: controlledVisible, onClose
     }
   };
 
-  const activeIndex = DETENTS.indexOf(preview);
-  const thumbFraction = DETENTS.length > 1 ? activeIndex / (DETENTS.length - 1) : 0;
   const whitehotChip = active === "whitehot";
 
   // Effort presents as a bottom sheet on compact and a centered ~560px popover on desktop-web
-  // (README: "sheet (mobile) / popover (desktop-web)"). The ramp body is identical either way.
+  // (README: "sheet (mobile) / popover (desktop-web)"). The segmented body is identical either
+  // way — Machined replaces the old thermal gradient ramp with a flat segmented strip.
   const panel = (
     <View style={styles.content}>
           <Text style={[typeScale.headingBold, { color: tokens.ink }]}>Effort</Text>
           <Text style={[typeScale.sub, styles.subtitle, { color: tokens.ink3 }]}>How hard the model thinks on each turn.</Text>
 
-          <View style={styles.trackWrap}>
-            <LinearGradient
-              colors={[tokens.warnBg, tokens.ember.ember700, tokens.ember.ember600, tokens.ember.ember500, tokens.ember.ember400, tokens.warnBgInk]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.track}
-            />
-            <View style={[styles.thumb, { left: `${thumbFraction * 100}%`, backgroundColor: tokens.accent, borderColor: tokens.bg2, shadowColor: tokens.accent }]} pointerEvents="none" />
-          </View>
-
-          <View style={styles.detentLabels}>
+          <View
+            style={[styles.segTrack, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}
+            accessibilityRole="radiogroup"
+            accessibilityLabel="Reasoning effort choices"
+          >
             {DETENTS.map((detent) => {
               const selected = detent === preview;
+              const meta = DETENT_META[detent];
               return (
-                <Text key={detent} style={[styles.detentLabel, { color: labelColor(detent, selected, tokens), fontWeight: selected ? "700" : "400" }]}>
-                  {detent.toUpperCase()}
-                </Text>
+                <Pressable
+                  key={detent}
+                  onPress={() => setPreview(detent)}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: selected }}
+                  accessibilityLabel={`${meta.label} — ${meta.meaning}`}
+                  style={[
+                    styles.segItem,
+                    { borderRadius: radii.radiusSegmentInner },
+                    selected ? { backgroundColor: tokens.selection } : null,
+                  ]}
+                >
+                  <Text
+                    style={[styles.segLabel, tabularNums, { color: segmentLabelColor(detent, selected, tokens) }]}
+                    numberOfLines={1}
+                  >
+                    {meta.label}
+                  </Text>
+                </Pressable>
               );
             })}
           </View>
 
-          <View style={styles.options} accessibilityRole="radiogroup" accessibilityLabel="Reasoning effort choices">
-            {DETENTS.map((detent, index) => {
-              const selected = detent === preview;
-              const meta = DETENT_META[detent];
-              const labelInk = meta.whitehot ? tokens.warnBgInk : selected ? tokens.accent : tokens.ink3;
-              return (
-                <React.Fragment key={detent}>
-                  {index > 0 ? <View style={[styles.hairline, { backgroundColor: tokens.hairline }]} /> : null}
-                  <Pressable
-                    onPress={() => setPreview(detent)}
-                    accessibilityRole="radio"
-                    accessibilityState={{ checked: selected }}
-                    accessibilityLabel={`${detent} — ${meta.meaning}`}
-                    style={[styles.option, selected ? { backgroundColor: tokens.selection } : null]}
-                  >
-                    <Text style={[styles.optionKey, tabularNums, { color: labelInk, fontWeight: selected || meta.whitehot ? "700" : "400" }]} numberOfLines={1}>
-                      {detent}
-                    </Text>
-                    <Text style={[typeScale.sub, styles.optionMeaning, { color: selected ? tokens.ink : tokens.ink2 }]} numberOfLines={1}>
-                      {meta.meaning}
-                    </Text>
-                    <Text style={[styles.optionCost, tabularNums, { color: meta.whitehot ? tokens.warn : selected ? tokens.ink3 : tokens.ink4 }]} numberOfLines={1}>
-                      {meta.cost}
-                    </Text>
-                  </Pressable>
-                </React.Fragment>
-              );
-            })}
-          </View>
+          <Text style={[typeScale.monoMeta, styles.previewMeaning, { color: tokens.ink2 }]}>
+            {DETENT_META[preview].meaning}
+            {"  ·  "}
+            <Text style={{ color: DETENT_META[preview].whitehot ? tokens.accent : tokens.ink3 }}>{DETENT_META[preview].cost}</Text>
+          </Text>
+          {preview !== "whitehot" ? (
+            <Text style={[typeScale.meta, styles.whitehotHint, { color: tokens.ink4 }]}>
+              {"whitehot — "}
+              {DETENT_META.whitehot.meaning}
+              {" · "}
+              <Text style={{ color: tokens.accent }}>{DETENT_META.whitehot.cost}</Text>
+            </Text>
+          ) : null}
 
           <View style={styles.actions}>
-            <Button label={`Set effort · ${preview}`} onPress={() => commit(preview)} style={styles.setButton} accessibilityLabel={`Set effort to ${preview}`} />
+            <Button label={`Set effort · ${DETENT_META[preview].label.toLowerCase()}`} onPress={() => commit(preview)} style={styles.setButton} accessibilityLabel={`Set effort to ${preview}`} />
             <Pressable onPress={() => commit("default")} accessibilityRole="button" accessibilityLabel="Reset to session default" style={styles.reset} hitSlop={8}>
               <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Reset to session default</Text>
             </Pressable>
@@ -237,30 +237,19 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   subtitle: { marginTop: 2 },
-  trackWrap: { marginTop: space.space20, height: 6, justifyContent: "center" },
-  track: { height: 6, borderRadius: 3 },
-  thumb: {
-    position: "absolute",
-    top: -8,
-    marginLeft: -11,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    borderWidth: 3,
-    shadowOpacity: 0.5,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 0 },
-    elevation: 6,
+  segTrack: {
+    flexDirection: "row",
+    marginTop: space.space20,
+    padding: 3,
+    minHeight: tapTarget,
+    borderWidth: 1,
+    borderRadius: radii.radiusSegmentOuter,
   },
-  detentLabels: { flexDirection: "row", justifyContent: "space-between", marginTop: space.space12 },
-  detentLabel: { fontFamily: monoFamily.regular, fontSize: 9.5, letterSpacing: 0.4 },
-  options: { marginTop: space.space16 },
-  hairline: { height: StyleSheet.hairlineWidth },
-  option: { minHeight: 46, flexDirection: "row", alignItems: "center", gap: space.space8, marginHorizontal: -space.space20, paddingHorizontal: space.space20 },
-  optionKey: { fontFamily: monoFamily.regular, fontSize: 12, width: 76 },
-  optionMeaning: { flex: 1 },
-  optionCost: { fontFamily: monoFamily.regular, fontSize: 11 },
-  actions: { flexDirection: "row", alignItems: "center", gap: space.space12, marginTop: space.space16 },
+  segItem: { flex: 1, alignItems: "center", justifyContent: "center" },
+  segLabel: { fontFamily: monoFamily.bold, fontSize: 10, letterSpacing: 0.3 },
+  previewMeaning: { marginTop: space.space12 },
+  whitehotHint: { marginTop: space.space4 },
+  actions: { flexDirection: "row", alignItems: "center", gap: space.space12, marginTop: space.space20 },
   setButton: { flex: 1 },
   reset: { minHeight: tapTarget, justifyContent: "center" },
 });

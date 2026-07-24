@@ -1,16 +1,17 @@
-// DESIGN_SYSTEM.md §2 `section` style: 11/14 700 +0.8 letter-spacing UPPERCASE
-// ink4 (Hearth: moved from ink3) — used to head grouped rows (settings, palette
-// results, gallery sections). Hearth fidelity fix: dropped the ember tick +
-// trailing hairline rule the previous build carried over from DESIGN_ELEVATION.md
-// Move 3 — the redesign's section headers are a plain label; grouped rows below
-// already carry their own hairline separators, and the header's own top padding
-// (not a rule) is what separates one group from the next.
+// DESIGN_SYSTEM.md §2 `section` style: 10/14 600 +1 letter-spacing UPPERCASE,
+// rendered in mono (Machined: section labels are technical text — same box
+// metrics as `type.section`, family overridden to Geist Mono) in ink3 — used to
+// head grouped rows (settings, palette results, gallery sections). Dropped the
+// ember tick + trailing hairline rule the previous build carried over from
+// DESIGN_ELEVATION.md Move 3 — section headers are a plain label; grouped rows
+// below already carry their own hairline separators, and the header's own top
+// padding (not a rule) is what separates one group from the next.
 import React from "react";
 import { StyleSheet, Text, type TextStyle, View } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
-import { type as typeScale } from "../../theme/typography";
+import { monoFamily, type as typeScale } from "../../theme/typography";
 
 export interface SectionHeaderProps {
   children: string;
@@ -22,7 +23,7 @@ export function SectionHeader({ children, style }: SectionHeaderProps) {
 
   return (
     <View style={styles.wrap} accessibilityRole="header">
-      <Text style={[typeScale.section, { color: tokens.ink4 }, style]} numberOfLines={1}>
+      <Text style={[typeScale.section, styles.mono, { color: tokens.ink3 }, style]} numberOfLines={1}>
         {children}
       </Text>
     </View>
@@ -35,4 +36,5 @@ const styles = StyleSheet.create({
     paddingTop: space.space12,
     paddingBottom: space.space4,
   },
+  mono: { fontFamily: monoFamily.regular },
 });

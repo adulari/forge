@@ -1,5 +1,7 @@
-// DESIGN_SYSTEM.md §6 Input — bg2, border, radius 8, 15pt; label (meta, ink3) above;
-// D/F/E/X; mono variant for URLs/paths; `clear` affordance.
+// DESIGN_SYSTEM.md §6 Input — a derived darker fill (bg0, not bg2 — Machined wants
+// inputs to read as a recessed well against surrounding cards), border, radius 4,
+// 13pt; label (meta, ink3) above; D/F/E/X; mono variant for URLs/paths; `clear`
+// affordance.
 import React, { useState } from "react";
 import {
   Platform,
@@ -66,7 +68,7 @@ export function Input({
         style={[
           styles.field,
           {
-            backgroundColor: tokens.bg2,
+            backgroundColor: tokens.bg0,
             borderColor,
             borderWidth: webFocusRing ? 2 : 1,
             borderRadius: radii.radius8,
