@@ -567,6 +567,7 @@ pub(crate) async fn build_session(
     build_session_with(presenter, mock, mode, resume, pin, false).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     prompt: String,
     mock: bool,
@@ -574,6 +575,7 @@ pub(crate) async fn run(
     tui: bool,
     resume: Option<String>,
     pin: Option<String>,
+    system: Vec<String>,
     output_format: OutputFormat,
 ) -> Result<()> {
     if prompt.trim().is_empty() {
@@ -587,7 +589,9 @@ pub(crate) async fn run(
     // like the interactive dispatcher — without this the literal `/rust` reaches the model as
     // prose and it guesses at the intent. Unknown tokens (absolute paths, TUI-only builtins)
     // pass through verbatim; `//…` escapes a literal leading slash, mirroring chat.
-    let (prompt, guidance, tier) = expand_one_shot_slash(&prompt)?;
+    let (prompt, command_guidance, tier) = expand_one_shot_slash(&prompt)?;
+    let mut guidance = system;
+    guidance.extend(command_guidance);
 
     // stream-json: emit NDJSON events on stdout via the StreamJsonPresenter (no TUI, no heartbeat —
     // stdout stays a clean machine-readable event stream). Ctrl-C still returns partial output.

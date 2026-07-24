@@ -15,6 +15,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             r#continue,
             resume,
             model,
+            system,
             output_format,
         } => {
             // Unified continuity with `chat`: --continue / --resume <id> / bare --resume (picker).
@@ -35,6 +36,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 tui,
                 resume_id,
                 model,
+                system,
                 output_format,
             )
             .await

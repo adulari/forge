@@ -81,7 +81,7 @@ impl HeuristicRouter {
         effort: Option<EffortLevel>,
         project: &ProjectContext,
     ) -> RoutingExplanation {
-        let cls = score_prompt(prompt, project);
+        let cls = score_prompt(self.classification_activity(prompt), project);
         self.explain_classified(
             prompt,
             cls.tier,
@@ -107,7 +107,7 @@ impl HeuristicRouter {
         quota: &SubscriptionQuota,
         effort: Option<EffortLevel>,
     ) -> RoutingExplanation {
-        let hints = RouteHints::from_prompt(prompt);
+        let hints = RouteHints::from_prompt(self.classification_activity(prompt));
 
         // The authoritative decision (pin / budget / fallback handling all live here). Compute it
         // FIRST: `decide` can downshift the tier (e.g. budget exhausted → Trivial), and the candidate

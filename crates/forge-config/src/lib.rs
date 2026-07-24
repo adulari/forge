@@ -1405,11 +1405,16 @@ pub struct MeshConfig {
     /// deterministic heuristic when classification is unavailable.
     #[serde(default)]
     pub classifier: ClassifierKind,
-    /// Model id the `llm` classifier calls to label the tier (a cheap/$0 model, e.g. a local
-    /// `ollama::` or a `claude-cli::`/`codex-cli::` subscription bridge). Ignored for the
-    /// heuristic classifier. Falls back to the trivial-tier model when unset.
-    #[serde(default)]
+    /// Fixed model id the `llm` classifier calls to label the tier. A fixed default keeps
+    /// identical inputs on one capable classifier instead of mesh-routing the classifier itself.
+    /// Ignored for the heuristic classifier.
+    #[serde(default = "default_classifier_model")]
     pub classifier_model: Option<String>,
+    /// Compatibility mode for callers that still concatenate standing context and the active
+    /// task into one unstructured prompt. When enabled, classification uses only the final
+    /// non-empty paragraph. Prefer role-separated API messages or `forge run --system`.
+    #[serde(default)]
+    pub classifier_activity_focused: bool,
     /// How a CLI-bridge (`claude-cli::`/`codex-cli::`) turn runs (RFC cli-bridge-full-harness):
     /// `harness` (default) routes the model's tools through Forge's own MCP server + permission
     /// gate; `text` runs the CLI as its own agent with its own tools.
@@ -1886,6 +1891,10 @@ fn default_prefer_subscription() -> bool {
     true
 }
 
+fn default_classifier_model() -> Option<String> {
+    Some("groq::llama-3.3-70b-versatile".to_string())
+}
+
 /// How a CLI-bridge turn runs (RFC cli-bridge-full-harness).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -2160,7 +2169,8 @@ impl Default for Config {
                 models,
                 prefer_subscription: default_prefer_subscription(),
                 classifier: ClassifierKind::default(),
-                classifier_model: None,
+                classifier_model: default_classifier_model(),
+                classifier_activity_focused: false,
                 bridge_mode: BridgeMode::default(),
                 bridge_lean: false,
                 bridge_mcp_external: true,
@@ -2849,6 +2859,9 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "mesh.monthly_cap_usd" => Some(("Mesh & Cost", "Monthly spend cap (USD)")),
         "mesh.classifier" => Some(("Mesh & Cost", "Task classifier")),
         "mesh.classifier_model" => Some(("Mesh & Cost", "Classifier model")),
+        "mesh.classifier_activity_focused" => {
+            Some(("Mesh & Cost", "Focus trailing prompt activity"))
+        }
         "mesh.bridge_mcp_external" => Some(("Mesh & Cost", "Bridge external MCP")),
         "mesh.prefer_subscription" => Some(("Mesh & Cost", "Prefer subscriptions")),
         "mesh.max_output_tokens" => Some(("Mesh & Cost", "Max output tokens")),
@@ -3067,7 +3080,8 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "mesh.weekly_budget_usd" => "Hard weekly spend cap (USD). Empty = unlimited.",
         "mesh.monthly_cap_usd" => "Hard monthly spend cap (USD). Empty = unlimited.",
         "mesh.classifier" => "Task-tier classifier: heuristic (instant, no call) or llm (a cheap model labels each turn).",
-        "mesh.classifier_model" => "Model the llm classifier calls — pick a $0/local one (e.g. ollama::… or a CLI bridge).",
+        "mesh.classifier_model" => "Fixed model the llm classifier calls. Default: groq::llama-3.3-70b-versatile. Set an available capable model to override it.",
+        "mesh.classifier_activity_focused" => "Compatibility mode for unstructured prompts: classify only the final non-empty paragraph. Prefer API system/user roles or `forge run --system`.",
         "mesh.bridge_mcp_external" => "Connect external project MCP servers (dual-graph/helm/…) inside the CLI bridge. On by default; servers connect concurrently in the background with a timeout, so slow servers are skipped instead of stalling turns. Set false to disable. Forge core tools stay either way.",
         "mesh.prefer_subscription" => "Prefer $0 CLI-bridge subscriptions over a metered API model on a tie.",
         "mesh.max_output_tokens" => {
@@ -5632,5 +5646,33 @@ deployments = ["gpt-4o", "gpt-4o-mini"]
 
         // An invalid block (no resource/endpoint) is rejected before writing.
         assert!(add_azure_provider_at(&path, &AzureConfig::default()).is_err());
+    }
+
+    #[test]
+    fn classifier_defaults_are_fixed_and_activity_focus_is_documented() {
+        let mesh = Config::default().mesh;
+        assert_eq!(
+            mesh.classifier_model.as_deref(),
+            Some("groq::llama-3.3-70b-versatile")
+        );
+        assert!(!mesh.classifier_activity_focused);
+        assert!(setting_help("mesh.classifier_model")
+            .unwrap()
+            .contains("Fixed model"));
+        assert!(setting_help("mesh.classifier_activity_focused")
+            .unwrap()
+            .contains("final non-empty paragraph"));
+
+        let configured: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                "[mesh]\nclassifier_activity_focused = true\nclassifier_model = \"cerebras::gpt-oss-120b\"\n",
+            ))
+            .extract()
+            .unwrap();
+        assert!(configured.mesh.classifier_activity_focused);
+        assert_eq!(
+            configured.mesh.classifier_model.as_deref(),
+            Some("cerebras::gpt-oss-120b")
+        );
     }
 }

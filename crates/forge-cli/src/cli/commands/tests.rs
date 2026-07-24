@@ -772,6 +772,31 @@ fn run_gains_unified_continuity_and_surface_flags() {
 }
 
 #[test]
+fn run_accepts_role_separated_system_prompts() {
+    let cli = Cli::try_parse_from([
+        "forge",
+        "run",
+        "How many tasks are due today?",
+        "--system",
+        "You are a task assistant.",
+        "--append-system-prompt",
+        "Use the on-screen task data.",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Command::Run { prompt, system, .. } => {
+            assert_eq!(prompt, ["How many tasks are due today?"]);
+            assert_eq!(
+                system,
+                ["You are a task assistant.", "Use the on-screen task data."]
+            );
+        }
+        _ => panic!("expected run"),
+    }
+}
+
+#[test]
 fn chat_gains_symmetric_tui_flag() {
     // --tui accepted on chat (default surface anyway), symmetric with run.
     assert!(Cli::try_parse_from(["forge", "chat", "--tui"]).is_ok());

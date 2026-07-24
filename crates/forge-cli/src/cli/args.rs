@@ -405,6 +405,14 @@ pub(crate) enum Command {
         /// Pin a specific model (e.g. `openai::gpt-4o`), bypassing mesh classification.
         #[arg(long)]
         model: Option<String>,
+        /// Append standing system instructions for the provider without including them in mesh
+        /// task classification. Repeat the flag to add multiple system messages.
+        #[arg(
+            long = "system",
+            visible_alias = "append-system-prompt",
+            value_name = "TEXT"
+        )]
+        system: Vec<String>,
         /// Output format: `text` (default, human line output) or `stream-json` (NDJSON — one JSON
         /// event per line on stdout, mirroring Claude Code's stream-json so editors/tools can embed
         /// Forge). Pair with `--mode bypass`/`--mode accept-edits` for autonomous tool use.
