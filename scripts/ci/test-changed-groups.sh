@@ -60,7 +60,7 @@ classify native mobile/ios/Forge/Info.plist
 expect native mobile_app false
 expect native mobile_tauri false
 
-classify protocol protocol/remote-v8.json
+classify protocol protocol/remote-v9.json
 expect protocol mobile_app true
 expect protocol rust true
 expect protocol release_build true

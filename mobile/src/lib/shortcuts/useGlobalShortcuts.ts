@@ -7,11 +7,17 @@
 // branching of its own. Mounted once at the app root (HANDOFF in src/app/_layout.tsx).
 import { router } from "expo-router";
 
+import { useDesktopMenu } from "../desktopMenu";
 import { useHotkey } from "./useHotkeys";
 
 const TAB_ROUTES = ["/", "/inbox", "/history", "/settings"] as const;
 
 export function useGlobalShortcuts(): void {
+  // The Tauri menu bar / tray event bridge (docs/design/machined § 08 Native). Mounted here
+  // because this hook is already the app-root, once-per-launch shortcut host, and the bridge
+  // needs no context; it is inert off Tauri.
+  useDesktopMenu();
+
   useHotkey("1", () => router.push(TAB_ROUTES[0]), { alt: true });
   useHotkey("2", () => router.push(TAB_ROUTES[1]), { alt: true });
   useHotkey("3", () => router.push(TAB_ROUTES[2]), { alt: true });

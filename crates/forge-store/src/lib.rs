@@ -6297,21 +6297,64 @@ impl Store {
         before_seq: Option<i64>,
         limit: usize,
     ) -> Result<Vec<HistoryRow>> {
+        self.load_history_page_with(session_id, before_seq, limit, false)
+    }
+
+    /// [`load_history_page`](Self::load_history_page) with the tool rows opted in.
+    ///
+    /// `include_tools = false` is byte-for-byte the historical page (the filter below collapses to
+    /// the original predicate), so every existing caller and the legacy PWA see no change.
+    ///
+    /// `include_tools = true` additionally returns the persisted `role='tool'` rows — the tool
+    /// RESULT rows written by `Session::invoke_tool` — with [`HistoryRow::tool_name`] resolved.
+    /// Note what that is and isn't: the tool row itself stores only the result text and its
+    /// `tool_call_id`; the NAME lives in the assistant carrier's `tool_calls_json`, so it is
+    /// recovered from the nearest preceding row that has one and left `None` when that carrier is
+    /// gone or does not contain the id. A tool CALL that never produced a result row (an
+    /// interrupted turn) has nothing persisted in `message` at all and cannot be reconstructed
+    /// here. `llm_only` tool rows stay excluded — like their user/assistant siblings they are
+    /// provider-continuity plumbing, not conversation.
+    pub fn load_history_page_with(
+        &self,
+        session_id: &str,
+        before_seq: Option<i64>,
+        limit: usize,
+        include_tools: bool,
+    ) -> Result<Vec<HistoryRow>> {
         let conn = self.lock()?;
+        // The carrier lookup sits behind `CASE WHEN ?4 = 1 AND m.role = 'tool'` rather than in the
+        // projection unconditionally: SQLite short-circuits the CASE, so the default page runs the
+        // same work it always did and pays nothing for a subquery it never needs.
         let mut stmt = conn.prepare(
-            "SELECT seq, role, content, model, created_at, visibility
-             FROM message
-             WHERE session_id = ?1
-               AND (?2 IS NULL OR seq < ?2)
-               AND ((role IN ('user', 'assistant') AND visibility != 'llm_only') OR visibility = 'ui')
-               AND content != ''
-             ORDER BY seq DESC LIMIT ?3",
+            "SELECT m.seq, m.role, m.content, m.model, m.created_at, m.visibility,
+                    m.tool_call_id,
+                    CASE WHEN ?4 = 1 AND m.role = 'tool' THEN (
+                        SELECT c.tool_calls_json FROM message c
+                         WHERE c.session_id = m.session_id
+                           AND c.seq < m.seq
+                           AND c.tool_calls_json IS NOT NULL
+                         ORDER BY c.seq DESC LIMIT 1
+                    ) END
+             FROM message m
+             WHERE m.session_id = ?1
+               AND (?2 IS NULL OR m.seq < ?2)
+               AND (((m.role IN ('user', 'assistant') AND m.visibility != 'llm_only') OR m.visibility = 'ui')
+                    OR (?4 = 1 AND m.role = 'tool' AND m.visibility != 'llm_only'))
+               AND m.content != ''
+             ORDER BY m.seq DESC LIMIT ?3",
         )?;
         let rows = stmt.query_map(
-            rusqlite::params![session_id, before_seq, limit as i64],
+            rusqlite::params![
+                session_id,
+                before_seq,
+                limit as i64,
+                i64::from(include_tools)
+            ],
             |row| {
                 let role: String = row.get(1)?;
                 let visibility: String = row.get(5)?;
+                let tool_call_id: Option<String> = row.get(6)?;
+                let carrier_json: Option<String> = row.get(7)?;
                 Ok(HistoryRow {
                     seq: row.get(0)?,
                     role: Role::parse(&role).unwrap_or(Role::User),
@@ -6319,11 +6362,44 @@ impl Store {
                     model: row.get(3)?,
                     created_at: row.get(4)?,
                     visibility: Visibility::parse(&visibility),
+                    tool_name: carrier_json.as_deref().and_then(|carrier| {
+                        tool_name_from_carrier(carrier, tool_call_id.as_deref())
+                    }),
                 })
             },
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    /// When the session's FIRST user-facing row was written — the zero point a transcript replay
+    /// measures its offsets from (raw `created_at` epochs give a scrubber nothing to anchor on).
+    /// Same row filter as [`load_history_page`](Self::load_history_page), so the epoch is the
+    /// first row a client can actually page to. `None` for a session with no visible rows yet.
+    pub fn history_epoch(&self, session_id: &str) -> Result<Option<i64>> {
+        self.history_epoch_with(session_id, false)
+    }
+
+    /// [`history_epoch`](Self::history_epoch) over the row set
+    /// [`load_history_page_with`](Self::load_history_page_with) returns for the same `include_tools`.
+    ///
+    /// The two MUST be asked the same question: a session whose first row is a tool result has one
+    /// epoch with tools included and a later one without, and mixing them would slide every
+    /// `elapsed_ms` on the wire — the scrubber's zero point would jump the moment a client toggled
+    /// tool rows on.
+    pub fn history_epoch_with(&self, session_id: &str, include_tools: bool) -> Result<Option<i64>> {
+        let conn = self.lock()?;
+        let epoch = conn.query_row(
+            "SELECT MIN(created_at)
+             FROM message
+             WHERE session_id = ?1
+               AND (((role IN ('user', 'assistant') AND visibility != 'llm_only') OR visibility = 'ui')
+                    OR (?2 = 1 AND role = 'tool' AND visibility != 'llm_only'))
+               AND content != ''",
+            rusqlite::params![session_id, i64::from(include_tools)],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        Ok(epoch)
     }
 
     /// Whether this session has a stored compaction summary (was compacted at least once) — the
@@ -6725,6 +6801,24 @@ pub struct HistoryRow {
     pub created_at: i64,
     /// `UiOnly` rows are user-facing notes; they belong in the visible conversation.
     pub visibility: Visibility,
+    /// The tool behind a `Role::Tool` row, resolved from the assistant carrier that made the call
+    /// (see [`Store::load_history_page_with`]). Always `None` on the default page (which has no
+    /// tool rows) and `None` on a tool row whose carrier is no longer recoverable — never guessed.
+    pub tool_name: Option<String>,
+}
+
+/// Resolve a tool row's name out of the assistant carrier's `tool_calls_json`, matching on the
+/// row's `tool_call_id`. The `tool_call` audit table records names too, but only keyed by the
+/// carrier's message id — with parallel calls in one turn it cannot say WHICH result row is which,
+/// while the carrier's `[{id, name, args}]` can. `None` on a missing/unparseable carrier or an id
+/// that isn't in it: an unnamed tool row is honest, a mis-paired name is not.
+fn tool_name_from_carrier(carrier_json: &str, tool_call_id: Option<&str>) -> Option<String> {
+    let id = tool_call_id?;
+    serde_json::from_str::<Vec<ToolCall>>(carrier_json)
+        .ok()?
+        .into_iter()
+        .find(|call| call.id == id)
+        .map(|call| call.name)
 }
 
 /// One `forge tree` row: a session's display metadata and fork linkage.
@@ -7438,6 +7532,17 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Flip a schedule's `enabled` flag. Pausing does NOT stop the OS timer by itself — the caller
+    /// must uninstall/reinstall it (see `forge serve`'s schedules API); this only records the
+    /// state `forge schedule list` reports. Returns `false` if no row matched.
+    pub fn set_schedule_enabled(&self, id: &str, enabled: bool) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "UPDATE schedule SET enabled = ?1 WHERE id = ?2",
+            (i64::from(enabled), id),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Record the epoch-seconds timestamp of a schedule's most recent tick.
     pub fn set_schedule_last_run(&self, id: &str, at: i64) -> Result<()> {
         self.lock()?
@@ -8038,6 +8143,145 @@ mod tests {
     }
 
     #[test]
+    fn history_page_includes_tool_rows_only_when_asked_and_names_them() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        // One realistic turn: a user prompt, an assistant carrier announcing TWO parallel calls,
+        // and the two result rows that answer them.
+        store.add_message(&sid, 0, Role::User, "q", None).unwrap();
+        let calls = [
+            ToolCall {
+                id: "call-a".into(),
+                name: "read_file".into(),
+                args: serde_json::json!({"path": "a.rs"}),
+            },
+            ToolCall {
+                id: "call-b".into(),
+                name: "shell".into(),
+                args: serde_json::json!({"command": "ls"}),
+            },
+        ];
+        store
+            .add_message_full(&sid, 1, Role::Assistant, "looking…", None, &calls, None)
+            .unwrap();
+        store
+            .add_message_full(
+                &sid,
+                2,
+                Role::Tool,
+                "a.rs contents",
+                None,
+                &[],
+                Some("call-a"),
+            )
+            .unwrap();
+        store
+            .add_message_full(&sid, 3, Role::Tool, "a.rs  b.rs", None, &[], Some("call-b"))
+            .unwrap();
+        // An orphan: the carrier that requested it is gone (pruned/never written), so its name is
+        // not recoverable and must not be guessed.
+        store
+            .add_message_full(&sid, 4, Role::Tool, "???", None, &[], Some("call-gone"))
+            .unwrap();
+        // Provider-continuity plumbing stays out of BOTH modes.
+        store
+            .add_llm_only_message_full(
+                &sid,
+                5,
+                Role::Tool,
+                "provisional",
+                None,
+                &[],
+                Some("call-a"),
+            )
+            .unwrap();
+        store
+            .add_message(&sid, 6, Role::Assistant, "done", None)
+            .unwrap();
+
+        // Default: byte-for-byte the old page — no tool rows, no names.
+        let plain = store.load_history_page(&sid, None, 20).unwrap();
+        assert_eq!(
+            plain.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![6, 1, 0],
+            "tool rows stay out of the default page"
+        );
+        assert!(plain.iter().all(|r| r.tool_name.is_none()));
+
+        // Opted in: the result rows appear, each named from its carrier's tool_calls_json.
+        let with_tools = store.load_history_page_with(&sid, None, 20, true).unwrap();
+        assert_eq!(
+            with_tools.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![6, 4, 3, 2, 1, 0],
+            "tool rows join the page; the llm_only one is still plumbing"
+        );
+        let named: Vec<(i64, Option<&str>)> = with_tools
+            .iter()
+            .filter(|r| r.role == Role::Tool)
+            .map(|r| (r.seq, r.tool_name.as_deref()))
+            .collect();
+        assert_eq!(
+            named,
+            vec![(4, None), (3, Some("shell")), (2, Some("read_file"))],
+            "parallel calls resolve per tool_call_id, and an orphan stays unnamed"
+        );
+
+        // Pagination still windows correctly with tools in the set.
+        let first = store.load_history_page_with(&sid, None, 2, true).unwrap();
+        assert_eq!(first.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![6, 4]);
+        let next = store
+            .load_history_page_with(&sid, Some(4), 2, true)
+            .unwrap();
+        assert_eq!(next.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![3, 2]);
+    }
+
+    #[test]
+    fn history_epoch_matches_the_row_set_the_page_returns() {
+        // The scrubber's zero point must be the first row of the SAME set — otherwise including
+        // tools would shift every elapsed_ms on the wire.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        let stamp = |seq: i64, at: i64| {
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE message SET created_at = ?1 WHERE session_id = ?2 AND seq = ?3",
+                    rusqlite::params![at, &sid, seq],
+                )
+                .unwrap();
+        };
+        // A tool row is the OLDEST visible row here (a resumed session whose earlier turns were
+        // pruned), so the two epochs genuinely differ.
+        store
+            .add_message_full(&sid, 0, Role::Tool, "result", None, &[], Some("call-a"))
+            .unwrap();
+        stamp(0, 1_000);
+        store.add_message(&sid, 1, Role::User, "q", None).unwrap();
+        stamp(1, 1_010);
+
+        assert_eq!(
+            store.history_epoch(&sid).unwrap(),
+            Some(1_010),
+            "the default page starts at the first user/assistant row"
+        );
+        assert_eq!(
+            store.history_epoch_with(&sid, true).unwrap(),
+            Some(1_000),
+            "an include_tools page starts at the tool row it actually returns"
+        );
+        // And each epoch really is the minimum of its own page.
+        for tools in [false, true] {
+            let page = store.load_history_page_with(&sid, None, 20, tools).unwrap();
+            assert_eq!(
+                page.iter().map(|r| r.created_at).min(),
+                store.history_epoch_with(&sid, tools).unwrap(),
+                "epoch must be the oldest row of the set it describes"
+            );
+        }
+    }
+
+    #[test]
     fn history_page_keeps_compacted_away_rows_for_the_user() {
         // Compaction soft-deletes old rows from the MODEL's view; the user's scrollback (and so
         // the remote history page) still shows them.
@@ -8413,10 +8657,12 @@ mod tests {
             TodoItem {
                 title: "write the parser".into(),
                 status: TodoStatus::Done,
+                assignee: None,
             },
             TodoItem {
                 title: "wire it up".into(),
                 status: TodoStatus::InProgress,
+                assignee: None,
             },
         ];
         store.set_tasks(&sid, &tasks).unwrap();
@@ -8426,9 +8672,40 @@ mod tests {
         let next = vec![TodoItem {
             title: "ship".into(),
             status: TodoStatus::Pending,
+            assignee: None,
         }];
         store.set_tasks(&sid, &next).unwrap();
         assert_eq!(store.tasks(&sid).unwrap(), next, "replaced, not appended");
+    }
+
+    #[test]
+    fn session_tasks_carry_an_assignee_and_load_rows_written_without_one() {
+        use forge_types::{TodoItem, TodoStatus};
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+
+        let delegated = vec![TodoItem {
+            title: "port the store".into(),
+            status: TodoStatus::InProgress,
+            assignee: Some("builder-a3".into()),
+        }];
+        store.set_tasks(&sid, &delegated).unwrap();
+        assert_eq!(store.tasks(&sid).unwrap(), delegated, "owner round-trips");
+
+        // A row written by an older build has no `assignee` key at all — it must still load
+        // (serde default), not drop the whole list on the floor and silently show no tasks.
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session_tasks SET tasks_json = ?1 WHERE session_id = ?2",
+                rusqlite::params![r#"[{"title":"legacy","status":"pending"}]"#, &sid],
+            )
+            .unwrap();
+        let loaded = store.tasks(&sid).unwrap();
+        assert_eq!(loaded.len(), 1, "pre-assignee rows still parse");
+        assert_eq!(loaded[0].title, "legacy");
+        assert_eq!(loaded[0].assignee, None);
     }
 
     #[test]

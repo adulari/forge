@@ -1,41 +1,49 @@
 // Forge Anywhere — billing & entitlement (mobile.dc.html "AW Billing", lines 1185-1231).
 import { router } from "expo-router";
 import { Check } from "lucide-react-native";
-import React, { useEffect, useState } from "react";
-import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useEffect, useState } from "react";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { BackLink } from "../../components/ds/BackLink";
 import { Button } from "../../components/ds/Button";
 import { Screen } from "../../components/ds/Screen";
+import { useToast } from "../../components/ds/ToastHost";
 import { EntitlementBadge } from "../../components/anywhere/EntitlementBadge";
+import { useAnywhere as useManagedAnywhere } from "../../lib/AnywhereProvider";
 import { useAnywhere } from "../../lib/anywhere/store";
 import type { AnywhereAccount, BillingPlan, EntitlementState } from "../../lib/anywhere/types";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type } from "../../theme/typography";
 
-const CHECKOUT_URL = "https://forge.dev/billing/checkout";
+/** `9 days left` — omitted entirely when the service has not published a deadline. */
+function daysClause(days: number | undefined, suffix: string): string | null {
+  return days === undefined ? null : `${days} day${days === 1 ? "" : "s"} ${suffix}`;
+}
 
 function summaryLine(account: AnywhereAccount): string {
   switch (account.entitlement) {
     case "not-started":
       return "Trial begins when your first host connects — no card required.";
-    case "trial": {
-      const days = account.trialDaysLeft ?? 0;
-      return `${days} day${days === 1 ? "" : "s"} left. No card on file. At expiry Anywhere goes read-only immediately; local Forge is unaffected.`;
-    }
+    case "trial":
+      return [
+        daysClause(account.trialDaysLeft, "left."),
+        "No card on file. At expiry Anywhere goes read-only immediately; local Forge is unaffected.",
+      ].filter(Boolean).join(" ");
     case "active":
       return `Active${account.plan ? ` · ${account.plan === "yearly" ? "annual" : "monthly"} plan` : ""}. Cancel anytime — access continues to the paid-through date.`;
-    case "grace": {
-      const days = account.graceDaysLeft ?? 0;
-      return `${days} day${days === 1 ? "" : "s"} left in grace — payment retry in progress. Full access continues.`;
-    }
+    case "grace":
+      return [
+        daysClause(account.graceDaysLeft, "left in grace —"),
+        "Payment retry in progress. Full access continues.",
+      ].filter(Boolean).join(" ");
     case "read-only":
       return "Read-only — download, restore, delete, export and billing only. Checkout restores full access instantly.";
-    case "suspended": {
-      const days = account.deletesInDays ?? 0;
-      return `${days} day${days === 1 ? "" : "s"} until this data is permanently deleted. Billing, export and deletion only.`;
-    }
+    case "suspended":
+      return [
+        daysClause(account.deletesInDays, "until this data is permanently deleted."),
+        "Billing, export and deletion only.",
+      ].filter(Boolean).join(" ");
     case "webhook-pending":
       return "Payment received — entitlement updating, usually under a minute.";
     default: {
@@ -85,12 +93,27 @@ function lifecycleColor(key: EntitlementState, tokens: ReturnType<typeof useToke
 
 export default function AnywhereBillingScreen() {
   const tokens = useTokens();
+  const toast = useToast();
+  const managed = useManagedAnywhere();
   const { account, signedIn, loading } = useAnywhere();
   const [plan, setPlan] = useState<BillingPlan>("yearly");
+  const [checkingOut, setCheckingOut] = useState(false);
 
   useEffect(() => {
     if (!loading && !signedIn) router.replace("/anywhere");
   }, [loading, signedIn]);
+
+  // The service mints the Paddle session (`POST /v1/billing/checkout`) — never a static link.
+  const startCheckout = useCallback(async () => {
+    setCheckingOut(true);
+    try {
+      await managed.checkout(plan === "yearly" ? "annual" : "monthly");
+    } catch (reason) {
+      toast.show(reason instanceof Error ? reason.message : "Checkout could not be opened.", { tone: "danger" });
+    } finally {
+      setCheckingOut(false);
+    }
+  }, [managed, plan, toast]);
 
   if (loading || !signedIn || !account) return null;
 
@@ -121,13 +144,9 @@ export default function AnywhereBillingScreen() {
         <Button
           label="Continue in browser — Paddle checkout"
           fullWidth
+          loading={checkingOut}
           style={styles.checkoutButton}
-          onPress={() => {
-            // Placeholder Paddle checkout URL — the real relay backend will mint a
-            // session-scoped checkout link server-side; this hits the marketing
-            // domain's static entry point until that endpoint exists.
-            void Linking.openURL(CHECKOUT_URL);
-          }}
+          onPress={() => void startCheckout()}
         />
         <Text style={[type.meta, styles.checkoutFootnote, { color: tokens.ink4 }]}>
           You&apos;ll return here when payment completes. Includes 3 hosts, unlimited devices,

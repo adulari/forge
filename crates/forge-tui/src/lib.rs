@@ -43,8 +43,8 @@ pub use app::{
     picker_kind_wire, print_banner_direct, render_mesh_overlay, render_usage_overlay,
     render_voice_overlay, ActivityKind, ActivityStatus, App, DiffFileSnapshot, DiffHunkSnapshot,
     DiffSnapshot, InputOutcome, KeyKind, MeshCandRow, MeshOverlay, MeshQuotaRow,
-    OverlayRowSnapshot, OverlaySnapshot, RemoteSnapshot, TranscriptView, UsageOverlay,
-    VoiceOverlay, VoicePhase,
+    OverlayRowSnapshot, OverlaySnapshot, RemoteSnapshot, TranscriptKind, TranscriptRow,
+    TranscriptView, UsageOverlay, VoiceOverlay, VoicePhase,
 };
 pub use commands::{
     arg_values, at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken,

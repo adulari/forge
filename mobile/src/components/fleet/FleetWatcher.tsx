@@ -9,10 +9,15 @@ import type { SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { TWebSocket } from "../../lib/transport";
 import { supportsFleetInvalidationSocket } from "../../lib/fleetTransport";
+import { useDesktopNativeSync } from "../../lib/desktopMenu";
 
 const DEBOUNCE_MS = 1200;
 
 export function FleetWatcher() {
+  // The Tauri tray + native Appearance switch need the same fleet state this component already
+  // watches, and they must run inside the provider tree (query client + theme). No-op off desktop.
+  useDesktopNativeSync();
+
   const { data } = useSessions();
   const { baseUrl } = useAuth();
   const queryClient = useQueryClient();

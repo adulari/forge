@@ -1,4 +1,7 @@
+const path = require("path");
+
 const { getDefaultConfig } = require("expo/metro-config");
+const exclusionList = require("metro-config/private/defaults/exclusionList").default;
 
 const config = getDefaultConfig(__dirname);
 
@@ -12,5 +15,22 @@ const maxWorkers = process.env.METRO_MAX_WORKERS;
 if (maxWorkers) {
   config.maxWorkers = Number(maxWorkers);
 }
+
+// Metro's file watcher walks everything under the project root, which includes the Tauri
+// crate's build directory. A concurrent `cargo build` (desktop work, or `tauri dev`) writes
+// and unlinks temp artifacts there faster than the watcher can stat them, and the resulting
+// ENOENT kills the whole dev server. Nothing under `src-tauri/target` is ever bundled, so
+// exclude it from both the watcher and the resolver.
+const escapedTauriTarget = path
+  .join(__dirname, "src-tauri", "target")
+  .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+config.resolver.blockList = exclusionList([
+  ...(Array.isArray(config.resolver.blockList)
+    ? config.resolver.blockList
+    : config.resolver.blockList
+      ? [config.resolver.blockList]
+      : []),
+  new RegExp(`^${escapedTauriTarget}/.*`),
+]);
 
 module.exports = config;

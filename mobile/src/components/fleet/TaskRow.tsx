@@ -1,8 +1,13 @@
 // Machined `TaskRow` (Mobile/Desktop "Session Tasks" frames): dense hairline-separated
 // rows — done = check + strikethrough dim title + "done" mono tag, in_progress = pulsing
-// filled accent dot + a neutral row-highlight wash + mono status tag (assignee when the
-// caller has one, else "in progress" — `SnapshotTask` carries no assignee field on the
-// wire today, see `assignee` prop doc), pending = hollow ring + "queued" mono tag.
+// filled accent dot + a neutral row-highlight wash + mono status tag (the assignee when there
+// is one, else "in progress"), pending = hollow ring + "queued" mono tag.
+//
+// Protocol v9 added `SnapshotTask.assignee`, so the assignee no longer has to be threaded in by
+// a caller — this row reads it off the task itself. The field is RESERVED though: the task
+// machinery (`update_tasks`) tracks no owner, so a v9 host always sends `null` and the tag
+// keeps reading "in progress". The moment the core starts populating it, the mono assignee tag
+// appears with no further wiring; a null/absent value never renders a placeholder.
 import { Check } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
@@ -21,8 +26,8 @@ export interface TaskRowProps {
   /** Session-level `busy` (Snapshot.busy) — gates the in_progress dot's pulse ("live" heat). */
   busy?: boolean;
   showSeparator?: boolean;
-  /** Who's working this task, mono-tagged beside "in progress" — omitted when the caller
-   * doesn't have one (the wire's `SnapshotTask` carries no assignee field today). */
+  /** Overrides `task.assignee` for a caller that resolves the owner itself (e.g. a fleet view
+   * that knows which agent picked the row up). Omit to use the wire value. */
   assignee?: string;
 }
 
@@ -47,7 +52,7 @@ function TaskGlyph({ status, busy }: { status: SnapshotTask["status"]; busy: boo
   );
 }
 
-function statusTag(task: SnapshotTask, assignee: string | undefined, tokens: ColorTokens) {
+function statusTag(task: SnapshotTask, assignee: string | null, tokens: ColorTokens) {
   if (task.status === "done") return { label: "done", color: tokens.ink3 };
   if (task.status === "in_progress") return { label: assignee ?? "in progress", color: tokens.accent };
   return { label: "queued", color: tokens.ink3 };
@@ -58,7 +63,9 @@ function TaskRowBase({ task, busy = false, showSeparator = true, assignee }: Tas
   const done = task.status === "done";
   const inProgress = task.status === "in_progress";
   const statusLabel = task.status === "in_progress" ? "in progress" : task.status;
-  const tag = statusTag(task, assignee, tokens);
+  // An empty string on the wire is as unassigned as null — never tag a row with nothing.
+  const owner = (assignee ?? task.assignee)?.trim() || null;
+  const tag = statusTag(task, owner, tokens);
 
   return (
     <View>
@@ -68,7 +75,7 @@ function TaskRowBase({ task, busy = false, showSeparator = true, assignee }: Tas
           inProgress ? { backgroundColor: hexToRgba(tokens.ink, 0.05) } : null,
         ]}
         accessibilityRole="text"
-        accessibilityLabel={`${task.title}, ${statusLabel}`}
+        accessibilityLabel={owner ? `${task.title}, ${statusLabel}, ${owner}` : `${task.title}, ${statusLabel}`}
       >
         <View style={styles.glyphSlot}>
           <TaskGlyph status={task.status} busy={busy} />

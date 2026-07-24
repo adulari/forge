@@ -8846,6 +8846,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             .map(|s| forge_types::TodoItem {
                 title: s.title.trim().to_string(),
                 status: forge_types::TodoStatus::Pending,
+                // A `PlanStep` has no owner field, so a seeded task starts unassigned; the model
+                // can hand one out later via `update_tasks` if it delegates the step.
+                assignee: None,
             })
             .collect();
         self.persist_tasks();
@@ -9206,6 +9209,15 @@ pub fn parse_tasks(args: &serde_json::Value) -> Vec<forge_types::TodoItem> {
                             .and_then(|v| v.as_str())
                             .map(TodoStatus::parse_loose)
                             .unwrap_or_default(),
+                        // Optional and only ever what the model actually wrote: an omitted (or
+                        // blank) `assignee` stays `None` rather than defaulting to some invented
+                        // owner, so a client renders the task as unassigned.
+                        assignee: t
+                            .get("assignee")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string),
                     })
                 })
                 .collect()
@@ -9236,6 +9248,13 @@ pub fn merge_task_update(
     for update in incoming {
         if let Some(task) = merged.iter_mut().find(|task| task.title == update.title) {
             task.status = update.status;
+            // A patch payload is written to move a STATUS; a bridge that re-sends the item
+            // without repeating `assignee` is not unassigning it. Only an explicit owner
+            // overwrites — otherwise the delegation recorded by the full list would silently
+            // evaporate on the next status tick.
+            if update.assignee.is_some() {
+                task.assignee = update.assignee;
+            }
         }
     }
     merged
@@ -9265,6 +9284,12 @@ pub fn update_tasks_spec() -> ToolSpec {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "done"],
                                 "description": "task state (default pending)"
+                            },
+                            "assignee": {
+                                "type": "string",
+                                "description": "optional — the subagent or worker responsible \
+                                    for this task, when the model is delegating. Omit for work \
+                                    you are doing yourself; do not invent an owner."
                             }
                         },
                         "required": ["title"]
@@ -11374,10 +11399,12 @@ mod tests {
         let done = vec![forge_types::TodoItem {
             title: "ship".into(),
             status: forge_types::TodoStatus::Done,
+            assignee: None,
         }];
         let open = vec![forge_types::TodoItem {
             title: "ship".into(),
             status: forge_types::TodoStatus::InProgress,
+            assignee: None,
         }];
 
         assert!(completion_verification_empty_is_terminal(1, &done, true));
@@ -12287,6 +12314,67 @@ mod tests {
         assert_eq!(tasks[2].title, "Claude shape");
         assert_eq!(tasks[2].status, forge_types::TodoStatus::Done);
         assert!(parse_tasks(&serde_json::json!({"tasks": []})).is_empty());
+        assert!(
+            tasks.iter().all(|t| t.assignee.is_none()),
+            "an omitted assignee stays absent — the pre-existing call shape is unchanged"
+        );
+    }
+
+    #[test]
+    fn parse_tasks_reads_an_optional_assignee_without_inventing_one() {
+        let tasks = parse_tasks(&serde_json::json!({
+            "tasks": [
+                {"title": "port the store", "status": "in_progress", "assignee": " builder-a3 "},
+                {"title": "review the diff", "status": "pending"},
+                {"title": "ship it", "status": "pending", "assignee": "   "}
+            ]
+        }));
+        assert_eq!(tasks[0].assignee.as_deref(), Some("builder-a3"), "trimmed");
+        assert_eq!(tasks[1].assignee, None, "omitted stays unassigned");
+        assert_eq!(tasks[2].assignee, None, "blank is not an owner");
+
+        // The advertised schema must actually offer the field, or the model can never send it.
+        let schema = update_tasks_spec().schema;
+        let props = &schema["properties"]["tasks"]["items"]["properties"];
+        assert!(
+            props.get("assignee").is_some(),
+            "schema advertises assignee"
+        );
+        let required = schema["properties"]["tasks"]["items"]["required"]
+            .as_array()
+            .expect("items.required is an array");
+        assert_eq!(
+            required.len(),
+            1,
+            "assignee must stay optional — title is the only required field"
+        );
+    }
+
+    #[test]
+    fn partial_task_update_keeps_an_assignee_it_does_not_mention() {
+        // A status-only patch is not an unassignment: the owner recorded by the full list must
+        // survive, and an explicit new owner must still win.
+        let existing = parse_tasks(&serde_json::json!({
+            "tasks": [
+                {"title": "port the store", "status": "in_progress", "assignee": "builder-a3"},
+                {"title": "review the diff", "status": "pending", "assignee": "reviewer"},
+                {"title": "ship it", "status": "pending"}
+            ]
+        }));
+        let merged = merge_task_update(
+            &existing,
+            parse_tasks(&serde_json::json!({
+                "tasks": [
+                    {"title": "port the store", "status": "done"},
+                    {"title": "review the diff", "status": "in_progress", "assignee": "someone-else"}
+                ]
+            })),
+        );
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].status, forge_types::TodoStatus::Done);
+        assert_eq!(merged[0].assignee.as_deref(), Some("builder-a3"));
+        assert_eq!(merged[1].assignee.as_deref(), Some("someone-else"));
+        assert_eq!(merged[2].assignee, None);
     }
 
     #[test]
@@ -13490,6 +13578,7 @@ mod tests {
                 &[TodoItem {
                     title: "earlier work".into(),
                     status: TodoStatus::InProgress,
+                    assignee: None,
                 }],
             )
             .unwrap();
@@ -13769,10 +13858,12 @@ mod tests {
         let before = vec![forge_types::TodoItem {
             title: "Write alpha.txt containing ALPHA".to_string(),
             status: forge_types::TodoStatus::InProgress,
+            assignee: None,
         }];
         let after = vec![forge_types::TodoItem {
             title: "Write alpha.txt containing ALPHA".to_string(),
             status: forge_types::TodoStatus::Done,
+            assignee: None,
         }];
         assert_eq!(
             completed_tasks_recap(
@@ -13788,6 +13879,7 @@ mod tests {
             .map(|i| forge_types::TodoItem {
                 title: format!("Task {i}"),
                 status: forge_types::TodoStatus::Done,
+                assignee: None,
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -13806,6 +13898,7 @@ mod tests {
         let done = vec![forge_types::TodoItem {
             title: "Old task".to_string(),
             status: forge_types::TodoStatus::Done,
+            assignee: None,
         }];
         assert_eq!(
             completed_tasks_recap(&done, &done, "Answered the unrelated follow-up"),
@@ -16586,6 +16679,7 @@ mod tests {
                 } else {
                     forge_types::TodoStatus::Pending
                 },
+                assignee: None,
             })
             .collect();
         store.set_tasks(id, &tasks).unwrap();

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import fixture from "../../../protocol/remote-v8.json";
+import fixture from "../../../protocol/remote-v9.json";
 import { PROTOCOL_VERSION, isValidSnapshotFrame } from "./remoteProtocol";
 import { decideSnapshotRevision, reconcilePendingMessages } from "./sessionReconciler";
 

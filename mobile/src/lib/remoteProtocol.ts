@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 export interface SnapshotIdentity {
   protocol: number;

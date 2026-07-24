@@ -156,15 +156,17 @@ function FeaturedPlanCard({ plan }: { plan: PlanRow }) {
 
       {decision && livePlan ? (
         <>
+          {/* M/D Plans frames put Approve and Revise side by side at equal width; Cancel is real
+              (`decision.cancel`) so it keeps its slot rather than being dropped to match the mock. */}
           <View style={styles.actions}>
             <Button
               label="Approve"
               variant="allow"
               onPress={() => answer(decision.build, haptics.allow)}
               disabled={locked}
-              style={styles.approve}
+              style={styles.action}
             />
-            <Button label="Revise" variant="ghost" onPress={() => setRevising((value) => !value)} disabled={locked} />
+            <Button label="Revise" variant="secondary" onPress={() => setRevising((value) => !value)} disabled={locked} style={styles.action} />
             <Button label="Cancel" variant="ghost" onPress={() => answer(decision.cancel, haptics.deny)} disabled={locked} />
           </View>
           {revising ? (
@@ -197,7 +199,7 @@ function FeaturedPlanCard({ plan }: { plan: PlanRow }) {
             label="Open session to review"
             variant="secondary"
             onPress={() => router.push(`/session/${plan.session_id}`)}
-            style={styles.approve}
+            style={styles.action}
           />
         </View>
       )}
@@ -252,7 +254,12 @@ function PlansScreenBody() {
   const rest = plans.slice(1);
   const [expanded, setExpanded] = useState<string | null>(null);
 
-  const awaitingLabel = useMemo(() => `${plans.length} awaiting review`, [plans.length]);
+  // Only claim a count once one has actually arrived — "0 awaiting review" during the first
+  // fetch reads as a fact, not as "still loading".
+  const awaitingLabel = useMemo(
+    () => (query.data ? `${plans.length} awaiting review` : null),
+    [query.data, plans.length],
+  );
 
   const openList = (
     <View>
@@ -309,7 +316,7 @@ function PlansScreenBody() {
       <BackLink />
       <View style={styles.titleRow}>
         <Text style={[type.title, styles.title, { color: tokens.ink }]}>Plans</Text>
-        <Text style={[type.monoMeta, tabularNums, { color: tokens.ink3 }]}>{awaitingLabel}</Text>
+        {awaitingLabel ? <Text style={[type.monoMeta, tabularNums, { color: tokens.ink3 }]}>{awaitingLabel}</Text> : null}
       </View>
       {content}
     </Screen>
@@ -347,7 +354,7 @@ const styles = StyleSheet.create({
   medallion: { width: 18, height: 18, borderRadius: 9, alignItems: "center", justifyContent: "center", marginTop: 2 },
   medallionPending: { width: 16, height: 16, borderRadius: 8, borderWidth: 2, marginTop: 3, marginLeft: 1 },
   actions: { flexDirection: "row", alignItems: "center", gap: space.space8 },
-  approve: { flex: 1 },
+  action: { flex: 1 },
   reviseRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   reviseInput: { flex: 1 },
 

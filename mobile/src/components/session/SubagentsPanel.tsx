@@ -9,12 +9,13 @@ import React, { useCallback, useState } from "react";
 import { type LayoutChangeEvent, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
-import type { SnapshotSubagent } from "../../lib/ws";
+import type { RemoteInput, SnapshotSubagent } from "../../lib/ws";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { formatCost, tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
+import { Button } from "../ds/Button";
 import { EmptyState } from "../ds/EmptyState";
 import { StatusDot } from "../ds/StatusDot";
 import { AgentRow, rowStateOf } from "./AgentRow";
@@ -24,6 +25,12 @@ const TAIL_RADIUS = 9;
 
 export interface SubagentsPanelProps {
   subagents: SnapshotSubagent[];
+  /** The session socket's sender + the snapshot's `prompt_seq`, forwarded to AgentRow so a child
+   * parked on its own `permission_prompt` (v9, reserved — always null today) can be answered
+   * inline through the same `{kind:"allow"}` path the session-level card uses. Omit for a
+   * read-only rendering. */
+  send?: (input: RemoteInput) => boolean;
+  promptSeq?: number;
 }
 
 function CompactRow({
@@ -32,17 +39,28 @@ function CompactRow({
   expanded,
   onToggle,
   showSeparator,
+  send,
+  promptSeq,
 }: {
   agent: SnapshotSubagent;
   index: number;
   expanded: boolean;
   onToggle: () => void;
   showSeparator: boolean;
+  send?: (input: RemoteInput) => boolean;
+  promptSeq?: number;
 }) {
   const entrance = useForgeline(index);
   return (
     <Animated.View style={entrance}>
-      <AgentRow agent={agent} expanded={expanded} onPress={onToggle} showSeparator={showSeparator} />
+      <AgentRow
+        agent={agent}
+        expanded={expanded}
+        onPress={onToggle}
+        showSeparator={showSeparator}
+        send={send}
+        promptSeq={promptSeq}
+      />
     </Animated.View>
   );
 }
@@ -53,12 +71,16 @@ function Tile({
   width,
   expanded,
   onToggle,
+  send,
+  promptSeq,
 }: {
   agent: SnapshotSubagent;
   index: number;
   width: number | undefined;
   expanded: boolean;
   onToggle: () => void;
+  send?: (input: RemoteInput) => boolean;
+  promptSeq?: number;
 }) {
   const tokens = useTokens();
   const entrance = useForgeline(index);
@@ -66,6 +88,9 @@ function Tile({
   const running = state === "running";
   const failed = state === "failed";
   const done = state === "done";
+  // Same dormant v9 path as AgentRow's — always null today; buttons only when answerable.
+  const prompt = running ? agent.permission_prompt ?? null : null;
+  const answerable = send != null && promptSeq != null;
 
   return (
     <Animated.View style={[{ width: width ?? "100%" }, entrance]}>
@@ -125,13 +150,37 @@ function Tile({
               </Text>
             )
           ) : null}
+          {prompt ? (
+            <View style={styles.tilePermission}>
+              <Text style={[typeScale.monoMeta, { color: tokens.danger }]}>needs permission</Text>
+              <Text style={[typeScale.sub, { color: tokens.ink2 }]} numberOfLines={expanded ? undefined : 2}>
+                {prompt}
+              </Text>
+              {answerable ? (
+                <View style={styles.tileActions}>
+                  <Button
+                    label="Allow"
+                    variant="allow"
+                    onPress={() => send?.({ kind: "allow", yes: true, seq: promptSeq as number })}
+                    style={styles.allowBtn}
+                  />
+                  <Button
+                    label="Deny"
+                    variant="danger"
+                    onPress={() => send?.({ kind: "allow", yes: false, seq: promptSeq as number })}
+                    style={styles.denyBtn}
+                  />
+                </View>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       </Pressable>
     </Animated.View>
   );
 }
 
-function SubagentsPanelBase({ subagents }: SubagentsPanelProps) {
+function SubagentsPanelBase({ subagents, send, promptSeq }: SubagentsPanelProps) {
   const tokens = useTokens();
   const { isCompact, isExpanded } = useBreakpoint();
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -181,6 +230,8 @@ function SubagentsPanelBase({ subagents }: SubagentsPanelProps) {
               expanded={expandedId === agent.id}
               onToggle={() => toggle(agent.id)}
               showSeparator={index < rows.length - 1}
+              send={send}
+              promptSeq={promptSeq}
             />
           ))}
         </View>
@@ -194,6 +245,8 @@ function SubagentsPanelBase({ subagents }: SubagentsPanelProps) {
               width={tileWidth}
               expanded={expandedId === agent.id}
               onToggle={() => toggle(agent.id)}
+              send={send}
+              promptSeq={promptSeq}
             />
           ))}
         </View>
@@ -220,5 +273,9 @@ const styles = StyleSheet.create({
   tileTask: { marginTop: -space.space4 },
   tailBlock: { borderWidth: StyleSheet.hairlineWidth, borderRadius: TAIL_RADIUS, paddingHorizontal: 10, paddingVertical: space.space8 },
   tileTail: {},
+  tilePermission: { gap: space.space4 },
+  tileActions: { flexDirection: "row", gap: space.space8, marginTop: space.space4 },
+  allowBtn: { flex: 1.4 },
+  denyBtn: { flex: 1 },
   failDot: { width: 8, height: 8, borderRadius: 4 },
 });

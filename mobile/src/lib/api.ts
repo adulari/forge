@@ -8,7 +8,7 @@
 // Types mirror the serde struct field names VERBATIM (snake_case) — do not camelCase the
 // wire (UI_RULES.md #4).
 
-import { tFetch } from "./transport";
+import { tFetch, TWebSocket } from "./transport";
 
 export class ApiError extends Error {
   status: number;
@@ -54,7 +54,14 @@ export interface UpdateConfigRequest {
 }
 
 export interface SkillRow { name: string; description: string; scope: "builtin" | "user" | "project"; tier: string | null; resources: number; }
-export interface WorkflowRow { name: string; description: string; when_to_use: string | null; phases: string[]; }
+
+/** A declared workflow parameter (`meta.args`). `arg_type` is the author's free-form type word —
+ * the wire field is not called `type` because that is a Rust keyword. */
+export interface WorkflowArg { name: string; arg_type: string | null; required: boolean; description: string | null; default: string | null; }
+/** Reserved. The daemon ALWAYS returns `runs: []` today — nothing persists workflow runs
+ * (there is no `workflow_run` table in forge-store), and the server refuses to synthesize them. */
+export interface WorkflowRun { started_at: number; finished_at: number | null; ok: boolean | null; summary: string | null; }
+export interface WorkflowRow { name: string; description: string; when_to_use: string | null; phases: string[]; args: WorkflowArg[]; runs: WorkflowRun[]; }
 export interface HookRow { event: string; matcher: string | null; command: string; timeout_secs: number; cc_compat: boolean; }
 export interface ModelsResponse { catalog: "available" | "unavailable"; providers: ModelProvider[]; }
 export interface ModelProvider { provider: string; models: ModelRow[]; }
@@ -65,7 +72,46 @@ export interface PlanRow { session_id: string; session_title: string; title: str
 export interface CreateMcpServerRequest { name: string; transport: "stdio" | "http" | "sse"; command?: string; args?: string[]; url?: string; token_env?: string; }
 
 export interface McpResponse { servers: McpServerRow[]; allowed_servers: string[]; allowed_tools: string[]; call_timeout_secs: number; connect_timeout_secs: number; }
-export interface McpServerRow { name: string; transport: "stdio" | "http" | "sse"; enabled: boolean; auth_configured: boolean; secret_env_count: number; }
+// `editable` is false for a server the daemon resolves from somewhere other than the mcp.toml
+// files it writes (an imported `.mcp.json`) — PATCH would 404, so the row stays read-only.
+// Optional: a pre-v9 daemon omits it, and an absent flag must not disable a working toggle.
+export interface McpServerRow { name: string; transport: "stdio" | "http" | "sse"; enabled: boolean; auth_configured: boolean; secret_env_count: number; editable?: boolean; }
+/** `PATCH /api/mcp` — 404 when the server is configured somewhere the CLI does not write
+ * (an imported `.mcp.json`); the daemon refuses to fork the source of truth. */
+export interface UpdateMcpServerRequest { name: string; enabled: boolean; }
+
+// --- Git review dock (crates/forge-cli/src/serve_git.rs) ---
+
+/** `status` is git's porcelain letter for the bucket the row sits in: `M`/`A`/`D`/`R`/`C`/`T`/`U`
+ * for tracked changes, `?` for untracked. A file edited after staging appears in BOTH buckets. */
+export interface GitFileRow { path: string; status: string; orig_path: string | null; adds: number; dels: number; binary: boolean; }
+export interface GitStatusResponse { root: string; branch: string; base_branch: string | null; staged: GitFileRow[]; unstaged: GitFileRow[]; untracked: GitFileRow[]; truncated: number; }
+/** Same shape as the WS snapshot's `DiffHunk` — the first character of each line is the gutter. */
+export interface GitDiffHunk { header: string; lines: string[]; }
+export interface GitDiffFile { path: string; kind: "created" | "modified" | "deleted" | "renamed"; orig_path: string | null; binary: boolean; adds: number; dels: number; hunks: GitDiffHunk[]; skipped_lines: number; }
+export interface GitDiffResponse { root: string; staged: boolean; files: GitDiffFile[]; }
+export interface GitPathsRequest { session: string; paths: string[]; }
+export interface GitCommitRequest { session: string; message: string; }
+export interface GitCommitResponse { ok: boolean; sha: string; summary: string; }
+/** `GET /api/sessions/{id}/diff` — a fork's worktree against its `merge-base`, uncommitted edits
+ * included. 400 for a session with no worktree. */
+export interface SessionDiffResponse { base: string; branch: string; worktree: string; files: GitDiffFile[]; }
+
+// --- Schedules (crates/forge-cli/src/serve_schedules.rs) ---
+
+/** `cron` is the stored spec verbatim (`every:1800` / `daily:09:00` / `cron:<expr>`);
+ * `spec_label` is the human rendering `forge schedule list` prints. */
+export interface ScheduleRow { id: string; task: string; cwd: string; mode: string | null; model: string | null; cron: string; spec_label: string; enabled: boolean; created_at: number; last_run: number | null; }
+/** Exactly one of `every` / `at` / `cron` must be set. */
+export interface CreateScheduleRequest { task: string; cwd?: string; every?: string; at?: string; cron?: string; mode?: string; model?: string; }
+export interface DeleteScheduleResponse { ok: true; deleted: true; }
+
+// --- What's New (`GET /api/changelog`) ---
+
+/** `section` is the `### Added` / `### Changed` / `### Fixed` heading the bullet sat under. */
+export interface ChangelogEntry { section: string; text: string; }
+/** `date` is null for the `Unreleased` section, which carries none. */
+export interface ChangelogRelease { version: string; date: string | null; entries: ChangelogEntry[]; }
 
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
@@ -110,6 +156,10 @@ export interface PastSessionRow {
   preview: string | null;
 }
 
+/** Mirrors `TranscriptKind` in lib/ws.ts — same vocabulary on both wires, declared here so the
+ * HTTP client keeps no dependency on the socket module. */
+export type TranscriptKind = "user" | "assistant" | "tool" | "system";
+
 export interface HistoryRow {
   seq: number;
   role: "user" | "assistant" | "system";
@@ -117,6 +167,16 @@ export interface HistoryRow {
   model: string | null;
   created_at: number;
   visibility: "llm" | "ui";
+  /** v9 additive: the row's provenance, so a paged-in replay row renders like a live transcript
+   * row. Absent from a pre-v9 daemon — derive from `role` in that case. Never `"tool"` today:
+   * the store's history query selects only user/assistant turns plus `ui` notes, leaving tool
+   * activity out of this stream entirely. */
+  kind?: TranscriptKind;
+  /** v9 additive: milliseconds from the session's FIRST visible row to this one — the zero point
+   * a replay scrubber needs, which raw `created_at` epochs don't give. Second-resolution in fact
+   * (`created_at` is stored in whole seconds). Absent from a pre-v9 daemon, null when the epoch
+   * could not be read. */
+  elapsed_ms?: number | null;
 }
 
 export interface CreateSessionRequest {
@@ -454,6 +514,79 @@ export function createMcpServer(baseUrl: string, body: CreateMcpServerRequest): 
 
 export function getMcp(baseUrl: string): Promise<McpResponse> { return request(baseUrl, "/api/mcp"); }
 
+export function updateMcpServer(baseUrl: string, body: UpdateMcpServerRequest): Promise<McpResponse> {
+  return request(baseUrl, "/api/mcp", { method: "PATCH", body: JSON.stringify(body) });
+}
+
+// ---------------------------------------------------------------------------
+// Git review dock
+// ---------------------------------------------------------------------------
+
+export function getGitStatus(baseUrl: string, session: string): Promise<GitStatusResponse> {
+  return request(baseUrl, `/api/git/status${qs({ session })}`);
+}
+
+/** `staged` picks which side of the index is diffed: `true` = index vs HEAD, `false` = working
+ * tree vs index (with an all-additions render for untracked files). */
+export function getGitDiff(
+  baseUrl: string,
+  params: { session: string; path: string; staged?: boolean },
+): Promise<GitDiffResponse> {
+  return request(
+    baseUrl,
+    `/api/git/diff${qs({ session: params.session, path: params.path, staged: params.staged ? "true" : "false" })}`,
+  );
+}
+
+export function stagePaths(baseUrl: string, body: GitPathsRequest): Promise<OkResponse> {
+  return request(baseUrl, "/api/git/stage", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function unstagePaths(baseUrl: string, body: GitPathsRequest): Promise<OkResponse> {
+  return request(baseUrl, "/api/git/unstage", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Commits ONLY what is already staged — the dock's staging decisions are the whole contract. */
+export function commitStaged(baseUrl: string, body: GitCommitRequest): Promise<GitCommitResponse> {
+  return request(baseUrl, "/api/git/commit", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function getSessionDiff(baseUrl: string, id: string): Promise<SessionDiffResponse> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/diff`);
+}
+
+// ---------------------------------------------------------------------------
+// Schedules
+// ---------------------------------------------------------------------------
+
+export function getSchedules(baseUrl: string): Promise<ScheduleRow[]> {
+  return request(baseUrl, "/api/schedules");
+}
+
+export function createSchedule(baseUrl: string, body: CreateScheduleRequest): Promise<ScheduleRow> {
+  return request(baseUrl, "/api/schedules", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function pauseSchedule(baseUrl: string, id: string): Promise<ScheduleRow> {
+  return request(baseUrl, `/api/schedules/${encodeURIComponent(id)}/pause`, { method: "POST" });
+}
+
+export function resumeSchedule(baseUrl: string, id: string): Promise<ScheduleRow> {
+  return request(baseUrl, `/api/schedules/${encodeURIComponent(id)}/resume`, { method: "POST" });
+}
+
+export function deleteSchedule(baseUrl: string, id: string): Promise<DeleteScheduleResponse> {
+  return request(baseUrl, `/api/schedules/${encodeURIComponent(id)}/delete`, { method: "POST" });
+}
+
+// ---------------------------------------------------------------------------
+// What's New
+// ---------------------------------------------------------------------------
+
+export function getChangelog(baseUrl: string, limit?: number): Promise<ChangelogRelease[]> {
+  return request(baseUrl, `/api/changelog${qs({ limit })}`);
+}
+
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {
   return request(baseUrl, `/api/usage${qs({ session })}`);
 }
@@ -530,4 +663,77 @@ export function unsubscribePush(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Terminal dock (WS /ws/terminal)
+// ---------------------------------------------------------------------------
+
+/** Client → server frames on `/ws/terminal`. Server → client is raw binary pty output. */
+export type TerminalClientFrame =
+  | { kind: "input"; data: string }
+  | { kind: "resize"; cols: number; rows: number };
+
+export interface TerminalSocketHandlers {
+  /** Decoded pty output. UTF-8 is decoded in STREAMING mode, so a multi-byte glyph split across
+   * two frames is reassembled instead of turning into replacement characters. */
+  onOutput: (chunk: string) => void;
+  onOpen?: () => void;
+  onClose?: (event: { code: number; reason: string }) => void;
+  onError?: (error: unknown) => void;
+}
+
+export interface TerminalSocket {
+  send: (data: string) => boolean;
+  resize: (cols: number, rows: number) => boolean;
+  close: () => void;
+}
+
+/** Open a PTY-backed shell in a session's directory. The daemon token already rides in `baseUrl`
+ * as a path segment (there is no extra privilege here — see serve_terminal.rs), so the URL is
+ * built exactly like the session socket's. */
+export function openTerminalSocket(
+  baseUrl: string,
+  sessionId: string,
+  handlers: TerminalSocketHandlers,
+  size?: { cols: number; rows: number },
+): TerminalSocket {
+  const url = new URL(`${baseUrl}/ws/terminal`);
+  url.protocol =
+    url.protocol === "fany:" ? "fany-ws:" : url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("session", sessionId);
+  if (size) {
+    url.searchParams.set("cols", String(size.cols));
+    url.searchParams.set("rows", String(size.rows));
+  }
+
+  const socket = new TWebSocket(url.toString());
+  socket.binaryType = "arraybuffer";
+  const decoder = new TextDecoder();
+
+  socket.onopen = () => handlers.onOpen?.();
+  socket.onerror = (error: unknown) => handlers.onError?.(error);
+  socket.onclose = (event: { code?: number; reason?: string }) =>
+    handlers.onClose?.({ code: event.code ?? 0, reason: event.reason ?? "" });
+  socket.onmessage = (event: MessageEvent) => {
+    const { data } = event;
+    if (typeof data === "string") {
+      // The daemon only sends text for a pre-shell failure message (pty/spawn errors).
+      handlers.onOutput(data);
+      return;
+    }
+    handlers.onOutput(decoder.decode(new Uint8Array(data as ArrayBuffer), { stream: true }));
+  };
+
+  const post = (frame: TerminalClientFrame): boolean => {
+    if (socket.readyState !== TWebSocket.OPEN) return false;
+    socket.send(JSON.stringify(frame));
+    return true;
+  };
+
+  return {
+    send: (data: string) => post({ kind: "input", data }),
+    resize: (cols: number, rows: number) => post({ kind: "resize", cols, rows }),
+    close: () => socket.close(),
+  };
 }

@@ -90,12 +90,14 @@ aes-gcm = "0.11"
 sysinfo = { workspace = true }
 self_update = { version = "1.0.0-rc.6", default-features = false, features = ["archive-tar", "archive-zip", "checksums", "compression-tar-gz", "compression-zip-deflate", "github", "reqwest", "rustls"] }
 tower-http = { version = "0.7", features = ["cors"] }
+# The daemon terminal dock (`WS /ws/terminal`, crates/forge-cli/src/serve_terminal.rs) spawns a
+# real interactive shell on a native PTY (Unix openpty / Windows ConPTY).
+portable-pty = "0.9"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 forge-voice = { workspace = true, features = ["microphone"] }
 
 [dev-dependencies]
-portable-pty = "0.9"
 tower = { version = "0.5", features = ["util"] }
 # In-memory secret_store for tests (resolver=2: does not leak into production builds).
 forge-config = { workspace = true, features = ["test-secrets"] }

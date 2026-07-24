@@ -1,8 +1,18 @@
-// Hearth redesign — see mobile.dc.html's "Mobile Live Activity" (lock screen) and "Mobile
-// Dynamic Island" screens (source of truth for colors/copy/layout) and HANDOFF.md's "Live
-// Activity / Dynamic Island" nav-map bullet + "Design tokens" section. Allow/Deny buttons live
-// in ForgeActivityIntents.swift (iOS 17+ `LiveActivityIntent`); pre-17 devices fall back to just
-// the "Open" `Link`, since interactive Live Activity buttons don't exist before iOS 17.
+// Machined redesign — docs/design/machined/"Forge Machined - Mobile.dc.html" L610-627 ("M Native
+// Surfaces") is the source of truth for colors/copy/layout; INVENTORY.md §05 "Native iOS" is the
+// frame map. This supersedes the retired Emberline/Hearth styling: the thermal heat edge, the
+// ember glows and the gradient progress fill are gone — flat fills, hairline borders, one ember
+// accent. Palette + typeface rationale live in ForgeMachinedStyle.swift.
+//
+// Three presentations, each straight off the design frame:
+//   · lock screen  — permission card (spark + title + NEEDS YOU/timer, question, Allow/Deny/Open
+//                    outlined at 7pt) when waiting; a one-glance forging card otherwise.
+//   · island compact — spark leading + mono pace text trailing (`2/4 · 64%`).
+//   · island expanded — spark, elapsed timer, then the permission mini-card with pill Allow/Deny.
+//
+// Allow/Deny are backed by ForgeActivityIntents.swift (iOS 17+ `LiveActivityIntent`); pre-17
+// devices fall back to just an "Open" `Link`, since interactive Live Activity buttons don't exist
+// before iOS 17. That interaction contract is unchanged by this restyle.
 import ActivityKit
 import AppIntents
 import SwiftUI
@@ -14,68 +24,46 @@ struct ForgeSessionActivityWidget: Widget {
         ActivityConfiguration(for: ForgeSessionActivityAttributes.self) { context in
             ForgeSessionActivityLockScreenView(attributes: context.attributes, state: context.state)
                 .widgetURL(URL(string: "forge://session/\(context.attributes.sessionId)"))
-                .activityBackgroundTint(ForgeActivityStyle.background)
-                .activitySystemActionForegroundColor(.white)
+                // The system container is the card — tinting it (rather than drawing a second
+                // rounded rect inside it) is what keeps this a single Machined surface instead of
+                // a card-inside-a-card with mismatched corner radii.
+                .activityBackgroundTint(ForgeMachined.panel)
+                .activitySystemActionForegroundColor(ForgeMachined.accent)
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Image(systemName: "flame.fill")
-                        .foregroundStyle(ForgeActivityStyle.accent)
+                    ForgeSparkMark(size: 12)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    ForgeActivityBeacon(state: context.state)
+                    ForgeElapsedLabel(state: context.state)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     ForgeSessionActivityExpandedBody(attributes: context.attributes, state: context.state)
                 }
             } compactLeading: {
-                Image(systemName: "flame.fill")
-                    .foregroundStyle(ForgeActivityStyle.accent)
+                ForgeSparkMark(size: 11)
             } compactTrailing: {
-                ForgeActivityBeacon(state: context.state, size: 7)
+                ForgePaceLabel(state: context.state)
             } minimal: {
-                ForgeActivityBeacon(state: context.state, size: 9)
+                ForgeStatusDot(color: ForgeActivityState.tint(for: context.state), size: 7)
             }
             .widgetURL(URL(string: "forge://session/\(context.attributes.sessionId)"))
-            .keylineTint(ForgeActivityStyle.color(for: context.state))
+            .keylineTint(ForgeActivityState.tint(for: context.state))
         }
     }
 }
 
-// MARK: - Hearth tokens (mirrors mobile/src/theme/tokens.ts's dark palette — see HANDOFF.md's
-// "Design tokens" section; there is no way to share the TS token file with this target, so these
-// are kept as the literal hex values from there).
+// MARK: - Derived state
 
-private enum ForgeActivityStyle {
-    static let background = Color(hex: 0x0E0E14)
-    static let cardBg = Color(hex: 0x16161D, opacity: 0.92)
-    static let cardBorder = Color(hex: 0x34343E, opacity: 0.8)
-    static let trackBg = Color(hex: 0x26262E, opacity: 0.9)
-    static let ink = Color(hex: 0xE9E9EF)
-    static let ink2 = Color(hex: 0xA9A9B6)
-    static let ink3 = Color(hex: 0x6E6E7A)
-    static let accent = Color(hex: 0xFF913C)
-    static let accentPressed = Color(hex: 0xF5761A)
-    static let onAccent = Color(hex: 0x1B1B22)
-    static let success = Color(hex: 0x7DD394)
-    static let successBg = Color(hex: 0x12291A)
-    static let danger = Color(hex: 0xF0716E)
-    static let dangerDeep = Color(hex: 0xC24845)
-    static let dangerBg = Color(hex: 0x2E1516)
-
-    static func color(for state: ForgeSessionActivityAttributes.ContentState) -> Color {
-        if state.waiting { return danger }
-        if state.busy { return accent }
-        return success
+private enum ForgeActivityState {
+    static func tint(for state: ForgeSessionActivityAttributes.ContentState) -> Color {
+        if state.waiting { return ForgeMachined.danger }
+        if state.busy { return ForgeMachined.accent }
+        return ForgeMachined.success
     }
 
-    static func edgeGradient(for state: ForgeSessionActivityAttributes.ContentState) -> LinearGradient {
-        let stops = state.waiting ? [danger, dangerDeep] : [accent, accentPressed]
-        return LinearGradient(colors: stops, startPoint: .top, endPoint: .bottom)
-    }
-
-    static func glow(for state: ForgeSessionActivityAttributes.ContentState) -> Color {
-        (state.waiting ? danger : accent).opacity(state.waiting ? 0.35 : 0.3)
+    static func title(_ attributes: ForgeSessionActivityAttributes) -> String {
+        attributes.title.isEmpty ? "Forge session" : attributes.title
     }
 
     static func ctxPercent(for state: ForgeSessionActivityAttributes.ContentState) -> Int {
@@ -83,101 +71,117 @@ private enum ForgeActivityStyle {
         return Int((Double(state.contextTokens) / Double(state.contextLimit) * 100).rounded())
     }
 
-    static func taskProgress(for state: ForgeSessionActivityAttributes.ContentState) -> Double? {
-        guard let done = state.tasksDone, let total = state.tasksTotal, total > 0 else { return nil }
-        return min(max(Double(done) / Double(total), 0), 1)
-    }
-
     static func costLabel(for state: ForgeSessionActivityAttributes.ContentState) -> String {
         String(format: "$%.2f", state.costUsd)
     }
-}
 
-private extension Color {
-    init(hex: UInt32, opacity: Double = 1) {
-        self.init(
-            .sRGB,
-            red: Double((hex >> 16) & 0xFF) / 255,
-            green: Double((hex >> 8) & 0xFF) / 255,
-            blue: Double(hex & 0xFF) / 255,
-            opacity: opacity
-        )
+    /// Compact Dynamic Island pace text — the design's `2/4 · 64%`, degrading to just the context
+    /// percentage when the session has no task list.
+    static func paceLabel(for state: ForgeSessionActivityAttributes.ContentState) -> String {
+        let ctx = "\(ctxPercent(for: state))%"
+        guard let done = state.tasksDone, let total = state.tasksTotal, total > 0 else { return ctx }
+        return "\(done)/\(total) · \(ctx)"
     }
 }
 
 // MARK: - Shared subviews
 
-/// Forgework "emberdot pulse" (opacity 1→.35→1, busy/waiting) plus the "waiting beacon" ring
-/// (scale 1→1.6 + fade, waiting only) — see HANDOFF.md's Motion section.
-private struct ForgeActivityBeacon: View {
+/// Dynamic Island compact trailing: the design's mono pace text, tinted by state so a waiting
+/// session still reads as urgent at a glance in the smallest presentation.
+private struct ForgePaceLabel: View {
     let state: ForgeSessionActivityAttributes.ContentState
-    var size: CGFloat = 8
-    @State private var dotPulse = false
-    @State private var ringPulse = false
 
     var body: some View {
-        ZStack {
-            if state.waiting {
-                Circle()
-                    .stroke(ForgeActivityStyle.danger, lineWidth: 1.5)
-                    .frame(width: size, height: size)
-                    .scaleEffect(ringPulse ? 1.6 : 1)
-                    .opacity(ringPulse ? 0 : 1)
-                    .onAppear {
-                        withAnimation(.easeOut(duration: 2.8).repeatForever(autoreverses: false)) {
-                            ringPulse = true
-                        }
-                    }
-            }
-            Circle()
-                .fill(ForgeActivityStyle.color(for: state))
-                .frame(width: size, height: size)
-                .opacity(dotPulse ? 0.35 : 1)
-        }
-        .onAppear {
-            guard state.busy || state.waiting else { return }
-            withAnimation(.easeInOut(duration: state.waiting ? 0.7 : 1.0).repeatForever(autoreverses: true)) {
-                dotPulse = true
-            }
-        }
+        Text(ForgeActivityState.paceLabel(for: state))
+            .font(ForgeMachined.mono(10))
+            .foregroundStyle(ForgeActivityState.tint(for: state))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
     }
 }
 
-private struct ForgeActivityPillButton: View {
-    let label: String
-    let background: Color
-    let foreground: Color
-    var width: CGFloat?
+/// Dynamic Island expanded trailing: elapsed time in the current state (the design's `12s`).
+private struct ForgeElapsedLabel: View {
+    let state: ForgeSessionActivityAttributes.ContentState
 
     var body: some View {
-        Text(label)
-            .font(.system(size: 14, weight: .semibold))
-            .frame(maxWidth: width == nil ? .infinity : nil)
-            .frame(width: width, height: 40)
-            .background(background)
-            .foregroundStyle(foreground)
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        Group {
+            if let since = state.stateSinceEpoch {
+                Text(Date(timeIntervalSince1970: since), style: .timer)
+            } else {
+                Text(state.waiting ? "waiting" : "forging")
+            }
+        }
+        .font(ForgeMachined.mono(10.5))
+        .foregroundStyle(state.waiting ? ForgeMachined.danger : ForgeMachined.ink3)
+        .lineLimit(1)
+        .multilineTextAlignment(.trailing)
     }
 }
 
-/// The mono meta line on the forging card / island expanded body: `2/4 tasks · 64% ctx · $1.84`.
+/// The mono meta line: `forging 4m · 2/4 tasks · 64% ctx`.
 private struct ForgeMetaLine: View {
     let state: ForgeSessionActivityAttributes.ContentState
 
     var body: some View {
-        HStack(spacing: 4) {
-            if let done = state.tasksDone, let total = state.tasksTotal {
+        HStack(spacing: 5) {
+            if let since = state.stateSinceEpoch {
+                (Text("forging ") + Text(Date(timeIntervalSince1970: since), style: .timer))
+                Text("·")
+            }
+            if let done = state.tasksDone, let total = state.tasksTotal, total > 0 {
                 Text("\(done)/\(total) tasks")
                 Text("·")
             }
-            Text("\(ForgeActivityStyle.ctxPercent(for: state))% ctx")
-            Text("·")
-            Text(ForgeActivityStyle.costLabel(for: state))
-                .foregroundStyle(ForgeActivityStyle.success)
+            Text("\(ForgeActivityState.ctxPercent(for: state))% ctx")
+            Spacer(minLength: 0)
         }
-        .font(.system(size: 11, design: .monospaced))
-        .foregroundStyle(ForgeActivityStyle.ink3)
-        .fixedSize(horizontal: true, vertical: false)
+        .font(ForgeMachined.mono(10.5))
+        .foregroundStyle(ForgeMachined.ink3)
+        .lineLimit(1)
+    }
+}
+
+/// Lock-screen action: an outlined 7pt-radius button. Machined does not fill action surfaces —
+/// emphasis is carried by border strength and ink, not by a colored block.
+private struct ForgeOutlineButton: View {
+    enum Emphasis { case primary, quiet }
+
+    let label: String
+    let emphasis: Emphasis
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 12.5, weight: emphasis == .primary ? .semibold : .regular))
+            .foregroundStyle(emphasis == .primary ? ForgeMachined.ink : ForgeMachined.ink2)
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
+            .contentShape(Rectangle())
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(
+                        emphasis == .primary ? ForgeMachined.borderStrong : ForgeMachined.borderSoft,
+                        lineWidth: 1
+                    )
+            )
+    }
+}
+
+/// Dynamic Island expanded action: the design uses tinted pills here rather than the lock
+/// screen's outlines, because the island has no card edge of its own to sit against.
+private struct ForgePillButton: View {
+    let label: String
+    let tint: Color
+    let fill: Color
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(tint)
+            .frame(maxWidth: .infinity)
+            .frame(height: 30)
+            .background(fill, in: Capsule())
+            .contentShape(Capsule())
     }
 }
 
@@ -190,7 +194,7 @@ private struct ForgeSessionActivityLockScreenView: View {
     var body: some View {
         Group {
             if state.waiting {
-                ForgeNeedsYouCard(attributes: attributes, state: state)
+                ForgePermissionCard(attributes: attributes, state: state)
             } else if state.busy {
                 ForgeForgingCard(attributes: attributes, state: state)
             } else {
@@ -198,178 +202,122 @@ private struct ForgeSessionActivityLockScreenView: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.vertical, 12)
     }
 }
 
-private struct ForgeNeedsYouCard: View {
+private struct ForgePermissionCard: View {
     let attributes: ForgeSessionActivityAttributes
     let state: ForgeSessionActivityAttributes.ContentState
 
     var body: some View {
-        HStack(spacing: 0) {
-            ForgeActivityStyle.edgeGradient(for: state)
-                .frame(width: 3)
-                .shadow(color: ForgeActivityStyle.glow(for: state), radius: 8, x: 2)
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 9) {
-                    Image(systemName: "flame.fill")
-                        .font(.system(size: 15))
-                        .foregroundStyle(ForgeActivityStyle.accent)
-                    Text(attributes.title.isEmpty ? "Forge session" : attributes.title)
-                        .font(.system(size: 15.5, weight: .semibold))
-                        .foregroundStyle(ForgeActivityStyle.ink)
-                        .lineLimit(1)
-                    Spacer(minLength: 6)
-                    Text("NEEDS YOU")
-                        .font(.system(size: 10, weight: .bold))
-                        .tracking(0.5)
-                        .foregroundStyle(ForgeActivityStyle.danger)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(ForgeActivityStyle.dangerBg)
-                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                }
-
-                if let question = state.question, !question.isEmpty {
-                    Text(question)
-                        .font(.system(size: 14))
-                        .foregroundStyle(ForgeActivityStyle.ink)
-                        .lineLimit(3)
-                }
-
-                HStack(spacing: 6) {
-                    if !attributes.agentLabel.isEmpty {
-                        Text(attributes.agentLabel)
-                        Text("·")
-                    }
-                    if let since = state.stateSinceEpoch {
-                        Text("waiting") + Text(" ") + Text(Date(timeIntervalSince1970: since), style: .timer)
-                    }
-                }
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(ForgeActivityStyle.ink3)
-
-                HStack(spacing: 8) {
-                    if #available(iOS 17.0, *), let seq = state.promptSeq {
-                        Button(intent: ForgeAllowIntent(sessionId: attributes.sessionId, baseUrl: attributes.baseUrl, seq: seq)) {
-                            ForgeActivityPillButton(label: "Allow", background: ForgeActivityStyle.success, foreground: ForgeActivityStyle.successBg)
-                        }
-                        .buttonStyle(.plain)
-
-                        Button(intent: ForgeDenyIntent(sessionId: attributes.sessionId, baseUrl: attributes.baseUrl, seq: seq)) {
-                            ForgeActivityPillButton(label: "Deny", background: ForgeActivityStyle.dangerBg, foreground: ForgeActivityStyle.danger)
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    if let url = URL(string: "forge://session/\(attributes.sessionId)") {
-                        Link(destination: url) {
-                            ForgeActivityPillButton(label: "Open", background: ForgeActivityStyle.accent, foreground: ForgeActivityStyle.onAccent, width: 92)
-                        }
-                    }
-                }
-                .padding(.top, 4)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                ForgeSparkMark(size: 12)
+                Text(ForgeActivityState.title(attributes))
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(ForgeMachined.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                needsYouLabel
             }
-            .padding(.leading, 16)
-            .padding(.trailing, 16)
-            .padding(.vertical, 16)
+
+            if let question = state.question, !question.isEmpty {
+                Text(question)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(ForgeMachined.inkBody)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 9) {
+                if #available(iOS 17.0, *), let seq = state.promptSeq {
+                    Button(intent: ForgeAllowIntent(sessionId: attributes.sessionId, baseUrl: attributes.baseUrl, seq: seq)) {
+                        ForgeOutlineButton(label: "Allow", emphasis: .primary)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(intent: ForgeDenyIntent(sessionId: attributes.sessionId, baseUrl: attributes.baseUrl, seq: seq)) {
+                        ForgeOutlineButton(label: "Deny", emphasis: .quiet)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                // Always present — and the only action on pre-iOS-17 devices, where it stretches
+                // to the full width because the two intent buttons above don't exist.
+                if let url = URL(string: "forge://session/\(attributes.sessionId)") {
+                    Link(destination: url) {
+                        ForgeOutlineButton(label: "Open", emphasis: .quiet)
+                    }
+                }
+            }
         }
-        .background(ForgeActivityStyle.cardBg)
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(ForgeActivityStyle.cardBorder, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+
+    private var needsYouLabel: some View {
+        Group {
+            if let since = state.stateSinceEpoch {
+                Text("NEEDS YOU · ") + Text(Date(timeIntervalSince1970: since), style: .timer)
+            } else {
+                Text("NEEDS YOU")
+            }
+        }
+        .font(ForgeMachined.mono(10.5, weight: .medium))
+        .foregroundStyle(ForgeMachined.danger)
+        .lineLimit(1)
     }
 }
 
+/// The design's second lock-screen card: one glance line plus the mono meta line. No progress
+/// bar — Machined carries pace in the numbers, not in a gradient track.
 private struct ForgeForgingCard: View {
     let attributes: ForgeSessionActivityAttributes
     let state: ForgeSessionActivityAttributes.ContentState
 
     var body: some View {
-        HStack(spacing: 0) {
-            ForgeActivityStyle.edgeGradient(for: state)
-                .frame(width: 3)
-                .shadow(color: ForgeActivityStyle.glow(for: state), radius: 8, x: 2)
-
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 9) {
-                    ForgeActivityBeacon(state: state, size: 8)
-                    Text(attributes.title.isEmpty ? "Forge session" : attributes.title)
-                        .font(.system(size: 15.5, weight: .semibold))
-                        .foregroundStyle(ForgeActivityStyle.ink)
-                        .lineLimit(1)
-                    Spacer(minLength: 6)
-                    if let since = state.stateSinceEpoch {
-                        (Text("forging") + Text(" ") + Text(Date(timeIntervalSince1970: since), style: .timer))
-                            .font(.system(size: 11.5, design: .monospaced))
-                            .foregroundStyle(ForgeActivityStyle.ink3)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(ForgeActivityStyle.trackBg)
-                            Capsule()
-                                .fill(LinearGradient(colors: [ForgeActivityStyle.accentPressed, ForgeActivityStyle.accent], startPoint: .leading, endPoint: .trailing))
-                                .frame(width: geo.size.width * (ForgeActivityStyle.taskProgress(for: state) ?? 0))
-                        }
-                    }
-                    .frame(height: 3)
-                    ForgeMetaLine(state: state)
-                }
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 9) {
+                ForgeStatusDot(color: ForgeMachined.accent, size: 5)
+                Text(ForgeActivityState.title(attributes))
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(ForgeMachined.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                Text(ForgeActivityState.costLabel(for: state))
+                    .font(ForgeMachined.mono(10.5))
+                    .foregroundStyle(ForgeMachined.ink3)
+                    .lineLimit(1)
             }
-            .padding(.leading, 16)
-            .padding(.trailing, 16)
-            .padding(.vertical, 14)
+            ForgeMetaLine(state: state)
         }
-        .background(ForgeActivityStyle.cardBg)
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(ForgeActivityStyle.cardBorder, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }
 
-/// Not part of the Hearth spec screens (which only show waiting/forging) — kept for the
-/// busy=false/waiting=false tail end of a session's life, styled with the same "idle rows have
-/// no heat edge" rule the rest of Hearth uses (HANDOFF.md core rule 3).
+/// Not a design frame (the spec only draws waiting/forging) — this covers the
+/// busy=false/waiting=false tail end of a session's life, in the same flat Machined language.
 private struct ForgeIdleCard: View {
     let attributes: ForgeSessionActivityAttributes
     let state: ForgeSessionActivityAttributes.ContentState
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(ForgeActivityStyle.success)
+        HStack(spacing: 9) {
+            ForgeStatusDot(color: ForgeMachined.success, size: 5)
             VStack(alignment: .leading, spacing: 2) {
-                Text(attributes.title.isEmpty ? "Forge session" : attributes.title)
-                    .font(.system(size: 15.5, weight: .semibold))
-                    .foregroundStyle(ForgeActivityStyle.ink)
+                Text(ForgeActivityState.title(attributes))
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(ForgeMachined.ink)
                     .lineLimit(1)
                 Text("Session complete")
-                    .font(.system(size: 12))
-                    .foregroundStyle(ForgeActivityStyle.ink3)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(ForgeMachined.ink2)
+                    .lineLimit(1)
             }
             Spacer(minLength: 8)
-            Text(ForgeActivityStyle.costLabel(for: state))
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(ForgeActivityStyle.ink3)
-                .fixedSize(horizontal: true, vertical: false)
+            Text(ForgeActivityState.costLabel(for: state))
+                .font(ForgeMachined.mono(10.5))
+                .foregroundStyle(ForgeMachined.ink3)
+                .lineLimit(1)
         }
-        .padding(16)
-        .background(ForgeActivityStyle.cardBg)
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(ForgeActivityStyle.cardBorder, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }
 
@@ -380,30 +328,50 @@ private struct ForgeSessionActivityExpandedBody: View {
     let state: ForgeSessionActivityAttributes.ContentState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(attributes.title.isEmpty ? "Forge session" : attributes.title)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(ForgeActivityStyle.ink)
+        VStack(alignment: .leading, spacing: 9) {
+            Text(ForgeActivityState.title(attributes))
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(ForgeMachined.ink)
                 .lineLimit(1)
 
             if state.waiting {
                 if let question = state.question, !question.isEmpty {
                     Text(question)
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(ForgeActivityStyle.ink2)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(ForgeMachined.ink2)
                         .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+
                 if #available(iOS 17.0, *), let seq = state.promptSeq {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 9) {
                         Button(intent: ForgeAllowIntent(sessionId: attributes.sessionId, baseUrl: attributes.baseUrl, seq: seq)) {
-                            ForgeActivityPillButton(label: "Allow", background: ForgeActivityStyle.success, foreground: ForgeActivityStyle.successBg)
+                            ForgePillButton(
+                                label: "Allow",
+                                tint: ForgeMachined.success,
+                                fill: ForgeMachined.success.opacity(0.18)
+                            )
                         }
                         .buttonStyle(.plain)
 
                         Button(intent: ForgeDenyIntent(sessionId: attributes.sessionId, baseUrl: attributes.baseUrl, seq: seq)) {
-                            ForgeActivityPillButton(label: "Deny", background: ForgeActivityStyle.dangerBg, foreground: ForgeActivityStyle.danger)
+                            ForgePillButton(
+                                label: "Deny",
+                                tint: ForgeMachined.danger,
+                                fill: ForgeMachined.danger.opacity(0.15)
+                            )
                         }
                         .buttonStyle(.plain)
+                    }
+                } else if let url = URL(string: "forge://session/\(attributes.sessionId)") {
+                    // Pre-iOS 17, or a waiting state that arrived without a prompt sequence to
+                    // answer: the decision can only be made in the app.
+                    Link(destination: url) {
+                        ForgePillButton(
+                            label: "Open in Forge",
+                            tint: ForgeMachined.accent,
+                            fill: ForgeMachined.accent.opacity(0.16)
+                        )
                     }
                 }
             } else if state.busy {
@@ -411,5 +379,6 @@ private struct ForgeSessionActivityExpandedBody: View {
             }
         }
         .padding(.horizontal, 4)
+        .padding(.bottom, 2)
     }
 }

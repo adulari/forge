@@ -25,7 +25,18 @@
 //! - `POST /api/sessions/{id}/merge`   stop, snapshot the worktree, and merge its branch back
 //!   into the base repo (3-way patch; conflicts are reported, never auto-resolved)
 //! - `POST /api/sessions/{id}/discard` stop and drop the worktree + branch WITHOUT merging
+//! - `GET  /api/sessions/{id}/diff`    a forked session's worktree vs its fork point (read-only —
+//!   the same merge-base machinery `merge` uses, but nothing is committed); see [`crate::serve_git`]
 //! - `GET  /api/history?session=<id>&before=<seq>&limit=<n>`  scrollback pagination
+//! - `GET  /api/changelog?limit=<n>`  parsed "What's New" releases from the compiled-in CHANGELOG
+//! - `GET|POST /api/git/*`            the git review dock ([`crate::serve_git`]): status, per-file
+//!   diff, stage/unstage, commit — always inside the addressed session's own repository
+//! - `GET|POST /api/schedules[/{id}/pause|resume|delete]`  the real `forge schedule` registry
+//!   ([`crate::serve_schedules`]) — store rows plus the same OS timers the CLI installs
+//! - `WS   /ws/terminal?session=<id>` a PTY-backed shell in the session's directory
+//!   ([`crate::serve_terminal`]); no privilege beyond the daemon token that already grants it
+//! - `PATCH /api/mcp`                 enable/disable a configured MCP server in the same
+//!   `mcp.toml` the CLI writes
 //! - `GET  /api/push/key`             the VAPID public key (`applicationServerKey`)
 //! - `POST /api/push/subscribe`       store a Web Push subscription (dedupe by endpoint)
 //! - `POST /api/push/unsubscribe`     remove one
@@ -292,15 +303,15 @@ fn attention_became_required(was_waiting: bool, is_waiting: bool) -> bool {
 }
 
 /// Shared HTTP state for the daemon router.
-struct DaemonState {
-    registry: Arc<SessionRegistry>,
-    store: Arc<forge_store::Store>,
+pub(crate) struct DaemonState {
+    pub(crate) registry: Arc<SessionRegistry>,
+    pub(crate) store: Arc<forge_store::Store>,
     /// `/ <token>` — injected into the page/manifest like the single-session server does.
     base: String,
     /// Sessions created from the page inherit this (testing: `forge serve --mock`).
     mock: bool,
     /// The daemon process's cwd — the default for new sessions.
-    default_cwd: String,
+    pub(crate) default_cwd: String,
     /// Canonical directories the remote project browser may enumerate. The create-session API
     /// still accepts any explicit directory because possession of the daemon token already grants
     /// full agent control; this list limits passive filesystem disclosure through browsing.
@@ -707,7 +718,58 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             &format!("{base}/api/sessions/{{id}}/discard"),
             post(discard_session),
         )
+        .route(
+            &format!("{base}/api/sessions/{{id}}/diff"),
+            get(crate::serve_git::session_diff),
+        )
         .route(&format!("{base}/api/history"), get(history_page))
+        .route(&format!("{base}/api/changelog"), get(changelog_page))
+        // Git review dock (serve_git.rs) — every route is session-addressed and runs git only in
+        // that session's own repository.
+        .route(
+            &format!("{base}/api/git/status"),
+            get(crate::serve_git::git_status),
+        )
+        .route(
+            &format!("{base}/api/git/diff"),
+            get(crate::serve_git::git_diff),
+        )
+        .route(
+            &format!("{base}/api/git/stage"),
+            post(crate::serve_git::git_stage),
+        )
+        .route(
+            &format!("{base}/api/git/unstage"),
+            post(crate::serve_git::git_unstage),
+        )
+        .route(
+            &format!("{base}/api/git/commit"),
+            post(crate::serve_git::git_commit),
+        )
+        // Schedule registry (serve_schedules.rs) — the same rows + OS timers `forge schedule` owns.
+        .route(
+            &format!("{base}/api/schedules"),
+            get(crate::serve_schedules::list_schedules)
+                .post(crate::serve_schedules::create_schedule),
+        )
+        .route(
+            &format!("{base}/api/schedules/{{id}}/pause"),
+            post(crate::serve_schedules::pause_schedule),
+        )
+        .route(
+            &format!("{base}/api/schedules/{{id}}/resume"),
+            post(crate::serve_schedules::resume_schedule),
+        )
+        .route(
+            &format!("{base}/api/schedules/{{id}}/delete"),
+            post(crate::serve_schedules::delete_schedule),
+        )
+        // Terminal dock (serve_terminal.rs): a real PTY in the session's directory, gated by the
+        // same daemon token as every other route and granted no additional privilege.
+        .route(
+            &format!("{base}/ws/terminal"),
+            get(crate::serve_terminal::terminal_ws),
+        )
         .route(&format!("{base}/api/usage"), get(usage_page))
         .route(&format!("{base}/api/hooks"), get(hooks_page))
         .route(&format!("{base}/api/skills"), get(skills_page))
@@ -716,7 +778,9 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/plans"), get(plans_page))
         .route(
             &format!("{base}/api/mcp"),
-            get(mcp_page).post(create_mcp_server),
+            get(mcp_page)
+                .post(create_mcp_server)
+                .patch(update_mcp_server),
         )
         .route(
             &format!("{base}/api/config"),
@@ -1485,7 +1549,7 @@ async fn past_sessions(
 /// `forge/subagent/<child_id>` (see [`forge_core::worktree::WorktreeGuard::create`]), so both are
 /// recoverable from the path alone — no extra state, and it matches exactly what the guard's own
 /// removal uses. Returns `None` if the path is too shallow to be one of ours.
-fn worktree_repo_and_branch(worktree: &str) -> Option<(std::path::PathBuf, String)> {
+pub(crate) fn worktree_repo_and_branch(worktree: &str) -> Option<(std::path::PathBuf, String)> {
     let wt = std::path::Path::new(worktree);
     let child_id = wt.file_name()?.to_str()?.to_string();
     // `<repo_root>/.forge/worktrees/<child_id>` → strip three components back to `<repo_root>`.
@@ -1549,7 +1613,7 @@ enum MergeOutcome {
 }
 
 /// Run `git -C <root> <args>`, returning trimmed stdout on success.
-fn git_stdout(root: &std::path::Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git_stdout(root: &std::path::Path, args: &[&str]) -> Result<String, String> {
     let mut full = vec!["-C", root.to_str().unwrap_or(".")];
     full.extend_from_slice(args);
     let out = std::process::Command::new("git")
@@ -2574,6 +2638,102 @@ struct WorkflowRow {
     description: String,
     when_to_use: Option<String>,
     phases: Vec<String>,
+    /// Typed parameters the script reads off its injected `args` global, declared in `meta.args`.
+    /// Empty for every workflow that doesn't declare them (most don't) — never inferred.
+    args: Vec<WorkflowArg>,
+    /// Recorded past runs. ALWAYS empty today: nothing persists workflow runs — there is no
+    /// `workflow_run` table in forge-store and `run_saved_workflow` writes only the session
+    /// transcript. The field exists so a history backend can fill it without a wire break; it is
+    /// never populated with reconstructed or guessed rows.
+    runs: Vec<WorkflowRun>,
+}
+
+/// One declared workflow parameter. `arg_type` (not `type`, a Rust keyword) carries the author's
+/// free-form type word — `string`, `number`, `boolean`, `path`, … — verbatim.
+#[derive(serde::Serialize)]
+struct WorkflowArg {
+    name: String,
+    arg_type: Option<String>,
+    required: bool,
+    description: Option<String>,
+    default: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct WorkflowRun {
+    started_at: i64,
+    finished_at: Option<i64>,
+    ok: Option<bool>,
+    summary: Option<String>,
+}
+
+/// Split a `meta` literal's `args: [ {...}, {...} ]` array into its top-level object literals.
+/// Brace-balanced and quote-aware for the same reason [`meta_literal`] is: a `{`/`}` inside a
+/// description string must not end an object.
+fn meta_arg_objects(meta: &str) -> Vec<&str> {
+    let Some(idx) = meta.find("args:") else {
+        return Vec::new();
+    };
+    let tail = &meta[idx + "args:".len()..];
+    let Some(open_bracket) = tail.find('[') else {
+        return Vec::new();
+    };
+    let body = &tail[open_bracket + 1..];
+    let mut objects = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut in_str: Option<char> = None;
+    let mut prev_backslash = false;
+    for (i, c) in body.char_indices() {
+        if let Some(quote) = in_str {
+            if prev_backslash {
+                prev_backslash = false;
+            } else if c == '\\' {
+                prev_backslash = true;
+            } else if c == quote {
+                in_str = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => in_str = Some(c),
+            '{' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    objects.push(&body[start..=i]);
+                }
+            }
+            ']' if depth == 0 => break,
+            _ => {}
+        }
+    }
+    objects
+}
+
+/// Parse `meta.args` into typed rows. An entry with no `name` is skipped rather than given a
+/// placeholder — a nameless argument tells the UI nothing true.
+fn meta_args(meta: &str) -> Vec<WorkflowArg> {
+    meta_arg_objects(meta)
+        .into_iter()
+        .filter_map(|object| {
+            let name = meta_string_field(object, "name")?;
+            Some(WorkflowArg {
+                name,
+                arg_type: meta_string_field(object, "type"),
+                required: object.contains("required: true")
+                    || object.contains("required:true")
+                    || object.contains("required: !0"),
+                description: meta_string_field(object, "description"),
+                default: meta_string_field(object, "default"),
+            })
+        })
+        .collect()
 }
 
 /// Pull a string field (`description: '…'` / `"…"`) out of a workflow script's `meta` literal.
@@ -2694,6 +2854,8 @@ async fn workflows_page(
                 description: meta_string_field(meta, "description").unwrap_or_default(),
                 when_to_use: meta_string_field(meta, "whenToUse"),
                 phases: meta_phase_titles(meta),
+                args: meta_args(meta),
+                runs: Vec::new(),
             });
         }
         rows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2956,6 +3118,11 @@ struct McpServerRow {
     enabled: bool,
     auth_configured: bool,
     secret_env_count: usize,
+    /// Whether `PATCH /api/mcp` can toggle this server — true only when it is declared in one of
+    /// the `mcp.toml` files the CLI writes. A server resolved from somewhere else (an imported
+    /// `.mcp.json`) is read-only, and the client needs to know that BEFORE offering a control,
+    /// rather than discovering it from a 404 after the user flips a switch.
+    editable: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -3034,6 +3201,63 @@ async fn create_mcp_server(Json(request): Json<CreateMcpServerRequest>) -> Respo
     }
 }
 
+/// Body of `PATCH /api/mcp` — currently only the enable/disable toggle the app's MCP screen needs.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateMcpServerRequest {
+    name: String,
+    enabled: bool,
+}
+
+/// The two `mcp.toml` files the CLI writes, project scope first — the same order and paths
+/// `forge mcp add/remove --scope` uses (`crates/forge-cli/src/cli/commands/mcp.rs`).
+fn mcp_toml_scopes() -> Vec<std::path::PathBuf> {
+    let mut paths = vec![std::path::PathBuf::from(".forge/mcp.toml")];
+    if let Some(dir) = forge_config::config_dir() {
+        paths.push(dir.join("mcp.toml"));
+    }
+    paths
+}
+
+/// `PATCH /api/mcp` — flip a configured server's `enabled` flag, persisting through the same
+/// `mcp.toml` the CLI writes so `forge mcp list` and the daemon never disagree.
+///
+/// A server that resolves from somewhere else entirely (an imported `.mcp.json`, say) is NOT
+/// silently materialised into a new `mcp.toml` entry — that would fork the source of truth, so it
+/// is a 404 naming where the toggle would have to be made instead.
+async fn update_mcp_server(Json(request): Json<UpdateMcpServerRequest>) -> Response {
+    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        for path in mcp_toml_scopes() {
+            let mut config = forge_config::load_mcp_toml(&path);
+            let Some(server) = config
+                .servers
+                .iter_mut()
+                .find(|server| server.name == request.name)
+            else {
+                continue;
+            };
+            if server.enabled == request.enabled {
+                return Ok(());
+            }
+            server.enabled = request.enabled;
+            return forge_config::write_mcp_toml(&path, &config).map_err(|e| e.to_string());
+        }
+        Err(format!(
+            "no server '{}' in .forge/mcp.toml or the user mcp.toml — edit it where it is defined",
+            request.name
+        ))
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => mcp_page().await,
+        Ok(Err(message)) => err_response(axum::http::StatusCode::NOT_FOUND, &message),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not update MCP server",
+        ),
+    }
+}
+
 fn valid_mcp_url(url: Option<String>) -> Result<String, String> {
     let url = url.ok_or_else(|| "HTTP and SSE servers need an http(s) URL".to_string())?;
     if url.starts_with("http://") || url.starts_with("https://") {
@@ -3046,6 +3270,13 @@ fn valid_mcp_url(url: Option<String>) -> Result<String, String> {
 async fn mcp_page() -> Response {
     match tokio::task::spawn_blocking(|| {
         let config = forge_config::load().unwrap_or_default();
+        // Read the toggleable scopes once, not once per server: `editable` is exactly the
+        // membership test `update_mcp_server` performs before it agrees to write.
+        let editable: std::collections::HashSet<String> = mcp_toml_scopes()
+            .iter()
+            .flat_map(|path| forge_config::load_mcp_toml(path).servers)
+            .map(|server| server.name)
+            .collect();
         McpResponse {
             servers: config
                 .mcp
@@ -3057,6 +3288,7 @@ async fn mcp_page() -> Response {
                     enabled: server.enabled,
                     auth_configured: server.auth.is_some(),
                     secret_env_count: server.secret_env.len(),
+                    editable: editable.contains(&server.name),
                 })
                 .collect(),
             allowed_servers: config.mcp.allow.servers,
@@ -3134,6 +3366,9 @@ struct HistoryParams {
     session: String,
     before: Option<i64>,
     limit: Option<usize>,
+    /// Opt in to tool rows (`?include_tools=1`) — same contract as the `/remote` server's route;
+    /// see `remote::history_include_tools` for why this is a string, not a bool.
+    include_tools: Option<String>,
 }
 
 async fn history_page(
@@ -3143,23 +3378,23 @@ async fn history_page(
     let limit = remote::history_page_limit(params.limit);
     let sid = params.session;
     let before = params.before;
+    let include_tools = remote::history_include_tools(params.include_tools.as_deref());
     let store = state.store.clone();
     let rows: Vec<remote::HistoryRow> = if sid.is_empty() {
         Vec::new()
     } else {
         tokio::task::spawn_blocking(move || {
+            // Same mapping the TUI's `/remote` provider uses, so both routes serve one shape —
+            // including the v9 replay fields, whose zero point is the first row OF THE SET this
+            // request returns (so the scrubber's origin doesn't move when tools are included).
+            let epoch = store
+                .history_epoch_with(&sid, include_tools)
+                .unwrap_or_default();
             store
-                .load_history_page(&sid, before, limit)
+                .load_history_page_with(&sid, before, limit, include_tools)
                 .unwrap_or_default()
                 .into_iter()
-                .map(|r| remote::HistoryRow {
-                    seq: r.seq,
-                    role: r.role.as_str().to_string(),
-                    content: r.content,
-                    model: r.model,
-                    created_at: r.created_at,
-                    visibility: r.visibility.as_str().to_string(),
-                })
+                .map(|r| crate::cli::commands::run::map_history_row(r, epoch))
                 .collect()
         })
         .await
@@ -3175,7 +3410,109 @@ async fn history_page(
         .into_response()
 }
 
-fn json_response<T: serde::Serialize>(value: &T) -> Response {
+// ---------------------------------------------------------------------------
+// What's New (`GET /api/changelog`)
+// ---------------------------------------------------------------------------
+
+/// The repository's Keep-a-Changelog file, compiled in.
+///
+/// Embedded rather than read from disk because the daemon's cwd is a USER project, not the Forge
+/// checkout — there is no path at runtime that reliably holds the changelog for the binary that is
+/// actually running, and "what's new" is only true if it matches that binary. Same reach-out-to-the
+/// -repo-root pattern as `include_str!("../../../protocol/remote-v9.json")` in `remote.rs`. Only
+/// the top [`CHANGELOG_DEFAULT_RELEASES`] sections are ever parsed, so the ~200 KB is static
+/// rodata, never a per-request cost.
+const CHANGELOG_MD: &str = include_str!("../../../CHANGELOG.md");
+
+const CHANGELOG_DEFAULT_RELEASES: usize = 10;
+const CHANGELOG_MAX_RELEASES: usize = 50;
+
+#[derive(serde::Deserialize)]
+struct ChangelogParams {
+    limit: Option<usize>,
+}
+
+/// One bullet, tagged with the `### Added` / `### Changed` / `### Fixed` heading it sat under.
+#[derive(serde::Serialize, PartialEq, Debug)]
+struct ChangelogEntry {
+    section: String,
+    text: String,
+}
+
+#[derive(serde::Serialize, PartialEq, Debug)]
+struct ChangelogRelease {
+    version: String,
+    /// `null` for `[Unreleased]`, which carries no date.
+    date: Option<String>,
+    entries: Vec<ChangelogEntry>,
+}
+
+/// Parse the top `limit` `## [version] - date` sections. Continuation lines of a wrapped bullet are
+/// folded back into that bullet; `[Unreleased]` is emitted only when it actually has entries.
+fn parse_changelog(markdown: &str, limit: usize) -> Vec<ChangelogRelease> {
+    let mut releases: Vec<ChangelogRelease> = Vec::new();
+    let mut current: Option<ChangelogRelease> = None;
+    let mut section = String::new();
+    for line in markdown.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            if let Some(release) = current.take() {
+                if !release.entries.is_empty() {
+                    releases.push(release);
+                }
+            }
+            if releases.len() >= limit {
+                return releases;
+            }
+            let (version, date) = match heading.split_once(" - ") {
+                Some((version, date)) => (version, Some(date.trim().to_string())),
+                None => (heading, None),
+            };
+            current = Some(ChangelogRelease {
+                version: version.trim().trim_matches(['[', ']']).to_string(),
+                date,
+                entries: Vec::new(),
+            });
+            section.clear();
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("### ") {
+            section = heading.trim().to_string();
+            continue;
+        }
+        let Some(release) = current.as_mut() else {
+            continue;
+        };
+        if let Some(item) = line.strip_prefix("- ") {
+            release.entries.push(ChangelogEntry {
+                section: section.clone(),
+                text: item.trim().to_string(),
+            });
+        } else if line.starts_with("  ") && !line.trim().is_empty() {
+            // A wrapped bullet: Forge's changelog hard-wraps long entries at ~100 columns.
+            if let Some(last) = release.entries.last_mut() {
+                last.text.push(' ');
+                last.text.push_str(line.trim());
+            }
+        }
+    }
+    if let Some(release) = current.take() {
+        if !release.entries.is_empty() && releases.len() < limit {
+            releases.push(release);
+        }
+    }
+    releases
+}
+
+/// `GET /api/changelog?limit=<n>` — the "What's New" feed for the running binary.
+async fn changelog_page(Query(params): Query<ChangelogParams>) -> Response {
+    let limit = params
+        .limit
+        .unwrap_or(CHANGELOG_DEFAULT_RELEASES)
+        .clamp(1, CHANGELOG_MAX_RELEASES);
+    json_response(&parse_changelog(CHANGELOG_MD, limit))
+}
+
+pub(crate) fn json_response<T: serde::Serialize>(value: &T) -> Response {
     (
         [
             (axum::http::header::CONTENT_TYPE, "application/json"),
@@ -3186,7 +3523,7 @@ fn json_response<T: serde::Serialize>(value: &T) -> Response {
         .into_response()
 }
 
-fn err_response(status: axum::http::StatusCode, msg: &str) -> Response {
+pub(crate) fn err_response(status: axum::http::StatusCode, msg: &str) -> Response {
     (
         status,
         [
@@ -5293,7 +5630,12 @@ export async function run() {}
             mock: true,
             model: None,
             resume: None,
-            temper: None,
+            // Ask for Full explicitly instead of inheriting whatever `permission_mode` the
+            // ambient config resolves to. Without this the assertion below depends on the
+            // developer's own config: forge-config walks UP from the cwd, so running this
+            // suite from a worktree nested inside another Forge repo picks that repo's
+            // `.forge/config.toml` up and the session starts in Ask, not Full.
+            temper: Some(forge_types::PermissionMode::Bypass),
             push: None,
             apns: None,
         })
@@ -5352,6 +5694,339 @@ export async function run() {}
             );
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
+
+        handle.shutdown();
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn changelog_parses_the_top_releases_with_their_sections() {
+        let releases = parse_changelog(CHANGELOG_MD, 3);
+        assert_eq!(releases.len(), 3, "the top N releases, no more");
+        assert!(
+            releases.iter().all(|r| !r.entries.is_empty()),
+            "empty sections (notably `[Unreleased]`) are never emitted"
+        );
+        let first = &releases[0];
+        assert!(
+            first
+                .version
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit()),
+            "version brackets are stripped: {}",
+            first.version
+        );
+        assert!(first.date.is_some(), "a released version carries its date");
+        assert!(first.entries.iter().all(|e| matches!(
+            e.section.as_str(),
+            "Added" | "Changed" | "Fixed" | "Removed"
+        )));
+    }
+
+    #[test]
+    fn changelog_folds_wrapped_bullets_and_skips_empty_unreleased() {
+        let markdown = "# Changelog\n\n## [Unreleased]\n\n## [1.2.0] - 2026-01-02\n\n### Added\n\n- a thing\n  that wrapped\n- another\n\n### Fixed\n\n- a fix\n";
+        let releases = parse_changelog(markdown, 10);
+        assert_eq!(releases.len(), 1, "empty `[Unreleased]` is dropped");
+        assert_eq!(releases[0].version, "1.2.0");
+        assert_eq!(releases[0].date.as_deref(), Some("2026-01-02"));
+        assert_eq!(
+            releases[0].entries,
+            vec![
+                ChangelogEntry {
+                    section: "Added".into(),
+                    text: "a thing that wrapped".into()
+                },
+                ChangelogEntry {
+                    section: "Added".into(),
+                    text: "another".into()
+                },
+                ChangelogEntry {
+                    section: "Fixed".into(),
+                    text: "a fix".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn workflow_meta_args_parse_typed_declarations_only() {
+        let meta = "{ name: 'x', args: [{ name: 'target', type: 'path', required: true, description: 'what to scan' }, { type: 'string' }] }";
+        let args = meta_args(meta);
+        assert_eq!(args.len(), 1, "a nameless arg is skipped, never placeheld");
+        assert_eq!(args[0].name, "target");
+        assert_eq!(args[0].arg_type.as_deref(), Some("path"));
+        assert!(args[0].required);
+        assert_eq!(args[0].description.as_deref(), Some("what to scan"));
+        assert!(meta_args("{ name: 'x' }").is_empty());
+    }
+
+    /// The git review dock over the REAL router and a REAL repository: status buckets a staged
+    /// add and an untracked file, the per-file diff carries hunks, stage/unstage move a file
+    /// between buckets, commit returns a real sha — and a traversal path is refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn git_dock_reads_and_mutates_only_the_sessions_own_repo() {
+        use tower::ServiceExt;
+
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("git-test.db"));
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("git must be on PATH for this test");
+            assert!(ok.status.success(), "git {args:?}: {ok:?}");
+        };
+        git(&["init", "-q", "."]);
+        git(&["config", "user.email", "test@forge.local"]);
+        git(&["config", "user.name", "Forge Test"]);
+        // No hooks: `forge git setup` may have installed a prepare-commit-msg hook globally.
+        std::fs::create_dir_all(dir.join("no-hooks")).unwrap();
+        git(&["config", "core.hooksPath", "no-hooks"]);
+        std::fs::write(dir.join("tracked.txt"), "one\ntwo\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-qm", "init"]);
+        std::fs::write(dir.join("tracked.txt"), "one\nTWO\nthree\n").unwrap();
+        std::fs::write(dir.join("fresh.txt"), "brand new\n").unwrap();
+
+        let registry = Arc::new(SessionRegistry::new());
+        let handle = registry
+            .insert(
+                spawn_session_driver(DriverSpec {
+                    cwd: dir.display().to_string(),
+                    worktree: None,
+                    title: "git-dock".into(),
+                    mock: true,
+                    model: None,
+                    resume: None,
+                    temper: None,
+                    push: None,
+                    apns: None,
+                })
+                .await
+                .unwrap(),
+            )
+            .await;
+        let sid = handle.session_id.clone();
+        let router = daemon_router(Arc::new(DaemonState {
+            registry: registry.clone(),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        }));
+        let json = |router: Router, request: axum::http::Request<axum::body::Body>| async move {
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default(),
+            )
+        };
+        let get = |path: String| {
+            axum::http::Request::get(path)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let post = |path: &str, body: serde_json::Value| {
+            axum::http::Request::post(path)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        // Unknown session → 404, exactly like every other session-scoped route.
+        let (status, _) = json(
+            router.clone(),
+            get("/tok/api/git/status?session=ghost".into()),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+
+        let (status, body) = json(
+            router.clone(),
+            get(format!("/tok/api/git/status?session={sid}")),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        // The mock driver writes its own `.forge/` scratch into the cwd, so buckets are checked
+        // by membership, not by index.
+        let paths = |bucket: &serde_json::Value| {
+            bucket
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["path"].as_str().unwrap_or_default().to_string())
+                .collect::<Vec<_>>()
+        };
+        let row = |bucket: &serde_json::Value, want: &str| {
+            bucket
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["path"] == want)
+                .cloned()
+                .unwrap_or_default()
+        };
+        let tracked = row(&body["unstaged"], "tracked.txt");
+        assert_eq!(tracked["status"], "M");
+        assert_eq!(tracked["adds"], 2);
+        assert_eq!(tracked["dels"], 1);
+        assert!(paths(&body["untracked"]).contains(&"fresh.txt".to_string()));
+        assert!(paths(&body["staged"]).is_empty());
+
+        // A tracked file's working-tree diff carries real hunks with gutter-prefixed lines.
+        let (status, body) = json(
+            router.clone(),
+            get(format!(
+                "/tok/api/git/diff?session={sid}&path=tracked.txt&staged=false"
+            )),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["files"][0]["adds"], 2);
+        assert!(body["files"][0]["hunks"][0]["header"]
+            .as_str()
+            .unwrap()
+            .starts_with("@@"));
+
+        // An untracked file has no git diff at all — it renders as all-additions, not as empty.
+        let (_, body) = json(
+            router.clone(),
+            get(format!(
+                "/tok/api/git/diff?session={sid}&path=fresh.txt&staged=false"
+            )),
+        )
+        .await;
+        assert_eq!(body["files"][0]["kind"], "created");
+        assert_eq!(body["files"][0]["hunks"][0]["lines"][0], "+brand new");
+
+        // Traversal is refused before git ever runs.
+        let (status, body) = json(
+            router.clone(),
+            get(format!(
+                "/tok/api/git/diff?session={sid}&path=../../etc/passwd"
+            )),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("inside"));
+        let (status, _) = json(
+            router.clone(),
+            post(
+                "/tok/api/git/stage",
+                serde_json::json!({ "session": sid, "paths": ["/etc/passwd"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        // Committing with nothing staged is a 400, not an empty commit.
+        let (status, _) = json(
+            router.clone(),
+            post(
+                "/tok/api/git/commit",
+                serde_json::json!({ "session": sid, "message": "nope" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        // Stage → the file moves buckets; unstage → it moves back.
+        let (status, _) = json(
+            router.clone(),
+            post(
+                "/tok/api/git/stage",
+                serde_json::json!({ "session": sid, "paths": ["tracked.txt", "fresh.txt"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let (_, body) = json(
+            router.clone(),
+            get(format!("/tok/api/git/status?session={sid}")),
+        )
+        .await;
+        let staged = paths(&body["staged"]);
+        assert!(staged.contains(&"tracked.txt".to_string()));
+        assert!(staged.contains(&"fresh.txt".to_string()));
+        assert!(!paths(&body["untracked"]).contains(&"fresh.txt".to_string()));
+
+        let (status, _) = json(
+            router.clone(),
+            post(
+                "/tok/api/git/unstage",
+                serde_json::json!({ "session": sid, "paths": ["fresh.txt"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let (_, body) = json(
+            router.clone(),
+            get(format!("/tok/api/git/status?session={sid}")),
+        )
+        .await;
+        assert_eq!(paths(&body["staged"]), vec!["tracked.txt".to_string()]);
+        assert!(paths(&body["untracked"]).contains(&"fresh.txt".to_string()));
+
+        // Commit only what is staged, and report the real sha.
+        let (status, body) = json(
+            router.clone(),
+            post(
+                "/tok/api/git/commit",
+                serde_json::json!({ "session": sid, "message": "dock commit" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let sha = body["sha"].as_str().unwrap().to_string();
+        assert_eq!(sha.len(), 40, "a real object id, not a placeholder");
+        assert_eq!(body["summary"], "dock commit");
+        assert_eq!(
+            git_stdout(&dir, &["rev-parse", "HEAD"]).unwrap(),
+            sha,
+            "the daemon reported the commit git actually made"
+        );
+
+        // A session with no worktree has no fork point — the cross-session diff refuses rather
+        // than inventing a base.
+        let (status, _) = json(router.clone(), get(format!("/tok/api/sessions/{sid}/diff"))).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        // The changelog route is session-independent and returns parsed releases.
+        let (status, body) = json(router.clone(), get("/tok/api/changelog?limit=2".into())).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 2);
+        assert!(!body[0]["entries"].as_array().unwrap().is_empty());
+
+        // Schedules list the REAL registry — empty here (in-memory store), never mock rows.
+        let (status, body) = json(router.clone(), get("/tok/api/schedules".into())).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(body.as_array().unwrap().is_empty());
+
+        // Workflow rows now carry the metadata fields, with `runs` honestly empty.
+        let (status, body) = json(
+            router.clone(),
+            get(format!("/tok/api/workflows?session={sid}")),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(body.is_array());
 
         handle.shutdown();
         std::env::remove_var("FORGE_DB");
