@@ -4,7 +4,7 @@ import { Pressable, StyleSheet, type StyleProp, type ViewStyle } from "react-nat
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
 
 import { durations, easings } from "../../theme/motion";
-import { useTokens } from "../../theme/ThemeProvider";
+import { useTheme } from "../../theme/ThemeProvider";
 import { radii, tapTarget } from "../../theme/tokens";
 
 export interface SwitchProps {
@@ -22,7 +22,10 @@ const THUMB = 22;
 const PAD = 2;
 
 export function Switch({ value, onValueChange, disabled = false, accessibilityLabel, testID, style }: SwitchProps) {
-  const tokens = useTokens();
+  const { scheme, tokens } = useTheme();
+  // Machined off-track: a fixed neutral gray, not a theme background token —
+  // dark #33333B (the shared "stale/idle" neutral, see StatusDot), light rgba(0,0,0,0.2).
+  const offTrack = scheme === "light" ? "rgba(0,0,0,0.2)" : "#33333B";
   const reduced = useReducedMotion();
   const progress = useSharedValue(value ? 1 : 0);
   const [focused, setFocused] = useState(false);
@@ -40,7 +43,7 @@ export function Switch({ value, onValueChange, disabled = false, accessibilityLa
     transform: [{ translateX: progress.value * (TRACK_W - THUMB - PAD * 2) }],
   }));
   const trackStyle = useAnimatedStyle(() => ({
-    backgroundColor: progress.value > 0.5 ? tokens.accent : tokens.bg3,
+    backgroundColor: progress.value > 0.5 ? tokens.accent : offTrack,
   }));
 
   return (

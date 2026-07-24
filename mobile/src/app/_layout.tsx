@@ -149,13 +149,20 @@ export default function RootLayout() {
     if (isTauri) void checkForDesktopUpdate().catch(() => undefined);
   }, []);
 
-  // Native gets JetBrains Mono from the expo-font config plugin's build-time embed;
+  // Native gets Geist + Geist Mono from the expo-font config plugin's build-time embed;
   // that plugin has no effect on the web export, so web needs this runtime load too
   // (it registers a @font-face under the same family names — resolves near-instantly
-  // since the ttf is bundled, and is a no-op check on native where it's already embedded).
+  // since the ttfs are bundled, and is a no-op check on native where they're already
+  // embedded). Machined makes sans a bundled family on every platform too (not just
+  // mono), so both families load here now.
   const [monoFontsLoaded, monoFontsError] = useFonts({
-    [monoFamily.regular]: require("../../assets/JetBrainsMono-Regular.ttf"),
-    [monoFamily.bold]: require("../../assets/JetBrainsMono-Bold.ttf"),
+    "Geist-Regular": require("../../assets/Geist-Regular.ttf"),
+    "Geist-Medium": require("../../assets/Geist-Medium.ttf"),
+    "Geist-SemiBold": require("../../assets/Geist-SemiBold.ttf"),
+    "Geist-Bold": require("../../assets/Geist-Bold.ttf"),
+    [monoFamily.regular]: require("../../assets/GeistMono-Regular.ttf"),
+    [monoFamily.medium]: require("../../assets/GeistMono-Medium.ttf"),
+    [monoFamily.bold]: require("../../assets/GeistMono-SemiBold.ttf"),
   });
 
   // Only block on the still-loading case — on error (e.g. the web runtime load failing)

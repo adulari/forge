@@ -96,8 +96,13 @@ const config: ExpoConfig = {
       "expo-font",
       {
         fonts: [
-          "./assets/JetBrainsMono-Regular.ttf",
-          "./assets/JetBrainsMono-Bold.ttf",
+          "./assets/Geist-Regular.ttf",
+          "./assets/Geist-Medium.ttf",
+          "./assets/Geist-SemiBold.ttf",
+          "./assets/Geist-Bold.ttf",
+          "./assets/GeistMono-Regular.ttf",
+          "./assets/GeistMono-Medium.ttf",
+          "./assets/GeistMono-SemiBold.ttf",
         ],
       },
     ],

@@ -1,8 +1,9 @@
 // DESIGN_SYSTEM.md §6 Status & data: `Badge` — tones neutral/accent/success/danger/
-// warn/outline; 4-radius `small` or `pill` shape. Tone backgrounds reuse the existing
-// semantic *Bg tokens (§1.2/§1.3) rather than inventing new hex — `warn` uses
-// `warnBgInk` since that token exists precisely to pick readable text on `warnBg`
-// across both themes; `accent` reuses the ember-tinted `selection` well.
+// warn/outline; radius-4 `small` or `pill` shape, mono label (Machined: badges are
+// technical labels). Tone backgrounds reuse the existing semantic *Bg tokens
+// (§1.2/§1.3) rather than inventing new hex — `warn` uses `warnBgInk` since that
+// token exists precisely to pick readable text on `warnBg` across both themes;
+// `accent` reuses the ember-tinted `selection` well.
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -68,7 +69,7 @@ export function Badge({ label, tone = "neutral", shape: shapeProp, lowercase }: 
       accessibilityRole="text"
       accessibilityLabel={label}
     >
-      <Text style={[typeScale.meta, { color: ink, textTransform }]} numberOfLines={1}>
+      <Text style={[typeScale.monoMeta, { color: ink, textTransform }]} numberOfLines={1}>
         {label}
       </Text>
     </View>

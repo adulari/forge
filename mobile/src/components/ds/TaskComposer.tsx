@@ -1,8 +1,10 @@
-// Hearth core rule 6: the task composer replaces every "new session" affordance
-// across every surface — bottom-floating on mobile Fleet, top of rail on
-// desktop/web, centered in the web empty state. Callers position it; this
-// component only renders the pill itself. Pill radius 999, "Describe a task to
-// forge…" placeholder, 38px ember send disc. Web+native via RN TextInput/Pressable.
+// The task composer replaces every "new session" affordance across every
+// surface — bottom-floating on mobile Fleet, top of rail on desktop/web,
+// centered in the web empty state. Callers position it; this component only
+// renders the pill itself. Pill radius 999, "Describe a task to forge…"
+// placeholder, 38px accent send disc. Web+native via RN TextInput/Pressable.
+// Machined: no drop shadow — a border-only pill like every other surface (only
+// Sheet/overlay containers keep `depth.sheet`).
 import { ArrowUp } from "lucide-react-native";
 import React, { useState } from "react";
 import { Pressable, StyleSheet, TextInput, View, type StyleProp, type ViewStyle } from "react-native";
@@ -10,7 +12,7 @@ import Animated from "react-native-reanimated";
 
 import { useStrike } from "../../theme/motion";
 import { useTheme } from "../../theme/ThemeProvider";
-import { depthDark, depthLight, radii, shadowStyle, space, tapTarget } from "../../theme/tokens";
+import { radii, space, tapTarget } from "../../theme/tokens";
 import { type, webInputTextStyle } from "../../theme/typography";
 
 export interface TaskComposerProps {
@@ -44,8 +46,7 @@ export function TaskComposer({
   testID,
   style,
 }: TaskComposerProps) {
-  const { scheme, tokens } = useTheme();
-  const depth = scheme === "dark" ? depthDark : depthLight;
+  const { tokens } = useTheme();
   const strike = useStrike();
   const [focused, setFocused] = useState(false);
 
@@ -64,7 +65,6 @@ export function TaskComposer({
           backgroundColor: tokens.bg2,
           borderColor: focused ? tokens.accent : tokens.borderStrong,
         },
-        shadowStyle(depth.sheet),
         style,
       ]}
       testID={testID}

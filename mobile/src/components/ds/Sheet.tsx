@@ -170,7 +170,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
           style={[
             styles.sheet,
             {
-              backgroundColor: tokens.bg2,
+              backgroundColor: tokens.bg1,
               maxHeight: maxSheetHeight,
               left: sheetInset,
               right: sheetInset,

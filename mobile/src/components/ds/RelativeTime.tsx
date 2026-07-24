@@ -1,10 +1,11 @@
 // DESIGN_SYSTEM.md §6 Status & data: `RelativeTime` — self-refreshing every 30s,
-// meta style, `12s · 4m · 2h · 3d` via `formatRelativeTime` (§2).
+// mono (a timer — Machined technical-text rule), `12s · 4m · 2h · 3d` via
+// `formatRelativeTime` (§2).
 import React from "react";
-import { Text, type TextStyle } from "react-native";
+import { StyleSheet, Text, type TextStyle } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
-import { formatRelativeTime, type as typeScale } from "../../theme/typography";
+import { formatRelativeTime, monoFamily, type as typeScale } from "../../theme/typography";
 import { useRelativeClock } from "./relativeClock";
 
 export interface RelativeTimeProps {
@@ -19,7 +20,7 @@ export function RelativeTime({ timestampMs, style }: RelativeTimeProps) {
 
   return (
     <Text
-      style={[typeScale.meta, { color: tokens.ink3 }, style]}
+      style={[typeScale.meta, styles.mono, { color: tokens.ink3 }, style]}
       numberOfLines={1}
       accessibilityRole="text"
       accessibilityLabel={`${label} ago`}
@@ -28,3 +29,7 @@ export function RelativeTime({ timestampMs, style }: RelativeTimeProps) {
     </Text>
   );
 }
+
+const styles = StyleSheet.create({
+  mono: { fontFamily: monoFamily.regular },
+});

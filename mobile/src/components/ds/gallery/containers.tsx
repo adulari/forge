@@ -39,11 +39,11 @@ export default function ContainersGallery() {
       <SectionLabel>Card</SectionLabel>
       <Card style={styles.gap}>
         <Text style={[type.heading, { color: tokens.ink }]}>Default card</Text>
-        <Text style={[type.sub, { color: tokens.ink2 }]}>bg2, radius 12, hairline border.</Text>
+        <Text style={[type.sub, { color: tokens.ink2 }]}>bg2, radius 4, hairline border, no shadow.</Text>
       </Card>
       <Card variant="feature" style={styles.gap}>
         <Text style={[type.heading, { color: tokens.ink }]}>Feature card</Text>
-        <Text style={[type.sub, { color: tokens.ink2 }]}>radius 16 — plan/diff/permission cards.</Text>
+        <Text style={[type.sub, { color: tokens.ink2 }]}>same radius 4 — plan/diff/permission cards.</Text>
       </Card>
 
       <SectionLabel>ListRow</SectionLabel>
