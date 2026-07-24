@@ -3,7 +3,7 @@
 # binary, shell completions, and man page. Build-from-source users want a `forge` (source) AUR
 # package instead; this is the `-bin` variant.
 pkgname=forge-bin
-pkgver=2.8.5
+pkgver=2.9.0
 pkgrel=1
 pkgdesc="Fast, model-agnostic AI coding harness and CLI in Rust (prebuilt binary)"
 arch=('x86_64' 'aarch64')
@@ -19,8 +19,8 @@ source_aarch64=("forge-${pkgver}-aarch64.tar.gz::${url}/releases/download/v${pkg
 # Placeholders — run `updpkgsums` (pacman-contrib) against the published release to fill these,
 # or copy them from the release's checksums.txt. 'SKIP' disables verification; replace before
 # publishing to the AUR.
-sha256sums_x86_64=('9b3fc02a9c666a954092be09e147039e7d0e8bbe738d2ab71615bef15c6e66e1')
-sha256sums_aarch64=('31e015a8c56cfd7006f0ce2954109d16cfe05e3f386c62222934b9d4fcc4040c')
+sha256sums_x86_64=('5e9841dca9dec73983a4cf57b6d4f50339537f04b2a617f73096689133b69b26')
+sha256sums_aarch64=('1ca267036c7d1ae320fa8df9f5bdd569f1709b272b07172d2ea2d4005d1f873b')
 
 package() {
     local _dir="${srcdir}/forge-${CARCH}-unknown-linux-gnu"
