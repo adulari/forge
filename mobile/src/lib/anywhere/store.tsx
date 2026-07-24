@@ -6,6 +6,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 import { useAnywhere as useEncryptedAnywhere } from "../AnywhereProvider";
+import { managedHostPresence } from "../anywhereHostPresence";
 import type { AnywhereClient } from "./client";
 import { MockAnywhereClient } from "./mockClient";
 import type { AnywhereAccount, AnywhereDevice, AnywhereHost, RemoteJob, StorageInfo } from "./types";
@@ -61,15 +62,14 @@ export function useAnywhere(): AnywhereContextValue {
 export function useAnywhereHosts() {
   const encrypted = useEncryptedAnywhere();
   const hosts = useMemo<AnywhereHost[]>(() => encrypted.hosts.map((host) => {
-    const heartbeat = host.last_heartbeat_at ? Date.parse(host.last_heartbeat_at) : 0;
-    const age = heartbeat ? 0 : Number.MAX_SAFE_INTEGER;
+    const presence = managedHostPresence(host);
     return {
       id: host.id,
       name: host.name,
       fingerprint: "",
       connectorVersion: "managed",
-      heartbeatAgeSec: age,
-      state: age <= 90 ? { kind: "online", activity: "idle" } : { kind: "offline", lastHeartbeatAt: heartbeat },
+      heartbeatAgeSec: presence.heartbeatAgeSec,
+      state: presence.state,
       reachableVia: ["anywhere-relay"],
       transportPreference: "auto",
     };
