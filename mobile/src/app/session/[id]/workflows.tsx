@@ -1,5 +1,6 @@
 // Workflow Library. Lists the session's saved workflows (`useWorkflows`) as de-boxed rows;
-// the one the active run names (if any) is highlighted with a heat edge + card. Each workflow
+// the one the active run names (if any) is highlighted via its accent name/"running" label +
+// (expanded) a bordered card. Each workflow
 // runs from a free-text args field into `/workflow run <name> [args]`, then returns to the
 // session. On medium+ it folds into a two-column list + detail (desktop prototype). A live-run
 // pill links to the run view whenever a workflow is active.
@@ -10,7 +11,6 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 
 import { Button } from "../../../components/ds/Button";
 import { EmptyState } from "../../../components/ds/EmptyState";
-import { HeatEdge } from "../../../components/ds/HeatEdge";
 import { IconButton } from "../../../components/ds/IconButton";
 import { Input } from "../../../components/ds/Input";
 import { Screen } from "../../../components/ds/Screen";
@@ -113,7 +113,6 @@ export default function WorkflowLibraryScreen() {
           if (expanded) {
             return (
               <View key={wf.name} style={[styles.card, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
-                {isActive ? <HeatEdge state="busy" /> : null}
                 <View style={styles.cardBody}>
                   <WorkflowDetail
                     workflow={wf}
@@ -218,7 +217,6 @@ function CollapsedRow({
   const tokens = useTokens();
   return (
     <View style={[styles.rowWrap, selected ? { backgroundColor: tokens.selection, borderRadius: radii.radius12 } : null]}>
-      {active ? <HeatEdge state="busy" /> : null}
       <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`Workflow ${workflow.name}`} style={styles.row}>
         <View style={styles.rowHeader}>
           <Text style={[styles.name, { color: active ? tokens.accent : tokens.ink }]} numberOfLines={1}>

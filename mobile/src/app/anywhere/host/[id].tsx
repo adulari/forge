@@ -9,10 +9,20 @@ import { Input } from "../../../components/ds/Input";
 import { Screen } from "../../../components/ds/Screen";
 import { useToast } from "../../../components/ds/ToastHost";
 import { useAnywhere } from "../../../lib/AnywhereProvider";
-import { hostStatusText } from "../../../lib/anywhereHostPresence";
+import { hostLastActiveMs, hostStatusText } from "../../../lib/anywhereHostPresence";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space } from "../../../theme/tokens";
-import { type as typeScale } from "../../../theme/typography";
+import { tabularNums, type as typeScale } from "../../../theme/typography";
+
+function heartbeatLabel(lastActiveMs: number | null): string | null {
+  if (lastActiveMs === null) return null;
+  const deltaSec = Math.max(0, Math.round((Date.now() - lastActiveMs) / 1000));
+  if (deltaSec < 60) return `heartbeat ${deltaSec}s`;
+  const deltaMin = Math.round(deltaSec / 60);
+  if (deltaMin < 60) return `heartbeat ${deltaMin}m`;
+  const deltaHour = Math.round(deltaMin / 60);
+  return `heartbeat ${deltaHour}h`;
+}
 
 export default function AnywhereHostScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -45,9 +55,14 @@ export default function AnywhereHostScreen() {
   if (anywhere.phase !== "ready") return <Redirect href="/anywhere" />;
   if (!host) return <Redirect href="/anywhere" />;
 
+  const heartbeat = heartbeatLabel(hostLastActiveMs(host));
+
   return <Screen scroll keyboardAvoiding contentContainerStyle={styles.screen}><View style={styles.shell}>
     <BackLink label="Forge Anywhere" />
-    <View style={styles.header}><View style={[styles.icon, { backgroundColor: tokens.selection }]}><Laptop size={22} color={tokens.accent} /></View><View style={styles.headerCopy}><Text accessibilityRole="header" style={[typeScale.title, { color: tokens.ink }]}>{host.name}</Text><Text style={[typeScale.sub, { color: tokens.ink3 }]}>{hostStatusText(host)}</Text></View></View>
+    <View style={styles.header}><View style={[styles.icon, { backgroundColor: tokens.selection }]}><Laptop size={22} color={tokens.accent} /></View><View style={styles.headerCopy}><Text accessibilityRole="header" style={[typeScale.title, { color: tokens.ink }]}>{host.name}</Text><Text style={[typeScale.monoMeta, tabularNums, { color: host.online === true ? tokens.success : tokens.ink3 }]}>{hostStatusText(host)}</Text></View></View>
+    <View style={[styles.identity, { borderTopColor: tokens.border }]}>
+      <View style={styles.identityRow}><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Connector</Text><Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink2 }]}>{heartbeat ?? "no heartbeat yet"}</Text></View>
+    </View>
     <View style={styles.form}><Input label="Host name" value={name} onChangeText={setName} maxLength={80} /><Button label="Save host name" onPress={() => void rename()} loading={busy} disabled={!name.trim() || name.trim() === host.name} fullWidth /></View>
     <View style={[styles.danger, { borderColor: tokens.borderStrong }]}><Text style={[typeScale.headingBold, { color: tokens.ink }]}>Remove managed access</Text><Text style={[typeScale.sub, { color: tokens.ink2 }]}>Revoking disconnects this host from Forge Anywhere. Projects and other local Forge data stay on the computer.</Text>{confirmRevoke ? <View style={styles.actions}><Button label="Keep host" variant="ghost" disabled={busy} onPress={() => setConfirmRevoke(false)} style={styles.action} /><Button label="Revoke host" variant="danger" icon={<Trash2 size={17} color={tokens.danger} />} loading={busy} onPress={() => void revoke()} style={styles.action} /></View> : <Button label="Revoke host" variant="danger" onPress={() => setConfirmRevoke(true)} fullWidth />}</View>
   </View></Screen>;
@@ -55,6 +70,8 @@ export default function AnywhereHostScreen() {
 
 const styles = StyleSheet.create({
   screen: { paddingTop: space.space12, paddingBottom: space.space48 }, shell: { width: "100%", maxWidth: 680, alignSelf: "center" },
-  header: { flexDirection: "row", alignItems: "center", gap: space.space12, marginTop: space.space12 }, icon: { width: 44, height: 44, borderRadius: radii.radius12, alignItems: "center", justifyContent: "center" }, headerCopy: { flex: 1 },
+  header: { flexDirection: "row", alignItems: "center", gap: space.space12, marginTop: space.space12 }, icon: { width: 44, height: 44, borderRadius: radii.radius12, alignItems: "center", justifyContent: "center" }, headerCopy: { flex: 1, gap: 2 },
+  identity: { marginTop: space.space16, borderTopWidth: 1, paddingTop: space.space8 },
+  identityRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", minHeight: 32 },
   form: { marginTop: space.space24, gap: space.space12 }, danger: { marginTop: space.space32, borderWidth: 1, borderRadius: radii.radius12, padding: space.space16, gap: space.space12 }, actions: { flexDirection: "row", gap: space.space8 }, action: { flex: 1 },
 });

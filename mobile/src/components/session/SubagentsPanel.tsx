@@ -16,7 +16,6 @@ import { radii, space } from "../../theme/tokens";
 import { formatCost, tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 import { EmptyState } from "../ds/EmptyState";
-import { HeatEdge } from "../ds/HeatEdge";
 import { StatusDot } from "../ds/StatusDot";
 import { AgentRow, rowStateOf } from "./AgentRow";
 
@@ -81,7 +80,6 @@ function Tile({
           done && styles.dimmed,
         ]}
       >
-        {running ? <HeatEdge state="busy" /> : failed ? <HeatEdge state="waiting" /> : null}
         <View style={styles.tileInner}>
           <View style={styles.header}>
             {running ? (

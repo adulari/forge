@@ -20,22 +20,10 @@ import { SearchField } from "../components/ds/SearchField";
 import { type HookRow } from "../lib/api";
 import { useHooks } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
-import { type ColorTokens, radii, space } from "../theme/tokens";
+import { type ColorTokens, hexToRgba, radii, space } from "../theme/tokens";
 import { monoFamily, type } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
 import { SettingsShell } from "./(tabs)/settings";
-
-// Derive a translucent surface from a token hex (the info event badge has no `*Bg`
-// token — successBg/dangerBg/warnBg exist, infoBg does not — so it is tinted here from
-// tokens.info exactly as the prototype's rgba(79,208,217,.12) chip; still token-derived,
-// never a raw literal).
-function tint(hex: string, alpha: number): string {
-  const h = hex.replace("#", "");
-  const r = parseInt(h.slice(0, 2), 16);
-  const g = parseInt(h.slice(2, 4), 16);
-  const b = parseInt(h.slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
 
 type EventKind = "info" | "danger" | "neutral";
 
@@ -55,7 +43,7 @@ function eventColors(kind: EventKind, tokens: ColorTokens): { bg: string; ink: s
     case "danger":
       return { bg: tokens.dangerBg, ink: tokens.danger };
     case "info":
-      return { bg: tint(tokens.info, 0.12), ink: tokens.info };
+      return { bg: hexToRgba(tokens.info, 0.12), ink: tokens.info };
     case "neutral":
     default:
       return { bg: tokens.bg3, ink: tokens.ink2 };
@@ -179,7 +167,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", gap: space.space8, alignItems: "center" },
   command: { flex: 1, fontSize: 13, fontFamily: monoFamily.bold },
   eventBadge: { alignSelf: "flex-start", borderRadius: radii.radius4, paddingHorizontal: 7, paddingVertical: 2 },
-  eventBadgeText: { fontSize: 10, fontWeight: "700", letterSpacing: 0.3 },
+  eventBadgeText: { fontSize: 10, fontWeight: "700", letterSpacing: 0.3, fontFamily: monoFamily.bold, textTransform: "uppercase" },
   ccBadge: { borderRadius: radii.radiusPill, paddingHorizontal: space.space8, paddingVertical: 2 },
   ccBadgeText: { fontSize: 10, fontWeight: "700", letterSpacing: 0.3 },
 });

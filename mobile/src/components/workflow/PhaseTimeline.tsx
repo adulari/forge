@@ -13,7 +13,6 @@ import { useEmberdot, useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { formatCost, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
-import { HeatEdge } from "../ds/HeatEdge";
 import { isFailed, type PhaseGroup } from "./format";
 
 function Emberdot({ kind }: { kind: "busy" | "waiting" | "idle" }) {
@@ -81,7 +80,6 @@ export function AgentLiveRow({
         selected ? { backgroundColor: tokens.selection, borderRadius: radii.radius8 } : null,
       ]}
     >
-      {failed ? <HeatEdge state="waiting" /> : null}
       <View style={styles.agentRow}>
         <View style={styles.agentHeader}>
           <Emberdot kind={dotKind} />
@@ -126,12 +124,10 @@ function PhaseBlock({
 }) {
   const tokens = useTokens();
   const entrance = useForgeline(index);
-  const running = group.state === "running";
   const label = group.unknown ? "unphased" : group.phase;
 
   return (
     <Animated.View style={[styles.block, entrance]}>
-      {running ? <HeatEdge state="busy" /> : null}
       <View style={styles.phaseHeader}>
         <Medallion state={group.state} />
         <Text

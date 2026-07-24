@@ -1,11 +1,11 @@
-// DESIGN_ELEVATION.md Move 2 (de-box) SessionCard (fleet): hairline-separated row, no
-// per-row border/box/fill — StatusDot + title + NEEDS-YOU/worktree badges on the title
-// line; metadata line cwd tail (mono, head-ellipsized) · model · relative time; quiet
-// gauge+cost line. Live (busy/waiting) rows carry a HeatEdge bleeding to the row's left
-// edge; waiting rows additionally get a `selection` wash. Swipe (native,
-// react-native-gesture-handler) / long-press / trailing `…` all open the SAME
-// archive/merge/discard actions — merge 409s and discard warnings never render as a generic
-// toast (FEATURES.md §1.1), they get their own result sheet.
+// Machined SessionCard (fleet quiet row): a bordered Card — StatusDot + title + a single
+// right-aligned mono metric on the header line, mono meta line below (host · transport ·
+// cwd tail · model). Matches the "quiet tool row" card treatment used by the needs-you
+// DecisionCard sibling (same Card primitive, no per-row heat/glow — Machined retired the
+// thermal identity entirely). Swipe (native, react-native-gesture-handler) /
+// long-press / trailing `…` all open the SAME archive/merge/discard actions — merge 409s
+// and discard warnings never render as a generic toast (FEATURES.md §1.1), they get their
+// own result sheet.
 import { router } from "expo-router";
 import { Archive, GitMerge, Trash2 } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -26,8 +26,8 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { springs, useForgeline, useSettle } from "../../theme/motion";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { formatCost, formatCwd, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
+import { Card } from "../ds/Card";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
-import { HeatEdge } from "../ds/HeatEdge";
 import { IconButton } from "../ds/IconButton";
 import { ListRow } from "../ds/ListRow";
 import { RelativeTime } from "../ds/RelativeTime";
@@ -254,51 +254,44 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                 accessibilityLabel={`${title}, ${state}, ${row.cwd}`}
                 accessibilityState={{ selected }}
               >
-                <View
-                  style={[styles.rowBg, { backgroundColor: row.waiting || selected ? tokens.selection : tokens.bg1 }]}
-                >
-                  <HeatEdge state={row.waiting ? "waiting" : row.busy ? "busy" : false} />
-                  <View style={[styles.inner, { minHeight: state === "idle" ? 54 : 62 }]}>
-                    <View style={styles.row1}>
-                      <StatusDot state={state} size={state === "idle" ? 7 : 8} />
-                      <Text
-                        style={[
-                          styles.title,
-                          {
-                            fontSize: state === "idle" ? 13.5 : 14.5,
-                            lineHeight: state === "idle" ? 19 : 20,
-                            color: state === "idle" ? tokens.ink2 : tokens.ink,
-                          },
-                        ]}
-                        numberOfLines={1}
-                      >
-                        {title}
-                      </Text>
-                      <SessionMetric row={row} state={state} />
-                    </View>
-
+                <Card style={[styles.card, { backgroundColor: row.waiting || selected ? tokens.selection : tokens.bg2 }]}>
+                  <View style={styles.row1}>
+                    <StatusDot state={state} size={state === "idle" ? 7 : 8} />
                     <Text
                       style={[
-                        styles.meta,
+                        styles.title,
                         {
-                          fontSize: state === "idle" ? 11 : 11.5,
-                          color: state === "waiting" ? tokens.ink2 : state === "busy" ? tokens.ink3 : tokens.ink4,
-                          fontFamily: monoFamily.regular,
+                          fontSize: state === "idle" ? 13.5 : 14.5,
+                          lineHeight: state === "idle" ? 19 : 20,
+                          color: state === "idle" ? tokens.ink2 : tokens.ink,
                         },
                       ]}
                       numberOfLines={1}
-                      ellipsizeMode={row.waiting ? "tail" : "head"}
-                      accessibilityLabel={row.waiting ? undefined : `path: ${row.cwd}`}
                     >
-                      {row.waiting ? "needs a decision" : `${hostLabel} · direct · ${cwdLabel} · ${row.model}`}
+                      {title}
                     </Text>
+                    <SessionMetric row={row} state={state} />
                   </View>
-                </View>
+
+                  <Text
+                    style={[
+                      styles.meta,
+                      {
+                        fontSize: state === "idle" ? 11 : 11.5,
+                        color: state === "waiting" ? tokens.ink2 : state === "busy" ? tokens.ink3 : tokens.ink4,
+                        fontFamily: monoFamily.regular,
+                      },
+                    ]}
+                    numberOfLines={1}
+                    ellipsizeMode={row.waiting ? "tail" : "head"}
+                    accessibilityLabel={row.waiting ? undefined : `path: ${row.cwd}`}
+                  >
+                    {row.waiting ? "needs a decision" : `${hostLabel} · direct · ${cwdLabel} · ${row.model}`}
+                  </Text>
+                </Card>
               </Pressable>
             </Animated.View>
           </GestureDetector>
-
-          <View style={[styles.separator, { backgroundColor: tokens.border }]} />
         </View>
       </Animated.View>
 
@@ -406,22 +399,17 @@ export const SessionCard = React.memo(SessionCardBase, (prev, next) => {
 
 const styles = StyleSheet.create({
   wrap: { position: "relative" },
-  actionsRow: { position: "absolute", top: 0, bottom: 0, right: 0, flexDirection: "row" },
+  // Aligned to the card's own inset/gap (space16 margin, space12 bottom gap) so the
+  // revealed actions sit flush against the card's real edges, not the full-bleed row.
+  actionsRow: { position: "absolute", top: 0, bottom: space.space12, right: space.space16, flexDirection: "row" },
   actionButton: { height: "100%", width: ACTION_WIDTH, borderRadius: 0, borderWidth: 0 },
-  // De-boxed row (DESIGN_ELEVATION.md Move 2): no border/fill/radius — the row's own
-  // hairline separator (below) is the only division between sessions.
-  rowBg: { position: "relative" },
-  heatEdgeWrap: { position: "absolute", left: 0, top: 0, bottom: 0 },
-  inner: {
-    justifyContent: "center",
-    paddingHorizontal: space.space16,
-    paddingVertical: 10,
-  },
+  // Machined card row — same gap-separated bordered treatment as DecisionCard, so the
+  // quiet rows and the needs-you card read as one consistent list.
+  card: { marginHorizontal: space.space16, marginBottom: space.space12 },
   row1: { flexDirection: "row", alignItems: "center", gap: 9 },
   title: { flex: 1, fontWeight: "600" },
   meta: { marginTop: 2 },
   metric: { fontSize: 11, lineHeight: 15 },
-  separator: { height: StyleSheet.hairlineWidth, marginLeft: space.space16 },
   sheetBody: { paddingHorizontal: space.space4, paddingBottom: space.space16, gap: space.space4 },
   fileRow: { paddingHorizontal: space.space16 },
 });

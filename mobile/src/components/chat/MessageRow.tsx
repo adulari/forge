@@ -152,8 +152,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
 
   return (
     <Animated.View style={entrance}>
-      <View style={[styles.row, !isUser && !isSystem && styles.assistantRow, isUser && styles.userRow]}>
-      {!isUser && !isSystem ? <View style={[styles.spine, { backgroundColor: tokens.border }]} /> : null}
+      <View style={styles.row}>
       <Pressable
         onLongPress={onLongPress ? handleLongPress : undefined}
         {...webContextMenu}
@@ -188,9 +187,9 @@ export const MessageRow = React.memo(MessageRowImpl);
 
 const styles = StyleSheet.create({
   row: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
-  assistantRow: { paddingLeft: space.space24, position: "relative" },
-  spine: { position: "absolute", left: space.space16, top: space.space8, bottom: space.space8, width: 2, borderRadius: radii.radiusPill },
-  userRow: { alignItems: "flex-end" },
-  bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8 },
-  userBubble: { maxWidth: "85%", borderRadius: radii.radius16, borderWidth: StyleSheet.hairlineWidth },
+  // Machined: no card chrome / left rail on assistant rows — plain full-width prose, same
+  // gutter as everything else in the transcript. Only the user turn gets a quiet bordered box.
+  bubble: { borderRadius: radii.radius8, paddingHorizontal: space.space12, paddingVertical: space.space8 },
+  // Full-width bordered quiet box (bg2, hairline, radius4) — not a right-aligned chat bubble.
+  userBubble: { width: "100%", borderWidth: StyleSheet.hairlineWidth },
 });

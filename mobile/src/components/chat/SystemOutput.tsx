@@ -87,15 +87,25 @@ function SystemOutputBody({ content }: SystemOutputProps) {
 
   const firstLine = lines.find((line) => line.trim()) ?? "output";
   const summary = useMemo(() => summarizeToolLine(firstLine), [firstLine]);
-  // A tool row only ever renders once the call has settled into history — the live/busy state
-  // is LiveToolActivity's job (session/[id]/index.tsx) — so the glyph is done (✓) unless the
-  // line itself reports a failure.
+  // Machined "quiet tool row" (INVENTORY.md shared pattern): verb in ink3, target in default
+  // ink, no leading status glyph — a settled row only reads as failed through color, never an
+  // icon. `summary` is already "<verb> <target>" (summarizeToolLine's own JSON-arg extraction);
+  // split back on the first space rather than re-deriving the verb, so this never drifts from
+  // what that function actually produced. A bare tool name with no target (no space) renders as
+  // verb-only, same as before.
+  const spaceIdx = summary.indexOf(" ");
+  const verb = spaceIdx === -1 ? summary : summary.slice(0, spaceIdx);
+  const target = spaceIdx === -1 ? "" : summary.slice(spaceIdx + 1);
   const failed = /\b(failed|error)\b/i.test(firstLine) && !/\bpassed\b/i.test(firstLine);
   const hasDetail = lines.length > 1 || summary !== firstLine.replace(/^↳\s*/, "").trim();
 
   const hiddenCount = lines.length - COLLAPSE_LINES;
   const diffLike = lines.filter((line) => line.startsWith("+") || line.startsWith("-")).length / Math.max(lines.length, 1) > 0.3;
   const visibleLines = innerExpanded ? lines : lines.slice(0, COLLAPSE_LINES);
+  // "Edit file +38 −9" — added/removed line counts, mono success/danger, appended after the
+  // target when the settled output is diff-shaped (excludes `+++`/`---` file headers).
+  const added = diffLike ? lines.filter((l) => l.startsWith("+") && !l.startsWith("+++")).length : 0;
+  const removed = diffLike ? lines.filter((l) => l.startsWith("-") && !l.startsWith("---")).length : 0;
 
   const onCopy = async () => {
     await Clipboard.setStringAsync(content);
@@ -115,11 +125,11 @@ function SystemOutputBody({ content }: SystemOutputProps) {
         style={styles.summaryRow}
         hitSlop={8}
       >
-        <Text style={[type.codeSmall, { color: failed ? tokens.danger : tokens.success, fontFamily: monoFamily.regular }]}>
-          {failed ? "✗" : "✓"}
-        </Text>
-        <Text style={[type.codeSmall, { color: tokens.ink3, fontFamily: monoFamily.regular }]} numberOfLines={1} selectable>
-          {summary}
+        <Text style={[type.codeSmall, { fontFamily: monoFamily.regular }]} numberOfLines={1} selectable>
+          <Text style={{ color: failed ? tokens.danger : tokens.ink3 }}>{verb}</Text>
+          {target ? <Text style={{ color: failed ? tokens.danger : tokens.ink }}>{` ${target}`}</Text> : null}
+          {added > 0 ? <Text style={{ color: tokens.success }}>{` +${added}`}</Text> : null}
+          {removed > 0 ? <Text style={{ color: tokens.danger }}>{` −${removed}`}</Text> : null}
         </Text>
       </Pressable>
       {detailShown ? (

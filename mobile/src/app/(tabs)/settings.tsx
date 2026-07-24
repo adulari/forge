@@ -68,7 +68,7 @@ import { PROTOCOL_VERSION } from "../../lib/remoteProtocol";
 import { checkForDesktopUpdate, type DesktopUpdate } from "../../lib/updater";
 import { useStrike } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
-import { radii, rowHeight, space } from "../../theme/tokens";
+import { hexToRgba, radii, rowHeight, space } from "../../theme/tokens";
 import { formatCost, type, tabularNums } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
@@ -132,12 +132,17 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
   { key: "session-tree", label: "Session tree", href: "/session-tree" },
 ];
 
+// Machined D/W Settings General (L791-827 / L153-186): 196px nav rail on desktop,
+// 186px on web; dense 27px rows; the active row gets a neutral ink-alpha fill (never
+// accent-tinted — Machined keeps the ember accent state-only) with a plain ink label,
+// not the accent-colored selection this rail used pre-Machined.
 export function SettingsNavRail({ active }: { active: string }) {
   const tokens = useTokens();
   const { account } = useAnywhere();
   const appVersion = useAppVersion();
+  const railActiveFill = hexToRgba(tokens.ink, 0.07);
   return (
-    <View style={[railStyles.rail, { borderRightColor: tokens.border }]}>
+    <View style={[railStyles.rail, { width: isWeb ? 186 : 196, borderRightColor: tokens.border }]}>
       <Text style={[type.headingBold, railStyles.title, { color: tokens.ink }]}>Settings</Text>
       {SETTINGS_NAV_ITEMS.map((item) => {
         const selected = item.key === active;
@@ -151,10 +156,10 @@ export function SettingsNavRail({ active }: { active: string }) {
             accessibilityRole="button"
             accessibilityLabel={item.label}
             accessibilityState={{ selected }}
-            style={[railStyles.item, selected ? { backgroundColor: tokens.selection } : null]}
+            style={[railStyles.item, selected ? { backgroundColor: railActiveFill } : null]}
           >
             <View style={railStyles.itemRow}>
-              <Text style={[type.bodyBold, railStyles.itemLabel, { color: selected ? tokens.accent : tokens.ink2 }]} numberOfLines={1}>
+              <Text style={[type.bodyBold, railStyles.itemLabel, { color: selected ? tokens.ink : tokens.ink2 }]} numberOfLines={1}>
                 {item.label}
               </Text>
               {showEntitlement && account ? <EntitlementBadge account={account} /> : null}
@@ -203,12 +208,17 @@ function DenseRow({
   hasInteractiveTrailing = false,
 }: DenseRowProps) {
   const tokens = useTokens();
+  const { isCompact } = useBreakpoint();
   const { style: strikeStyle, onPressIn, onPressOut } = useStrike();
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const pressableRef = useRef<React.ComponentRef<typeof Pressable>>(null);
 
   const suppressWebButtonTag = Platform.OS === "web" && hasInteractiveTrailing;
+  // M Settings' FORGE/SERVERS rows are 50px (L337 min-height:50px); desktop/web content
+  // panes stay dense at rowHeight.dense (44) — the settings-family nav rail itself is a
+  // separate, denser 27px row defined in `railStyles.item` above.
+  const minHeight = isCompact ? 50 : rowHeight.dense;
 
   useEffect(() => {
     if (!suppressWebButtonTag || !onPress) return;
@@ -228,6 +238,7 @@ function DenseRow({
     <Animated.View
       style={[
         styles.denseRow,
+        { minHeight },
         onPress ? strikeStyle : undefined,
         onPress && hovered ? { backgroundColor: tokens.bg3 } : undefined,
       ]}
@@ -514,6 +525,9 @@ export default function SettingsScreen() {
             const reachable = fleet.isSuccess;
             const waitingCount = rows.filter((row) => row.waiting).length;
             const active = server.id === activeServerId;
+            // D/M/W Settings General caption: "…a1F9 · online · 1 waiting" — the reachability
+            // word was previously dropped, leaving only token+waiting-count.
+            const statusWord = fleet.isLoading ? "checking…" : reachable ? "online" : "offline";
             return (
               <DenseRow
                 key={server.id}
@@ -523,7 +537,7 @@ export default function SettingsScreen() {
                 leading={<View style={[styles.reachabilityDot, { backgroundColor: fleet.isLoading ? tokens.warn : reachable ? tokens.success : tokens.danger }]} />}
                 trailing={
                   <View style={styles.serverTrailing}>
-                    <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>{`${maskToken(server.token)} · ${waitingCount} waiting`}</Text>
+                    <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>{`${maskToken(server.token)} · ${statusWord} · ${waitingCount} waiting`}</Text>
                     <IconButton
                       icon={<Pencil size={16} strokeWidth={1.75} color={tokens.ink4} />}
                       accessibilityLabel={`Rename server ${server.name}`}
@@ -587,21 +601,24 @@ export default function SettingsScreen() {
             value={preference}
             onChange={setScheme}
           />
-          {NOTIFICATIONS_SUPPORTED ? (
+          {/* iOS's native push toggle stays here (Appearance); the web equivalent moves to
+              its own Behavior section below — W Settings (L153-186) shows Behavior as a
+              distinct group from Appearance, not folded into it. */}
+          {isIOS && NOTIFICATIONS_SUPPORTED ? (
             <DenseRow
-              accessibilityLabel={isIOS ? "Push notifications" : "Web push"}
+              accessibilityLabel="Push notifications"
               trailing={
                 pushSupported && pushLoaded ? (
                   <Switch
                     value={pushStatus === "subscribed"}
                     onValueChange={onPushChange}
                     disabled={pushBusy || !baseUrl}
-                    accessibilityLabel="Web push notifications"
+                    accessibilityLabel="Push notifications"
                   />
                 ) : undefined
               }
             >
-              <Text style={[type.body, { color: tokens.ink }]}>{isIOS ? "Push notifications" : "Web push"}</Text>
+              <Text style={[type.body, { color: tokens.ink }]}>Push notifications</Text>
             </DenseRow>
           ) : null}
           <DenseRow
@@ -616,6 +633,35 @@ export default function SettingsScreen() {
             <Text style={[type.body, { color: tokens.ink }]}>Require Face ID</Text>
           </DenseRow>
         </View>
+
+        {/* W Settings BEHAVIOR (L180-183): browser notifications + tab badge. Browser
+            notifications reuses the same web-push subscription this build already has
+            (enablePush/disablePush/getPushStatus) under its Machined label. Tab badge has
+            no backing implementation anywhere in the app (no needs-you-count -> document.title
+            wiring exists) — per this task's own instruction to skip rather than fake a toggle
+            with nothing behind it, that row is omitted; see the build report. */}
+        {isWeb && !isTauri ? (
+          <View>
+            <SectionHeader>Behavior</SectionHeader>
+            <DenseRow
+              showSeparator={false}
+              accessibilityLabel="Browser notifications"
+              trailing={
+                pushSupported && pushLoaded ? (
+                  <Switch
+                    value={pushStatus === "subscribed"}
+                    onValueChange={onPushChange}
+                    disabled={pushBusy || !baseUrl}
+                    accessibilityLabel="Browser notifications"
+                  />
+                ) : undefined
+              }
+            >
+              <Text style={[type.body, { color: tokens.ink }]}>Browser notifications</Text>
+              <Text style={[type.sub, { color: tokens.ink3 }]}>Forge notifies this tab when a session needs you.</Text>
+            </DenseRow>
+          </View>
+        ) : null}
 
         <View style={styles.footerRow}>
           <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 0 }]}>{`v${appVersion} · protocol v${PROTOCOL_VERSION}`}</Text>
@@ -756,7 +802,7 @@ const styles = StyleSheet.create({
   activeTag: { paddingHorizontal: space.space8, paddingVertical: 1, borderRadius: radii.radius4 },
   serverTrailing: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   navTrailing: { flexDirection: "row", alignItems: "center", gap: space.space8 },
-  reachabilityDot: { width: 7, height: 7, borderRadius: 4 },
+  reachabilityDot: { width: 6, height: 6, borderRadius: 3 },
   content: { paddingTop: space.space16, paddingBottom: space.space48 },
   pageTitle: { paddingHorizontal: space.space4 },
   footerRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space16, paddingTop: space.space16 },
@@ -769,9 +815,11 @@ const styles = StyleSheet.create({
 
 const railStyles = StyleSheet.create({
   shellRow: { flex: 1, flexDirection: "row", minHeight: 0 },
-  rail: { width: 240, flexShrink: 0, borderRightWidth: StyleSheet.hairlineWidth, paddingHorizontal: space.space12, paddingVertical: space.space16, gap: 2 },
+  rail: { flexShrink: 0, borderRightWidth: StyleSheet.hairlineWidth, paddingHorizontal: space.space8, paddingVertical: space.space12, gap: 1 },
   title: { paddingHorizontal: space.space8, paddingBottom: space.space12 },
-  item: { minHeight: 36, paddingHorizontal: space.space8, borderRadius: 8, justifyContent: "center" },
+  // Dense 27px rail rows (D Settings General L795 / W Settings L155) — mouse-driven
+  // desktop/web chrome, not a touch target, so this sits below the 44px mobile floor.
+  item: { minHeight: 27, paddingHorizontal: space.space8, borderRadius: radii.radius4, justifyContent: "center" },
   itemRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   itemLabel: { flex: 1 },
   flexFill: { flex: 1 },

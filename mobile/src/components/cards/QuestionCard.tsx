@@ -23,7 +23,7 @@ import { haptics } from "../../lib/haptics";
 import { type QuestionOption, type RemoteInput } from "../../lib/ws";
 import { useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii, space } from "../../theme/tokens";
+import { hexToRgba, radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 
 export interface QuestionCardProps {
@@ -64,7 +64,7 @@ export function QuestionCard({ question, options, allowOther, promptSeq, send, o
   const showFreeText = allowOther || options.length === 0;
 
   return (
-    <Card variant="feature" heatEdge="waiting" style={styles.container}>
+    <Card variant="feature" style={[styles.container, { borderColor: hexToRgba(tokens.danger, 0.35) }]}>
       <Text style={[typeScale.body, { color: tokens.ink }, styles.question]}>{question}</Text>
       {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
 

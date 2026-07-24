@@ -15,6 +15,7 @@ import { SessionCard } from "../../components/fleet/SessionCard";
 import { HostDot } from "../../components/anywhere/HostDot";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
+import { Card } from "../../components/ds/Card";
 import { Chip } from "../../components/ds/Chip";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { IconButton } from "../../components/ds/IconButton";
@@ -88,14 +89,14 @@ function FleetSummary({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: 
 
 function FleetRowSkeleton() {
   return (
-    <View style={styles.skeletonRow}>
+    <Card style={styles.skeletonCard}>
       <View style={styles.skeletonRow1}>
         <Skeleton width={8} height={8} radius={4} />
         <Skeleton width="45%" height={17} />
       </View>
       <Skeleton width="70%" height={12} style={styles.skeletonGap} />
       <Skeleton width="40%" height={12} style={styles.skeletonGap} />
-    </View>
+    </Card>
   );
 }
 
@@ -366,7 +367,9 @@ const styles = StyleSheet.create({
   emptyAsh: { flexDirection: "row", justifyContent: "center", gap: space.space8, paddingTop: space.space24 },
   ashCoal: { width: 6, height: 6, borderRadius: 3 },
   groupLabel: { paddingTop: space.space16, paddingHorizontal: space.space16 },
-  skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
+  // Matches the real SessionCard/DecisionCard gap-separated bordered-card treatment so
+  // the loading state doesn't flash a different layout than the content it's standing in for.
+  skeletonCard: { marginHorizontal: space.space16, marginBottom: space.space12, gap: space.space8 },
   skeletonRow1: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   skeletonGap: { marginTop: space.space4 },
   composer: { position: "absolute", left: space.space16, right: space.space16 },

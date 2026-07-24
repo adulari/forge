@@ -64,7 +64,7 @@ export function GoalBanner({ snapshot, send }: GoalBannerProps) {
 
   return (
     <View style={styles.wrap}>
-      <Card heatEdge="busy" style={styles.card}>
+      <Card style={[styles.card, { borderColor: tokens.accent }]}>
         <View style={styles.header}>
           <StatusDot state="busy" size={6} accessibilityLabel="goal active" />
           <View style={[styles.dash, { backgroundColor: tokens.accent }]} />

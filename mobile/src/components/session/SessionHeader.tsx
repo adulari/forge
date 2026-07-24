@@ -26,6 +26,7 @@ import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
+import { useBreakpoint } from "../../theme/useBreakpoint";
 import { IconButton } from "../ds/IconButton";
 import { ListRow } from "../ds/ListRow";
 import { Sheet } from "../ds/Sheet";
@@ -69,6 +70,7 @@ export interface SessionHeaderProps {
 
 export function SessionHeader(props: SessionHeaderProps) {
   const tokens = useTokens();
+  const { isExpanded } = useBreakpoint();
   const [actionsVisible, setActionsVisible] = useState(false);
   const isPublic = props.exposure.startsWith("public");
   const closeActions = useCallback(() => setActionsVisible(false), []);
@@ -79,7 +81,10 @@ export function SessionHeader(props: SessionHeaderProps) {
 
   return (
     <View style={styles.wrap}>
-      <View style={styles.row}>
+      {/* W Main / D Main: desktop density is a tighter 40px header row than mobile's 44px
+          minimum touch target — mobile still gets the full tap target via IconButton's own
+          hit area, only the row's own height tightens on wider breakpoints. */}
+      <View style={[styles.row, isExpanded && styles.rowExpanded]}>
         {props.showBack !== false ? <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onBack} accessibilityLabel="Back" style={styles.leadingBleed} /> : null}
         <StatusDot state={props.state} />
         <Text style={[typeScale.headingBold, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
@@ -152,6 +157,7 @@ export function SessionHeader(props: SessionHeaderProps) {
 const styles = StyleSheet.create({
   wrap: { gap: space.space4 },
   row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 44 },
+  rowExpanded: { minHeight: 40 },
   title: { flex: 1 },
   // Icon buttons pad their 20px glyph to a 44px hit area; at the header's rails that padding
   // reads as misalignment against rows whose text/borders sit flush. Bleed it over the edge so

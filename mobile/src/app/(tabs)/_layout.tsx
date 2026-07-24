@@ -79,8 +79,13 @@ function StandardTabs() {
       screenOptions={{
         headerShown: false,
         tabBarStyle: {
-          backgroundColor: tokens.bg2,
-          borderTopColor: tokens.border,
+          // Machined's tab-bar/footer band reads a shade darker than the card
+          // background (`bg2`) — `bg0` is the closest existing token to the design's
+          // dedicated footer neutral (undocumented 4th neutral, see INVENTORY.md
+          // "Design tokens observed"). `hairline` (not `border`) matches the design's
+          // exact top-rule alpha.
+          backgroundColor: tokens.bg0,
+          borderTopColor: tokens.hairline,
           borderTopWidth: StyleSheet.hairlineWidth,
           ...webTabBar,
         },

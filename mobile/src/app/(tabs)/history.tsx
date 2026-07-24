@@ -4,7 +4,7 @@
 import { router } from "expo-router";
 import { Archive, History as HistoryIcon } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import { stripLeadingAttachMentions } from "../../components/chat/MessageRow";
@@ -12,22 +12,23 @@ import { SyncGlyph } from "../../components/anywhere/SyncGlyph";
 import { Badge } from "../../components/ds/Badge";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
-import { Chip } from "../../components/ds/Chip";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { RelativeTime } from "../../components/ds/RelativeTime";
 import { Screen } from "../../components/ds/Screen";
 import { SearchField } from "../../components/ds/SearchField";
 import { SectionHeader } from "../../components/ds/SectionHeader";
+import { Segmented } from "../../components/ds/Segmented";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { useToast } from "../../components/ds/ToastHost";
 import { ApiError, type PastSessionRow } from "../../lib/api";
 import { useAnywhere } from "../../lib/anywhere/store";
+import { syncGlyph } from "../../lib/anywhere/format";
 import { useArchiveSession, useCreateSession, usePastSessions } from "../../lib/queries";
 import { useForgeline, useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
-import { formatCost, monoFamily, type } from "../../theme/typography";
+import { hexToRgba, radii, space } from "../../theme/tokens";
+import { formatCost, monoFamily, tabularNums, type } from "../../theme/typography";
 
 function matchesQuery(row: PastSessionRow, query: string): boolean {
   if (!query) return true;
@@ -93,12 +94,24 @@ function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
   const title = row.title || `#${row.id.slice(0, 8)}`;
   const resumeRow = useCallback(() => onPress(row), [onPress, row]);
 
+  // Forge Anywhere: no relay sync has happened for any real session yet, so every row
+  // is honestly rendered via SyncGlyph's "offline-cache" kind (glyph "◌") — the closest
+  // existing SyncStatus for "local only, nothing has round-tripped through the relay".
+  // Deriving the card's border tint from `syncGlyph(...).colorKey` (rather than a
+  // hardcoded neutral) means once real per-row sync events land (synced/uploading/
+  // conflict/etc.), a "⑂ conflict kept" row automatically gets the design's warn-tinted
+  // border — the same vocabulary switch the mock uses — without inventing that state now.
+  const syncStatus = anywhereSignedIn ? ({ kind: "offline-cache", cachedAt: row.last_activity * 1000 } as const) : null;
+  const syncInfo = syncStatus ? syncGlyph(syncStatus) : null;
+  const tintedBorder = syncInfo && (syncInfo.colorKey === "warn" || syncInfo.colorKey === "danger");
+  const borderColor = tintedBorder ? hexToRgba(tokens[syncInfo!.colorKey], 0.3) : tokens.border;
+
   return (
     <Animated.View style={entrance}>
-      <Animated.View style={strike.style}>
+      <Animated.View style={[strike.style, styles.wrap]}>
         {/* Keep Resume and Archive as sibling controls. Nesting the archive Pressable inside the
             row Pressable renders <button><button /></button> on web and breaks hydration. */}
-        <View style={[styles.rowBg, { backgroundColor: tokens.bg1 }]}>
+        <View style={[styles.card, { backgroundColor: tokens.bg2, borderColor }]}>
           <Pressable
             onPress={resumeRow}
             onPressIn={strike.onPressIn}
@@ -128,21 +141,9 @@ function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
               <View style={[styles.footerRow, !row.archived ? styles.footerWithArchive : undefined]}>
                 <RelativeTime timestampMs={row.last_activity * 1000} />
                 <View style={styles.metaRight}>
-                  <Text style={[type.meta, { color: tokens.ink3 }]}>{row.message_count} msgs</Text>
-                  {row.cost_usd > 0 ? <Text style={[type.meta, { color: tokens.success }]}>{formatCost(row.cost_usd)}</Text> : null}
-                  {anywhereSignedIn ? (
-                    // Forge Anywhere: no relay sync has happened for any real session yet,
-                    // so every row is honestly rendered via SyncGlyph's "offline-cache" kind
-                    // (glyph "◌") — the closest existing SyncStatus for "local only, nothing
-                    // has round-tripped through the relay" — paired with our own "local only"
-                    // label. The glyph itself is the real shared component, so once real
-                    // per-row sync events land (synced/uploading/conflict/etc.), swapping in
-                    // the real SyncStatus here makes the full state range light up for free.
-                    <View style={styles.syncMeta}>
-                      <SyncGlyph status={{ kind: "offline-cache", cachedAt: row.last_activity * 1000 }} showText={false} />
-                      <Text style={[type.meta, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>local only</Text>
-                    </View>
-                  ) : null}
+                  <Text style={[type.meta, styles.mono, { color: tokens.ink3 }, tabularNums]}>{row.message_count} msgs</Text>
+                  {row.cost_usd > 0 ? <Text style={[type.meta, styles.mono, { color: tokens.success }, tabularNums]}>{formatCost(row.cost_usd)}</Text> : null}
+                  {syncStatus ? <SyncGlyph status={syncStatus} /> : null}
                 </View>
               </View>
             </View>
@@ -150,7 +151,6 @@ function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
           {!row.archived ? <Pressable style={styles.archiveButton} onPress={() => onArchive(row)} accessibilityRole="button" accessibilityLabel={`Archive ${title}`} hitSlop={space.space8}><Archive size={16} strokeWidth={1.75} color={tokens.ink3} /></Pressable> : null}
         </View>
       </Animated.View>
-      <View style={[styles.separator, { backgroundColor: tokens.border }]} />
     </Animated.View>
   );
 }
@@ -271,21 +271,9 @@ export default function HistoryScreen() {
         autoCorrect={false}
         containerStyle={styles.search}
       />
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.filtersScroll}
-        contentContainerStyle={styles.filters}
-      >
-        {FILTERS.map((option) => (
-          <Chip
-            key={option.value}
-            label={option.label}
-            selected={filter === option.value}
-            onPress={() => setFilter(option.value)}
-          />
-        ))}
-      </ScrollView>
+      <View style={styles.filters}>
+        <Segmented options={FILTERS} value={filter} onChange={setFilter} testID="history-filter" />
+      </View>
       {/* Forge Anywhere: design calls for a sync-state banner here (retrying/offline/
           storage-full/key-update) sourced from useAnywhere().account.syncBanner, storage-
           full linking to /anywhere/storage. AnywhereAccount (lib/anywhere/types.ts) has no
@@ -364,25 +352,26 @@ const styles = StyleSheet.create({
   screenPad: { paddingTop: space.space12 },
   search: { marginBottom: space.space8 },
   // A horizontal ScrollView stretches on its cross-axis inside a flex column on
-  // react-native-web (harmless on native), ballooning to fill the screen and
-  // shoving the list far down — the History "empty gap". Pin it to its content height.
-  filtersScroll: { flexGrow: 0, flexShrink: 0 },
-  filters: { gap: space.space8, paddingBottom: space.space8 },
+  // History "empty gap" note no longer applies (the horizontal Chip ScrollView is gone,
+  // replaced by a full-width Segmented control) — kept as the bottom-margin wrapper.
+  filters: { paddingBottom: space.space8 },
   listPad: { paddingBottom: space.space32 },
-  rowBg: { position: "relative" },
+  // Machined card row (gap-separated, bordered) — replaces the old hairline-separated
+  // de-boxed row so History matches the same bordered-card list treatment as Fleet.
+  wrap: { paddingHorizontal: space.space16, paddingTop: space.space4, paddingBottom: space.space8 },
+  card: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius4, overflow: "hidden" },
   inner: {
     paddingHorizontal: space.space16,
     paddingVertical: space.space16,
     gap: space.space8,
   },
-  separator: { height: StyleSheet.hairlineWidth, marginLeft: space.space16 },
   headerRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   title: { flex: 1 },
   cwd: {},
   footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   footerWithArchive: { paddingRight: space.space32 },
   metaRight: { flexDirection: "row", alignItems: "center", gap: space.space8 },
-  syncMeta: { flexDirection: "row", alignItems: "center", gap: space.space4 },
+  mono: { fontFamily: monoFamily.regular },
   archiveButton: { position: "absolute", right: space.space16, bottom: space.space16 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonGap: { marginTop: space.space8 },

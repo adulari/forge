@@ -13,8 +13,8 @@ import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client
 import { useFonts } from "expo-font";
 import { Redirect, Stack, usePathname } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
-import React, { useEffect, useMemo } from "react";
-import { ActivityIndicator, View } from "react-native";
+import React, { useEffect, useMemo, useState } from "react";
+import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
@@ -26,7 +26,10 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Screen } from "../components/ds/Screen";
 import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
-import { ExpandedFleetRail } from "../components/fleet/DesktopDrillDown";
+import { DockHost } from "../components/shell/DockHost";
+import { IconRail } from "../components/shell/IconRail";
+import { QuickComposer } from "../components/shell/QuickComposer";
+import { Sidebar } from "../components/shell/Sidebar";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
 import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
@@ -36,10 +39,19 @@ import { initHaptics } from "../lib/haptics";
 import { isTauri, isWeb } from "../lib/platform";
 import { checkForDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
-import { useGlobalShortcuts } from "../lib/shortcuts";
+import {
+  useGlobalShortcuts,
+  useQuickComposerHotkey,
+  useSidebarCollapseHotkey,
+  useUsageDockHotkey,
+} from "../lib/shortcuts";
 import { ThemeProvider, useTokens } from "../theme/ThemeProvider";
 import { monoFamily } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
+
+const SIDEBAR_COLLAPSED_KEY = "forge.sidebarCollapsed";
+const SIDEBAR_WIDTH = 232;
+const ICON_RAIL_WIDTH = 48;
 
 // Keep the native splash up until pairing state resolves (avoids a flash of the
 // "unpaired" redirect before AuthProvider finishes its one AsyncStorage/secure-store read).
@@ -78,6 +90,33 @@ function RootNavigator() {
   const { isExpanded } = useBreakpoint();
   const pathname = usePathname();
   const railless = RAILLESS_ROUTES.test(pathname);
+
+  // Machined wave 2 shell chrome — sidebar collapse (persisted), the usage dock, and
+  // the quick composer all live here (not in Sidebar/IconRail/DockHost themselves)
+  // because MasterDetail needs `collapsed` to size its rail BEFORE it renders either
+  // rail component (see ds/MasterDetail.tsx's `railWidth` prop). Registering the
+  // hotkeys unconditionally is harmless — the chrome they toggle only ever renders
+  // below, gated on `isPaired && isExpanded`.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [dockOpen, setDockOpen] = useState(false);
+  const [quickComposerOpen, setQuickComposerOpen] = useState(false);
+
+  useEffect(() => {
+    void AsyncStorage.getItem(SIDEBAR_COLLAPSED_KEY).then((raw) => {
+      if (raw === "true") setSidebarCollapsed(true);
+    });
+  }, []);
+
+  const toggleSidebarCollapsed = () => {
+    setSidebarCollapsed((collapsed) => {
+      const next = !collapsed;
+      void AsyncStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next)).catch(() => undefined);
+      return next;
+    });
+  };
+  useSidebarCollapseHotkey(toggleSidebarCollapsed);
+  useUsageDockHotkey(() => setDockOpen((open) => !open));
+  useQuickComposerHotkey(() => setQuickComposerOpen(true));
 
   useEffect(() => {
     if (!isLoading) {
@@ -121,12 +160,22 @@ function RootNavigator() {
     </Stack>
   );
 
+  const rail = railless ? null : sidebarCollapsed ? (
+    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={() => setDockOpen((open) => !open)} />
+  ) : (
+    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={() => setDockOpen((open) => !open)} />
+  );
+
   return (
     <>
       {isPaired && isExpanded ? (
         <>
-          {isWeb && !isTauri ? <WebTopBar /> : null}
-          <MasterDetail master={railless ? null : <ExpandedFleetRail />} detail={appStack} />
+          {isWeb && !isTauri ? <WebTopBar onToggleDock={() => setDockOpen((open) => !open)} dockOpen={dockOpen} /> : null}
+          <View style={styles.shellRow}>
+            <MasterDetail master={rail} detail={appStack} railWidth={sidebarCollapsed ? ICON_RAIL_WIDTH : SIDEBAR_WIDTH} />
+            <DockHost open={dockOpen && !railless} onClose={() => setDockOpen(false)} />
+          </View>
+          <QuickComposer visible={quickComposerOpen} onClose={() => setQuickComposerOpen(false)} />
         </>
       ) : (
         appStack
@@ -138,6 +187,10 @@ function RootNavigator() {
     </>
   );
 }
+
+const styles = StyleSheet.create({
+  shellRow: { flex: 1, flexDirection: "row" },
+});
 
 export default function RootLayout() {
   const persistOptions = useMemo(() => ({ persister: asyncStoragePersister }), []);

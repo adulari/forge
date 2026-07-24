@@ -28,7 +28,6 @@ import { useTheme } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, shadowStyle, space, tapTarget } from "../../theme/tokens";
 import { type, webInputTextStyle } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
-import { HeatEdge } from "../ds/HeatEdge";
 import { IconButton } from "../ds/IconButton";
 import { useToast } from "../ds/ToastHost";
 import {
@@ -109,6 +108,10 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     suppressedSuggestion,
     setSuppressedSuggestion,
     composerFocusSignal,
+    // Read-only display only (D Main / M Session Chat control row: model + effort chip) — no
+    // new picker interaction is wired here, since there's no existing mid-session model/effort
+    // switch behavior to preserve ("restyle only, keep ALL existing behavior").
+    snapshot,
   } = useSessionCtx();
   const toast = useToast();
   const [recording, setRecording] = useState(false);
@@ -526,24 +529,44 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
       ) : (
         <View
           style={[
-            styles.row,
+            styles.composerCard,
             {
               backgroundColor: tokens.bg2,
               borderColor: focused ? tokens.accent : tokens.borderStrong,
-              // Preserve the web rest-state centering, then pin controls beside the newest
-              // line once it grows. Native height belongs to the mirror, so controls stay
-              // bottom-aligned without feeding a measured height back through JavaScript.
-              alignItems:
-                Platform.OS === "web"
-                  ? height > MIN_HEIGHT
-                    ? "flex-end"
-                    : "center"
-                  : "flex-end",
             },
             shadowStyle(depth.sheet),
           ]}
         >
-          <HeatEdge active={busy} />
+          {snapshot?.model || snapshot?.effort ? (
+            <View style={styles.metaRow}>
+              {snapshot?.model ? (
+                <View style={[styles.metaChip, { borderColor: tokens.border }]}>
+                  <Text style={[type.monoMeta, { color: tokens.ink2 }]} numberOfLines={1}>{snapshot.model}</Text>
+                </View>
+              ) : null}
+              {snapshot?.effort ? (
+                <View style={[styles.metaChip, { borderColor: tokens.border }]}>
+                  <Text style={[type.monoMeta, { color: tokens.ink3 }]} numberOfLines={1}>{`effort · ${snapshot.effort}`}</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+          <View
+            style={[
+              styles.row,
+              {
+                // Preserve the web rest-state centering, then pin controls beside the newest
+                // line once it grows. Native height belongs to the mirror, so controls stay
+                // bottom-aligned without feeding a measured height back through JavaScript.
+                alignItems:
+                  Platform.OS === "web"
+                    ? height > MIN_HEIGHT
+                      ? "flex-end"
+                      : "center"
+                    : "flex-end",
+              },
+            ]}
+          >
           <IconButton
             icon={<ImageIcon size={20} strokeWidth={1.75} color={tokens.ink2} />}
             onPress={onAttachImage}
@@ -634,6 +657,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
             accessibilityLabel={busy ? "stop" : online ? "send" : "queue — will send on reconnect"}
             style={[styles.sendCircle, { backgroundColor: busy ? tokens.danger : canSend ? tokens.accent : tokens.bg3 }]}
           />
+          </View>
         </View>
       )}
       {!online && !recording ? (
@@ -655,16 +679,33 @@ const styles = StyleSheet.create({
   chipsRow: { flexDirection: "row", gap: space.space8, paddingRight: space.space12 },
   commandScroll: { flexGrow: 0, flexShrink: 0 },
   chipThumb: { width: 20, height: 20, borderRadius: radii.radius4 },
+  // D Main / M Session Chat composer: one bordered card (radius4, hairline) wrapping the
+  // optional model/effort meta row and the icon+input control row beneath it.
+  composerCard: {
+    borderWidth: 1,
+    borderRadius: radii.radius8,
+    overflow: "hidden",
+  },
+  metaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space8,
+    paddingHorizontal: space.space8,
+    paddingTop: space.space8,
+  },
+  metaChip: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radii.radius4,
+    paddingHorizontal: space.space8,
+    paddingVertical: 3,
+  },
   row: {
     position: "relative",
     flexDirection: "row",
     gap: space.space4,
-    borderWidth: 1,
-    borderRadius: radii.radius12 + 2,
     paddingLeft: space.space4,
     paddingRight: space.space4,
     paddingVertical: space.space4,
-    overflow: "hidden",
   },
   input: {
     flex: 1,
@@ -696,7 +737,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.space8,
     paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2,
   },
-  sendCircle: { borderRadius: radii.radiusPill, width: tapTarget, height: tapTarget },
+  // Machined: square-ish accent send button, not a full circle — radius4 is the compressed
+  // 3px step (see tokens.ts comment on the radii scale).
+  sendCircle: { borderRadius: radii.radius4, width: tapTarget, height: tapTarget },
   actionIcon: { width: 20, height: 20, alignItems: "center", justifyContent: "center" },
   actionLayer: { position: "absolute" },
   offlineHint: { paddingLeft: space.space4 },
