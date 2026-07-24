@@ -42,6 +42,14 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
 
+/** Human-readable encrypted-storage usage that always includes the account cap when known. */
+export function formatStorageUsage(usedBytes: number, limitBytes: number): string {
+  const used = Math.max(0, usedBytes);
+  const limit = Math.max(0, limitBytes);
+  if (limit === 0) return `${formatBytes(used)} used`;
+  return `${formatBytes(used)} of ${formatBytes(limit)} used`;
+}
+
 export interface EntitlementBadgeInfo {
   label: string;
   tone: BadgeTone;
