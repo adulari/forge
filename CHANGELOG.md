@@ -6,6 +6,40 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-07-24
+
+### Added
+
+- `forge run` accepts repeatable `--system` / `--append-system-prompt` instructions that reach the
+  provider without polluting Model Mesh classification
+  (`crates/forge-cli/src/cli/args.rs`, `crates/forge-cli/src/cli/commands/run/dispatch.rs`).
+- Embedded API routing classifies the active user message plus bounded current-turn tool results
+  while excluding system and developer content (`crates/forge-cli/src/api_serve.rs`,
+  `crates/forge-core/src/llm_router.rs`).
+- Model Mesh exposes documented fixed-classifier and activity-focused controls through configuration
+  and `/config` (`crates/forge-config/src/lib.rs`, `docs/features/mesh-routing.md`).
+
+### Changed
+
+- Referential follow-ups such as “continue” retain the prior task complexity they depend on, while
+  independent turns route from the new task instead of stale conversation complexity
+  (`crates/forge-core/src/llm_router.rs`, `crates/forge-mesh/src/lib.rs`).
+- LLM classification now uses a fixed capable model at zero temperature and falls back to the
+  deterministic contextual heuristic instead of recursively routing the classifier itself
+  (`crates/forge-core/src/llm_router.rs`).
+
+### Fixed
+
+- Large injected assistant, skill, and on-screen system prompts no longer promote trivial Helm,
+  Forge API, or CLI requests to the complex tier (`crates/forge-cli/src/api_serve.rs`,
+  `crates/forge-core/src/llm_router.rs`).
+- `forge init` project setup is treated as mutating and can create missing repository guidance
+  files instead of being denied by incidental read-only wording
+  (`crates/forge-cli/src/cli/commands/run/dispatch.rs`, `crates/forge-core/src/turn_contract.rs`).
+- Cross-platform real-provider smoke coverage again exercises a supported production route, and
+  shared mobile, desktop, and web render failures emit only the existing privacy-safe anonymous
+  release-health code (`.github/workflows/e2e.yml`, `mobile/src/lib/anonymousTelemetry.ts`).
+
 ## [2.8.5] - 2026-07-23
 
 ### Added
@@ -2762,7 +2796,9 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.8.4...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.9.0...HEAD
+[2.9.0]: https://github.com/Adulari/forge/compare/v2.8.5...v2.9.0
+[2.8.5]: https://github.com/Adulari/forge/compare/v2.8.4...v2.8.5
 [2.8.4]: https://github.com/Adulari/forge/compare/v2.8.3...v2.8.4
 [2.8.3]: https://github.com/Adulari/forge/compare/v2.8.2...v2.8.3
 [2.8.2]: https://github.com/Adulari/forge/compare/v2.8.1...v2.8.2
