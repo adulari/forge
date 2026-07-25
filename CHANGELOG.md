@@ -6,6 +6,26 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.10.1] - 2026-07-25
+
+Ships everything listed under 2.10.0 below. **2.10.0 was tagged but never published**: its
+Windows desktop bundle failed to build, and the release-publication guard added in that same
+version correctly refused to publish a release missing an installer-required asset, so it stayed
+an unpublished draft rather than becoming a broken "latest". This is that release, with the
+Windows failure fixed.
+
+### Fixed
+
+- **Every Windows desktop build failed in `expo export`** with `SyntaxError: Invalid regular
+  expression … Unterminated character class`, which failed the whole five-platform desktop
+  release. The `src-tauri/target` exclusion rebuilt `config.resolver.blockList` by passing it
+  through `exclusionList()`, but Expo's default is already a finished array of RegExps — one
+  being `/^(?:android[\\/]app[\\/]build|…)$/` — and `exclusionList` rewrites `\/` to
+  `\` + `path.sep` in every pattern's source. On Windows that turns each `[\\/]` separator class
+  into `[\\\]`, so merely requiring `metro.config.js` threw before any bundling began. On Linux
+  and macOS `path.sep` is `/`, the rewrite is a no-op, and the defect is invisible — which is why
+  it passed every local check and every non-Windows job (`mobile/metro.config.js`).
+
 ## [2.10.0] - 2026-07-25
 
 ### Added
@@ -2849,7 +2869,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.10.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.10.1...HEAD
+[2.10.1]: https://github.com/Adulari/forge/compare/v2.9.1...v2.10.1
 [2.10.0]: https://github.com/Adulari/forge/compare/v2.9.1...v2.10.0
 [2.9.1]: https://github.com/Adulari/forge/compare/v2.9.0...v2.9.1
 [2.9.0]: https://github.com/Adulari/forge/compare/v2.8.5...v2.9.0
