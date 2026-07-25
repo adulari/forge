@@ -373,12 +373,20 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
 
   // Web: Enter=send / Shift+Enter=newline + paste-image. Bound directly to the underlying DOM
   // node (RN-Web's TextInput ref IS that node) since RN's onKeyPress doesn't expose `shiftKey`.
+  // `recording` is a required dep, not an oversight: below, `recording ? <VoiceRecordingPill/>
+  // : <View>…<TextInput ref={inputRef}/>…</View>` unmounts the TextInput while recording and
+  // remounts a BRAND NEW `<textarea>` node when it ends. Without `recording` here, the effect
+  // never re-runs on that transition, so `node` stays pinned to the old, now-detached element —
+  // the live textarea has no listeners at all. Keying on `recording` (not e.g. re-binding every
+  // render) means it only re-runs on that mount/unmount edge, not on every keystroke.
   useEffect(() => {
     if (Platform.OS !== "web") return;
     const node = inputRef.current as unknown as HTMLTextAreaElement | null;
     if (!node) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
+      // An IME candidate-confirming Enter (CJK input) must only confirm the candidate, not send.
+      if (e.isComposing) return;
       // Enter (no Shift) already sends; ⌘/Ctrl+Enter (T5.1 alias) sends too, even in the
       // edge case both modifiers are held at once, so the desktop shortcut always works.
       if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) {
@@ -401,7 +409,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
       node.removeEventListener("paste", onPasteEvt);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+  }, [sessionId, recording]);
 
   // Web ghost text: plain Tab accepts the live suggestion into the (editable) draft — never
   // auto-sends. Document-level (not the input node) so it also fires when nothing is focused

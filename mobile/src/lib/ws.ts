@@ -422,9 +422,20 @@ export function useSessionSocket(
 
     // Web has no AppState lifecycle — branch on the DOM's visibilitychange directly.
     if (Platform.OS === "web") {
+      // `appStateRef` gates the liveness watchdog, and on web the AppState listener below never
+      // runs — so the ref would keep forever whatever `AppState.currentState` reported at mount.
+      // react-native-web derives that from `document.visibilityState`, which is "hidden" for a tab
+      // opened in the background (⌘-click, session restore): the watchdog would then be disabled
+      // for the whole life of the page and a half-open socket would freeze the session silently.
+      // Mirror the DOM's visibility into the ref instead — seeded now, updated on every change.
+      const syncAppState = (hidden: boolean) => {
+        appStateRef.current = hidden ? "background" : "active";
+      };
       const wasHidden = { current: document.visibilityState === "hidden" };
+      syncAppState(wasHidden.current);
       const onVisibilityChange = () => {
         const isHidden = document.visibilityState === "hidden";
+        syncAppState(isHidden);
         if (isHidden && !wasHidden.current) {
           goBackground();
         } else if (!isHidden && wasHidden.current) {

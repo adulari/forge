@@ -7,6 +7,8 @@
 // only re-renders the menu from it. That also keeps the privacy rule in one place — the summary
 // arrives already generic for Anywhere-routed/locked sessions (see `desktopNotify.ts`), so
 // there is no path by which locked content can reach the tray.
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Runtime};
@@ -14,6 +16,15 @@ use tauri::{AppHandle, Runtime};
 use crate::menu;
 
 pub const TRAY_ID: &str = "forge";
+
+/// Whether the menu-bar extra actually came up. `lib.rs` only keeps the app alive past its last
+/// window when it did — parking Forge in a tray that does not exist would leave a running
+/// process with no surface at all.
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+pub fn is_installed() -> bool {
+    INSTALLED.load(Ordering::Relaxed)
+}
 
 pub const TRAY_OPEN: &str = "tray:open";
 pub const TRAY_QUICK_COMPOSER: &str = "tray:quick-composer";
@@ -133,7 +144,14 @@ fn apply<R: Runtime>(app: &AppHandle<R>, summary: &TraySummary) -> tauri::Result
         .item(&MenuItemBuilder::with_id(TRAY_OPEN, "Open Forge").build(app)?)
         .item(&MenuItemBuilder::with_id(TRAY_QUICK_COMPOSER, "Quick Composer").build(app)?)
         .separator()
-        .quit()
+        // Windows and Linux never get the application menu bar (`lib.rs` installs it on macOS
+        // only), so without this row the About panel — and with it Documentation / Report an
+        // Issue / Acknowledgements — is unreachable on two of the three desktop targets.
+        .item(&MenuItemBuilder::with_id(menu::APP_ABOUT, "About Forge").build(app)?)
+        // Deliberately not `PredefinedMenuItem::quit`: see the identical item in `menu.rs`.
+        // Closing the window no longer exits, so this is the exit, and it has to be the one
+        // `lib.rs`'s prevent-exit guard lets through.
+        .item(&MenuItemBuilder::with_id(menu::APP_QUIT, "Quit Forge").build(app)?)
         .build()?;
 
     tray.set_menu(Some(menu))?;
@@ -160,6 +178,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         builder = builder.icon(icon);
     }
     builder.build(app)?;
+    INSTALLED.store(true, Ordering::Relaxed);
     apply(app, &TraySummary::default())
 }
 

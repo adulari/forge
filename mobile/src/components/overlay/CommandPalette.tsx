@@ -238,6 +238,12 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
 
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  // Ref to the SearchField's wrapping DOM node — lets the window keydown handler below tell
+  // "typing in the palette's own search box" apart from "typing in some other input", the same
+  // distinction Composer.tsx makes for its own TextInput at lines 419/460. SearchField/Input
+  // don't forward a ref to the underlying <input> (out of scope here), so this wraps one level
+  // up and uses `.contains()` instead of an identity check.
+  const searchFieldRef = useRef<React.ComponentRef<typeof View>>(null);
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
   const [whatsNewVisible, setWhatsNewVisible] = useState(false);
   const [schedulesVisible, setSchedulesVisible] = useState(false);
@@ -635,7 +641,13 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
         return;
       }
       const target = e.target as HTMLElement | null;
-      const isEditing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable;
+      // The autofocused SearchField is itself an <input> — without this exemption `isEditing`
+      // is true the instant the palette opens, and Arrow/Enter never reach the branches below.
+      const searchNode = searchFieldRef.current as unknown as HTMLElement | null;
+      const withinSearchField = !!(target && searchNode?.contains(target));
+      const isEditing =
+        !withinSearchField &&
+        (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable);
       if (isEditing) return;
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -738,7 +750,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
   const body = (
     <View style={[styles.body, { paddingTop: Math.max(12, insets.top) }]}>
       <View style={styles.searchWrap}>
-        <View style={styles.searchField}>
+        <View style={styles.searchField} ref={searchFieldRef}>
           <SearchField
             value={query}
             onChangeText={setQuery}

@@ -88,7 +88,13 @@ fn browse<F: FnMut() -> Vec<TranscriptView>>(
                     scroll,
                     a.height,
                     a.width,
-                    wrapped.expect("selected view has wrapped rows"),
+                    // `views` can legitimately be EMPTY (a task list with no subagents ⇒
+                    // `activity_views()` returns nothing), in which case `views.get(selected)` is
+                    // None. This used to `.expect(…)` and panic INSIDE `term.draw`, killing the
+                    // whole session mid-turn with the terminal still in raw mode.
+                    // `transcript_lines_from_wrapped` already renders a "no activity yet"
+                    // placeholder for empty `views`, so hand it an empty slice and let it.
+                    wrapped.map_or(&[][..], Vec::as_slice),
                 )),
                 a,
             );
@@ -414,6 +420,26 @@ mod tests {
     fn empty_views_render_placeholder() {
         let txt = render(&transcript_lines(&[], 0, 0, 10, 80));
         assert!(txt.contains("no activity"));
+    }
+
+    #[test]
+    fn browse_with_an_empty_activity_list_renders_instead_of_panicking() {
+        // Regression: opening the inline viewer with an empty activity list (a task list with no
+        // subagents ⇒ `activity_views()` returns nothing) made `views.get(selected)` None, and
+        // `browse` `.expect()`ed on it INSIDE `term.draw` — panicking the whole session mid-turn.
+        // This is the exact expression `browse` now evaluates.
+        let views: Vec<TranscriptView> = Vec::new();
+        // What `browse`'s `views.get(selected).map(|view| …wrap…)` yields for an empty list.
+        let wrapped: Option<&Vec<TextLine<'static>>> = None;
+        let out = transcript_lines_from_wrapped(
+            &views,
+            0,
+            0,
+            24,
+            80,
+            wrapped.map_or(&[][..], Vec::as_slice),
+        );
+        assert!(render(&out).contains("no activity"));
     }
 
     #[test]

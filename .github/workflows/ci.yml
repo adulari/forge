@@ -49,6 +49,11 @@ jobs:
         run: bash scripts/ci/test-eas-ota-safety.sh
       - name: Test runner resource budgets
         run: bash scripts/ci/test-runner-resource-budget.sh
+      # Static contract between the release workflows and the published one-line installers: the
+      # CLI half stays a draft, app-desktop.yml publishes it, the manifest covers every filename
+      # an installer asks for, and Latest moves only after the public bytes verify (#837).
+      - name: Test desktop release publication contract
+        run: bash scripts/ci/test-desktop-release-publication.sh
 
   anywhere-policy:
     name: anywhere plaintext-canary harness

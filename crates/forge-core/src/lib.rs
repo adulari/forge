@@ -315,6 +315,22 @@ pub(crate) fn severity_meets(finding_sev: forge_types::Severity, threshold: &str
     finding_sev.weight() >= min_weight
 }
 
+/// Adopt a post-turn re-drive's answer into the turn's `final_text` — but ONLY when the re-drive
+/// actually produced one.
+///
+/// A re-drive (autofix, empty-diff nudge, test-edit guard, stop-hook continuation) re-enters
+/// [`Session::run_model_loop`], whose `final_text` starts empty and STAYS empty whenever that inner
+/// loop ends via a repetition/failure guard halt, the empty-response dead-end, or the step cap.
+/// Assigning it unconditionally destroyed the primary turn's real answer: Forge emitted
+/// `Done { final_text: "" }` and returned an empty `LoopOutcome`, so `forge_chat` handed its caller
+/// an empty response and the TUI's final answer block was blank — for work that HAD been done.
+/// This matches the self-review pass, which deliberately keeps the original answer text.
+fn adopt_redrive_text(final_text: &mut String, redrive_text: String) {
+    if !redrive_text.trim().is_empty() {
+        *final_text = redrive_text;
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
     #[error(transparent)]
@@ -329,8 +345,20 @@ pub enum CoreError {
     SessionNotFound(String),
     #[error("invalid session workspace: {0}")]
     Workspace(String),
-    #[error("no healthy model available: every routed/fallback model is rate-limited or down")]
-    NoHealthyModel,
+    /// Failover walked the whole routed/fallback chain (and the last-resort model) without finding
+    /// anything usable. Carries the LAST provider error: the generic "everything is rate-limited"
+    /// story is wrong (and actively misleading) when the real cause was an expired credential or a
+    /// permanent capability failure, and the provider's message is the actionable part —
+    /// e.g. "ChatGPT OAuth token rejected (401) — run `forge auth codex-oauth` to sign in again".
+    #[error(
+        "no healthy model available — every routed/fallback model is rate-limited or down; \
+             last error from {model} ({reason}): {last_error}"
+    )]
+    NoHealthyModel {
+        model: String,
+        reason: &'static str,
+        last_error: String,
+    },
     /// The auto-review gate found findings at/above the configured severity and `gate_mode =
     /// "block"` is set — the turn is aborted so the model can fix them before proceeding.
     #[error("auto-review gate blocked: {0}")]
@@ -3565,7 +3593,7 @@ Rules:\n\
                     .model_for(forge_types::TaskTier::Complex)
                     .map(str::to_string)
             })
-            .unwrap_or_else(|| "anthropic::claude-opus-4-8".to_string())
+            .unwrap_or_else(|| "anthropic::claude-opus-5".to_string())
     }
 
     /// The first configured candidate for `tier` whose provider has a key — keyless providers
@@ -3601,7 +3629,7 @@ Rules:\n\
                     .model_for(forge_types::TaskTier::Standard)
                     .map(str::to_string)
             })
-            .unwrap_or_else(|| "anthropic::claude-opus-4-8".to_string())
+            .unwrap_or_else(|| "anthropic::claude-opus-5".to_string())
     }
 
     fn auxiliary_model(&self, routed: &forge_mesh::RoutingDecision) -> String {
@@ -5445,7 +5473,23 @@ prompt text, nothing else.";
                                     transient_retries = 0;
                                     continue;
                                 }
-                                None => return Err(CoreError::NoHealthyModel),
+                                // Nothing left to try. The per-hop failure only ever surfaced as a
+                                // status-bar `ModelSearch`, so without this the provider's real,
+                                // actionable message (expired credential, capability failure) was
+                                // dropped and the user was told to wait out a rate limit that
+                                // doesn't exist. Mirror `advance_fallback`'s terminal warning and
+                                // carry the error into the returned CoreError.
+                                None => {
+                                    let reason = e.reason();
+                                    self.presenter.emit(PresenterEvent::Warning(format!(
+                                        "{active_model} {reason} — model chain exhausted: {e}"
+                                    )));
+                                    return Err(CoreError::NoHealthyModel {
+                                        model: active_model.clone(),
+                                        reason,
+                                        last_error: e.to_string(),
+                                    });
+                                }
                             },
                         }
                     }
@@ -6779,7 +6823,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                 stream_idle,
                             )
                             .await?;
-                        final_text = nudge_outcome.final_text;
+                        adopt_redrive_text(&mut final_text, nudge_outcome.final_text);
                         context_tokens = nudge_outcome.context_tokens;
                         active_model = nudge_outcome.active_model;
                         hit_step_cap = nudge_outcome.hit_step_cap;
@@ -6843,7 +6887,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     )
                     .await?;
                 // Leave whatever state the model chose; only the answer bookkeeping updates.
-                final_text = guard_outcome.final_text;
+                adopt_redrive_text(&mut final_text, guard_outcome.final_text);
                 context_tokens = guard_outcome.context_tokens;
                 active_model = guard_outcome.active_model;
                 hit_step_cap = guard_outcome.hit_step_cap;
@@ -6984,7 +7028,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                 stream_idle,
                             )
                             .await?;
-                        final_text = fix_outcome.final_text;
+                        adopt_redrive_text(&mut final_text, fix_outcome.final_text);
                         context_tokens = fix_outcome.context_tokens;
                         active_model = fix_outcome.active_model;
                         hit_step_cap = fix_outcome.hit_step_cap;
@@ -7098,7 +7142,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     stream_idle,
                 )
                 .await?;
-            final_text = cont_outcome.final_text;
+            adopt_redrive_text(&mut final_text, cont_outcome.final_text);
             context_tokens = cont_outcome.context_tokens;
             active_model = cont_outcome.active_model;
             hit_step_cap = cont_outcome.hit_step_cap;
@@ -17384,8 +17428,74 @@ mod tests {
         let (_store, mut session) = fixed_session(provider, router);
         assert!(matches!(
             session.run_turn("hi").await,
-            Err(CoreError::NoHealthyModel)
+            Err(CoreError::NoHealthyModel { .. })
         ));
+    }
+
+    #[test]
+    fn a_redrive_without_text_keeps_the_primary_answer() {
+        // Regression: the empty-diff nudge, test-edit guard, autofix and stop-hook re-drives each
+        // assigned their `final_text` unconditionally. A re-drive that ends on a loop-guard halt,
+        // the empty-response dead-end, or the step cap returns "" — which erased the answer the
+        // primary loop had already produced, so the turn reported an empty final answer for work
+        // that was actually done.
+        let mut answer = "here is what I changed".to_string();
+        adopt_redrive_text(&mut answer, String::new());
+        assert_eq!(
+            answer, "here is what I changed",
+            "empty re-drive must not erase"
+        );
+        adopt_redrive_text(&mut answer, "  \n\t ".to_string());
+        assert_eq!(
+            answer, "here is what I changed",
+            "whitespace-only re-drive must not erase"
+        );
+        adopt_redrive_text(&mut answer, "and here is the fix".to_string());
+        assert_eq!(
+            answer, "and here is the fix",
+            "a real re-drive answer still wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_exhaustion_reports_the_real_provider_error() {
+        // The generic "every model is rate-limited or down" story is WRONG (and sends the user off
+        // to wait out a nonexistent rate limit) when the real cause was an expired credential. The
+        // provider's actionable message must survive into the terminal error.
+        let provider = Arc::new(FlakyProvider {
+            bad: ["bad::model".to_string()].into_iter().collect(),
+            err: |_| {
+                forge_provider::ProviderError::Auth(
+                    "ChatGPT OAuth token rejected (401) — run `forge auth codex-oauth`".into(),
+                )
+            },
+        });
+        let router = Arc::new(FixedRouter {
+            model: "bad::model".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        let err = session.run_turn("hi").await.expect_err("chain exhausted");
+        let shown = err.to_string();
+        match err {
+            CoreError::NoHealthyModel {
+                model,
+                reason,
+                last_error,
+            } => {
+                assert_eq!(model, "bad::model");
+                assert_eq!(reason, "auth failed");
+                assert!(
+                    last_error.contains("forge auth codex-oauth"),
+                    "actionable provider message must survive: {last_error}"
+                );
+            }
+            other => panic!("expected NoHealthyModel, got {other}"),
+        }
+        assert!(
+            shown.contains("forge auth codex-oauth"),
+            "…and be visible in the Display string: {shown}"
+        );
     }
 
     // --- Conversation checkpoints + /undo (RFC session-management-and-commands, PR2) ---

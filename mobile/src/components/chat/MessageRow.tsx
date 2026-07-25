@@ -156,11 +156,18 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
       <Pressable
         onLongPress={onLongPress ? handleLongPress : undefined}
         {...webContextMenu}
+        // The row has no onPress — this Pressable exists purely to host long-press (native +
+        // touch-web) and right-click (desktop web, via webContextMenu above) message actions.
+        // RNW's Pressable defaults every instance to tabIndex 0 + cursor:pointer regardless,
+        // which turns every chat bubble into a Tab stop and makes prose read as a clickable
+        // link. Neither reflects a real keyboard/pointer affordance here, so both are overridden.
+        tabIndex={IS_WEB ? -1 : undefined}
         style={[
           styles.bubble,
           isUser
             ? [styles.userBubble, { backgroundColor: tokens.bg2, borderColor: tokens.border }]
             : { backgroundColor: "transparent" },
+          IS_WEB && (webTextCursor as object),
         ]}
       >
         {attachments && attachments.length > 0 ? <AttachmentRow attachments={attachments} /> : null}
@@ -184,6 +191,10 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
 }
 
 export const MessageRow = React.memo(MessageRowImpl);
+
+// Web-only: overrides Pressable's built-in `cursor: 'pointer'` (same untyped-CSS passthrough
+// escape hatch as Screen.tsx/BoundedList.tsx) so message text reads as selectable prose.
+const webTextCursor = { cursor: "text" };
 
 const styles = StyleSheet.create({
   row: { paddingHorizontal: space.space16, paddingVertical: space.space8 },

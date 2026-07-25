@@ -10,6 +10,7 @@
 // bring their own imports.
 #[cfg(not(target_os = "macos"))]
 use tauri::Manager;
+use tauri::{RunEvent, WindowEvent};
 
 mod about;
 mod menu;
@@ -68,8 +69,47 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| menu::handle_event(app, event.id().as_ref()))
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        // Closing the window parks Forge in the menu bar instead of ending the process. The
+        // tray's whole reason to exist (glance at a waiting decision while the app is in the
+        // background, per the D Tray design) needs the app to outlive its window, and ⌘W —
+        // bound twice in `menu.rs`, on File and on Window — means "close this window" to every
+        // macOS user, never "quit". Only "main" is intercepted: the About panel is disposable
+        // and `about::open` rebuilds it on demand.
+        //
+        // Gated on the tray having actually come up. Without it (a bare Linux session with no
+        // StatusNotifier host) hiding the sole window would leave Forge running with nothing
+        // left to click, which is strictly worse than the close-quits behaviour it replaces.
+        .on_window_event(|window, event| {
+            if window.label() != "main" || !tray::is_installed() {
+                return;
+            }
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| match event {
+            // Tauri ends the event loop the moment the last window is destroyed, tray icon or
+            // not, so hiding the window is only half the job. `code: None` is precisely that
+            // path — tauri-runtime-wry only sets `Some` for `AppHandle::exit`, which is how
+            // both Quit items (tray and the macOS Forge menu) leave, so this never makes the
+            // app unquittable.
+            RunEvent::ExitRequested {
+                code: None, api, ..
+            } if tray::is_installed() => {
+                api.prevent_exit();
+            }
+            // With no visible window macOS has no Dock preview to click through; the Dock icon
+            // reopen request is the OS's only "give me the window back" gesture.
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => menu::raise_main_window(_app),
+            _ => {}
+        });
 }
 
 /// WebKitGTK denies `getUserMedia()` unless the embedder handles its permission signal. Forge's

@@ -6,6 +6,37 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-07-25
+
+### Added
+
+- Claude Opus 5 (released 2026-07-24) is now a first-class model across the Model Mesh: bundled pricing, benchmark-backed ranking, frontier capability class, and the default Complex-tier model. Claude Sonnet 5 and Haiku 4.5 were also missing bundled prices — an unpriced model costs `$0.0`, so cost-tiered routing was treating the most expensive frontier models as the cheapest candidates (`crates/forge-mesh/src/pricing.rs`, `bench.rs`, `catalog.rs`, `crates/forge-config/src/lib.rs`, `crates/forge-core/src/lib.rs`).
+- `forge lattice roots`, `forge lattice prune <root> [--vacuum]` and `forge lattice prune --stale` — there was previously no supported way to remove an unwanted index root or reclaim its space (`crates/forge-cli/src/cli/commands/lattice.rs`).
+
+### Fixed
+
+- **Shell permission floor was bypassable by a newline.** The built-in, documented-as-unoverridable denylist split commands only on `;`, `&&`, `||`, `|` and `&`, so `git status\nrm -rf ~` stayed one segment, collapsed to a single flat string, matched no anchored pattern, and executed both statements. Newlines and carriage returns are now statement separators, backslash line-continuations stay one command, `$( … )`/backtick substitutions are recursed into, and heredoc bodies are treated as data unless fed to a shell. The remaining evasion classes (variable indirection, `eval`, base64-staged scripts, `xargs`/`find -exec`/`ssh` wrappers) are documented in the source: this is a floor against accidents and obvious mistakes, not a sandbox (`crates/forge-core/src/permission.rs`).
+- **The Lattice indexed the entire home directory.** `forge run`/`forge chat` built an index on the launch directory with no root check, so starting a session in `$HOME` walked the whole tree — 80,117 files and 1.44M symbols, 2.2 GB of Go-toolchain and Android-SDK symbols that were 77% of the database. The file watcher already refused `$HOME` and said so, while the indexer silently proceeded. Indexing now refuses the home directory and its ancestors outright, applies a file-count ceiling before writing any row, and skips toolchain/SDK trees (`crates/forge-index/src/root.rs`, `lib.rs`, `watch.rs`, `crates/forge-cli/src/cli/commands/run.rs`).
+- **Every Anthropic model was budgeted at the conservative 32k floor.** The `/v1/models` parser read a `context_window` field that the API does not return; the correct field is `max_input_tokens`. A 1M-token Opus was being treated as 32k for context assembly and trimming. The old unit test passed only because its fixture used the non-existent key (`crates/forge-cli/src/context_windows.rs`).
+- **Desktop releases could publish with no desktop artifacts at all.** `app-desktop.yml` is dispatched by the last step of the release job, which sat below the package-manager manifest work — so a single failure in that chain (run 29831376887 died on `gh workflow run codeql.yml` with HTTP 422) meant desktop bundles, `desktop-checksums.txt` and `latest.json` were never produced, and the documented installer aborted. The release is now published as a draft, the desktop/web dispatch runs immediately after, manifest bookkeeping moved to its own `needs: release` job, and the draft is flipped to published only once every installer-required asset exists. Manifest generation now enumerates all five platforms and fails closed — the two `.dmg` files were previously covered by nothing (`.github/workflows/release.yml`, `app-desktop.yml`, `ci.yml`).
+- The release-publication CI guard (`scripts/ci/test-desktop-release-publication.sh`) existed but was wired into no workflow, so it never ran. It is now part of CI and additionally asserts the draft handoff, publish ordering, and installer↔manifest filename parity.
+- Forge Voice and every file attachment failed before leaving the device when connected through Forge Anywhere on iOS/Android. The transport serialised request bodies via `new Request(...).arrayBuffer()`, which on React Native is whatwg-fetch — its `blob()` throws `could not read FormData body as blob`, and no content-type was set either. Multipart bodies are now encoded directly, handling web `Blob`/`File` and React Native byte adapters (`mobile/src/lib/transport/requestBody.ts`, `AnywhereTransport.ts`).
+- The terminal dock was permanently blank in the desktop app: the Tauri WebSocket shim never set `binaryType`, so every binary PTY frame decoded to an empty string. Opening the dock while an Anywhere host was selected threw synchronously out of a React effect and took down the whole app via the root error boundary; it now explains that the terminal needs a direct connection (`mobile/src/lib/transport/index.ts`, `mobile/src/components/shell/TerminalDock.tsx`).
+- Bottom sheets were hidden behind the iOS keyboard. Any sheet shorter than the keyboard — including the goal, fork, memory, checkpoint and schedule sheets — disappeared entirely when a field was focused, leaving only the scrim. Fixed once in the shared sheet so all callers benefit (`mobile/src/components/ds/Sheet.tsx`).
+- The Fleet tab's task composer — the only way to start a session on mobile — was covered by the iOS keyboard, and was also positioned a full safe-area too high because the inset was counted twice (`mobile/src/app/(tabs)/index.tsx`).
+- Command palette arrow-key and Enter navigation did nothing on web and desktop: the palette's own autofocused search field was treated as "editing" by the global key handler, which bailed out before reaching the navigation branches (`mobile/src/components/overlay/CommandPalette.tsx`).
+- The composer's Enter-to-send and paste-image handlers were bound to a detached DOM node after a voice recording ended, because the input remounts on that transition and the effect never re-ran. Enter during IME composition no longer sends a half-typed message (`mobile/src/components/chat/Composer.tsx`).
+- Mouse-wheel scrolling the transcript moved roughly 3px per notch in Firefox — the handler ignored `WheelEvent.deltaMode` — and swallowed horizontal gestures meant for nested scrollers such as code blocks (`mobile/src/components/ds/BoundedList.tsx`).
+- Every transcript message was a keyboard focus stop showing a pointer cursor on web, despite having no press action (`mobile/src/components/chat/MessageRow.tsx`).
+- The desktop split-pane divider was a 1px hit target with no resize cursor (`mobile/src/components/shell/SplitPanes.tsx`).
+- Opening the activity transcript viewer with an empty activity list panicked and killed the session (`crates/forge-tui/src/transcript.rs`).
+- Ctrl+O with a task list but no subagents captured every keystroke with no visible way out (`crates/forge-cli/src/cli/commands/run.rs`).
+- Post-turn re-drives (empty-diff nudge, test-edit guard, autofix, stop-hook continuation) overwrote a completed answer with an empty string (`crates/forge-core/src/lib.rs`).
+- A turn that exhausted the failover chain reported a generic cause and discarded the real provider error, hiding actionable messages such as an expired credential (`crates/forge-core/src/lib.rs`).
+- Desktop Settings reported the shared mobile client version instead of the installed desktop release. It now shows both, clearly labelled (`mobile/src/app/(tabs)/settings.tsx`, `mobile/src/lib/appVersion.ts`).
+- The WebSocket liveness watchdog stayed permanently disarmed on web when the page first loaded in a background tab, so a half-open socket froze the session view indefinitely (`mobile/src/lib/ws.ts`).
+- `npm run lint` failed locally on generated Tauri build artifacts under the gitignored `src-tauri/target`, producing warnings nobody could act on (`mobile/eslint.config.js`).
+
 ## [2.9.1] - 2026-07-24
 
 ### Fixed
@@ -2803,7 +2834,9 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.9.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.10.0...HEAD
+[2.10.0]: https://github.com/Adulari/forge/compare/v2.9.1...v2.10.0
+[2.9.1]: https://github.com/Adulari/forge/compare/v2.9.0...v2.9.1
 [2.9.0]: https://github.com/Adulari/forge/compare/v2.8.5...v2.9.0
 [2.8.5]: https://github.com/Adulari/forge/compare/v2.8.4...v2.8.5
 [2.8.4]: https://github.com/Adulari/forge/compare/v2.8.3...v2.8.4

@@ -96,11 +96,30 @@ build-provenance attestation identical to the source that is checked out and pub
 advances first, do not move the release tag; prepare a new version from the new head instead.
 
 `release.yml` also validates that the existing tag matches the workspace version, builds all five
-CLI/TUI targets + `checksums.txt`, attests and publishes the release, and
-opens an auto-merge PR that updates `Formula/forge.rb`, `packaging/aur/PKGBUILD`, and
-`packaging/aur/.SRCINFO`, and `bucket/forge.json` from those exact checksums. It then dispatches the
-transactional five-platform desktop build and static web export from protected `main`, both checking
-out the exact tag. Mobile source changes publish through the independent production OTA workflow.
+CLI/TUI targets + `checksums.txt`, attests them, and stages them into a **draft** release. It then
+immediately dispatches the transactional five-platform desktop build and static web export from
+protected `main`, both checking out the exact tag. A separate `manifests` job (`needs: release`)
+opens the auto-merge PR that updates `Formula/forge.rb`, `packaging/aur/PKGBUILD`,
+`packaging/aur/.SRCINFO`, and `bucket/forge.json` from those exact checksums. That split is
+deliberate: the manifest chain is several independently flaky operations, and while it lived above
+the dispatch in the same job any one of them failing meant the tag never got desktop or web
+artifacts at all. A red `manifests` job is still a failed release, but it can no longer starve the
+artifacts. Mobile source changes publish through the independent production OTA workflow.
+
+The release stays a draft until `app-desktop.yml` has attached the five desktop bundles,
+`desktop-checksums.txt`, and `latest.json`; that workflow flips it to published, verifies the
+public CDN bytes of both manifests, and only then moves GitHub's Latest pointer. Nothing about the
+new version is publicly resolvable before that — no release page, no `releases/latest`, no
+`releases/download/vX.Y.Z/...`. This is what keeps `install-desktop.sh` and the Tauri updater from
+resolving a version whose `desktop-checksums.txt`/`latest.json` have not been uploaded yet.
+
+**If the desktop matrix fails, the release deliberately remains a draft.** Nothing ships, the
+previous release stays Latest and installable, and the red `app-desktop` run is the signal. Fix the
+cause and re-dispatch (see below) — do not publish the draft by hand; that reintroduces exactly the
+partially-populated release the draft exists to prevent. Until the draft publishes, the
+`dist/vX.Y.Z` manifest PR references download URLs that 404; it is safe to let it merge, but do not
+announce Homebrew/Scoop availability before the release is published.
+
 Because the manifest PR is created with `GITHUB_TOKEN`, `release.yml` explicitly dispatches every
 branch-protection workflow on its branch before enabling auto-merge.
 The x86-64 and ARM64 Linux legs run inside the same digest-pinned Debian Bullseye container and
@@ -108,7 +127,7 @@ enforce glibc 2.31, GLIBCXX 3.4.28, and no-ALSA ceilings before uploading either
 Wait for the CLI, desktop, web, and package-manifest runs to finish:
 
 ```bash
-gh release view vX.Y.Z --json assets
+gh release view vX.Y.Z --json isDraft,assets   # isDraft must be false once app-desktop finished
 gh pr list --state all --head dist/vX.Y.Z
 ```
 
@@ -127,7 +146,10 @@ exact existing tag, then transactionally republishes the complete platform set.
 
 ## 7. Verify
 
-- `gh release view vX.Y.Z` shows latest with 5 CLI archives + checksums and desktop assets.
+- `gh release view vX.Y.Z` shows a published (non-draft) latest release with 5 CLI archives +
+  `checksums.txt`, the desktop bundles, `desktop-checksums.txt`, and `latest.json`.
+- The documented one-liner installs on a clean host:
+  `curl -fsSL https://raw.githubusercontent.com/Adulari/forge/main/install-desktop.sh | sh`.
 - A pre-X.Y.Z binary's `forge update` self-replaces to X.Y.Z.
 - `brew install Adulari/forge/forge` and `scoop install forge/forge` resolve X.Y.Z with
   non-placeholder hashes. Publish and verify AUR separately after its maintainer SSH key is set.

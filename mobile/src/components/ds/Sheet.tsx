@@ -4,7 +4,8 @@
 // transition 260ms `standard`, Esc/scrim closes. Platform branch lives inside
 // this one file per BUILD_ORDER T1.3.
 import React, { useCallback, useEffect, useState } from "react";
-import { BackHandler, Modal, Platform, Pressable, ScrollView, StyleSheet, View, useWindowDimensions } from "react-native";
+import { BackHandler, Keyboard, Modal, Platform, Pressable, ScrollView, StyleSheet, View, useWindowDimensions } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   cancelAnimation,
@@ -43,6 +44,7 @@ const SHEET_ANIMATION_MS = 150;
 export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightRatio = 0.9, accessibilityLabel }: SheetProps) {
   const tokens = useTokens();
   const { scheme } = useTheme();
+  const insets = useSafeAreaInsets();
   const { height: windowHeight, width: windowWidth } = useWindowDimensions();
   // A bottom sheet spanning a 1440px desktop window reads as a wall, not a sheet — cap it
   // at a comfortable column and center it (no-op on phones). Computed insets rather than
@@ -62,6 +64,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
   const translateY = useSharedValue(closedY);
   const scrimOpacity = useSharedValue(0);
   const startY = useSharedValue(0);
+  const keyboardOffset = useSharedValue(0);
 
   const [mounted, setMounted] = useState(visible);
 
@@ -120,6 +123,30 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
     return () => window.removeEventListener("keydown", handler);
   }, [visible, close]);
 
+  // iOS: the Modal covers the full screen with no window resize to compensate, so an
+  // open keyboard sits on top of a `bottom: 0` sheet. `keyboardWillShow`/`keyboardWillHide`
+  // fire on iOS only — Android already reflows via the default `adjustResize` softInputMode
+  // (shifting this too would double the keyboard offset there), and react-native-web's
+  // Keyboard module never fires these listeners, so this is a natural no-op elsewhere.
+  useEffect(() => {
+    if (!visible || Platform.OS !== "ios") {
+      keyboardOffset.value = 0;
+      return;
+    }
+    const show = Keyboard.addListener("keyboardWillShow", (e) => {
+      const height = e.endCoordinates.height;
+      keyboardOffset.value = reduced ? height : withTiming(height, { duration: e.duration || durations.base, easing: easings.standard });
+    });
+    const hide = Keyboard.addListener("keyboardWillHide", (e) => {
+      keyboardOffset.value = reduced ? 0 : withTiming(0, { duration: e.duration || durations.fast, easing: easings.exit });
+    });
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, reduced]);
+
   const pan = Gesture.Pan()
     .enabled(Platform.OS !== "web")
     .onStart(() => {
@@ -144,15 +171,18 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
       scrimOpacity.value = withTiming(1, { duration: durations.base, easing: easings.standard });
     });
 
-  const sheetStyle = useAnimatedStyle(() => ({ transform: [{ translateY: translateY.value }] }));
+  // keyboardOffset is subtracted here (not folded into translateY) so it stays independent
+  // of the open/close and drag-to-dismiss math above, which own translateY entirely.
+  const sheetStyle = useAnimatedStyle(() => ({ transform: [{ translateY: translateY.value - keyboardOffset.value }] }));
   const scrimStyle = useAnimatedStyle(() => ({ opacity: scrimOpacity.value }));
 
   useEffect(() => {
     return () => {
       cancelAnimation(translateY);
       cancelAnimation(scrimOpacity);
+      cancelAnimation(keyboardOffset);
     };
-  }, [translateY, scrimOpacity]);
+  }, [translateY, scrimOpacity, keyboardOffset]);
 
   if (!mounted) return null;
 
@@ -194,7 +224,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
           </GestureDetector>
           <ScrollView
             style={styles.bodyScroll}
-            contentContainerStyle={styles.bodyContent}
+            contentContainerStyle={[styles.bodyContent, { paddingBottom: insets.bottom }]}
             showsVerticalScrollIndicator
             keyboardShouldPersistTaps="handled"
           >

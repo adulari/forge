@@ -315,6 +315,15 @@ fn build_basename_index(body: &serde_json::Value) -> HashMap<String, u32> {
 }
 
 /// Extract `(anthropic::<id>, window)` from Anthropic's `/v1/models` response.
+///
+/// The field is `max_input_tokens` ("Maximum input context window size in tokens for this model"),
+/// NOT `context_window` — Anthropic's ModelInfo never had a `context_window` key. Reading the
+/// wrong name made this return an empty vec for EVERY Anthropic model, so none of them ever got a
+/// fetched window and they all silently fell back to `CONSERVATIVE_CONTEXT_WINDOW` — a 1M-token
+/// Opus was budgeted as if it were 32k. The old unit test hid this by asserting against a
+/// hand-written fixture that used the non-existent key, so it verified the parser against a shape
+/// the API does not produce. `max_tokens` is the OUTPUT cap and is deliberately not read here.
+/// The `> 0` filter matters: the API returns 0 when a window is unknown rather than omitting it.
 fn anthropic_windows(body: &serde_json::Value) -> Vec<(String, u32)> {
     let Some(data) = body["data"].as_array() else {
         return Vec::new();
@@ -322,7 +331,7 @@ fn anthropic_windows(body: &serde_json::Value) -> Vec<(String, u32)> {
     data.iter()
         .filter_map(|m| {
             let id = m["id"].as_str()?;
-            let window = m["context_window"].as_u64().filter(|w| *w > 0)?;
+            let window = m["max_input_tokens"].as_u64().filter(|w| *w > 0)?;
             Some((
                 format!("anthropic::{id}"),
                 window.min(u32::MAX as u64) as u32,
@@ -559,17 +568,56 @@ mod tests {
         assert_eq!(index.get("some-model"), Some(&131072));
     }
 
+    /// Shape copied from Anthropic's published `GET /v1/models` reference, not invented: each
+    /// ModelInfo carries `max_input_tokens` (the context window) and `max_tokens` (the output
+    /// cap). The previous version of this test asserted against a `context_window` key that the
+    /// API has never returned, so it passed while the parser silently matched nothing in
+    /// production and every Anthropic model fell back to the conservative floor.
     #[test]
-    fn parses_anthropic_context_window_field() {
+    fn parses_anthropic_max_input_tokens_from_real_response_shape() {
         let body = json!({
             "data": [
-                { "id": "claude-opus-4-8", "context_window": 200000 },
-                { "id": "claude-haiku-4-5", "context_window": 200000 },
+                {
+                    "id": "claude-opus-5",
+                    "type": "model",
+                    "display_name": "Claude Opus 5",
+                    "created_at": "2026-07-24T00:00:00Z",
+                    "max_input_tokens": 1_000_000,
+                    "max_tokens": 64_000,
+                },
+                {
+                    "id": "claude-haiku-4-5",
+                    "type": "model",
+                    "display_name": "Claude Haiku 4.5",
+                    "max_input_tokens": 200_000,
+                    "max_tokens": 8_192,
+                },
             ]
         });
         let windows = anthropic_windows(&body);
-        assert!(windows.contains(&("anthropic::claude-opus-4-8".to_string(), 200000)));
-        assert!(windows.contains(&("anthropic::claude-haiku-4-5".to_string(), 200000)));
+        assert!(windows.contains(&("anthropic::claude-opus-5".to_string(), 1_000_000)));
+        assert!(windows.contains(&("anthropic::claude-haiku-4-5".to_string(), 200_000)));
+        // `max_tokens` is the output cap — reading it as the window would badly under-budget.
+        assert!(!windows.iter().any(|(_, w)| *w == 64_000 || *w == 8_192));
+    }
+
+    /// The API returns 0 rather than omitting the field when a window is unknown, and it must not
+    /// be recorded as a real 0-token window (which would make every request look over-budget).
+    #[test]
+    fn anthropic_zero_and_missing_windows_are_skipped_not_recorded() {
+        let body = json!({
+            "data": [
+                { "id": "claude-unknown-window", "max_input_tokens": 0 },
+                { "id": "claude-no-field", "display_name": "No window field" },
+                { "id": "claude-opus-5", "max_input_tokens": 1_000_000 },
+            ]
+        });
+        let windows = anthropic_windows(&body);
+        assert_eq!(
+            windows,
+            vec![("anthropic::claude-opus-5".to_string(), 1_000_000)],
+            "only models with a positive window are recorded"
+        );
     }
 
     #[test]

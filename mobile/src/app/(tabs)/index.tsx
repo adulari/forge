@@ -5,9 +5,8 @@
 // stable indices across polls (see theme/motion.ts useForgeline) — nothing extra to wire here.
 import { router } from "expo-router";
 import { Flame, Search } from "lucide-react-native";
-import React, { useCallback, useMemo, useState } from "react";
-import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { FlatList, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { DecisionCard } from "../../components/cards/DecisionCard";
 import { DecisionPeek } from "../../components/cards/DecisionPeek";
@@ -194,7 +193,6 @@ function FleetHostFilter({ selected, onSelect }: { selected: string | null; onSe
 
 export default function FleetScreen() {
   const tokens = useTokens();
-  const insets = useSafeAreaInsets();
   const { isExpanded } = useBreakpoint();
   const { activeServerId } = useAuth();
   const query = useSessions();
@@ -208,6 +206,20 @@ export default function FleetScreen() {
   const [hostFilter, setHostFilter] = useState<string | null>(null);
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
   const [composerText, setComposerText] = useState("");
+  // The composer is `position: absolute`, so it never participates in layout resize — Android
+  // already lifts it for free via the default `adjustResize` softInputMode, but iOS does not
+  // resize the window for the keyboard at all, so the pill needs its own offset there.
+  // `keyboardWillShow`/`keyboardWillHide` fire on iOS only, so this is a no-op elsewhere.
+  const [keyboardOffset, setKeyboardOffset] = useState(0);
+  useEffect(() => {
+    if (Platform.OS !== "ios") return;
+    const show = Keyboard.addListener("keyboardWillShow", (e) => setKeyboardOffset(e.endCoordinates.height));
+    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardOffset(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
   const { refetch } = query;
   const onRefresh = useCallback(() => {
     setManualRefreshing(true);
@@ -307,7 +319,7 @@ export default function FleetScreen() {
   }
 
   return (
-    <Screen scroll={false}>
+    <Screen scroll={false} contentContainerStyle={styles.screen}>
       <FleetTitle />
       {pickerState === "ready" ? <FleetSummary sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /> : null}
       <FleetServerSwitcher />
@@ -337,7 +349,11 @@ export default function FleetScreen() {
         value={composerText}
         onChangeText={setComposerText}
         onSubmit={onComposerSubmit}
-        style={[styles.composer, { bottom: space.space16 + insets.bottom }]}
+        // `bottom: 0` already sits flush with the safe area here — Screen's SafeAreaView
+        // (`edges` includes "bottom" by default) shrinks this View by insets.bottom itself,
+        // so adding it again would double-count it. `keyboardOffset` (iOS only) lifts the
+        // pill clear of the keyboard.
+        style={[styles.composer, { bottom: space.space16 + keyboardOffset }]}
         testID="fleet-composer"
       />
 
@@ -347,22 +363,27 @@ export default function FleetScreen() {
 }
 
 const styles = StyleSheet.create({
+  // Screen's own 16pt gutter is zeroed here — SessionCard/DecisionCard/the skeleton card
+  // already carry their own 16pt inset, so leaving Screen's padding on doubled it to 32pt.
+  // The header rows below (title/summary/chip strips) carry the single 16pt gutter directly
+  // instead, so they land flush with the cards rather than the old extra 16pt step.
+  screen: { paddingHorizontal: 0 },
   // Horizontal ScrollViews stretch on their cross-axis in a flex column on web; pin to content.
   serverListScroll: { flexGrow: 0, flexShrink: 0 },
-  serverList: { gap: space.space8, paddingTop: space.space12 },
+  serverList: { gap: space.space8, paddingTop: space.space12, paddingHorizontal: space.space16 },
   serverChip: { minHeight: 28, maxWidth: 220, flexDirection: "row", alignItems: "center", gap: space.space4, paddingHorizontal: space.space12, borderRadius: radii.radiusPill },
   serverDot: { width: 6, height: 6, borderRadius: 3 },
   hostFilterScroll: { flexGrow: 0, flexShrink: 0 },
-  hostFilterList: { gap: space.space8, paddingTop: space.space8 },
+  hostFilterList: { gap: space.space8, paddingTop: space.space8, paddingHorizontal: space.space16 },
   hostFilterDot: { width: 5, height: 5, borderRadius: 2.5 },
-  titleRow: { flexDirection: "row", alignItems: "center", paddingTop: space.space12 },
+  titleRow: { flexDirection: "row", alignItems: "center", paddingTop: space.space12, paddingHorizontal: space.space16 },
   titleText: { letterSpacing: -0.4 },
   mark: { fontSize: 14, marginLeft: space.space8, padding: space.space4 },
   titleSpacer: { flex: 1 },
   searchButton: { marginRight: -space.space12 },
   list: { paddingTop: space.space12 },
   listContent: { paddingTop: space.space12, paddingBottom: 96 },
-  summary: { flexDirection: "row", flexWrap: "wrap", marginTop: space.space2 },
+  summary: { flexDirection: "row", flexWrap: "wrap", marginTop: space.space2, paddingHorizontal: space.space16 },
   emptyWrap: { flex: 1 },
   emptyAsh: { flexDirection: "row", justifyContent: "center", gap: space.space8, paddingTop: space.space24 },
   ashCoal: { width: 6, height: 6, borderRadius: 3 },

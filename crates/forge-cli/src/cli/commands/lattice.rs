@@ -2,6 +2,15 @@ use anyhow::{Context, Result};
 
 use crate::*;
 
+/// Roots are stored canonicalized (`Lattice::new`), so a hand-typed `~/proj/` or `./proj` has to be
+/// put through the same normalization before it can match a stored row. A root that no longer
+/// exists can't canonicalize — keep the text as typed so a missing root is still prunable.
+fn canonical_root(raw: &str) -> String {
+    std::fs::canonicalize(raw)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| raw.trim_end_matches('/').to_string())
+}
+
 /// `forge lattice <op>` — build / query / inspect the code-intelligence graph.
 pub(crate) async fn lattice_cmd(op: LatticeOp) -> Result<()> {
     let config = forge_config::load().context("loading configuration")?;
@@ -35,14 +44,77 @@ pub(crate) async fn lattice_cmd(op: LatticeOp) -> Result<()> {
                 lat.embedding_count().map_err(|e| anyhow::anyhow!("{e}"))?
             );
         }
-        LatticeOp::Update { path } => {
+        LatticeOp::Update { path, force } => {
             let root = path.map(std::path::PathBuf::from).unwrap_or(cwd);
-            let lat = forge_index::Lattice::new(store, &root);
+            let lat = forge_index::Lattice::new(store, &root).allow_oversize(force);
             let stats = lat.update().map_err(|e| anyhow::anyhow!("{e}"))?;
             println!(
                 "⌬ lattice updated — {} file(s) indexed, {} skipped, {} symbol(s)",
                 stats.files_indexed, stats.files_skipped, stats.symbols
             );
+        }
+        LatticeOp::Roots => {
+            let roots = forge_index::indexed_roots(&store).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if roots.is_empty() {
+                println!("no indexed roots — run `forge lattice update` in a project");
+                return Ok(());
+            }
+            for root in &roots {
+                let gone = if std::path::Path::new(root).is_dir() {
+                    ""
+                } else {
+                    "  (missing on disk)"
+                };
+                println!("{root}{gone}");
+            }
+            println!(
+                "\n{} root(s). Remove one with `forge lattice prune <root>`.",
+                roots.len()
+            );
+        }
+        LatticeOp::Prune {
+            root,
+            stale,
+            vacuum,
+        } => {
+            let targets: Vec<String> = match (root, stale) {
+                (Some(r), _) => vec![canonical_root(&r)],
+                (None, true) => {
+                    forge_index::stale_roots(&store).map_err(|e| anyhow::anyhow!("{e}"))?
+                }
+                (None, false) => {
+                    anyhow::bail!(
+                        "specify a root to prune (see `forge lattice roots`), or --stale to drop \
+                         every root whose directory is gone"
+                    )
+                }
+            };
+            if targets.is_empty() {
+                println!("nothing to prune");
+                return Ok(());
+            }
+            let known = forge_index::indexed_roots(&store).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut total = 0usize;
+            for target in &targets {
+                if !known.contains(target) {
+                    println!("⚠ not an indexed root: {target}  (see `forge lattice roots`)");
+                    continue;
+                }
+                let removed =
+                    forge_index::prune_root(&store, target).map_err(|e| anyhow::anyhow!("{e}"))?;
+                total += removed;
+                println!("⌬ pruned {removed} file(s) (and their symbols/edges/refs) from {target}");
+            }
+            if vacuum && total > 0 {
+                println!("⌬ vacuuming — rebuilding the database file to release the space…");
+                store.vacuum().context("vacuuming the store")?;
+                println!("⌬ done");
+            } else if total > 0 {
+                println!(
+                    "ⓘ the rows are gone but the file has not shrunk — re-run with --vacuum \
+                     (with no other Forge process running) to return the space to the filesystem"
+                );
+            }
         }
         LatticeOp::Query { query } => {
             let lat = forge_index::Lattice::new(store, &cwd);

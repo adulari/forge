@@ -1082,6 +1082,27 @@ pub(crate) enum LatticeOp {
     Update {
         /// Root to index (default: current directory).
         path: Option<String>,
+        /// Index the root even though it exceeds the indexable-file ceiling. Does not unlock the
+        /// home/system directory — that root is never indexable.
+        #[arg(long)]
+        force: bool,
+    },
+    /// List every repository root that has rows in the index, flagging roots whose directory is
+    /// gone. The store is shared across projects, so a mistaken root (a home directory, a deleted
+    /// scratch clone) lingers here until pruned.
+    Roots,
+    /// Delete an indexed root — its files, symbols, edges and references — and optionally reclaim
+    /// the freed disk with VACUUM.
+    Prune {
+        /// Root to remove (as printed by `forge lattice roots`).
+        root: Option<String>,
+        /// Remove every root whose directory no longer exists on disk.
+        #[arg(long)]
+        stale: bool,
+        /// Rebuild the database file afterwards to actually return the space to the filesystem.
+        /// Requires exclusive access and temporarily needs free space of the database's own size.
+        #[arg(long)]
+        vacuum: bool,
     },
     /// Find symbols by name (case-insensitive); prints kind, location, and signature.
     Query {

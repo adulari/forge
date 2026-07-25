@@ -428,6 +428,9 @@ defaults are `DEFAULT_RATES` (`pricing.rs:37`), USD per 1k tokens:
 | `anthropic::claude-opus-4-8` | 0.005 | 0.025 |
 | `anthropic::claude-fable-5` | 0.010 | 0.050 |
 | `anthropic::claude-mythos-5` | 0.010 | 0.050 |
+| `anthropic::claude-opus-5` | 0.005 | 0.025 |
+| `anthropic::claude-sonnet-5` | 0.003 | 0.015 |
+| `anthropic::claude-haiku-4-5` | 0.001 | 0.005 |
 | `gemini::gemini-2.5-flash` | 0.0003 | 0.0025 |
 | `gemini::gemini-2.5-pro` | 0.00125 | 0.01 |
 | `deepseek::deepseek-chat` | 0.00027 | 0.0011 |
@@ -435,11 +438,19 @@ defaults are `DEFAULT_RATES` (`pricing.rs:37`), USD per 1k tokens:
 
 Precedence: bundled defaults **<** prices fetched live from a provider's model API (e.g.
 OpenRouter) **<** explicit `[mesh.pricing]` config overrides
-(`from_config_with_fetched`, `pricing.rs:107`).
+(`from_config_with_fetched`, `pricing.rs:121`).
 
-**Cost computation.** `cost_for` (`pricing.rs:139`) is
+The `anthropic::` rows carry their weight alone: the fetched layer only ever produces
+`openrouter::…` ids (`openrouter_pricing`, `crates/forge-cli/src/context_windows.rs:426`) and
+Anthropic's own `/v1/models` publishes context windows but no prices, so a Claude model that
+auto-discovery surfaces gets its price from this table or from nowhere. `anthropic::claude-sonnet-5` is listed at
+its steady-state $3/$15 per 1M rather than the $2/$10 introductory rate that lapses 2026-08-31 —
+the same deliberate choice `known_burn_weight` makes for its 3.0 Sonnet weight (§4.6, §13.2), so
+neither constant goes stale on the day the intro price expires.
+
+**Cost computation.** `cost_for` (`pricing.rs:153`) is
 `(in/1000)·rate_in + (out/1000)·rate_out`; **a model with no rate entry returns `0.0`** (never
-panics). `cost_for_usage` (`pricing.rs:154`) prices cache-read tokens at the discounted
+panics). `cost_for_usage` (`pricing.rs:168`) prices cache-read tokens at the discounted
 `cache_read_per_1k` when known (fresh input = `input_tokens − cached_input_tokens`); with no
 cache rate it equals `cost_for`. This is what actual spend accounting uses. The shared genai path
 for native and custom OpenAI-compatible API-key providers forwards the stable Forge session as
@@ -468,9 +479,9 @@ does not report cache usage. Such providers continue normally and report zero ca
 than failing the turn. `forge api` exposes cache hits in non-streaming usage and in the final
 usage-only SSE chunk when `stream_options.include_usage` is set.
 
-**The routing comparator.** `estimated_cost` (`pricing.rs:170`) prices a nominal turn of
+**The routing comparator.** `estimated_cost` (`pricing.rs:184`) prices a nominal turn of
 `NOMINAL_INPUT_TOKENS` = 1000 input and `NOMINAL_OUTPUT_TOKENS` = 500 output tokens
-(`pricing.rs:177-178`). It is a *relative* comparator for ranking candidates, not a forecast.
+(`pricing.rs:191-192`). It is a *relative* comparator for ranking candidates, not a forecast.
 
 **The unpriced-model footgun (real, live).** Because `cost_for` returns `0.0` for an absent
 entry, a metered model with no `DEFAULT_RATES` row, no fetched price, and no config price is
@@ -834,31 +845,35 @@ binary fetches + caches them; `BenchmarkScores` is pure data + matching.
 **Matching is the hard part** — AA says "Claude 4.5 Sonnet", Forge says
 `anthropic::claude-sonnet-4-5`, the bridge says `claude-cli::opus`:
 
-- `tokens` (`bench.rs:180`) reduces a name to lowercased alphanumeric tokens, split on
+- `tokens` (`bench.rs:218`) reduces a name to lowercased alphanumeric tokens, split on
   separators AND letter↔digit boundaries; a leading gateway path (`anthropic/claude-…`) is
   dropped to its last segment; parenthetical decoration is stripped first by `strip_parens`
-  (`bench.rs:224`) — "(xhigh)", "(… Opus 4.8 Fallback)" would otherwise cross-match unrelated
+  (`bench.rs:262`) — "(xhigh)", "(… Opus 4.8 Fallback)" would otherwise cross-match unrelated
   models (Fable's AA row name literally contains "Opus 4.8 Fallback"). Noise tokens
   ("latest", "preview", "instruct", "fallback", …) are dropped; disambiguating tier words
   (mini/nano/flash/max/pro/air) are kept.
 - `insert` (`bench.rs:53`) collapses effort variants of one model ("GPT-5.5 (low)"/"(xhigh)")
   to a single canonical row keeping the highest-intelligence one — a model is represented by
   its best effort.
-- `score_for` (`bench.rs:92`) tries an exact sorted-token-set match first (`canon`,
-  `bench.rs:239`), then a fuzzy fallback: the row sharing the most tokens (`overlap`,
-  `bench.rs:247`), **required** to share a *family word* (an alphabetic token ≥ 3 chars that is
+- `score_for` (`bench.rs:96`) tries an exact sorted-token-set match first (`canon`,
+  `bench.rs:277`), then a fuzzy fallback: the row sharing the most tokens (`overlap`,
+  `bench.rs:285`), **required** to share a *family word* (an alphabetic token ≥ 3 chars that is
   not a `ROLE_WORDS` member — "coder"/"chat"/"instruct"/"vision"/… describe capabilities many
   families share, and let deepseek-coder inherit Qwen-Coder's score before the exclusion) with
   ≥ 2 shared tokens, and **refused** on a version conflict (both sides carry numeric tokens
   with zero overlap): a brand-new `claude-sonnet-5` must not silently inherit Sonnet 4.6's
   stale score — which would also defeat the "no score yet → refetch" trigger. A versionless
   bridge alias (`claude-cli::opus`) is unaffected and maps to the best matching family row.
-- Product-reviewed successor rules bypass generic fuzzy matching. Until Artificial Analysis
-  publishes Qwen 3.8 Max Preview's own row, `qwen3.8-max-preview` inherits the exact Qwen3.7 Max
-  score; a published Qwen 3.8 row always wins afterward. `source_score_for` excludes inheritance,
+- Product-reviewed successor rules (`predecessor_canon`, `bench.rs:178`) bypass generic fuzzy
+  matching for a successor the version-conflict guard above would otherwise leave unscored. Until
+  Artificial Analysis publishes their own rows, `qwen3.8-max-preview` inherits the exact Qwen3.7 Max score and `claude-opus-5`
+  (released 2026-07-24, and priced identically to its predecessor) inherits Claude Opus 4.8's; a
+  published row for the successor always wins afterward. `source_score_for` excludes inheritance,
   so cache refresh and negative-cache bookkeeping continue to distinguish measured data from the
-  temporary prior.
-- `id_tokens` (`bench.rs:160`) injects a family token per bridge (`claude-cli`/`anthropic` →
+  temporary prior. Bare bridge aliases carry no version token and so never inherit —
+  `claude-cli::opus` keeps mapping to the best-scoring Claude-Opus row, which becomes Opus 5 as
+  soon as AA measures it.
+- `id_tokens` (`bench.rs:198`) injects a family token per bridge (`claude-cli`/`anthropic` →
   "claude", `codex-cli` → "gpt", `agy-cli` → "gemini") so bare aliases match at all.
 - `exact_score_for` (`bench.rs:82`) is the no-fuzzy variant for precisely-named local tags
   (`ollama::qwen2.5-coder:14b`), where the fallback would cross-match sizes.
@@ -986,7 +1001,9 @@ under every id form it appears as, add one entry per bare name. (Asserted by the
 Sonnet 5 is on introductory pricing ($2/$10 per 1M) through 2026-08-31, reverting to $3/$15 on
 2026-09-01. The table encodes the steady-state 3.0 deliberately, so the constant doesn't
 silently go stale the day the intro price expires (`capability.rs:226-231`). Until then the
-mesh slightly *over*-counts Sonnet burn.
+mesh slightly *over*-counts Sonnet burn. `DEFAULT_RATES` (§5.1) makes the same call for
+`anthropic::claude-sonnet-5`'s 0.003/0.015, so the two tables can't disagree about which price
+regime they describe.
 
 ### 13.3 Tokenizer skew is deliberately not modelled
 
