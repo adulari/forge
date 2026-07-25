@@ -69,6 +69,7 @@ import { entitlementBadge, hostStateText } from "../../lib/anywhere/format";
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { useAuth } from "../../lib/auth";
 import { haptics } from "../../lib/haptics";
+import { modKey } from "../../lib/platform";
 import { useArchiveSession, useCreateSession, usePastSessions, useSessions } from "../../lib/queries";
 import { usePaletteHotkey, useThreadSearchHotkey } from "../../lib/shortcuts";
 import { useSessionSocket } from "../../lib/ws";
@@ -352,7 +353,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
         title: "Forge a session",
         keywords: "new session create start forge task",
         leading: <Plus size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        trailing: !isCompact ? <KeyHint label="⌘N" /> : undefined,
+        trailing: !isCompact ? <KeyHint label={`${modKey}N`} /> : undefined,
         onSelect: () => {
           close();
           router.push("/new-session");

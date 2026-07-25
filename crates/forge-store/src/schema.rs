@@ -352,7 +352,8 @@ CREATE TABLE IF NOT EXISTS anywhere_sync_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     enabled   INTEGER NOT NULL CHECK (enabled IN (0, 1))
 );
-INSERT OR IGNORE INTO anywhere_sync_state (singleton, enabled) VALUES (1, 0);
+-- Seeded by `seed_singleton_rows` only when missing: an unconditional INSERT here would take
+-- the WAL writer lock on every open, even when the row already exists.
 
 CREATE TABLE IF NOT EXISTS sync_journal (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -381,7 +382,7 @@ CREATE TABLE IF NOT EXISTS anywhere_sync_cursor (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     cursor    INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO anywhere_sync_cursor (singleton, cursor) VALUES (1, 0);
+-- Seeded by `seed_singleton_rows` (see above).
 
 CREATE TABLE IF NOT EXISTS anywhere_sync_remote (
     cursor           INTEGER PRIMARY KEY,

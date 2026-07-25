@@ -1,6 +1,18 @@
 // Compact navigation uses the platform tab bar on iOS so iOS 26 can render its native
 // Liquid Glass material and interaction. Other compact targets keep the existing Expo
 // Router tabs, while expanded layouts use the persistent root-level Fleet rail.
+//
+// INVARIANT — every file in this directory must be a real tab in BOTH navigators below.
+// A `(tabs)` route with no `<NativeTabs.Trigger>` is not "hidden", it is DELETED: expo-router
+// collects untriggered (and `hidden`-triggered) children into `protectedScreens` and
+// `useSortedScreens` drops them from the navigator entirely (layouts/withLayoutContext.js,
+// useScreens.js), so a NAVIGATE to one is silently unhandled on iOS while it still works on
+// every other target. `<Tabs.Screen href={null}>` has no NativeTabs equivalent — `hidden` is
+// stricter, and navigating to a hidden trigger additionally throws in dev / falls back to
+// tab 0 in release (native-tabs/NativeBottomTabsNavigator.js). Screens reached by push
+// rather than by tab (Floor, Plans) therefore live in the ROOT stack — `app/floor.tsx`,
+// `app/plans.tsx` — which keeps their `/floor` and `/plans` URLs and leaves the native bar
+// untouched. `src/lib/tabRoutes.test.ts` fails the build if this drifts.
 import { Slot, Tabs } from "expo-router";
 import { NativeTabs } from "expo-router/unstable-native-tabs";
 import { BellDot, Flame, History, Settings2, type LucideIcon } from "lucide-react-native";
@@ -98,8 +110,6 @@ function StandardTabs() {
         name="index"
         options={{ title: "Fleet", tabBarIcon: FleetTabIcon, tabBarAccessibilityLabel: "Fleet" }}
       />
-      <Tabs.Screen name="floor" options={{ href: null }} />
-      <Tabs.Screen name="plans" options={{ href: null }} />
       <Tabs.Screen
         name="inbox"
         options={{

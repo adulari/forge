@@ -25,7 +25,12 @@ const config: ExpoConfig = {
   orientation: "portrait",
   icon: "./assets/icon.png",
   userInterfaceStyle: "automatic",
-  backgroundColor: "#16161c",
+  // Root native view background, painted before any JS/theme runs. No light/dark split at
+  // this level (Expo's top-level `backgroundColor` is a single static value), so this
+  // matches the dark splash below. Value = theme/tokens.ts darkTokens.bg0 ("#09090B") — the
+  // same token Screen.tsx paints every screen's root with. Keep in sync by hand: this file
+  // can't import from src/theme without pulling RN into the (Node-executed) config context.
+  backgroundColor: "#09090B",
   ios: {
     bundleIdentifier: BUNDLE_ID,
     supportsTablet: true,
@@ -75,7 +80,10 @@ const config: ExpoConfig = {
   android: {
     package: BUNDLE_ID,
     adaptiveIcon: {
-      backgroundColor: "#16161c",
+      // Same pre-Machined hex as the old root/splash backgroundColor above — kept in sync
+      // with it (theme/tokens.ts darkTokens.bg0, "#09090B") rather than left to drift now
+      // that those are fixed.
+      backgroundColor: "#09090B",
       foregroundImage: "./assets/android-icon-foreground.png",
       monochromeImage: "./assets/android-icon-monochrome.png",
     },
@@ -135,17 +143,19 @@ const config: ExpoConfig = {
     [
       "expo-splash-screen",
       {
-        // Default (light) variant uses the light theme's bg1 (theme/tokens.ts
-        // lightTokens.bg1) instead of the dark bg — this was hardcoded to the dark
-        // color for both variants, so light-theme users got a dark flash on every cold
-        // start. NOTE: splash-icon.png is a light-gray mark drawn for the dark bg; on
-        // this light bg it's low-contrast (near-invisible) rather than wrong-colored —
-        // a barely-visible glyph for ~1 frame beats an incongruous dark flash, but a
-        // proper light-variant asset (dark-on-transparent) would fix this fully.
-        backgroundColor: "#FAF8F4",
+        // Default (light) variant uses the light theme's bg0 (theme/tokens.ts
+        // lightTokens.bg0, "#F5F4F1" — the same token Screen.tsx paints every screen's
+        // root with) instead of the dark bg — this was hardcoded to the dark color for
+        // both variants, so light-theme users got a dark flash on every cold start. NOTE:
+        // splash-icon.png is a light-gray mark drawn for the dark bg; on this light bg
+        // it's low-contrast (near-invisible) rather than wrong-colored — a barely-visible
+        // glyph for ~1 frame beats an incongruous dark flash, but a proper light-variant
+        // asset (dark-on-transparent) would fix this fully.
+        backgroundColor: "#F5F4F1",
         image: "./assets/splash-icon.png",
         imageWidth: 200,
-        dark: { backgroundColor: "#16161c", image: "./assets/splash-icon.png" },
+        // theme/tokens.ts darkTokens.bg0 ("#09090B") — was a stale pre-Machined hex.
+        dark: { backgroundColor: "#09090B", image: "./assets/splash-icon.png" },
       },
     ],
   ],

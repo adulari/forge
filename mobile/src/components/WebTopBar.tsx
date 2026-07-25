@@ -9,6 +9,7 @@ import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useAuth } from "../lib/auth";
+import { modKey } from "../lib/platform";
 import { useSessions } from "../lib/queries";
 import { usePalette } from "./overlay/CommandPalette";
 import { useProviderPace, UsageRing } from "./shell/UsageRing";
@@ -100,7 +101,7 @@ export function WebTopBar({ onToggleDock, dockOpen }: WebTopBarProps) {
         style={[styles.kbdChip, { borderColor: tokens.border }]}
       >
         <Search size={11} color={tokens.ink4} strokeWidth={2} />
-        <Text style={[styles.kbd, { color: tokens.ink4 }]}>⌘K</Text>
+        <Text style={[styles.kbd, { color: tokens.ink4 }]}>{modKey}K</Text>
       </Pressable>
     </View>
   );

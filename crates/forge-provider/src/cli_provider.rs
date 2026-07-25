@@ -4464,109 +4464,125 @@ mod tests {
         ));
     }
 
+    /// Materialize `script` as an executable fake CLI under a unique temp path and return it.
+    ///
+    /// The bytes go to a plain data file which an external `cp` then copies into the path we exec.
+    /// A plain `File::create` + `set_permissions` would be equivalent in a single-threaded program,
+    /// but the test binary is MULTI-THREADED: any other test thread that forks while our write fd is
+    /// open hands its child a copy of that fd, and `execve` of a file that still has a writer fails
+    /// with `ETXTBSY` — measured here at ~6% of execs under CPU contention, which is why several of
+    /// these fakes used to probe-exec in a retry loop. `cp`'s write fd lives in `cp`'s own descriptor
+    /// table, which our forks can never inherit, and it is closed before `cp` exits — so the inode we
+    /// hand the provider has never had a writer in this process and the exec cannot race.
+    #[cfg(unix)]
+    fn install_fake_cli(name: &str, script: &str) -> String {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir();
+        let source = dir.join(format!("{name}-{}-{n}.src", std::process::id()));
+        let program = dir.join(format!("{name}-{}-{n}", std::process::id()));
+        let mut f = std::fs::File::create(&source).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+        let copied = std::process::Command::new("cp")
+            .arg(&source)
+            .arg(&program)
+            .status()
+            .expect("run `cp` to install the fake CLI");
+        assert!(copied.success(), "cp {source:?} -> {program:?} failed");
+        let _ = std::fs::remove_file(&source);
+        // `chmod`, not a second open — `set_permissions` never makes this process a writer.
+        let mut perms = std::fs::metadata(&program).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&program, perms).unwrap();
+        program.to_string_lossy().into_owned()
+    }
+
     /// A fake `claude --input-format stream-json`: loops reading user lines from stdin and emits one
     /// assistant+result turn PER line, staying alive (exits only on stdin EOF). So a 2nd turn served
     /// by the SAME process answers "reply 2"; a fresh one-shot spawn would always answer "reply 1".
     #[cfg(unix)]
     fn make_fake_persistent_cli() -> String {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("forge-fake-live-{}-{n}", std::process::id()));
-        let mut f = std::fs::File::create(&path).unwrap();
         // dash/bash `printf` is a builtin and writes unbuffered, so each turn's lines reach the
         // reader immediately (the process never exits to flush).
-        writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, "i=0").unwrap();
-        writeln!(f, "while IFS= read -r line; do").unwrap();
-        writeln!(f, "  i=$((i+1))").unwrap();
-        writeln!(
-            f,
-            r#"  printf '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"reply %d"}}]}}}}\n' "$i""#
+        install_fake_cli(
+            "forge-fake-live",
+            r#"#!/bin/sh
+i=0
+while IFS= read -r line; do
+  i=$((i+1))
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"reply %d"}]}}\n' "$i"
+  printf '{"type":"result","is_error":false,"result":"reply %d","usage":{"input_tokens":5,"output_tokens":3}}\n' "$i"
+done
+"#,
         )
-        .unwrap();
-        writeln!(
-            f,
-            r#"  printf '{{"type":"result","is_error":false,"result":"reply %d","usage":{{"input_tokens":5,"output_tokens":3}}}}\n' "$i""#
-        )
-        .unwrap();
-        writeln!(f, "done").unwrap();
-        f.sync_all().unwrap();
-        drop(f);
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
-        // Probe-exec past any transient ETXTBSY (a concurrent fork briefly holding the write fd).
-        for _ in 0..200 {
-            match std::process::Command::new(&path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                Ok(mut c) => {
-                    let _ = c.wait();
-                    break;
-                }
-                Err(_) => std::thread::sleep(Duration::from_millis(10)),
-            }
-        }
-        path.to_string_lossy().into_owned()
     }
 
-    /// A fake persistent Claude process that exposes the startup race from the real CLI: if Forge
-    /// writes the first user turn before completing `initialize` + `mcp_status`, the turn completes
-    /// without tools. Once Forge performs the control handshake, the same process returns `ready`.
+    /// A fake persistent Claude process modelling the startup race in the real CLI: the streaming
+    /// (`--input-format stream-json`) transport starts a turn the moment one is written, whether or
+    /// not `initialize` + `mcp_status` have completed, so a turn sent too early runs without tools.
+    ///
+    /// It answers whatever it is handed, whenever it arrives, and APPENDS what that was to `log`.
+    /// The ordering guarantee is then read off that log rather than inferred from the reply text: a
+    /// reply string cannot tell an ordering bug apart from the bridge having quietly fallen back to
+    /// the one-shot transport (which this fake also records), and it cannot see the handshake at all.
     #[cfg(unix)]
-    fn make_fake_delayed_mcp_cli() -> String {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("forge-fake-mcp-race-{}-{n}", std::process::id()));
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "#!/usr/bin/env bash").unwrap();
-        writeln!(f, "IFS= read -r line").unwrap();
-        writeln!(
-            f,
-            "if [[ \"$line\" != *'\"subtype\":\"initialize\"'* ]]; then"
+    fn make_fake_delayed_mcp_cli(log: &std::path::Path) -> String {
+        let log = log.display();
+        install_fake_cli(
+            "forge-fake-mcp-race",
+            &format!(
+                r#"#!/usr/bin/env bash
+# Which transport spawned us: only `spawn_live` passes --input-format stream-json.
+case " $* " in
+  *" --input-format stream-json "*) printf 'transport:persistent\n' >> '{log}' ;;
+  *) printf 'transport:oneshot\n' >> '{log}' ;;
+esac
+polls=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"subtype":"initialize"'*)
+      printf 'initialize\n' >> '{log}'
+      printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"forge-init","response":{{}}}}}}\n'
+      ;;
+    *'"subtype":"mcp_status"'*)
+      printf 'mcp_status\n' >> '{log}'
+      # `pending` first, `connected` next: Forge has to keep polling. The echoed request_id mirrors
+      # its 0-based `attempt` counter, which is what it matches responses on.
+      if [ "$polls" -eq 0 ]; then status=pending; else status=connected; fi
+      printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"forge-mcp-status-%d","response":{{"mcpServers":[{{"name":"forge","status":"%s"}}]}}}}}}\n' "$polls" "$status"
+      polls=$((polls+1))
+      ;;
+    *)
+      printf 'prompt\n' >> '{log}'
+      printf '{{"type":"result","is_error":false,"result":"ready:%s","usage":{{"input_tokens":1,"output_tokens":1}}}}\n' "$PWD"
+      ;;
+  esac
+done
+"#
+            ),
         )
-        .unwrap();
-        let prompt_before_ready = r#"  printf '{"type":"result","is_error":false,"result":"prompt-before-ready","usage":{"input_tokens":1,"output_tokens":1}}\n'"#;
-        writeln!(f, "{prompt_before_ready}").unwrap();
-        writeln!(f, "  exit 0").unwrap();
-        writeln!(f, "fi").unwrap();
-        let init_response = r#"printf '{"type":"control_response","response":{"subtype":"success","request_id":"forge-init","response":{}}}\n'"#;
-        writeln!(f, "{init_response}").unwrap();
-        writeln!(f, "IFS= read -r line").unwrap();
-        let pending_response = r#"printf '{"type":"control_response","response":{"subtype":"success","request_id":"forge-mcp-status-0","response":{"mcpServers":[{"name":"forge","status":"pending"}]}}}\n'"#;
-        writeln!(f, "{pending_response}").unwrap();
-        writeln!(f, "IFS= read -r line").unwrap();
-        let connected_response = r#"printf '{"type":"control_response","response":{"subtype":"success","request_id":"forge-mcp-status-1","response":{"mcpServers":[{"name":"forge","status":"connected"}]}}}\n'"#;
-        writeln!(f, "{connected_response}").unwrap();
-        writeln!(f, "IFS= read -r line").unwrap();
-        let ready_response = r#"printf '{"type":"result","is_error":false,"result":"ready:%s","usage":{"input_tokens":1,"output_tokens":1}}\n' "$PWD""#;
-        writeln!(f, "{ready_response}").unwrap();
-        f.sync_all().unwrap();
-        drop(f);
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
-        path.to_string_lossy().into_owned()
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn persistent_harness_waits_for_forge_mcp_before_first_prompt() {
-        let fake = make_fake_delayed_mcp_cli();
+        let recorder = tempfile::tempdir().expect("handshake recorder");
+        let handshake = recorder.path().join("handshake.log");
+        let fake = make_fake_delayed_mcp_cli(&handshake);
         let workspace = tempfile::tempdir().expect("session workspace");
         let provider = CliProvider::claude_code()
             .with_harness(true)
             .with_persistent(true)
             .with_binary(&fake)
-            .with_timeout(Duration::from_secs(2));
+            // Deliberately generous: the fake replies as soon as it is scheduled, so any budget
+            // short enough for CPU contention to exhaust turns a loaded runner into a failed
+            // assertion. What this test asserts is proven by the handshake log below, which no
+            // amount of slowness can reorder; the timeout only bounds a genuine hang.
+            .with_timeout(Duration::from_secs(60));
         let mut sink = |_e: StreamEvent| {};
 
         let options = CompletionOptions {
@@ -4597,7 +4613,24 @@ mod tests {
         assert_eq!(
             response.content.trim(),
             format!("ready:{}", workspace.path().display()),
-            "the first prompt must wait for Forge MCP and run in the session workspace"
+            "the turn must run in the session workspace"
+        );
+        let steps: Vec<String> = std::fs::read_to_string(&handshake)
+            .expect("the fake CLI records every line it was handed")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                "transport:persistent",
+                "initialize",
+                "mcp_status",
+                "mcp_status",
+                "prompt",
+            ],
+            "the first prompt must be written only after `initialize` and an `mcp_status` poll that \
+             reports Forge connected"
         );
     }
 
@@ -4606,49 +4639,18 @@ mod tests {
     /// tool round-trip that never returns (#714).
     #[cfg(unix)]
     fn make_fake_wedges_after_first_cli() -> String {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("forge-fake-wedge-{}-{n}", std::process::id()));
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, "i=0").unwrap();
-        writeln!(f, "while IFS= read -r line; do").unwrap();
-        writeln!(f, "  i=$((i+1))").unwrap();
-        writeln!(f, "  if [ \"$i\" -ge 2 ]; then sleep 3600; continue; fi").unwrap();
-        writeln!(
-            f,
-            r#"  printf '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"reply %d"}}]}}}}\n' "$i""#
+        install_fake_cli(
+            "forge-fake-wedge",
+            r#"#!/bin/sh
+i=0
+while IFS= read -r line; do
+  i=$((i+1))
+  if [ "$i" -ge 2 ]; then sleep 3600; continue; fi
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"reply %d"}]}}\n' "$i"
+  printf '{"type":"result","is_error":false,"result":"reply %d","usage":{"input_tokens":5,"output_tokens":3}}\n' "$i"
+done
+"#,
         )
-        .unwrap();
-        writeln!(
-            f,
-            r#"  printf '{{"type":"result","is_error":false,"result":"reply %d","usage":{{"input_tokens":5,"output_tokens":3}}}}\n' "$i""#
-        )
-        .unwrap();
-        writeln!(f, "done").unwrap();
-        f.sync_all().unwrap();
-        drop(f);
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
-        for _ in 0..200 {
-            match std::process::Command::new(&path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                Ok(mut c) => {
-                    let _ = c.wait();
-                    break;
-                }
-                Err(_) => std::thread::sleep(Duration::from_millis(10)),
-            }
-        }
-        path.to_string_lossy().into_owned()
     }
 
     /// #714: a persistent turn that wedges (a tool round-trip that never returns) must NOT hang the
@@ -5017,48 +5019,13 @@ mod tests {
 
     #[cfg(unix)]
     fn make_fake_cli_exit_with_stderr(stdout: &str, stderr: &str, code: i32) -> String {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-        // Unique path per call without external deps.
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("forge-fake-cli-{}-{n}", std::process::id()));
-        let mut f = std::fs::File::create(&path).unwrap();
-        // Use a heredoc-free script: printf the payload (escaped) then exit.
-        writeln!(f, "#!/bin/sh").unwrap();
-        write!(f, "cat <<'FORGE_EOF'\n{stdout}\nFORGE_EOF\n").unwrap();
+        // Heredocs, so an arbitrary payload needs no escaping.
+        let mut script = format!("#!/bin/sh\ncat <<'FORGE_EOF'\n{stdout}\nFORGE_EOF\n");
         if !stderr.is_empty() {
-            write!(f, "cat >&2 <<'FORGE_ERR'\n{stderr}\nFORGE_ERR\n").unwrap();
+            script.push_str(&format!("cat >&2 <<'FORGE_ERR'\n{stderr}\nFORGE_ERR\n"));
         }
-        writeln!(f, "exit {code}").unwrap();
-        f.sync_all().unwrap();
-        drop(f);
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
-
-        // Wait out ETXTBSY: a *concurrent* test's fork can briefly inherit this file's open
-        // write-fd, so exec'ing it would transiently fail with "Text file busy". Probe-exec
-        // (retrying past ETXTBSY) until the OS lets us run it — once it does, no writer holds
-        // the file, so the provider's real spawn won't flake.
-        for _ in 0..200 {
-            match std::process::Command::new(&path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                Ok(mut child) => {
-                    let _ = child.wait();
-                    break;
-                }
-                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => break,
-            }
-        }
-        path.to_string_lossy().into_owned()
+        script.push_str(&format!("exit {code}\n"));
+        install_fake_cli("forge-fake-cli", &script)
     }
 
     /// Deterministic fuzz for `clamp_to_chars` — the function that trims an over-long prompt to

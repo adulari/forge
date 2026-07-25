@@ -118,7 +118,8 @@ pub struct LatticeView {
     pub why: Option<Provenance>,
 }
 
-/// Index-wide counts for `forge lattice status`.
+/// Row counts for ONE indexed repo root — the `forge lattice status` summary. Not store-wide: the
+/// store is shared by every project, and `forge lattice roots` is the deliberate all-roots view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexStatus {
     pub files: i64,
@@ -533,9 +534,9 @@ impl Lattice {
         Ok(())
     }
 
-    /// How many nodes currently carry an embedding.
+    /// How many of this repo's nodes currently carry an embedding.
     pub fn embedding_count(&self) -> Result<i64, LatticeError> {
-        Ok(self.store.lattice_embedding_count()?)
+        Ok(self.store.lattice_embedding_count(&self.repo_root)?)
     }
 
     /// Compute + store embeddings for every node that lacks one, in batches (incremental: already-
@@ -549,7 +550,9 @@ impl Lattice {
         let batch = batch.max(1);
         let mut total = 0;
         loop {
-            let nodes = self.store.lattice_nodes_without_embedding(batch)?;
+            let nodes = self
+                .store
+                .lattice_nodes_without_embedding(&self.repo_root, batch)?;
             if nodes.is_empty() {
                 break;
             }
@@ -578,7 +581,7 @@ impl Lattice {
         embedder: &dyn Embedder,
     ) -> Result<InjectedContext, LatticeError> {
         let ctx = self.retrieve_async(prompt, token_budget, bodies).await?;
-        if self.store.lattice_embedding_count()? == 0 {
+        if self.store.lattice_embedding_count(&self.repo_root)? == 0 {
             return Ok(ctx);
         }
         match embedder.embed(&[prompt.to_string()]).await {
@@ -604,7 +607,7 @@ impl Lattice {
     ) -> Result<Vec<NodeHit>, LatticeError> {
         let mut scored: Vec<(f32, String)> = self
             .store
-            .lattice_embeddings()?
+            .lattice_embeddings(&self.repo_root)?
             .into_iter()
             .map(|(id, v)| (cosine(query, &v), id))
             .collect();
@@ -826,9 +829,11 @@ impl Lattice {
             .map_err(|e| LatticeError::Io(format!("lattice retrieval task failed: {e}")))?
     }
 
+    /// Row counts for THIS repo root only — the shared store holds every indexed project, so a
+    /// global count would report a sibling project's (or a stale bench clone's) size as this one's.
     pub fn status(&self) -> Result<IndexStatus, LatticeError> {
-        let (files, nodes, edges) = self.store.lattice_counts()?;
-        let refs = self.store.lattice_ref_count()?;
+        let (files, nodes, edges) = self.store.lattice_counts(&self.repo_root)?;
+        let refs = self.store.lattice_ref_count(&self.repo_root)?;
         Ok(IndexStatus {
             files,
             nodes,
@@ -1202,6 +1207,81 @@ mod tests {
             !map_a.contains("beta_only"),
             "map must NOT include the other repo's symbol: {map_a}"
         );
+    }
+
+    /// `forge lattice status` must describe THIS project. It read store-wide `COUNT(*)`s before, so
+    /// a sibling project — or a multi-GB stale bench clone still sitting in the shared database —
+    /// was reported as this repo's index size.
+    #[test]
+    fn status_counts_only_this_repo_root() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let a = Tmp::new();
+        a.write(
+            "src/a.rs",
+            "pub fn alpha() { beta_helper(); }\npub fn beta_helper() {}\n",
+        );
+        let b = Tmp::new();
+        b.write("src/b1.rs", "pub fn one() {}\n");
+        b.write("src/b2.rs", "pub fn two() {}\n");
+        b.write("src/b3.rs", "pub fn three() {}\n");
+        let lat_a = Lattice::new_with_home(Arc::clone(&store), &a.root, None);
+        let lat_b = Lattice::new_with_home(Arc::clone(&store), &b.root, None);
+        lat_a.update().unwrap();
+        lat_b.update().unwrap();
+
+        let s_a = lat_a.status().unwrap();
+        let s_b = lat_b.status().unwrap();
+        assert_eq!(s_a.files, 1, "root A indexed one file: {s_a:?}");
+        assert_eq!(s_b.files, 3, "root B indexed three files: {s_b:?}");
+        assert!(s_a.nodes > 0 && s_b.nodes > 0);
+        assert!(
+            s_a.nodes < s_b.nodes + s_a.nodes,
+            "counts must not be the store-wide total"
+        );
+
+        // A directory that was never indexed reports zero, not the store's contents.
+        let c = Tmp::new();
+        let s_c = Lattice::new_with_home(Arc::clone(&store), &c.root, None)
+            .status()
+            .unwrap();
+        assert_eq!(
+            (s_c.files, s_c.nodes, s_c.edges, s_c.refs),
+            (0, 0, 0, 0),
+            "an unindexed root must not borrow another project's numbers: {s_c:?}"
+        );
+    }
+
+    /// Embedding work and semantic ranking are per-project too: `embed_pending` must not spend this
+    /// project's embedding budget on a sibling project's symbols, and `rank_by_vector` must not
+    /// surface another repo's code as context.
+    #[tokio::test]
+    async fn embeddings_are_scoped_to_their_repo_root() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let a = Tmp::new();
+        a.write("src/a.rs", "pub fn alpha_only() {}\n");
+        let b = Tmp::new();
+        b.write("src/b.rs", "pub fn beta_only() {}\n");
+        let lat_a = Lattice::new_with_home(Arc::clone(&store), &a.root, None);
+        let lat_b = Lattice::new_with_home(Arc::clone(&store), &b.root, None);
+        lat_a.update().unwrap();
+        lat_b.update().unwrap();
+
+        let embedded_a = lat_a.embed_pending(&FakeEmbedder, 50).await.unwrap();
+        assert!(embedded_a > 0);
+        assert_eq!(
+            lat_b.embedding_count().unwrap(),
+            0,
+            "embedding root A must leave root B's nodes untouched (and unbilled)"
+        );
+        assert_eq!(lat_a.embedding_count().unwrap(), embedded_a as i64);
+
+        let ranked = lat_a.rank_by_vector(&[1.0, 1.0, 1.0], 50).unwrap();
+        assert!(
+            ranked.iter().all(|h| h.name != "beta_only"),
+            "semantic ranking must not reach into the other repo: {:?}",
+            ranked.iter().map(|h| &h.name).collect::<Vec<_>>()
+        );
+        assert!(ranked.iter().any(|h| h.name == "alpha_only"));
     }
 
     struct FakeEmbedder;
@@ -1667,9 +1747,10 @@ pub fn caller_c() { hub(); }
             ),
             "expected a home-root refusal, got {err:?}"
         );
-        assert_eq!(
-            store.lattice_counts().unwrap(),
-            (0, 0, 0),
+        // Counts are per-root now, so "wrote nothing" is asserted through the deliberately global
+        // root list: every lattice row hangs off a `lattice_file`, which hangs off a repo_root.
+        assert!(
+            store.lattice_repo_roots().unwrap().is_empty(),
             "a refused root must not write a single row"
         );
     }
@@ -1715,7 +1796,7 @@ pub fn caller_c() { hub(); }
                 RootRefusal::HomeOrSystemRoot { .. }
             ))
         ));
-        assert_eq!(store.lattice_counts().unwrap(), (0, 0, 0));
+        assert!(store.lattice_repo_roots().unwrap().is_empty());
     }
 
     /// Magnitude guard: even a legitimate, non-home root is refused once it is large enough that
@@ -1746,9 +1827,8 @@ pub fn caller_c() { hub(); }
             }
             other => panic!("expected a size refusal, got {other:?}"),
         }
-        assert_eq!(
-            store.lattice_counts().unwrap(),
-            (0, 0, 0),
+        assert!(
+            store.lattice_repo_roots().unwrap().is_empty(),
             "the ceiling must be checked before any file is written"
         );
 
@@ -1843,15 +1923,20 @@ pub fn caller_c() { hub(); }
             .unwrap()
             .display()
             .to_string();
-        let (files, nodes, edges) = store.lattice_counts().unwrap();
-        let refs = store.lattice_ref_count().unwrap();
+        let (files, nodes, edges) = store.lattice_counts(&root_a).unwrap();
+        let refs = store.lattice_ref_count(&root_a).unwrap();
         assert!(
             nodes > 0 && edges > 0 && refs > 0 && files > 0,
             "fixture must produce all four row kinds ({files},{nodes},{edges},{refs})"
         );
-        let nodes_b = store.lattice_node_ids_and_names(&root_b).unwrap().len();
-        let refs_b = store.lattice_ref_edges(&root_b).unwrap().len();
-        assert!(nodes_b > 0 && refs_b > 0);
+        let counts_b = store.lattice_counts(&root_b).unwrap();
+        let refs_b = store.lattice_ref_count(&root_b).unwrap();
+        assert_eq!(
+            counts_b,
+            (files, nodes, edges),
+            "both roots hold the same fixture, so their per-root counts must match"
+        );
+        assert_eq!(refs_b, refs);
 
         let removed = prune_root(&store, &root_a).unwrap();
         assert!(removed > 0, "prune must report the files it dropped");
@@ -1867,19 +1952,26 @@ pub fn caller_c() { hub(); }
             store.lattice_ref_edges(&root_a).unwrap().is_empty(),
             "root A's references must be gone (FK cascade)"
         );
-        let (files_after, nodes_after, edges_after) = store.lattice_counts().unwrap();
-        assert_eq!(nodes_after, nodes_b as i64, "only root B's symbols remain");
         assert_eq!(
-            store.lattice_ref_count().unwrap(),
-            refs_b as i64,
-            "only root B's references remain — the cascade reached lattice_ref"
+            store.lattice_counts(&root_a).unwrap(),
+            (0, 0, 0),
+            "root A's files, symbols and edges are all gone"
         );
         assert_eq!(
-            edges_after,
-            edges / 2,
-            "root A's contains-edges are gone too"
+            store.lattice_ref_count(&root_a).unwrap(),
+            0,
+            "root A's references are gone — the cascade reached lattice_ref"
         );
-        assert!(files_after > 0, "root B's files survive");
+        assert_eq!(
+            store.lattice_counts(&root_b).unwrap(),
+            counts_b,
+            "root B is untouched"
+        );
+        assert_eq!(
+            store.lattice_ref_count(&root_b).unwrap(),
+            refs_b,
+            "root B's references are untouched"
+        );
         assert_eq!(
             indexed_roots(&store).unwrap(),
             vec![root_b],

@@ -299,10 +299,116 @@ fn start_linux_backend(backend: LinuxBackend) -> Result<RecordingHandle> {
     })
 }
 
+/// Gap between meter samples on the portable Linux path. The [`RecordingHandle::levels`] contract
+/// promises roughly 30 updates/sec, which is also about one TUI frame — polling finer would only
+/// re-read the growing file more often for the same waveform.
+#[cfg(all(target_os = "linux", not(feature = "microphone")))]
+const LEVEL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// Byte offset of the `data` chunk's payload in a RIFF/WAVE stream, or `None` while the header is
+/// still too short to name it. pw-record and arecord both happen to write the canonical 44-byte
+/// header, but neither promises it — `LIST`/`fact` chunks are legal before `data` — so walk the
+/// chunk list instead of assuming a fixed size.
+#[cfg(all(target_os = "linux", not(feature = "microphone")))]
+fn wav_data_offset(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        if &bytes[at..at + 4] == b"data" {
+            return Some(at + 8);
+        }
+        let size = u32::from_le_bytes([bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]])
+            as usize;
+        // Chunks are word-aligned: an odd payload is followed by a pad byte.
+        at += 8 + size + (size & 1);
+    }
+    None
+}
+
+/// A read cursor over the WAV the recorder helper is still writing, so each poll measures only the
+/// frames appended since the last one instead of the whole recording.
+///
+/// pw-record/arecord hand us no sample stream — the file IS the capture — so the meter is derived
+/// from the very bytes that will be transcribed. A flat waveform therefore means no audio is
+/// reaching the file, which is the thing a user needs to be told.
+#[cfg(all(target_os = "linux", not(feature = "microphone")))]
+#[derive(Default)]
+struct WavLevelTail {
+    file: Option<std::fs::File>,
+    /// Absolute offset already measured. Stays 0 until the header names the `data` payload, so a
+    /// header that is still being written is simply re-read on the next poll.
+    pos: u64,
+    in_data: bool,
+}
+
+#[cfg(all(target_os = "linux", not(feature = "microphone")))]
+impl WavLevelTail {
+    /// RMS of the frames appended since the previous call, or `None` when there are none yet.
+    /// Assumes the mono s16 the backends are launched with (see [`linux_record_thread`]).
+    fn poll(&mut self, wav: &std::path::Path) -> Option<f32> {
+        use std::io::{Read, Seek, SeekFrom};
+        // 32 KiB is one second of 16 kHz mono s16 — a poll that gets descheduled catches up on the
+        // next one rather than falling permanently behind the recorder.
+        let mut buf = [0u8; 32 * 1024];
+        if self.file.is_none() {
+            self.file = std::fs::File::open(wav).ok();
+        }
+        let file = self.file.as_mut()?;
+        file.seek(SeekFrom::Start(self.pos)).ok()?;
+        let read = file.read(&mut buf).ok()?;
+        let fresh = if self.in_data {
+            &buf[..read]
+        } else {
+            let start = wav_data_offset(&buf[..read])?;
+            self.in_data = true;
+            self.pos = start as u64;
+            &buf[start..read]
+        };
+        // An odd trailing byte is half a sample: leave it for the next poll to pair up.
+        let whole = fresh.len() & !1;
+        if whole == 0 {
+            return None;
+        }
+        self.pos += whole as u64;
+        // Scale by 2^15 to match `decode`'s integer path, so the bars mean the same thing as the
+        // samples whisper ends up seeing (and the same as the cpal backend's meter).
+        let samples: Vec<f32> = fresh[..whole]
+            .chunks_exact(2)
+            .map(|s| f32::from(i16::from_le_bytes([s[0], s[1]])) / 32_768.0)
+            .collect();
+        Some(rms(&samples))
+    }
+}
+
+/// Block until the handle stops or cancels the recording, publishing a level for whatever the helper
+/// appended to `wav` in the meantime. `None` means the handle was dropped without either, which
+/// [`linux_record_thread`] treats like a cancel.
+#[cfg(all(target_os = "linux", not(feature = "microphone")))]
+fn wait_for_stop(
+    cmd_rx: &std::sync::mpsc::Receiver<Cmd>,
+    wav: &std::path::Path,
+    level_tx: &watch::Sender<f32>,
+) -> Option<Cmd> {
+    let mut tail = WavLevelTail::default();
+    loop {
+        match cmd_rx.recv_timeout(LEVEL_POLL_INTERVAL) {
+            Ok(cmd) => return Some(cmd),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(level) = tail.poll(wav) {
+                    let _ = level_tx.send(level);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(all(target_os = "linux", not(feature = "microphone")))]
 fn linux_record_thread(
     backend: LinuxBackend,
-    _level_tx: watch::Sender<f32>,
+    level_tx: watch::Sender<f32>,
     cmd_rx: std::sync::mpsc::Receiver<Cmd>,
     done_tx: std::sync::mpsc::Sender<Result<Vec<f32>>>,
 ) {
@@ -346,7 +452,7 @@ fn linux_record_thread(
         let mut child = command.spawn().map_err(|error| {
             VoiceError::Record(format!("starting {}: {error}", backend.program.display()))
         })?;
-        let keep = matches!(cmd_rx.recv(), Ok(Cmd::Stop));
+        let keep = matches!(wait_for_stop(&cmd_rx, &wav, &level_tx), Some(Cmd::Stop));
         // A very fast stop/cancel can arrive while the helper is still exec'ing. Give it a
         // bounded chance to open the output so SIGINT can finalize a valid WAV, while also
         // detecting permission/device failures that exit before recording starts.
@@ -419,8 +525,9 @@ pub(crate) fn downmix(data: &[f32], channels: usize) -> Vec<f32> {
 }
 
 /// Root-mean-square amplitude of `samples`, clamped to 0..1 (samples are expected to already be
-/// in -1.0..1.0 range).
-#[cfg(feature = "microphone")]
+/// in -1.0..1.0 range). Shared by both capture backends so a given bar height means the same
+/// loudness whichever one is recording.
+#[cfg(any(feature = "microphone", target_os = "linux"))]
 fn rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -667,6 +774,105 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("microphone permissions"), "{error}");
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "microphone")))]
+    #[test]
+    fn wav_data_offset_walks_past_extra_chunks() {
+        let mut wav = b"RIFF\x00\x00\x00\x00WAVE".to_vec();
+        wav.extend_from_slice(b"fmt \x10\x00\x00\x00");
+        wav.extend_from_slice(&[0u8; 16]);
+        // An odd-sized LIST chunk plus its pad byte must not throw the walk off by one.
+        wav.extend_from_slice(b"LIST\x03\x00\x00\x00abc\x00");
+        let header = wav.len();
+        wav.extend_from_slice(b"data\x00\x00\x00\x00");
+        wav.extend_from_slice(&[1u8, 2, 3, 4]);
+        assert_eq!(wav_data_offset(&wav), Some(header + 8));
+        // A header that is still being written yields nothing rather than a wrong offset.
+        assert_eq!(wav_data_offset(&wav[..header]), None);
+        assert_eq!(wav_data_offset(b"RIFF"), None);
+        assert_eq!(wav_data_offset(b"not a wav at all"), None);
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "microphone")))]
+    #[test]
+    fn wav_level_tail_measures_only_newly_appended_frames() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let wav = root.path().join("growing.wav");
+        let mut tail = WavLevelTail::default();
+        // Nothing to read yet: no file, then a header with no frames behind it.
+        assert_eq!(tail.poll(&wav), None);
+        let mut file = std::fs::File::create(&wav).unwrap();
+        file.write_all(b"RIFF\x00\x00\x00\x00WAVEfmt \x10\x00\x00\x00")
+            .unwrap();
+        file.write_all(&[0u8; 16]).unwrap();
+        file.write_all(b"data\x00\x00\x00\x00").unwrap();
+        file.flush().unwrap();
+        assert_eq!(tail.poll(&wav), None, "header alone carries no audio");
+
+        // Full-scale square wave → RMS 1.0; a second poll sees nothing new.
+        for _ in 0..64 {
+            file.write_all(&i16::MIN.to_le_bytes()).unwrap();
+            file.write_all(&i16::MAX.to_le_bytes()).unwrap();
+        }
+        file.flush().unwrap();
+        let loud = tail.poll(&wav).expect("frames appended");
+        assert!(loud > 0.9, "full-scale audio reads near 1.0, got {loud}");
+        assert_eq!(
+            tail.poll(&wav),
+            None,
+            "already-measured frames aren't reread"
+        );
+
+        // Silence afterwards must pull the meter back down, not average with the loud window.
+        file.write_all(&[0u8; 256]).unwrap();
+        file.flush().unwrap();
+        assert_eq!(tail.poll(&wav), Some(0.0));
+
+        // A frame split across two polls is carried, not counted as a half sample.
+        file.write_all(&[0xff]).unwrap();
+        file.flush().unwrap();
+        assert_eq!(tail.poll(&wav), None, "half a sample is not a frame");
+        file.write_all(&[0x7f]).unwrap();
+        file.flush().unwrap();
+        let split = tail.poll(&wav).expect("the split frame completes");
+        assert!(
+            split > 0.9,
+            "carried bytes form one full-scale sample: {split}"
+        );
+    }
+
+    /// The portable backend's meter is wired end-to-end: `levels` must move while the helper writes,
+    /// which is what the `/voice` waveform reads. It was bound as `_level_tx` and never published,
+    /// leaving the overlay's waveform flat for the whole recording.
+    #[cfg(all(target_os = "linux", not(feature = "microphone")))]
+    #[test]
+    fn portable_linux_recorder_publishes_live_levels() {
+        let root = tempfile::tempdir().unwrap();
+        let wav = root.path().join("fixture.wav");
+        let pid_file = root.path().join("pid");
+        write_test_wav(&wav);
+        let program = write_fake_recorder(root.path(), "pw-record", &wav, &pid_file);
+        let handle = start_linux_backend(LinuxBackend {
+            kind: LinuxBackendKind::PipeWire,
+            program,
+        })
+        .unwrap();
+        // The fake writes the fixture immediately, so the first polls see it; bounded so a broken
+        // meter fails instead of hanging.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut level = 0.0f32;
+        while level == 0.0 && std::time::Instant::now() < deadline {
+            level = *handle.levels.borrow();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            level > 0.0,
+            "meter stayed flat while audio was being written"
+        );
+        let samples = handle.stop().unwrap();
+        assert_eq!(samples.len(), 4, "levels must not consume the recording");
     }
 
     /// Hardware acceptance probe, intentionally opt-in for local/release verification.

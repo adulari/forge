@@ -2,19 +2,24 @@ import { Flame } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 
-import { FloorTile } from "../../components/floor/FloorTile";
-import { Button } from "../../components/ds/Button";
-import { EmptyState } from "../../components/ds/EmptyState";
-import { Screen } from "../../components/ds/Screen";
-import { BoundedList } from "../../components/ds/BoundedList";
-import type { SessionRow } from "../../lib/api";
-import { useSessions } from "../../lib/queries";
-import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
-import { type as typeScale } from "../../theme/typography";
-import { useBreakpoint } from "../../theme/useBreakpoint";
+import { FloorTile } from "../components/floor/FloorTile";
+import { BackLink } from "../components/ds/BackLink";
+import { Button } from "../components/ds/Button";
+import { EmptyState } from "../components/ds/EmptyState";
+import { Screen } from "../components/ds/Screen";
+import { BoundedList } from "../components/ds/BoundedList";
+import type { SessionRow } from "../lib/api";
+import { useSessions } from "../lib/queries";
+import { useTokens } from "../theme/ThemeProvider";
+import { space } from "../theme/tokens";
+import { type as typeScale } from "../theme/typography";
+import { useBreakpoint } from "../theme/useBreakpoint";
 
 const SOCKET_CAP = 8;
+
+// Floor is a push destination, not a tab (see (tabs)/_layout.tsx's INVARIANT) — the root stack
+// draws no header and the tab bar is gone once pushed, so this is the only visible way back to
+// the ⚒ mark that opened it. Plans carries the same link for the same reason.
 
 export default function FloorScreen() {
   const tokens = useTokens();
@@ -31,6 +36,7 @@ export default function FloorScreen() {
   if (query.isLoading) return <Screen><View style={styles.loading}><ActivityIndicator color={tokens.accent} /><Text style={[typeScale.sub, { color: tokens.ink3 }]}>Loading live sessions…</Text></View></Screen>;
 
   return <Screen scroll={false}>
+    <BackLink label="Fleet" />
     <View style={styles.header}><Text style={[typeScale.title, { color: tokens.ink }]}>Floor</Text><Text style={[typeScale.meta, styles.mark, { color: tokens.ink3 }]}>⚒</Text><Text style={[typeScale.sub, { color: tokens.ink3 }]}>{burning.length} forging · live tails</Text></View>
     <BoundedList key={`floor-${columns}`} data={burning} renderItem={renderItem} keyExtractor={keyExtractor} numColumns={columns} onViewableItemsChanged={onViewableItemsChanged} refreshing={query.isRefetching} onRefresh={() => void query.refetch()} ListEmptyComponent={query.isError ? <EmptyState icon={Flame} message="Could not load live sessions." action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} />} /> : <EmptyState icon={Flame} message="The floor is cool — no live sessions right now." />} contentContainerStyle={styles.list} />
   </Screen>;

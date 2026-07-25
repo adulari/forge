@@ -16,3 +16,9 @@ export const isIOS = Platform.OS === "ios";
 // `platform`.
 export const isMacOS =
   typeof navigator !== "undefined" && /Mac/.test(navigator.platform || navigator.userAgent || "");
+
+// The modifier glyph shown in keycap hints. Several surfaces used to hardcode "⌘", which is wrong
+// on the Windows and Linux desktop builds — the shortcut fires on Ctrl there, so the hint told the
+// user to press a key that does nothing. Kept here rather than re-deriving the ternary per file so
+// a new hint cannot reintroduce the macOS assumption.
+export const modKey = isMacOS ? "⌘" : "Ctrl";

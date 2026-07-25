@@ -1,6 +1,40 @@
 use crate::*;
 use anyhow::{Context, Result};
 
+/// Undo the provider-wide auth bench a credential failure left behind, so a repaired credential
+/// takes effect on the very next turn.
+///
+/// The first auth error writes a 24h `__forge_provider__::<provider>` exclusion row
+/// ([`Store::exclude_provider`]) and `ModelHealth::is_benched` then drops every alias of that
+/// provider from routing AND from the failover chain. `ProviderError::Auth`'s own doc promises the
+/// exclusion "recovers automatically once the user fixes the key" via a periodic re-probe — but no
+/// such re-probe exists in the runtime, so the only thing that ever cleared it was the
+/// undiscoverable `forge models --probe`. Every successful credential write is therefore the place
+/// to clear it: the user's next action after `forge auth` is a turn, not a probe.
+///
+/// Best-effort by design: a store that will not open must not fail a sign-in that already succeeded.
+fn clear_auth_exclusion(provider: &str) {
+    if let Ok(store) = open_store() {
+        clear_auth_exclusion_in(&store, provider);
+    }
+}
+
+/// Store half of [`clear_auth_exclusion`], separated so it is testable against a scratch store
+/// without a keyring write.
+///
+/// Per-model rows are cleared too, but ONLY the ones benched for an auth reason: a rate-limit or
+/// outage bench says nothing about the credential and must survive a re-login, otherwise signing in
+/// would resurrect a model that is genuinely still 429ing.
+pub(crate) fn clear_auth_exclusion_in(store: &Store, provider: &str) {
+    let _ = store.clear_provider_health(provider);
+    let prefix = format!("{provider}::");
+    for (model, _, reason) in store.current_benched_report().unwrap_or_default() {
+        if model.starts_with(&prefix) && reason.contains("auth failed") {
+            let _ = store.clear_model_health(&model);
+        }
+    }
+}
+
 pub(crate) fn auth(provider: &str, remove: bool, list: bool, replace: bool) -> Result<()> {
     let known_provider = forge_config::known_key_providers().any(|p| p == provider);
     let known_search = forge_config::known_search_providers().any(|p| p == provider);
@@ -69,6 +103,10 @@ pub(crate) fn auth(provider: &str, remove: bool, list: bool, replace: bool) -> R
             String::new()
         };
         println!("stored {provider} key (OS keyring, or encrypted file if no keyring is available){note}");
+    }
+    // Search/data keys have no mesh health record; only model providers can be excluded.
+    if known_provider {
+        clear_auth_exclusion(provider);
     }
     Ok(())
 }
@@ -219,6 +257,8 @@ pub(crate) async fn auth_xai_oauth(
     crate::cli::commands::models::invalidate_catalog_cache();
     // Same for the detected-plan cache: don't serve a stale/absent plan for up to 60s.
     forge_provider::invalidate_plan_cache();
+    // …and the same for a provider-wide auth exclusion an earlier expired session left behind.
+    clear_auth_exclusion("xai-oauth");
 
     match forge_provider::probe_entitlement(&tokens.access_token).await {
         Ok(forge_provider::EntitlementStatus::Entitled) => println!(
@@ -500,6 +540,8 @@ pub(crate) async fn auth_codex_oauth(
     crate::cli::commands::models::invalidate_catalog_cache();
     // Same for the detected-plan cache: don't serve a stale/absent plan for up to 60s.
     forge_provider::invalidate_plan_cache();
+    // …and the same for a provider-wide auth exclusion an earlier expired session left behind.
+    clear_auth_exclusion("codex-oauth");
 
     let probe_id = chatgpt_id.as_deref().unwrap_or(&account_id);
     match forge_provider::probe_codex_entitlement(&tokens.access_token, probe_id).await {
@@ -1177,6 +1219,13 @@ pub(crate) fn apply_wizard_outcome(
         forge_config::store_api_key(provider, key)
             .with_context(|| format!("storing {provider} key"))?;
     }
+    // Wizard-supplied keys are credential repairs like any other — un-exclude their providers so
+    // `/config` isn't a second way to fix a key and still be routed around for 24h.
+    if let Ok(store) = open_store() {
+        for (provider, _) in &outcome.keys {
+            clear_auth_exclusion_in(&store, provider);
+        }
+    }
     let path = forge_config::write_subscriptions(&outcome.plans).context("writing config")?;
     forge_config::write_settings(outcome.permission, outcome.credit_mode)
         .context("writing settings")?;
@@ -1207,6 +1256,61 @@ mod tests {
         assert!(
             url.contains("codex_cli_simplified_flow=true"),
             "missing codex_cli_simplified_flow param in {url}"
+        );
+    }
+
+    /// The store side of re-authentication: an auth failure excludes the whole provider for 24h and
+    /// nothing in the runtime re-probes it, so a successful credential write is the only chance to
+    /// make the fix take effect. A rate-limit bench on a sibling must survive — a new key does not
+    /// reset someone else's quota.
+    #[test]
+    fn reauthenticating_clears_the_provider_auth_exclusion_but_keeps_unrelated_benches() {
+        let store = Store::open_in_memory().unwrap();
+        store.exclude_provider("openai", "auth failed").unwrap();
+        store
+            .exclude_model("openai::gpt-5-mini", "auth failed")
+            .unwrap();
+        store
+            .bench_for(
+                "openai::gpt-5",
+                std::time::Duration::from_secs(600),
+                "rate-limited",
+            )
+            .unwrap();
+        store
+            .bench_for(
+                "groq::llama-4",
+                std::time::Duration::from_secs(600),
+                "auth failed",
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .current_benched()
+                .unwrap()
+                .is_benched("openai::gpt-5.5"),
+            "the provider exclusion must bench every openai alias before the fix"
+        );
+
+        clear_auth_exclusion_in(&store, "openai");
+
+        let health = store.current_benched().unwrap();
+        assert!(
+            !health.is_benched("openai::gpt-5.5"),
+            "a re-authenticated provider must be routable again"
+        );
+        assert!(
+            !health.is_benched("openai::gpt-5-mini"),
+            "the per-model auth exclusion must go too"
+        );
+        assert!(
+            health.is_benched("openai::gpt-5"),
+            "a rate-limit bench is not a credential problem and must survive re-auth"
+        );
+        assert!(
+            health.is_benched("groq::llama-4"),
+            "another provider's exclusion must be untouched"
         );
     }
 }

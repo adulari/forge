@@ -211,6 +211,15 @@ pub(crate) async fn lattice_cmd(op: LatticeOp) -> Result<()> {
                 s.refs,
                 forge_index::supported_languages().len()
             );
+            // These counts describe THIS root only. Say so when it has no index, or the zeros read
+            // as "the lattice is empty" while other projects sit indexed in the shared database.
+            if s.files == 0 {
+                println!(
+                    "ⓘ nothing indexed for {} — run `forge lattice update`, or `forge lattice roots` \
+                     to list the roots this database does hold",
+                    cwd.display()
+                );
+            }
         }
         LatticeOp::Map { budget } => {
             let lat = forge_index::Lattice::new(store, &cwd);

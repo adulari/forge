@@ -683,6 +683,10 @@ pub struct App {
     /// the (immutable-`&self`) render path so `viewer_key` can re-enable follow when the user scrolls
     /// back to the bottom (it has no other way to know the wrapped length at keypress time).
     viewer_geom: std::cell::Cell<Option<(usize, u16)>>,
+    /// Memoized wrap of the in-loop activity viewer's selected entry. The viewer redraws at the
+    /// render loop's full rate, and rebuilding it per frame meant cloning the whole transcript and
+    /// re-wrapping it char-by-char ~60×/s on long sessions.
+    viewer_wrap: std::cell::RefCell<ViewerWrapCache>,
     /// Active text selection in transcript coords: (wrapped_row, col) anchor + cursor. `None` when
     /// nothing is selected. Highlighted in the transcript and copied to the clipboard on release.
     selection: Option<(TextPos, TextPos)>,
@@ -722,6 +726,16 @@ struct TranscriptGeom {
 struct WrapCache {
     width: u16,
     rev: u64,
+    rows: Vec<TextLine<'static>>,
+}
+
+/// Cached wrap of the entry the in-loop activity viewer has selected, keyed on
+/// `(selected, wrap_width, revision)` — the same key the standalone viewer's own cache uses
+/// (`transcript.rs`). `None` while the viewer is closed so a session that once looked at a
+/// 5000-line main chat doesn't keep that copy alive afterwards.
+#[derive(Debug, Clone, Default)]
+struct ViewerWrapCache {
+    key: Option<(usize, u16, u64)>,
     rows: Vec<TextLine<'static>>,
 }
 
@@ -2707,6 +2721,19 @@ impl App {
     /// markdown) — call ONLY when the full-screen viewer is open, never per render frame.
     /// Empty when there's no activity (see [`has_activity`]).
     pub fn activity_views(&self) -> Vec<TranscriptView> {
+        let mut views = self.activity_view_headers();
+        for (idx, view) in views.iter_mut().enumerate() {
+            view.lines = self.activity_view_lines(idx);
+        }
+        views
+    }
+
+    /// The activity views WITHOUT their transcripts: everything the viewer's chrome reads (title,
+    /// subtitle, status, cost, model, revision) with `lines` left empty. Cheap enough to rebuild
+    /// every frame — no transcript clone, no markdown render — so the header stays live while only
+    /// the one entry actually on screen pays for [`activity_view_lines`].
+    /// Empty when there's no activity (see [`has_activity`]).
+    fn activity_view_headers(&self) -> Vec<TranscriptView> {
         if !self.has_activity() {
             return Vec::new();
         }
@@ -2714,9 +2741,6 @@ impl App {
 
         // 0: main chat — the real, already-styled transcript lines plus anything still pending in
         // the flush outbox (so the view updates live even while the full-screen viewer is open).
-        let mut main_lines = self.main_log.clone();
-        main_lines.extend(self.flush.iter().cloned());
-        let main_count = main_lines.len();
         views.push(TranscriptView {
             kind: ActivityKind::MainChat,
             title: "main chat".to_string(),
@@ -2728,32 +2752,17 @@ impl App {
                 ActivityStatus::Done
             },
             cost: self.cost_usd,
-            revision: self.main_log_rev,
-            lines: main_lines,
-            line_count: main_count,
+            // Both halves of the content, packed: `main_log_rev` alone would leave a wrap cache
+            // stale for the queued flush lines until the next drain folded them in, and a sum of
+            // the two can hold still across a "drain 2, queue 1" step. `flush` only ever grows
+            // between drains (and every non-empty drain bumps the rev), so the pair is exact.
+            revision: (self.main_log_rev << 32) | (self.flush.len() as u64 & 0xffff_ffff),
+            lines: Vec::new(),
+            line_count: self.main_log.len() + self.flush.len(),
         });
 
-        // Subagents, in spawn order. The transcript is streamed token-fragments assembled into
-        // lines — render as plain styled text (markdown would mangle the partial streaming).
+        // Subagents, in spawn order.
         for r in &self.subagents {
-            let lines: Vec<TextLine<'static>> = if r.log.iter().all(|l| l.trim().is_empty()) {
-                vec![TextLine::from(Span::styled(
-                    "(no activity captured yet)",
-                    Style::default().fg(DIM),
-                ))]
-            } else {
-                r.log
-                    .iter()
-                    .map(|l| {
-                        let style = if l.starts_with("── result") {
-                            Style::default().fg(TOOLCYAN)
-                        } else {
-                            Style::default().fg(TEXT)
-                        };
-                        TextLine::from(Span::styled(l.clone(), style))
-                    })
-                    .collect()
-            };
             views.push(TranscriptView {
                 kind: ActivityKind::Subagent,
                 title: r.agent.clone(),
@@ -2766,7 +2775,7 @@ impl App {
                 },
                 cost: r.cost,
                 revision: r.log.len() as u64,
-                lines,
+                lines: Vec::new(),
                 line_count: r.log.len(),
             });
         }
@@ -2784,15 +2793,6 @@ impl App {
                     (ActivityStatus::Skipped, format!("skipped ({reason})"))
                 }
             };
-            let lines = if c.output.trim().is_empty() {
-                vec![TextLine::from(Span::styled(
-                    "(no output yet)",
-                    Style::default().fg(DIM),
-                ))]
-            } else {
-                crate::render::markdown_to_lines(&c.output)
-            };
-            let line_count = c.output.lines().count();
             views.push(TranscriptView {
                 kind: ActivityKind::AssayCritic,
                 title: c.lens.clone(),
@@ -2801,12 +2801,56 @@ impl App {
                 status,
                 cost: c.cost_usd,
                 revision: c.output.len() as u64,
-                lines,
-                line_count,
+                lines: Vec::new(),
+                line_count: c.output.lines().count(),
             });
         }
 
         views
+    }
+
+    /// The pre-styled transcript of activity entry `idx` (indices as in [`activity_view_headers`]).
+    /// This is the expensive half — a main-chat clone or a markdown render — so build only the entry
+    /// about to be drawn, and only when its revision says the last one is stale.
+    fn activity_view_lines(&self, idx: usize) -> Vec<TextLine<'static>> {
+        if !self.has_activity() {
+            return Vec::new();
+        }
+        if idx == 0 {
+            let mut lines = self.main_log.clone();
+            lines.extend(self.flush.iter().cloned());
+            return lines;
+        }
+        // Subagent transcripts are streamed token-fragments assembled into lines — render as plain
+        // styled text (markdown would mangle the partial streaming).
+        if let Some(r) = self.subagents.get(idx - 1) {
+            if r.log.iter().all(|l| l.trim().is_empty()) {
+                return vec![TextLine::from(Span::styled(
+                    "(no activity captured yet)",
+                    Style::default().fg(DIM),
+                ))];
+            }
+            return r
+                .log
+                .iter()
+                .map(|l| {
+                    let style = if l.starts_with("── result") {
+                        Style::default().fg(TOOLCYAN)
+                    } else {
+                        Style::default().fg(TEXT)
+                    };
+                    TextLine::from(Span::styled(l.clone(), style))
+                })
+                .collect();
+        }
+        match self.assay_critics.get(idx - 1 - self.subagents.len()) {
+            Some(c) if c.output.trim().is_empty() => vec![TextLine::from(Span::styled(
+                "(no output yet)",
+                Style::default().fg(DIM),
+            ))],
+            Some(c) => crate::render::markdown_to_lines(&c.output),
+            None => Vec::new(),
+        }
     }
 
     /// Toggle the effort slider popup.
@@ -3418,6 +3462,43 @@ impl App {
     pub fn transcript_to_bottom(&mut self) {
         self.transcript_follow = true;
         self.transcript_scroll = usize::MAX / 2;
+    }
+
+    /// Wrap the in-loop activity viewer's selected entry to `width` (already the wrap width, i.e.
+    /// one column short of the area), reusing the previous frame's rows unless the selection, the
+    /// width, or that entry's content revision changed. The viewer redraws at the render loop's full
+    /// rate, so without this every frame cloned the whole transcript and wrapped it twice.
+    /// `headers` must be the same list `selected` indexes into, from this frame.
+    fn ensure_viewer_wrapped(
+        &self,
+        headers: &[TranscriptView],
+        selected: usize,
+        width: u16,
+    ) -> std::cell::Ref<'_, ViewerWrapCache> {
+        let key = headers.get(selected).map(|v| (selected, width, v.revision));
+        {
+            let mut c = self.viewer_wrap.borrow_mut();
+            if c.key != key {
+                c.rows = match key {
+                    Some(_) => crate::transcript::wrap_lines(
+                        &self.activity_view_lines(selected),
+                        width as usize,
+                    ),
+                    None => Vec::new(),
+                };
+                c.key = key;
+            }
+        }
+        self.viewer_wrap.borrow()
+    }
+
+    /// Drop the viewer's wrapped rows once it closes, so the transcript copy they hold doesn't
+    /// outlive the view that needed it.
+    fn forget_viewer_wrapped(&self) {
+        let mut c = self.viewer_wrap.borrow_mut();
+        if c.key.is_some() {
+            *c = ViewerWrapCache::default();
+        }
     }
 
     /// Refresh the wrap cache for `width` if `main_log` or the width changed. Re-wrapping the whole
@@ -4209,28 +4290,32 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     // The in-loop activity viewer (full-screen mode) takes over the whole frame, rendered through
     // the SAME terminal as the chat — no nested alternate screen, so it can't collide with it.
     if let Some(v) = &app.viewer {
-        let views = app.activity_views();
+        // Headers only: the chrome is rebuilt every frame (so status/cost stay live) while the
+        // selected entry's transcript comes from the revision-keyed wrap cache.
+        let views = app.activity_view_headers();
+        let selected = v.selected.min(views.len().saturating_sub(1));
         let scroll = if v.follow { usize::MAX / 2 } else { v.scroll };
         let a = frame.area();
+        let wrapped = app.ensure_viewer_wrapped(&views, selected, a.width.saturating_sub(1));
         // Record the scroll geometry so `viewer_key` can re-enable follow at the tail. `body_h`
         // mirrors `transcript_lines` (2 header + 1 footer rows reserved).
-        let wrapped_len = views
-            .get(v.selected)
-            .map(|view| {
-                crate::transcript::wrap_lines(&view.lines, a.width.saturating_sub(1) as usize).len()
-            })
-            .unwrap_or(0);
         let body_h = a.height.saturating_sub(3).max(1);
-        app.viewer_geom.set(Some((wrapped_len, body_h)));
+        app.viewer_geom.set(Some((wrapped.rows.len(), body_h)));
         frame.render_widget(
-            Paragraph::new(crate::transcript::transcript_lines(
-                &views, v.selected, scroll, a.height, a.width,
+            Paragraph::new(crate::transcript::transcript_lines_from_wrapped(
+                &views,
+                selected,
+                scroll,
+                a.height,
+                a.width,
+                &wrapped.rows,
             )),
             a,
         );
         return;
     }
     app.viewer_geom.set(None);
+    app.forget_viewer_wrapped();
     const MIN_STREAM: u16 = 1;
     // The input box grows with wrapped/multiline content (capped); the stream area absorbs the
     // change, so the inline viewport's total height is untouched (never resized at runtime).
@@ -9880,6 +9965,96 @@ mod tests {
             "batch a's row survives"
         );
         assert_eq!(views[2].subtitle, "next");
+    }
+
+    /// The in-loop viewer memoizes the wrap of the entry it is showing, so its cache must invalidate
+    /// on every input that changes those rows: the content underneath, the terminal width, and the
+    /// selected entry. Scroll must NOT invalidate it (it only moves the window) but must still move
+    /// the visible slice — a cache that outlived a content change would freeze a streaming turn's
+    /// viewer, and one keyed too coarsely would re-wrap the whole transcript every frame again.
+    #[test]
+    fn viewer_wrap_cache_tracks_content_width_and_selection() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::SubagentStart {
+            id: "a".into(),
+            agent: "general".into(),
+            task: "find call sites".into(),
+            model: None,
+            phase: None,
+        });
+        app.push_scrollback(
+            (0..40)
+                .map(|i| TextLine::from(Span::raw(format!("chat line {i}"))))
+                .collect(),
+        );
+        app.open_viewer(0);
+
+        let first = screen_wh(&app, 40, 12);
+        assert!(first.contains("chat line 39"), "tail shown: {first}");
+        let key_after_first = app.viewer_wrap.borrow().key;
+        assert!(key_after_first.is_some(), "the wrap was cached");
+
+        // Proof the rows are memoized and not silently rebuilt every frame: rewrite a cached line
+        // WITHOUT bumping the revision (only reachable from inside this module) and the frame is
+        // byte-identical, i.e. nothing re-read `main_log`.
+        app.main_log[39] = TextLine::from(Span::raw("rewritten behind the cache"));
+        assert_eq!(
+            screen_wh(&app, 40, 12),
+            first,
+            "an unchanged revision must reuse the wrapped rows"
+        );
+        assert_eq!(app.viewer_wrap.borrow().key, key_after_first);
+
+        // Content change → new rows.
+        app.push_scrollback(vec![TextLine::from(Span::raw("chat line 40"))]);
+        let grown = screen_wh(&app, 40, 12);
+        assert!(
+            grown.contains("chat line 40"),
+            "appended line is picked up: {grown}"
+        );
+
+        // Width change → re-wrap at the new width (this line only wraps at 40 columns).
+        app.push_scrollback(vec![TextLine::from(Span::raw("w".repeat(60)))]);
+        let narrow_rows = {
+            let _ = screen_wh(&app, 40, 12);
+            app.viewer_wrap.borrow().rows.len()
+        };
+        let wide_rows = {
+            let _ = screen_wh(&app, 100, 12);
+            app.viewer_wrap.borrow().rows.len()
+        };
+        assert!(
+            narrow_rows > wide_rows,
+            "narrow terminal wraps into more rows: {narrow_rows} vs {wide_rows}"
+        );
+
+        // Scrolling back to the top reveals earlier rows without rebuilding the wrap.
+        let cached = app.viewer_wrap.borrow().key;
+        app.viewer_key(KeyKind::Home);
+        let scrolled = screen_wh(&app, 100, 12);
+        assert_eq!(
+            app.viewer_wrap.borrow().key,
+            cached,
+            "scrolling must not invalidate the wrap"
+        );
+        assert!(
+            scrolled.contains("chat line 0") && !scrolled.contains("chat line 40"),
+            "the window moved: {scrolled}"
+        );
+
+        // Switching entry → the subagent's own transcript, then closing releases the cache.
+        app.viewer_key(KeyKind::Right);
+        let subagent = screen_wh(&app, 100, 12);
+        assert!(
+            subagent.contains("general") && !subagent.contains("chat line"),
+            "selection change re-wraps the new entry: {subagent}"
+        );
+        app.viewer_key(KeyKind::Esc);
+        let _ = screen_wh(&app, 100, 12);
+        assert!(
+            app.viewer_wrap.borrow().key.is_none(),
+            "closing the viewer releases its transcript copy"
+        );
     }
 
     #[test]

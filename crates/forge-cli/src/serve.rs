@@ -1740,7 +1740,11 @@ async fn stop_and_join(handle: Arc<SessionDriverHandle>) {
 /// merge that branch back into the base repo via a 3-way patch. Guards against data loss:
 /// - refuses (409) if the base repo has uncommitted TRACKED changes — never a silent merge on top;
 /// - snapshots the worktree first ([`forge_core::worktree::commit_worktree`]) so nothing is lost;
-/// - on conflict, reports the files and leaves the worktree + branch intact (no auto-resolution).
+/// - on conflict, reports the files and leaves the worktree + branch intact (no auto-resolution);
+/// - on any other hard failure (a git error `run_merge` couldn't parse into a conflict list —
+///   see `MergeOutcome::Error`), the session is respawned and re-registered exactly like the
+///   conflict case. Nothing was merged, so nothing may vanish from the fleet: only `Clean`, where
+///   the worktree/branch are already gone, is allowed to archive the session.
 ///
 /// The merged changes are STAGED (not committed) in the base tree for the user to review + commit.
 async fn merge_session(
@@ -1819,11 +1823,16 @@ async fn merge_session(
             .await
             .unwrap_or_else(|e| MergeOutcome::Error(format!("merge task failed: {e}")))
     };
-    if let MergeOutcome::Conflicts(files) = outcome {
-        match spawn_session_driver(resume_spec).await {
-            Ok(handle) => {
+    // Conflicts and hard errors both mean nothing was merged — the worktree + branch are still
+    // there (run_merge either never applied anything or reset --hard'd the base back). Both must
+    // respawn the driver and re-register the session so it stays visible in the fleet instead of
+    // silently vanishing; only `Clean` (worktree + branch already removed by run_merge) archives.
+    if !matches!(outcome, MergeOutcome::Clean) {
+        let restart = spawn_session_driver(resume_spec).await;
+        return match (outcome, restart) {
+            (MergeOutcome::Conflicts(files), Ok(handle)) => {
                 state.registry.insert(handle).await;
-                return (
+                (
                     axum::http::StatusCode::CONFLICT,
                     [
                         (axum::http::header::CONTENT_TYPE, "application/json"),
@@ -1837,27 +1846,30 @@ async fn merge_session(
                     })
                     .to_string(),
                 )
-                    .into_response();
+                    .into_response()
             }
-            Err(e) => {
-                return err_response(
+            (MergeOutcome::Error(msg), Ok(handle)) => {
+                state.registry.insert(handle).await;
+                err_response(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("merge conflicts, but session restart failed: {e}"),
+                    &format!("merge failed: {msg} — nothing was merged, session left running"),
                 )
             }
-        }
+            (MergeOutcome::Conflicts(_), Err(e)) => err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("merge conflicts, but session restart failed: {e}"),
+            ),
+            (MergeOutcome::Error(msg), Err(e)) => err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("merge failed: {msg}; additionally the session failed to restart: {e}"),
+            ),
+            (MergeOutcome::Clean, _) => unreachable!("Clean is filtered out above"),
+        };
     }
     let _ = state.store.archive_session(&id);
-    match outcome {
-        MergeOutcome::Clean => json_response(&serde_json::json!({
-            "ok": true, "merged": true, "branch": branch,
-        })),
-        MergeOutcome::Conflicts(_) => unreachable!("conflicts restore a resumable driver"),
-        MergeOutcome::Error(msg) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("merge failed: {msg}"),
-        ),
-    }
+    json_response(&serde_json::json!({
+        "ok": true, "merged": true, "branch": branch,
+    }))
 }
 
 /// `POST /api/sessions/{id}/discard` — stop the session and drop its worktree + branch WITHOUT
