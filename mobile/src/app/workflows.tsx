@@ -11,9 +11,8 @@
 // `name=value` words rather than sent as structured JSON.
 //
 // HONESTY: `WorkflowRow.args` is empty for every workflow that doesn't declare `meta.args` (most
-// don't), and `runs` is ALWAYS empty today — nothing persists workflow runs (no `workflow_run`
-// table in forge-store). Both render explicit empty states; neither is ever filled with
-// reconstructed rows. The layout below is what the screen looks like the day the daemon fills them.
+// don't), and `runs` is empty for a workflow that has never run on this machine. Both render
+// explicit empty states; neither is ever filled with reconstructed rows.
 import { router } from "expo-router";
 import { ArrowRight, Workflow as WorkflowIcon } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
@@ -29,7 +28,7 @@ import type { WorkflowArg, WorkflowRow, WorkflowRun } from "../lib/api";
 import { useWorkflows } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
-import { formatRelativeTime, monoFamily, tabularNums, type as typeScale } from "../theme/typography";
+import { formatCost, formatRelativeTime, monoFamily, tabularNums, type as typeScale } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
 
 type ArgValues = Record<string, string>;
@@ -65,6 +64,20 @@ function missingRequired(workflow: WorkflowRow, values: ArgValues): boolean {
   return workflow.args.some((arg) => arg.required && argValue(arg, values).trim().length === 0);
 }
 
+/** The strip's mark + tint per status. `interrupted` is deliberately NOT rendered as a failure:
+ * an interrupted run (Esc, a killed process, a crash) never reported an outcome, so calling it
+ * failed would be inventing one — it gets the warn tint and says so in words. */
+function runTone(status: WorkflowRun["status"], tokens: ReturnType<typeof useTokens>): { mark: string; color: string } {
+  if (status === "running") return { mark: "●", color: tokens.accent };
+  if (status === "ok") return { mark: "✓", color: tokens.success };
+  if (status === "failed") return { mark: "✗", color: tokens.danger };
+  return { mark: "!", color: tokens.warn };
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
 function RunHistory({ runs }: { runs: WorkflowRun[] }) {
   const tokens = useTokens();
   if (runs.length === 0) {
@@ -73,19 +86,32 @@ function RunHistory({ runs }: { runs: WorkflowRun[] }) {
   return (
     <View style={styles.runs}>
       {runs.map((run, index) => {
-        const running = run.finished_at == null;
-        const ok = run.ok === true;
-        const color = running ? tokens.accent : ok ? tokens.success : tokens.danger;
-        const mark = running ? "●" : ok ? "✓" : "✗";
-        // Epoch seconds, matching every other timestamp on this wire (`created_at`, `last_activity`).
-        const when = running ? "running" : formatRelativeTime(run.started_at * 1000);
+        const { mark, color } = runTone(run.status, tokens);
+        // LIVENESS COMES FROM `status`, NOT `finished_at`: a run killed mid-flight has no
+        // `finished_at` either, so reading the old `finished_at == null` test would have left it
+        // claiming "running" forever.
+        const running = run.status === "running";
+        const parts = [
+          // Epoch seconds, matching every other timestamp on this wire (`created_at`, `last_activity`).
+          running ? "running" : formatRelativeTime(run.started_at * 1000),
+          run.status === "failed" || run.status === "interrupted" ? run.status : null,
+          // The counts are closed out when a run finishes, so a live one still reads 0/0 —
+          // showing those would be a claim about work that hasn't been counted yet.
+          running ? null : `${plural(run.phases, "phase")} · ${plural(run.agents, "agent")}`,
+          // 0 means no agent reported a cost, which is not the same as a run that was free.
+          run.cost_usd > 0 ? formatCost(run.cost_usd) : null,
+          run.summary,
+        ].filter(Boolean);
         return (
           <Text
             key={`${run.started_at}-${index}`}
             style={[typeScale.monoMeta, tabularNums, { color }]}
             numberOfLines={1}
+            accessibilityRole="button"
+            accessibilityLabel={`open the session of the ${run.status} run`}
+            onPress={() => router.push(`/session/${run.session_id}`)}
           >
-            {`${mark} ${when}${run.summary ? ` · ${run.summary}` : ""}`}
+            {`${mark} ${parts.join(" · ")}`}
           </Text>
         );
       })}

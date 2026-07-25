@@ -18,7 +18,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -30,6 +30,24 @@ const BUSY_RETRY_MAX: u32 = 8;
 /// to this many bytes at insert time, with a marker. Keeps the append-only global DB from growing
 /// without bound while preserving the head of the args/output for audit/replay.
 const MAX_RESULT_JSON_BYTES: usize = 64 * 1024;
+
+/// How long a `workflow_run` row may sit in `running` before a reader treats it as `interrupted`.
+/// A run is closed out by the process that opened it (normally, on Esc, and on turn abort — see
+/// `WorkflowRunGuard` in forge-core), so only a hard crash/kill can leave one open; without a
+/// horizon such a row would claim "running" forever. Deliberately far longer than any real
+/// workflow: agent concurrency, `mesh.workflows.max_total_agents` and the budget cap all bound a
+/// run, and calling a live one dead would be the worse lie.
+const WORKFLOW_RUN_STALE_SECS: i64 = 12 * 60 * 60;
+
+/// Max characters of a tool call's arguments carried in a synthesized call row's content. Long
+/// enough to identify the call (path, command, pattern), short enough that a `write_file` body or
+/// a pasted document can never ride a transcript row. See [`tool_call_args_summary`].
+const MAX_CALL_ARGS_CHARS: usize = 200;
+
+/// Max characters of any single string VALUE inside those arguments. Applied before the whole-
+/// summary cap so one huge field can't crowd out the other keys — the shape of the call stays
+/// readable even when one argument is a file body.
+const MAX_CALL_ARG_VALUE_CHARS: usize = 80;
 
 /// Default retention horizon: sessions untouched for longer than this are eligible for opportunistic
 /// pruning (cascading to their messages/usage/routing/tool_calls/live_events). ~90 days.
@@ -772,6 +790,35 @@ fn migration_0018(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #19: saved-workflow run history (`/workflow run <name>`, docs/rfcs/forge-workflow.md).
+/// One row per run of a `.forge/workflows/<name>.js` script, so the app's workflow library can show
+/// what a workflow has actually done instead of an always-empty strip. Local machine state like
+/// `schedule`/`queue_task` — `cwd` and session ids don't travel — so deliberately NOT in
+/// [`PORTABLE_METADATA_TABLES`]. Cascades with its session: the run is part of that session's
+/// history, and a pruned session should not leave orphan rows pointing at a transcript that's gone.
+///
+/// Must stay idempotent (like every step from 18 on): [`run_migrations`]'s pre-release Anywhere
+/// repair rewinds a `user_version` of 18-21 to 17, so a genuine v19 DB re-runs this step on open.
+fn migration_0019(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_run (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            session_id  TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+            cwd         TEXT NOT NULL,
+            started_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            finished_at INTEGER,
+            status      TEXT NOT NULL DEFAULT 'running',
+            summary     TEXT,
+            phases      INTEGER NOT NULL DEFAULT 0,
+            agents      INTEGER NOT NULL DEFAULT 0,
+            cost_usd    REAL NOT NULL DEFAULT 0
+         );
+         CREATE INDEX IF NOT EXISTS idx_workflow_run_lookup
+             ON workflow_run(name, cwd, started_at DESC)",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -793,6 +840,7 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0016,
     migration_0017,
     migration_0018,
+    migration_0019,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -807,8 +855,9 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     // remain rejected below.
     if (18..=21).contains(&current) {
         // Re-run the public migrations from the last unambiguous public version. Every affected
-        // step is additive/idempotent, including migration 18, so this also safely distinguishes
-        // a real v18 cache-metrics database from the old pre-release Anywhere markers.
+        // step is additive/idempotent, including migrations 18 and 19, so this also safely
+        // distinguishes a real v18 cache-metrics / v19 workflow-history database from the old
+        // pre-release Anywhere markers. Any step added inside this window must stay idempotent.
         conn.pragma_update(None, "user_version", 17i64)?;
         current = 17;
     }
@@ -6310,10 +6359,18 @@ impl Store {
     /// Note what that is and isn't: the tool row itself stores only the result text and its
     /// `tool_call_id`; the NAME lives in the assistant carrier's `tool_calls_json`, so it is
     /// recovered from the nearest preceding row that has one and left `None` when that carrier is
-    /// gone or does not contain the id. A tool CALL that never produced a result row (an
-    /// interrupted turn) has nothing persisted in `message` at all and cannot be reconstructed
-    /// here. `llm_only` tool rows stay excluded — like their user/assistant siblings they are
-    /// provider-continuity plumbing, not conversation.
+    /// gone or does not contain the id. `llm_only` tool rows stay excluded — like their
+    /// user/assistant siblings they are provider-continuity plumbing, not conversation.
+    ///
+    /// It also SURFACES the tool CALLS, which are persisted but were previously unreachable: a
+    /// carrier row's `content` is empty, so the `content != ''` filter dropped it and the
+    /// `[{id, name, args}]` it carries went with it. With tools opted in, each carrier is expanded
+    /// into one row per declared call ([`ToolPhase::Call`], content = a capped args summary), at
+    /// the CARRIER's `seq`/`created_at` — so every call sorts before the result row that answers
+    /// it (results always carry a later seq), and a call whose result never arrived (an
+    /// interrupted turn) still shows up instead of vanishing. A carrier that also wrote prose
+    /// keeps its own assistant row, ordered before its calls. Nothing here is reconstructed: the
+    /// carrier row and its JSON are real persisted data.
     pub fn load_history_page_with(
         &self,
         session_id: &str,
@@ -6324,7 +6381,9 @@ impl Store {
         let conn = self.lock()?;
         // The carrier lookup sits behind `CASE WHEN ?4 = 1 AND m.role = 'tool'` rather than in the
         // projection unconditionally: SQLite short-circuits the CASE, so the default page runs the
-        // same work it always did and pays nothing for a subquery it never needs.
+        // same work it always did and pays nothing for a subquery it never needs. Same for the
+        // row's OWN `tool_calls_json` (the carrier expansion below) and for the widened content
+        // filter, which collapses back to `m.content != ''` when tools aren't asked for.
         let mut stmt = conn.prepare(
             "SELECT m.seq, m.role, m.content, m.model, m.created_at, m.visibility,
                     m.tool_call_id,
@@ -6334,13 +6393,16 @@ impl Store {
                            AND c.seq < m.seq
                            AND c.tool_calls_json IS NOT NULL
                          ORDER BY c.seq DESC LIMIT 1
-                    ) END
+                    ) END,
+                    CASE WHEN ?4 = 1 THEN m.tool_calls_json END
              FROM message m
              WHERE m.session_id = ?1
                AND (?2 IS NULL OR m.seq < ?2)
                AND (((m.role IN ('user', 'assistant') AND m.visibility != 'llm_only') OR m.visibility = 'ui')
                     OR (?4 = 1 AND m.role = 'tool' AND m.visibility != 'llm_only'))
-               AND m.content != ''
+               AND (m.content != ''
+                    OR (?4 = 1 AND m.role = 'assistant' AND m.visibility != 'llm_only'
+                        AND m.tool_calls_json IS NOT NULL))
              ORDER BY m.seq DESC LIMIT ?3",
         )?;
         let rows = stmt.query_map(
@@ -6355,21 +6417,57 @@ impl Store {
                 let visibility: String = row.get(5)?;
                 let tool_call_id: Option<String> = row.get(6)?;
                 let carrier_json: Option<String> = row.get(7)?;
-                Ok(HistoryRow {
-                    seq: row.get(0)?,
-                    role: Role::parse(&role).unwrap_or(Role::User),
-                    content: row.get(2)?,
-                    model: row.get(3)?,
-                    created_at: row.get(4)?,
-                    visibility: Visibility::parse(&visibility),
-                    tool_name: carrier_json.as_deref().and_then(|carrier| {
-                        tool_name_from_carrier(carrier, tool_call_id.as_deref())
-                    }),
-                })
+                let own_calls_json: Option<String> = row.get(8)?;
+                let role = Role::parse(&role).unwrap_or(Role::User);
+                Ok((
+                    HistoryRow {
+                        seq: row.get(0)?,
+                        role,
+                        content: row.get(2)?,
+                        model: row.get(3)?,
+                        created_at: row.get(4)?,
+                        visibility: Visibility::parse(&visibility),
+                        tool_name: carrier_json.as_deref().and_then(|carrier| {
+                            tool_name_from_carrier(carrier, tool_call_id.as_deref())
+                        }),
+                        tool_phase: (role == Role::Tool).then_some(ToolPhase::Result),
+                    },
+                    own_calls_json,
+                ))
             },
         )?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        // `limit` bounds the DB rows read, not the rows returned: one carrier expands into as many
+        // call rows as it declares. Pagination is unaffected — every returned row carries a REAL
+        // `seq`, so `before_seq` from the oldest of them opens the next window with no gap and no
+        // repeat.
+        let mut out = Vec::new();
+        for row in rows {
+            let (row, own_calls_json) = row?;
+            // Newest-first order, so a carrier's calls are pushed in reverse declaration order and
+            // its own prose last: reversed by the client, that reads prose → call 1 → call 2.
+            if let Some(json) = own_calls_json.as_deref() {
+                for call in parse_tool_calls(json).into_iter().rev() {
+                    out.push(HistoryRow {
+                        seq: row.seq,
+                        // A call is tool activity, like the result it precedes — the carrier's
+                        // `assistant` role belongs to its prose row, not to the calls.
+                        role: Role::Tool,
+                        content: tool_call_args_summary(&call.args),
+                        // Only a provider round-trip has a model; the persisted result rows this
+                        // sits next to carry none either.
+                        model: None,
+                        created_at: row.created_at,
+                        visibility: row.visibility,
+                        tool_name: Some(call.name),
+                        tool_phase: Some(ToolPhase::Call),
+                    });
+                }
+            }
+            if !row.content.is_empty() {
+                out.push(row);
+            }
+        }
+        Ok(out)
     }
 
     /// When the session's FIRST user-facing row was written — the zero point a transcript replay
@@ -6389,13 +6487,19 @@ impl Store {
     /// tool rows on.
     pub fn history_epoch_with(&self, session_id: &str, include_tools: bool) -> Result<Option<i64>> {
         let conn = self.lock()?;
+        // Must mirror `load_history_page_with`'s filter exactly, INCLUDING the carrier rows it
+        // expands into call rows: a carrier can be the oldest row of an include_tools page (a turn
+        // that opened with a tool call), and measuring against a later row would slide every
+        // `elapsed_ms` on the wire.
         let epoch = conn.query_row(
             "SELECT MIN(created_at)
              FROM message
              WHERE session_id = ?1
                AND (((role IN ('user', 'assistant') AND visibility != 'llm_only') OR visibility = 'ui')
                     OR (?2 = 1 AND role = 'tool' AND visibility != 'llm_only'))
-               AND content != ''",
+               AND (content != ''
+                    OR (?2 = 1 AND role = 'assistant' AND visibility != 'llm_only'
+                        AND tool_calls_json IS NOT NULL))",
             rusqlite::params![session_id, i64::from(include_tools)],
             |row| row.get::<_, Option<i64>>(0),
         )?;
@@ -6805,6 +6909,29 @@ pub struct HistoryRow {
     /// (see [`Store::load_history_page_with`]). Always `None` on the default page (which has no
     /// tool rows) and `None` on a tool row whose carrier is no longer recoverable — never guessed.
     pub tool_name: Option<String>,
+    /// Which half of a tool interaction this row is (see [`Store::load_history_page_with`]).
+    /// `None` on every non-tool row, and on the whole default page.
+    pub tool_phase: Option<ToolPhase>,
+}
+
+/// Which half of a tool interaction a `Role::Tool` [`HistoryRow`] is: the CALL the model made
+/// (synthesized from the assistant carrier's `tool_calls_json`, content = an args summary) or the
+/// RESULT row that answered it. The two are otherwise indistinguishable on the wire — same kind,
+/// same tool name — and a client that renders a call as a result would be showing arguments as
+/// output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolPhase {
+    Call,
+    Result,
+}
+
+impl ToolPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolPhase::Call => "call",
+            ToolPhase::Result => "result",
+        }
+    }
 }
 
 /// Resolve a tool row's name out of the assistant carrier's `tool_calls_json`, matching on the
@@ -6819,6 +6946,56 @@ fn tool_name_from_carrier(carrier_json: &str, tool_call_id: Option<&str>) -> Opt
         .into_iter()
         .find(|call| call.id == id)
         .map(|call| call.name)
+}
+
+/// The calls an assistant carrier declared, in the order the model made them. An unparseable
+/// carrier yields none rather than erroring the page: the rest of the transcript is still true.
+fn parse_tool_calls(carrier_json: &str) -> Vec<ToolCall> {
+    serde_json::from_str::<Vec<ToolCall>>(carrier_json).unwrap_or_default()
+}
+
+/// A tool call's arguments, compacted for a transcript row: the same JSON the model sent, with
+/// every string value capped at [`MAX_CALL_ARG_VALUE_CHARS`] and the whole line at
+/// [`MAX_CALL_ARGS_CHARS`]. Value-level capping comes first deliberately — truncating the raw JSON
+/// alone would spend the whole budget on a `write_file` body and hide the `path` that says what
+/// the call actually did. Elisions are marked with `…` so a reader can tell a capped value from a
+/// short one; nothing is summarized or reworded.
+fn tool_call_args_summary(args: &serde_json::Value) -> String {
+    let capped = cap_json_strings(args);
+    let line = serde_json::to_string(&capped).unwrap_or_else(|_| "{}".to_string());
+    let mut chars = line.chars();
+    let head: String = chars.by_ref().take(MAX_CALL_ARGS_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+/// Recursively cap every string in a JSON value to [`MAX_CALL_ARG_VALUE_CHARS`] characters,
+/// marking each cap with `…`. Keys are left alone (they are short and identify the argument).
+fn cap_json_strings(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            let mut chars = s.chars();
+            let head: String = chars.by_ref().take(MAX_CALL_ARG_VALUE_CHARS).collect();
+            if chars.next().is_some() {
+                serde_json::Value::from(format!("{head}…"))
+            } else {
+                serde_json::Value::from(head)
+            }
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(cap_json_strings).collect())
+        }
+        serde_json::Value::Object(fields) => serde_json::Value::Object(
+            fields
+                .iter()
+                .map(|(k, v)| (k.clone(), cap_json_strings(v)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// One `forge tree` row: a session's display metadata and fork linkage.
@@ -7745,6 +7922,126 @@ impl Store {
         )?;
         Ok(())
     }
+
+    // --- saved-workflow run history (`/workflow run <name>`) ---
+
+    /// Open a `workflow_run` row for a starting saved workflow. `id` is caller-generated
+    /// ([`forge_types::new_id`]) so the caller can close the row out later without a round-trip.
+    /// `cwd` is the workspace root the script runs against — the same key the workflow library
+    /// screen lists scripts by, so one project's history never shows up under another's.
+    ///
+    /// Also sweeps this session's own long-dead `running` rows (see [`WORKFLOW_RUN_STALE_SECS`]):
+    /// a row left open by a killed process is repaired the next time a workflow runs, so the
+    /// projection [`list_workflow_runs`](Self::list_workflow_runs) applies on read doesn't have to
+    /// be re-derived forever.
+    pub fn start_workflow_run(
+        &self,
+        id: &str,
+        name: &str,
+        session_id: &str,
+        cwd: &str,
+    ) -> Result<()> {
+        let stale_before = chrono::Utc::now().timestamp() - WORKFLOW_RUN_STALE_SECS;
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE workflow_run SET status = 'interrupted' \
+             WHERE status = 'running' AND started_at < ?1",
+            [stale_before],
+        )?;
+        conn.execute(
+            "INSERT INTO workflow_run (id, name, session_id, cwd) VALUES (?1, ?2, ?3, ?4)",
+            (id, name, session_id, cwd),
+        )?;
+        Ok(())
+    }
+
+    /// Close a run out with what it ended up doing. `ok` distinguishes `ok` from `failed`; the
+    /// counts and cost are the run's own observed totals, not estimates (see
+    /// `Session::run_saved_workflow`). No-op if the row is gone (its session was pruned).
+    pub fn finish_workflow_run(
+        &self,
+        id: &str,
+        ok: bool,
+        summary: &str,
+        phases: i64,
+        agents: i64,
+        cost_usd: f64,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE workflow_run \
+             SET status = ?1, finished_at = ?2, summary = ?3, phases = ?4, agents = ?5, \
+                 cost_usd = ?6 \
+             WHERE id = ?7 AND status = 'running'",
+            (
+                if ok { "ok" } else { "failed" },
+                chrono::Utc::now().timestamp(),
+                summary,
+                phases,
+                agents,
+                cost_usd,
+                id,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Mark a run interrupted — the turn was aborted (Esc) or the process is shutting down, so no
+    /// outcome exists. Unlike a crash this DOES know when the run stopped, so `finished_at` is
+    /// recorded; a crash-interrupted row keeps a NULL `finished_at` because that moment was never
+    /// observed. Guarded on `status = 'running'` so it can never overwrite a real outcome.
+    pub fn interrupt_workflow_run(&self, id: &str) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE workflow_run SET status = 'interrupted', finished_at = ?1 \
+             WHERE id = ?2 AND status = 'running'",
+            (chrono::Utc::now().timestamp(), id),
+        )?;
+        Ok(())
+    }
+
+    /// The newest `limit` recorded runs of one workflow in one workspace, newest first.
+    ///
+    /// A `running` row older than [`WORKFLOW_RUN_STALE_SECS`] is REPORTED as `interrupted` (its
+    /// `finished_at` stays NULL — the end time was never observed and is not invented). That is
+    /// the read-side half of the staleness rule; [`start_workflow_run`](Self::start_workflow_run)
+    /// writes the same verdict back to disk on the next run.
+    pub fn list_workflow_runs(
+        &self,
+        name: &str,
+        cwd: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkflowRun>> {
+        let stale_before = chrono::Utc::now().timestamp() - WORKFLOW_RUN_STALE_SECS;
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, session_id, cwd, started_at, finished_at, status, summary, \
+                    phases, agents, cost_usd \
+             FROM workflow_run WHERE name = ?1 AND cwd = ?2 \
+             ORDER BY started_at DESC, rowid DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![name, cwd, limit as i64], |r| {
+            let status: String = r.get(6)?;
+            let started_at: i64 = r.get(4)?;
+            Ok(WorkflowRun {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                session_id: r.get(2)?,
+                cwd: r.get(3)?,
+                started_at,
+                finished_at: r.get(5)?,
+                status: if status == "running" && started_at < stale_before {
+                    "interrupted".to_string()
+                } else {
+                    status
+                },
+                summary: r.get(7)?,
+                phases: r.get(8)?,
+                agents: r.get(9)?,
+                cost_usd: r.get(10)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
 }
 
 /// One registered `forge schedule` row: a task, its working directory, and the cron/interval spec
@@ -7783,6 +8080,29 @@ pub struct QueueTask {
     pub summary: Option<String>,
     pub cost_usd: Option<f64>,
     pub gate: Option<String>,
+}
+
+/// One recorded run of a saved workflow (`/workflow run <name>`). `status` lifecycle:
+/// `running` → `ok` / `failed` (the script returned) / `interrupted` (the turn was aborted, or the
+/// process died mid-run — see [`Store::list_workflow_runs`]). `phases`/`agents`/`cost_usd` are the
+/// run's own observed totals: phases announced, agents started, and cost summed over the agents
+/// that reported one — never estimates, and 0 on a run that reported none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowRun {
+    pub id: String,
+    pub name: String,
+    pub session_id: String,
+    /// Workspace root the script ran against, so a same-named workflow in another project is a
+    /// different history.
+    pub cwd: String,
+    pub started_at: i64,
+    /// `None` while running, and on a run interrupted by a crash (the end moment was never seen).
+    pub finished_at: Option<i64>,
+    pub status: String,
+    pub summary: Option<String>,
+    pub phases: i64,
+    pub agents: i64,
+    pub cost_usd: f64,
 }
 
 #[cfg(test)]
@@ -8207,17 +8527,23 @@ mod tests {
             "tool rows stay out of the default page"
         );
         assert!(plain.iter().all(|r| r.tool_name.is_none()));
+        assert!(
+            plain.iter().all(|r| r.tool_phase.is_none()),
+            "and neither half of a tool interaction is even describable there"
+        );
 
-        // Opted in: the result rows appear, each named from its carrier's tool_calls_json.
+        // Opted in: the result rows appear, each named from its carrier's tool_calls_json — and
+        // the carrier's own calls become rows of their own, at the carrier's seq (so each sorts
+        // before the result answering it) and after its prose.
         let with_tools = store.load_history_page_with(&sid, None, 20, true).unwrap();
         assert_eq!(
             with_tools.iter().map(|r| r.seq).collect::<Vec<_>>(),
-            vec![6, 4, 3, 2, 1, 0],
+            vec![6, 4, 3, 2, 1, 1, 1, 0],
             "tool rows join the page; the llm_only one is still plumbing"
         );
         let named: Vec<(i64, Option<&str>)> = with_tools
             .iter()
-            .filter(|r| r.role == Role::Tool)
+            .filter(|r| r.role == Role::Tool && r.tool_phase == Some(ToolPhase::Result))
             .map(|r| (r.seq, r.tool_name.as_deref()))
             .collect();
         assert_eq!(
@@ -8226,13 +8552,158 @@ mod tests {
             "parallel calls resolve per tool_call_id, and an orphan stays unnamed"
         );
 
-        // Pagination still windows correctly with tools in the set.
+        // Newest-first, so reversing gives the chronological read: prose, then the calls in the
+        // order the model made them, then each result.
+        let chronological: Vec<(i64, &str, Option<&str>, Option<ToolPhase>)> = with_tools
+            .iter()
+            .rev()
+            .map(|r| {
+                (
+                    r.seq,
+                    r.content.as_str(),
+                    r.tool_name.as_deref(),
+                    r.tool_phase,
+                )
+            })
+            .collect();
+        assert_eq!(
+            chronological,
+            vec![
+                (0, "q", None, None),
+                (1, "looking…", None, None),
+                (
+                    1,
+                    r#"{"path":"a.rs"}"#,
+                    Some("read_file"),
+                    Some(ToolPhase::Call)
+                ),
+                (
+                    1,
+                    r#"{"command":"ls"}"#,
+                    Some("shell"),
+                    Some(ToolPhase::Call)
+                ),
+                (
+                    2,
+                    "a.rs contents",
+                    Some("read_file"),
+                    Some(ToolPhase::Result)
+                ),
+                (3, "a.rs  b.rs", Some("shell"), Some(ToolPhase::Result)),
+                (4, "???", None, Some(ToolPhase::Result)),
+                (6, "done", None, None),
+            ],
+            "every call precedes the result that answers it"
+        );
+        // A call row is tool activity, not the carrier's assistant turn, and carries no model —
+        // it renders exactly like the result row next to it.
+        let calls: Vec<&HistoryRow> = with_tools
+            .iter()
+            .filter(|r| r.tool_phase == Some(ToolPhase::Call))
+            .collect();
+        assert!(calls
+            .iter()
+            .all(|r| r.role == Role::Tool && r.model.is_none()));
+
+        // Pagination still windows correctly with tools in the set. `limit` bounds the DB rows
+        // read, so a page containing a carrier hands back MORE rows than it asked for — but every
+        // one carries a real seq, so walking `before` from the oldest of them neither skips nor
+        // repeats a row.
         let first = store.load_history_page_with(&sid, None, 2, true).unwrap();
         assert_eq!(first.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![6, 4]);
         let next = store
             .load_history_page_with(&sid, Some(4), 2, true)
             .unwrap();
         assert_eq!(next.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![3, 2]);
+        let last = store
+            .load_history_page_with(&sid, Some(2), 2, true)
+            .unwrap();
+        assert_eq!(
+            last.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![1, 1, 1, 0],
+            "the carrier's two calls and its prose all belong to seq 1"
+        );
+        assert!(store
+            .load_history_page_with(&sid, Some(0), 2, true)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn history_page_keeps_a_call_whose_result_never_arrived() {
+        // An interrupted turn: the carrier is persisted, the tool never got to answer. The call
+        // is real (the model made it) and is the only trace of it, so dropping it would erase the
+        // most interesting row of the transcript.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        store.add_message(&sid, 0, Role::User, "q", None).unwrap();
+        store
+            .add_message_full(
+                &sid,
+                1,
+                Role::Assistant,
+                "",
+                Some("m1"),
+                &[ToolCall {
+                    id: "call-a".into(),
+                    name: "shell".into(),
+                    args: serde_json::json!({"command": "cargo test"}),
+                }],
+                None,
+            )
+            .unwrap();
+
+        // The empty carrier still contributes nothing to the default page.
+        assert_eq!(
+            store
+                .load_history_page(&sid, None, 10)
+                .unwrap()
+                .iter()
+                .map(|r| r.seq)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+
+        let page = store.load_history_page_with(&sid, None, 10, true).unwrap();
+        assert_eq!(
+            page.iter()
+                .map(|r| (r.seq, r.tool_name.as_deref(), r.tool_phase))
+                .collect::<Vec<_>>(),
+            vec![(1, Some("shell"), Some(ToolPhase::Call)), (0, None, None)],
+            "the unanswered call rides alone; the empty carrier itself never becomes a row"
+        );
+        assert_eq!(page[0].content, r#"{"command":"cargo test"}"#);
+    }
+
+    #[test]
+    fn tool_call_args_are_summarized_without_leaking_a_file_body() {
+        // A `write_file` call is the worst case: the body is arbitrarily large and the `path` is
+        // the part that says what happened. Capping values first keeps the path visible.
+        let body = "x".repeat(10_000);
+        let summary = tool_call_args_summary(&serde_json::json!({
+            "path": "src/lib.rs",
+            "content": body,
+        }));
+        assert!(summary.chars().count() <= MAX_CALL_ARGS_CHARS + 1);
+        assert!(summary.contains(r#""path":"src/lib.rs""#));
+        assert!(
+            summary.matches('x').count() <= MAX_CALL_ARG_VALUE_CHARS,
+            "no more of the body than one capped value: {summary}"
+        );
+        assert!(summary.contains('…'), "the elision is visible: {summary}");
+
+        // Short args survive verbatim — a summary that rewrote them would misreport the call.
+        assert_eq!(
+            tool_call_args_summary(&serde_json::json!({"path": "a.rs"})),
+            r#"{"path":"a.rs"}"#
+        );
+        assert_eq!(tool_call_args_summary(&serde_json::json!({})), "{}");
+        // Nested and non-object args are capped the same way, never dropped.
+        let nested = tool_call_args_summary(&serde_json::json!({
+            "edits": [{"old": "y".repeat(500), "new": "z"}],
+        }));
+        assert!(nested.contains(r#""new":"z""#), "{nested}");
+        assert!(nested.matches('y').count() <= MAX_CALL_ARG_VALUE_CHARS);
     }
 
     #[test]
@@ -8279,6 +8750,211 @@ mod tests {
                 "epoch must be the oldest row of the set it describes"
             );
         }
+
+        // The widened set includes the call rows, which sit at their CARRIER's timestamp — an
+        // empty carrier is invisible to the default page but can be the oldest row of an
+        // include_tools one, and the epoch has to follow.
+        let other = store.create_session("/y", "default").unwrap();
+        other_stamped_carrier(&store, &other);
+        assert_eq!(
+            store.history_epoch(&other).unwrap(),
+            Some(2_020),
+            "the carrier is invisible without tools"
+        );
+        assert_eq!(
+            store.history_epoch_with(&other, true).unwrap(),
+            Some(2_000),
+            "with tools the call row is the zero point"
+        );
+        for tools in [false, true] {
+            let page = store
+                .load_history_page_with(&other, None, 20, tools)
+                .unwrap();
+            assert_eq!(
+                page.iter().map(|r| r.created_at).min(),
+                store.history_epoch_with(&other, tools).unwrap()
+            );
+        }
+    }
+
+    /// A session that OPENS with a tool call: an empty carrier at t=2000, its result at t=2010,
+    /// and the model's reply at t=2020 (the only row the default page can see).
+    fn other_stamped_carrier(store: &Store, sid: &str) {
+        store
+            .add_message_full(
+                sid,
+                0,
+                Role::Assistant,
+                "",
+                None,
+                &[ToolCall {
+                    id: "call-a".into(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": "a.rs"}),
+                }],
+                None,
+            )
+            .unwrap();
+        store
+            .add_message_full(sid, 1, Role::Tool, "contents", None, &[], Some("call-a"))
+            .unwrap();
+        store
+            .add_message(sid, 2, Role::Assistant, "done", None)
+            .unwrap();
+        let conn = store.lock().unwrap();
+        for (seq, at) in [(0_i64, 2_000_i64), (1, 2_010), (2, 2_020)] {
+            conn.execute(
+                "UPDATE message SET created_at = ?1 WHERE session_id = ?2 AND seq = ?3",
+                rusqlite::params![at, sid, seq],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn workflow_runs_record_their_outcome_and_stay_scoped_to_one_workspace() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+        let other_sid = store.create_session("/other", "default").unwrap();
+
+        store
+            .start_workflow_run("run-1", "audit", &sid, "/repo")
+            .unwrap();
+        // Still open: no outcome to report yet, and none invented.
+        let live = store.list_workflow_runs("audit", "/repo", 10).unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].status, "running");
+        assert_eq!(live[0].finished_at, None);
+        assert_eq!(live[0].summary, None);
+        assert_eq!(live[0].session_id, sid);
+
+        store
+            .finish_workflow_run("run-1", true, "AUDIT_OK", 3, 5, 0.42)
+            .unwrap();
+        let done = store.list_workflow_runs("audit", "/repo", 10).unwrap();
+        assert_eq!(done[0].status, "ok");
+        assert_eq!(done[0].summary.as_deref(), Some("AUDIT_OK"));
+        assert_eq!((done[0].phases, done[0].agents), (3, 5));
+        assert!((done[0].cost_usd - 0.42).abs() < f64::EPSILON);
+        assert!(done[0].finished_at.is_some());
+
+        // A finished run is terminal: a late writer can't reopen or relabel it.
+        store
+            .finish_workflow_run("run-1", false, "later", 0, 0, 0.0)
+            .unwrap();
+        store.interrupt_workflow_run("run-1").unwrap();
+        assert_eq!(
+            store.list_workflow_runs("audit", "/repo", 10).unwrap()[0].status,
+            "ok"
+        );
+
+        // Same workflow NAME in another project is a different history.
+        store
+            .start_workflow_run("run-2", "audit", &other_sid, "/other")
+            .unwrap();
+        store
+            .finish_workflow_run("run-2", false, "boom", 1, 1, 0.0)
+            .unwrap();
+        assert_eq!(
+            store
+                .list_workflow_runs("audit", "/repo", 10)
+                .unwrap()
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["run-1"]
+        );
+        assert_eq!(
+            store.list_workflow_runs("audit", "/other", 10).unwrap()[0].status,
+            "failed"
+        );
+        assert!(store
+            .list_workflow_runs("never-run", "/repo", 10)
+            .unwrap()
+            .is_empty());
+
+        // Newest first, capped.
+        for i in 3..8 {
+            let id = format!("run-{i}");
+            store
+                .start_workflow_run(&id, "audit", &sid, "/repo")
+                .unwrap();
+            store
+                .finish_workflow_run(&id, true, "ok", 0, 0, 0.0)
+                .unwrap();
+        }
+        let capped = store.list_workflow_runs("audit", "/repo", 3).unwrap();
+        assert_eq!(
+            capped.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["run-7", "run-6", "run-5"],
+            "newest first (same-second runs break the tie by insertion order)"
+        );
+
+        // The run belongs to its session's history: pruning the session takes it along rather
+        // than leaving a row pointing at a transcript that no longer exists.
+        store
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM session WHERE id = ?1", [&sid])
+            .unwrap();
+        assert!(store
+            .list_workflow_runs("audit", "/repo", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn an_interrupted_workflow_run_never_keeps_claiming_it_is_running() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+
+        // Esc mid-run (or shutdown): the end moment IS observed, so it is recorded.
+        store
+            .start_workflow_run("run-esc", "audit", &sid, "/repo")
+            .unwrap();
+        store.interrupt_workflow_run("run-esc").unwrap();
+        let esc = store.list_workflow_runs("audit", "/repo", 10).unwrap();
+        assert_eq!(esc[0].status, "interrupted");
+        assert!(esc[0].finished_at.is_some());
+        assert_eq!(esc[0].summary, None, "there is no outcome to summarize");
+
+        // A killed process leaves the row open. Backdate it past the horizon: the reader reports
+        // `interrupted` WITHOUT inventing a finish time it never saw.
+        store
+            .start_workflow_run("run-crash", "build", &sid, "/repo")
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE workflow_run SET started_at = ?1 WHERE id = 'run-crash'",
+                [chrono::Utc::now().timestamp() - WORKFLOW_RUN_STALE_SECS - 1],
+            )
+            .unwrap();
+        let crashed = store.list_workflow_runs("build", "/repo", 10).unwrap();
+        assert_eq!(crashed[0].status, "interrupted");
+        assert_eq!(crashed[0].finished_at, None);
+
+        // A run that started moments ago is genuinely live and must be left alone.
+        store
+            .start_workflow_run("run-live", "build", &sid, "/repo")
+            .unwrap();
+        assert_eq!(
+            store.list_workflow_runs("build", "/repo", 10).unwrap()[0].status,
+            "running"
+        );
+        // …and starting it swept the crashed row's verdict to disk, so the projection isn't the
+        // only thing keeping the table honest.
+        let on_disk: String = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM workflow_run WHERE id = 'run-crash'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(on_disk, "interrupted");
     }
 
     #[test]

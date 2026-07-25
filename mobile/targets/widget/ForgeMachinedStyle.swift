@@ -15,11 +15,15 @@
 // widget tile) are the design's deliberate native-platform exception to the app's 3-4pt radius.
 //
 // TYPEFACE: the app bundles Geist / Geist Mono via the expo-font config plugin, but that plugin
-// registers the faces in the MAIN app bundle's UIAppFonts only. A widget extension is a separate
-// bundle and cannot see them without adding the .ttf files to this target's resources — a target
-// -config change that can't be validated without a real iOS build. So this target stays on San
-// Francisco, using `design: .monospaced` (SF Mono) everywhere the design specifies Geist Mono.
+// registers the faces in the MAIN app bundle's UIAppFonts only — a widget extension is a separate
+// bundle and cannot see them. So this target carries its own copies: the five .ttf files sitting
+// beside this source file are swept into the extension's Copy Bundle Resources phase by the
+// target's PBXFileSystemSynchronizedRootGroup (they are not listed in its membershipExceptions),
+// and Info.plist here declares them in UIAppFonts. `ForgeTypeface` then resolves them by exact
+// PostScript name — falling back to San Francisco if, for any reason, a face fails to register.
+// See ForgeTypeface below for the fallback contract.
 import SwiftUI
+import UIKit
 
 enum ForgeMachined {
     static let bg = Color(hex: 0x09090B)
@@ -44,10 +48,72 @@ enum ForgeMachined {
     static let border = Color(hex: 0xF4F4F6, opacity: 0.10)
     static let borderStrong = Color(hex: 0xF4F4F6, opacity: 0.14)
 
-    /// Technical/status text (counters, percentages, money, timers). See the TYPEFACE note above
-    /// for why this is SF Mono rather than the app's Geist Mono.
+    /// Body / label text — Geist.
+    static func sans(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        ForgeTypeface.resolve(
+            ForgeTypeface.sansFace(for: weight),
+            available: ForgeTypeface.sansAvailable,
+            size: size,
+            weight: weight
+        )
+    }
+
+    /// Technical/status text (counters, percentages, money, timers) — Geist Mono, per the design's
+    /// rule that everything numeric or machine-ish is set in the mono face.
     static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+        ForgeTypeface.resolve(
+            ForgeTypeface.monoFace(for: weight),
+            available: ForgeTypeface.monoAvailable,
+            size: size,
+            weight: weight
+        )
+    }
+}
+
+/// Resolves the bundled Geist faces, with San Francisco as a hard fallback.
+///
+/// The strings below are PostScript names (name-table ID 6), read out of the actual .ttf files
+/// rather than assumed from their filenames:
+///   Geist-Regular · Geist-Medium · Geist-SemiBold · GeistMono-Regular · GeistMono-Medium
+///
+/// Only those five faces ship in this target (the app bundles Geist-Bold and GeistMono-SemiBold
+/// too, but nothing here asks for them and an extension pays for every byte it embeds), so heavier
+/// weights clamp down to the heaviest face present: sans .bold/.heavy/.black → Geist-SemiBold,
+/// mono .semibold and up → GeistMono-Medium. No call site currently requests those.
+///
+/// FALLBACK: if a family fails to register — a resource that didn't get copied, a plist that lost
+/// UIAppFonts — every helper returns `.system(size:weight:)` instead. A widget in SF is a cosmetic
+/// regression; a widget that renders nothing is a bug report. `Font.custom` alone would also fall
+/// back, but it would silently drop the requested weight, so the availability probe is explicit.
+private enum ForgeTypeface {
+    /// One probe per family; the faces of a family are registered together or not at all.
+    /// `static let` gives a lazy, once-only, thread-safe evaluation.
+    static let sansAvailable: Bool = UIFont(name: "Geist-Regular", size: 12) != nil
+    static let monoAvailable: Bool = UIFont(name: "GeistMono-Regular", size: 12) != nil
+
+    static func sansFace(for weight: Font.Weight) -> String {
+        if weight == .medium { return "Geist-Medium" }
+        if weight == .semibold || weight == .bold || weight == .heavy || weight == .black {
+            return "Geist-SemiBold"
+        }
+        return "Geist-Regular"
+    }
+
+    static func monoFace(for weight: Font.Weight) -> String {
+        if weight == .medium || weight == .semibold || weight == .bold
+            || weight == .heavy || weight == .black
+        {
+            return "GeistMono-Medium"
+        }
+        return "GeistMono-Regular"
+    }
+
+    /// `fixedSize:` (not `size:`) deliberately: `Font.custom(_:size:)` scales with Dynamic Type
+    /// whereas the `.system(size:)` calls this replaces did not, and these widget/Live Activity
+    /// layouts are laid out to the point. `fixedSize:` keeps the previous metrics exactly.
+    static func resolve(_ postScriptName: String, available: Bool, size: CGFloat, weight: Font.Weight) -> Font {
+        guard available else { return .system(size: size, weight: weight) }
+        return .custom(postScriptName, fixedSize: size)
     }
 }
 

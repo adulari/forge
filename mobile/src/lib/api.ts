@@ -58,9 +58,29 @@ export interface SkillRow { name: string; description: string; scope: "builtin" 
 /** A declared workflow parameter (`meta.args`). `arg_type` is the author's free-form type word —
  * the wire field is not called `type` because that is a Rust keyword. */
 export interface WorkflowArg { name: string; arg_type: string | null; required: boolean; description: string | null; default: string | null; }
-/** Reserved. The daemon ALWAYS returns `runs: []` today — nothing persists workflow runs
- * (there is no `workflow_run` table in forge-store), and the server refuses to synthesize them. */
-export interface WorkflowRun { started_at: number; finished_at: number | null; ok: boolean | null; summary: string | null; }
+/** One recorded run of a saved workflow, read from the `workflow_run` rows `run_saved_workflow`
+ * writes — real runs only, never reconstructed.
+ *
+ * `status` is the honest verdict and the ONLY field that says whether a run is still going:
+ * `finished_at` is null both while a run is live AND on a crash-interrupted one whose end moment
+ * was never observed. `ok` is the coarse boolean (null for `running` and `interrupted`, which
+ * reported no outcome at all). `phases`/`agents`/`cost_usd` are the run's own counts, closed out
+ * when it finished — 0 on a run that is still going, and a real 0 on one that reported none. */
+export interface WorkflowRun {
+  started_at: number;
+  finished_at: number | null;
+  ok: boolean | null;
+  summary: string | null;
+  status: "running" | "ok" | "failed" | "interrupted";
+  /** The session the run happened in, so its transcript can be opened. */
+  session_id: string;
+  phases: number;
+  agents: number;
+  cost_usd: number;
+}
+/** `runs` is newest-first and capped by the daemon (10 today). Empty for a workflow that has
+ * never run on this machine, or that was only ever run inline via the `run_workflow` tool (which
+ * authors an anonymous script belonging to no library entry). */
 export interface WorkflowRow { name: string; description: string; when_to_use: string | null; phases: string[]; args: WorkflowArg[]; runs: WorkflowRun[]; }
 export interface HookRow { event: string; matcher: string | null; command: string; timeout_secs: number; cc_compat: boolean; }
 export interface ModelsResponse { catalog: "available" | "unavailable"; providers: ModelProvider[]; }
@@ -168,10 +188,19 @@ export interface HistoryRow {
   created_at: number;
   visibility: "llm" | "ui";
   /** v9 additive: the row's provenance, so a paged-in replay row renders like a live transcript
-   * row. Absent from a pre-v9 daemon — derive from `role` in that case. Never `"tool"` today:
-   * the store's history query selects only user/assistant turns plus `ui` notes, leaving tool
-   * activity out of this stream entirely. */
+   * row. Absent from a pre-v9 daemon — derive from `role` in that case. `"tool"` appears ONLY on
+   * a page fetched with `include_tools`; without it the store selects just user/assistant turns
+   * plus `ui` notes, leaving tool activity out of the stream. */
   kind?: TranscriptKind;
+  /** The tool a `kind === "tool"` row belongs to — same field the live socket's transcript rows
+   * use, so one renderer handles both. Null when the call carrier is no longer recoverable from
+   * the store; absent on every page that asked for no tools. */
+  tool?: string | null;
+  /** Which half of the tool interaction the row is: `"call"` (the arguments the model sent, in
+   * `content`) or `"result"` (what came back). The daemon omits the key entirely off an
+   * `include_tools` page, and a pre-v10 daemon never sends it at all — absent means "render as
+   * before", not "call". */
+  tool_phase?: "call" | "result" | null;
   /** v9 additive: milliseconds from the session's FIRST visible row to this one — the zero point
    * a replay scrubber needs, which raw `created_at` epochs don't give. Second-resolution in fact
    * (`created_at` is stored in whole seconds). Absent from a pre-v9 daemon, null when the epoch
@@ -591,11 +620,18 @@ export function getUsage(baseUrl: string, session?: string): Promise<UsageRespon
   return request(baseUrl, `/api/usage${qs({ session })}`);
 }
 
+/** `include_tools` widens the page to tool CALL and RESULT rows (`tool_phase` says which).
+ * Opt-in: the parameter is left off the URL entirely unless asked for, so every existing caller
+ * sends the same request and gets the same payload it always did. */
 export function getHistory(
   baseUrl: string,
-  params: { session: string; before?: number; limit?: number },
+  params: { session: string; before?: number; limit?: number; include_tools?: boolean },
 ): Promise<HistoryRow[]> {
-  return request(baseUrl, `/api/history${qs(params)}`);
+  const { include_tools, ...page } = params;
+  return request(
+    baseUrl,
+    `/api/history${qs({ ...page, include_tools: include_tools ? 1 : undefined })}`,
+  );
 }
 
 export function uploadFile(

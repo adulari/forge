@@ -207,6 +207,53 @@ impl WorkflowState {
     }
 }
 
+/// What a saved-workflow run observed about itself, accumulated from the run's own event stream
+/// (`Session::run_saved_workflow`) and written onto its `workflow_run` row when it ends. Every
+/// field is a count of things that actually happened — an announced phase, a started agent, a cost
+/// an agent reported — so a script that announces no phases records 0, not "unknown".
+#[derive(Debug, Default)]
+pub(crate) struct WorkflowRunStats {
+    pub phases: i64,
+    pub agents: i64,
+    pub cost_usd: f64,
+}
+
+impl WorkflowRunStats {
+    /// Close the run's row out with these totals. Best-effort: the run genuinely ended whatever
+    /// the store says, and losing the history strip must not turn a finished workflow into a
+    /// failed command.
+    pub fn record(&self, store: &forge_store::Store, run_id: &str, ok: bool, summary: &str) {
+        let _ =
+            store.finish_workflow_run(run_id, ok, summary, self.phases, self.agents, self.cost_usd);
+    }
+}
+
+/// Closes a `workflow_run` row out as `interrupted` if the run's future is dropped before it
+/// finishes. Esc mid-workflow aborts the whole turn task, so neither completion path below runs
+/// and the row would otherwise sit at `running` until the staleness horizon expired.
+/// [`WorkflowRunGuard::finished`] disarms it once a real outcome has been recorded.
+pub(crate) struct WorkflowRunGuard {
+    pub store: Arc<forge_store::Store>,
+    pub id: Option<String>,
+}
+
+impl WorkflowRunGuard {
+    pub fn finished(&mut self) {
+        self.id = None;
+    }
+}
+
+impl Drop for WorkflowRunGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            // Best-effort, and it must be: a Drop has nowhere to report a store error, and the run
+            // was interrupted whether or not this write lands (the staleness horizon is the
+            // backstop for exactly that case).
+            let _ = self.store.interrupt_workflow_run(&id);
+        }
+    }
+}
+
 /// First non-empty line of a result, truncated — mirrors `subagent::summary`'s one-line style.
 pub(crate) fn summary(text: &str) -> String {
     let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
@@ -692,6 +739,48 @@ mod tests {
     use forge_mesh::{Router, RoutingDecision};
     use forge_provider::{EventSink, ModelResponse, Provider, ProviderError};
     use forge_types::{ModelHealth, PermissionMode, ProjectContext, SubscriptionQuota};
+
+    #[test]
+    fn dropping_a_running_workflow_marks_its_row_interrupted() {
+        // Esc mid-workflow aborts the turn task, which DROPS this future — no completion path
+        // runs, so the guard is the only thing that can close the row out.
+        let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let sid = store.create_session("/repo", "default").unwrap();
+        store
+            .start_workflow_run("run-1", "audit", &sid, "/repo")
+            .unwrap();
+        {
+            let _guard = WorkflowRunGuard {
+                store: Arc::clone(&store),
+                id: Some("run-1".to_string()),
+            };
+        }
+        let runs = store.list_workflow_runs("audit", "/repo", 10).unwrap();
+        assert_eq!(runs[0].status, "interrupted");
+        assert!(
+            runs[0].finished_at.is_some(),
+            "an abort knows when it happened, unlike a crash"
+        );
+
+        // A finished run disarms the guard, so a normal completion is never relabelled.
+        store
+            .start_workflow_run("run-2", "audit", &sid, "/repo")
+            .unwrap();
+        store
+            .finish_workflow_run("run-2", true, "OK", 1, 0, 0.0)
+            .unwrap();
+        {
+            let mut guard = WorkflowRunGuard {
+                store: Arc::clone(&store),
+                id: Some("run-2".to_string()),
+            };
+            guard.finished();
+        }
+        assert_eq!(
+            store.list_workflow_runs("audit", "/repo", 10).unwrap()[0].status,
+            "ok"
+        );
+    }
 
     #[test]
     fn strip_meta_export_removes_leading_meta_block() {

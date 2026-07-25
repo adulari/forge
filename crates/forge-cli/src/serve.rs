@@ -2641,12 +2641,17 @@ struct WorkflowRow {
     /// Typed parameters the script reads off its injected `args` global, declared in `meta.args`.
     /// Empty for every workflow that doesn't declare them (most don't) — never inferred.
     args: Vec<WorkflowArg>,
-    /// Recorded past runs. ALWAYS empty today: nothing persists workflow runs — there is no
-    /// `workflow_run` table in forge-store and `run_saved_workflow` writes only the session
-    /// transcript. The field exists so a history backend can fill it without a wire break; it is
-    /// never populated with reconstructed or guessed rows.
+    /// Recorded past runs, newest first, capped at [`WORKFLOW_RUNS_PER_ROW`]. Read from the
+    /// `workflow_run` table `Session::run_saved_workflow` writes — only real runs of THIS
+    /// workspace's script appear, never reconstructed or guessed rows. Empty for a workflow the
+    /// model has only ever run inline (the `run_workflow` tool authors an anonymous script, which
+    /// belongs to no entry in this library) or that has never run on this machine.
     runs: Vec<WorkflowRun>,
 }
+
+/// How many past runs each workflow row carries. The library screen shows a short history strip,
+/// not an audit log — the full history stays queryable in the store.
+const WORKFLOW_RUNS_PER_ROW: usize = 10;
 
 /// One declared workflow parameter. `arg_type` (not `type`, a Rust keyword) carries the author's
 /// free-form type word — `string`, `number`, `boolean`, `path`, … — verbatim.
@@ -2659,12 +2664,48 @@ struct WorkflowArg {
     default: Option<String>,
 }
 
+/// One recorded run of a saved workflow. `ok` is the coarse verdict older clients render;
+/// `status` is the honest one — an `interrupted` run (Esc, or a killed process) neither succeeded
+/// nor failed, so `ok` is null there rather than a fabricated `false`. `finished_at` is null while
+/// a run is live AND on a crash-interrupted run, whose end moment was never observed; `status`, not
+/// `finished_at`, is what says whether a run is still going.
 #[derive(serde::Serialize)]
 struct WorkflowRun {
     started_at: i64,
     finished_at: Option<i64>,
     ok: Option<bool>,
     summary: Option<String>,
+    /// `"running"` | `"ok"` | `"failed"` | `"interrupted"`.
+    status: String,
+    /// The session the run happened in, so the app can open its transcript.
+    session_id: String,
+    /// Phases the script announced and agents it started — the run's own counts, 0 when it
+    /// reported none (a single-phase script is a real 0, not a missing value).
+    phases: i64,
+    agents: i64,
+    /// Summed over the agents that reported a cost; 0 when none did.
+    cost_usd: f64,
+}
+
+impl From<forge_store::WorkflowRun> for WorkflowRun {
+    fn from(run: forge_store::WorkflowRun) -> Self {
+        Self {
+            started_at: run.started_at,
+            finished_at: run.finished_at,
+            ok: match run.status.as_str() {
+                "ok" => Some(true),
+                "failed" => Some(false),
+                // `running` and `interrupted` have no outcome to report.
+                _ => None,
+            },
+            summary: run.summary,
+            status: run.status,
+            session_id: run.session_id,
+            phases: run.phases,
+            agents: run.agents,
+            cost_usd: run.cost_usd,
+        }
+    }
 }
 
 /// Split a `meta` literal's `args: [ {...}, {...} ]` array into its top-level object literals.
@@ -2833,8 +2874,17 @@ async fn workflows_page(
             None => state.default_cwd.clone(),
         }
     };
+    let store = state.store.clone();
     let rows = tokio::task::spawn_blocking(move || {
         let dir = std::path::Path::new(&cwd).join(".forge").join("workflows");
+        // Runs are keyed by the workspace root `Session::run_saved_workflow` recorded, which is
+        // canonicalized (`WorkspaceContext::new`) — canonicalize this side too so a session opened
+        // through a symlink or a trailing slash still finds its own history. A path that can't be
+        // canonicalized (a session whose cwd is gone) falls back to the raw string: at worst the
+        // strip is empty, never another project's runs.
+        let run_key = std::fs::canonicalize(&cwd)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| cwd.clone());
         let mut rows: Vec<WorkflowRow> = Vec::new();
         let Ok(entries) = std::fs::read_dir(dir) else {
             return rows;
@@ -2855,7 +2905,14 @@ async fn workflows_page(
                 when_to_use: meta_string_field(meta, "whenToUse"),
                 phases: meta_phase_titles(meta),
                 args: meta_args(meta),
-                runs: Vec::new(),
+                // A store read that fails leaves the strip empty rather than failing the whole
+                // library — the scripts are still worth listing.
+                runs: store
+                    .list_workflow_runs(name, &run_key, WORKFLOW_RUNS_PER_ROW)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(WorkflowRun::from)
+                    .collect(),
             });
         }
         rows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -3596,6 +3653,115 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["hostname"], crate::anywhere::default_host_name());
+    }
+
+    #[tokio::test]
+    async fn workflow_library_serves_the_runs_this_workspace_actually_had() {
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".forge").join("workflows")).unwrap();
+        std::fs::write(
+            root.join(".forge").join("workflows").join("audit.js"),
+            "export const meta = { description: 'audit the repo' };\nreturn 1;",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".forge").join("workflows").join("unrun.js"),
+            "export const meta = { description: 'never run' };\nreturn 1;",
+        )
+        .unwrap();
+
+        let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let sid = store
+            .create_session(&root.display().to_string(), "default")
+            .unwrap();
+        let key = root.display().to_string();
+        store
+            .start_workflow_run("run-old", "audit", &sid, &key)
+            .unwrap();
+        store
+            .finish_workflow_run("run-old", true, "AUDIT_OK", 2, 4, 0.25)
+            .unwrap();
+        store
+            .start_workflow_run("run-live", "audit", &sid, &key)
+            .unwrap();
+        // Another project's identically-named workflow must not bleed into this history.
+        let other = store.create_session("/elsewhere", "default").unwrap();
+        store
+            .start_workflow_run("run-other", "audit", &other, "/elsewhere")
+            .unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            store,
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: root.display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let response = daemon_router(state)
+            .oneshot(
+                axum::http::Request::get("/tok/api/workflows")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(body[0]["name"], "audit");
+        let runs = body[0]["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2, "only this workspace's runs: {runs:?}");
+        // Newest first: the still-open run leads, with no outcome claimed for it.
+        assert_eq!(runs[0]["status"], "running");
+        assert_eq!(runs[0]["ok"], serde_json::Value::Null);
+        assert_eq!(runs[0]["finished_at"], serde_json::Value::Null);
+        assert_eq!(runs[0]["session_id"], sid);
+        assert_eq!(runs[1]["status"], "ok");
+        assert_eq!(runs[1]["ok"], true);
+        assert_eq!(runs[1]["summary"], "AUDIT_OK");
+        assert_eq!(runs[1]["phases"], 2);
+        assert_eq!(runs[1]["agents"], 4);
+        assert_eq!(runs[1]["cost_usd"], 0.25);
+
+        // A workflow that has never run says so with an empty strip, not a placeholder row.
+        assert_eq!(body[1]["name"], "unrun");
+        assert!(body[1]["runs"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_interrupted_run_reports_no_verdict_to_the_client() {
+        // `ok` is the coarse boolean older clients render; an interrupted run neither succeeded
+        // nor failed, so it stays null there and only `status` carries the truth.
+        let row = |status: &str| {
+            WorkflowRun::from(forge_store::WorkflowRun {
+                id: "r".into(),
+                name: "audit".into(),
+                session_id: "s".into(),
+                cwd: "/repo".into(),
+                started_at: 1_770_000_000,
+                finished_at: None,
+                status: status.into(),
+                summary: None,
+                phases: 0,
+                agents: 0,
+                cost_usd: 0.0,
+            })
+        };
+        assert_eq!(row("ok").ok, Some(true));
+        assert_eq!(row("failed").ok, Some(false));
+        assert_eq!(row("interrupted").ok, None);
+        assert_eq!(row("running").ok, None);
     }
 
     #[test]

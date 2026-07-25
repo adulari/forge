@@ -114,7 +114,13 @@ function keys(baseUrl: string | null) {
     projectBrowse: (path?: string) => ["projects", "browse", baseUrl, path ?? "default"] as const,
     sessionTree: ["sessions", "tree", baseUrl] as const,
     pastSessions: ["sessions", "past", baseUrl] as const,
-    history: (sessionId: string) => ["history", baseUrl, sessionId] as const,
+    // A tools page and a plain page are DIFFERENT row sets (and different `elapsed_ms` zero
+    // points), so they get separate cache entries. The tools key extends the plain one, so the
+    // prefix invalidation below still refreshes both after a turn completes.
+    history: (sessionId: string, includeTools = false) =>
+      includeTools
+        ? (["history", baseUrl, sessionId, "tools"] as const)
+        : (["history", baseUrl, sessionId] as const),
     config: ["config", baseUrl] as const,
     skills: ["skills", baseUrl] as const,
     workflows: (sessionId?: string) => ["workflows", baseUrl, sessionId ?? null] as const,
@@ -205,16 +211,23 @@ export function usePastSessions() {
   });
 }
 
-/** Transcript history for a session, infinite upward by `before` = oldest seq. */
-export function useHistory(sessionId: string | null) {
+/** Transcript history for a session, infinite upward by `before` = oldest seq.
+ *
+ * `includeTools` opts into the tool call/result rows (see `getHistory`) — off by default, so the
+ * chat, fork picker and turn watcher keep the exact stream they always read. A tools page can
+ * return MORE rows than it asked for (one assistant carrier expands into a row per call it made),
+ * which only ever keeps the length check below paging. */
+export function useHistory(sessionId: string | null, options: { includeTools?: boolean } = {}) {
   const { baseUrl } = useAuth();
+  const includeTools = options.includeTools ?? false;
   return useInfiniteQuery<HistoryRow[]>({
-    queryKey: keys(baseUrl).history(sessionId ?? ""),
+    queryKey: keys(baseUrl).history(sessionId ?? "", includeTools),
     queryFn: ({ pageParam }) =>
       getHistory(baseUrl as string, {
         session: sessionId as string,
         limit: HISTORY_PAGE_SIZE,
         before: pageParam as number | undefined,
+        include_tools: includeTools || undefined,
       }),
     enabled: baseUrl != null && sessionId != null,
     initialPageParam: undefined as number | undefined,

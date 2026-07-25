@@ -33,7 +33,9 @@ pub(crate) struct ScheduleRow {
     model: Option<String>,
     /// The stored spec verbatim (`every:1800` / `daily:09:00` / `cron:<expr>`).
     cron: String,
-    /// Human rendering of `cron` — the same text `forge schedule list` prints.
+    /// Human rendering of `cron` — the same text `forge schedule list` prints. For a `cron:` spec
+    /// it names the dialect (`cron` vs `OnCalendar`), which is also what tells the client whether
+    /// its own cron parser can compute a "next run" for the row.
     spec_label: String,
     enabled: bool,
     created_at: i64,
@@ -47,7 +49,9 @@ pub(crate) struct CreateScheduleRequest {
     /// Where the task runs. Defaults to the daemon's cwd, mirroring `forge schedule add`, which
     /// uses the shell's cwd.
     cwd: Option<String>,
-    /// Exactly one of these three must be set (`30m`, `09:00`, or a systemd `OnCalendar=` expr).
+    /// Exactly one of these three must be set: `30m`, `09:00`, or a calendar expression — either
+    /// standard 5-field cron (`0 6 * * 1`), which the installer translates to the host's native
+    /// trigger, or a systemd `OnCalendar=` string, which is passed through as it always was.
     every: Option<String>,
     at: Option<String>,
     cron: Option<String>,
@@ -294,6 +298,29 @@ mod tests {
         });
         assert_eq!(row.spec_label, "every 30m");
         assert_eq!(row.cron, "every:1800");
+    }
+
+    #[test]
+    fn cron_rows_label_the_dialect_the_installer_recognised() {
+        let row = |cron: &str| {
+            schedule_row(forge_store::Schedule {
+                id: "abc".into(),
+                task: "t".into(),
+                cwd: "/tmp".into(),
+                mode: None,
+                model: None,
+                cron: cron.into(),
+                enabled: true,
+                created_at: 1,
+                last_run: None,
+            })
+        };
+        assert_eq!(row("cron:0 6 * * 1").spec_label, "cron `0 6 * * 1`");
+        // Rows written before the translator existed hold OnCalendar syntax and keep working.
+        assert_eq!(
+            row("cron:Mon *-*-* 06:00:00").spec_label,
+            "OnCalendar `Mon *-*-* 06:00:00`"
+        );
     }
 
     #[test]

@@ -4,18 +4,21 @@
 // `HistoryRow[]` via `useHistory(sessionId)` (see `app/session/[id]/replay.tsx` for the live
 // wiring pattern) and hands the resolved rows + loading/error state to this view.
 //
-// Protocol v9 gave `/api/history` rows two fields this view now runs on:
+// Protocol v9 gave `/api/history` rows two fields this view runs on:
 //   `kind`       — the row's real provenance in the transcript vocabulary, so the role column
-//                  shows sys/you/forge/tool instead of being inferred from `role`. `kind` is
-//                  never "tool" today (the store's history query leaves tool activity out of
-//                  the stream), but the column and the tool body render generically so those
-//                  rows come out right the moment they start appearing.
+//                  shows sys/you/forge/tool instead of being inferred from `role`.
 //   `elapsed_ms` — offset from the session's FIRST visible row, i.e. a real zero point. The
 //                  scrub counter reads mm:ss elapsed off it instead of the wall-clock
 //                  approximation it used before.
 // Both are absent from a pre-v9 daemon: `kind` falls back to `role`, and the scrub counter
 // falls back to the old HH:MM/HH:MM clock pair. The per-row timestamp column stays wall-clock
 // either way — it is the row's real `created_at`, and useful independently of the scrubber.
+//
+// The replay screen asks for `include_tools`, so `kind === "tool"` rows DO appear here, and each
+// carries `tool_phase`: a "call" row's content is the arguments the model sent (rendered as a
+// call, under the tool's name), a "result" row's is what came back (rendered as output, as every
+// tool row was before). A row with no `tool_phase` — an older daemon, or a page fetched without
+// tools — renders exactly as it did: as output. Nothing is inferred from the prose.
 import { Clock, Route as RouteIcon } from "lucide-react-native";
 import React, { useCallback, useRef, useState } from "react";
 import {
@@ -33,7 +36,7 @@ import {
 
 import type { HistoryRow, TranscriptKind } from "../../lib/api";
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii, space } from "../../theme/tokens";
+import { hexToRgba, radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { EmptyState } from "../ds/EmptyState";
 import { Markdown } from "../chat/Markdown";
@@ -199,8 +202,10 @@ export function ReplayView({
           ) : undefined
         }
       >
+        {/* `seq` is NOT unique on a tools page: an assistant carrier's synthesized call rows all
+            carry the carrier's own seq, so the position has to join the key. */}
         {rows.map((row, index) => (
-          <ReplayRow key={row.seq} row={row} showSeparator={index < rows.length - 1} />
+          <ReplayRow key={`${row.seq}-${index}`} row={row} showSeparator={index < rows.length - 1} />
         ))}
         {loadingMore ? (
           <View style={styles.loadingMore}>
@@ -250,9 +255,18 @@ const ReplayRow = React.memo(function ReplayRow({ row, showSeparator }: { row: H
   const tokens = useTokens();
   const kind = kindOf(row);
   const color = kindColor(kind, tokens);
-  // A tool row is machine output by definition, so it always takes the boxed mono body; a system
-  // row only does once it spans lines (a one-line notice reads better as plain sub text).
-  const boxed = kind === "tool" || (kind === "system" && row.content.includes("\n"));
+  // Only a tool row has a phase to render; an absent one (older daemon, or a page fetched
+  // without tools) means "unknown", which reads as the result rendering this view always used.
+  const phase = kind === "tool" ? (row.tool_phase ?? null) : null;
+  const isCall = phase === "call";
+  // The arrow says which direction the row moved in — into the tool, or back out. Drawn only
+  // when the daemon actually said which; a phase-less tool row gets its bare name.
+  const marker = isCall ? "→" : phase === "result" ? "←" : null;
+  const callArgs = isCall ? row.content.trim() : "";
+  // A tool RESULT is machine output by definition, so it takes the boxed mono body; a system row
+  // only does once it spans lines (a one-line notice reads better as plain sub text). A call
+  // renders its own way below — its content is arguments, not output.
+  const boxed = (kind === "tool" && !isCall) || (kind === "system" && row.content.includes("\n"));
 
   return (
     <View style={styles.entry}>
@@ -263,8 +277,27 @@ const ReplayRow = React.memo(function ReplayRow({ row, showSeparator }: { row: H
         <Text style={[typeScale.monoMeta, styles.role, { color }]} numberOfLines={1}>
           {kindLabel(kind)}
         </Text>
+        {row.tool ? (
+          <Text style={[typeScale.monoMeta, styles.toolName, { color: tokens.ink3 }]} numberOfLines={1}>
+            {[marker, row.tool].filter(Boolean).join(" ")}
+          </Text>
+        ) : null}
       </View>
-      {boxed ? (
+      {isCall ? (
+        // Arguments, capped daemon-side. An empty summary renders nothing rather than an empty
+        // box — the head line above already says which tool was called.
+        callArgs.length > 0 ? (
+          <View
+            style={[
+              styles.entryBody,
+              styles.callArgs,
+              { borderColor: tokens.border, backgroundColor: hexToRgba(tokens.accent, 0.06) },
+            ]}
+          >
+            <Text style={[typeScale.monoMeta, { color: tokens.ink2 }]}>{callArgs}</Text>
+          </View>
+        ) : null
+      ) : boxed ? (
         <View style={styles.entryBody}>
           <SystemOutput content={row.content} />
         </View>
@@ -290,7 +323,9 @@ const styles = StyleSheet.create({
   entryHead: { flexDirection: "row", alignItems: "baseline", gap: space.space8 },
   timestamp: { width: TIMESTAMP_COL_WIDTH },
   role: { width: ROLE_COL_WIDTH, fontFamily: monoFamily.bold },
+  toolName: { flex: 1 },
   entryBody: { marginTop: space.space8, marginLeft: TIMESTAMP_COL_WIDTH + space.space8 },
+  callArgs: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius4, padding: space.space8 },
   separator: { height: StyleSheet.hairlineWidth, marginTop: space.space16 },
   scrubWrap: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingTop: space.space8 },
   scrubTrack: { flex: 1, height: 3, borderRadius: radii.radius4, position: "relative", justifyContent: "center" },

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  @bacons/apple-targets writes a default Info.plist into this folder ONLY when one does not
+	  already exist (build/with-widget.js: `if (!fs.existsSync(filePath))`), and its README states
+	  "The root Info.plist file in each target directory is not managed and can be freely
+	  modified". So this file is committed (see mobile/.gitignore's `!targets/widget/Info.plist`
+	  un-ignore) and prebuild leaves it alone.
+
+	  The NSExtension dict below is byte-for-byte what the plugin generates for `type: "widget"`
+	  (target.js `getTargetInfoPlistForType` default branch → NSExtensionPointIdentifier =
+	  com.apple.widgetkit-extension). If the plugin is upgraded and starts emitting more keys for
+	  widgets, they must be mirrored here by hand — that is the cost of owning this file.
+
+	  UIAppFonts is why we own it. A widget extension is a separate bundle and cannot see the
+	  fonts expo-font registers in the MAIN app's UIAppFonts, so Geist/Geist Mono have to be both
+	  copied into this target (the .ttf files beside this plist, picked up automatically by the
+	  target's PBXFileSystemSynchronizedRootGroup) and declared here. Names are relative to the
+	  .appex resources root. Consumed by ForgeMachinedStyle.swift via Font.custom(PostScript name).
+	-->
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.widgetkit-extension</string>
+	</dict>
+	<key>UIAppFonts</key>
+	<array>
+		<string>Geist-Regular.ttf</string>
+		<string>Geist-Medium.ttf</string>
+		<string>Geist-SemiBold.ttf</string>
+		<string>GeistMono-Regular.ttf</string>
+		<string>GeistMono-Medium.ttf</string>
+	</array>
+</dict>
+</plist>

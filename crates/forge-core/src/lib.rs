@@ -8550,6 +8550,19 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.presenter.emit(PresenterEvent::WorkflowStarted {
             name: Some(name.to_string()),
         });
+        // Persisted run history (the workflow library's "past runs" strip). Only this path records:
+        // the `run_workflow` tool authors an anonymous script, which belongs to no saved workflow
+        // and so has no history to belong to. The guard closes the row out as `interrupted` if this
+        // future is dropped mid-run (Esc aborts the whole turn task — no completion path runs).
+        let run_id = forge_types::new_id();
+        self.store
+            .start_workflow_run(&run_id, name, &self.id, &repo_root.display().to_string())?;
+        let mut run_guard = workflow::WorkflowRunGuard {
+            store: Arc::clone(&self.store),
+            id: Some(run_id.clone()),
+        };
+        let stats = Arc::new(std::sync::Mutex::new(workflow::WorkflowRunStats::default()));
+        let stats_events = Arc::clone(&stats);
         let audit = Arc::new(std::sync::Mutex::new(vec![format!(
             "⛓ workflow '{name}' started"
         )]));
@@ -8567,6 +8580,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     .lock()
                     .unwrap()
                     .push(format!("├─ [{agent}] started: {task}"));
+                stats_events.lock().unwrap().agents += 1;
                 presenter.emit(PresenterEvent::SubagentStart {
                     id,
                     agent,
@@ -8589,6 +8603,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     "├─ {} [{agent}] {summary}",
                     if ok { "✓" } else { "✗" }
                 ));
+                stats_events.lock().unwrap().cost_usd += cost_usd;
                 presenter.emit(PresenterEvent::SubagentResult {
                     id,
                     agent,
@@ -8602,6 +8617,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     .lock()
                     .unwrap()
                     .push(format!("▶ phase: {title}"));
+                stats_events.lock().unwrap().phases += 1;
                 presenter.emit(PresenterEvent::WorkflowPhase { title })
             }
             workflow::WorkflowEvent::Log(msg) => {
@@ -8632,6 +8648,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     ok: false,
                     summary: summary.clone(),
                 });
+                run_guard.finished();
+                stats
+                    .lock()
+                    .unwrap()
+                    .record(&self.store, &run_id, false, &summary);
                 audit
                     .lock()
                     .unwrap()
@@ -8655,6 +8676,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             ok: all_ok,
             summary: format!("'{name}': {}", workflow::summary(&combined)),
         });
+        run_guard.finished();
+        stats
+            .lock()
+            .unwrap()
+            .record(&self.store, &run_id, all_ok, &workflow::summary(&combined));
         audit.lock().unwrap().push(format!(
             "⛓ {} workflow finished: '{name}': {}",
             if all_ok { "✓" } else { "✗" },
@@ -9668,6 +9694,39 @@ mod tests {
         assert!(replay
             .iter()
             .any(|entry| { entry.role == Role::User && entry.content == "/workflow run audit" }));
+        // The same run is recorded as history the workflow library can show, with the counts it
+        // actually observed (one `phase()` call, no agents, so no cost).
+        let runs = store
+            .list_workflow_runs(
+                "audit",
+                &dir.canonicalize().unwrap().display().to_string(),
+                10,
+            )
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "ok");
+        assert_eq!(runs[0].summary.as_deref(), Some("AUDIT_OK"));
+        assert_eq!(runs[0].session_id, session.id);
+        assert_eq!((runs[0].phases, runs[0].agents), (1, 0));
+        assert_eq!(runs[0].cost_usd, 0.0);
+        assert!(runs[0].finished_at.is_some());
+
+        // A run that never gets off the ground is recorded as `failed`, not left open.
+        assert!(session
+            .run_saved_workflow("missing", serde_json::Value::Null)
+            .await
+            .is_err());
+        let failed = store
+            .list_workflow_runs(
+                "missing",
+                &dir.canonicalize().unwrap().display().to_string(),
+                10,
+            )
+            .unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].status, "failed");
+        assert!(failed[0].summary.as_deref().unwrap().contains("missing"));
+
         let audit = replay
             .iter()
             .find(|entry| {
