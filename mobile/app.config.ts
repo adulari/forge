@@ -49,6 +49,25 @@ const config: ExpoConfig = {
     appleTeamId: "95VXXPD28Y",
     entitlements: {
       "com.apple.security.application-groups": [APP_GROUP],
+      // APNs environment. expo-notifications' plugin writes `development` here and EAS Build
+      // rewrites it to `production` from the signing credentials — but Forge builds iOS on Xcode
+      // Cloud, so nothing performed that rewrite and every distribution archive shipped a
+      // development entitlement. A distribution-signed app whose entitlement says `development`
+      // cannot register with production APNs: `getDevicePushTokenAsync()` rejects, and the
+      // in-app notification toggle silently refused to turn on while iOS Settings still showed
+      // the permission as granted (permission and entitlement are unrelated).
+      //
+      // The previous fix was to hand-edit the generated pbxproj so Release pointed at a separate
+      // `Forge.Release.entitlements`. prebuild deletes that file and repoints Release back at
+      // this one on every single build, so it never survived to a real archive. Declaring it here
+      // is the only form that does. `scripts/ci/verify-ios-entitlements.sh` fails the build if
+      // prebuild ever produces anything other than `production`.
+      //
+      // Consequence, deliberately accepted: local Xcode debug builds would need `development` to
+      // sign against a development profile. Nothing builds this app that way — Xcode Cloud always
+      // produces distribution archives and mobile-sidestore.yml archives unsigned
+      // (CODE_SIGNING_ALLOWED=NO), so a single production value is correct for every real build.
+      "aps-environment": "production",
     },
     infoPlist: {
       NSSupportsLiveActivities: true,

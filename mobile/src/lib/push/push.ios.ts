@@ -13,6 +13,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 
+import { PushRegistrationError } from "./pushErrors";
 import { subscribePush as apiSubscribePush, unsubscribePush as apiUnsubscribePush } from "../api";
 
 export type PushSubscriptionState = "unsupported" | "subscribed" | "unsubscribed";
@@ -55,8 +56,15 @@ export async function enablePush(baseUrl: string): Promise<PushSubscriptionState
   try {
     const token = await Notifications.getDevicePushTokenAsync();
     deviceToken = token.data;
-  } catch {
-    return "unsubscribed";
+  } catch (err) {
+    // This rejects when iOS itself refuses to register the app for remote notifications, which is
+    // NOT the same as the user declining — permission is already granted by the time we get here.
+    // In practice it means the build lacks a usable `aps-environment` entitlement. Returning
+    // "unsubscribed" here (as this did) made the toggle silently snap back while the UI advised
+    // checking a permission that was fine.
+    throw new PushRegistrationError(
+      `iOS refused to register for push (${err instanceof Error ? err.message : String(err)}). This build may be missing its push entitlement.`,
+    );
   }
 
   // Unlike the permission/device-token failures above (genuinely "no subscription possible"),

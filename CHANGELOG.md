@@ -8,6 +8,24 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **iOS notifications could not be enabled at all**, and the app blamed a permission the user had
+  already granted. Every Xcode Cloud archive shipped `aps-environment: development`:
+  expo-notifications' plugin writes that value, EAS Build rewrites it to `production` from the
+  signing credentials, and Xcode Cloud performs no such rewrite. A distribution-signed app carrying
+  a development entitlement installs and shows its permission as granted in iOS Settings, but
+  cannot register with production APNs — `getDevicePushTokenAsync()` rejected and the toggle snapped
+  back. The earlier fix for this was a hand-edit to the generated Xcode project pointing Release at
+  a separate `Forge.Release.entitlements`; `expo prebuild` deletes that file and repoints Release
+  back on every build, so it never reached an archive. Declared in `app.config.ts` instead (verified
+  to survive prebuild), with `scripts/ci/verify-ios-entitlements.sh` failing the build if it ever
+  regresses.
+- **A push registration failure was indistinguishable from a declined permission.** The toggle had
+  two channels — a resolved non-subscribed state meaning "user declined", a thrown error meaning
+  "the network call failed" — and an OS-level registration refusal collapsed into the first, which
+  is what made the entitlement bug undiagnosable from the device. It now raises
+  `PushRegistrationError` and both toggles report it accurately; the Anywhere screen previously had
+  no `catch` at all, so a throw there became an unhandled rejection.
+
 - **The light-theme splash mark was effectively invisible.** `splash-icon.png` is inked in a light
   gray for the dark splash background; composited on the light one it measured **1.41:1**. The light
   variant now gets its own asset, the same geometry re-inked in `lightTokens.ink` at **15.65:1**,

@@ -16,6 +16,18 @@ node -v
 # network calls — pure network round-trip savings, doesn't change what gets installed.
 npm ci --prefer-offline --no-audit --no-fund
 npx expo prebuild -p ios --no-install
+
+# prebuild owns ios/ and rewrites it from app.config.js every build, so a push-broken archive is a
+# configuration regression rather than a code one — and one that still installs and runs fine.
+# Specifically: expo-notifications' plugin writes `aps-environment: development`, EAS Build would
+# rewrite that to `production` from the signing credentials, and Xcode Cloud does not. Fail here
+# rather than ship a build whose notification toggle cannot be turned on.
+#
+# (prebuild also deletes this very ci_scripts/ directory. Harmless — Xcode Cloud clones fresh and
+# runs this hook once, before the deletion — but it does mean no ci_pre_xcodebuild.sh or
+# ci_post_xcodebuild.sh can be added, because prebuild would remove it before Xcode ran it.)
+bash "$CI_PRIMARY_REPOSITORY_PATH/scripts/ci/verify-ios-entitlements.sh"
+
 cd ios
 
 # expo prebuild always regenerates project.pbxproj with CURRENT_PROJECT_VERSION = 1.
