@@ -237,7 +237,9 @@ pub fn transcript_lines(
     transcript_lines_from_wrapped(views, selected, scroll, height, width, &wrapped)
 }
 
-fn transcript_lines_from_wrapped(
+/// [`transcript_lines`] with the selected entry's rows already wrapped — the form the render paths
+/// that memoize their wrap use, so a redraw costs only the visible slice.
+pub(crate) fn transcript_lines_from_wrapped(
     views: &[TranscriptView],
     selected: usize,
     scroll: usize,

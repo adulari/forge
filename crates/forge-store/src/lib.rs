@@ -26,6 +26,25 @@ const SCHEMA_VERSION: i64 = 19;
 /// transaction a bounded number of times with a short backoff rather than dropping the row.
 const BUSY_RETRY_MAX: u32 = 8;
 
+/// How large `forge.db-wal` may remain after a checkpoint.
+///
+/// WAL is reused in place: SQLite's passive autocheckpoint (default ~1000 pages) copies committed
+/// frames into the main database but leaves the `-wal` file at its high-water mark, and the
+/// last-connection-close checkpoint+delete never fires while `forge serve` holds a connection open.
+/// One outsized write transaction — a lattice PageRank pass, a bulk prune — therefore pins hundreds
+/// of megabytes of disk for the life of the install (656 MB observed on a 2.8 GB database).
+/// `journal_size_limit` makes each checkpoint truncate the file back down to this size.
+///
+/// Deliberately set FAR above the autocheckpoint threshold (~4 MB at the default page size): in
+/// steady state the WAL never reaches 64 MB, so the truncate never runs and no checkpoint pays for
+/// it. It only fires after an abnormal spike — exactly when the space should come back. Reclaiming
+/// the *database* file is a separate, far more expensive operation that must stay explicit; see
+/// [`Store::vacuum`].
+///
+/// The pragma is per-connection and is NOT persisted in the file, so it has to be applied on every
+/// connection the pool opens rather than once at migration time.
+const WAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
 /// Oversized `tool_call.args_json`/`result_json` (e.g. a full large-file read or write) is truncated
 /// to this many bytes at insert time, with a marker. Keeps the append-only global DB from growing
 /// without bound while preserving the head of the args/output for audit/replay.
@@ -379,6 +398,10 @@ impl r2d2::ManageConnection for SqliteManager {
         conn.pragma_update(None, "cache_size", -32_000_i64)?;
         //   Sort/group-by temp tables in memory — no tmp file for our aggregation queries.
         conn.pragma_update(None, "temp_store", "MEMORY")?;
+        // Bound the WAL. Without this SQLite reuses the -wal file in place after every checkpoint
+        // and it never shrinks again; see [`WAL_SIZE_LIMIT_BYTES`]. Per-connection and not
+        // persisted, hence set here rather than once during migration.
+        conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
         Ok(conn)
     }
 
@@ -843,23 +866,90 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0019,
 ];
 
+/// Create the singleton rows the Anywhere sync state machine expects, if they are missing.
+///
+/// These were `INSERT OR IGNORE` statements at the end of [`schema::SCHEMA`]. An `INSERT` takes the
+/// single WAL writer lock even when the row already exists and nothing changes, so they made merely
+/// OPENING the store a write on every one of Forge's many short-lived processes (CLI subcommands,
+/// statusline probes, `mcp-serve`) — the same startup contention the `user_version` repair used to
+/// cause, see [`run_migrations`]. Reading first keeps opening an initialized database write-free.
+fn seed_singleton_rows(conn: &Connection) -> rusqlite::Result<()> {
+    for (table, insert) in [
+        (
+            "anywhere_sync_state",
+            "INSERT OR IGNORE INTO anywhere_sync_state (singleton, enabled) VALUES (1, 0)",
+        ),
+        (
+            "anywhere_sync_cursor",
+            "INSERT OR IGNORE INTO anywhere_sync_cursor (singleton, cursor) VALUES (1, 0)",
+        ),
+    ] {
+        let present = conn
+            .prepare(&format!("SELECT 1 FROM {table} WHERE singleton = 1"))?
+            .exists([])?;
+        if !present {
+            conn.execute(insert, [])?;
+        }
+    }
+    Ok(())
+}
+
+/// Lowest `user_version` inside the ambiguous pre-release window (see [`run_migrations`]). Equals
+/// the first version the unreleased Forge Anywhere branch stamped, i.e. one past the last
+/// unambiguously public version at the time that branch forked.
+const ANYWHERE_PRERELEASE_MIN_VERSION: i64 = 18;
+
+/// Highest `user_version` the unreleased Forge Anywhere branch stamped.
+const ANYWHERE_PRERELEASE_MAX_VERSION: i64 = 21;
+
+/// Whether public migration 18's column is present.
+///
+/// This is the evidence that separates a database written by a PUBLIC build from one stamped by the
+/// unreleased Forge Anywhere branch inside the ambiguous window: that branch forked while
+/// [`SCHEMA_VERSION`] was still 17, before [`migration_0018`] existed, and `CREATE TABLE IF NOT
+/// EXISTS usage` in the base schema cannot add a column to a table that already exists. So no
+/// pre-release database can carry this column, and every public database at 18 or above must.
+fn public_v18_marker_present(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.prepare("SELECT 1 FROM pragma_table_info('usage') WHERE name = 'cached_input_tokens'")?
+        .exists([])
+}
+
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
 /// crash mid-run resumes cleanly. Refuses (with [`StoreError::SchemaTooNew`]) to open a DB written
 /// by a newer build, rather than silently misreading it.
+///
+/// Opening an already-current database performs NO write at all, which matters because Forge runs
+/// many short-lived processes (CLI subcommands, statusline probes, `mcp-serve`) that would otherwise
+/// each contend for the single WAL writer just to open a database they have no work to do on.
 fn run_migrations(conn: &Connection) -> Result<()> {
     debug_assert_eq!(MIGRATIONS.len() as i64, SCHEMA_VERSION);
     let mut current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     // Forge Anywhere's additive tables briefly consumed versions 18-21 on its unreleased feature
     // branch. They now live in the idempotent base schema so the previous public binary can open a
-    // database after rollback. Repair only those known pre-release markers; truly newer versions
-    // remain rejected below.
-    if (18..=21).contains(&current) {
-        // Re-run the public migrations from the last unambiguous public version. Every affected
-        // step is additive/idempotent, including migrations 18 and 19, so this also safely
-        // distinguishes a real v18 cache-metrics / v19 workflow-history database from the old
-        // pre-release Anywhere markers. Any step added inside this window must stay idempotent.
-        conn.pragma_update(None, "user_version", 17i64)?;
-        current = 17;
+    // database after rollback. A number in that window is therefore AMBIGUOUS: it may come from that
+    // branch (which never ran the public steps 18+) or from a public build that legitimately reached
+    // it. Resolve it by replaying the public steps rather than by trusting the number.
+    if (ANYWHERE_PRERELEASE_MIN_VERSION..=ANYWHERE_PRERELEASE_MAX_VERSION).contains(&current) {
+        // Read the marker BEFORE the replay below adds the column it looks for.
+        let from_public_build = public_v18_marker_present(conn)?;
+        // Every step from 18 on is additive and idempotent by contract (`CREATE ... IF NOT EXISTS` /
+        // `add_column_if_missing`), so replaying them is a pure no-op — and writes nothing — on a
+        // database that really is at `current`, while a pre-release database that merely reused these
+        // numbers gets the public tables/columns it is missing. The previous form rewound
+        // `user_version` to 17 instead, which wrote page 1 twice on EVERY open of an already-migrated
+        // database and made startup fail with "database is locked" whenever a long lattice write held
+        // the writer.
+        for step in ANYWHERE_PRERELEASE_MIN_VERSION..=current.min(SCHEMA_VERSION) {
+            MIGRATIONS[(step - 1) as usize](conn)?;
+        }
+        // A version above what this build ships, inside the window, and WITHOUT the public marker can
+        // only have come from the pre-release branch — renumber it down once so it stops tripping the
+        // refusal below. With the marker present the number is trustworthy, so a database from a
+        // genuinely newer public build is refused instead of being silently downgraded.
+        if current > SCHEMA_VERSION && !from_public_build {
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            current = SCHEMA_VERSION;
+        }
     }
     if current > SCHEMA_VERSION {
         return Err(StoreError::SchemaTooNew {
@@ -1723,20 +1813,30 @@ impl Store {
             if !in_memory {
                 conn.pragma_update(None, "journal_mode", "WAL")?;
             }
-            // Migrate before schema so old DBs get the composite PK before CREATE TABLE IF NOT EXISTS no-ops.
-            migrate_subscription_usage(&conn)?;
-            conn.execute_batch(schema::SCHEMA)?;
-            // Versioned migrations (PRAGMA user_version). Folds the historic ad-hoc ADD COLUMN
-            // migrations and the UNIQUE(session_id, seq) index; refuses a DB from a newer build.
-            run_migrations(&conn)?;
-            // Forge Anywhere's payload snapshot column was added while schema v18 was still on an
-            // unreleased feature branch. Repair databases opened by that branch without consuming
-            // a permanent migration number; released schemas must use MIGRATIONS instead.
-            add_column_if_missing(
-                &conn,
-                "ALTER TABLE sync_journal ADD COLUMN payload BLOB NOT NULL DEFAULT X''",
-            )?;
-            add_column_if_missing(&conn, "ALTER TABLE sync_journal ADD COLUMN base_hash BLOB")?;
+            // Every step below is idempotent, so the whole group can be retried as a unit — and it
+            // needs to be, because a database that DOES have work to do here writes while another
+            // process may be holding the single WAL writer for tens of seconds (a lattice PageRank
+            // pass, a bulk prune). Without the retry, `Store::open` fails outright with "database is
+            // locked" rather than waiting its turn. On an already-initialized database this whole
+            // block performs no write at all, so it never contends in the first place.
+            with_busy_retry(|| {
+                // Migrate before schema so old DBs get the composite PK before CREATE TABLE IF NOT EXISTS no-ops.
+                migrate_subscription_usage(&conn)?;
+                conn.execute_batch(schema::SCHEMA)?;
+                seed_singleton_rows(&conn)?;
+                // Versioned migrations (PRAGMA user_version). Folds the historic ad-hoc ADD COLUMN
+                // migrations and the UNIQUE(session_id, seq) index; refuses a DB from a newer build.
+                run_migrations(&conn)?;
+                // Forge Anywhere's payload snapshot column was added while schema v18 was still on an
+                // unreleased feature branch. Repair databases opened by that branch without consuming
+                // a permanent migration number; released schemas must use MIGRATIONS instead.
+                add_column_if_missing(
+                    &conn,
+                    "ALTER TABLE sync_journal ADD COLUMN payload BLOB NOT NULL DEFAULT X''",
+                )?;
+                add_column_if_missing(&conn, "ALTER TABLE sync_journal ADD COLUMN base_hash BLOB")?;
+                Ok(())
+            })?;
         }
         let reservation_store_id = match reservation_source {
             ConnSource::File(path) => std::fs::canonicalize(&path)
@@ -4138,9 +4238,17 @@ impl Store {
         })
     }
 
-    /// Reclaim free pages and checkpoint the WAL — the periodic compaction a host can call (e.g. on
-    /// a timer or at shutdown) after retention pruning. `VACUUM` rebuilds the file; the truncating
-    /// checkpoint then shrinks the WAL. Both are safe in WAL mode with no open write transaction.
+    /// Reclaim free pages and checkpoint the WAL: `VACUUM` rebuilds the database file, then a
+    /// truncating checkpoint shrinks the `-wal`. Both are safe in WAL mode with no open write
+    /// transaction.
+    ///
+    /// MUST stay user-initiated. `VACUUM` rewrites the whole file — minutes of I/O and roughly the
+    /// database's own size in temporary free space on a multi-GB store — while holding a write lock
+    /// the entire time, which would stall every other Forge process (and `forge serve`'s live
+    /// sessions) at an unpredictable moment. Its one caller is therefore the explicit
+    /// `forge lattice prune --vacuum`, run by a user who has just deleted a lot of rows and knows to
+    /// do it with no other Forge process running. Routine WAL growth needs no such stall: it is
+    /// bounded automatically on every connection by [`WAL_SIZE_LIMIT_BYTES`].
     pub fn vacuum(&self) -> Result<()> {
         let conn = self.lock()?;
         conn.execute_batch("VACUUM")?;
@@ -7279,10 +7387,19 @@ impl Store {
         Ok(rows)
     }
 
-    /// Total reference rows — completes the `status` summary.
-    pub fn lattice_ref_count(&self) -> Result<i64> {
+    /// Reference rows belonging to `repo_root` — completes the `status` summary. Scoped like the
+    /// structural queries: the store is global (one DB across every project and bench clone), so an
+    /// unscoped `COUNT(*)` reports another project's rows as if they were this one's.
+    pub fn lattice_ref_count(&self, repo_root: &str) -> Result<i64> {
         let conn = self.lock()?;
-        Ok(conn.query_row("SELECT COUNT(*) FROM lattice_ref", [], |r| r.get(0))?)
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM lattice_ref r
+             JOIN lattice_node n ON n.id = r.src_id
+             JOIN lattice_file f ON f.id = n.file_id
+             WHERE f.repo_root = ?1",
+            [repo_root],
+            |r| r.get(0),
+        )?)
     }
 
     /// Symbols whose name contains `query` (case-insensitive), best-first: exact name, then
@@ -7414,12 +7531,35 @@ impl Store {
             .ok())
     }
 
-    /// `(files, nodes, edges)` row counts — the `forge lattice status` summary.
-    pub fn lattice_counts(&self) -> Result<(i64, i64, i64)> {
+    /// `(files, nodes, edges)` row counts for `repo_root` — the `forge lattice status` summary.
+    /// Scoped, because the store is global: unscoped `COUNT(*)`s made `status` report every indexed
+    /// project's rows as this project's, which is how a multi-GB stray index (a deleted `/tmp` bench
+    /// clone) could sit in the database for a month without anyone noticing. Use
+    /// [`Store::lattice_repo_roots`] for the deliberate all-roots view.
+    pub fn lattice_counts(&self, repo_root: &str) -> Result<(i64, i64, i64)> {
         let conn = self.lock()?;
-        let files = conn.query_row("SELECT COUNT(*) FROM lattice_file", [], |r| r.get(0))?;
-        let nodes = conn.query_row("SELECT COUNT(*) FROM lattice_node", [], |r| r.get(0))?;
-        let edges = conn.query_row("SELECT COUNT(*) FROM lattice_edge", [], |r| r.get(0))?;
+        let files = conn.query_row(
+            "SELECT COUNT(*) FROM lattice_file WHERE repo_root = ?1",
+            [repo_root],
+            |r| r.get(0),
+        )?;
+        let nodes = conn.query_row(
+            "SELECT COUNT(*) FROM lattice_node n
+             JOIN lattice_file f ON f.id = n.file_id
+             WHERE f.repo_root = ?1",
+            [repo_root],
+            |r| r.get(0),
+        )?;
+        // Scoped by the edge's SOURCE node, matching `lattice_ref_edges`: the indexer writes an
+        // edge together with the file that produced it, so its src always lives in that repo.
+        let edges = conn.query_row(
+            "SELECT COUNT(*) FROM lattice_edge e
+             JOIN lattice_node n ON n.id = e.src_id
+             JOIN lattice_file f ON f.id = n.file_id
+             WHERE f.repo_root = ?1",
+            [repo_root],
+            |r| r.get(0),
+        )?;
         Ok((files, nodes, edges))
     }
 
@@ -7438,28 +7578,46 @@ impl Store {
         Ok(())
     }
 
-    /// Nodes that don't yet have an embedding — the work list for incremental `embed_pending`.
-    pub fn lattice_nodes_without_embedding(&self, limit: usize) -> Result<Vec<LatticeNodeRow>> {
+    /// Nodes under `repo_root` that don't yet have an embedding — the work list for incremental
+    /// `embed_pending`. Scoped: unscoped, `embed_pending` spends this project's embedding API calls
+    /// (and quota) on every OTHER project indexed in the shared store.
+    pub fn lattice_nodes_without_embedding(
+        &self,
+        repo_root: &str,
+        limit: usize,
+    ) -> Result<Vec<LatticeNodeRow>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT n.id, n.file_id, n.kind, n.name, n.qualname, n.signature,
                     n.span_start, n.span_end, n.line_start, n.pagerank
              FROM lattice_node n
+             JOIN lattice_file f ON f.id = n.file_id
              LEFT JOIN lattice_embedding e ON e.node_id = n.id
-             WHERE e.node_id IS NULL
-             LIMIT ?1",
+             WHERE e.node_id IS NULL AND f.repo_root = ?1
+             LIMIT ?2",
         )?;
         let rows = stmt
-            .query_map([limit as i64], lattice_node_from_row)?
+            .query_map(
+                rusqlite::params![repo_root, limit as i64],
+                lattice_node_from_row,
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
-    /// All stored `(node_id, vector)` embeddings — loaded once to cosine-rank a query vector.
-    pub fn lattice_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
+    /// The `(node_id, vector)` embeddings under `repo_root` — loaded once to cosine-rank a query
+    /// vector. Scoped for the same reason as the structural queries: unscoped, semantic retrieval
+    /// ranks every indexed project's symbols against this project's prompt and can inject another
+    /// repo's code as context.
+    pub fn lattice_embeddings(&self, repo_root: &str) -> Result<Vec<(String, Vec<f32>)>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare("SELECT node_id, vec FROM lattice_embedding")?;
-        let rows = stmt.query_map([], |r| {
+        let mut stmt = conn.prepare(
+            "SELECT e.node_id, e.vec FROM lattice_embedding e
+             JOIN lattice_node n ON n.id = e.node_id
+             JOIN lattice_file f ON f.id = n.file_id
+             WHERE f.repo_root = ?1",
+        )?;
+        let rows = stmt.query_map([repo_root], |r| {
             let id: String = r.get(0)?;
             let blob: Vec<u8> = r.get(1)?;
             let vec = blob
@@ -7472,11 +7630,18 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    /// How many nodes currently have an embedding (`forge lattice status`: "embeddings: N").
-    pub fn lattice_embedding_count(&self) -> Result<i64> {
-        Ok(self
-            .lock()?
-            .query_row("SELECT COUNT(*) FROM lattice_embedding", [], |r| r.get(0))?)
+    /// How many of `repo_root`'s nodes currently have an embedding (`forge lattice status`:
+    /// "N embedded"). Also the gate `retrieve_hybrid` uses to decide whether semantic retrieval is
+    /// available for THIS repo, so it must not be satisfied by another project's vectors.
+    pub fn lattice_embedding_count(&self, repo_root: &str) -> Result<i64> {
+        Ok(self.lock()?.query_row(
+            "SELECT COUNT(*) FROM lattice_embedding e
+             JOIN lattice_node n ON n.id = e.node_id
+             JOIN lattice_file f ON f.id = n.file_id
+             WHERE f.repo_root = ?1",
+            [repo_root],
+            |r| r.get(0),
+        )?)
     }
 
     /// All (src_id, dst_name) pairs from lattice_ref — the directed reference graph for PageRank.
@@ -10176,13 +10341,13 @@ mod tests {
         store
             .put_lattice_embedding("n1", &[1.0, -0.5, 0.25])
             .unwrap();
-        assert_eq!(store.lattice_embedding_count().unwrap(), 1);
-        let all = store.lattice_embeddings().unwrap();
+        assert_eq!(store.lattice_embedding_count("/r").unwrap(), 1);
+        let all = store.lattice_embeddings("/r").unwrap();
         assert_eq!(all, vec![("n1".to_string(), vec![1.0, -0.5, 0.25])]);
         // Upsert replaces, not duplicates.
         store.put_lattice_embedding("n1", &[2.0, 2.0]).unwrap();
-        assert_eq!(store.lattice_embedding_count().unwrap(), 1);
-        assert_eq!(store.lattice_embeddings().unwrap()[0].1, vec![2.0, 2.0]);
+        assert_eq!(store.lattice_embedding_count("/r").unwrap(), 1);
+        assert_eq!(store.lattice_embeddings("/r").unwrap()[0].1, vec![2.0, 2.0]);
     }
 
     #[test]
@@ -10966,6 +11131,381 @@ mod tests {
             .unwrap();
         }
         cleanup(&path);
+    }
+
+    /// A `usage` table shaped as it was at schema v17 — before migration_0018 added
+    /// `cached_input_tokens`. Stamping a version from the ambiguous 18..=21 window on top of this is
+    /// what a database written by the unreleased Forge Anywhere branch looks like.
+    fn write_pre_v18_usage_table(path: &std::path::Path, stamp_version: i64) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage (
+                 id TEXT PRIMARY KEY,
+                 message_id TEXT NOT NULL,
+                 provider TEXT,
+                 model TEXT,
+                 input_tokens INTEGER NOT NULL,
+                 output_tokens INTEGER NOT NULL,
+                 cost_usd REAL NOT NULL,
+                 created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+             );
+             INSERT INTO usage
+                 (id, message_id, provider, model, input_tokens, output_tokens, cost_usd)
+             VALUES ('u-pre', 'm-pre', 'provider', 'model', 7, 8, 0.9);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", stamp_version)
+            .unwrap();
+    }
+
+    /// The regression: `run_migrations` used to rewind `user_version` 18..=21 to 17 unconditionally,
+    /// so opening an ALREADY-CURRENT database wrote page 1 twice and re-ran two migrations — turning
+    /// every short-lived Forge process (CLI subcommand, statusline probe, mcp-serve) into a writer
+    /// that failed with "database is locked" whenever a long lattice write held the WAL writer.
+    ///
+    /// `PRAGMA query_only` makes any write attempt fail with SQLITE_READONLY, so this asserts the
+    /// zero-write property directly rather than inferring it.
+    #[test]
+    fn run_migrations_writes_nothing_when_the_database_is_already_current() {
+        let path = temp_db_path();
+        Store::open(&path).unwrap(); // create + migrate to SCHEMA_VERSION, then close
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION,
+        );
+        conn.pragma_update(None, "query_only", true).unwrap();
+        // Prove the probe is real: the write the old code performed is rejected under query_only.
+        assert!(
+            conn.pragma_update(None, "user_version", 17i64).is_err(),
+            "query_only must reject the rewind the old code did on every open"
+        );
+        run_migrations(&conn).expect("a fully-migrated database must open without writing");
+        conn.pragma_update(None, "query_only", false).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION,
+            "the version is left exactly as found"
+        );
+        drop(conn);
+        cleanup(&path);
+    }
+
+    /// The user-visible half of the same bug: because opening the store wrote (a `user_version`
+    /// rewind plus two unconditional singleton `INSERT`s), a freshly launched Forge process could not
+    /// open an already-migrated database at all while a long lattice write held the single WAL
+    /// writer — it failed with "database is locked" instead of just reading. Opening must now
+    /// succeed with another connection sitting in an exclusive write transaction the whole time.
+    #[test]
+    fn opening_a_current_database_succeeds_while_another_writer_holds_the_lock() {
+        let path = temp_db_path();
+        Store::open(&path).unwrap(); // create + migrate, then close
+        let blocker = Connection::open(&path).unwrap();
+        blocker
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        let store =
+            Store::open(&path).expect("opening a migrated database must not need the writer");
+        {
+            let conn = store.lock().unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION,
+            );
+        }
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(blocker);
+        drop(store);
+        cleanup(&path);
+    }
+
+    /// The seeded singleton rows still exist (moving them out of `schema::SCHEMA` must not have lost
+    /// them), and re-seeding an initialized database is a no-op.
+    #[test]
+    fn singleton_rows_are_seeded_once_and_never_duplicated() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.lock().unwrap();
+        for table in ["anywhere_sync_state", "anywhere_sync_cursor"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 1, "{table} is seeded exactly once");
+        }
+        seed_singleton_rows(&conn).unwrap();
+        seed_singleton_rows(&conn).unwrap();
+        for table in ["anywhere_sync_state", "anywhere_sync_cursor"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 1, "{table} stays at one row");
+        }
+    }
+
+    /// The compatibility mechanism this repair exists for: a database stamped inside 18..=21 by the
+    /// unreleased Anywhere branch never ran the PUBLIC steps 18+, so those steps have to be replayed
+    /// and the number renumbered down to what this build ships. Covers every version in the window.
+    #[test]
+    fn prerelease_anywhere_versions_are_repaired_and_renumbered() {
+        for stamped in ANYWHERE_PRERELEASE_MIN_VERSION..=ANYWHERE_PRERELEASE_MAX_VERSION {
+            let path = temp_db_path();
+            write_pre_v18_usage_table(&path, stamped);
+            for pass in ["first open (repairs)", "second open (idempotent)"] {
+                let store = Store::open(&path)
+                    .unwrap_or_else(|e| panic!("stamped {stamped}, {pass}: {e:?}"));
+                let conn = store.lock().unwrap();
+                assert_eq!(
+                    conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    SCHEMA_VERSION,
+                    "stamped {stamped}, {pass}: renumbered to the public version"
+                );
+                // Public migration 18's column was applied despite the number claiming otherwise…
+                let (input, cached): (i64, i64) = conn
+                    .query_row(
+                        "SELECT input_tokens, cached_input_tokens FROM usage WHERE id = 'u-pre'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap_or_else(|e| panic!("stamped {stamped}, {pass}: {e:?}"));
+                assert_eq!((input, cached), (7, 0), "stamped {stamped}, {pass}");
+                // …and so was public migration 19's table.
+                assert!(
+                    conn.prepare("SELECT 1 FROM workflow_run")
+                        .unwrap()
+                        .exists([])
+                        .is_ok(),
+                    "stamped {stamped}, {pass}: workflow_run exists"
+                );
+            }
+            cleanup(&path);
+        }
+    }
+
+    /// The other half of the window's ambiguity: a database at 20/21 that DOES carry public
+    /// migration 18's column cannot have come from the pre-release branch (that branch forked at
+    /// SCHEMA_VERSION 17, before the column existed), so it was written by a newer public build and
+    /// must be REFUSED. The old code renumbered it down and opened it, silently bypassing the
+    /// `SchemaTooNew` guard for exactly the two versions above what it supported.
+    #[test]
+    fn a_newer_public_database_inside_the_window_is_refused_not_downgraded() {
+        if SCHEMA_VERSION >= ANYWHERE_PRERELEASE_MAX_VERSION {
+            return; // the window is fully consumed by public versions; nothing ambiguous is left
+        }
+        let path = temp_db_path();
+        Store::open(&path).unwrap(); // fully migrated, so the public v18 marker is present
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", ANYWHERE_PRERELEASE_MAX_VERSION)
+                .unwrap();
+        }
+        match Store::open(&path) {
+            Err(StoreError::SchemaTooNew { found, supported }) => {
+                assert_eq!(found, ANYWHERE_PRERELEASE_MAX_VERSION);
+                assert_eq!(supported, SCHEMA_VERSION);
+            }
+            Err(e) => panic!("expected SchemaTooNew, got {e:?}"),
+            Ok(_) => panic!("a database from a newer build must not be silently downgraded"),
+        }
+        cleanup(&path);
+    }
+
+    /// Forward/backward compatibility with an OLDER binary. The previous public build repairs the
+    /// ambiguous window by rewinding `user_version` to 17 and re-running every step from there, so a
+    /// database this build wrote must survive that round trip: the rewind must not lose data, and
+    /// re-running the in-window steps must stay a clean no-op. That "additive and idempotent from 18
+    /// on" contract is what makes the whole mechanism safe in both directions.
+    #[test]
+    fn a_database_written_by_this_build_survives_an_older_binarys_rewind_to_17() {
+        let path = temp_db_path();
+        let sid = {
+            let store = Store::open(&path).unwrap();
+            let sid = store.create_session("/tmp/proj", "default").unwrap();
+            store
+                .add_message(&sid, 1, Role::User, "keep me", None)
+                .unwrap();
+            sid
+        };
+        // What the older binary's repair does on open.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", 17i64).unwrap();
+        }
+        let store = Store::open(&path).expect("reopening after a rewind must succeed");
+        {
+            let conn = store.lock().unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION,
+                "the rewind is re-applied up to the current version"
+            );
+            // Every in-window step is re-runnable, twice, with no error — the contract that lets an
+            // older binary rewind at all.
+            for _ in 0..2 {
+                for step in ANYWHERE_PRERELEASE_MIN_VERSION..=SCHEMA_VERSION {
+                    MIGRATIONS[(step - 1) as usize](&conn)
+                        .unwrap_or_else(|e| panic!("migration {step} is not idempotent: {e:?}"));
+                }
+            }
+        }
+        assert_eq!(
+            store.load_messages(&sid).unwrap().len(),
+            1,
+            "the transcript survived the round trip"
+        );
+        cleanup(&path);
+    }
+
+    /// WAL growth is bounded automatically. `journal_size_limit` is per-connection and is NOT stored
+    /// in the file, so the load-bearing assertion is that EVERY connection the pool hands out carries
+    /// it — a single connection missing it is a checkpoint that leaves the `-wal` at its high-water
+    /// mark forever (656 MB was observed in the wild).
+    #[test]
+    fn wal_growth_is_bounded_on_every_pooled_connection() {
+        let path = temp_db_path();
+        let store = Store::open(&path).unwrap();
+        // Held simultaneously, so the pool is forced to open four DISTINCT connections rather than
+        // handing the same one back each time.
+        let held: Vec<_> = (0..4).map(|_| store.lock().unwrap()).collect();
+        for (i, conn) in held.iter().enumerate() {
+            let limit: i64 = conn
+                .query_row("PRAGMA journal_size_limit", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                limit, WAL_SIZE_LIMIT_BYTES,
+                "pooled connection {i} must bound the WAL"
+            );
+        }
+        drop(held);
+        // Write enough to cross the autocheckpoint threshold several times, then check the file.
+        let sid = store.create_session("/tmp/proj", "default").unwrap();
+        let big = "x".repeat(4096);
+        for i in 0..400 {
+            store.add_message(&sid, i, Role::User, &big, None).unwrap();
+        }
+        let wal = path.with_extension("db-wal");
+        let wal_len = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+        assert!(
+            wal_len <= WAL_SIZE_LIMIT_BYTES as u64,
+            "-wal grew to {wal_len} bytes, past the {WAL_SIZE_LIMIT_BYTES}-byte limit"
+        );
+        drop(store);
+        cleanup(&path);
+    }
+
+    /// The explicit, user-initiated reclaim (`forge lattice prune --vacuum`) still shrinks the WAL to
+    /// nothing. Deliberately NOT wired to run automatically — see [`Store::vacuum`].
+    #[test]
+    fn vacuum_truncates_the_wal() {
+        let path = temp_db_path();
+        let store = Store::open(&path).unwrap();
+        let sid = store.create_session("/tmp/proj", "default").unwrap();
+        for i in 0..200 {
+            store
+                .add_message(&sid, i, Role::User, &format!("m{i}"), None)
+                .unwrap();
+        }
+        store.vacuum().unwrap();
+        let wal_len = std::fs::metadata(path.with_extension("db-wal"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        assert_eq!(wal_len, 0, "a truncating checkpoint leaves an empty -wal");
+        drop(store);
+        cleanup(&path);
+    }
+
+    /// Every lattice count/embedding query must report only its own repo root. The store is global —
+    /// one database across every project and every bench clone — so an unscoped query made
+    /// `forge lattice status` print another project's totals as this project's, spent this project's
+    /// embedding quota on another project's nodes, and cosine-ranked another project's symbols
+    /// against this project's prompt.
+    #[test]
+    fn lattice_counts_and_embeddings_are_scoped_to_their_repo_root() {
+        let store = Store::open_in_memory().unwrap();
+        let mk = |root: &str, tag: &str, nodes: usize| {
+            let file = LatticeFileRow {
+                id: format!("f-{tag}"),
+                repo_root: root.into(),
+                rel_path: "a.rs".into(),
+                lang: "rust".into(),
+                content_hash: "h".into(),
+                parse_status: "ok".into(),
+            };
+            let rows: Vec<LatticeNodeRow> = (0..nodes)
+                .map(|i| LatticeNodeRow {
+                    id: format!("n-{tag}-{i}"),
+                    file_id: format!("f-{tag}"),
+                    kind: "function".into(),
+                    name: format!("sym_{tag}_{i}"),
+                    qualname: None,
+                    signature: None,
+                    span_start: 0,
+                    span_end: 1,
+                    line_start: 1,
+                    pagerank: 0.0,
+                })
+                .collect();
+            let edges = vec![LatticeEdgeRow {
+                id: format!("e-{tag}"),
+                src_id: format!("n-{tag}-0"),
+                dst_id: format!("n-{tag}-1"),
+                kind: "calls".into(),
+                unresolved_name: None,
+            }];
+            let refs = vec![LatticeRefRow {
+                id: format!("r-{tag}"),
+                src_id: format!("n-{tag}-0"),
+                name: format!("sym_{tag}_1"),
+                kind: "call".into(),
+                line: 1,
+            }];
+            store
+                .replace_lattice_file(&file, &rows, &edges, &refs)
+                .unwrap();
+        };
+        mk("/repo/a", "a", 2);
+        mk("/repo/b", "b", 3);
+        // One embedding in each root, so neither can satisfy the other's queries by accident.
+        store.put_lattice_embedding("n-a-0", &[1.0, 0.0]).unwrap();
+        store.put_lattice_embedding("n-b-0", &[0.0, 1.0]).unwrap();
+
+        assert_eq!(store.lattice_counts("/repo/a").unwrap(), (1, 2, 1));
+        assert_eq!(store.lattice_counts("/repo/b").unwrap(), (1, 3, 1));
+        assert_eq!(store.lattice_counts("/repo/none").unwrap(), (0, 0, 0));
+
+        assert_eq!(store.lattice_ref_count("/repo/a").unwrap(), 1);
+        assert_eq!(store.lattice_ref_count("/repo/b").unwrap(), 1);
+        assert_eq!(store.lattice_ref_count("/repo/none").unwrap(), 0);
+
+        assert_eq!(store.lattice_embedding_count("/repo/a").unwrap(), 1);
+        assert_eq!(store.lattice_embedding_count("/repo/none").unwrap(), 0);
+        assert_eq!(
+            store.lattice_embeddings("/repo/a").unwrap(),
+            vec![("n-a-0".to_string(), vec![1.0, 0.0])],
+            "only this root's vectors are cosine-ranked"
+        );
+        assert!(store.lattice_embeddings("/repo/none").unwrap().is_empty());
+
+        let pending: Vec<String> = store
+            .lattice_nodes_without_embedding("/repo/a", 50)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert_eq!(
+            pending,
+            vec!["n-a-1".to_string()],
+            "embed_pending must never spend calls on another project's nodes"
+        );
+        assert!(store
+            .lattice_nodes_without_embedding("/repo/none", 50)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

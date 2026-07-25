@@ -14,9 +14,11 @@ import { RefreshControl, StyleSheet, Text, View, type ViewStyle } from "react-na
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BackLink } from "../components/ds/BackLink";
+import { Button } from "../components/ds/Button";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
 import { SearchField } from "../components/ds/SearchField";
+import { Skeleton } from "../components/ds/Skeleton";
 import { type HookRow } from "../lib/api";
 import { useHooks } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
@@ -101,6 +103,17 @@ function ConfigHint({ card }: { card: boolean }) {
   );
 }
 
+// Shape-matched loading placeholder for a `HookRowItem` — see the identical comment on
+// `SkillRowSkeleton` in skills.tsx for why this branch exists at all.
+function HookRowSkeleton() {
+  return (
+    <View style={styles.hook}>
+      <Skeleton width="45%" height={14} />
+      <Skeleton width="70%" height={12} />
+    </View>
+  );
+}
+
 function HooksScreenBody() {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
@@ -113,9 +126,19 @@ function HooksScreenBody() {
   );
 
   const list =
-    query.isError && !query.data ? (
-      <Text style={[type.body, { color: tokens.danger }]}>Could not load hooks. Pull to retry.</Text>
-    ) : !query.isLoading && hooks.length === 0 ? (
+    query.isLoading ? (
+      <View>
+        {[0, 1, 2, 3].map((i) => (
+          <HookRowSkeleton key={i} />
+        ))}
+      </View>
+    ) : query.isError && !query.data ? (
+      <EmptyState
+        icon={Zap}
+        message="Could not load hooks."
+        action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} accessibilityLabel="Retry loading hooks" />}
+      />
+    ) : hooks.length === 0 ? (
       <EmptyState icon={Zap} message={search ? "No hooks match that search." : "No hooks configured."} />
     ) : (
       <View>

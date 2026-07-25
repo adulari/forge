@@ -1,7 +1,7 @@
 // Native Features pack — Plan launcher. Hearth bottom sheet: dash-marked "Plan" label,
 // an objective input, and a primary action. Submitting sends `/plan <objective>`; Forge
 // investigates read-only and then presents a decision card for approval. The presented
-// plan + its per-step state also render on the Plans screen (app/(tabs)/plans.tsx) and the
+// plan + its per-step state also render on the Plans screen (app/plans.tsx) and the
 // in-session review card (components/review/PlanCard.tsx).
 //
 // `plan` is OPTIONAL and additive — the existing session-shell call site keeps working

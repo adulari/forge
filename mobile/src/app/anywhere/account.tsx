@@ -17,6 +17,7 @@ import { Platform, Pressable, Share, StyleSheet, Text, View } from "react-native
 import { BackLink } from "../../components/ds/BackLink";
 import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
+import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { Input } from "../../components/ds/Input";
 import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
@@ -31,6 +32,7 @@ export default function AnywhereAccountScreen() {
   const tokens = useTokens();
   const toast = useToast();
   const [signingOut, setSigningOut] = useState(false);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [showReset, setShowReset] = useState(false);
   const [resetConfirmation, setResetConfirmation] = useState("");
@@ -40,10 +42,12 @@ export default function AnywhereAccountScreen() {
     setSigningOut(true);
     try {
       await anywhere.logout();
+    } catch (reason) {
+      toast.show(reason instanceof Error ? reason.message : "Sign out failed.", { tone: "danger" });
     } finally {
       setSigningOut(false);
     }
-  }, [anywhere]);
+  }, [anywhere, toast]);
 
   const exportData = useCallback(async () => {
     setExporting(true);
@@ -118,7 +122,7 @@ export default function AnywhereAccountScreen() {
 
         <SectionHeader>account</SectionHeader>
         <Pressable
-          onPress={() => void signOut()}
+          onPress={() => setConfirmSignOut(true)}
           disabled={signingOut}
           accessibilityRole="button"
           accessibilityLabel="Sign out on this device"
@@ -193,6 +197,19 @@ export default function AnywhereAccountScreen() {
         <Text style={[typeScale.monoMeta, styles.footnote, { color: tokens.ink4 }]}>
           Recover on a new device with GitHub sign-in plus your recovery phrase, or approval from a paired device.
         </Text>
+
+        <ConfirmDialog
+          visible={confirmSignOut}
+          title="Sign out of Forge Anywhere?"
+          message="This device's keys are removed. Signing back in needs GitHub sign-in plus your recovery phrase, or approval from a paired device."
+          confirmLabel="Sign out"
+          destructive
+          onConfirm={() => {
+            setConfirmSignOut(false);
+            void signOut();
+          }}
+          onCancel={() => setConfirmSignOut(false)}
+        />
       </View>
     </Screen>
   );

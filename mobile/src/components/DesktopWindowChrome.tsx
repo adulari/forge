@@ -18,6 +18,13 @@ import { monoFamily } from "../theme/typography";
 
 export const DESKTOP_WINDOW_CHROME_HEIGHT = 36;
 
+// This bar only ever renders inside the Tauri desktop shell (the `!isTauri` guard below), so
+// it always has a real hardware keyboard behind it — no touch-surface case to gate on here,
+// just the label: Windows/Linux have no Command key, so the chip must say what's actually on
+// the keyboard instead of assuming macOS (Composer.tsx:675 makes the same isMacOS ? ⌘ : Ctrl
+// choice for the same reason).
+const MOD_KEY = isMacOS ? "⌘" : "Ctrl";
+
 type WebViewProps = ViewProps & { dataSet?: Record<string, string>; onDoubleClick?: () => void };
 const WebView = View as unknown as React.ComponentType<WebViewProps>;
 
@@ -93,7 +100,7 @@ export function DesktopWindowChrome() {
           style={[styles.kbdChip, { borderColor: tokens.border }]}
         >
           <Search size={11} color={tokens.ink4} strokeWidth={2} />
-          <Text style={[styles.kbd, { color: tokens.ink4 }]}>⌘K</Text>
+          <Text style={[styles.kbd, { color: tokens.ink4 }]}>{MOD_KEY}K</Text>
         </Pressable>
       </WebView>
 

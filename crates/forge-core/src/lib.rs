@@ -1407,6 +1407,95 @@ fn compact_candidate_chain(
     out
 }
 
+/// Reply room reserved for the compaction summary itself when sizing its request.
+///
+/// Deliberately far smaller than the main loop's [`output_planning_reserve_tokens`]:
+/// [`COMPACT_SYSTEM`] asks for a concise summary, not an unbounded answer, and reserving the main
+/// loop's 8k planning cushion would leave an 8k-window trivial summarizer with no input budget at
+/// all — the chain is trivial-tier first precisely because those models are cheap and small.
+const COMPACT_SUMMARY_RESERVE_TOKENS: usize = 2_048;
+
+/// Stands in for the messages a compaction payload had to drop. `{}` is the dropped count.
+///
+/// Said out loud in the payload rather than dropped silently, so the summarizer knows its input has
+/// a hole in it instead of inventing continuity across the seam.
+const COMPACT_ELISION_MARKER: &str =
+    "\n[… {} message(s) from the middle of this stretch were omitted because the whole stretch did \
+     not fit the summarizer's context window …]\n";
+
+/// Fit a rendered compaction payload into `budget_tokens` by dropping from the MIDDLE.
+///
+/// The newest-first trimming `context_pipeline::fit_messages` does for a normal request is exactly
+/// backwards here: compaction's job is to stand in for the OLDEST messages, so keeping only the tail
+/// would summarize the stretch nearest the messages that survive verbatim anyway and silently lose
+/// the ones the summary is supposed to replace. So keep both ends instead — the opening messages
+/// (the task statement and early decisions everything after them refers back to) and, with the
+/// larger share of the budget, the end of the older stretch (the live state the kept-recent messages
+/// continue from). What goes is the middle, and [`COMPACT_ELISION_MARKER`] says so.
+///
+/// `entries` is one rendered line-group per summarizable message; the caller keeps them unjoined so
+/// this can be re-run per failover hop against each candidate model's own window.
+fn fit_compaction_payload(entries: &[String], budget_tokens: usize) -> String {
+    let costs: Vec<usize> = entries.iter().map(|e| tokens::count_message(e)).collect();
+    if costs.iter().sum::<usize>() <= budget_tokens {
+        return entries.join("\n");
+    }
+    let marker = |dropped: usize| COMPACT_ELISION_MARKER.replacen("{}", &dropped.to_string(), 1);
+    // Charge the marker at its widest possible count, so the assembled payload can never come out
+    // over budget just because the omitted count grew a digit.
+    let budget = budget_tokens.saturating_sub(tokens::count_message(&marker(entries.len())));
+
+    let mut used = 0usize;
+    let mut tail = entries.len();
+    let tail_budget = budget * 3 / 4;
+    while tail > 0 && used + costs[tail - 1] <= tail_budget {
+        tail -= 1;
+        used += costs[tail];
+    }
+    let mut head = 0usize;
+    while head < tail && used + costs[head] <= budget {
+        used += costs[head];
+        head += 1;
+    }
+    let dropped = tail - head;
+    if dropped == 0 {
+        return entries.join("\n");
+    }
+    if head == 0 && tail == entries.len() {
+        // Not even one whole message fits. Keep the tail characters of the most recent one rather
+        // than sending an empty payload the summarizer would answer with nothing.
+        return tail_within_token_budget(
+            entries.last().map(String::as_str).unwrap_or_default(),
+            budget_tokens,
+        );
+    }
+    let mut out = entries[..head].join("\n");
+    out.push_str(&marker(dropped));
+    out.push_str(&entries[tail..].join("\n"));
+    out
+}
+
+/// The longest suffix of `text` that costs at most `budget_tokens`, found by bisecting on chars.
+/// The suffix (not the prefix) because it is the most recent — the same reason
+/// `truncate_message_to_budget` keeps a message's tail.
+fn tail_within_token_budget(text: &str, budget_tokens: usize) -> String {
+    if tokens::count_message(text) <= budget_tokens {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let suffix = |keep: usize| -> String { chars[chars.len() - keep..].iter().collect() };
+    let (mut fits, mut too_long) = (0usize, chars.len());
+    while fits + 1 < too_long {
+        let mid = fits + (too_long - fits) / 2;
+        if tokens::count_message(&suffix(mid)) <= budget_tokens {
+            fits = mid;
+        } else {
+            too_long = mid;
+        }
+    }
+    suffix(fits)
+}
+
 /// Classify a tool RESULT string as a failure of a given kind, or `None` if it looks like a success.
 ///
 /// Anchored on the markers Forge actually produces for failures (`invoke_tool` returns `"error: …"`
@@ -3956,6 +4045,14 @@ Rules:\n\
         err: &forge_provider::ProviderError,
         default_cooldown: std::time::Duration,
     ) {
+        // An over-window request is a statement about the payload, not about the model: the same
+        // model answers fine the moment we send less. Benching for it sidelines a healthy model for
+        // a full cooldown and, because the auxiliary chains are trivial-tier, walks the identical
+        // oversized payload into the next cheap model and benches that one too — so the damage
+        // outlives the request that caused it and degrades routing for ordinary turns afterwards.
+        if err.is_context_overflow() {
+            return;
+        }
         let reason = err.reason();
         if err.is_auth() {
             let _ = self
@@ -3968,6 +4065,17 @@ Rules:\n\
                 .store
                 .bench_for(model, err.cooldown(default_cooldown), reason);
         }
+    }
+
+    /// Token budget for ONE compaction request against `model`: its window, minus the standing
+    /// [`COMPACT_SYSTEM`] prompt, minus room for the summary it has to write back, with the same 5%
+    /// headroom [`Self::transcript_for`] keeps for the divergence between our o200k count and the
+    /// target model's own tokenizer. Floored so a pathologically small window still gets a request
+    /// worth making rather than an empty one.
+    fn compact_input_budget(&self, model: &str) -> usize {
+        let window = self.effective_context_window(model) as usize;
+        let reserve = COMPACT_SUMMARY_RESERVE_TOKENS + tokens::count_message(COMPACT_SYSTEM);
+        (window.saturating_sub(reserve) * 95 / 100).max(512)
     }
 
     pub async fn compact(&mut self, auto: bool) -> Result<(usize, usize), CoreError> {
@@ -3986,7 +4094,10 @@ Rules:\n\
         .await;
         let split = before - COMPACT_KEEP_RECENT;
         let older = &self.transcript[..split];
-        let rendered = older
+        // Kept as one entry per message instead of a single pre-joined string: the candidate chain
+        // deliberately crosses models with wildly different windows, so the payload has to be
+        // re-fitted on every failover hop (see the loop below).
+        let entries = older
             .iter()
             // UI-only notes never reach a provider — don't pay to summarize them either.
             .filter(|m| m.visibility.is_llm())
@@ -4000,8 +4111,7 @@ Rules:\n\
                 }
                 line
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
 
         // Route the summary at the trivial tier (it's cheap, fixed work) and call the model once.
         let budget = BudgetState {
@@ -4031,7 +4141,6 @@ Rules:\n\
             )
             .await;
 
-        let messages = [Message::system(COMPACT_SYSTEM), Message::user(rendered)];
         // Compaction must NEVER hard-fail because a cheap trivial model is unreachable (e.g. a
         // local ollama model when ollama isn't running): losing the summary drops the task plan
         // with it. Mirror the LLM classifier's approach (#648): try the top trivial candidates,
@@ -4054,6 +4163,18 @@ Rules:\n\
         let completion_opts = Self::auxiliary_completion_options(&self.id, "compact");
         let resp = loop {
             let mut sink = |_: StreamEvent| {};
+            // Fit the payload to THIS candidate's own window. Built inside the loop because the
+            // chain hops between models whose windows differ by orders of magnitude, and because
+            // sending an un-fitted transcript here was the whole defect: every trivial-tier model
+            // returned a context-overflow error and got benched for it, so a long session's
+            // auto-compaction reliably failed AND degraded routing for the turns after it.
+            let messages = [
+                Message::system(COMPACT_SYSTEM),
+                Message::user(fit_compaction_payload(
+                    &entries,
+                    self.compact_input_budget(&model),
+                )),
+            ];
             match self
                 .provider
                 .complete_with(&model, &messages, &[], &completion_opts, &mut sink)
@@ -10004,6 +10125,44 @@ mod tests {
     }
 
     #[test]
+    fn fit_compaction_payload_keeps_both_ends_and_elides_the_middle() {
+        let entries: Vec<String> = (0..40)
+            .map(|i| format!("user: message {i} {}", "x ".repeat(400)))
+            .collect();
+
+        let untouched = fit_compaction_payload(&entries, usize::MAX);
+        assert!(
+            untouched.contains("message 20 "),
+            "a payload that already fits must be passed through whole"
+        );
+        assert!(!untouched.contains("omitted"));
+
+        let budget = 2_000;
+        let fitted = fit_compaction_payload(&entries, budget);
+        assert!(
+            tokens::count_message(&fitted) <= budget,
+            "fitted payload must respect the budget: {} > {budget}",
+            tokens::count_message(&fitted)
+        );
+        assert!(
+            fitted.contains("message 0 "),
+            "the opening of the conversation anchors the summary and must survive"
+        );
+        assert!(
+            fitted.contains("message 39 "),
+            "the end of the older stretch is what the kept-recent messages continue from"
+        );
+        assert!(
+            !fitted.contains("message 20 "),
+            "the MIDDLE is what gets dropped — not the oldest, which is the point of compacting"
+        );
+        assert!(
+            fitted.contains("omitted"),
+            "the hole must be declared so the summarizer doesn't invent continuity"
+        );
+    }
+
+    #[test]
     fn tool_failure_tracker_trips_at_threshold() {
         let mut tracker = ToolFailureTracker::new();
 
@@ -13486,6 +13645,113 @@ mod tests {
         assert_eq!(report[0].0, "bad::model");
     }
 
+    /// Records the payload the summarizer was actually handed, so a test can assert the request was
+    /// fitted to the model's window BEFORE dispatch rather than after a round of overflow errors.
+    #[derive(Default)]
+    struct CapturePayloadProvider {
+        payload: std::sync::Mutex<Option<String>>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for CapturePayloadProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            *self.payload.lock().unwrap() = messages
+                .iter()
+                .find(|m| m.role == Role::User)
+                .map(|m| m.content.clone());
+            Ok(forge_provider::ModelResponse {
+                content: "SUMMARY: fitted".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_payload_is_fitted_to_the_summarizer_window_before_dispatch() {
+        // The defect: `compact` sent the entire untrimmed older transcript, so on a long session
+        // every trivial-tier summarizer returned a context-overflow error before the summary could
+        // be produced at all.
+        let provider = Arc::new(CapturePayloadProvider::default());
+        let router = Arc::new(FixedRouter {
+            model: "small::summarizer".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(provider.clone(), router);
+        // A small FETCHED window, so the budget is deterministic instead of riding the conservative
+        // floor, and far smaller than the transcript below.
+        store.set_model_context("small::summarizer", 8_000).unwrap();
+        let filler = "alpha bravo charlie delta echo foxtrot ".repeat(200);
+        for i in 0..46 {
+            session
+                .transcript
+                .push(Message::user(format!("message {i} {filler}")));
+        }
+
+        let (before, after) = session.compact(false).await.unwrap();
+        assert_eq!(before, 46);
+        assert_eq!(after, COMPACT_KEEP_RECENT + 1, "the summary landed");
+
+        let payload = provider
+            .payload
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the summarizer was called exactly once");
+        let budget = session.compact_input_budget("small::summarizer");
+        assert!(
+            tokens::count_message(&payload) <= budget,
+            "the summarizer must never be handed more than its window holds: {} > {budget}",
+            tokens::count_message(&payload)
+        );
+        assert!(
+            payload.contains("message 0 ") && payload.contains("message 39 "),
+            "both ends of the older stretch must survive the fit"
+        );
+        assert!(
+            !payload.contains("message 20 "),
+            "the middle is what was dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_context_overflow_during_compaction_records_no_health_penalty() {
+        // The second half of the defect: an over-window compaction payload benched every healthy
+        // trivial model it was walked into, degrading routing for the ordinary turns afterwards.
+        // An oversized request is the caller's fault and must not touch the model's health record.
+        let provider = Arc::new(FlakyProvider {
+            bad: ["over::a".to_string(), "over::b".to_string()]
+                .into_iter()
+                .collect(),
+            err: context_overflow,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "over::a".into(),
+            fallbacks: vec!["over::b".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        for i in 0..12 {
+            session
+                .transcript
+                .push(Message::user(format!("message {i}")));
+        }
+
+        let err = session
+            .compact(false)
+            .await
+            .expect_err("every candidate overflowed, so the chain is exhausted");
+        assert!(matches!(err, CoreError::Provider(_)));
+        let benched = store.current_benched_report().unwrap();
+        assert!(
+            benched.is_empty(),
+            "an oversized request is not a health signal about the model: {benched:?}"
+        );
+    }
+
     #[tokio::test]
     async fn full_history_survives_compaction_for_the_user_view() {
         // After compaction the model sees a summary, but the USER must still be able to view the
@@ -14777,6 +15043,14 @@ mod tests {
 
     fn unavailable(_m: &str) -> forge_provider::ProviderError {
         forge_provider::ProviderError::Unavailable("502".into())
+    }
+
+    /// Overflow rides `Unavailable` in the wild (providers report it inconsistently) — the sniff in
+    /// `ProviderError::is_context_overflow` is what tells it apart from a real outage.
+    fn context_overflow(_m: &str) -> forge_provider::ProviderError {
+        forge_provider::ProviderError::Unavailable(
+            "maximum context length is 8192 tokens, however you requested 41000".into(),
+        )
     }
 
     /// Fails `bad` models with a chosen error; every other model answers with its OWN id as the

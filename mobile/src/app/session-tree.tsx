@@ -122,14 +122,20 @@ export default function SessionTreeScreen() {
   const merge = useMergeSession();
   const { isCompact } = useBreakpoint();
   const [mergeTarget, setMergeTarget] = useState<string | null>(null);
+  // Separate from `mergeTarget`: `confirmMerge` clears that the instant it fires the mutation
+  // (so the ConfirmDialog closes), so it can't also drive the button's pending state. This one
+  // lives for the mutation's full lifetime instead, cleared in `onSettled` regardless of outcome.
+  const [mergingId, setMergingId] = useState<string | null>(null);
   const [diffTarget, setDiffTarget] = useState<string | null>(null);
   const diff = useSessionDiff(diffTarget, diffTarget != null);
 
   const runMerge = useCallback(
     (id: string) => {
+      setMergingId(id);
       merge.mutate(id, {
         onSuccess: (res) => toast.show(`merged branch ${res.branch}`, { tone: "success" }),
         onError: (err) => toast.show(err instanceof ApiError ? err.message : "merge failed", { tone: "danger" }),
+        onSettled: () => setMergingId((current) => (current === id ? null : current)),
       });
     },
     [merge, toast],
@@ -234,7 +240,18 @@ export default function SessionTreeScreen() {
                           {isFork && session?.worktree ? (
                             <>
                               <Pressable onPress={() => setDiffTarget(node.id)} accessibilityRole="button" accessibilityLabel={`Diff ${titleFor(node)}`} hitSlop={8}><Text style={[typeScale.meta, { color: tokens.ink2 }]}>Diff</Text></Pressable>
-                              <Pressable onPress={() => setMergeTarget(node.id)} accessibilityRole="button" accessibilityLabel={`Merge ${titleFor(node)} back`} hitSlop={8}><Text style={[typeScale.meta, { color: tokens.ink2 }]}>Merge back</Text></Pressable>
+                              <Pressable
+                                onPress={() => setMergeTarget(node.id)}
+                                disabled={mergingId === node.id}
+                                accessibilityRole="button"
+                                accessibilityLabel={`Merge ${titleFor(node)} back`}
+                                accessibilityState={{ busy: mergingId === node.id, disabled: mergingId === node.id }}
+                                hitSlop={8}
+                              >
+                                <Text style={[typeScale.meta, { color: mergingId === node.id ? tokens.ink4 : tokens.ink2 }]}>
+                                  {mergingId === node.id ? "Merging…" : "Merge back"}
+                                </Text>
+                              </Pressable>
                             </>
                           ) : null}
                         </View>
@@ -266,7 +283,7 @@ export default function SessionTreeScreen() {
                 live={liveById.get(selectedRow.node.id) ?? null}
                 session={sessionById.get(selectedRow.node.id) ?? null}
                 tokens={tokens}
-                merging={merge.isPending && mergeTarget === selectedRow.node.id}
+                merging={mergingId === selectedRow.node.id}
                 onOpen={() => openNode(selectedRow.node.id)}
                 onFork={() => setForkTarget(selectedRow.node.id)}
                 onMerge={() => setMergeTarget(selectedRow.node.id)}

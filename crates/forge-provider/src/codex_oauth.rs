@@ -20,7 +20,7 @@ use crate::oauth_responses::{
 };
 use crate::{
     bundled_http_client, CompletionOptions, EventSink, ModelResponse, Provider, ProviderError,
-    ToolSpec,
+    StreamEvent, ToolSpec,
 };
 
 /// The `codex-oauth::` model-id namespace [`crate::DispatchProvider`] routes on.
@@ -680,6 +680,30 @@ fn apply_codex_body_overrides(body: &mut serde_json::Value, opts: &CompletionOpt
     }
 }
 
+/// Wrap `inner` so the caller can tell whether anything user-visible was already streamed by the
+/// time a request fails — the condition that decides whether the next-account hop is still safe.
+///
+/// `execute` streams straight into the caller's sink and forge-core forwards every
+/// `StreamEvent::Text`/`Reasoning` on to the presenter as it arrives, so a hop taken after the first
+/// delta re-renders the reply from the beginning: the user reads the truncated first attempt with the
+/// complete second attempt appended, while the persisted transcript keeps only the second. Live
+/// output and saved history then disagree and neither half is identifiable as the real one. Once
+/// anything has been shown the retry is no longer ours to take — surface the error and let
+/// forge-core's failover own it. Mirrors `genai_provider`'s `can_reconnect` guard.
+///
+/// Only Text/Reasoning count: `ProviderActivity` is a private heartbeat and renders nothing.
+fn watch_visible_output<'a>(
+    inner: &'a mut EventSink<'_>,
+    streamed: &'a mut bool,
+) -> Box<EventSink<'a>> {
+    Box::new(move |event: StreamEvent| {
+        if matches!(event, StreamEvent::Text(_) | StreamEvent::Reasoning(_)) {
+            *streamed = true;
+        }
+        inner(event);
+    })
+}
+
 fn fill_subscription_usage(mut response: ModelResponse, body: &serde_json::Value) -> ModelResponse {
     if response.usage.input_tokens == 0 {
         let request_chars = serde_json::to_string(body).map_or(0, |json| json.chars().count());
@@ -728,23 +752,29 @@ impl Provider for CodexOauthProvider {
             build_responses_request(model, messages, tools, opts, self.max_output_tokens);
         apply_codex_body_overrides(&mut body, opts);
 
+        // Set once the first attempt puts text/reasoning on screen; from then on a hop would replay
+        // it — see `watch_visible_output`.
+        let mut streamed = false;
+
         // "v1"-tagged models (currently just Luna) 404 ("Model not found") over the plain HTTPS
         // path above — the ChatGPT backend serves them ONLY over WebSocket. Everything else keeps
         // using the battle-tested HTTP path below UNCHANGED.
         if codex_websocket::is_websocket_model(model) {
             let ws_url = codex_websocket::to_ws_url(&url)?;
-            let first = self
-                .execute_ws(
+            let first = {
+                let mut watched = watch_visible_output(on_event, &mut streamed);
+                self.execute_ws(
                     &ws_url,
                     account_id.as_deref(),
                     &token,
                     &chatgpt_id,
                     &body,
-                    on_event,
+                    &mut *watched,
                 )
-                .await;
+                .await
+            };
             let response = match first {
-                Err(ref e) if should_hop_account(e) && pool.has_rotation() => {
+                Err(ref e) if should_hop_account(e) && pool.has_rotation() && !streamed => {
                     let (account_id2, token2, id2) = self.pick_access_token(&pool).await?;
                     self.execute_ws(
                         &ws_url,
@@ -761,18 +791,20 @@ impl Provider for CodexOauthProvider {
             return Ok(fill_subscription_usage(response, &body));
         }
 
-        let first = self
-            .execute(
+        let first = {
+            let mut watched = watch_visible_output(on_event, &mut streamed);
+            self.execute(
                 &url,
                 account_id.as_deref(),
                 &token,
                 &chatgpt_id,
                 &body,
-                on_event,
+                &mut *watched,
             )
-            .await;
+            .await
+        };
         let response = match first {
-            Err(ref e) if should_hop_account(e) && pool.has_rotation() => {
+            Err(ref e) if should_hop_account(e) && pool.has_rotation() && !streamed => {
                 let (account_id2, token2, id2) = self.pick_access_token(&pool).await?;
                 self.execute(&url, account_id2.as_deref(), &token2, &id2, &body, on_event)
                     .await
@@ -786,7 +818,6 @@ impl Provider for CodexOauthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::StreamEvent;
     use forge_types::Role;
 
     #[tokio::test]
@@ -1103,6 +1134,69 @@ mod tests {
             .expect_err("403 permanent");
         assert!(matches!(err, ProviderError::Auth(_)));
         assert_eq!(hit.calls(), 1);
+    }
+
+    /// Account A streams a visible delta and only then dies mid-stream. The in-stream error
+    /// classifies as `Unavailable` (hoppable), but hopping now would replay the reply from the top
+    /// into the same sink and the user would read it twice.
+    fn partial_then_stream_error_sse() -> String {
+        "event: response.output_text.delta\ndata: {\"delta\":\"the first half\"}\n\n\
+         event: response.failed\ndata: {\"response\":{\"error\":{\"message\":\"upstream overload\"}}}\n\n"
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn mid_stream_failure_after_visible_output_does_not_replay_into_the_same_sink() {
+        let server = httpmock::MockServer::start();
+        let a_hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/responses")
+                .header("authorization", "Bearer at-a");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(partial_then_stream_error_sse());
+        });
+        let b_hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/responses")
+                .header("authorization", "Bearer at-b");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(ok_sse());
+        });
+        let store = memory_store(&[("acct-a", "a"), ("acct-b", "b")], "acct-a");
+        let provider = CodexOauthProvider::new()
+            .with_api_base(server.base_url())
+            .with_accounts(store);
+
+        let mut deltas: Vec<String> = Vec::new();
+        let mut sink = |event: StreamEvent| {
+            if let StreamEvent::Text(t) = event {
+                deltas.push(t);
+            }
+        };
+        let err = provider
+            .complete(
+                "codex-oauth::gpt-5.5",
+                &[Message::user("hi")],
+                &[],
+                &mut sink,
+            )
+            .await
+            .expect_err("a failure after visible output must surface, not hop");
+
+        assert!(matches!(err, ProviderError::Unavailable(_)));
+        assert_eq!(
+            deltas,
+            vec!["the first half".to_string()],
+            "the already-streamed prefix must be emitted exactly once"
+        );
+        assert_eq!(a_hit.calls(), 1);
+        assert_eq!(
+            b_hit.calls(),
+            0,
+            "the second account must not re-stream the reply from the start"
+        );
     }
 
     #[tokio::test]

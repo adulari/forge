@@ -19,10 +19,12 @@ import { Pressable, RefreshControl, StyleSheet, Text, View, type ViewStyle } fro
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BackLink } from "../components/ds/BackLink";
+import { Button } from "../components/ds/Button";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
 import { SearchField } from "../components/ds/SearchField";
 import { SectionHeader } from "../components/ds/SectionHeader";
+import { Skeleton } from "../components/ds/Skeleton";
 import { useToast } from "../components/ds/ToastHost";
 import { type SkillRow } from "../lib/api";
 import { useSkills } from "../lib/queries";
@@ -161,6 +163,18 @@ function DetailPane({ skill }: { skill: SkillRow | null }) {
   );
 }
 
+// Shape-matched loading placeholder for a `SkillRowItem` — otherwise `query.isLoading` falls
+// through to the "render the list" branch with an empty array and the screen shows only its
+// title/search over blank space (react-native-web's RefreshControl renders no spinner at all).
+function SkillRowSkeleton() {
+  return (
+    <View style={styles.skill}>
+      <Skeleton width="35%" height={14} />
+      <Skeleton width="85%" height={12} />
+    </View>
+  );
+}
+
 function SkillsScreenBody() {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
@@ -193,9 +207,19 @@ function SkillsScreenBody() {
   };
 
   const listContent =
-    query.isError && !query.data ? (
-      <Text style={[type.body, { color: tokens.danger }]}>Could not load skills. Pull to retry.</Text>
-    ) : !query.isLoading && filtered.length === 0 ? (
+    query.isLoading ? (
+      <View>
+        {[0, 1, 2, 3].map((i) => (
+          <SkillRowSkeleton key={i} />
+        ))}
+      </View>
+    ) : query.isError && !query.data ? (
+      <EmptyState
+        icon={Sparkles}
+        message="Could not load skills."
+        action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} accessibilityLabel="Retry loading skills" />}
+      />
+    ) : filtered.length === 0 ? (
       <EmptyState icon={Sparkles} message={search ? "No skills match that search." : "No skills are available on this server."} />
     ) : (
       <View>

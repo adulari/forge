@@ -20,7 +20,7 @@
         "minWidth": 380,
         "minHeight": 640,
         "titleBarStyle": "Overlay",
-        "backgroundColor": "#131318"
+        "backgroundColor": "#09090B"
       }
     ],
     "security": {

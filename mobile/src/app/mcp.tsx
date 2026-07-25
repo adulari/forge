@@ -13,8 +13,10 @@ import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { AddMcpServerSheet } from "../components/mcp/AddMcpServerSheet";
 import { Badge } from "../components/ds/Badge";
 import { BackLink } from "../components/ds/BackLink";
+import { Button } from "../components/ds/Button";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
+import { Skeleton } from "../components/ds/Skeleton";
 import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
 import { ApiError } from "../lib/api";
@@ -31,6 +33,23 @@ function externalConfigReason(error: unknown): string | null {
   if (!(error instanceof ApiError) || error.status !== 404) return null;
   const body = error.body as { error?: string } | undefined;
   return body?.error ?? "not defined in a mcp.toml Forge writes — edit it where it is defined";
+}
+
+// Shape-matched loading placeholder for one server row — without this, `query.isLoading` fell
+// through to `data?.servers.map` on `undefined` data (no branch at all, not even the "Pull to
+// retry" text the other two settings-family screens at least had) and rendered nothing below
+// the title/subtitle for the whole load.
+function McpServerSkeleton() {
+  const tokens = useTokens();
+  return (
+    <View style={styles.server}>
+      <View style={[styles.dot, { backgroundColor: tokens.bg3 }]} />
+      <View style={styles.serverBody}>
+        <Skeleton width="40%" height={14} />
+        <Skeleton width="65%" height={12} />
+      </View>
+    </View>
+  );
 }
 
 function McpScreenBody() {
@@ -80,8 +99,21 @@ function McpScreenBody() {
     <View style={styles.headerRow}><BackLink /><View style={styles.flexFill} /><Pressable onPress={() => setAdding(true)} accessibilityRole="button"><Text style={[styles.add, { color: tokens.accent }]}>+ Add</Text></Pressable></View>
     <Text style={[type.title, { color: tokens.ink }]}>MCP servers</Text>
     <Text style={[type.sub, { color: tokens.ink3 }]}>External tools available to Forge. Secrets remain on the host.</Text>
-    {query.isError ? <Text style={[type.body, { color: tokens.danger }]}>Could not load MCP servers. Pull to retry.</Text> : null}
-    {data?.servers.length === 0 ? <EmptyState icon={Plug} message="No MCP servers configured." /> : null}
+    {query.isLoading ? (
+      <View>
+        {[0, 1, 2].map((i) => (
+          <McpServerSkeleton key={i} />
+        ))}
+      </View>
+    ) : null}
+    {query.isError && !data ? (
+      <EmptyState
+        icon={Plug}
+        message="Could not load MCP servers."
+        action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} accessibilityLabel="Retry loading MCP servers" />}
+      />
+    ) : null}
+    {!query.isLoading && data?.servers.length === 0 ? <EmptyState icon={Plug} message="No MCP servers configured." /> : null}
     {data?.servers.map((server, index) => {
       const enabled = pending[server.name] ?? server.enabled;
       // The daemon now says up front whether it can write this server (v9); the latched 404

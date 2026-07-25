@@ -341,7 +341,7 @@ export default function NewSessionScreen() {
         </SafeAreaView>
 
         <Screen edges={["left", "right", "bottom"]} scroll keyboardAvoiding contentContainerStyle={styles.content}>
-          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} />
+          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} onSubmitKey={handleSubmit} />
           {whereAndHow}
           <View style={styles.spacer} />
           <Button
@@ -380,7 +380,7 @@ export default function NewSessionScreen() {
           />
         </View>
 
-        <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} wide />
+        <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} onSubmitKey={handleSubmit} wide />
         {whereAndHow}
 
         <View style={styles.modalFooterRow}>
@@ -409,13 +409,41 @@ function TaskDescriptionBox({
   onChangeText,
   disabled,
   wide,
+  onSubmitKey,
 }: {
   value: string;
   onChangeText: (text: string) => void;
   disabled?: boolean;
   wide?: boolean;
+  /** Web only: fired on Enter (Shift+Enter keeps inserting a newline), matching the "↵ forge"
+   * hint the desktop modal footer shows and the chat Composer's own Enter-to-send convention
+   * (Composer.tsx:392) — without this the hint lied about what Enter does. */
+  onSubmitKey?: () => void;
 }) {
   const tokens = useTokens();
+  const inputRef = useRef<TextInput>(null);
+  const onSubmitRef = useRef(onSubmitKey);
+  useEffect(() => {
+    onSubmitRef.current = onSubmitKey;
+  });
+
+  // Bound directly to the underlying DOM node (RN-Web's TextInput ref IS that node) since RN's
+  // onKeyPress doesn't expose shiftKey — same approach as Composer.tsx:382-412.
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const node = inputRef.current as unknown as HTMLTextAreaElement | null;
+    if (!node) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        onSubmitRef.current?.();
+      }
+    };
+    node.addEventListener("keydown", onKeyDown);
+    return () => node.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   const { isCompact } = useBreakpoint();
   // One step darker than the surrounding surface, per HANDOFF: bg2 on the mobile screen
   // (which sits on bg1), bg1 inside the desktop/web bg2 modal card.
@@ -430,6 +458,7 @@ function TaskDescriptionBox({
       ]}
     >
       <TextInput
+        ref={inputRef}
         value={value}
         onChangeText={onChangeText}
         placeholder="Describe a task to forge…"

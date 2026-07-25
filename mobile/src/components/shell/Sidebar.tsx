@@ -13,6 +13,7 @@ import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import type { AnywhereHost } from "../../lib/anywhere/types";
 import { hostStateText } from "../../lib/anywhere/format";
 import type { SessionRow } from "../../lib/api";
+import { modKey } from "../../lib/platform";
 import { useSessions } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, type StatusDotState } from "../../theme/tokens";
@@ -152,7 +153,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
       >
         <Search size={12} strokeWidth={1.75} color={tokens.ink3} />
         <Text style={[typeScale.sub, styles.searchHint, { color: tokens.ink3 }]}>Search sessions…</Text>
-        <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>⌘P</Text>
+        <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{modKey}P</Text>
       </Pressable>
 
       <Pressable
@@ -163,7 +164,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
       >
         <Plus size={13} strokeWidth={2} color={tokens.ink} />
         <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>New session</Text>
-        <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>⌘N</Text>
+        <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{modKey}N</Text>
       </Pressable>
 
       <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
