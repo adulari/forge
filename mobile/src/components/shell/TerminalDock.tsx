@@ -25,6 +25,7 @@ import {
 
 import { openTerminalSocket, type TerminalSocket } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
+import { supportsDirectDaemonEndpoints } from "../../lib/transport";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, space, type ColorTokens } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
@@ -188,6 +189,12 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
   const [status, setStatus] = useState<"idle" | "connecting" | "open" | "closed">("idle");
   const [size, setSize] = useState<{ cols: number; rows: number } | null>(null);
 
+  // The PTY lives on `/ws/terminal`, which the Anywhere bridge does not carry (it allowlists the
+  // `/ws` session stream only). Asking anyway used to throw straight out of the connect effect
+  // below and take the whole shell down through the root ErrorBoundary, so the dock decides up
+  // front and renders its own explanation instead.
+  const supported = !baseUrl || supportsDirectDaemonEndpoints(baseUrl);
+
   // Mirrors `size` for the socket-open effect below, which must not re-run (and re-spawn the
   // pty) every time the pane is resized. Declared first so it is already up to date when that
   // effect runs in the same commit.
@@ -224,35 +231,46 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
   // right geometry instead of the daemon's 80x24 default.
   const measured = size != null;
   useEffect(() => {
-    if (!baseUrl || !sessionId || !measured) return;
+    if (!baseUrl || !sessionId || !measured || !supported) return;
     const buffer = bufferRef.current;
     buffer.clear();
     setLines(buffer.lines());
     setStatus("connecting");
-    const socket = openTerminalSocket(
-      baseUrl,
-      sessionId,
-      {
-        onOutput: (chunk) => {
-          buffer.write(chunk);
-          scheduleFlush();
+    let socket: TerminalSocket;
+    try {
+      socket = openTerminalSocket(
+        baseUrl,
+        sessionId,
+        {
+          onOutput: (chunk) => {
+            buffer.write(chunk);
+            scheduleFlush();
+          },
+          onOpen: () => setStatus("open"),
+          onClose: () => {
+            setStatus("closed");
+            buffer.write("\r\n[terminal closed]\r\n");
+            scheduleFlush();
+          },
+          onError: () => setStatus("closed"),
         },
-        onOpen: () => setStatus("open"),
-        onClose: () => {
-          setStatus("closed");
-          buffer.write("\r\n[terminal closed]\r\n");
-          scheduleFlush();
-        },
-        onError: () => setStatus("closed"),
-      },
-      sizeRef.current ?? undefined,
-    );
+        sizeRef.current ?? undefined,
+      );
+    } catch (err) {
+      // Transports reject an unroutable socket synchronously (an un-enrolled Anywhere host, a
+      // malformed base URL). Uncaught, that unmounts the entire app via the root ErrorBoundary —
+      // report it in the pane the user is already looking at instead.
+      setStatus("closed");
+      buffer.write(`\r\n[terminal unavailable: ${err instanceof Error ? err.message : String(err)}]\r\n`);
+      scheduleFlush();
+      return;
+    }
     socketRef.current = socket;
     return () => {
       socketRef.current = null;
       socket.close();
     };
-  }, [baseUrl, sessionId, measured, scheduleFlush]);
+  }, [baseUrl, sessionId, measured, supported, scheduleFlush]);
 
   useEffect(() => {
     if (size) socketRef.current?.resize(size.cols, size.rows);
@@ -299,6 +317,17 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
     return (
       <View style={styles.empty}>
         <EmptyState icon={Terminal} message="Open a session to run a terminal in its working directory." />
+      </View>
+    );
+  }
+
+  if (!supported) {
+    return (
+      <View style={styles.empty}>
+        <EmptyState
+          icon={Terminal}
+          message="The terminal needs a direct connection to this host. Forge Anywhere carries sessions only — connect over your network or a tunnel to open a shell."
+        />
       </View>
     );
   }

@@ -176,7 +176,15 @@ impl BenchmarkScores {
     /// canonical key. Generic cross-version fuzzy matching is deliberately bypassed for these
     /// successors so a preview cannot select whichever older sibling has the highest score.
     fn predecessor_canon(id: &str) -> Option<String> {
-        const PREDECESSORS: &[(&str, &str)] = &[("qwen3.8-max-preview", "qwen3.7-max")];
+        const PREDECESSORS: &[(&str, &str)] = &[
+            ("qwen3.8-max-preview", "qwen3.7-max"),
+            // Claude Opus 5 shipped 2026-07-24; Artificial Analysis has no row for it yet. The
+            // version-conflict guard above (correctly) refuses to fuzzy-match it onto Opus 4.8,
+            // which would otherwise leave the fleet's newest frontier model unscored — ranked by
+            // the family heuristic alone and sorted below every benched peer at high effort.
+            // Opus 5 lists at Opus 4.8's price, so 4.8's measured score is the honest prior.
+            ("claude-opus-5", "claude-opus-4-8"),
+        ];
 
         let want = canon(&id_tokens(id));
         PREDECESSORS.iter().find_map(|(successor, predecessor)| {
@@ -497,6 +505,134 @@ mod tests {
                 intelligence: 39.0,
                 coding: 38.0,
             })
+        );
+    }
+
+    #[test]
+    fn claude_opus_5_inherits_opus_4_8_until_its_own_row_exists() {
+        let mut b = BenchmarkScores::new();
+        b.insert(
+            "Claude Opus 4.8 (Adaptive Reasoning, Max Effort)",
+            55.7,
+            56.7,
+        );
+        b.insert(
+            "Claude Sonnet 4.6 (Adaptive Reasoning, Max Effort)",
+            47.2,
+            63.0,
+        );
+        // Fable's row NAME carries "Opus 4.8 Fallback"; strip_parens must keep it out of the way.
+        b.insert("Claude Fable 5 (Max Effort, Opus 4.8 Fallback)", 59.9, 76.5);
+
+        assert!(
+            b.source_score_for("anthropic::claude-opus-5").is_none(),
+            "inheritance must not hide the missing source row from cache refresh logic"
+        );
+
+        for id in [
+            "anthropic::claude-opus-5",
+            "openrouter::anthropic/claude-opus-5",
+        ] {
+            assert_eq!(
+                b.score_for(id).expect("Opus 5 should inherit a score"),
+                BenchScore {
+                    intelligence: 55.7,
+                    coding: 56.7,
+                },
+                "{id} must inherit Opus 4.8 exactly — not Fable's higher row, not Sonnet's"
+            );
+        }
+
+        // The bare bridge alias has no version token, so it never inherits; it keeps mapping to
+        // the best Claude-Opus row, which is still 4.8 while that's the only one measured.
+        assert!(b.source_score_for("claude-cli::opus").is_some());
+        assert_eq!(b.score_for("claude-cli::opus").unwrap().intelligence, 55.7);
+
+        // Once AA publishes Opus 5, the measured row wins over the inherited prior, and the bare
+        // alias follows it up — `claude-cli::opus` is the CLI's *latest* Opus, not a pinned 4.8.
+        b.insert("Claude Opus 5 (Adaptive Reasoning, Max Effort)", 61.4, 72.0);
+        assert!(b.source_score_for("anthropic::claude-opus-5").is_some());
+        assert_eq!(
+            b.score_for("anthropic::claude-opus-5"),
+            Some(BenchScore {
+                intelligence: 61.4,
+                coding: 72.0,
+            })
+        );
+        assert_eq!(
+            b.score_for("claude-cli::opus").unwrap().intelligence,
+            61.4,
+            "bare opus → best Claude-Opus row, now Opus 5"
+        );
+    }
+
+    /// Verbatim Artificial Analysis rows for Opus 5, as actually returned by
+    /// `/api/v2/data/llms/models` on 2026-07-25 — AA publishes one row PER EFFORT LEVEL, and all
+    /// six collapse to the same canonical key. The effort spread is wide (50.6 → 60.7 intelligence),
+    /// so picking the wrong variant would silently under-rank the flagship by ~10 points and hand
+    /// complex work to a weaker model. `insert` must keep the model's BEST effort as its
+    /// representative capability regardless of the order the API happens to list them in.
+    #[test]
+    fn opus_5_collapses_real_effort_variants_to_its_best_row() {
+        let mut b = BenchmarkScores::new();
+        // Deliberately inserted worst-first so a "last write wins" regression would fail here.
+        b.insert("Claude Opus 5 (Adaptive Reasoning, Low Effort)", 50.6, 66.9);
+        b.insert(
+            "Claude Opus 5 (Adaptive Reasoning, Medium Effort)",
+            56.3,
+            74.3,
+        );
+        b.insert(
+            "Claude Opus 5 (Adaptive Reasoning, High Effort)",
+            58.9,
+            76.5,
+        );
+        b.insert(
+            "Claude Opus 5 (Adaptive Reasoning, Xhigh Effort)",
+            60.1,
+            77.0,
+        );
+        b.insert("Claude Opus 5 (Adaptive Reasoning, Max Effort)", 60.7, 78.0);
+        b.insert(
+            "Claude Opus 4.8 (Adaptive Reasoning, Max Effort)",
+            55.7,
+            74.3,
+        );
+        // Fable's real row name contains the literal text "Opus 4.8 Fallback".
+        b.insert(
+            "Claude Fable 5 (Adaptive Reasoning, Max Effort, Opus 4.8 Fallback)",
+            59.9,
+            76.5,
+        );
+
+        assert_eq!(
+            b.score_for("anthropic::claude-opus-5"),
+            Some(BenchScore {
+                intelligence: 60.7,
+                coding: 78.0,
+            }),
+            "Opus 5 must rank on its Max-Effort row, not a lesser effort variant"
+        );
+        // A published row must win outright — the predecessor entry is only a pre-publication
+        // bridge and must never shadow real measured data.
+        assert_eq!(
+            b.source_score_for("anthropic::claude-opus-5"),
+            b.score_for("anthropic::claude-opus-5"),
+            "a measured row must not be overridden by predecessor inheritance"
+        );
+        // Measured data, not the name heuristic, is what puts Opus 5 above Opus 4.8.
+        let opus_48 = b.score_for("anthropic::claude-opus-4-8").unwrap();
+        assert!(
+            b.score_for("anthropic::claude-opus-5")
+                .unwrap()
+                .intelligence
+                > opus_48.intelligence,
+            "Opus 5 must outrank Opus 4.8 on measured intelligence"
+        );
+        // "Opus 4.8 Fallback" inside Fable's parenthetical must not pull Fable into an Opus match.
+        assert_eq!(
+            opus_48.intelligence, 55.7,
+            "Fable's row must not be read as Opus 4.8"
         );
     }
 }

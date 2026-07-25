@@ -1,4 +1,5 @@
 import type { RemoteSocket, RemoteTransport } from "./RemoteTransport";
+import { encodeRequestBody } from "./requestBody";
 
 export type BridgeRoute =
   | "health"
@@ -75,15 +76,21 @@ export class AnywhereTransport implements RemoteTransport {
     assertHost(url, this.hostId);
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
     const mapping = routeFor(url.pathname, method);
-    const request = new Request("https://forge-anywhere.invalid/", init);
-    const body = init?.body == null ? new Uint8Array() : new Uint8Array(await request.arrayBuffer());
+    // The body is encoded here rather than round-tripped through `new Request(...).arrayBuffer()`:
+    // that route cannot serialise FormData on React Native (see requestBody.ts), which broke
+    // voice upload and every attachment on phones paired through Anywhere.
+    const encoded = await encodeRequestBody(init?.body);
+    const headers = new Headers(init?.headers);
+    // A multipart body only parses against the boundary we just generated, so the encoding the
+    // body actually has wins over whatever content-type the caller guessed.
+    if (encoded.contentType) headers.set("content-type", encoded.contentType);
     const response = await this.relay.request({
       hostId: this.hostId,
       route: mapping.route,
       parameters: [...mapping.parameters, url.search],
       method,
-      headers: Array.from(request.headers.entries()),
-      body,
+      headers: Array.from(headers.entries()),
+      body: encoded.bytes,
     });
     return new Response(response.body as unknown as BodyInit, {
       status: response.status,

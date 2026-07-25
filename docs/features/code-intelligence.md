@@ -601,6 +601,78 @@ than by file path — useful for very large repos where file grouping scatters r
 | Concurrent writers (watcher + agent edit) | Single SQLite connection behind the `Store` mutex serialises writes (as today); the debounced watcher coalesces bursts. |
 | Cost double-count | Lattice does **no** model calls in the structural path; embedding calls (if enabled) are recorded as usage against the session like any provider call — once. |
 
+### 5.9 Index-root policy, size ceiling, and cleanup
+
+The walker originally indexed whatever root it was handed. `forge run` / `forge chat` launched from
+`$HOME` therefore background-indexed the entire home directory. On one real install that produced a
+single `repo_root = /home/<user>` holding **80,117 files / 1,445,013 symbols / 8,448,887 references
+— about 2.2 GB of the 2.86 GB database**, of which 73,086 files were the Go module cache
+(`~/go/pkg/mod`, 58,408) and the Android SDK (`~/Android/Sdk`, 14,678).
+
+The mechanism was an asymmetry between two entry points that both act on the launch directory:
+
+| Entry point | Root | Guard before |
+|-------------|------|--------------|
+| Watcher (`crates/forge-cli/src/cli/commands/run.rs`, `resolve_watch_root`) | nearest project root above `cwd` | refused `$HOME` — printed "watch & reindex skipped" |
+| Indexer (`run.rs`, `Lattice::new(store, &workspace_root)` + a background `update()`) | `std::env::current_dir()` verbatim | **none** |
+
+So the user was told watching was skipped while the full index ran anyway. A `.git` in `$HOME` (a
+dotfiles repo) means "require a VCS marker" would *not* have caught it either.
+
+**Policy.** All of it lives in `crates/forge-index/src/root.rs` and is enforced inside
+`Lattice::update` / `Lattice::reindex_path` rather than at a call site, because three independent
+callers index (`forge lattice update`, the session's background auto-index, and
+`Session::transition_workspace`) and a guard on any one of them is bypassed by the other two.
+
+1. **Identity — unconditional, no override.** A root that is the home directory, an ancestor of it
+   (`/home`, `/Users`, `/`), or a filesystem root is refused. This is the same predicate
+   `resolve_watch_root` now uses, so the watcher and the indexer refuse exactly the same set.
+2. **Magnitude — overridable with `--force`.** Counted in *indexable* source files, after the
+   ignore rules, and checked **before any row is written**: the walk collects candidates and stops
+   as soon as it passes the ceiling, so a pathological root costs one truncated stat-walk instead
+   of a multi-GB index.
+   - `MAX_FILES_MARKED_ROOT = 25_000` for a root carrying a project marker (`.git`, `.hg`, `.jj`,
+     `.forge`, `Cargo.toml`, `go.mod`, `package.json`, `pyproject.toml`, …). Calibration: Forge
+     ~1,000 tracked files, CPython ~3,000, rustc ~15,000, Linux ~55,000. At the ~27 KB of SQLite
+     per indexed file this database averages, 25,000 files is already ~650 MB.
+   - `MAX_FILES_UNMARKED_ROOT = 2_000` with no marker. A marker is the only evidence the user meant
+     this directory as a codebase; without one, allow an index only while it is obviously one
+     ad-hoc folder of source — two orders of magnitude below the 80,117-file failure mode.
+   - `--force` is a one-shot full walk. It does **not** persist, but `reindex_path` is not
+     magnitude-gated, so once a large root has been force-indexed the watcher and the agent's own
+     edits keep it fresh; re-run `--force` for another full walk.
+3. **Toolchain / SDK trees — always skipped.** Matched on *trailing path components*, never a bare
+   directory name, so a project's own `pkg/`, `pkg/mod/` or `sdk/` source directories still index:
+   `go/pkg/mod`, `go/pkg/sumdb`, `Android/Sdk`, `Android/sdk`, `Library/Android/sdk`,
+   `site-packages`, `dist-packages`. (`.cargo`, `.gradle`, `.venv` etc. were already covered by the
+   pre-existing dotdir rule; `node_modules`, `target`, `vendor`, `dist`, `build`, `__pycache__` by
+   the name list.) Only the *default* Go module-cache location is matched — a relocated
+   `GOMODCACHE`/`GOPATH` is not.
+
+**Cleanup.** The store is global across projects, so a mistaken root survives until it is removed
+explicitly: `update`'s built-in orphan purge only drops roots that are *dead* (gone from disk) or
+*nested under* the root being walked, and `$HOME` is neither.
+
+```
+forge lattice roots                      # every indexed root, flagging ones missing on disk
+forge lattice prune <root>               # delete that root's files + symbols + edges + refs
+forge lattice prune --stale              # every root whose directory no longer exists
+forge lattice prune <root> --vacuum      # …and rebuild the file to actually return the space
+```
+
+`prune` deletes `lattice_file` rows and relies on `ON DELETE CASCADE` to take the nodes, and the
+nodes' edges and refs, with them. SQLite enforces foreign keys **per connection** and defaults them
+*off*; `forge-store`'s connection manager sets `PRAGMA foreign_keys = ON` on every connection it
+hands out, and `prune_root_removes_nodes_refs_and_edges_and_spares_other_roots` asserts the child
+rows actually disappear rather than trusting the schema.
+
+`DELETE` alone leaves the pages free-but-allocated, so the file does not shrink — hence the separate
+`--vacuum`. `VACUUM` rebuilds the whole database: it needs temporary free space of roughly the
+database's own size, takes minutes on a multi-GB file, and requires exclusive access. **Stop any
+running `forge serve` / daemon first**; it is deliberately opt-in rather than automatic for exactly
+that reason.
+
+
 ## 6. Definition of done
 
 - [ ] `forge-index` crate exists: `parser` (tree-sitter Rust compiled in), `extract`, `graph`,

@@ -15,6 +15,23 @@ function socket(): RemoteSocket {
   };
 }
 
+/**
+ * React Native's FormData is a real `FormData` whose entries are not `Blob`s — parts are the
+ * plain `{bytes,name,type}` adapters the recorder and file picker append. Subclassing keeps the
+ * `instanceof` identity the production code branches on while reproducing those entry values.
+ */
+class NativeFormData extends FormData {
+  private readonly parts: [string, unknown][] = [];
+
+  appendPart(name: string, value: unknown): void {
+    this.parts.push([name, value]);
+  }
+
+  entries(): FormDataIterator<[string, FormDataEntryValue]> {
+    return this.parts[Symbol.iterator]() as unknown as FormDataIterator<[string, FormDataEntryValue]>;
+  }
+}
+
 describe("AnywhereTransport", () => {
   it("maps an existing daemon endpoint to a typed bridge route", async () => {
     const captured: AnywhereBridgeRequest[] = [];
@@ -29,6 +46,48 @@ describe("AnywhereTransport", () => {
     const response = await transport.fetch("fany://host-1/api/sessions");
     expect(response.status).toBe(200);
     expect(captured[0]?.route).toBe("list_sessions");
+  });
+
+  it("relays a FormData body as real multipart bytes with a matching boundary", async () => {
+    const captured: AnywhereBridgeRequest[] = [];
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        captured.push(request);
+        return { status: 200, body: new TextEncoder().encode('{"text":"hello"}') };
+      },
+      openSessionSocket: socket,
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+    // Faithful to native: a real FormData whose entries are the `{bytes,name,type}` adapters
+    // voice.ts/attach.ts append. React Native's own `Request` cannot serialise that at all.
+    const form = new NativeFormData();
+    form.appendPart("file", {
+      bytes: async () => new TextEncoder().encode("RIFFdata"),
+      name: "voice.wav",
+      type: "audio/wav",
+    });
+
+    await transport.fetch("fany://host-1/api/voice/transcribe?language=en", {
+      method: "POST",
+      body: form,
+      headers: { Accept: "application/json" },
+    });
+
+    const request = captured[0];
+    expect(request?.route).toBe("voice_transcribe");
+    const contentType = request?.headers.find(([name]) => name === "content-type")?.[1];
+    expect(contentType).toMatch(/^multipart\/form-data; boundary=/);
+    expect(request?.headers.find(([name]) => name === "accept")?.[1]).toBe("application/json");
+    // The relayed bytes are the multipart the declared boundary describes — the daemon reads the
+    // audio format hint off that filename (requestBody.test.ts parses one back with a real parser).
+    const boundary = contentType?.replace("multipart/form-data; boundary=", "");
+    expect(new TextDecoder().decode(request.body)).toBe(
+      `--${boundary}\r\n`
+        + 'Content-Disposition: form-data; name="file"; filename="voice.wav"\r\n'
+        + "Content-Type: audio/wav\r\n\r\n"
+        + "RIFFdata\r\n"
+        + `--${boundary}--\r\n`,
+    );
   });
 
   it("refuses arbitrary URLs instead of acting as a proxy", async () => {

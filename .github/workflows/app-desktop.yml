@@ -366,10 +366,45 @@ jobs:
           manifest = {'version': version, 'notes': 'Forge desktop update', 'pub_date': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'platforms': platforms}
           pathlib.Path('latest.json').write_text(json.dumps(manifest, indent=2) + '\n')
           PY
+      # `latest.json` above only proves the five SIGNED UPDATER bundles exist. The one-line
+      # installers ask for different filenames — install-desktop.sh downloads `.dmg` on macOS and
+      # `.AppImage` on Linux, install-desktop.ps1 downloads `.nsis.exe` — and abort when their
+      # entry is absent from this manifest (#837). Enumerate every installer-required name for
+      # every platform this workflow builds and fail closed, instead of hashing whatever happened
+      # to be downloaded and calling that a manifest.
       - name: Generate desktop checksums
+        shell: bash
         run: |
-          (cd assets && sha256sum *) > desktop-checksums.txt
+          set -euo pipefail
+          required=(
+            Forge-desktop-linux-x86_64.AppImage
+            Forge-desktop-linux-aarch64.AppImage
+            Forge-desktop-macos-aarch64.dmg
+            Forge-desktop-macos-x86_64.dmg
+            Forge-desktop-windows-x86_64.nsis.exe
+            Forge-desktop-macos-aarch64.app.tar.gz
+            Forge-desktop-macos-x86_64.app.tar.gz
+          )
+          missing=()
+          for asset in "${required[@]}"; do
+            [ -s "assets/$asset" ] || missing+=("$asset")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'desktop publication aborted; installer assets missing:\n' >&2
+            printf -- '- %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+          # Hash everything that was built (this also covers the .deb and .sig companions), then
+          # prove each installer-required name really made it into the manifest.
+          (cd assets && sha256sum -- *) > desktop-checksums.txt
           sha256sum latest.json >> desktop-checksums.txt
+          for asset in "${required[@]}"; do
+            grep -Fqx -- "$(sha256sum "assets/$asset" | cut -d' ' -f1)  $asset" desktop-checksums.txt || {
+              echo "desktop-checksums.txt has no entry for $asset" >&2
+              exit 1
+            }
+          done
+          cat desktop-checksums.txt
       - name: Attest desktop release provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
         with:
@@ -377,6 +412,11 @@ jobs:
             assets/*
             latest.json
             desktop-checksums.txt
+      # release.yml staged the CLI archives into a DRAFT. This single step adds the complete
+      # desktop set to that same release and flips it to published, so the first moment the
+      # release is publicly resolvable at all, every asset the installers and the updater need is
+      # already on it — no CLI-only window (#837). `draft: false` is the flip; the action resolves
+      # the existing draft by tag before updating it, so this never forks a second release.
       - name: Publish complete desktop release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
         with:
@@ -386,6 +426,7 @@ jobs:
             latest.json
             desktop-checksums.txt
           fail_on_unmatched_files: true
+          draft: false
           # Publication is deliberately non-promoting. The next step verifies the public CDN
           # bytes before a v* release is allowed to own GitHub's Latest pointer.
           make_latest: false
@@ -396,7 +437,9 @@ jobs:
         run: |
           set -euo pipefail
           base="https://github.com/${REPO}/releases/download/${VERSION}"
-          for attempt in 1 2 3 4 5; do
+          # The step above just flipped the release out of draft, so give the asset CDN a little
+          # longer than a plain upload would need before declaring the manifest unreadable.
+          for attempt in 1 2 3 4 5 6 7 8; do
             if curl --fail --silent --show-error --location \
               "$base/desktop-checksums.txt" -o published-desktop-checksums.txt; then
               break
@@ -417,6 +460,31 @@ jobs:
           done < published-desktop-checksums.txt
           (cd published-assets && sha256sum --check ../published-desktop-checksums.txt)
           python -c 'import json; p=json.load(open("published-assets/latest.json")); assert len(p["platforms"]) == 5'
+
+          # On a unified `v*` release the CLI archives rode through the draft flip on this same
+          # release, so prove install.sh's manifest and every archive it names are publicly
+          # resolvable too: "published" must mean the whole release is installable, not just its
+          # desktop half. A desktop-only `app-v*` tag has no CLI half to check.
+          case "$VERSION" in
+            v*)
+              curl --fail --silent --show-error --location \
+                "$base/checksums.txt" -o published-checksums.txt || {
+                echo "CLI checksum manifest is not publicly readable: $base/checksums.txt" >&2
+                exit 1
+              }
+              [ -s published-checksums.txt ] || {
+                echo "CLI checksum manifest is empty: $base/checksums.txt" >&2
+                exit 1
+              }
+              while read -r _digest filename; do
+                curl --fail --silent --show-error --location --range 0-0 \
+                  "$base/$filename" -o /dev/null || {
+                  echo "CLI release asset is not publicly readable: $base/$filename" >&2
+                  exit 1
+                }
+              done < published-checksums.txt
+              ;;
+          esac
       - name: Promote verified unified release to Latest
         if: startsWith(inputs.release_tag || github.ref_name, 'v')
         env:

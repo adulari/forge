@@ -2159,7 +2159,7 @@ impl Default for Config {
             TaskTier::Complex.as_str().into(),
             many(&[
                 "claude-cli::",
-                "anthropic::claude-opus-4-8",
+                "anthropic::claude-opus-5",
                 "groq::llama-3.3-70b-versatile",
             ]),
         );

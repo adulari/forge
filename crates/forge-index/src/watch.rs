@@ -209,6 +209,11 @@ fn should_reindex(path: &Path) -> bool {
     if skipped {
         return false;
     }
+    // Installed toolchain/SDK trees (Go module cache, Android SDK, site-packages) — never source
+    // the user edits, and the single largest contributor to a runaway index (root.rs).
+    if path.parent().is_some_and(crate::is_toolchain_dir) {
+        return false;
+    }
     path.to_str().and_then(lang_for_path).is_some()
 }
 
@@ -306,8 +311,11 @@ pub fn resolve_watch_root(cwd: &Path, home: Option<&Path>) -> Option<PathBuf> {
         }
     }
     let root = found.unwrap_or(cwd);
-    if Some(root) == home {
-        return None; // refuse to recursively watch the entire home directory
+    // Shares [`crate::is_home_or_system_root`] with the indexer's root policy so the two entry
+    // points refuse exactly the same set of roots — the asymmetry between them (watcher refused
+    // $HOME, indexer did not) is what let an entire home directory into the index.
+    if crate::is_home_or_system_root(root, home) {
+        return None;
     }
     Some(root.to_path_buf())
 }

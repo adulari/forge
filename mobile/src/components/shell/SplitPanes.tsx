@@ -14,7 +14,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router, usePathname } from "expo-router";
 import { ArrowLeftRight, Check, SquareSplitHorizontal, X } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, View, type GestureResponderEvent, type LayoutChangeEvent } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, View, type GestureResponderEvent, type LayoutChangeEvent } from "react-native";
 
 import SessionChat from "../../app/session/[id]/index";
 import { useSessions } from "../../lib/queries";
@@ -345,15 +345,21 @@ export function SplitPanes({ primaryId, secondaryId, primary, onSwap, onClosePan
         <PrimaryPaneHeader sessionId={primaryId} onSwap={onSwap} onClose={() => onClosePane(0)} />
         <View style={styles.paneBody}>{primary}</View>
       </View>
+      {/* Machined: the painted seam stays a true hairline (styles.splitterLine) — only the
+          responder's HIT area widens, via a wider transparent parent, so the design's 1px
+          divider is never visually thickened. Web/desktop also gets a col-resize cursor so the
+          seam reads as draggable before the user ever tries. */}
       <View
         onStartShouldSetResponder={() => true}
         onMoveShouldSetResponder={() => true}
         onResponderGrant={onGrantSplit}
         onResponderMove={onMoveSplit}
-        style={[styles.splitter, { backgroundColor: tokens.border }]}
+        style={[styles.splitterHit, Platform.OS === "web" && (webColResizeCursor as object)]}
         accessibilityRole="adjustable"
         accessibilityLabel="Resize split panes"
-      />
+      >
+        <View pointerEvents="none" style={[styles.splitterLine, { backgroundColor: tokens.border }]} />
+      </View>
       <View style={[styles.pane, { flex: 1 - fraction }]}>
         <SecondaryPane sessionId={secondaryId} onSwap={onSwap} onClose={() => onClosePane(1)} />
       </View>
@@ -361,11 +367,20 @@ export function SplitPanes({ primaryId, secondaryId, primary, onSwap, onClosePan
   );
 }
 
+// Web-only: same untyped-CSS passthrough already used for `overscrollBehavior` in
+// Screen.tsx/BoundedList.tsx — RN has no typed `cursor` style.
+const webColResizeCursor = { cursor: "col-resize" };
+
 const styles = StyleSheet.create({
   row: { flex: 1, flexDirection: "row" },
   pane: { minWidth: 0, flexDirection: "column" },
   paneBody: { flex: 1, minHeight: 0 },
-  splitter: { width: StyleSheet.hairlineWidth, marginHorizontal: 2 },
+  // 9px transparent hit target (vs. the 1px painted line below) — a bare hairline-wide
+  // responder view is nearly ungrabbable with a mouse. `alignItems: "center"` centers the
+  // hairline child horizontally; the child's own `flex: 1` fills the full height (this View's
+  // own height comes from the row's default cross-axis stretch, same as before).
+  splitterHit: { width: 9, alignItems: "center" },
+  splitterLine: { flex: 1, width: StyleSheet.hairlineWidth },
   header: {
     height: HEADER_HEIGHT,
     flexShrink: 0,

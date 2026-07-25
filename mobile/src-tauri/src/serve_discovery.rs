@@ -70,7 +70,12 @@ fn read_and_validate(dir: &std::path::Path) -> Option<ServeState> {
     Some(state)
 }
 
-#[tauri::command]
+/// `async` is load-bearing, not decoration: `#[tauri::command]` defaults to
+/// `ExecutionContext::Blocking`, which runs the body inline on the IPC/main thread, and this one
+/// blocks for up to 300ms in `probe_port`. The connect screen polls it, so on the default
+/// context the window stops repainting a few times a second while the user waits for a daemon.
+/// The webview side is unaffected — the invoke promise resolves with the same value.
+#[tauri::command(async)]
 pub fn detect_forge_serve() -> Option<ServeState> {
     read_and_validate(&config_dir()?)
 }
@@ -259,7 +264,11 @@ pub fn forge_anywhere_host_enrolled() -> bool {
 
 /// Install a distinct, encrypted-pairing-derived CLI identity and activate it as a host.
 /// Existing CLI enrollment is never overwritten.
-#[tauri::command]
+///
+/// `async` for the same reason as [`detect_forge_serve`]: this writes the state file and then
+/// waits out `activate_forge_anywhere_host`'s subprocess, and it is on the happy path of
+/// first-host pairing.
+#[tauri::command(async)]
 pub fn install_forge_anywhere_host(state: AnywhereHostState, name: String) -> Result<(), String> {
     state.validate()?;
     let host_name = name.trim();
@@ -296,7 +305,14 @@ pub fn install_forge_anywhere_host(state: AnywhereHostState, name: String) -> Re
     activate_forge_anywhere_host(host_name.to_string())
 }
 
-#[tauri::command]
+/// `async` for the same reason as [`detect_forge_serve`], and most acutely here: `.output()`
+/// waits synchronously on `forge anywhere enable`, which performs relay enrollment over the
+/// network. On the default blocking context the whole window freezes — no repaint, no input,
+/// "not responding" to the OS — for however long that takes, up to a full network timeout.
+///
+/// The function itself stays sync so `install_forge_anywhere_host` can keep calling it directly;
+/// `#[tauri::command(async)]` only changes where Tauri runs it when invoked over IPC.
+#[tauri::command(async)]
 pub fn activate_forge_anywhere_host(name: String) -> Result<(), String> {
     let host_name = name.trim();
     if host_name.is_empty()

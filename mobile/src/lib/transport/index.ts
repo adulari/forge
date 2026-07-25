@@ -87,6 +87,7 @@ class TauriAwareWebSocket {
 
   readyState: number = TauriAwareWebSocket.CONNECTING;
 
+  private currentBinaryType: BinaryType = "arraybuffer";
   private nativeWs: WebSocket | null = null;
   private pluginWs: import("@tauri-apps/plugin-websocket").default | null = null;
   private disposed = false;
@@ -102,8 +103,26 @@ class TauriAwareWebSocket {
     this.attachNative(url, /* allowFallback */ true);
   }
 
+  /**
+   * `/ws/terminal` streams raw PTY output as binary frames (serve_terminal.rs), so `api.ts`
+   * asks for `arraybuffer` frames right after constructing the socket. Without this accessor
+   * that assignment landed on an inert own property of the shim while the real socket kept the
+   * DOM default `"blob"` — every chunk then decoded to `""` and the desktop terminal dock was
+   * permanently blank. The default is `"arraybuffer"` because it is the only thing the plugin
+   * fallback below can honestly produce, and `/ws`'s text frames are unaffected either way.
+   */
+  get binaryType(): BinaryType {
+    return this.currentBinaryType;
+  }
+
+  set binaryType(value: BinaryType) {
+    this.currentBinaryType = value;
+    if (this.nativeWs) this.nativeWs.binaryType = value;
+  }
+
   private attachNative(url: string, allowFallback: boolean): void {
     const native = new WebSocket(url);
+    native.binaryType = this.currentBinaryType;
     this.nativeWs = native;
     let opened = false;
 
@@ -161,13 +180,21 @@ class TauriAwareWebSocket {
       sock.addListener((msg: TauriWsMessage) => {
         if (msg.type === "Text") {
           this.onmessage?.({ data: msg.data } as MessageEvent);
+        } else if (msg.type === "Binary") {
+          // `/ws` is text-JSON (ARCHITECTURE §3) but `/ws/terminal` is not — serve_terminal.rs
+          // sends PTY output as binary frames. The plugin hands them over as a plain number[],
+          // so rebuild the container `binaryType` promises instead of dropping the frame.
+          const bytes = Uint8Array.from(msg.data);
+          this.onmessage?.({
+            data: this.currentBinaryType === "blob" ? new Blob([bytes]) : bytes.buffer,
+          } as MessageEvent);
         } else if (msg.type === "Close") {
           this.emitClose({
             code: msg.data?.code ?? 1000,
             reason: msg.data?.reason ?? "",
           } as CloseEvent);
         }
-        // Binary/Ping/Pong: the Forge WS protocol (ARCHITECTURE §3) is text-JSON only.
+        // Ping/Pong are answered inside the plugin and never surface as data frames.
       });
     } catch (err) {
       this.terminateWithError(err, "tauri websocket connect failed");
@@ -231,6 +258,27 @@ export function registerAnywhereTransport(transport: AnywhereTransport): () => v
       anywhereTransports.delete(transport.hostId);
     }
   };
+}
+
+/**
+ * Whether `baseUrl` reaches the daemon's whole HTTP/WebSocket surface.
+ *
+ * Forge Anywhere is a typed, allowlisted bridge, not a proxy: `AnywhereTransport` carries the
+ * `/ws` session stream and the enumerated `/api/*` routes and refuses everything else — by
+ * throwing, synchronously, from `fetch`/`openWebSocket`. Anything built on another endpoint (the
+ * terminal PTY on `/ws/terminal`, the git dock's `/api/git/*`) has to ask first and render its
+ * own unsupported state, rather than discovering the refusal as an exception mid-render.
+ */
+export function supportsDirectDaemonEndpoints(baseUrl: string): boolean {
+  try {
+    const protocol = new URL(baseUrl).protocol;
+    return protocol !== "fany:" && protocol !== "fany-ws:";
+  } catch {
+    // Callers ask this while deciding what to render, so a corrupt stored base URL must not throw
+    // out of their render. It is at least not an Anywhere target; letting the connection attempt
+    // fail surfaces the real problem where the user can see it.
+    return true;
+  }
 }
 
 function transportFor(urlValue: string): RemoteTransport {

@@ -19,12 +19,17 @@ mod embed;
 mod extract;
 mod map;
 mod retrieve;
+mod root;
 mod watch;
 
 pub use embed::{parse_ollama_embeddings, Embedder, OllamaEmbedder};
 pub use extract::{extract, lang_for_path, supported_languages, Def, Parsed, Ref};
 pub use map::build_map;
 pub use retrieve::{BodyOpts, InjectedContext, RetrievedSnippet};
+pub use root::{
+    has_project_marker, indexed_roots, is_home_or_system_root, is_toolchain_dir, prune_root,
+    stale_roots, RootRefusal, MAX_FILES_MARKED_ROOT, MAX_FILES_UNMARKED_ROOT,
+};
 pub use watch::{resolve_watch_root, spawn_watcher, LatticeWatcher};
 
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +38,10 @@ pub enum LatticeError {
     Store(#[from] StoreError),
     #[error("io: {0}")]
     Io(String),
+    /// The root failed the index-root policy (`root.rs`) — it is the home/system directory, or it
+    /// holds more source files than may be indexed unattended.
+    #[error(transparent)]
+    RefusedRoot(#[from] RootRefusal),
 }
 
 /// The code-intelligence graph for one repository root, backed by the shared [`Store`].
@@ -40,6 +49,12 @@ pub struct Lattice {
     store: Arc<Store>,
     /// Canonical root path, used to namespace symbols and compute repo-relative paths.
     repo_root: String,
+    /// Set when the root is one the Lattice must never index at all (home/system directory). It is
+    /// decided once at construction and re-checked by every write path, so the CLI, the session's
+    /// background auto-index, and the watcher cannot bypass one another's guard.
+    refusal: Option<RootRefusal>,
+    /// `--force`: skip the file-count ceiling for this Lattice. Never relaxes `refusal`.
+    allow_oversize: bool,
 }
 
 /// What an `update` did.
@@ -114,18 +129,46 @@ pub struct IndexStatus {
 
 impl Lattice {
     /// Open the Lattice for `repo_root` (canonicalized so identity is stable regardless of how
-    /// the path was spelled).
+    /// the path was spelled). The home directory is read from the environment; see
+    /// [`Lattice::new_with_home`] for the injectable form.
     pub fn new(store: Arc<Store>, repo_root: &Path) -> Self {
-        let repo_root = std::fs::canonicalize(repo_root)
-            .unwrap_or_else(|_| repo_root.to_path_buf())
-            .to_string_lossy()
-            .into_owned();
-        Self { store, repo_root }
+        let home = forge_config::home_dir();
+        Self::new_with_home(store, repo_root, home.as_deref())
+    }
+
+    /// [`Lattice::new`] with the home directory supplied explicitly, so the root policy is testable
+    /// without mutating process-wide environment state.
+    pub fn new_with_home(store: Arc<Store>, repo_root: &Path, home: Option<&Path>) -> Self {
+        let canonical =
+            std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+        let refusal = root::classify_root(&canonical, home);
+        Self {
+            store,
+            repo_root: canonical.to_string_lossy().into_owned(),
+            refusal,
+            allow_oversize: false,
+        }
+    }
+
+    /// Opt out of the file-count ceiling (`forge lattice update --force`) for a genuinely huge but
+    /// wanted repository. Does **not** unlock a home/system root: that refusal has no override,
+    /// matching [`resolve_watch_root`], because such a root is never a project.
+    pub fn allow_oversize(mut self, allow: bool) -> Self {
+        self.allow_oversize = allow;
+        self
+    }
+
+    /// The root-identity refusal for this Lattice, if any — `None` when the root is indexable.
+    pub fn refusal(&self) -> Option<&RootRefusal> {
+        self.refusal.as_ref()
     }
 
     /// Incrementally (re)index every supported source file under the root. Files whose content
     /// hash is unchanged since the last run are skipped without re-parsing.
     pub fn update(&self) -> Result<UpdateStats, LatticeError> {
+        if let Some(refusal) = &self.refusal {
+            return Err(LatticeError::RefusedRoot(refusal.clone()));
+        }
         let mut stats = UpdateStats::default();
         // Every rel-path we index this run; anything in the store but NOT here is stale (removed or
         // now-skipped, e.g. a vendored/nested-git tree) and gets pruned at the end.
@@ -153,6 +196,12 @@ impl Lattice {
                     if is_skippable_dir(&name) {
                         return false;
                     }
+                    // Installed toolchains/SDKs (Go module cache, Android SDK, site-packages).
+                    // Matched on the path tail, not the bare name, so a project's own `pkg/` or
+                    // `sdk/` source directory is untouched (root.rs).
+                    if root::is_toolchain_dir(e.path()) {
+                        return false;
+                    }
                     if e.path().join(".git").exists() {
                         return false; // nested repo (submodule / vendored clone / scratch checkout)
                     }
@@ -160,6 +209,13 @@ impl Lattice {
                 true
             })
             .build();
+        // Collect the candidate files BEFORE indexing any of them, so the size ceiling can refuse
+        // the root without having written a single row. Bounded: once the count passes the limit
+        // the walk stops, so a pathological root (a home directory, a mounted toolchain tree) costs
+        // one truncated stat-walk rather than a multi-GB index. This replaces no work — `update`
+        // already had to walk and hash every file — it only moves the walk ahead of the writes.
+        let limit = root::file_limit_for(&root);
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
         for entry in walker.flatten() {
             if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
@@ -169,14 +225,26 @@ impl Lattice {
                 .file_name()
                 .map(|n| n.to_string_lossy())
                 .unwrap_or_default();
-            if lang_for_path(&name).is_some() {
-                seen.insert(self.rel_path(path));
-                // A single file's store error (e.g. a transient SQLite lock) shouldn't abort the
-                // whole walk — log it and keep indexing the rest, matching index_file's own
-                // best-effort handling of unreadable files.
-                if let Err(e) = self.index_file(path, &mut stats) {
-                    tracing::warn!(file = %path.display(), error = %e, "lattice: failed to index file, skipping");
-                }
+            if lang_for_path(&name).is_none() {
+                continue;
+            }
+            candidates.push(path.to_path_buf());
+            if !self.allow_oversize && candidates.len() > limit {
+                return Err(LatticeError::RefusedRoot(RootRefusal::too_many(
+                    &self.repo_root,
+                    candidates.len(),
+                    limit,
+                    root::has_project_marker(&root),
+                )));
+            }
+        }
+        for path in &candidates {
+            seen.insert(self.rel_path(path));
+            // A single file's store error (e.g. a transient SQLite lock) shouldn't abort the
+            // whole walk — log it and keep indexing the rest, matching index_file's own
+            // best-effort handling of unreadable files.
+            if let Err(e) = self.index_file(path, &mut stats) {
+                tracing::warn!(file = %path.display(), error = %e, "lattice: failed to index file, skipping");
             }
         }
         // Purge files that vanished from the walk (deleted, or now under a skipped/nested-git dir).
@@ -320,7 +388,15 @@ impl Lattice {
 
     /// (Re)index a single file (e.g. after the agent edits it). No-op for unsupported files.
     pub fn reindex_path(&self, path: &Path) -> Result<(), LatticeError> {
+        // Same guard as `update`: a session rooted at $HOME must not dribble symbols in one file at
+        // a time through the watcher or through the agent's own edits.
+        if let Some(refusal) = &self.refusal {
+            return Err(LatticeError::RefusedRoot(refusal.clone()));
+        }
         if path.to_str().and_then(lang_for_path).is_none() {
+            return Ok(());
+        }
+        if root::is_toolchain_dir(path.parent().unwrap_or(path)) {
             return Ok(());
         }
         let mut stats = UpdateStats::default();
@@ -741,6 +817,8 @@ impl Lattice {
         let lat = Lattice {
             store: Arc::clone(&self.store),
             repo_root: self.repo_root.clone(),
+            refusal: self.refusal.clone(),
+            allow_oversize: self.allow_oversize,
         };
         let prompt = prompt.to_string();
         tokio::task::spawn_blocking(move || lat.retrieve(&prompt, token_budget, bodies))
@@ -1536,5 +1614,300 @@ pub fn caller_c() { hub(); }
             ctx.snippets[0].rel_path, high_path,
             "higher-pagerank parse_target must be ordered first"
         );
+    }
+
+    // ---- index-root policy (root.rs) -------------------------------------------------------
+
+    /// A throwaway `$HOME` with a project inside it, so the root policy can be exercised without
+    /// touching the real home directory or mutating process environment.
+    struct FakeHome {
+        home: std::path::PathBuf,
+    }
+    impl FakeHome {
+        fn new() -> FakeHome {
+            let n = N.fetch_add(1, Ordering::SeqCst);
+            let home = std::env::temp_dir()
+                .join(format!("forge-fakehome-{}-{n}", std::process::id()))
+                .join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            FakeHome { home }
+        }
+        fn write(&self, rel: &str, content: &str) {
+            let p = self.home.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        }
+    }
+    impl Drop for FakeHome {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.home.parent().unwrap());
+        }
+    }
+
+    fn store() -> Arc<Store> {
+        Arc::new(Store::open_in_memory().unwrap())
+    }
+
+    /// The bug: `forge run` launched in `$HOME` background-indexed the entire home directory. The
+    /// watcher refused that root but the indexer did not, so 80k files went in anyway. A `.git` in
+    /// `$HOME` (a dotfiles repo — the real user has one) must not buy an exemption.
+    #[test]
+    fn update_refuses_the_home_directory_even_when_it_holds_a_git_marker() {
+        let h = FakeHome::new();
+        std::fs::create_dir_all(h.home.join(".git")).unwrap();
+        h.write("scratch.rs", "pub fn home_symbol() {}\n");
+        let store = store();
+        let lat = Lattice::new_with_home(Arc::clone(&store), &h.home, Some(&h.home));
+
+        let err = lat.update().expect_err("indexing $HOME must be refused");
+        assert!(
+            matches!(
+                err,
+                LatticeError::RefusedRoot(RootRefusal::HomeOrSystemRoot { .. })
+            ),
+            "expected a home-root refusal, got {err:?}"
+        );
+        assert_eq!(
+            store.lattice_counts().unwrap(),
+            (0, 0, 0),
+            "a refused root must not write a single row"
+        );
+    }
+
+    #[test]
+    fn update_refuses_a_directory_above_home() {
+        let h = FakeHome::new();
+        let above = h.home.parent().unwrap().to_path_buf();
+        std::fs::write(above.join("x.rs"), "pub fn above_home() {}\n").unwrap();
+        let lat = Lattice::new_with_home(store(), &above, Some(&h.home));
+        assert!(matches!(
+            lat.update(),
+            Err(LatticeError::RefusedRoot(
+                RootRefusal::HomeOrSystemRoot { .. }
+            ))
+        ));
+    }
+
+    /// A project inside the fake home is ordinary and must still index — the guard is about the
+    /// home directory itself, not about living under it.
+    #[test]
+    fn update_allows_a_project_inside_home() {
+        let h = FakeHome::new();
+        std::fs::create_dir_all(h.home.join("work/app/.git")).unwrap();
+        h.write("work/app/src/lib.rs", "pub fn app_symbol() {}\n");
+        let root = h.home.join("work/app");
+        let lat = Lattice::new_with_home(store(), &root, Some(&h.home));
+        assert_eq!(lat.update().unwrap().files_indexed, 1);
+        assert_eq!(lat.query("app_symbol", 5).unwrap().len(), 1);
+    }
+
+    /// The watcher's in-turn reindex is a second write path into the same index; it must honour the
+    /// same refusal, or a session rooted at `$HOME` refills the index one saved file at a time.
+    #[test]
+    fn reindex_path_refuses_a_home_root() {
+        let h = FakeHome::new();
+        h.write("scratch.rs", "pub fn home_symbol() {}\n");
+        let store = store();
+        let lat = Lattice::new_with_home(Arc::clone(&store), &h.home, Some(&h.home));
+        assert!(matches!(
+            lat.reindex_path(&h.home.join("scratch.rs")),
+            Err(LatticeError::RefusedRoot(
+                RootRefusal::HomeOrSystemRoot { .. }
+            ))
+        ));
+        assert_eq!(store.lattice_counts().unwrap(), (0, 0, 0));
+    }
+
+    /// Magnitude guard: even a legitimate, non-home root is refused once it is large enough that
+    /// indexing it unattended would write a multi-hundred-MB index. `--force` (`allow_oversize`)
+    /// is the documented escape hatch, and the refusal must happen before any row is written.
+    #[test]
+    fn update_refuses_an_oversized_root_until_forced_and_writes_nothing_when_refused() {
+        let t = Tmp::new();
+        let over = MAX_FILES_UNMARKED_ROOT + 1;
+        for i in 0..over {
+            std::fs::write(
+                t.root.join(format!("f{i}.rs")),
+                format!("pub fn sym_{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let store = store();
+
+        let lat = Lattice::new_with_home(Arc::clone(&store), &t.root, None);
+        let err = lat.update().expect_err("oversized root must be refused");
+        match err {
+            LatticeError::RefusedRoot(RootRefusal::TooManyFiles { limit, found, .. }) => {
+                assert_eq!(
+                    limit, MAX_FILES_UNMARKED_ROOT,
+                    "unmarked roots use the small cap"
+                );
+                assert!(found > limit, "found {found} must exceed {limit}");
+            }
+            other => panic!("expected a size refusal, got {other:?}"),
+        }
+        assert_eq!(
+            store.lattice_counts().unwrap(),
+            (0, 0, 0),
+            "the ceiling must be checked before any file is written"
+        );
+
+        let forced = Lattice::new_with_home(Arc::clone(&store), &t.root, None).allow_oversize(true);
+        assert_eq!(
+            forced.update().unwrap().files_indexed,
+            over,
+            "--force indexes it"
+        );
+    }
+
+    /// A project marker is the evidence that the user meant this directory as a codebase, so it
+    /// raises the ceiling. Same tree, one `Cargo.toml` apart.
+    #[test]
+    fn a_project_marker_raises_the_file_ceiling() {
+        let t = Tmp::new();
+        for i in 0..(MAX_FILES_UNMARKED_ROOT + 1) {
+            std::fs::write(t.root.join(format!("f{i}.rs")), "pub fn s() {}\n").unwrap();
+        }
+        assert!(matches!(
+            Lattice::new_with_home(store(), &t.root, None).update(),
+            Err(LatticeError::RefusedRoot(RootRefusal::TooManyFiles { .. }))
+        ));
+        std::fs::write(t.root.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        assert!(
+            Lattice::new_with_home(store(), &t.root, None)
+                .update()
+                .is_ok(),
+            "under the marked-root ceiling of {MAX_FILES_MARKED_ROOT}"
+        );
+    }
+
+    /// Toolchain/SDK trees are never the user's source. The skip is path-based, so a project's own
+    /// `pkg/mod` and `sdk` directories keep indexing.
+    #[test]
+    fn toolchain_and_sdk_trees_are_skipped_but_lookalike_project_dirs_are_not() {
+        let t = Tmp::new();
+        t.write(
+            "go/pkg/mod/dep/vendored.rs",
+            "pub fn go_module_cache() {}\n",
+        );
+        t.write("Android/Sdk/tools/gen.rs", "pub fn android_sdk() {}\n");
+        t.write(
+            "venv/lib/python3.13/site-packages/p.py",
+            "def installed_pkg():\n    pass\n",
+        );
+        t.write("pkg/mod/real.rs", "pub fn my_own_pkg_mod() {}\n");
+        t.write("sdk/real.rs", "pub fn my_own_sdk() {}\n");
+        t.write("src/lib.rs", "pub fn ordinary() {}\n");
+
+        let lat = Lattice::new_with_home(store(), &t.root, None);
+        lat.update().unwrap();
+        for skipped in ["go_module_cache", "android_sdk", "installed_pkg"] {
+            assert!(
+                lat.query(skipped, 5).unwrap().is_empty(),
+                "{skipped} must not be indexed"
+            );
+        }
+        for kept in ["my_own_pkg_mod", "my_own_sdk", "ordinary"] {
+            assert_eq!(
+                lat.query(kept, 5).unwrap().len(),
+                1,
+                "{kept} must be indexed"
+            );
+        }
+    }
+
+    /// Cleanup: pruning a root must remove its nodes, references AND edges — not just the
+    /// `lattice_file` rows — and must leave every other root untouched. `lattice_node` cascades
+    /// from `lattice_file`, which only holds because forge-store sets `PRAGMA foreign_keys = ON`
+    /// per connection; this asserts the cascade actually happens at runtime.
+    #[test]
+    fn prune_root_removes_nodes_refs_and_edges_and_spares_other_roots() {
+        let a = Tmp::new();
+        let b = Tmp::new();
+        // Python, because its tags query nests methods inside their class — that is what produces
+        // the `contains` edges this test needs to see cascade away.
+        let body = "class Widget:\n    def render(self):\n        return helper()\n\ndef helper():\n    return 1\n";
+        a.write("src/mod.py", body);
+        b.write("src/mod.py", body);
+        let store = store();
+        let lat_a = Lattice::new_with_home(Arc::clone(&store), &a.root, None);
+        let lat_b = Lattice::new_with_home(Arc::clone(&store), &b.root, None);
+        lat_a.update().unwrap();
+        lat_b.update().unwrap();
+
+        let root_a = std::fs::canonicalize(&a.root)
+            .unwrap()
+            .display()
+            .to_string();
+        let root_b = std::fs::canonicalize(&b.root)
+            .unwrap()
+            .display()
+            .to_string();
+        let (files, nodes, edges) = store.lattice_counts().unwrap();
+        let refs = store.lattice_ref_count().unwrap();
+        assert!(
+            nodes > 0 && edges > 0 && refs > 0 && files > 0,
+            "fixture must produce all four row kinds ({files},{nodes},{edges},{refs})"
+        );
+        let nodes_b = store.lattice_node_ids_and_names(&root_b).unwrap().len();
+        let refs_b = store.lattice_ref_edges(&root_b).unwrap().len();
+        assert!(nodes_b > 0 && refs_b > 0);
+
+        let removed = prune_root(&store, &root_a).unwrap();
+        assert!(removed > 0, "prune must report the files it dropped");
+
+        assert!(
+            store
+                .lattice_node_ids_and_names(&root_a)
+                .unwrap()
+                .is_empty(),
+            "root A's symbols must be gone"
+        );
+        assert!(
+            store.lattice_ref_edges(&root_a).unwrap().is_empty(),
+            "root A's references must be gone (FK cascade)"
+        );
+        let (files_after, nodes_after, edges_after) = store.lattice_counts().unwrap();
+        assert_eq!(nodes_after, nodes_b as i64, "only root B's symbols remain");
+        assert_eq!(
+            store.lattice_ref_count().unwrap(),
+            refs_b as i64,
+            "only root B's references remain — the cascade reached lattice_ref"
+        );
+        assert_eq!(
+            edges_after,
+            edges / 2,
+            "root A's contains-edges are gone too"
+        );
+        assert!(files_after > 0, "root B's files survive");
+        assert_eq!(
+            indexed_roots(&store).unwrap(),
+            vec![root_b],
+            "only root B is still indexed"
+        );
+    }
+
+    #[test]
+    fn stale_roots_lists_only_roots_whose_directory_is_gone() {
+        let live = Tmp::new();
+        let dead = Tmp::new();
+        live.write("src/lib.rs", "pub fn live_symbol() {}\n");
+        dead.write("src/lib.rs", "pub fn dead_symbol() {}\n");
+        let store = store();
+        Lattice::new_with_home(Arc::clone(&store), &live.root, None)
+            .update()
+            .unwrap();
+        Lattice::new_with_home(Arc::clone(&store), &dead.root, None)
+            .update()
+            .unwrap();
+        let dead_root = std::fs::canonicalize(&dead.root)
+            .unwrap()
+            .display()
+            .to_string();
+        std::fs::remove_dir_all(&dead.root).unwrap();
+
+        assert_eq!(stale_roots(&store).unwrap(), vec![dead_root.clone()]);
+        assert_eq!(prune_root(&store, &dead_root).unwrap(), 1);
+        assert!(stale_roots(&store).unwrap().is_empty());
     }
 }

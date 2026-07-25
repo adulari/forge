@@ -3078,10 +3078,22 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
 
-            // While the activity panel has focus: ↑↓ move the selection (wrapping), Enter opens the
-            // selected entry's full-screen transcript viewer, Esc unfocuses. Handled before the
-            // global Esc so Esc steps out of the panel instead of quitting.
-            if app.activity_focused {
+            // Ctrl+O over a bare TASK list (no subagents, no critics) expands the details panels
+            // but leaves nothing to select: `activity_len()` is 0, and `render_activity_panel`
+            // early-returns so not even the "↑↓ select · ⏎ open · esc" hint is drawn. The exclusive
+            // key-capture below then swallowed EVERY keystroke — no typing, no Enter, no visible
+            // way out; it read as a hung TUI. Consume only Esc (collapse the details) and let every
+            // other key fall through to normal input handling.
+            if app.activity_focused && app.activity_len() == 0 {
+                if matches!(key, KeyKind::Esc) {
+                    app.activity_focused = false;
+                    dirty = true;
+                    continue;
+                }
+            } else if app.activity_focused {
+                // While the activity panel has focus: ↑↓ move the selection (wrapping), Enter opens
+                // the selected entry's full-screen transcript viewer, Esc unfocuses. Handled before
+                // the global Esc so Esc steps out of the panel instead of quitting.
                 match key {
                     KeyKind::Up => {
                         let n = app.activity_len();
@@ -3097,7 +3109,12 @@ pub(crate) async fn run_chat_tui(
                     }
                     KeyKind::Enter => {
                         let idx = app.activity_idx;
-                        if app.fullscreen {
+                        if app.activity_len() == 0 {
+                            // Belt-and-braces (the guard above already excludes this): never enter
+                            // a viewer with zero entries — the inline alt-screen path used to panic
+                            // on the empty view list and take the whole session with it.
+                            app.activity_focused = false;
+                        } else if app.fullscreen {
                             // Full-screen: open the in-loop viewer (same terminal, no nested
                             // alt-screen). The main render loop keeps draining events, so the
                             // selected entry auto-updates while open.

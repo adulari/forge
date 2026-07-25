@@ -250,8 +250,7 @@ jobs:
       attestations: write
       contents: write
       id-token: write
-      pull-requests: write
-      actions: write # dispatches required workflows against the generated distribution-manifest PR
+      actions: write # dispatches app-desktop.yml / app-web.yml against protected main
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -374,20 +373,81 @@ jobs:
           body_path: dist/RELEASE_NOTES.md
           generate_release_notes: true
           fail_on_unmatched_files: false
-          # Desktop artifacts and updater metadata are published by app-desktop.yml. That
-          # workflow moves Latest only after their public bytes and checksums verify.
+          # Stage the CLI archives into a DRAFT release. app-desktop.yml appends the desktop
+          # bundles, `desktop-checksums.txt`, and `latest.json` to this same draft and only then
+          # flips it to published (`draft: false`) and moves Latest.
+          #
+          # Publishing here instead left the release publicly resolvable with CLI assets only:
+          # on v2.9.1 `checksums.txt` landed at 16:59:22Z and `desktop-checksums.txt` +
+          # every desktop bundle + `latest.json` only at 17:10:02Z. During those ~11 minutes
+          # `releases/download/<tag>/desktop-checksums.txt` 404s, so install-desktop.sh aborts
+          # after downloading a valid bundle (#837) and the Tauri updater cannot read
+          # `latest.json` either. A draft is invisible to both the release API and the asset CDN,
+          # so the incomplete state is never observable.
+          draft: true
           make_latest: false
 
-      # Keep Homebrew, AUR metadata, and Scoop in step with THIS release's just-built checksums (no "sha
-      # race" against assets that don't exist yet). Opens a PR because main is branch-protected.
-      # This is a required release stage: a published binary with broken/stale package-manager
-      # metadata is an incomplete release, so failures stay visible instead of being swallowed.
+      # Hands the draft off, and does so as the FIRST thing after publishing it. app-desktop.yml
+      # owns publication from here: it appends the five-platform bundle set,
+      # `desktop-checksums.txt`, and `latest.json`, flips the draft to published, then verifies the
+      # public bytes before moving Latest. app-web.yml appends its tarball to the same release with
+      # `gh release upload`, which resolves draft releases by pending tag name.
       #
-      # The PR is opened using GITHUB_TOKEN, so its `pull_request` event does NOT spawn a new
-      # workflow run (GitHub's anti-recursion guard on the default token) — the branch-protection-
-      # required checks would otherwise never appear on it, leaving `gh pr merge --auto` stuck
-      # forever. `workflow_dispatch` is explicitly exempt from that guard, so we manually dispatch
-      # every required workflow against the PR branch before enabling auto-merge.
+      # This step used to sit BELOW the package-manifest work in this same job, so any failure in
+      # that chain (makepkg, `git push -f`, `gh pr create`, `gh workflow run`, `gh pr merge`)
+      # aborted the job before the dispatch ever ran and the tag then had no desktop bundles, no
+      # `latest.json`, and no `desktop-checksums.txt` at all. That is not hypothetical: run
+      # 29831376887 (v2.8.4) died on `gh workflow run codeql.yml` with "HTTP 422: Workflow does not
+      # have 'workflow_dispatch' trigger" and starved the dispatch, and app-desktop.yml no longer
+      # has the `push: tags` trigger that used to paper over it. Artifact production must never be
+      # gated behind package-manager bookkeeping, which now runs in its own job below (#837).
+      #
+      # If app-desktop.yml fails, the release deliberately STAYS a draft: nothing is public, the
+      # previous release remains Latest and installable, and the failed run is the operator's
+      # signal. Recover with `gh workflow run app-desktop.yml --ref main -f release_tag=vX.Y.Z`
+      # (RELEASING.md §6) — never by publishing the draft by hand.
+      - name: Dispatch matching desktop and web releases from protected main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh workflow run app-desktop.yml --ref main -f release_tag="$RELEASE_TAG"
+          gh workflow run app-web.yml --ref main -f release_tag="$RELEASE_TAG"
+
+      - name: Upload CLI checksums for the manifest job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: forge-cli-checksums
+          path: dist/checksums.txt
+          if-no-files-found: error
+
+  # Keep Homebrew, AUR metadata, and Scoop in step with THIS release's just-built checksums (no "sha
+  # race" against assets that don't exist yet). Opens a PR because main is branch-protected.
+  # This is a required release stage: a published binary with broken/stale package-manager
+  # metadata is an incomplete release, so failures stay visible instead of being swallowed — but it
+  # is a SEPARATE job so that visibility costs a red job, never the release's desktop and web
+  # artifacts (#837).
+  #
+  # The PR is opened using GITHUB_TOKEN, so its `pull_request` event does NOT spawn a new
+  # workflow run (GitHub's anti-recursion guard on the default token) — the branch-protection-
+  # required checks would otherwise never appear on it, leaving `gh pr merge --auto` stuck
+  # forever. `workflow_dispatch` is explicitly exempt from that guard, so we manually dispatch
+  # every required workflow against the PR branch before enabling auto-merge.
+  manifests:
+    name: update package-manager manifests
+    needs: release
+    runs-on: [release, linux, x64]
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write # dispatches required workflows against the generated distribution-manifest PR
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: forge-cli-checksums
+          path: dist
+
       - name: Update package-manager manifests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -418,11 +478,3 @@ jobs:
             gh workflow run "$workflow" --ref "$BRANCH"
           done
           gh pr merge "$BRANCH" --squash --auto
-
-      - name: Dispatch matching desktop and web releases from protected main
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          gh workflow run app-desktop.yml --ref main -f release_tag="$RELEASE_TAG"
-          gh workflow run app-web.yml --ref main -f release_tag="$RELEASE_TAG"

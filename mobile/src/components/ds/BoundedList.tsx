@@ -28,6 +28,10 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { BellowsSpinner } from "./BellowsSpinner";
 
+// Approximate CSS pixel height of one "line" for DOM_DELTA_LINE wheel normalization below —
+// matches the common browser default (16px root font-size × ~1 line-height).
+const WHEEL_LINE_HEIGHT_PX = 16;
+
 export interface BoundedListProps<T>
   extends Omit<FlatListProps<T>, "renderItem" | "keyExtractor" | "ListEmptyComponent" | "data"> {
   data: readonly T[] | null | undefined;
@@ -85,8 +89,19 @@ function BoundedListInner<T>(
       | undefined;
     if (!node || typeof node.addEventListener !== "function") return;
     const onWheel = (e: WheelEvent) => {
+      // Horizontal intent (shift+wheel, trackpad pan) must reach the browser's native
+      // handling instead of being swallowed here — otherwise a nested horizontal scroller
+      // (e.g. CodeBlock's code-line ScrollView) can never be shift-wheel scrolled, since this
+      // listener sits on the ancestor the event bubbles through on its way up.
+      if (e.deltaX !== 0) return;
       e.preventDefault();
-      node.scrollTop -= e.deltaY;
+      // `deltaY` is only pixels on Chrome/Safari/WebView2 (DOM_DELTA_PIXEL). Firefox reports a
+      // classic mouse wheel as DOM_DELTA_LINE (~3 "lines" per notch) and a few environments use
+      // DOM_DELTA_PAGE — without normalizing, Firefox scrolls the transcript ~3px per notch.
+      let deltaY = e.deltaY;
+      if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) deltaY *= WHEEL_LINE_HEIGHT_PX;
+      else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) deltaY *= node.clientHeight;
+      node.scrollTop -= deltaY;
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);

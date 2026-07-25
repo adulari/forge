@@ -47,6 +47,20 @@ const DEFAULT_RATES: &[(&str, f64, f64)] = &[
     // pricing page (platform.claude.com/docs/en/about-claude/pricing), 2026-07-10.
     ("anthropic::claude-fable-5", 0.010, 0.050),
     ("anthropic::claude-mythos-5", 0.010, 0.050),
+    // The rest of the current Claude line, which auto-discovery surfaces the moment an Anthropic
+    // key is present: Opus 5 (released 2026-07-24) lists at the same $5/$25 per 1M as Opus 4.8,
+    // Sonnet 5 at $3/$15, Haiku 4.5 at $1/$5. None had an entry, so all three priced as $0 and
+    // the cost axis ranked the fleet's frontier model as its cheapest. Nothing else can fill the
+    // gap: Anthropic's `/v1/models` reports context windows but no prices, and the fetched layer
+    // only ever yields `openrouter::…` ids — these bundled rows are the ONLY price these native
+    // ids get. Sonnet 5's $2/$10 introductory rate runs through 2026-08-31; the steady-state
+    // $3/$15 is encoded deliberately (the same call `capability::known_burn_weight` made for its
+    // 3.0 weight) so the constant doesn't silently go stale the day the intro price expires.
+    // Verified against Anthropic's pricing page
+    // (platform.claude.com/docs/en/about-claude/pricing), 2026-07-25.
+    ("anthropic::claude-opus-5", 0.005, 0.025),
+    ("anthropic::claude-sonnet-5", 0.003, 0.015),
+    ("anthropic::claude-haiku-4-5", 0.001, 0.005),
     // Additional BYOK providers (approx mid-2026 list prices, USD per 1k tokens).
     // Override via config [mesh.pricing] if a price changes (A-7).
     ("gemini::gemini-2.5-flash", 0.0003, 0.0025),
@@ -275,6 +289,9 @@ mod tests {
         assert_eq!(context_limit("codex-oauth::gpt-5.3-codex"), Some(272_000));
         assert_eq!(context_limit("agy-cli::"), Some(1_000_000));
         // All non-bridge models return None — their windows come from DB (fetch_and_persist).
+        // That includes the newest Claude API ids: Anthropic's `/v1/models` reports
+        // `context_window` per model, so hardcoding a figure here would only shadow live data.
+        assert_eq!(context_limit("anthropic::claude-opus-5"), None);
         assert_eq!(context_limit("anthropic::claude-opus-4-8"), None);
         assert_eq!(context_limit("gemini::gemini-2.5-pro"), None);
         assert_eq!(context_limit("openai::gpt-4o"), None);
@@ -327,6 +344,38 @@ mod tests {
         );
         // 1000 in @ 0.010/1k + 1000 out @ 0.050/1k = 0.010 + 0.050 = 0.060.
         assert!((fable - 0.060).abs() < 1e-9, "got {fable}");
+    }
+
+    #[test]
+    fn current_claude_line_is_priced_not_free_and_ordered_by_tier() {
+        // Same invariant Fable/Mythos hit: an absent DEFAULT_RATES row prices a metered model at
+        // $0, and cost-tiered routing then reads the frontier model as the cheapest candidate.
+        // Anthropic publishes no prices on `/v1/models` and the fetched layer only yields
+        // `openrouter::…` ids, so these three native ids have no other source of truth.
+        let p = Pricing::default();
+        let opus_5 = p.estimated_cost("anthropic::claude-opus-5");
+        let opus_4_8 = p.estimated_cost("anthropic::claude-opus-4-8");
+        let sonnet_5 = p.estimated_cost("anthropic::claude-sonnet-5");
+        let haiku_4_5 = p.estimated_cost("anthropic::claude-haiku-4-5");
+        for (id, cost) in [
+            ("claude-opus-5", opus_5),
+            ("claude-sonnet-5", sonnet_5),
+            ("claude-haiku-4-5", haiku_4_5),
+        ] {
+            assert!(cost > 0.0, "{id} must not price as free");
+        }
+        assert!(
+            (opus_5 - opus_4_8).abs() < 1e-12,
+            "Opus 5 lists at Opus 4.8's $5/$25 per 1M"
+        );
+        assert!(opus_5 > sonnet_5 && sonnet_5 > haiku_4_5, "tier ordering");
+        // 1000 in @ 0.005/1k + 500 out @ 0.025/1k = 0.005 + 0.0125 = 0.0175.
+        assert!((opus_5 - 0.0175).abs() < 1e-9, "got {opus_5}");
+        // Sonnet 5 carries its steady-state $3/$15, not the introductory $2/$10 that lapses
+        // 2026-08-31: 1000 in @ 0.003/1k + 500 out @ 0.015/1k = 0.003 + 0.0075 = 0.0105.
+        assert!((sonnet_5 - 0.0105).abs() < 1e-9, "got {sonnet_5}");
+        // 1000 in @ 0.001/1k + 500 out @ 0.005/1k = 0.001 + 0.0025 = 0.0035.
+        assert!((haiku_4_5 - 0.0035).abs() < 1e-9, "got {haiku_4_5}");
     }
 
     #[test]

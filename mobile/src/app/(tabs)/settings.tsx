@@ -43,7 +43,7 @@ import { Segmented } from "../../components/ds/Segmented";
 import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
 import { entitlementBadge } from "../../lib/anywhere/format";
-import { useAppVersion } from "../../lib/appVersion";
+import { useVersionMeta } from "../../lib/appVersion";
 import { useAnywhere } from "../../lib/anywhere/store";
 import { type StoredServer, useAuth } from "../../lib/auth";
 import { connectionHealthFromFleet } from "../../lib/connectionHealth";
@@ -140,7 +140,7 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
 export function SettingsNavRail({ active }: { active: string }) {
   const tokens = useTokens();
   const { account } = useAnywhere();
-  const appVersion = useAppVersion();
+  const versionMeta = useVersionMeta(PROTOCOL_VERSION);
   const railActiveFill = hexToRgba(tokens.ink, 0.07);
   return (
     <View style={[railStyles.rail, { width: isWeb ? 186 : 196, borderRightColor: tokens.border }]}>
@@ -169,7 +169,7 @@ export function SettingsNavRail({ active }: { active: string }) {
         );
       })}
       <View style={railStyles.flexFill} />
-      <Text style={[type.monoMeta, tabularNums, railStyles.version, { color: tokens.ink4 }]}>{`v${appVersion} · protocol v${PROTOCOL_VERSION}`}</Text>
+      <Text style={[type.monoMeta, tabularNums, railStyles.version, { color: tokens.ink4 }]}>{versionMeta}</Text>
     </View>
   );
 }
@@ -524,7 +524,7 @@ export default function SettingsScreen() {
     try { await desktopUpdate.install(); } catch { toast.show("couldn't install update.", { tone: "danger" }); }
     finally { setUpdateBusy(false); }
   }, [desktopUpdate, toast]);
-  const appVersion = useAppVersion();
+  const versionMeta = useVersionMeta(PROTOCOL_VERSION);
 
   return (
     <SettingsShell active="general">
@@ -682,7 +682,7 @@ export default function SettingsScreen() {
         ) : null}
 
         <View style={styles.footerRow}>
-          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 0 }]}>{`v${appVersion} · protocol v${PROTOCOL_VERSION}`}</Text>
+          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 0 }]}>{versionMeta}</Text>
           <View style={styles.footerFill} />
           <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 1 }]} numberOfLines={1}>
             {host ? `${host} · ${maskToken(activeToken)}` : "not connected"}

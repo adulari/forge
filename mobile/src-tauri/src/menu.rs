@@ -5,9 +5,9 @@
 // its own: every non-standard item carries a stable string id, and activating it emits
 // `MENU_EVENT` to the webview, where `src/lib/desktopMenu.ts` maps the id onto the real RN
 // action (router navigation, command palette, session socket). The two exceptions are handled
-// here because they are window-level facts the webview cannot know or do: opening the About
-// window, and raising/focusing the main window for tray actions that may fire while it is
-// hidden.
+// here because they are process- or window-level facts the webview cannot know or do: opening
+// the About window, quitting, and raising/focusing the main window for tray actions that may
+// fire while it is hidden.
 //
 // This module is compiled on every platform (so `cargo build` type-checks the whole tree on
 // Linux/CI) but only *installed* on macOS — see `lib.rs`. Windows and Linux hide their native
@@ -32,6 +32,8 @@ pub struct MenuEventPayload {
 pub const APP_ABOUT: &str = "app:about";
 pub const APP_CHECK_UPDATES: &str = "app:check-updates";
 pub const APP_SETTINGS: &str = "app:settings";
+/// Never reaches `desktopMenu.ts` — `handle_event` swallows it (see the quit item below).
+pub const APP_QUIT: &str = "app:quit";
 
 pub const SESSION_NEW: &str = "session:new";
 pub const SESSION_QUICK_COMPOSER: &str = "session:quick-composer";
@@ -87,13 +89,18 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .separator()
         .item(&item(DEV_RELOAD, "Reload", Some("CmdOrCtrl+R"))?);
 
+    // A custom item rather than `PredefinedMenuItem::quit`: the predefined one terminates
+    // through the platform (`NSApp terminate:`, `PostQuitMessage`), which never produces the
+    // `ExitRequested { code: Some(_) }` that `lib.rs`'s prevent-exit guard lets through. Going
+    // via `AppHandle::exit` keeps ⌘Q a guaranteed exit on every platform now that closing the
+    // window no longer is one. Label and accelerator match the predefined item exactly.
     let forge = forge
         .separator()
         .hide()
         .hide_others()
         .show_all()
         .separator()
-        .quit()
+        .item(&item(APP_QUIT, "Quit Forge", Some("CmdOrCtrl+Q"))?)
         .build()?;
 
     // ---- File -------------------------------------------------------------------------
@@ -214,6 +221,17 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Raises the main window from hidden/minimised/behind-another-app back to the front. Since
+/// `lib.rs` hides rather than closes it, this is the only route back to the app once the user
+/// has closed the window — the tray's own items, and the macOS Dock reopen request.
+pub fn raise_main_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 /// Single dispatch point for both the application menu and the tray menu (Tauri delivers those
 /// to two different handlers, but they share one id vocabulary).
 pub fn handle_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
@@ -222,6 +240,12 @@ pub fn handle_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         // still booting, which is exactly when a user reaches for "About".
         APP_ABOUT => {
             let _ = about::open(app);
+            return;
+        }
+        // The one deliberate exit. `AppHandle::exit` is the only path `lib.rs`'s
+        // `ExitRequested` guard treats as a real quit.
+        APP_QUIT => {
+            app.exit(0);
             return;
         }
         #[cfg(debug_assertions)]
@@ -237,11 +261,7 @@ pub fn handle_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     // A tray item can be picked while the window is hidden, minimised, or behind another app;
     // raising it is a native-side job the webview cannot do for itself before it has focus.
     if id.starts_with("tray:") {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.unminimize();
-            let _ = window.set_focus();
-        }
+        raise_main_window(app);
     }
 
     let _ = app.emit(MENU_EVENT, MenuEventPayload { id: id.to_string() });

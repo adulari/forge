@@ -1730,6 +1730,32 @@ mod tests {
     }
 
     #[test]
+    fn claude_opus_5_outranks_opus_4_8_and_reads_as_frontier() {
+        // Opus 5 and Opus 4.8 are the same provider at the same list price, so every earlier sort
+        // key ties and `fine_capability` decides — 5.0 beats 4.8. Note the final `id` tiebreak
+        // would order them the OTHER way ("…opus-4-8" < "…opus-5"), so this genuinely exercises
+        // the version extraction rather than falling through to alphabetical luck.
+        assert!(
+            (fine_capability("anthropic::claude-opus-5") - 5.0).abs() < 1e-9,
+            "bare major version → 5.0"
+        );
+        assert!(crate::capability::is_frontier("anthropic::claude-opus-5"));
+        let cat = ModelCatalog::new(vec![
+            "anthropic::claude-opus-4-8".into(),
+            "anthropic::claude-opus-5".into(),
+        ]);
+        for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
+            assert_eq!(
+                cat.ranked_for(tier, &Pricing::default(), 2)
+                    .first()
+                    .unwrap(),
+                "anthropic::claude-opus-5",
+                "the newer Opus must lead its predecessor at {tier:?}"
+            );
+        }
+    }
+
+    #[test]
     fn fine_capability_does_not_overflow_on_long_digit_runs() {
         // Regression: model ids are sourced from external provider/gateway catalogs and could
         // contain a long digit run (embedded hash, snowflake id, timestamp, ...). The accumulator
