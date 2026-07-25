@@ -1,7 +1,6 @@
 const path = require("path");
 
 const { getDefaultConfig } = require("expo/metro-config");
-const exclusionList = require("metro-config/private/defaults/exclusionList").default;
 
 const config = getDefaultConfig(__dirname);
 
@@ -21,16 +20,27 @@ if (maxWorkers) {
 // and unlinks temp artifacts there faster than the watcher can stat them, and the resulting
 // ENOENT kills the whole dev server. Nothing under `src-tauri/target` is ever bundled, so
 // exclude it from both the watcher and the resolver.
+//
+// `blockList` is APPENDED TO, not rebuilt through `exclusionList()`. Expo's default is already a
+// finished array of RegExps — one of which is `/^(?:android[\\/]app[\\/]build|…)$/` — and
+// `exclusionList`'s `escapeRegExp` rewrites `\/` to `\` + `path.sep` in every pattern's source. On
+// Windows that turns the `[\\/]` separator classes into `[\\\]`, an unterminated character class,
+// so requiring this file threw `SyntaxError: Invalid regular expression` and every Windows desktop
+// build failed in `expo export`. On Linux `path.sep` is `/`, the rewrite is a no-op, and the bug is
+// invisible — which is exactly why it shipped.
 const escapedTauriTarget = path
   .join(__dirname, "src-tauri", "target")
   .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-config.resolver.blockList = exclusionList([
-  ...(Array.isArray(config.resolver.blockList)
-    ? config.resolver.blockList
-    : config.resolver.blockList
-      ? [config.resolver.blockList]
+const previousBlockList = config.resolver.blockList;
+config.resolver.blockList = [
+  ...(Array.isArray(previousBlockList)
+    ? previousBlockList
+    : previousBlockList
+      ? [previousBlockList]
       : []),
-  new RegExp(`^${escapedTauriTarget}/.*`),
-]);
+  // Both separators: `path.join` yields `\` on Windows and `/` elsewhere, and nothing rewrites
+  // this pattern for us now.
+  new RegExp(`^${escapedTauriTarget}[\\\\/].*`),
+];
 
 module.exports = config;
