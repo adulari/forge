@@ -3536,8 +3536,15 @@ fn parse_changelog(markdown: &str, limit: usize) -> Vec<ChangelogRelease> {
                 Some((version, date)) => (version, Some(date.trim().to_string())),
                 None => (heading, None),
             };
-            current = Some(ChangelogRelease {
-                version: version.trim().trim_matches(['[', ']']).to_string(),
+            let version = version.trim().trim_matches(['[', ']']).to_string();
+            // The running binary does not contain unreleased work, so `[Unreleased]` must never
+            // reach its own "What's New". This used to fall out of the empty-entries check below,
+            // which only held because that section happened to always be empty — the moment
+            // anything landed under it, it became the feed's newest "release", dateless.
+            // Leaving `current` unset also discards its bullets: entries only attach to a live
+            // release.
+            current = (!version.eq_ignore_ascii_case("Unreleased")).then_some(ChangelogRelease {
+                version,
                 date,
                 entries: Vec::new(),
             });
@@ -5884,7 +5891,13 @@ export async function run() {}
         assert_eq!(releases.len(), 3, "the top N releases, no more");
         assert!(
             releases.iter().all(|r| !r.entries.is_empty()),
-            "empty sections (notably `[Unreleased]`) are never emitted"
+            "sections with no entries are never emitted"
+        );
+        assert!(
+            !releases
+                .iter()
+                .any(|r| r.version.eq_ignore_ascii_case("Unreleased")),
+            "the running binary never advertises unreleased work"
         );
         let first = &releases[0];
         assert!(
@@ -5901,6 +5914,35 @@ export async function run() {}
             e.section.as_str(),
             "Added" | "Changed" | "Fixed" | "Removed"
         )));
+    }
+
+    // The assertion above goes vacuous whenever `[Unreleased]` happens to be empty, which is most
+    // of the time — a released CHANGELOG_MD cannot prove this. Pin the behaviour on a fixture that
+    // always has unreleased entries.
+    #[test]
+    fn a_populated_unreleased_section_never_reaches_the_whats_new_feed() {
+        let markdown = "\
+## [Unreleased]
+
+### Fixed
+
+- Something that has not shipped yet.
+
+## [9.9.9] - 2026-01-01
+
+### Added
+
+- Something that has.
+";
+        let releases = parse_changelog(markdown, 3);
+        assert_eq!(releases.len(), 1, "only the shipped release is advertised");
+        assert_eq!(releases[0].version, "9.9.9");
+        assert_eq!(
+            releases[0].entries.len(),
+            1,
+            "unreleased bullets are dropped"
+        );
+        assert_eq!(releases[0].entries[0].text, "Something that has.");
     }
 
     #[test]
