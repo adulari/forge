@@ -8,6 +8,17 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **The light-theme splash mark was effectively invisible.** `splash-icon.png` is inked in a light
+  gray for the dark splash background; composited on the light one it measured **1.41:1**. The light
+  variant now gets its own asset, the same geometry re-inked in `lightTokens.ink` at **15.65:1**,
+  matching the dark pairing's 14.69:1. Both marks are baked in at prebuild, so this can only reach a
+  device via a native build — regenerate with `scripts/gen-splash-light-variant.py`.
+- **`chore(dist)` package-manifest PRs could never merge**, so Homebrew, AUR, and Scoop stayed on
+  **2.9.1** while 2.10.1 was the published release. `release.yml` dispatches the required workflows
+  against the manifest branch to work around GitHub's anti-recursion guard, but those
+  `workflow_dispatch` runs do not satisfy branch protection — the `pull_request` runs it needs sit at
+  `action_required` awaiting manual approval, forever.
+
 - **A mobile fix could reach `main` and never reach a phone, silently.** The iOS OTA fired only on
   a push touching `mobile/src/**` or `mobile/assets/**`, and refusing to publish wrote a line to the
   step summary — which nobody opens — so the run went green either way. #890 is the concrete case:

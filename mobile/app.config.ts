@@ -146,13 +146,17 @@ const config: ExpoConfig = {
         // Default (light) variant uses the light theme's bg0 (theme/tokens.ts
         // lightTokens.bg0, "#F5F4F1" — the same token Screen.tsx paints every screen's
         // root with) instead of the dark bg — this was hardcoded to the dark color for
-        // both variants, so light-theme users got a dark flash on every cold start. NOTE:
-        // splash-icon.png is a light-gray mark drawn for the dark bg; on this light bg
-        // it's low-contrast (near-invisible) rather than wrong-colored — a barely-visible
-        // glyph for ~1 frame beats an incongruous dark flash, but a proper light-variant
-        // asset (dark-on-transparent) would fix this fully.
+        // both variants, so light-theme users got a dark flash on every cold start.
+        //
+        // Each variant gets its OWN mark. splash-icon.png is drawn in a light gray for the
+        // dark bg; on the light bg it measured 1.41:1 — effectively invisible, not merely
+        // dim. splash-icon-light.png is the same geometry re-inked in lightTokens.ink
+        // ("#1C1B19") at 15.65:1, matching the dark pairing's 14.69:1. Alpha carries each
+        // pixel's original brightness so the mark's internal weighting survives the
+        // inversion. Regenerate with scripts/gen-splash-light-variant.py if the source mark
+        // changes; both are baked in at prebuild, so an OTA can never update them.
         backgroundColor: "#F5F4F1",
-        image: "./assets/splash-icon.png",
+        image: "./assets/splash-icon-light.png",
         imageWidth: 200,
         // theme/tokens.ts darkTokens.bg0 ("#09090B") — was a stale pre-Machined hex.
         dark: { backgroundColor: "#09090B", image: "./assets/splash-icon.png" },
