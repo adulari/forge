@@ -25,11 +25,23 @@ const config: ExpoConfig = {
   orientation: "portrait",
   icon: "./assets/icon.png",
   userInterfaceStyle: "automatic",
-  // Root native view background, painted before any JS/theme runs. No light/dark split at
-  // this level (Expo's top-level `backgroundColor` is a single static value), so this
-  // matches the dark splash below. Value = theme/tokens.ts darkTokens.bg0 ("#09090B") — the
-  // same token Screen.tsx paints every screen's root with. Keep in sync by hand: this file
-  // can't import from src/theme without pulling RN into the (Node-executed) config context.
+  // Root native view background — the surface between iOS tearing down the launch storyboard and
+  // React's first painted frame. Left unset, RN's root view keeps its own default (white), which
+  // is the "default Expo screen" that flashed before the Face ID prompt on every cold start.
+  //
+  // This key ONLY takes effect if `expo-system-ui` is installed. Without it, prebuild's
+  // withIosRootViewBackgroundColor takes its `else` branch — `warnSystemUIMissing`, a warning in
+  // the build log — and writes nothing, so this value sat here inert for its whole life
+  // (verified: `RCTRootViewBackgroundColor` was absent from the generated Info.plist, and is
+  // 0xff09090b now that the package is a dependency). Removing expo-system-ui silently restores
+  // the white flash.
+  //
+  // Single static value, no light/dark split, so it matches the dark splash and the app's primary
+  // appearance. Value = theme/tokens.ts darkTokens.bg0 ("#09090B"), the same token Screen.tsx
+  // paints every screen's root with; keep in sync by hand, since this file can't import from
+  // src/theme without pulling RN into the (Node-executed) config context. RESIDUAL: a device in
+  // light mode gets one dark frame here against the light "#F5F4F1" splash. Fixing that properly
+  // needs an appearance-aware root colour, which is a custom native mod rather than a config key.
   backgroundColor: "#09090B",
   ios: {
     bundleIdentifier: BUNDLE_ID,
