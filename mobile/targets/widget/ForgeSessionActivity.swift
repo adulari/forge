@@ -62,8 +62,15 @@ private enum ForgeActivityState {
         return ForgeMachined.success
     }
 
+    /// A session's title is only known once its first turn has produced one, and `title` lives on
+    /// `Attributes` — which ActivityKit freezes at `Activity.request()`. A Live Activity started on
+    /// the idle→busy edge of an as-yet-untitled session therefore reads "Forge session" for its
+    /// whole life and can never be corrected. `agentLabel` is the session's cwd, known up front, so
+    /// it is a far better fallback than a constant that describes nothing.
     static func title(_ attributes: ForgeSessionActivityAttributes) -> String {
-        attributes.title.isEmpty ? "Forge session" : attributes.title
+        if !attributes.title.isEmpty { return attributes.title }
+        if !attributes.agentLabel.isEmpty { return attributes.agentLabel }
+        return "Forge session"
     }
 
     static func ctxPercent(for state: ForgeSessionActivityAttributes.ContentState) -> Int {
@@ -75,12 +82,31 @@ private enum ForgeActivityState {
         String(format: "$%.2f", state.costUsd)
     }
 
-    /// Compact Dynamic Island pace text — the design's `2/4 · 64%`, degrading to just the context
-    /// percentage when the session has no task list.
+    /// Compact Dynamic Island pace text — the design's `2/4 · 64%`.
     static func paceLabel(for state: ForgeSessionActivityAttributes.ContentState) -> String {
-        let ctx = "\(ctxPercent(for: state))%"
-        guard let done = state.tasksDone, let total = state.tasksTotal, total > 0 else { return ctx }
-        return "\(done)/\(total) · \(ctx)"
+        let parts = paceParts(for: state)
+        return parts.isEmpty ? costLabel(for: state) : parts.joined(separator: " · ")
+    }
+
+    /// The lock-screen card's right-hand meta — the design's `2/4 · 64% · $1.84`.
+    static func paceMeta(for state: ForgeSessionActivityAttributes.ContentState) -> String {
+        (paceParts(for: state) + [costLabel(for: state)]).joined(separator: " · ")
+    }
+
+    /// Only the segments that mean something. A session whose host never reported a context window
+    /// has `contextLimit == 0`, and printing the "0%" that falls out of that reads as a real
+    /// measurement of an idle session rather than as the absent number it is.
+    private static func paceParts(
+        for state: ForgeSessionActivityAttributes.ContentState
+    ) -> [String] {
+        var parts: [String] = []
+        if let done = state.tasksDone, let total = state.tasksTotal, total > 0 {
+            parts.append("\(done)/\(total)")
+        }
+        if state.contextLimit > 0 {
+            parts.append("\(ctxPercent(for: state))%")
+        }
+        return parts
     }
 }
 
@@ -119,26 +145,31 @@ private struct ForgeElapsedLabel: View {
     }
 }
 
-/// The mono meta line: `forging 4m · 2/4 tasks · 64% ctx`.
+/// The mono meta line — elapsed on the left, pace on the right.
+///
+/// A `Text` in `.timer` style reserves the width of the widest value it could ever show (hours),
+/// not the width of what it shows now. Laid out as one run of `HStack` items that reserve pushed
+/// everything after it toward the trailing edge, so a card reading `forging 0:07 · 0% ctx` put a
+/// stranded separator against the right margin with a hole in the middle of the row. Splitting it
+/// into two anchored groups makes that reserve harmless.
 private struct ForgeMetaLine: View {
     let state: ForgeSessionActivityAttributes.ContentState
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             if let since = state.stateSinceEpoch {
                 (Text("forging ") + Text(Date(timeIntervalSince1970: since), style: .timer))
-                Text("·")
+                    .lineLimit(1)
+            } else {
+                Text("forging").lineLimit(1)
             }
-            if let done = state.tasksDone, let total = state.tasksTotal, total > 0 {
-                Text("\(done)/\(total) tasks")
-                Text("·")
-            }
-            Text("\(ForgeActivityState.ctxPercent(for: state))% ctx")
-            Spacer(minLength: 0)
+            Spacer(minLength: 6)
+            Text(ForgeActivityState.paceMeta(for: state))
+                .lineLimit(1)
+                .layoutPriority(1)
         }
         .font(ForgeMachined.mono(10.5))
         .foregroundStyle(ForgeMachined.ink3)
-        .lineLimit(1)
     }
 }
 
@@ -268,28 +299,37 @@ private struct ForgePermissionCard: View {
     }
 }
 
-/// The design's second lock-screen card: one glance line plus the mono meta line. No progress
-/// bar — Machined carries pace in the numbers, not in a gradient track.
+/// The design's second lock-screen card, and it is a SINGLE row — dot, then
+/// `Fix mesh failover ranking — forging 4m`, then `2/4 · 64% · $1.84` pinned right. No progress
+/// bar; Machined carries pace in the numbers, not in a gradient track.
+///
+/// This was built as two stacked rows (title/cost, then a meta line), which is where the stranded
+/// `·` and the empty right half of the card came from. `.layoutPriority` keeps the numbers whole
+/// and truncates the title instead, since the title is the part a glance can still infer.
 private struct ForgeForgingCard: View {
     let attributes: ForgeSessionActivityAttributes
     let state: ForgeSessionActivityAttributes.ContentState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 9) {
-                ForgeStatusDot(color: ForgeMachined.accent, size: 5)
-                Text(ForgeActivityState.title(attributes))
-                    .font(ForgeMachined.sans(13.5, weight: .semibold))
-                    .foregroundStyle(ForgeMachined.ink)
-                    .lineLimit(1)
-                Spacer(minLength: 6)
-                Text(ForgeActivityState.costLabel(for: state))
-                    .font(ForgeMachined.mono(10.5))
-                    .foregroundStyle(ForgeMachined.ink3)
-                    .lineLimit(1)
-            }
-            ForgeMetaLine(state: state)
+        HStack(spacing: 9) {
+            ForgeStatusDot(color: ForgeMachined.accent, size: 5)
+            glanceLine
+                .font(ForgeMachined.sans(12))
+                .foregroundStyle(ForgeMachined.inkBody)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Text(ForgeActivityState.paceMeta(for: state))
+                .font(ForgeMachined.mono(10.5))
+                .foregroundStyle(ForgeMachined.ink3)
+                .lineLimit(1)
+                .layoutPriority(1)
         }
+    }
+
+    private var glanceLine: Text {
+        let title = Text(ForgeActivityState.title(attributes))
+        guard let since = state.stateSinceEpoch else { return title + Text(" — forging") }
+        return title + Text(" — forging ") + Text(Date(timeIntervalSince1970: since), style: .timer)
     }
 }
 
@@ -317,6 +357,7 @@ private struct ForgeIdleCard: View {
                 .font(ForgeMachined.mono(10.5))
                 .foregroundStyle(ForgeMachined.ink3)
                 .lineLimit(1)
+                .layoutPriority(1)
         }
     }
 }
