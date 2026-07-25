@@ -478,3 +478,43 @@ jobs:
             gh workflow run "$workflow" --ref "$BRANCH"
           done
           gh pr merge "$BRANCH" --squash --auto
+
+  # Ties the iOS OTA to the release instead of to a raw push. The push trigger alone is not
+  # sufficient: `mobile/src/**` changes that ship alongside a native/config change are correctly
+  # refused as an OTA, and a dropped push event produces no run at all — both leave phones on old JS
+  # with nothing saying so. #890 is the concrete case: it touched 17 files under `mobile/src/`, no
+  # eas-update run was ever created for its merge commit, and the OTA had to be dispatched by hand.
+  #
+  # This dispatch passes `base_ref` so the SAME OTA-safety guard runs over the whole span since the
+  # previous release. It is not a bypass: if that span contains native or dependency changes the
+  # guard still refuses to publish and now warns loudly instead of going silently green.
+  #
+  # Separate job with `needs: release` for the #837 reason: a failure here costs a red job, never
+  # the release's binaries, desktop bundles, or web tarball.
+  ota:
+    name: publish the matching iOS OTA
+    needs: release
+    runs-on: [release, linux, x64]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write # dispatches eas-update.yml
+    steps:
+      - name: Dispatch eas-update against the previous release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          # THIS release is still a draft at this point (app-desktop.yml owns the flip), so filtering
+          # to published releases already excludes it — as it does any older lingering draft.
+          previous=$(gh release list -R "$GITHUB_REPOSITORY" --limit 30 \
+            --json tagName,isDraft --jq '[.[] | select(.isDraft == false) | .tagName] | .[]' \
+            | grep -vxF "$RELEASE_TAG" | head -1)
+          if [[ -z $previous ]]; then
+            # Fail closed. Dispatching with no base would make the guard trust us unconditionally,
+            # which is exactly the bypass this job is built to avoid.
+            echo "::warning title=OTA not dispatched::Could not determine the previous published release, so the OTA-safety guard has no base to classify against. Publish manually per RELEASING.md §6 after confirming the runtimeVersion fingerprint."
+            exit 0
+          fi
+          echo "Classifying the OTA diff against $previous"
+          gh workflow run eas-update.yml --ref main -f base_ref="$previous"

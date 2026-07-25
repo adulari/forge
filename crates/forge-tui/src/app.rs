@@ -3343,6 +3343,7 @@ impl App {
         match key {
             KeyKind::Esc => self.viewer = None,
             KeyKind::Up => {
+                Self::viewer_pin_scroll_before_up(v, geom);
                 v.follow = false;
                 v.scroll = v.scroll.saturating_sub(1);
             }
@@ -3351,6 +3352,7 @@ impl App {
                 Self::viewer_refollow_at_tail(v, geom);
             }
             KeyKind::PageUp => {
+                Self::viewer_pin_scroll_before_up(v, geom);
                 v.follow = false;
                 v.scroll = v.scroll.saturating_sub(10);
             }
@@ -3378,6 +3380,7 @@ impl App {
             }
             KeyKind::Char('q') => self.viewer = None,
             KeyKind::Char('k') => {
+                Self::viewer_pin_scroll_before_up(v, geom);
                 v.follow = false;
                 v.scroll = v.scroll.saturating_sub(1);
             }
@@ -3396,6 +3399,21 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    /// Before an upward scroll, pin the tail sentinel down to the real bottom row. While `follow`
+    /// is true `v.scroll` sits at the raw `usize::MAX / 2` init value (the render path substitutes
+    /// its own `usize::MAX / 2` for display and clamps THAT copy, never writing the clamped value
+    /// back to `v.scroll`). Left unpinned, Up would decrement the untouched sentinel and the
+    /// render's `.min(max_scroll)` clamp would keep showing the same tail row — Up doing nothing —
+    /// for roughly `usize::MAX / 2 - max_scroll` presses. `geom` is `(wrapped_len, body_h)`
+    /// recorded by the render path; absent (no frame drawn yet) leaves `scroll` as-is.
+    fn viewer_pin_scroll_before_up(v: &mut ViewerState, geom: Option<(usize, u16)>) {
+        if v.follow {
+            if let Some((wrapped_len, body_h)) = geom {
+                v.scroll = wrapped_len.saturating_sub(body_h as usize);
+            }
+        }
     }
 
     /// When a downward scroll reaches the tail (last full page), clamp and re-arm follow so new
@@ -9042,6 +9060,29 @@ mod tests {
             !app.viewer.as_ref().unwrap().follow,
             "scrolling up pauses follow again"
         );
+    }
+
+    #[test]
+    fn viewer_up_from_a_freshly_opened_viewer_moves_one_line() {
+        // Bug: `ViewerState::default()` inits `scroll` to a `usize::MAX / 2` tail sentinel, and
+        // only a DOWNWARD scroll (`viewer_refollow_at_tail`) ever clamped it back into range.
+        // `render_live` substitutes its own `usize::MAX / 2` for display while `follow` is true
+        // and clamps THAT local copy — never writing the clamped value back to `v.scroll` — so
+        // Up just decremented the still-untouched sentinel. The render kept showing the same
+        // tail row (clamped to `max_scroll` every frame regardless), so Up appeared to do
+        // nothing for roughly `usize::MAX / 2 - max_scroll` presses.
+        let mut app = App {
+            viewer: Some(ViewerState::default()), // opens at the tail: follow = true
+            ..Default::default()
+        };
+        app.viewer_geom.set(Some((100, 20))); // wrapped_len=100, body_h=20 → max_scroll=80
+        app.viewer_key(KeyKind::Up);
+        let v = app.viewer.as_ref().unwrap();
+        assert_eq!(
+            v.scroll, 79,
+            "one Up press from a freshly opened (tailing) viewer must move up exactly one line"
+        );
+        assert!(!v.follow, "scrolling up pauses follow");
     }
 
     #[test]

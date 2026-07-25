@@ -6,6 +6,41 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A mobile fix could reach `main` and never reach a phone, silently.** The iOS OTA fired only on
+  a push touching `mobile/src/**` or `mobile/assets/**`, and refusing to publish wrote a line to the
+  step summary — which nobody opens — so the run went green either way. #890 is the concrete case:
+  it changed 17 files under `mobile/src/`, no `eas-update` run was ever created for its merge commit,
+  and the OTA had to be dispatched by hand hours later. Three changes close it: `release.yml` now
+  hands off to `eas-update.yml` after publishing, so every release either ships the matching OTA or
+  states why it cannot; a refusal emits a `::warning` naming the owed native build instead of a
+  buried summary line; and the push filter widened to `mobile/**` so a native-config-only change
+  produces a loud "native build required" run rather than nothing at all. The release hand-off
+  passes `base_ref`, so it is classified by the same OTA-safety guard as a push — tying the OTA to
+  releases must not become a way around the guard that stops a JS bundle expecting native code the
+  installed binary does not have.
+- **A Grok OAuth account hop replayed output the user had already seen.** `xai_oauth.rs` shared
+  `codex_oauth.rs`'s hop-replay defect and not merely a resembling one: both route through
+  `oauth_responses.rs`, where an in-stream `error`/`response.failed` SSE event is classified by
+  message text into `Unavailable`/`RateLimited` — both of which `should_hop_account` accepts. A
+  mid-stream failure after partial visible output therefore hopped to the next account, which
+  re-streamed the reply from the top into the same sink. The hop guard now also requires that
+  nothing visible has been streamed yet.
+- **The workflow view re-wrapped its zoomed transcript twice on every frame** — once to measure
+  `wrapped_len`, then again inside `transcript_lines`, with no memoisation. Cached on
+  `(selected, wrap_width, revision)`, matching the activity viewer.
+- **`Up` did nothing in a freshly opened activity viewer.** The scroll offset starts at a
+  `usize::MAX / 2` tail sentinel, and the clamp that keeps the view at the bottom was applied to a
+  local copy that was never written back — so `Up` decremented 9223372036854775807 and the view did
+  not move. `Up`/`k`/`PageUp` now pin the offset to the real tail before scrolling.
+- **Git review over Forge Anywhere failed 100% of the time behind a retry button that could never
+  succeed.** `/api/git/*` is not in the Anywhere bridge's `RouteId` enum, so every request returned
+  the raw `Forge Anywhere route is not allowlisted: GET /api/git/status` as though it were transient.
+  The dock now detects the relay up front and explains that git review needs a direct connection.
+  (Unlike the terminal dock, this never crashed: the git hooks reject a Promise where the terminal
+  threw synchronously out of a `useEffect`.)
+
 ## [2.10.1] - 2026-07-25
 
 Ships everything listed under 2.10.0 below. **2.10.0 was tagged but never published**: its

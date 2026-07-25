@@ -28,7 +28,7 @@ use crate::oauth_responses::{
 };
 use crate::{
     bundled_http_client, CompletionOptions, EventSink, ModelResponse, Provider, ProviderError,
-    ToolSpec,
+    StreamEvent, ToolSpec,
 };
 
 /// The `xai-oauth::` model-id namespace [`crate::DispatchProvider`] routes on.
@@ -537,6 +537,24 @@ fn seed_models() -> Vec<String> {
         .collect()
 }
 
+/// Wrap `inner` so the caller can tell whether anything user-visible was already streamed by the
+/// time a request fails — the condition that decides whether the next-account hop is still safe.
+/// A hop taken after the first delta would replay the reply from the beginning into the same
+/// sink, so once `streamed` is set the caller must surface the error instead of retrying. Mirrors
+/// `codex_oauth`'s `watch_visible_output` (kept as a local copy since that one is private to its
+/// own module). Only Text/Reasoning count: `ProviderActivity` is a private heartbeat.
+fn watch_visible_output<'a>(
+    inner: &'a mut EventSink<'_>,
+    streamed: &'a mut bool,
+) -> Box<EventSink<'a>> {
+    Box::new(move |event: StreamEvent| {
+        if matches!(event, StreamEvent::Text(_) | StreamEvent::Reasoning(_)) {
+            *streamed = true;
+        }
+        inner(event);
+    })
+}
+
 /// One HTTP+SSE completion against the Responses endpoint with a fixed bearer token.
 async fn execute_responses_request(
     http: &reqwest::Client,
@@ -596,8 +614,15 @@ impl Provider for XaiOauthProvider {
         let mut body =
             build_responses_request(model, messages, tools, opts, self.max_output_tokens);
 
+        // Set once an attempt below puts text/reasoning on screen; from then on a hop would
+        // replay it into the same sink — see `watch_visible_output`.
+        let mut streamed = false;
+
         // First attempt with the picked account.
-        let mut first = execute_responses_request(&self.http, &url, &token, &body, on_event).await;
+        let mut first = {
+            let mut watched = watch_visible_output(on_event, &mut streamed);
+            execute_responses_request(&self.http, &url, &token, &body, &mut *watched).await
+        };
 
         // xAI's Responses surface has evolved independently of OpenAI's. Prefer the stable
         // per-session `prompt_cache_key`, but if this deployment explicitly rejects that optional
@@ -615,7 +640,10 @@ impl Provider for XaiOauthProvider {
                 provider = XAI_OAUTH_NAMESPACE,
                 "provider rejected prompt_cache_key; retrying with automatic prefix caching"
             );
-            first = execute_responses_request(&self.http, &url, &token, &body, on_event).await;
+            first = {
+                let mut watched = watch_visible_output(on_event, &mut streamed);
+                execute_responses_request(&self.http, &url, &token, &body, &mut *watched).await
+            };
         }
 
         // On 429 or a connection-level Unavailable (connect timeout, stream stall/drop): if ≥2
@@ -624,9 +652,10 @@ impl Provider for XaiOauthProvider {
         // intra-provider hop, then surface the error so the mesh wait/failover chain runs once.
         // A stall is often per-connection/per-session, so a fresh account's fresh edge session
         // can route around it. 401/403 stay permanent Auth — never rotated (see
-        // `should_hop_account`).
+        // `should_hop_account`). Once anything has been shown (`streamed`) the retry is no longer
+        // ours to take — surface the error and let forge-core's failover own it instead.
         match first {
-            Err(ref e) if should_hop_account(e) && pool.has_rotation() => {
+            Err(ref e) if should_hop_account(e) && pool.has_rotation() && !streamed => {
                 let token2 = self.pick_access_token(&pool).await?;
                 execute_responses_request(&self.http, &url, &token2, &body, on_event).await
             }
@@ -1113,6 +1142,65 @@ mod tests {
             .expect_err("401 is permanent");
         assert!(matches!(err, ProviderError::Auth(_)), "got {err:?}");
         assert_eq!(auth_fail.calls(), 1, "must not hop accounts on Auth");
+    }
+
+    /// Account A streams a visible delta and only then dies mid-stream. The in-stream error
+    /// classifies as `Unavailable` (hoppable), but hopping now would replay the reply from the
+    /// top into the same sink and the user would read it twice.
+    fn partial_then_stream_error_sse() -> String {
+        "event: response.output_text.delta\ndata: {\"delta\":\"the first half\"}\n\n\
+         event: response.failed\ndata: {\"response\":{\"error\":{\"message\":\"upstream overload\"}}}\n\n"
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn mid_stream_failure_after_visible_output_does_not_replay_into_the_same_sink() {
+        let server = httpmock::MockServer::start();
+        let a_hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/v1/responses")
+                .header("authorization", "Bearer at-a");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(partial_then_stream_error_sse());
+        });
+        let b_hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/v1/responses")
+                .header("authorization", "Bearer at-b");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(ok_sse());
+        });
+
+        let store = memory_store(&[("acct-a", "a"), ("acct-b", "b")], "acct-a");
+        let provider = XaiOauthProvider::new()
+            .with_api_base(server.base_url() + "/v1")
+            .with_accounts(store);
+
+        let mut deltas: Vec<String> = Vec::new();
+        let mut sink = |event: StreamEvent| {
+            if let StreamEvent::Text(t) = event {
+                deltas.push(t);
+            }
+        };
+        let err = provider
+            .complete("xai-oauth::grok-4", &[Message::user("hi")], &[], &mut sink)
+            .await
+            .expect_err("a failure after visible output must surface, not hop");
+
+        assert!(matches!(err, ProviderError::Unavailable(_)), "got {err:?}");
+        assert_eq!(
+            deltas,
+            vec!["the first half".to_string()],
+            "the already-streamed prefix must be emitted exactly once"
+        );
+        assert_eq!(a_hit.calls(), 1);
+        assert_eq!(
+            b_hit.calls(),
+            0,
+            "the second account must not re-stream the reply from the start"
+        );
     }
 
     #[test]

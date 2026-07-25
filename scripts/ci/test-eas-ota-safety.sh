@@ -143,6 +143,38 @@ for base_case in all_zero empty; do
   expect "$base_case" ota_changed false
 done
 
+# release.yml's post-publish hand-off dispatches with `base_ref` set. That dispatch must be
+# classified exactly like a push: an unconditional trust would turn "tie the OTA to the release"
+# into a bypass of this entire guard, publishing JS that expects native code the installed binary
+# does not have. It also passes a TAG, not a sha, so the range resolution has to accept a ref name.
+dispatch_unsafe_base=$(git -C "$range_repo" rev-parse HEAD~2)
+dispatch_safe_base=$(git -C "$range_repo" rev-parse HEAD~1)
+git -C "$range_repo" tag previous-release "$dispatch_safe_base"
+
+(
+  cd "$range_repo"
+  GITHUB_OUTPUT="$scratch/dispatch_unsafe" \
+    EVENT_NAME=workflow_dispatch \
+    BASE_SHA="$dispatch_unsafe_base" \
+    HEAD_SHA="$range_head" \
+    "$classifier" >/dev/null
+)
+expect dispatch_unsafe safe false
+expect dispatch_unsafe ota_changed true
+
+for dispatch_base in "$dispatch_safe_base" previous-release; do
+  (
+    cd "$range_repo"
+    GITHUB_OUTPUT="$scratch/dispatch_safe" \
+      EVENT_NAME=workflow_dispatch \
+      BASE_SHA="$dispatch_base" \
+      HEAD_SHA="$range_head" \
+      "$classifier" >/dev/null
+  )
+  expect dispatch_safe safe true
+  expect dispatch_safe ota_changed true
+done
+
 invalid_output="$scratch/invalid_range"
 if (
   cd "$range_repo"

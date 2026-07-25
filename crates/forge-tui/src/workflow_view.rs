@@ -99,6 +99,19 @@ pub struct WorkflowView {
     /// Zoom scroll geometry `(wrapped_len, body_h)` recorded by the render path, so a downward
     /// scroll can re-arm follow at the tail (same mechanism as `App::viewer_geom`).
     pub zoom_geom: std::cell::Cell<Option<(usize, u16)>>,
+    /// Memoized wrap of the Enter-zoom's selected agent transcript, keyed on
+    /// `(selected, wrap_width, revision)` — same key as `App`'s `ViewerWrapCache`. Without this the
+    /// zoom re-wrapped the selected row's log TWICE every frame (once to measure `wrapped_len`,
+    /// again inside `transcript_lines`), at the render loop's full rate.
+    zoom_wrap: std::cell::RefCell<ZoomWrapCache>,
+}
+
+/// Cached wrap of the workflow zoom's selected agent transcript. `None` key while the zoom is
+/// closed so a session that zoomed into a long agent log doesn't keep that copy alive afterwards.
+#[derive(Debug, Clone, Default)]
+struct ZoomWrapCache {
+    key: Option<(usize, u16, u64)>,
+    rows: Vec<TextLine<'static>>,
 }
 
 impl WorkflowView {
@@ -319,6 +332,40 @@ impl WorkflowView {
             .collect()
     }
 
+    /// Wrap the zoom's selected transcript to `width`, reusing the previous frame's rows unless
+    /// the selection, the width, or that row's revision changed. Mirrors
+    /// `App::ensure_viewer_wrapped`. `views` must be the same list `selected` indexes into, from
+    /// this frame.
+    fn ensure_zoom_wrapped(
+        &self,
+        views: &[TranscriptView],
+        selected: usize,
+        width: u16,
+    ) -> std::cell::Ref<'_, ZoomWrapCache> {
+        let key = views.get(selected).map(|v| (selected, width, v.revision));
+        {
+            let mut c = self.zoom_wrap.borrow_mut();
+            if c.key != key {
+                c.rows = match key {
+                    Some(_) => {
+                        crate::transcript::wrap_lines(&views[selected].lines, width as usize)
+                    }
+                    None => Vec::new(),
+                };
+                c.key = key;
+            }
+        }
+        self.zoom_wrap.borrow()
+    }
+
+    /// Drop the zoom's wrapped rows once it closes, so the row's log copy doesn't outlive it.
+    fn forget_zoom_wrapped(&self) {
+        let mut c = self.zoom_wrap.borrow_mut();
+        if c.key.is_some() {
+            *c = ZoomWrapCache::default();
+        }
+    }
+
     /// Same tail-re-follow the Ctrl+O viewer uses: a downward scroll reaching the last full page
     /// clamps and re-arms follow, using the geometry the render path recorded.
     pub fn zoom_refollow_at_tail(&mut self) {
@@ -397,20 +444,20 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
         if !views.is_empty() {
             let selected = wf.selected.min(views.len() - 1);
             let scroll = if z.follow { usize::MAX / 2 } else { z.scroll };
-            let wrapped_len = crate::transcript::wrap_lines(
-                &views[selected].lines,
-                area.width.saturating_sub(1) as usize,
-            )
-            .len();
-            wf.zoom_geom
-                .set(Some((wrapped_len, area.height.saturating_sub(3).max(1))));
+            let width = area.width.saturating_sub(1);
+            let wrapped = wf.ensure_zoom_wrapped(&views, selected, width);
+            wf.zoom_geom.set(Some((
+                wrapped.rows.len(),
+                area.height.saturating_sub(3).max(1),
+            )));
             f.render_widget(
-                Paragraph::new(crate::transcript::transcript_lines(
+                Paragraph::new(crate::transcript::transcript_lines_from_wrapped(
                     &views,
                     selected,
                     scroll,
                     area.height,
                     area.width,
+                    &wrapped.rows,
                 )),
                 area,
             );
@@ -418,6 +465,7 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
         }
     }
     wf.zoom_geom.set(None);
+    wf.forget_zoom_wrapped();
 
     let spin = SPINNER[app.tick % SPINNER.len()];
     let (running, done, failed, cost) = wf.totals();
@@ -753,6 +801,53 @@ mod tests {
         wf.on_interrupt();
         wf.begin(Some("next".into()));
         assert!(wf.active && wf.rows.is_empty());
+    }
+
+    fn render_zoom_screen(app: &App, w: u16, h: u16) -> String {
+        use ratatui::backend::TestBackend;
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render_workflow_view(f, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    /// The workflow zoom memoizes the wrap of the entry it's showing (mirrors `App`'s in-loop
+    /// viewer cache). Without it, every frame re-wrapped the selected row's log TWICE — once to
+    /// measure `wrapped_len`, again inside `transcript_lines` — at the render loop's full rate.
+    #[test]
+    fn zoom_wrap_cache_reuses_rows_when_revision_is_unchanged() {
+        let mut app = App::default();
+        started(&mut app.workflow, "a", None);
+        app.workflow.on_progress(
+            "a",
+            &(0..40)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        app.workflow.zoom = Some(WfZoom::default());
+
+        let first = render_zoom_screen(&app, 60, 20);
+        assert!(first.contains("line 39"), "tail line rendered: {first}");
+        let key_after_first = app.workflow.zoom_wrap.borrow().key;
+        assert!(key_after_first.is_some(), "the wrap was cached");
+
+        // Rewrite the visible (tail) cached line WITHOUT changing `log.len()` (the revision) —
+        // only reachable from inside this module. If the wrap were rebuilt every frame this
+        // would show up immediately; a cache-hit must keep showing the old (cached) row.
+        let last = app.workflow.rows[0].log.len() - 1;
+        app.workflow.rows[0].log[last] = "rewritten behind the cache".into();
+        let second = render_zoom_screen(&app, 60, 20);
+        assert_eq!(
+            second, first,
+            "an unchanged revision must reuse the wrapped rows, not re-wrap the mutated log"
+        );
+        assert_eq!(app.workflow.zoom_wrap.borrow().key, key_after_first);
     }
 
     /// Regression: the >MAX_ROWS eviction pass could drop the SELECTED row (if done and old),

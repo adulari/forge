@@ -46,8 +46,17 @@ version is independent and a new binary is only built manually when native chang
   CHANGELOG section, then appends GitHub's auto PR list (hybrid). TUI binaries + desktop bundles +
   `latest.json` all attach to this same release.
 - **Mobile OTA** (iOS): `.github/workflows/eas-update.yml` publishes JavaScript/assets to the
-  `production` channel for OTA-safe mobile-source changes on `main`. A main-only manual dispatch is
-  the recovery path when an automatic publish failed; the runtime fingerprint still gates delivery.
+  `production` channel. It fires two ways: on any `mobile/**` push to `main`, and from `release.yml`'s
+  `ota` job, which dispatches it with `base_ref` set to the previous published release so the
+  OTA-safety guard classifies the entire span since that release. Every release therefore either
+  ships the matching OTA or says out loud why it cannot — a push event that never arrives can no
+  longer leave phones on stale JS in silence. A dispatch with `base_ref` is classified exactly like
+  a push, so it is not a way around the guard; a dispatch with `base_ref` EMPTY skips
+  classification and trusts the operator, which is the recovery path below. The runtime fingerprint
+  gates delivery in every case.
+  - If the guard refuses (`OTA not published — native build required` warning), the change touched
+    native/dependency/build config. Run Xcode Cloud, then refresh the `IOS_OTA_RUNTIME_VERSION`
+    repository variable from the new archive's fingerprint before the OTA can reach devices.
 - **TestFlight** (iOS): `scripts/testflight-assign-group.mjs` reads the same section and sets the
   build's "What to Test" note via the ASC API (best-effort). Trigger Xcode Cloud manually only
   when native changes require a new binary; the IPA is not a GitHub Release asset.
