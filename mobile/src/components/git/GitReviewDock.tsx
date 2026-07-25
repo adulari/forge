@@ -16,7 +16,9 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { GitCommitBox } from "./GitCommitBox";
 import { GitDiffPane } from "./GitDiffPane";
 import { GitFileList, type GitSelection } from "./GitFileList";
+import { isGitReviewSupported } from "./gitReviewSupport";
 import { type GitStatusResponse } from "../../lib/api";
+import { useAuth } from "../../lib/auth";
 import { useCommitStaged, useGitDiff, useGitStatus, useStagePaths, useUnstagePaths } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
@@ -45,12 +47,19 @@ function firstSelection(status: GitStatusResponse): GitSelection | null {
 
 export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.Element {
   const tokens = useTokens();
+  const { baseUrl } = useAuth();
   const [width, setWidth] = useState(0);
   const [selection, setSelection] = useState<GitSelection | null>(null);
   const [message, setMessage] = useState("");
 
-  const status = useGitStatus(sessionId);
-  const diff = useGitDiff(sessionId, selection?.path ?? null, selection?.staged ?? false);
+  // Every row here comes from `/api/git/*`, which — like the terminal PTY — the Anywhere bridge
+  // does not carry (no git variant of RouteId in forge-anywhere-protocol/src/bridge.rs). Left
+  // unguarded, every request fails identically forever with an internal "route is not
+  // allowlisted" error and a dead retry button, so the dock decides up front instead.
+  const supported = isGitReviewSupported(baseUrl);
+
+  const status = useGitStatus(supported ? sessionId : null);
+  const diff = useGitDiff(supported ? sessionId : null, selection?.path ?? null, selection?.staged ?? false);
   const stage = useStagePaths();
   const unstage = useUnstagePaths();
   const commit = useCommitStaged();
@@ -74,6 +83,17 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
       return firstSelection(data);
     });
   }, [data]);
+
+  if (!supported) {
+    return (
+      <View style={styles.empty}>
+        <EmptyState
+          icon={GitBranch}
+          message="Git review needs a direct connection to this host. Forge Anywhere carries sessions only — connect over your network or a tunnel to review changes."
+        />
+      </View>
+    );
+  }
 
   const stacked = width > 0 && width < STACK_BELOW;
   const indexBusy = stage.isPending || unstage.isPending;
@@ -165,6 +185,7 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
 }
 
 const styles = StyleSheet.create({
+  empty: { flex: 1, justifyContent: "center" },
   root: { flex: 1, flexDirection: "row", minHeight: 0 },
   rootStacked: { flexDirection: "column" },
   column: { flexShrink: 0 },

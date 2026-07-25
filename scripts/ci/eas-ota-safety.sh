@@ -24,7 +24,11 @@ classify_path() {
   esac
 }
 
-if [[ ${EVENT_NAME:-} == workflow_dispatch ]]; then
+# An operator-driven dispatch with no base is trusted (RELEASING.md §6 recovery). An AUTOMATED
+# dispatch — release.yml's post-publish hand-off — passes a base so it is classified exactly like a
+# push; otherwise tying the OTA to releases would have quietly bypassed the very guard that stops a
+# JS bundle expecting new native code from reaching an older installed binary.
+if [[ ${EVENT_NAME:-} == workflow_dispatch && -z ${BASE_SHA:-} ]]; then
   safe=true
   ota_changed=true
 elif (($#)); then

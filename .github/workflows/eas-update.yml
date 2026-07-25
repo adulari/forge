@@ -17,13 +17,27 @@ on:
   push:
     branches:
       - main
+    # Deliberately WIDER than the OTA-safe set (`mobile/src/**`, `mobile/assets/**`). A push that
+    # changes only `mobile/app.config.ts` cannot ship an OTA — but it does mean a native build is
+    # now owed, and with a narrow filter that push produced no run, no summary, and no warning at
+    # all. The guard below still decides what actually publishes; the wider filter only guarantees
+    # that "this change needs a native build" is *stated somewhere* instead of being silence.
     paths:
-      - "mobile/src/**"
-      - "mobile/assets/**"
-  # Main-only manual recovery when an automatic publish did not run or failed (see
-  # RELEASING.md §6). The runtimeVersion fingerprint still gates delivery, so a dispatch
-  # only reaches binaries whose native layer matches — never dispatch from a topic branch.
+      - "mobile/**"
+  # Manual recovery when an automatic publish did not run or failed (see RELEASING.md §6), and the
+  # post-release hand-off from release.yml. The runtimeVersion fingerprint still gates delivery, so
+  # a dispatch only reaches binaries whose native layer matches — never dispatch from a topic branch.
   workflow_dispatch:
+    inputs:
+      base_ref:
+        description: >-
+          Optional ref to classify the diff against (release.yml passes the previous release tag).
+          When set, the OTA-safety guard runs over base_ref..HEAD exactly as it does for a push, so
+          an automated dispatch cannot publish JS that expects native code the installed binary
+          does not have. Leave EMPTY for operator-driven recovery, which trusts the operator to
+          have confirmed the runtimeVersion fingerprint by hand.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -52,13 +66,22 @@ jobs:
         working-directory: .
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.before }}
+          # `inputs` is empty on push, so this resolves to the push base there and to the
+          # release hand-off's previous tag on an automated dispatch.
+          BASE_SHA: ${{ inputs.base_ref || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
         run: bash scripts/ci/eas-ota-safety.sh
 
+      # A skip means installed phones keep running the OLD JS while main has moved on, so it must be
+      # loud. It used to write only to the step summary, which nobody opens: the run went green and
+      # the owed native build was invisible. `::warning` surfaces it on the run, in the checks list,
+      # and in the Actions inbox without failing a release-adjacent workflow.
       - name: Skip incompatible OTA
         if: steps.guard.outputs.safe != 'true'
-        run: echo 'Skipped OTA publication because the push includes native, dependency, or build configuration changes. Run the required native Xcode Cloud build first.' >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          message='Skipped OTA publication: this change includes native, dependency, or build configuration changes, so the installed binary cannot run it. A native Xcode Cloud build + IOS_OTA_RUNTIME_VERSION refresh is required before mobile changes reach devices.'
+          echo "::warning title=OTA not published — native build required::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
 
       - name: No OTA content to publish
         if: steps.guard.outputs.safe == 'true' && steps.guard.outputs.ota_changed != 'true'

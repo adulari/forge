@@ -17,6 +17,7 @@ import { useToast } from "../../components/ds/ToastHost";
 import { useAuth } from "../../lib/auth";
 import { checkNotifyPermission, type NotifyPermission } from "../../lib/notify";
 import { enablePush, disablePush, getPushStatus, initPush, isPushSupported, type PushSubscriptionState } from "../../lib/push";
+import { PushRegistrationError } from "../../lib/push/pushErrors";
 import { useAnywhere } from "../../lib/anywhere/store";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { useEmberdot } from "../../theme/motion";
@@ -106,6 +107,14 @@ export default function AnywhereNotificationsScreen() {
         if (value && next !== "subscribed") {
           toast.show("Couldn't enable notifications — check the system permission prompt.", { tone: "danger" });
         }
+      } catch (err) {
+        // Without this the toggle threw into an unhandled rejection and simply snapped back.
+        // PushRegistrationError means the OS declined to register the app despite permission
+        // being granted, so its own message is the only accurate thing to show.
+        toast.show(
+          err instanceof PushRegistrationError ? err.message : "Couldn't enable notifications — try again.",
+          { tone: "danger" },
+        );
       } finally {
         setPushBusy(false);
       }

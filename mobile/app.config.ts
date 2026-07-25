@@ -25,11 +25,23 @@ const config: ExpoConfig = {
   orientation: "portrait",
   icon: "./assets/icon.png",
   userInterfaceStyle: "automatic",
-  // Root native view background, painted before any JS/theme runs. No light/dark split at
-  // this level (Expo's top-level `backgroundColor` is a single static value), so this
-  // matches the dark splash below. Value = theme/tokens.ts darkTokens.bg0 ("#09090B") — the
-  // same token Screen.tsx paints every screen's root with. Keep in sync by hand: this file
-  // can't import from src/theme without pulling RN into the (Node-executed) config context.
+  // Root native view background — the surface between iOS tearing down the launch storyboard and
+  // React's first painted frame. Left unset, RN's root view keeps its own default (white), which
+  // is the "default Expo screen" that flashed before the Face ID prompt on every cold start.
+  //
+  // This key ONLY takes effect if `expo-system-ui` is installed. Without it, prebuild's
+  // withIosRootViewBackgroundColor takes its `else` branch — `warnSystemUIMissing`, a warning in
+  // the build log — and writes nothing, so this value sat here inert for its whole life
+  // (verified: `RCTRootViewBackgroundColor` was absent from the generated Info.plist, and is
+  // 0xff09090b now that the package is a dependency). Removing expo-system-ui silently restores
+  // the white flash.
+  //
+  // Single static value, no light/dark split, so it matches the dark splash and the app's primary
+  // appearance. Value = theme/tokens.ts darkTokens.bg0 ("#09090B"), the same token Screen.tsx
+  // paints every screen's root with; keep in sync by hand, since this file can't import from
+  // src/theme without pulling RN into the (Node-executed) config context. RESIDUAL: a device in
+  // light mode gets one dark frame here against the light "#F5F4F1" splash. Fixing that properly
+  // needs an appearance-aware root colour, which is a custom native mod rather than a config key.
   backgroundColor: "#09090B",
   ios: {
     bundleIdentifier: BUNDLE_ID,
@@ -37,6 +49,25 @@ const config: ExpoConfig = {
     appleTeamId: "95VXXPD28Y",
     entitlements: {
       "com.apple.security.application-groups": [APP_GROUP],
+      // APNs environment. expo-notifications' plugin writes `development` here and EAS Build
+      // rewrites it to `production` from the signing credentials — but Forge builds iOS on Xcode
+      // Cloud, so nothing performed that rewrite and every distribution archive shipped a
+      // development entitlement. A distribution-signed app whose entitlement says `development`
+      // cannot register with production APNs: `getDevicePushTokenAsync()` rejects, and the
+      // in-app notification toggle silently refused to turn on while iOS Settings still showed
+      // the permission as granted (permission and entitlement are unrelated).
+      //
+      // The previous fix was to hand-edit the generated pbxproj so Release pointed at a separate
+      // `Forge.Release.entitlements`. prebuild deletes that file and repoints Release back at
+      // this one on every single build, so it never survived to a real archive. Declaring it here
+      // is the only form that does. `scripts/ci/verify-ios-entitlements.sh` fails the build if
+      // prebuild ever produces anything other than `production`.
+      //
+      // Consequence, deliberately accepted: local Xcode debug builds would need `development` to
+      // sign against a development profile. Nothing builds this app that way — Xcode Cloud always
+      // produces distribution archives and mobile-sidestore.yml archives unsigned
+      // (CODE_SIGNING_ALLOWED=NO), so a single production value is correct for every real build.
+      "aps-environment": "production",
     },
     infoPlist: {
       NSSupportsLiveActivities: true,
@@ -146,13 +177,17 @@ const config: ExpoConfig = {
         // Default (light) variant uses the light theme's bg0 (theme/tokens.ts
         // lightTokens.bg0, "#F5F4F1" — the same token Screen.tsx paints every screen's
         // root with) instead of the dark bg — this was hardcoded to the dark color for
-        // both variants, so light-theme users got a dark flash on every cold start. NOTE:
-        // splash-icon.png is a light-gray mark drawn for the dark bg; on this light bg
-        // it's low-contrast (near-invisible) rather than wrong-colored — a barely-visible
-        // glyph for ~1 frame beats an incongruous dark flash, but a proper light-variant
-        // asset (dark-on-transparent) would fix this fully.
+        // both variants, so light-theme users got a dark flash on every cold start.
+        //
+        // Each variant gets its OWN mark. splash-icon.png is drawn in a light gray for the
+        // dark bg; on the light bg it measured 1.41:1 — effectively invisible, not merely
+        // dim. splash-icon-light.png is the same geometry re-inked in lightTokens.ink
+        // ("#1C1B19") at 15.65:1, matching the dark pairing's 14.69:1. Alpha carries each
+        // pixel's original brightness so the mark's internal weighting survives the
+        // inversion. Regenerate with scripts/gen-splash-light-variant.py if the source mark
+        // changes; both are baked in at prebuild, so an OTA can never update them.
         backgroundColor: "#F5F4F1",
-        image: "./assets/splash-icon.png",
+        image: "./assets/splash-icon-light.png",
         imageWidth: 200,
         // theme/tokens.ts darkTokens.bg0 ("#09090B") — was a stale pre-Machined hex.
         dark: { backgroundColor: "#09090B", image: "./assets/splash-icon.png" },

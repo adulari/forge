@@ -56,6 +56,7 @@ import {
   isPushSupported,
   type PushSubscriptionState,
 } from "../../lib/push";
+import { PushRegistrationError } from "../../lib/push/pushErrors";
 import { ApiError } from "../../lib/api";
 import { haptics, initHaptics, isHapticsEnabled, setHapticsEnabled } from "../../lib/haptics";
 import {
@@ -471,11 +472,14 @@ export default function SettingsScreen() {
         }
       } catch (err) {
         // A thrown error (vs. a resolved non-"subscribed" state) means permission was fine but
-        // the subscribe/unsubscribe call itself failed — say so, rather than reusing the
-        // permission-denied copy above.
-        toast.show(err instanceof ApiError ? err.message : "couldn't reach the server — try again.", {
-          tone: "danger",
-        });
+        // something after it failed — say which, rather than reusing the permission-denied copy
+        // above. PushRegistrationError is the OS refusing to register the app at all, which is
+        // neither a permission problem nor a reachability one, so it carries its own message.
+        const message =
+          err instanceof PushRegistrationError || err instanceof ApiError
+            ? err.message
+            : "couldn't reach the server — try again.";
+        toast.show(message, { tone: "danger" });
       } finally {
         setPushBusy(false);
       }
