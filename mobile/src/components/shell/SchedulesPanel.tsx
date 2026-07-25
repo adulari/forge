@@ -7,6 +7,7 @@ import React, { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { type CreateScheduleRequest, type ScheduleRow } from "../../lib/api";
+import { nextCronRun } from "../../lib/cron";
 import {
   useCreateSchedule,
   useDeleteSchedule,
@@ -31,9 +32,14 @@ function epochMs(value: number | null): number | null {
 }
 
 /**
- * Next fire time for the two spec shapes that can be computed without a cron library
- * (`every:<seconds>` and `daily:HH:MM`). Real cron expressions return null and the row falls
- * back to showing the last run — a guessed "next" would be worse than none.
+ * Next fire time for a stored spec: `every:<seconds>` and `daily:HH:MM` are arithmetic, and
+ * `cron:<expr>` goes through the 5-field parser in lib/cron. `cron:` is a shared prefix for two
+ * dialects (crates/forge-cli/src/cli/commands/schedule.rs): standard 5-field cron, which the daemon
+ * translates into the host's native trigger — the same grammar lib/cron implements, so what we
+ * label here is what the OS timer fires — and systemd's own `OnCalendar=` (`Mon *-*-* 09:00:00`),
+ * kept for schedules created before that translation existed. Only the first parses here; an
+ * OnCalendar row returns null and falls back to showing the last run, because a guessed "next"
+ * would be worse than none. `spec_label` names which dialect the daemon recognised.
  */
 function nextRunMs(row: ScheduleRow, now: number): number | null {
   if (!row.enabled) return null;
@@ -55,6 +61,10 @@ function nextRunMs(row: ScheduleRow, now: number): number | null {
     return next.getTime();
   }
 
+  if (row.cron.startsWith("cron:")) {
+    return nextCronRun(row.cron.slice("cron:".length), now);
+  }
+
   return null;
 }
 
@@ -72,15 +82,20 @@ function trailingLabel(row: ScheduleRow, now: number = Date.now()): string {
 }
 
 /** Accepts the same spec strings `forge schedule` stores (`every:1800`, `daily:09:00`,
- * `cron:0 2 * * *`) plus the bare forms, and maps them onto the create endpoint's one-of. */
+ * `cron:0 2 * * *`) plus the bare forms, and maps them onto the create endpoint's one-of. Anything
+ * unrecognised goes to `cron`, which the daemon reads as standard cron first and as an
+ * `OnCalendar=` expression second — so both dialects can be typed here. */
 function parseCadence(raw: string): Pick<CreateScheduleRequest, "every" | "at" | "cron"> | null {
   const value = raw.trim();
   if (!value) return null;
-  if (value.startsWith("every:")) return { every: value.slice("every:".length) };
+  // The stored form counts seconds (`every:1800`) while the endpoint wants the `--every` shorthand
+  // (`30m`), so a bare number is spelled out as seconds rather than sent as-is and rejected.
+  const every = (interval: string) => ({ every: /^\d+$/.test(interval) ? `${interval}s` : interval });
+  if (value.startsWith("every:")) return every(value.slice("every:".length));
   if (value.startsWith("daily:")) return { at: value.slice("daily:".length) };
   if (value.startsWith("at:")) return { at: value.slice("at:".length) };
   if (value.startsWith("cron:")) return { cron: value.slice("cron:".length) };
-  if (/^\d+[smhd]?$/.test(value)) return { every: value };
+  if (/^\d+[smhd]?$/.test(value)) return every(value);
   if (/^\d{1,2}:\d{2}$/.test(value)) return { at: value };
   return { cron: value };
 }
@@ -149,8 +164,13 @@ function CreateScheduleForm({ onDone }: { onDone: () => void }) {
         value={cadence}
         onChangeText={setCadence}
         mono
-        placeholder="every:1800 · daily:02:00 · cron:0 6 * * 1"
+        placeholder="every:30m · daily:02:00 · 0 6 * * 1"
       />
+      {/* Standard 5-field cron is translated into the host's native timer, so it is the form worth
+          advertising; systemd OnCalendar strings still install, but only on a Linux daemon. */}
+      <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>
+        {"every:30m · daily:HH:MM · cron: minute hour day-of-month month day-of-week"}
+      </Text>
       {create.isError ? (
         <Text style={[typeScale.monoMeta, { color: tokens.danger }]}>
           {create.error instanceof Error ? create.error.message : "Could not create the schedule."}

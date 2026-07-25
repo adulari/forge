@@ -152,7 +152,7 @@ private struct ForgeOutlineButton: View {
 
     var body: some View {
         Text(label)
-            .font(.system(size: 12.5, weight: emphasis == .primary ? .semibold : .regular))
+            .font(ForgeMachined.sans(12.5, weight: emphasis == .primary ? .semibold : .regular))
             .foregroundStyle(emphasis == .primary ? ForgeMachined.ink : ForgeMachined.ink2)
             .frame(maxWidth: .infinity)
             .frame(height: 38)
@@ -176,7 +176,7 @@ private struct ForgePillButton: View {
 
     var body: some View {
         Text(label)
-            .font(.system(size: 11.5, weight: .semibold))
+            .font(ForgeMachined.sans(11.5, weight: .semibold))
             .foregroundStyle(tint)
             .frame(maxWidth: .infinity)
             .frame(height: 30)
@@ -215,7 +215,7 @@ private struct ForgePermissionCard: View {
             HStack(spacing: 10) {
                 ForgeSparkMark(size: 12)
                 Text(ForgeActivityState.title(attributes))
-                    .font(.system(size: 13.5, weight: .semibold))
+                    .font(ForgeMachined.sans(13.5, weight: .semibold))
                     .foregroundStyle(ForgeMachined.ink)
                     .lineLimit(1)
                 Spacer(minLength: 6)
@@ -224,7 +224,7 @@ private struct ForgePermissionCard: View {
 
             if let question = state.question, !question.isEmpty {
                 Text(question)
-                    .font(.system(size: 12.5))
+                    .font(ForgeMachined.sans(12.5))
                     .foregroundStyle(ForgeMachined.inkBody)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -279,7 +279,7 @@ private struct ForgeForgingCard: View {
             HStack(spacing: 9) {
                 ForgeStatusDot(color: ForgeMachined.accent, size: 5)
                 Text(ForgeActivityState.title(attributes))
-                    .font(.system(size: 13.5, weight: .semibold))
+                    .font(ForgeMachined.sans(13.5, weight: .semibold))
                     .foregroundStyle(ForgeMachined.ink)
                     .lineLimit(1)
                 Spacer(minLength: 6)
@@ -304,11 +304,11 @@ private struct ForgeIdleCard: View {
             ForgeStatusDot(color: ForgeMachined.success, size: 5)
             VStack(alignment: .leading, spacing: 2) {
                 Text(ForgeActivityState.title(attributes))
-                    .font(.system(size: 13.5, weight: .semibold))
+                    .font(ForgeMachined.sans(13.5, weight: .semibold))
                     .foregroundStyle(ForgeMachined.ink)
                     .lineLimit(1)
                 Text("Session complete")
-                    .font(.system(size: 11.5))
+                    .font(ForgeMachined.sans(11.5))
                     .foregroundStyle(ForgeMachined.ink2)
                     .lineLimit(1)
             }
@@ -330,14 +330,14 @@ private struct ForgeSessionActivityExpandedBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             Text(ForgeActivityState.title(attributes))
-                .font(.system(size: 12.5, weight: .semibold))
+                .font(ForgeMachined.sans(12.5, weight: .semibold))
                 .foregroundStyle(ForgeMachined.ink)
                 .lineLimit(1)
 
             if state.waiting {
                 if let question = state.question, !question.isEmpty {
                     Text(question)
-                        .font(.system(size: 11.5))
+                        .font(ForgeMachined.sans(11.5))
                         .foregroundStyle(ForgeMachined.ink2)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)

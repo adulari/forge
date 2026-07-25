@@ -325,6 +325,26 @@ CREATE TABLE IF NOT EXISTS queue_task (
 );
 CREATE INDEX IF NOT EXISTS idx_queue_task_status ON queue_task(status);
 
+-- Saved-workflow run history (`/workflow run <name>`): one row per run of a
+-- `.forge/workflows/<name>.js` script, so the workflow library can show what a workflow actually
+-- did. `status`: running → ok | failed | interrupted. Local machine state only — deliberately not
+-- in PORTABLE_METADATA_TABLES (cwd + session ids don't travel). Also created in migration_0019 for
+-- pre-existing DBs.
+CREATE TABLE IF NOT EXISTS workflow_run (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    session_id  TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+    cwd         TEXT NOT NULL,           -- the workspace root the script ran against
+    started_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    finished_at INTEGER,                 -- NULL while running, and on a crash-interrupted run
+    status      TEXT NOT NULL DEFAULT 'running',
+    summary     TEXT,                    -- the script's own one-line return summary
+    phases      INTEGER NOT NULL DEFAULT 0,
+    agents      INTEGER NOT NULL DEFAULT 0,
+    cost_usd    REAL NOT NULL DEFAULT 0  -- summed over the agents that reported a cost
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_run_lookup ON workflow_run(name, cwd, started_at DESC);
+
 -- Forge Anywhere local sync outbox. Payload snapshots remain local plaintext until the worker
 -- encrypts them; provider credentials and other excluded record classes never enter this table.
 -- `uploaded_at IS NULL` is the durable worker cursor.

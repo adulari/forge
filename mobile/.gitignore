@@ -55,6 +55,10 @@ ios/**/xcuserdata/
 targets/*/Info.plist
 targets/*/generated.entitlements
 targets/*/Assets.xcassets
+# ...except the widget's, which is hand-owned: it carries UIAppFonts so the extension
+# bundle can resolve Geist/Geist Mono (the plugin only writes an Info.plist when none
+# exists, and its README declares this file unmanaged). See targets/widget/Info.plist.
+!targets/widget/Info.plist
 
 # Tauri (mobile/src-tauri/)
 src-tauri/target/

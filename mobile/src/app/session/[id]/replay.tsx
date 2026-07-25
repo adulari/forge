@@ -1,6 +1,6 @@
 // Replay segment: hosts the shared `ReplayView` (chronological log rows + mono timestamp
 // column + scrub bar — see components/session/ReplayView.tsx) against this session's live
-// `useHistory` data. Per T3.1 HANDOFF this segment owns its own Screen (edges omit "top" —
+// `useHistory` data, tool activity included. Per T3.1 HANDOFF this segment owns its own Screen (edges omit "top" —
 // the shell's header/status-strip/Segmented already consumed the top inset) and renders no
 // header of its own — the shell's SessionHeader back arrow + "Replay" Segmented tab already
 // own that chrome.
@@ -14,7 +14,10 @@ import { useHistory } from "../../../lib/queries";
 
 export default function SessionReplayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const query = useHistory(id ?? null);
+  // A replay is the record of what the session DID, so it asks for the tool rows the chat stream
+  // leaves out — calls and results both (ReplayView tells them apart by `tool_phase`). Its own
+  // cache entry, so the chat tab's plain stream is untouched by this.
+  const query = useHistory(id ?? null, { includeTools: true });
   const rows = useMemo(() => query.data?.pages.flat().slice().reverse() ?? [], [query.data?.pages]);
 
   const onEndReached = useCallback(() => {

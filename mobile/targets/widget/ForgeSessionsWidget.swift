@@ -66,7 +66,7 @@ private struct ForgeFleetRow: View {
             ForgeStatusDot(color: dotColor, size: 4)
             // The row that needs you is the only one drawn at body ink; the rest recede.
             Text(session.title.isEmpty ? "untitled session" : session.title)
-                .font(.system(size: 10.5))
+                .font(ForgeMachined.sans(10.5))
                 .foregroundStyle(session.waiting ? ForgeMachined.inkBody : ForgeMachined.ink2)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -92,7 +92,7 @@ struct ForgeSessionsWidgetView: View {
             HStack(spacing: 8) {
                 ForgeSparkMark(size: 11)
                 Text("Fleet")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(ForgeMachined.sans(11, weight: .semibold))
                     .foregroundStyle(ForgeMachined.ink)
                     .lineLimit(1)
                 Spacer(minLength: 4)
@@ -106,7 +106,7 @@ struct ForgeSessionsWidgetView: View {
 
             if entry.sessions.isEmpty {
                 Text("No sessions yet")
-                    .font(.system(size: 11))
+                    .font(ForgeMachined.sans(11))
                     .foregroundStyle(ForgeMachined.ink2)
                     .lineLimit(1)
                 Text("Open Forge to sync your fleet.")

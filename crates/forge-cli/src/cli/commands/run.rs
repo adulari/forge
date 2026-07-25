@@ -5447,6 +5447,11 @@ pub(crate) fn map_history_row(
         // Only the store can say which tool a result row came from; it stays `None` rather than
         // being inferred from the result prose when the carrier is unrecoverable.
         tool: row.tool_name,
+        // Call-vs-result only means anything on a tool row: a `ui` note written with role='tool'
+        // reads as a system line here, and tagging it would say something false about it.
+        tool_phase: (kind == "tool")
+            .then(|| row.tool_phase.map(|phase| phase.as_str().to_string()))
+            .flatten(),
     }
 }
 
@@ -6058,6 +6063,7 @@ mod tests {
             created_at: at,
             visibility: vis,
             tool_name: None,
+            tool_phase: None,
         };
         let epoch = Some(1_000);
 
@@ -6120,12 +6126,50 @@ mod tests {
                 created_at: 1_030,
                 visibility: forge_types::Visibility::Llm,
                 tool_name: Some("read_file".into()),
+                tool_phase: Some(forge_store::ToolPhase::Result),
             },
             epoch,
         );
         assert_eq!(tool.kind, "tool");
         assert_eq!(tool.tool.as_deref(), Some("read_file"));
         assert_eq!(tool.elapsed_ms, Some(30_000));
+        assert_eq!(tool.tool_phase.as_deref(), Some("result"));
+
+        // The synthesized call row that precedes it: same kind and name, distinguished only by
+        // the phase — without it a client would render the arguments as if they were output.
+        let call = map_history_row(
+            forge_store::HistoryRow {
+                seq: 5,
+                role: forge_types::Role::Tool,
+                content: r#"{"path":"a.rs"}"#.into(),
+                model: None,
+                created_at: 1_030,
+                visibility: forge_types::Visibility::Llm,
+                tool_name: Some("read_file".into()),
+                tool_phase: Some(forge_store::ToolPhase::Call),
+            },
+            epoch,
+        );
+        assert_eq!(call.kind, "tool");
+        assert_eq!(call.tool_phase.as_deref(), Some("call"));
+
+        // A `ui` note reads as a system line, so a phase on it would be a claim about a row that
+        // isn't tool activity at all.
+        let note_with_phase = map_history_row(
+            forge_store::HistoryRow {
+                seq: 6,
+                role: forge_types::Role::Tool,
+                content: "⚠ note".into(),
+                model: None,
+                created_at: 1_030,
+                visibility: forge_types::Visibility::UiOnly,
+                tool_name: None,
+                tool_phase: Some(forge_store::ToolPhase::Result),
+            },
+            epoch,
+        );
+        assert_eq!(note_with_phase.kind, "system");
+        assert_eq!(note_with_phase.tool_phase, None);
         assert_eq!(
             map_history_row(
                 row(

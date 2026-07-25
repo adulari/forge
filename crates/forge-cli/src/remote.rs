@@ -1160,6 +1160,20 @@ pub struct HistoryRow {
     /// whose call carrier is no longer recoverable from the store.
     #[serde(default)]
     pub tool: Option<String>,
+    /// Which half of the tool interaction a `kind == "tool"` row is: `"call"` (the arguments the
+    /// model sent, in `content`) or `"result"` (what came back). Only an `?include_tools=1` page
+    /// has either.
+    ///
+    /// Not folded into [`SnapTranscriptRow::meta`]'s vocabulary (`"ok"`/`"failed"` on a result,
+    /// `None` on a call) because a PERSISTED result row carries no outcome — the `tool_call` audit
+    /// table can't be paired back to a specific result row when a turn made parallel calls — so a
+    /// `meta`-less history row would be an unreadable "call or status-less result".
+    ///
+    /// `skip_serializing_if` keeps the default page (no `include_tools`) byte-identical to what it
+    /// served before this field existed; every row there would otherwise gain a `"tool_phase":null`
+    /// the bundled PWA and older clients never saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_phase: Option<String>,
 }
 
 /// The seam through which the server reads persisted transcript pages WITHOUT depending on
@@ -2597,6 +2611,7 @@ mod tests {
             kind: "assistant".into(),
             elapsed_ms: Some(4_500),
             tool: None,
+            tool_phase: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
@@ -2610,6 +2625,23 @@ mod tests {
         assert_eq!(v["kind"], "assistant");
         assert_eq!(v["elapsed_ms"], 4_500_i64);
         assert_eq!(v["tool"], serde_json::Value::Null, "no tool on prose rows");
+        // A default-page row must serialize EXACTLY the keys it always did: the bundled PWA and
+        // every shipped client read this shape, and `tool_phase` is meaningless without tools.
+        assert_eq!(
+            v.as_object().unwrap().keys().collect::<Vec<_>>(),
+            vec![
+                "content",
+                "created_at",
+                "elapsed_ms",
+                "kind",
+                "model",
+                "role",
+                "seq",
+                "tool",
+                "visibility"
+            ],
+            "no `tool_phase` on a page that has no tool rows to phase"
+        );
 
         // A tool row (only ever served with `?include_tools=1`) carries its name in the same
         // field the live `transcript_rows` use, so one renderer handles both.
@@ -2623,11 +2655,13 @@ mod tests {
             kind: "tool".into(),
             elapsed_ms: Some(5_500),
             tool: Some("read_file".into()),
+            tool_phase: Some("result".into()),
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&tool_row).unwrap()).unwrap();
         assert_eq!(v["kind"], "tool");
         assert_eq!(v["tool"], "read_file");
+        assert_eq!(v["tool_phase"], "result");
     }
 
     #[test]
@@ -3630,6 +3664,7 @@ mod tests {
                     kind: "assistant".into(),
                     elapsed_ms: Some(0),
                     tool: None,
+                    tool_phase: None,
                 }]
             });
             let rc =
