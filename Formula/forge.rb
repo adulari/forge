@@ -8,28 +8,28 @@
 class Forge < Formula
   desc "Multi-provider mesh AI coding CLI"
   homepage "https://github.com/Adulari/forge"
-  version "2.9.1"
+  version "2.10.0"
   license "AGPL-3.0-only"
 
   on_macos do
     on_arm do
       url "https://github.com/Adulari/forge/releases/download/v#{version}/forge-aarch64-apple-darwin.tar.gz"
-      sha256 "21b13fa54115321857f7690bce922e14f2a4e934ffc9054838de081b79e308ca"
+      sha256 "1cbe912bf04ff8cf7bd872c6a7d120a6da426199a890cedef159ef1a2a655937"
     end
     on_intel do
       url "https://github.com/Adulari/forge/releases/download/v#{version}/forge-x86_64-apple-darwin.tar.gz"
-      sha256 "bcc63fd3909d29b24d04b0b5f23e491bdfaf0793004e280c0efc7da19cc45a0d"
+      sha256 "ab78fe62605cdeb303ae7325fbafb2760cce1a5f232828e7111e2d6f1b4b3f53"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/Adulari/forge/releases/download/v#{version}/forge-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "fa3ac544d21f196702fe041e03761316aaf94a09f291875329e1bb5ae9f91b2c"
+      sha256 "e44833d0c536356bf3a1ff103560dfebddd0678bb09066548a4d1853e3431fa2"
     end
     on_arm do
       url "https://github.com/Adulari/forge/releases/download/v#{version}/forge-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "6cd1509aaf9ef9692b9d16db2d25a6deacb5382ab38e5bd6f4a642e08f24b554"
+      sha256 "28284be8aa08e96bc488b6cd44a5f79de19a7b2c35e0a06d6c5bba2b1b8a77e6"
     end
   end
 
