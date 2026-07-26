@@ -39,3 +39,14 @@ Important accounting rules:
 `reduced-config` profile invokes Codex's own user-config/rules/plugin isolation flags. Codex 0.145.0
 still loads the installed skill catalog in that mode and emits a skills-budget warning, so the
 profile is not called "clean."
+
+After a run, produce the authoritative corrected report from the immutable artifacts:
+
+```bash
+scripts/harness-bench/rescore_codex_oauth.py --run-dir /path/to/run
+```
+
+This replaces Forge's final stream counter with the complete per-session Store ledger (including
+post-stream auxiliary memory usage), re-runs the TypeScript contract's strict no-emit build without
+requiring a reference-specific `lint` alias, and writes separate `aggregate.corrected.{json,md}`
+files. It never overwrites the original live aggregate.

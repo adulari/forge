@@ -4756,6 +4756,32 @@ impl Store {
         )?)
     }
 
+    /// Provider-consumed usage across the complete session ledger.
+    ///
+    /// Unlike [`Store::session_tokens`], this includes inactive synthetic side calls (recap,
+    /// suggestion, memory, compaction, diagnosis) and calls belonging to later-deactivated turns.
+    /// Those calls still consumed provider quota and remain part of honest billing/benchmark
+    /// accounting even though they no longer contribute to the active transcript.
+    pub fn session_token_usage(&self, session_id: &str) -> Result<Usage> {
+        let conn = self.lock()?;
+        let (input, cached, output, cost): (i64, i64, i64, f64) = conn.query_row(
+            "SELECT COALESCE(SUM(u.input_tokens), 0),
+                    COALESCE(SUM(u.cached_input_tokens), 0),
+                    COALESCE(SUM(u.output_tokens), 0),
+                    COALESCE(SUM(u.cost_usd), 0.0)
+             FROM usage u JOIN message m ON m.id = u.message_id
+             WHERE m.session_id = ?1",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        Ok(Usage {
+            input_tokens: input.max(0) as u64,
+            cached_input_tokens: cached.max(0) as u64,
+            output_tokens: output.max(0) as u64,
+            cost_usd: cost.max(0.0),
+        })
+    }
+
     /// `(input_tokens, output_tokens)` summed across a session's `usage` rows — the live token
     /// counter (tui-token-counter.md).
     pub fn session_tokens(&self, session_id: &str) -> Result<(u64, u64)> {
@@ -9485,6 +9511,28 @@ mod tests {
         store.deactivate_messages_from(&sid, 1).unwrap();
         assert_eq!(store.session_step_count(&sid).unwrap(), 1);
         assert_eq!(store.session_tokens(&sid).unwrap(), (10, 5));
+
+        // Consumed usage is an accounting ledger: undo does not refund provider quota, and
+        // inactive synthetic side calls must also remain visible there without entering the
+        // active transcript counter.
+        let consumed = store.session_token_usage(&sid).unwrap();
+        assert_eq!((consumed.input_tokens, consumed.output_tokens), (30, 15));
+        store
+            .record_side_call_usage(
+                &sid,
+                "memory",
+                &Usage {
+                    input_tokens: 7,
+                    cached_input_tokens: 2,
+                    output_tokens: 3,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(store.session_tokens(&sid).unwrap(), (10, 5));
+        let consumed = store.session_token_usage(&sid).unwrap();
+        assert_eq!((consumed.input_tokens, consumed.output_tokens), (37, 18));
+        assert_eq!(consumed.cached_input_tokens, 2);
     }
 
     #[test]

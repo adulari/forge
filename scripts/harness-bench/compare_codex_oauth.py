@@ -407,7 +407,10 @@ def verification_commands(scenario: str, workspace: Path) -> list[list[str]]:
             ["go", "test", "-race", "./..."],
         ]
     if scenario == "typescript-config-recovery":
-        return [["npm", "test"], ["npm", "run", "lint"]]
+        # The task requires a fresh strict TypeScript build, not a specifically named `lint`
+        # package-script alias. Invoking the existing build script with --noEmit tests the actual
+        # contract without rewarding an implementation merely for matching the reference's alias.
+        return [["npm", "test"], ["npm", "run", "build", "--", "--noEmit"]]
     if scenario == "rust-transaction-ledger":
         return [
             ["cargo", "fmt", "--check"],
@@ -536,6 +539,41 @@ def forge_quota(db_path: Path) -> dict[str, Any] | None:
     }
 
 
+def forge_session_tokens(db_path: Path, session_id: str | None) -> dict[str, Any] | None:
+    """Return complete persisted usage for a Forge session.
+
+    The stream-json usage event is emitted when the user-visible turn finishes. Forge may then run
+    a small auxiliary memory extraction before the process exits. The Store ledger is therefore
+    the authoritative whole-harness total, while the stream value is retained separately.
+    """
+
+    if not session_id or not db_path.exists():
+        return None
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*),
+                   COALESCE(SUM(u.input_tokens), 0),
+                   COALESCE(SUM(u.cached_input_tokens), 0),
+                   COALESCE(SUM(u.output_tokens), 0)
+            FROM usage u
+            JOIN message m ON m.id = u.message_id
+            WHERE m.session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    if row is None or int(row[0]) == 0:
+        return None
+    tokens = token_metrics(
+        {
+            "input_tokens": int(row[1]),
+            "cached_input_tokens": int(row[2]),
+            "output_tokens": int(row[3]),
+        }
+    )
+    return {"provider_calls": int(row[0]), **tokens}
+
+
 def refresh_quota_with_forge(
     forge_bin: Path,
     forge_db: Path,
@@ -661,6 +699,18 @@ def run_trial(
         if trial.arm == "forge"
         else summarize_raw_events(trial_dir / "events.jsonl")
     )
+    if trial.arm == "forge":
+        complete_tokens = forge_session_tokens(forge_db, agent.get("session_id"))
+        if complete_tokens is not None:
+            agent["stream_tokens"] = agent["tokens"]
+            agent["tokens"] = complete_tokens
+            stream_total = agent["stream_tokens"].get("total_tokens")
+            complete_total = complete_tokens.get("total_tokens")
+            agent["post_stream_tokens"] = (
+                complete_total - stream_total
+                if complete_total is not None and stream_total is not None
+                else None
+            )
     verification = verify_scenario(
         trial.scenario,
         workspace,

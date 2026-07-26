@@ -4006,6 +4006,32 @@ Rules:\n\
         });
     }
 
+    /// Emit the terminal accounting snapshot followed by the result event. Terminal accounting
+    /// uses the complete provider-consumption ledger; the context gauge above intentionally keeps
+    /// using only active transcript messages.
+    fn emit_terminal_events(
+        &mut self,
+        final_text: &str,
+        stop_reason: StopReason,
+        context_tokens: u64,
+        active_model: &str,
+    ) -> Result<(), CoreError> {
+        let usage = self.store.session_token_usage(&self.id)?;
+        self.presenter.emit(PresenterEvent::Cost {
+            session_total_usd: self.store.session_cost(&self.id)?,
+            session_in: usage.input_tokens,
+            session_cached_in: usage.cached_input_tokens,
+            session_out: usage.output_tokens,
+            context_tokens,
+            context_limit: Some(self.effective_context_window(active_model)),
+        });
+        self.presenter.emit(PresenterEvent::Done {
+            final_text: final_text.to_string(),
+            stop_reason,
+        });
+        Ok(())
+    }
+
     /// Bench (or, for a permanent incapability, exclude) `model` after a retryable error and
     /// return the next model to try from `chain`, or `None` when the chain is exhausted. Emits the
     /// standard failover warning. Shared by the single-shot auxiliary calls (compaction, the
@@ -7083,19 +7109,22 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // off, or no edits happened, this block is a no-op (zero overhead).
         let mut af = self.config.autofix.clone();
 
-        // Auto-detect: fill in lint_cmd (and optionally test_cmd) from project structure when the
-        // user hasn't configured them. Activates on edits so there's no cost on read-only turns.
-        if af.auto_detect && self.edits_this_turn > 0 && af.lint_cmd.is_empty() {
+        // Auto-detect only fills commands the user explicitly enabled. It must not silently turn
+        // default-off autofix on: a missing project script would otherwise inject its failure and
+        // spend a whole additional model loop repairing an unrequested check.
+        let needs_detected_lint = af.auto_lint && af.lint_cmd.is_empty();
+        let needs_detected_test = af.auto_test && af.test_cmd.is_empty();
+        if af.auto_detect
+            && self.edits_this_turn > 0
+            && (needs_detected_lint || needs_detected_test)
+        {
             if let Some((lint, test)) = Self::detect_project_commands(self.workspace.root()) {
-                self.presenter.emit(PresenterEvent::Warning(format!(
-                    "autofix: auto-detected lint command from project structure: {lint}"
-                )));
-                af.lint_cmd = lint;
-                af.auto_lint = true;
-                if af.auto_test && af.test_cmd.is_empty() {
-                    if let Some(t) = test {
-                        af.test_cmd = t;
-                    }
+                let detected = Self::fill_detected_autofix_commands(&mut af, lint, test);
+                if !detected.is_empty() {
+                    self.presenter.emit(PresenterEvent::Warning(format!(
+                        "autofix: auto-detected project command(s): {}",
+                        detected.join("; ")
+                    )));
                 }
             }
         }
@@ -7273,27 +7302,18 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
         }
 
-        let (session_in, session_out) = self.store.session_tokens(&self.id)?;
-        self.presenter.emit(PresenterEvent::Cost {
-            session_total_usd: self.store.session_cost(&self.id)?,
-            session_in,
-            session_cached_in: self.store.session_cached_input_tokens(&self.id)?,
-            session_out,
-            context_tokens,
-            context_limit: Some(self.effective_context_window(&active_model)),
-        });
-        self.presenter.emit(PresenterEvent::Done {
-            final_text: final_text.clone(),
-            stop_reason: if hit_step_cap {
-                StopReason::MaxSteps
-            } else {
-                StopReason::FinalAnswer
-            },
-        });
+        let stop_reason = if hit_step_cap {
+            StopReason::MaxSteps
+        } else {
+            StopReason::FinalAnswer
+        };
         // A channel-backed interactive surface can keep receiving detached auxiliary results after
         // the main turn is done. Remember that capability before launching the side calls so the
         // input is never held hostage by recap/suggestion/memory provider latency.
         let detach_post_turn_work = self.presenter.recap_sink().is_some();
+        if detach_post_turn_work {
+            self.emit_terminal_events(&final_text, stop_reason, context_tokens, &active_model)?;
+        }
         self.generate_recap(prompt, &final_text, &recap_tasks_before)
             .await;
         self.generate_suggestion(prompt, &final_text).await;
@@ -7306,6 +7326,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             } else {
                 let _ = handle.await;
             }
+        }
+        if !detach_post_turn_work {
+            // Headless callers await auxiliary memory persistence, so emit their terminal usage
+            // only after those provider calls are in the Store ledger. Keep Done last: JSONL
+            // consumers commonly stop reading at the result event.
+            self.emit_terminal_events(&final_text, stop_reason, context_tokens, &active_model)?;
         }
         Ok(if hit_step_cap {
             LoopOutcome::max_steps(final_text)
@@ -7483,6 +7509,25 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
     /// Checks the current working directory — the project root where `forge chat` launched.
     /// Returns `(lint_cmd, test_cmd)` when a known project type is found; `test_cmd` is `None`
     /// when the project type has no obvious cheap test command.
+    fn fill_detected_autofix_commands(
+        config: &mut forge_config::AutofixConfig,
+        lint: String,
+        test: Option<String>,
+    ) -> Vec<String> {
+        let mut detected = Vec::with_capacity(2);
+        if config.auto_lint && config.lint_cmd.is_empty() && !lint.is_empty() {
+            detected.push(lint.clone());
+            config.lint_cmd = lint;
+        }
+        if config.auto_test && config.test_cmd.is_empty() {
+            if let Some(test) = test {
+                detected.push(test.clone());
+                config.test_cmd = test;
+            }
+        }
+        detected
+    }
+
     fn detect_project_commands(root: &std::path::Path) -> Option<(String, Option<String>)> {
         if root.join("Cargo.toml").exists() {
             return Some((
@@ -7491,10 +7536,18 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             ));
         }
         if root.join("package.json").exists() {
-            return Some((
-                "npm run lint 2>&1".to_string(),
-                Some("npm test 2>&1".to_string()),
-            ));
+            let package = std::fs::read_to_string(root.join("package.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())?;
+            let scripts = package.get("scripts").and_then(|value| value.as_object())?;
+            let lint = ["lint", "typecheck", "check"]
+                .into_iter()
+                .find(|name| scripts.contains_key(*name))
+                .map_or_else(String::new, |name| format!("npm run {name} 2>&1"));
+            let test = scripts
+                .contains_key("test")
+                .then(|| "npm test 2>&1".to_string());
+            return Some((lint, test));
         }
         if root.join("pyproject.toml").exists() || root.join("requirements.txt").exists() {
             return Some(("python -m pytest --tb=short -q 2>&1".to_string(), None));
@@ -14022,6 +14075,114 @@ mod tests {
         assert!(cost > 0.0, "expected a non-zero cost, got {cost}");
     }
 
+    #[derive(Default)]
+    struct TerminalUsageProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for TerminalUsageProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (content, input_tokens, cached_input_tokens, output_tokens) = if call == 0 {
+                ("main answer", 72, 20, 30)
+            } else {
+                ("", 30, 10, 12)
+            };
+            on_event(StreamEvent::Text(content.to_string()));
+            Ok(forge_provider::ModelResponse {
+                content: content.to_string(),
+                tool_calls: Vec::new(),
+                usage: forge_types::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cached_input_tokens,
+                    cost_usd: 0.0,
+                },
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn headless_terminal_cost_includes_awaited_memory_and_done_is_last() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = Config::default();
+        config.recap.enabled = false;
+        config.suggest.enabled = false;
+        config.mesh.auto_memory = true;
+        let capture = CapturePresenter::default();
+        let captured_events = Arc::clone(&capture.events);
+        let provider = Arc::new(TerminalUsageProvider::default());
+        let mut session = Session::start(
+            Arc::clone(&store),
+            provider.clone(),
+            Arc::new(FixedRouter {
+                model: "mock::terminal-usage".to_string(),
+                fallbacks: Vec::new(),
+            }),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        let outcome = session
+            .run_turn("check the project manifest")
+            .await
+            .unwrap();
+        assert!(outcome.contains("main answer"));
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one main completion plus one awaited memory completion"
+        );
+
+        // The provider spends 72/30 tokens on the main turn and 30/12 on the awaited memory
+        // extraction side call. The terminal event must reflect the complete Store ledger.
+        assert_eq!(
+            store.session_tokens(session.id()).unwrap(),
+            (72, 30),
+            "active-transcript usage intentionally excludes synthetic side calls"
+        );
+        let consumed = store.session_token_usage(session.id()).unwrap();
+        assert_eq!((consumed.input_tokens, consumed.output_tokens), (102, 42));
+        assert_eq!(consumed.cached_input_tokens, 30);
+        let events = captured_events.lock().unwrap();
+        let done_index = events
+            .iter()
+            .rposition(|event| matches!(event, PresenterEvent::Done { .. }))
+            .expect("turn emits Done");
+        let (cost_index, event_tokens) = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                PresenterEvent::Cost {
+                    session_in,
+                    session_cached_in,
+                    session_out,
+                    ..
+                } => Some((index, (*session_in, *session_cached_in, *session_out))),
+                _ => None,
+            })
+            .next_back()
+            .expect("turn emits Cost");
+        assert_eq!(event_tokens, (102, 30, 42));
+        assert!(cost_index < done_index, "terminal Cost must precede Done");
+        assert_eq!(
+            done_index,
+            events.len() - 1,
+            "Done must remain the final headless event"
+        );
+    }
+
     #[tokio::test]
     async fn warns_when_budget_threshold_reached() {
         // Complex turn costs (30+12)/1k + (42+18)/1k = 0.102 USD (keyless priced model, so
@@ -18359,6 +18520,55 @@ mod tests {
     }
 
     // ── Autofix tests ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn autofix_detection_does_not_enable_default_off_commands() {
+        let mut config = forge_config::AutofixConfig::default();
+        let detected = Session::fill_detected_autofix_commands(
+            &mut config,
+            "false".to_string(),
+            Some("false".to_string()),
+        );
+        assert!(detected.is_empty());
+        assert!(!config.auto_lint);
+        assert!(!config.auto_test);
+        assert!(config.lint_cmd.is_empty());
+        assert!(config.test_cmd.is_empty());
+    }
+
+    #[test]
+    fn autofix_detection_fills_only_explicitly_enabled_commands() {
+        let mut config = forge_config::AutofixConfig {
+            auto_lint: false,
+            auto_test: true,
+            ..forge_config::AutofixConfig::default()
+        };
+        let detected = Session::fill_detected_autofix_commands(
+            &mut config,
+            "npm run lint 2>&1".to_string(),
+            Some("npm test 2>&1".to_string()),
+        );
+        assert_eq!(detected, vec!["npm test 2>&1"]);
+        assert!(config.lint_cmd.is_empty());
+        assert_eq!(config.test_cmd, "npm test 2>&1");
+    }
+
+    #[test]
+    fn npm_autofix_detection_uses_only_scripts_that_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"build":"tsc -p tsconfig.json","test":"node --test"}}"#,
+        )
+        .unwrap();
+
+        let (lint, test) = Session::detect_project_commands(dir.path()).unwrap();
+        assert!(
+            lint.is_empty(),
+            "missing lint/typecheck/check must stay empty"
+        );
+        assert_eq!(test.as_deref(), Some("npm test 2>&1"));
+    }
 
     #[cfg(unix)]
     #[tokio::test]
