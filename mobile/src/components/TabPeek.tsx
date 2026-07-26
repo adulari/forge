@@ -14,30 +14,54 @@
 // is asking for, and the rule is right to ask: a component reference produced during render cannot
 // be shown to be stable, and an unstable one silently remounts and drops its state every frame.
 import React from "react";
+import { StyleSheet, View } from "react-native";
 
-const FleetBody = React.lazy(() =>
-  import("../app/(tabs)/index").then((m) => ({ default: m.FleetScreen })),
-);
-const InboxBody = React.lazy(() =>
-  import("../app/(tabs)/inbox").then((m) => ({ default: m.InboxScreen })),
-);
-const HistoryBody = React.lazy(() =>
-  import("../app/(tabs)/history").then((m) => ({ default: m.HistoryScreen })),
-);
-const SettingsBody = React.lazy(() =>
-  import("../app/(tabs)/settings").then((m) => ({ default: m.SettingsScreen })),
-);
+import { PeekProvider } from "../lib/peek";
+import { useTokens } from "../theme/ThemeProvider";
 
-/** Renders nothing for an out-of-range index, so the pager's edges need no special case. */
+// Metro bundles every module up front, so these resolve without any network work — but resolution
+// is still a promise, which costs a frame. That frame is visible at the very start of a drag as a
+// flash of nothing where the neighbour should be, so `preloadTabPeeks` settles them in advance and
+// the loaders are kept separate from `React.lazy` to make that possible.
+const loaders = [
+  () => import("../app/(tabs)/index"),
+  () => import("../app/(tabs)/inbox"),
+  () => import("../app/(tabs)/history"),
+  () => import("../app/(tabs)/settings"),
+] as const;
+
+const FleetBody = React.lazy(() => loaders[0]().then((m) => ({ default: m.FleetScreen })));
+const InboxBody = React.lazy(() => loaders[1]().then((m) => ({ default: m.InboxScreen })));
+const HistoryBody = React.lazy(() => loaders[2]().then((m) => ({ default: m.HistoryScreen })));
+const SettingsBody = React.lazy(() => loaders[3]().then((m) => ({ default: m.SettingsScreen })));
+
+/**
+ * Resolves every neighbour module ahead of the first drag. Idempotent and fire-and-forget: a failed
+ * import is not worth reporting, because `React.lazy` will surface it if the peek is ever rendered.
+ */
+export function preloadTabPeeks(): void {
+  for (const load of loaders) void load().catch(() => undefined);
+}
+
 export function TabPeek({ at }: { at: number }) {
-  // `fallback={null}` rather than a skeleton: the first drag is the only one that waits on the
-  // import, and an empty gap for a frame reads as depth, where a flash of skeleton reads as a bug.
+  const tokens = useTokens();
+
+  // An opaque fallback rather than `null`: nothing behind a peek is meant to be seen, and a
+  // transparent gap reads as a flicker. With preloading this should never actually render.
   return (
-    <React.Suspense fallback={null}>
-      {at === 0 ? <FleetBody /> : null}
-      {at === 1 ? <InboxBody /> : null}
-      {at === 2 ? <HistoryBody /> : null}
-      {at === 3 ? <SettingsBody /> : null}
-    </React.Suspense>
+    <View style={[styles.fill, { backgroundColor: tokens.bg0 }]}>
+      <PeekProvider>
+        <React.Suspense fallback={null}>
+          {at === 0 ? <FleetBody /> : null}
+          {at === 1 ? <InboxBody /> : null}
+          {at === 2 ? <HistoryBody /> : null}
+          {at === 3 ? <SettingsBody /> : null}
+        </React.Suspense>
+      </PeekProvider>
+    </View>
   );
 }
+
+const styles = StyleSheet.create({
+  fill: { flex: 1 },
+});
