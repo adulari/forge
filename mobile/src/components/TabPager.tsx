@@ -70,22 +70,28 @@ export function TabPager({ index, children }: { index: number; children: React.R
   const hasNext = index < TAB_SWIPE_ORDER.length - 1;
   const homeOffset = hasPrev ? width : 0;
 
+  const unpark = React.useRef<ReturnType<typeof setTimeout>>(undefined);
+
   const home = React.useCallback(() => {
     scroller.current?.scrollTo({ x: homeOffset, animated: false });
   }, [homeOffset]);
+
+  React.useEffect(() => () => clearTimeout(unpark.current), []);
 
   // Android ignores the `contentOffset` prop, and a width change (rotation) moves the pages out from
   // under a fixed offset on both platforms.
   React.useEffect(home, [home]);
 
-  // The pager is left resting on a neighbour page after a swipe commits, because moving it while the
-  // outgoing tab is still on screen is visible as a flash of the page just swiped away from. It is
-  // put back on every focus change instead — after interactions, so a switch has finished animating
-  // first. Both directions are handled: leaving covers the ordinary case, and arriving covers a tab
-  // whose blur was never observed, which would otherwise reopen mid-swipe.
-  React.useEffect(() => {
-    const task = InteractionManager.runAfterInteractions(home);
-    return () => task.cancel();
+  // A pager left PARKED on a neighbour page is what showed the previous tab for a frame on arrival:
+  // land on Fleet from Inbox, and Inbox's own pager is still sitting on the page that holds Fleet's
+  // peek, so returning to Inbox draws Fleet before it snaps back.
+  //
+  // So it is unparked on arrival, in a LAYOUT effect: that lands the scroll in the same native batch
+  // as the tab becoming visible, rather than a frame later where it would be seen. This deliberately
+  // does not depend on `useIsFocused` flipping or on `runAfterInteractions` firing — the previous
+  // attempt relied on both, and neither can be verified to hold inside NativeTabs from here.
+  React.useLayoutEffect(() => {
+    if (isFocused) home();
   }, [home, isFocused]);
 
   // Prepare the neighbours once this tab is settled, so the first drag already has something to
@@ -122,12 +128,15 @@ export function TabPager({ index, children }: { index: number; children: React.R
       const href = tabHrefAt(index + (landed - homePage));
       if (href === null) return;
       router.navigate(href);
-      // Deliberately NOT scrolling back here. This tab is still on screen for the frames it takes the
-      // switch to happen, so snapping the pager home now shows the page the user just swiped away
-      // from, immediately before the new tab appears — which is the flicker. The focus effect below
-      // does it once nobody is looking.
+      // Unparked on a short delay rather than here. This tab is still on screen for the frames it
+      // takes the switch to happen, so snapping back now shows the page just swiped away from
+      // immediately before the new tab appears — the flicker in its first form. A switch is a frame
+      // or two and no swipe brings you back inside 150ms, so by then this tab is hidden. Belt to the
+      // layout effect's braces: a pager that never gets unparked draws the wrong tab on arrival.
+      clearTimeout(unpark.current);
+      unpark.current = setTimeout(home, 150);
     },
-    [hasPrev, index, width],
+    [hasPrev, home, index, width],
   );
 
   // A release almost always hands over to the paging animation, and `onMomentumScrollEnd` is the

@@ -21,10 +21,12 @@ All notable changes to Forge are documented here. The format follows
   of a drag was too late, since a state update plus a lazy import cannot finish inside a quick swipe
   and the neighbour slid past empty — and are dropped when the tab loses focus, so no tab holds a
   live copy of another while you are elsewhere. They render as peeks, showing cached data and asking
-  the network for nothing. After a swipe commits, the pager is left resting on the page it landed on
-  and put back only once focus changes — resetting it while the outgoing tab is still on screen
-  showed as a flash of the page just swiped away from, immediately before the new tab appeared. The
-  iOS tab bar is still the real `UITabBarController`.
+  the network for nothing. After a swipe commits the pager is unparked on a short delay rather than
+  immediately — resetting it while the outgoing tab is still on screen showed as a flash of the page
+  just swiped away from — and again in a layout effect on arrival, because a pager still parked on a
+  neighbour page draws the *previous* tab for a frame when you return to it. Neither path depends on
+  `useIsFocused` flipping or on `runAfterInteractions` firing inside `NativeTabs`. The iOS tab bar is
+  still the real `UITabBarController`.
 
 ### Changed
 
