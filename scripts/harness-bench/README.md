@@ -50,3 +50,52 @@ This replaces Forge's final stream counter with the complete per-session Store l
 post-stream auxiliary memory usage), re-runs the TypeScript contract's strict no-emit build without
 requiring a reference-specific `lint` alias, and writes separate `aggregate.corrected.{json,md}`
 files. It never overwrites the original live aggregate.
+
+## Official SWE-bench Verified
+
+The controlled fixtures can reach a quality ceiling. Use the separate matched runner plus the
+official Docker evaluator for quality-discriminating evidence.
+
+Select a deterministic, repo-diverse sample before running either model arm:
+
+```bash
+scripts/harness-bench/select_swe_verified.py \
+  --source /path/to/swe-bench-verified.jsonl \
+  --out /path/to/swe-verified-stratified.jsonl \
+  --seed 20260726 \
+  --per-band 2
+```
+
+The selector ranks instances independently within the published `<15 min fix`, `15 min - 1 hour`,
+and `1-4 hours` bands, and never repeats a repository. The adjacent manifest records the source
+hash, algorithm, seed, and selected ids.
+
+Run every selected instance through Forge and native Codex on all three GPT-5.6 models:
+
+```bash
+scripts/harness-bench/compare_codex_oauth_swe.py \
+  --dataset /path/to/swe-verified-stratified.jsonl \
+  --out /path/to/run \
+  --worktree-root /path/to/reusable-clones \
+  --forge-bin ./target/debug/forge \
+  --baseline-weekly-pct 2 \
+  --max-weekly-increase-pct 28
+```
+
+This runner uses the same `xhigh` model commands and per-trial quota gate as the controlled runner.
+It retains raw JSONL, stderr, patches, process results, and full Forge Store usage, then writes one
+standard prediction file per arm/model under `predictions/`. It deliberately leaves
+`official_resolution` unset.
+
+Evaluate each prediction file with pinned `swebench` in Docker:
+
+```bash
+python -m swebench.harness.run_evaluation \
+  --dataset_name /path/to/swe-verified-stratified.jsonl \
+  --predictions_path /path/to/run/predictions/forge__gpt-5.6-sol.jsonl \
+  --max_workers 2 \
+  --run_id forge_sol
+```
+
+Only those official reports support a resolved/unresolved claim. A non-empty patch, successful
+agent process, or model assertion is never treated as resolution.

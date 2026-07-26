@@ -2936,9 +2936,9 @@ impl Session {
     /// Token and cost totals for the current session from the DB (reliable for bridge providers).
     pub fn session_usage_db(&self) -> (u64, u64, f64) {
         let id = self.session_id();
-        let (inp, out) = self.store.session_tokens(id).unwrap_or((0, 0));
+        let usage = self.store.session_token_usage(id).unwrap_or_default();
         let cost = self.store.session_cost(id).unwrap_or(0.0);
-        (inp, out, cost)
+        (usage.input_tokens, usage.output_tokens, cost)
     }
 
     /// Spend in the last 5 hours (rolling window). Returns 0.0 on store error.
@@ -14155,6 +14155,7 @@ mod tests {
         let consumed = store.session_token_usage(session.id()).unwrap();
         assert_eq!((consumed.input_tokens, consumed.output_tokens), (102, 42));
         assert_eq!(consumed.cached_input_tokens, 30);
+        assert_eq!(session.session_usage_db(), (102, 42, 0.0));
         let events = captured_events.lock().unwrap();
         let done_index = events
             .iter()
