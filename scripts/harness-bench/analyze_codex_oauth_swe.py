@@ -30,9 +30,27 @@ def load_summaries(path: Path) -> list[dict[str, Any]]:
             try:
                 summary = json.loads(line)
             except json.JSONDecodeError as error:
-                raise ValueError(f"{path}:{line_number}: invalid JSON: {error}") from error
+                raise ValueError(
+                    f"{path}:{line_number}: invalid JSON: {error}"
+                ) from error
             summaries.append(summary)
     return summaries
+
+
+def refresh_forge_token_rollups(
+    summaries: list[dict[str, Any]], forge_db: Path
+) -> None:
+    """Replace Forge parent-only telemetry with authoritative session-tree usage."""
+
+    for summary in summaries:
+        if summary["trial"]["arm"] != "forge":
+            continue
+        complete = bench.forge_session_tokens(
+            forge_db, summary["agent"].get("session_id")
+        )
+        if complete is None:
+            raise ValueError(f"missing Forge ledger usage for {summary['pair_id']}")
+        summary["agent"]["tokens"] = complete
 
 
 def median(values: Iterable[float]) -> float:
@@ -306,6 +324,7 @@ def main() -> int:
     run_dir = args.run_dir.resolve()
     evaluation_dir = args.evaluation_dir.resolve()
     summaries = load_summaries(run_dir / "trial-index.jsonl")
+    refresh_forge_token_rollups(summaries, run_dir / "forge-benchmark.db")
     combinations = {
         (summary["trial"]["arm"], summary["trial"]["model"]) for summary in summaries
     }

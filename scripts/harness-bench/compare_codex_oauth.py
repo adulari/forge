@@ -77,7 +77,9 @@ def utc_now() -> str:
 
 
 def json_dump(path: Path, value: Any) -> None:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -192,7 +194,9 @@ def initialize_workspace(scenario: str, workspace: Path) -> dict[str, str]:
     )
     return {
         "baseline_commit": tiny_command(("git", "rev-parse", "HEAD"), cwd=workspace),
-        "baseline_tree": tiny_command(("git", "rev-parse", "HEAD^{tree}"), cwd=workspace),
+        "baseline_tree": tiny_command(
+            ("git", "rev-parse", "HEAD^{tree}"), cwd=workspace
+        ),
         "prompt_sha256": sha256_file(prompt),
     }
 
@@ -287,9 +291,7 @@ def token_metrics(usage: dict[str, Any] | None) -> dict[str, int | float | None]
         }
     input_tokens = int(usage.get("input_tokens") or 0)
     cached = int(
-        usage.get("cached_input_tokens")
-        or usage.get("cache_read_input_tokens")
-        or 0
+        usage.get("cached_input_tokens") or usage.get("cache_read_input_tokens") or 0
     )
     output = int(usage.get("output_tokens") or 0)
     reasoning = int(usage.get("reasoning_output_tokens") or 0)
@@ -533,7 +535,10 @@ def raw_quota_for_thread(thread_id: str | None) -> dict[str, Any] | None:
                 except json.JSONDecodeError:
                     continue
                 payload = event.get("payload") or {}
-                if event.get("type") != "event_msg" or payload.get("type") != "token_count":
+                if (
+                    event.get("type") != "event_msg"
+                    or payload.get("type") != "token_count"
+                ):
                     continue
                 rate_limits = (payload.get("info") or {}).get("rate_limits")
                 if rate_limits:
@@ -576,12 +581,15 @@ def forge_quota(db_path: Path) -> dict[str, Any] | None:
     }
 
 
-def forge_session_tokens(db_path: Path, session_id: str | None) -> dict[str, Any] | None:
-    """Return complete persisted usage for a Forge session.
+def forge_session_tokens(
+    db_path: Path, session_id: str | None
+) -> dict[str, Any] | None:
+    """Return complete persisted usage for a Forge session tree.
 
-    The stream-json usage event is emitted when the user-visible turn finishes. Forge may then run
-    a small auxiliary memory extraction before the process exits. The Store ledger is therefore
-    the authoritative whole-harness total, while the stream value is retained separately.
+    The stream-json usage event is emitted when the user-visible turn finishes. Forge may run
+    auxiliary memory extraction or child agents before the process exits. The Store ledger,
+    recursively rolled up through ``parent_session_id``, is therefore the authoritative
+    whole-harness total, while the parent stream value is retained separately.
     """
 
     if not session_id or not db_path.exists():
@@ -589,13 +597,20 @@ def forge_session_tokens(db_path: Path, session_id: str | None) -> dict[str, Any
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
             """
+            WITH RECURSIVE session_tree(id) AS (
+                SELECT ?
+                UNION ALL
+                SELECT s.id
+                FROM session s
+                JOIN session_tree parent ON s.parent_session_id = parent.id
+            )
             SELECT COUNT(*),
                    COALESCE(SUM(u.input_tokens), 0),
                    COALESCE(SUM(u.cached_input_tokens), 0),
                    COALESCE(SUM(u.output_tokens), 0)
             FROM usage u
             JOIN message m ON m.id = u.message_id
-            WHERE m.session_id = ?
+            WHERE m.session_id IN (SELECT id FROM session_tree)
             """,
             (session_id,),
         ).fetchone()
@@ -900,7 +915,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             "| {arm} | {model} | {successes}/{trials} | {median_total_tokens} | "
             "{tokens_per_success} | {median_wall_seconds} | {telemetry} |".format(
                 **row,
-                telemetry="complete" if row["complete_token_telemetry"] else "incomplete",
+                telemetry="complete"
+                if row["complete_token_telemetry"]
+                else "incomplete",
             )
         )
     paired = report["paired_summary"]
@@ -925,7 +942,9 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def write_aggregate(out_root: Path, summaries: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def write_aggregate(
+    out_root: Path, summaries: Sequence[dict[str, Any]]
+) -> dict[str, Any]:
     report = aggregate(summaries)
     json_dump(out_root / "aggregate.json", report)
     (out_root / "aggregate.md").write_text(render_markdown(report), encoding="utf-8")

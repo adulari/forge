@@ -1,11 +1,104 @@
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
+import analyze_codex_oauth_swe as swe_analysis
 import compare_codex_oauth as bench
+
+
+class ForgeSessionTokenTests(unittest.TestCase):
+    def test_rolls_up_descendant_sessions_without_unrelated_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "forge.db"
+            with sqlite3.connect(db_path) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE session (
+                        id TEXT PRIMARY KEY,
+                        parent_session_id TEXT
+                    );
+                    CREATE TABLE message (
+                        id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL
+                    );
+                    CREATE TABLE usage (
+                        id TEXT PRIMARY KEY,
+                        message_id TEXT NOT NULL,
+                        input_tokens INTEGER NOT NULL,
+                        cached_input_tokens INTEGER NOT NULL,
+                        output_tokens INTEGER NOT NULL
+                    );
+
+                    INSERT INTO session VALUES ('root', NULL);
+                    INSERT INTO session VALUES ('child', 'root');
+                    INSERT INTO session VALUES ('grandchild', 'child');
+                    INSERT INTO session VALUES ('unrelated', NULL);
+
+                    INSERT INTO message VALUES ('m-root', 'root');
+                    INSERT INTO message VALUES ('m-child', 'child');
+                    INSERT INTO message VALUES ('m-grandchild', 'grandchild');
+                    INSERT INTO message VALUES ('m-unrelated', 'unrelated');
+
+                    INSERT INTO usage VALUES ('u-root', 'm-root', 100, 40, 10);
+                    INSERT INTO usage VALUES ('u-child', 'm-child', 200, 80, 20);
+                    INSERT INTO usage VALUES (
+                        'u-grandchild', 'm-grandchild', 300, 120, 30
+                    );
+                    INSERT INTO usage VALUES (
+                        'u-unrelated', 'm-unrelated', 1000, 400, 100
+                    );
+                    """
+                )
+
+            tokens = bench.forge_session_tokens(db_path, "root")
+
+            self.assertIsNotNone(tokens)
+            assert tokens is not None
+            self.assertEqual(tokens["provider_calls"], 3)
+            self.assertEqual(tokens["input_tokens"], 600)
+            self.assertEqual(tokens["cached_input_tokens"], 240)
+            self.assertEqual(tokens["uncached_input_tokens"], 360)
+            self.assertEqual(tokens["output_tokens"], 60)
+            self.assertEqual(tokens["total_tokens"], 660)
+
+    def test_official_analysis_refreshes_forge_but_not_raw_tokens(self) -> None:
+        summaries = [
+            {
+                "pair_id": "model__instance",
+                "trial": {"arm": "forge"},
+                "agent": {
+                    "session_id": "root",
+                    "tokens": {"total_tokens": 110},
+                },
+            },
+            {
+                "pair_id": "model__instance",
+                "trial": {"arm": "raw-codex"},
+                "agent": {
+                    "session_id": "raw-thread",
+                    "tokens": {"total_tokens": 220},
+                },
+            },
+        ]
+        rolled_up = {"provider_calls": 3, "total_tokens": 660}
+
+        with mock.patch.object(
+            swe_analysis.bench,
+            "forge_session_tokens",
+            return_value=rolled_up,
+        ) as token_rollup:
+            swe_analysis.refresh_forge_token_rollups(
+                summaries, Path("/benchmark/forge.db")
+            )
+
+        token_rollup.assert_called_once_with(Path("/benchmark/forge.db"), "root")
+        self.assertEqual(summaries[0]["agent"]["tokens"], rolled_up)
+        self.assertEqual(summaries[1]["agent"]["tokens"]["total_tokens"], 220)
 
 
 class PatchCaptureTests(unittest.TestCase):
