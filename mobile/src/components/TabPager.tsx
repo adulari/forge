@@ -48,7 +48,7 @@ import {
 } from "react-native";
 
 import { isNative } from "../lib/platform";
-import { tabHrefAt, TAB_SWIPE_ORDER } from "../lib/tabSwipe";
+import { landedTabHref, pagerGeometry, TAB_SWIPE_ORDER } from "../lib/tabSwipe";
 import { useTokens } from "../theme/ThemeProvider";
 import { TabPeek } from "./TabPeek";
 
@@ -71,30 +71,36 @@ export function TabPager({ index, children }: { index: number; children: React.R
 
   const hasPrev = index > 0;
   const hasNext = index < TAB_SWIPE_ORDER.length - 1;
-  const homeOffset = hasPrev ? width : 0;
+  const { homePage, homeOffset, contentWidth } = pagerGeometry(index, width);
 
-  const unpark = React.useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Set for the duration of a drag and its settle, so the recovery in `onLayout` cannot yank the
+  // pages out from under a finger if something else changes this view's size mid-swipe.
+  const dragging = React.useRef(false);
 
   const home = React.useCallback(() => {
     scroller.current?.scrollTo({ x: homeOffset, animated: false });
   }, [homeOffset]);
 
-  React.useEffect(() => () => clearTimeout(unpark.current), []);
-
-  // Android ignores the `contentOffset` prop, and a width change (rotation) moves the pages out from
-  // under a fixed offset on both platforms.
-  React.useEffect(home, [home]);
-
-  // A pager left PARKED on a neighbour page is what showed the previous tab for a frame on arrival:
-  // land on Fleet from Inbox, and Inbox's own pager is still sitting on the page that holds Fleet's
-  // peek, so returning to Inbox draws Fleet before it snaps back.
+  // Homed on every FOCUS CHANGE, rather than on a delay after navigating.
   //
-  // So it is unparked on arrival, in a LAYOUT effect: that lands the scroll in the same native batch
-  // as the tab becoming visible, rather than a frame later where it would be seen. This deliberately
-  // does not depend on `useIsFocused` flipping or on `runAfterInteractions` firing — the previous
-  // attempt relied on both, and neither can be verified to hold inside NativeTabs from here.
+  // The delay was the fourth attempt at the same flash and, like the three before it, it treated a
+  // symptom: it assumed the pager was left parked on a neighbour page and only needed putting back
+  // before its tab was next seen. Shortening it made the flash shorter, which read like progress and
+  // was really just evidence that the corrective scroll was racing something. The clamp described in
+  // `pagerGeometry` is that something, and it happens inside layout — earlier than any scroll this
+  // component can schedule, which is why no delay was ever going to be the answer.
+  //
+  // Homing on focus change is what remains once the clamp is gone: cheap, with nothing to tune, and
+  // it covers both ends. On blur this view is still attached, and blur comes from the same navigation
+  // state change that moves the tab controller to its new child, so the snap lands in that commit
+  // rather than in a frame where this tab is still the visible one — the flaw in snapping back inside
+  // `onSettled`, which runs before the navigation has taken effect at all. On focus it is the
+  // backstop for a pager that arrives somewhere unexpected regardless.
+  //
+  // Also covers mount (Android ignores the `contentOffset` prop) and a width change from rotation
+  // moving the pages out from under a fixed offset.
   React.useLayoutEffect(() => {
-    if (isFocused) home();
+    home();
   }, [home, isFocused]);
 
   // Prepare the neighbours once this tab is settled, and then LEAVE THEM MOUNTED. A one-way latch,
@@ -119,24 +125,28 @@ export function TabPager({ index, children }: { index: number; children: React.R
 
   const onSettled = React.useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      dragging.current = false;
       if (width === 0) return;
       const landed = Math.round(event.nativeEvent.contentOffset.x / width);
-      const homePage = hasPrev ? 1 : 0;
-      if (landed === homePage) return;
-
-      const href = tabHrefAt(index + (landed - homePage));
+      // `null` means it settled back where it started: nothing to navigate to, nothing to unpark.
+      const href = landedTabHref(index, landed, homePage);
       if (href === null) return;
+      // Deliberately does NOT unpark here. This tab is still the visible one for the frames the
+      // switch takes, so snapping back now shows the page just swiped away from immediately before
+      // the new tab appears. The blur that this navigation causes does it instead.
       router.navigate(href);
-      // Unparked on a short delay rather than here. This tab is still on screen for the frames it
-      // takes the switch to happen, so snapping back now shows the page just swiped away from
-      // immediately before the new tab appears — the flicker in its first form. A switch is a frame
-      // or two and no swipe brings you back inside 150ms, so by then this tab is hidden. Belt to the
-      // layout effect's braces: a pager that never gets unparked draws the wrong tab on arrival.
-      clearTimeout(unpark.current);
-      unpark.current = setTimeout(home, 150);
     },
-    [hasPrev, home, index, width],
+    [homePage, index, width],
   );
+
+  // Third line of defence, and the only one tied to the layout pass the clamp lives in. Layout is
+  // where a scroll view reconciles its offset against its content size, so if anything ever measures
+  // this content short again, `onLayout` is the first callback after it — ahead of display on iOS,
+  // where layout precedes drawing. Cheap and idempotent: in the ordinary case the pager is already
+  // home and the scroll is a no-op.
+  const onLayout = React.useCallback(() => {
+    if (!dragging.current) home();
+  }, [home]);
 
   // A release almost always hands over to the paging animation, and `onMomentumScrollEnd` is the
   // only event that knows where it landed — acting on the drag's own end offset would navigate to a
@@ -145,9 +155,18 @@ export function TabPager({ index, children }: { index: number; children: React.R
   // would stay mounted afterwards, and a peek that outlives its drag is what put one tab's confirm
   // dialog on top of another.
   const onEndedDrag = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    // Cleared here as well as in `onSettled`, because a release that produces no paging animation
+    // produces no momentum event either — and a drag flag left set would disable the recovery above
+    // for the rest of this tab's life.
+    dragging.current = false;
     if (width === 0) return;
     const past = event.nativeEvent.contentOffset.x % width;
     if (past < 1 || width - past < 1) onSettled(event);
+  };
+
+  const onBeganDrag = () => {
+    dragging.current = true;
+    setPeeking(true);
   };
 
   // Web and the Tauri webview have no touch paging worth the name — a click-drag is a text
@@ -168,11 +187,13 @@ export function TabPager({ index, children }: { index: number; children: React.R
       directionalLockEnabled
       showsHorizontalScrollIndicator={false}
       contentOffset={{ x: homeOffset, y: 0 }}
-      onScrollBeginDrag={() => setPeeking(true)}
+      onLayout={onLayout}
+      onScrollBeginDrag={onBeganDrag}
       onMomentumScrollEnd={onSettled}
       onScrollEndDrag={onEndedDrag}
       style={[styles.fill, { backgroundColor: tokens.bg0 }]}
-      contentContainerStyle={styles.content}
+      // Pinned rather than measured — see `pagerGeometry`. This is the flash.
+      contentContainerStyle={[styles.content, { width: contentWidth }]}
     >
       {hasPrev ? <View style={page}>{showPeeks ? <TabPeek at={index - 1} /> : null}</View> : null}
       <View style={page}>{children}</View>
