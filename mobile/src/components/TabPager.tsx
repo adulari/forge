@@ -1,74 +1,147 @@
-// Horizontal swipe anywhere on a tab screen switches to the neighbouring tab. The switch is
-// immediate: no peek, no content following the finger.
+// Interactive paging between tabs: the content follows the finger, the neighbouring tab peeks in,
+// and a release either settles back or lands on the next tab.
 //
-// IT USED TO PEEK, AND THAT IS WHY IT NO LONGER DOES.
+// THE PAGER IS A SCROLL VIEW, AND THAT IS THE WHOLE POINT.
 //
-// iOS keeps its real tab bar here — `RNSTabBarController` is a genuine UITabBarController — and a
-// UITabBarController only keeps the SELECTED child's view laid out. So peeking meant rendering a
-// SECOND live instance of the neighbouring screen inside the current tab, which leaked in every
-// direction:
+// The previous attempt drove a translation from a hand-rolled `Gesture.Pan`. It could not stop a
+// drag from also being a tap: a horizontal drag across a full-width row stays inside that row's hit
+// rect, so RN's `Pressable` retained the press and fired it on release — swiping History → Settings
+// opened History's "Resume this session?" dialog. There is no reliable way to reach into RN's
+// responder system from a gesture handler and take that press back.
 //
-//  · Accidental taps. A horizontal drag across a full-width row stays inside that row's hit rect, so
-//    RN's `Pressable` retains the press and fires it on release. Swiping History → Settings opened
-//    History's "Resume this session?" confirm dialog.
-//  · Worse, that dialog then floated OVER the Settings tab, because a peek that stays mounted keeps
-//    its state — including open modals — alive in a tab it does not belong to.
-//  · Duplicate fetches and loading states from screens that were never navigated to.
-//  · A one-frame light flash at the handover, from the gap between one instance unmounting and the
-//    next painting.
+// A UIScrollView does it natively. `canCancelContentTouches` (default, set explicitly below because
+// it is load-bearing) means that the moment the scroll view decides it is scrolling, it CANCELS the
+// touches it has already delivered to its subviews. Dragging across a button cannot press it. The
+// vertical axis is settled by the same owner: `directionalLockEnabled` keeps a vertical drag with
+// the list inside the page instead of arm-wrestling it, which is what made swipes get stolen.
 //
-// Each of those was fixable in isolation and the next one appeared. They share a cause: a screen
-// rendered outside the tab that owns it. A faithful interactive transition needs the platform to own
-// it — either a horizontal `ScrollView` with `pagingEnabled`, whose UIScrollView cancels touches in
-// its subviews the moment it starts scrolling (the mechanism RN's Pressable does not give us here),
-// or an interactive UITabBarController transition in Swift. Both are real work and neither should be
-// shipped blind again.
+// `pagingEnabled` supplies the peek, the rubber-banding at the first and last tab, and the settle —
+// all of it the platform's own physics rather than numbers I picked.
 //
-// What survives: the gesture itself, its thresholds (see lib/tabGesture.ts — a thumb swipe arcs, so
-// the pager must cancel later vertically than it activates horizontally), and no haptic on arrival,
-// because tapping a native tab bar does not buzz either.
-import { router } from "expo-router";
+// WHAT IS STILL TRUE FROM THE OLD DESIGN
+//
+// iOS keeps its real tab bar (`RNSTabBarController` is a genuine UITabBarController), and a
+// UITabBarController only keeps the SELECTED child's view laid out. So the pager still lives inside
+// each tab rather than around the navigator, and a peeked neighbour is still a second instance of
+// that screen. Two consequences are handled deliberately:
+//
+//  · Peeks mount when a drag starts and unmount when it ends. Never sticky — a peek that outlived
+//    its drag kept its state alive, and an open confirm dialog from one tab rendered on top of
+//    another.
+//  · They render as peeks (`useIsPeeking`), so they show cached data and ask the network for
+//    nothing. A screen sliding past under a thumb is not an arrival.
+//
+// The page slots exist even when empty, because the scroll view needs their width to be scrollable
+// at all — an empty slot is the app's own background, not a light gap.
+import { router, useIsFocused } from "expo-router";
 import React from "react";
-import { StyleSheet, View } from "react-native";
-import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import {
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+  ScrollView,
+  StyleSheet,
+  useWindowDimensions,
+  View,
+} from "react-native";
 
 import { isNative } from "../lib/platform";
-import { ACTIVATE_X, COMMIT_DISTANCE, COMMIT_VELOCITY, FAIL_Y } from "../lib/tabGesture";
 import { tabHrefAt, TAB_SWIPE_ORDER } from "../lib/tabSwipe";
+import { useTokens } from "../theme/ThemeProvider";
+import { TabPeek } from "./TabPeek";
 
 export function TabPager({ index, children }: { index: number; children: React.ReactNode }) {
+  const tokens = useTokens();
+  const scroller = React.useRef<ScrollView>(null);
+  const [peeking, setPeeking] = React.useState(false);
+  const isFocused = useIsFocused();
+  // Window width rather than a measured layout, because it is known on the FIRST render. Measuring
+  // would leave `contentOffset` at zero for that render, which for any tab with a page to its left
+  // means the pager opens showing the wrong page and jumps once the measurement lands.
+  const { width } = useWindowDimensions();
+
   const hasPrev = index > 0;
   const hasNext = index < TAB_SWIPE_ORDER.length - 1;
+  const homeOffset = hasPrev ? width : 0;
 
-  const pan = React.useMemo(
-    () =>
-      Gesture.Pan()
-        .enabled(isNative)
-        .activeOffsetX([-ACTIVATE_X, ACTIVATE_X])
-        .failOffsetY([-FAIL_Y, FAIL_Y])
-        // Nothing here animates a shared value, so the whole gesture runs on the JS thread and can
-        // call the router directly.
-        .runOnJS(true)
-        .onEnd((event) => {
-          const committed =
-            Math.abs(event.translationX) > COMMIT_DISTANCE ||
-            Math.abs(event.velocityX) > COMMIT_VELOCITY;
-          if (!committed) return;
-          const toPrev = event.translationX > 0;
-          if (toPrev ? !hasPrev : !hasNext) return;
-          const href = tabHrefAt(toPrev ? index - 1 : index + 1);
-          if (href !== null) router.navigate(href);
-        }),
-    [hasNext, hasPrev, index],
+  const home = React.useCallback(() => {
+    scroller.current?.scrollTo({ x: homeOffset, animated: false });
+  }, [homeOffset]);
+
+  // Android ignores the `contentOffset` prop, and a width change (rotation) moves the pages out from
+  // under a fixed offset on both platforms.
+  React.useEffect(home, [home]);
+
+  // NativeTabs keeps this tab mounted after the user leaves it, so a pager left resting on a
+  // neighbour page would still be there on return, showing the wrong screen.
+  React.useEffect(() => {
+    if (!isFocused) {
+      setPeeking(false);
+      home();
+    }
+  }, [home, isFocused]);
+
+  const onSettled = React.useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      setPeeking(false);
+      if (width === 0) return;
+      const landed = Math.round(event.nativeEvent.contentOffset.x / width);
+      const homePage = hasPrev ? 1 : 0;
+      if (landed === homePage) return;
+
+      const href = tabHrefAt(index + (landed - homePage));
+      if (href === null) return;
+      router.navigate(href);
+      // Put this pager back on its own page before the tab is hidden, so returning to it later does
+      // not land mid-swipe.
+      home();
+    },
+    [hasPrev, home, index, width],
   );
 
+  // A release almost always hands over to the paging animation, and `onMomentumScrollEnd` is the
+  // only event that knows where it landed — acting on the drag's own end offset would navigate to a
+  // page the animation never settles on. The exception is a release that is already exactly on a
+  // boundary, which produces no animation and therefore no momentum event; without this the peek
+  // would stay mounted afterwards, and a peek that outlives its drag is what put one tab's confirm
+  // dialog on top of another.
+  const onEndedDrag = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    if (width === 0) return;
+    const past = event.nativeEvent.contentOffset.x % width;
+    if (past < 1 || width - past < 1) onSettled(event);
+  };
+
+  // Web and the Tauri webview have no touch paging worth the name — a click-drag is a text
+  // selection and a trackpad swipe arrives as wheel deltas — so they get the screen unwrapped.
+  if (!isNative) return <View style={styles.fill}>{children}</View>;
+
+  const page = { width };
+
   return (
-    <GestureDetector gesture={pan}>
-      <View style={styles.fill}>{children}</View>
-    </GestureDetector>
+    <ScrollView
+      ref={scroller}
+      horizontal
+      pagingEnabled
+      // Load-bearing, not decoration: this is what cancels a press when a drag turns into a scroll.
+      canCancelContentTouches
+      // Keeps a vertical drag with the list inside the page rather than contesting it.
+      directionalLockEnabled
+      showsHorizontalScrollIndicator={false}
+      contentOffset={{ x: homeOffset, y: 0 }}
+      onScrollBeginDrag={() => setPeeking(true)}
+      onMomentumScrollEnd={onSettled}
+      onScrollEndDrag={onEndedDrag}
+      style={[styles.fill, { backgroundColor: tokens.bg0 }]}
+      contentContainerStyle={styles.content}
+    >
+      {hasPrev ? <View style={page}>{peeking ? <TabPeek at={index - 1} /> : null}</View> : null}
+      <View style={page}>{children}</View>
+      {hasNext ? <View style={page}>{peeking ? <TabPeek at={index + 1} /> : null}</View> : null}
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
+  // Without this the pages collapse to their content height inside a horizontal scroll view.
+  content: { alignItems: "stretch" },
 });
