@@ -8,6 +8,27 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **A light grey flashed through the tab pager.** Frame analysis of a screen recording found it four
+  times in 18.7s: once filling the whole content area for a single 17ms frame at the moment a swipe
+  committed, and otherwise as light strips down the incoming edge mid-drag, 6–20% of the area for
+  33–100ms. The colour is a uniform `#F0F0F0` — measured exactly, against pure white reading 255 in
+  the same frame, so neither white nor the light theme's `#F5F4F1` — which makes it a native surface
+  behind the JS view rather than anything the app draws. The pager's clipping container had no
+  background of its own, so any moment it had not filled fell through to it: the frame between one
+  tab's screen unmounting and the next one painting, and the first frames of a drag before the
+  neighbour had mounted. It now paints `bg0`, so an unfilled moment reads as the app.
+- **A swipe sometimes scrolled the page instead of changing tabs.** The pager needed 28px of
+  horizontal travel before 15px of vertical cancelled it — a ratio of nearly 2:1 just to begin, and a
+  thumb swipe arcs, so an ordinary curved swipe crossed the vertical limit first and the list
+  underneath took the drag. Now 20px horizontal against 24px vertical, so intent that is even roughly
+  sideways pages while a genuinely vertical drag still scrolls. 20px stays clear of SessionCard's
+  10px archive pan, which is a descendant and so still claims a card drag first. The thresholds moved
+  to `lib/tabGesture.ts` where the relationships between them are asserted, since the ratio — not
+  either number alone — is what a thumb experiences.
+- Tab neighbours now mount on the first drag and stay mounted, rather than unmounting on every
+  settle. Each swipe previously waited on `runOnJS` → `setState` → render before the neighbour
+  existed, which is what left the incoming edge empty at the start of a drag.
+
 - **The app failed to open** — `undefined is not a function`, caught by the root error boundary — on
   the OTA that added tab-peek preloading. Preloading resolved all four tab route modules from an
   effect when the pager mounted, to spend `React.lazy`'s promise frame before a drag rather than
