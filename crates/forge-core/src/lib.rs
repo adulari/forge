@@ -3521,9 +3521,9 @@ impl Session {
                 schema: t.schema(),
             })
             .collect();
-        // Advertise the subagent virtual tool to the top-level model only (RFC
-        // subagent-orchestration). Children build their own registry without it, so the
-        // depth-1 recursion guard is structural.
+        // Advertise the subagent virtual tool to the top-level model (RFC
+        // subagent-orchestration). Children may receive it separately only when the explicitly
+        // configured recursion depth allows another generation.
         if self.config.mesh.subagents.enabled
             && self
                 .task_scope
@@ -15489,6 +15489,47 @@ mod tests {
         assert_eq!(
             generations, 4,
             "parent + 3 nested generations (depths 0,1,2), bounded by max_depth"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_subagent_depth_stops_after_one_child_generation() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = tiered_config();
+        assert_eq!(
+            config.mesh.subagents.max_depth, 0,
+            "recursive delegation must remain an explicit opt-in"
+        );
+        config.mesh.subagents.max_concurrency = 2;
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(AlwaysRecurseProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+        let parent_id = session.id().to_string();
+
+        session
+            .run_turn("kick off a default delegating turn")
+            .await
+            .unwrap();
+
+        fn max_gen(store: &Store, id: &str) -> usize {
+            let kids = store.child_sessions(id).unwrap();
+            1 + kids
+                .iter()
+                .map(|kid| max_gen(store, kid))
+                .max()
+                .unwrap_or(0)
+        }
+        assert_eq!(
+            max_gen(&store, &parent_id),
+            2,
+            "the parent may delegate once, but default children must not recurse"
         );
     }
 

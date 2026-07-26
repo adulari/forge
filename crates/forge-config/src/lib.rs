@@ -1810,8 +1810,9 @@ pub struct SubagentsConfig {
     /// Max child agents running concurrently (parallel fan-out is Phase 2).
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: usize,
-    /// How deep subagents may nest (1 = a top-level turn may spawn children, but those children
-    /// may not spawn their own). Bounds total fan-out; the per-call `max_agents`/`max_concurrency`
+    /// How many additional spawn generations children may create. `0` lets the top-level turn
+    /// spawn children but prevents those children from recursively delegating. Higher values are
+    /// opt-in because fan-out grows exponentially; the per-call `max_agents`/`max_concurrency`
     /// caps still apply at every level (RFC subagent-orchestration Phase 3c).
     #[serde(default = "default_max_depth")]
     pub max_depth: usize,
@@ -1842,7 +1843,7 @@ fn default_max_concurrency() -> usize {
     4
 }
 fn default_max_depth() -> usize {
-    2
+    0
 }
 fn default_max_per_provider() -> usize {
     2
