@@ -41,6 +41,7 @@ DEFAULT_SCENARIOS = (
     "rust-transaction-ledger",
 )
 DEFAULT_ARMS = ("forge", "raw-codex")
+FORGE_CHECKPOINT_PATHSPEC = ":(exclude).forge/checkpoints/**"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -146,6 +147,20 @@ def tiny_command(argv: Sequence[str], *, cwd: Path = REPO_ROOT) -> str:
     return completed.stdout.strip()
 
 
+def add_local_git_excludes(workspace: Path, patterns: Sequence[str]) -> None:
+    """Append benchmark-local excludes without changing the checked-out tree."""
+
+    exclude_path = workspace / ".git" / "info" / "exclude"
+    existing = set(exclude_path.read_text(encoding="utf-8").splitlines())
+    missing = [pattern for pattern in patterns if pattern not in existing]
+    if not missing:
+        return
+    with exclude_path.open("a", encoding="utf-8") as handle:
+        if exclude_path.stat().st_size:
+            handle.write("\n")
+        handle.write("\n".join(missing) + "\n")
+
+
 def initialize_workspace(scenario: str, workspace: Path) -> dict[str, str]:
     source = SCENARIO_ROOT / scenario
     fixture = source / "fixture"
@@ -164,9 +179,16 @@ def initialize_workspace(scenario: str, workspace: Path) -> dict[str, str]:
         subprocess.run(command, cwd=workspace, check=True, timeout=30)
     # Agent/verifier build products are evidence only through their command logs. Keep them out of
     # the solution patch without changing the model-visible fixture or tracked .gitignore.
-    (workspace / ".git" / "info" / "exclude").write_text(
-        "target/\nnode_modules/\n.pytest_cache/\n__pycache__/\n*.pyc\n.forge/\n",
-        encoding="utf-8",
+    add_local_git_excludes(
+        workspace,
+        (
+            "target/",
+            "node_modules/",
+            ".pytest_cache/",
+            "__pycache__/",
+            "*.pyc",
+            ".forge/",
+        ),
     )
     return {
         "baseline_commit": tiny_command(("git", "rev-parse", "HEAD"), cwd=workspace),
@@ -454,7 +476,7 @@ def verify_scenario(
 
 def capture_patch(workspace: Path, trial_dir: Path) -> dict[str, Any]:
     subprocess.run(
-        ("git", "add", "-N", "."),
+        ("git", "add", "-N", "--", ".", FORGE_CHECKPOINT_PATHSPEC),
         cwd=workspace,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -462,7 +484,16 @@ def capture_patch(workspace: Path, trial_dir: Path) -> dict[str, Any]:
         timeout=30,
     )
     patch = subprocess.run(
-        ("git", "diff", "--binary", "--no-ext-diff", "HEAD"),
+        (
+            "git",
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "HEAD",
+            "--",
+            ".",
+            FORGE_CHECKPOINT_PATHSPEC,
+        ),
         cwd=workspace,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -471,8 +502,14 @@ def capture_patch(workspace: Path, trial_dir: Path) -> dict[str, Any]:
     )
     (trial_dir / "changes.patch").write_bytes(patch.stdout)
     (trial_dir / "changes.patch.stderr.log").write_bytes(patch.stderr)
-    status = tiny_command(("git", "status", "--short"), cwd=workspace)
-    diffstat = tiny_command(("git", "diff", "--stat", "HEAD"), cwd=workspace)
+    status = tiny_command(
+        ("git", "status", "--short", "--", ".", FORGE_CHECKPOINT_PATHSPEC),
+        cwd=workspace,
+    )
+    diffstat = tiny_command(
+        ("git", "diff", "--stat", "HEAD", "--", ".", FORGE_CHECKPOINT_PATHSPEC),
+        cwd=workspace,
+    )
     return {
         "patch_bytes": len(patch.stdout),
         "patch_sha256": hashlib.sha256(patch.stdout).hexdigest(),

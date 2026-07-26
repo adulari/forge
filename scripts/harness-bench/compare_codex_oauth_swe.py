@@ -166,6 +166,10 @@ def prepare_repo(instance: dict[str, Any], worktree_root: Path) -> Path:
     require_git_success(reset, operation=f"resetting {base_commit}")
     clean = run_git(("clean", "-ffdx", "--quiet"), cwd=workspace)
     require_git_success(clean, operation=f"cleaning {workspace}")
+    bench.add_local_git_excludes(
+        workspace,
+        (".forge/checkpoints/", ".forge/forge.log"),
+    )
     actual = bench.tiny_command(("git", "rev-parse", "HEAD"), cwd=workspace)
     if actual != base_commit:
         raise RuntimeError(
