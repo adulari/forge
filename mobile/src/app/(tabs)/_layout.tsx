@@ -20,6 +20,7 @@ import React from "react";
 import { Platform, StyleSheet } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { TabSwipe } from "../../components/TabSwipe";
 import { useSessions } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { useBreakpoint } from "../../theme/useBreakpoint";
@@ -135,7 +136,8 @@ function StandardTabs() {
 export default function TabsLayout() {
   const { isExpanded } = useBreakpoint();
 
+  // Expanded layouts navigate by the persistent Fleet rail, not a tab bar, so there are no
+  // neighbouring tabs for a swipe to mean anything relative to.
   if (isExpanded) return <Slot />;
-  if (Platform.OS === "ios") return <IOSNativeTabs />;
-  return <StandardTabs />;
+  return <TabSwipe>{Platform.OS === "ios" ? <IOSNativeTabs /> : <StandardTabs />}</TabSwipe>;
 }

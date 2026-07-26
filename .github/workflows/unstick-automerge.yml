@@ -1,0 +1,116 @@
+name: unstick stalled auto-merge PRs
+
+# Auto-merge in this repo cannot advance a PR on its own once `main` moves ahead of it, and nothing
+# was moving it. Two settings combine into a permanent deadlock:
+#
+#   ruleset "Protection branch": strict_required_status_checks_policy = true  (branch must be up to date)
+#   repository:                  allow_update_branch = false                 (GitHub will not update it)
+#
+# The PR then sits at `mergeStateStatus: BEHIND` with every check green and auto-merge armed,
+# forever, until a human runs `gh pr update-branch`. It looks healthy in every view that matters —
+# green checks, auto-merge on — which is why it went unnoticed release after release.
+#
+# Four known incidents, one cause: #891 (v2.10.0 manifests, left Homebrew pointing at a version that
+# was never published), #894 (v2.10.1 manifests, package managers stranded on 2.9.1), #897 (an
+# ordinary fix PR — so this was never specific to `dist/`), and #899 (v2.10.2 manifests).
+#
+# `release.yml`'s manifest job already works around GitHub's OTHER anti-recursion rule — a
+# GITHUB_TOKEN push creates no `pull_request` run — by dispatching the required workflows against
+# the branch. That part works: the required `CI` context was verified green on the stuck SHA of
+# #899. Only BEHIND was blocking it. But the same anti-recursion rule applies to the branch update
+# this workflow performs, so after every update it must re-dispatch those workflows, or the new SHA
+# would carry no `CI` check and the PR would merely stall for a different reason.
+#
+# Triggered on push to main because that is the exact moment PRs become BEHIND (proven to fire after
+# an auto-merge squash: eas-update.yml runs on the same event). The schedule is a backstop for a
+# dropped push event — #890 is the reason that is not treated as hypothetical.
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write # re-dispatches the required workflows after updating a branch
+
+# One at a time: two concurrent runs would both try to update the same branch, and the loser's
+# update lands on a SHA whose dispatched checks were already superseded.
+concurrency:
+  group: unstick-automerge
+  cancel-in-progress: false
+
+jobs:
+  unstick:
+    name: update branches auto-merge cannot advance
+    # GitHub-hosted on purpose: this is a handful of API calls on a 30-minute schedule, and the
+    # self-hosted runners are a real machine that should not be woken up for it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Update every stalled auto-merge PR and re-arm its checks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # mergeStateStatus is only computed on demand, so a freshly-pushed main can leave it
+          # UNKNOWN for a few seconds. Asking for it per-PR below (rather than in this list query)
+          # gives GitHub time to settle and avoids acting on a stale value.
+          numbers=$(gh pr list --state open --limit 50 \
+            --json number,isDraft,autoMergeRequest \
+            --jq '.[] | select(.isDraft == false) | select(.autoMergeRequest != null) | .number')
+
+          if [ -z "$numbers" ]; then
+            echo "no open PR has auto-merge armed — nothing to unstick"
+            exit 0
+          fi
+
+          for pr in $numbers; do
+            read -r state branch < <(gh pr view "$pr" \
+              --json mergeStateStatus,headRefName --jq '"\(.mergeStateStatus) \(.headRefName)"')
+
+            if [ "$state" != "BEHIND" ]; then
+              # A `dist/` branch is bot-authored, so GitHub creates no `pull_request` runs for it and
+              # release.yml's dispatch is the ONLY thing that can ever produce its required `CI`
+              # context. If that dispatch failed at release time, the PR is unmergeable forever with
+              # no other mechanism to notice. Human PRs need no equivalent — their checks arrive on
+              # the `pull_request` event — so this stays narrowly scoped rather than racing real CI.
+              if [ "$state" = "BLOCKED" ] && case "$branch" in dist/*) true ;; *) false ;; esac; then
+                head=$(gh pr view "$pr" --json headRefOid --jq .headRefOid)
+                if [ -z "$(gh api "repos/$GH_REPO/commits/$head/check-runs" \
+                     --jq '.check_runs[] | select(.name == "CI") | .name')" ]; then
+                  echo "#$pr: BLOCKED with no CI check on $head — dispatching the required workflows"
+                  for workflow in ci.yml security.yml mobile-typecheck.yml; do
+                    gh workflow run "$workflow" --ref "$branch" \
+                      || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
+                  done
+                  continue
+                fi
+              fi
+              echo "#$pr: $state — leaving alone"
+              continue
+            fi
+
+            echo "#$pr: BEHIND — auto-merge cannot advance it, updating the branch"
+            if ! gh pr update-branch "$pr"; then
+              # A genuine conflict with main needs a human; say so rather than retrying every
+              # 30 minutes in silence.
+              echo "::warning title=Stalled PR needs a human::#$pr is BEHIND and could not be updated automatically (likely a conflict with main)."
+              continue
+            fi
+
+            # The update above was pushed with GITHUB_TOKEN, so GitHub creates no `pull_request`
+            # runs for the new head SHA. Without these dispatches the required `CI` context would
+            # never appear on it and the PR would stall again, one state later.
+            for workflow in ci.yml security.yml mobile-typecheck.yml; do
+              gh workflow run "$workflow" --ref "$branch" \
+                || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
+            done
+            echo "#$pr: branch updated and required checks re-dispatched"
+          done
