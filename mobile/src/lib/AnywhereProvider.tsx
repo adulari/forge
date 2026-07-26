@@ -252,8 +252,9 @@ export interface AnywhereContextValue {
   selectHost(hostId: string): void;
   queueRemoteJob(input: Omit<CreateSessionJob, "hostDeviceId">): Promise<PendingRemoteJob>;
   refreshRemoteJobs(): Promise<void>;
-  enablePush(): Promise<void>;
-  disablePush(): Promise<void>;
+  /** Resolves with the resulting status — "denied" is a normal outcome, not a thrown error. */
+  enablePush(): Promise<AnywherePushStatus>;
+  disablePush(): Promise<AnywherePushStatus>;
   logout(): Promise<void>;
 }
 
@@ -1536,7 +1537,9 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const enablePush = useCallback(async () => {
     try {
       setError(null);
-      setPushStatus(await enableAnywherePush(pushApi));
+      const next = await enableAnywherePush(pushApi);
+      setPushStatus(next);
+      return next;
     } catch (reason) {
       setError(message(reason));
       throw reason;
@@ -1546,7 +1549,9 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const disablePush = useCallback(async () => {
     try {
       setError(null);
-      setPushStatus(await disableAnywherePush(pushApi));
+      const next = await disableAnywherePush(pushApi);
+      setPushStatus(next);
+      return next;
     } catch (reason) {
       setError(message(reason));
       throw reason;
