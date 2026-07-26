@@ -136,19 +136,25 @@ If you find a genuine problem, FIX it now with the tools. If the change is corre
 say so in one line and stop — do NOT make changes for their own sake or second-guess a sound fix.";
 
 /// Direct-provider counterpart of the bridge completeness re-drive. Unlike the broad same-model
-/// self-review (which regressed when always-on), this requires one concrete repository search and
-/// permits another edit only when that evidence exposes an omitted production path.
+/// self-review (which regressed when always-on), this requires a small, concrete repository-search
+/// sweep and permits another edit only when that evidence exposes an omitted production path.
 const DIRECT_COMPLETENESS_PROMPT: &str = "\
 Before finishing this code-change task, perform ONE bounded completeness audit grounded in \
 evidence:
 1. Run `git diff` once to inspect the COMPLETE current change, then re-read the original task.
-2. You MUST run ONE targeted repository search for related production paths. If the task or diff \
-renames, replaces, deprecates, or changes an identifier, option, API, format, or behavior, search \
-for the old AND new names and inspect the relevant matches. Otherwise search for the directly \
-affected callers/implementations. Passing existing tests alone is not proof: hidden tests often \
-exercise an omitted sibling path.
-3. For every concrete related production path found, confirm the diff handles the same requirement. \
-If one is missing, fix that specific omission and run focused verification. If the search reveals \
+2. You MUST run a targeted repository search sweep for related production paths (maximum THREE \
+search commands). If the task or removed diff lines rename, replace, deprecate, or change an \
+identifier, option, API, format, or behavior, search for EACH old/deprecated name as a plain \
+literal, separately or in a simple alternation. Do NOT add surrounding-syntax predicates such as \
+a particular variable, container, call shape, or accessor: those can hide a sibling implementation \
+that uses the same name differently. Search the nearest production subsystem containing the edited \
+file AND its sibling files; if that finds matches only in files already edited, widen one directory \
+level once. Otherwise search for the directly affected callers/implementations.
+3. Inspect every distinct production file returned by that sweep, especially sibling clients, \
+adapters, serializers, commands, and alternate entry points. For each concrete related path, \
+confirm the diff handles the same requirement. Passing existing tests alone is not proof: hidden \
+tests often exercise an omitted sibling path.
+4. If one is missing, fix that specific omission and run focused verification. If the sweep reveals \
 no concrete omission, make NO further edits and finish.
 
 Do not broadly re-explore or refactor, and do not modify existing tests to hide a failure. This is \
@@ -18931,6 +18937,15 @@ mod tests {
                 .iter()
                 .any(|message| message.content.contains("targeted repository search")),
             "the direct provider must receive the evidence-grounded completeness prompt"
+        );
+        assert!(
+            session
+                .transcript
+                .iter()
+                .any(|message| message.content.contains("plain literal")
+                    && message.content.contains("sibling files")
+                    && message.content.contains("maximum THREE")),
+            "the audit must require a bounded, high-recall search rather than one narrow regex"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

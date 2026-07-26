@@ -1529,9 +1529,10 @@ pub struct MeshConfig {
     pub benchmark_ranking: bool,
     /// Opt-in "max-resolve" mode: run one bounded, evidence-grounded completeness pass before a
     /// code-change turn finishes. CLI bridges re-check every stated requirement; direct providers
-    /// also inspect the final diff and search once for related production call sites. Measured to
-    /// raise bridge SWE-bench resolve (4/10 → 6/10, beating the raw CLI), but it costs an extra
-    /// model pass — so it remains OFF by default until the direct policy is validated.
+    /// also inspect the final diff and run a bounded plain-literal search sweep across related
+    /// production siblings. Measured to raise bridge SWE-bench resolve (4/10 → 6/10, beating the
+    /// raw CLI), but it costs an extra model pass — so it remains OFF by default until the direct
+    /// policy is validated.
     #[serde(default = "default_verify_completeness")]
     pub verify_completeness: bool,
     /// Empty-diff completion nudge (harness-robustness wave 2): when a headless code-change run
