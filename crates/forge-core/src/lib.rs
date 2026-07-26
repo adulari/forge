@@ -194,19 +194,6 @@ preferred while preserving the old name only as a compatibility fallback. Do not
 searches, do not edit tests, and do not finish with prose that merely repeats the changes already \
 made.";
 
-const DIRECT_NAMED_API_SCOPE_PROMPT: &str = "\
-The original task explicitly names the production API(s) below. Before finishing, perform ONE \
-bounded scope-and-invariant audit:
-1. Run `git diff` once, then OPEN each named API and every shared lower-level helper your diff \
-changes for it.
-2. If the diff implements the request in a shared helper instead of the named API, inspect that \
-helper's production callers. You MUST preserve behavior for callers outside the requested API and \
-for the named API when the new option/condition is absent or default. A new focused test passing \
-does not prove those existing invariants.
-3. If you cannot demonstrate those invariants from the opened code, move or gate the change at the \
-named API boundary. If the current diff is already scoped there and preserves default behavior, \
-make NO edit and finish. Do not modify tests and do not broadly re-explore the repository.";
-
 fn completeness_search_reported_no_matches(messages: &[Message]) -> bool {
     messages.iter().any(|message| {
         if message.role != Role::Tool {
@@ -255,40 +242,6 @@ fn direct_completeness_is_identifier_migration(prompt: &str) -> bool {
     ]
     .iter()
     .any(|signal| prompt.contains(signal))
-}
-
-fn direct_scope_review_named_apis(prompt: &str) -> Vec<String> {
-    let mut names = prompt
-        .split_whitespace()
-        .filter_map(|token| {
-            let token = token
-                .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'));
-            let token = token.trim_matches('.');
-            let (owner, member) = token.split_once('.')?;
-            if owner.contains('.') || member.contains('.') {
-                return None;
-            }
-            let mut owner_chars = owner.chars();
-            let first = owner_chars.next()?;
-            let second = owner_chars.next()?;
-            let owner_is_class = first.is_ascii_uppercase()
-                && second.is_ascii_lowercase()
-                && owner
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
-            let member_is_method = member
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
-                && member
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
-            (owner_is_class && member_is_method).then(|| token.to_string())
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
 }
 
 fn changed_paths_from_status(status: Option<&[u8]>) -> std::collections::HashSet<String> {
@@ -7254,13 +7207,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
         }
 
-        // ── Selective direct-provider audits (mesh.verify_completeness) ───────────────────────
+        // ── Direct-provider completeness audit (mesh.verify_completeness) ─────────────────────
         // The loop-gated completeness re-drive inside `run_model_loop` covers CLI bridges, whose
         // subprocess yields back to Forge before the outer turn ends. Direct providers never pass
         // through that bridge-yield branch, so the same opt-in quality lever was silently inert for
-        // `codex-oauth`/API models. Run a bounded evidence pass here after the edit/test guard only
-        // for explicit identifier migrations or an explicitly named Class.method API. Matched
-        // same-model evaluation found the broad direct pass harmful for unrelated bug fixes; the
+        // `codex-oauth`/API models. Run one bounded evidence pass here after the edit/test guard,
+        // but only for explicit identifier migrations. Matched same-model evaluation found the
+        // direct pass helpful for deprecation/rename work and harmful for unrelated bug fixes; the
         // bridge pass above intentionally remains broad.
         //
         // This is deliberately narrower than `mesh.self_review`: the model must inspect the final
@@ -7274,50 +7227,6 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let code_change_turn = self.edits_this_turn > 0
             || self.expect_code_change
             || self.last_turn_contract.requires_changed_artifact();
-        let named_apis = direct_scope_review_named_apis(prompt);
-        if self.config.mesh.verify_completeness
-            && code_change_turn
-            && !direct_completeness_is_identifier_migration(prompt)
-            && !named_apis.is_empty()
-            && !forge_provider::is_cli_bridge(&active_model)
-            && !self.past_turn_deadline()
-            && !hit_step_cap
-            && !halted_by_loop_guard
-            && working_tree_changed_since(
-                Some(self.workspace.root()),
-                working_tree_baseline.as_deref(),
-            )
-        {
-            self.presenter.emit(PresenterEvent::Warning(format!(
-                "scope check — preserving callers of explicitly named API(s): {}",
-                named_apis.join(", ")
-            )));
-            self.auto_compact_if_needed(&active_model).await;
-            let prompt = format!(
-                "{DIRECT_NAMED_API_SCOPE_PROMPT}\n\nNamed production APIs:\n- {}",
-                named_apis.join("\n- ")
-            );
-            let seq = self.next_seq();
-            self.store
-                .add_message(&self.id, seq, Role::System, &prompt, None)?;
-            self.transcript.push(Message::system(&prompt));
-            let review_specs = self.tool_specs();
-            let review = self
-                .run_model_loop(
-                    active_model.clone(),
-                    &review_specs,
-                    None,
-                    max_steps,
-                    stream_idle,
-                )
-                .await?;
-            adopt_redrive_text(&mut final_text, review.final_text);
-            context_tokens = review.context_tokens;
-            active_model = review.active_model;
-            hit_step_cap = review.hit_step_cap;
-            halted_by_loop_guard = review.halted_by_loop_guard;
-        }
-
         if self.config.mesh.verify_completeness
             && code_change_turn
             && direct_completeness_is_identifier_migration(prompt)
@@ -19354,23 +19263,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn direct_scope_review_extracts_explicit_class_methods_only() {
-        assert_eq!(
-            direct_scope_review_named_apis(
-                "Fix `Figure.subfigures()` consistently with Function._eval_evalf."
-            ),
-            vec!["Figure.subfigures", "Function._eval_evalf"]
-        );
-        assert!(
-            direct_scope_review_named_apis(
-                "Preserve X_out.dtypes on 5.2.3; do not collect __init__.py or ExitCode.OK"
-            )
-            .is_empty(),
-            "variables, versions, filenames, and enum variants are not named production APIs"
-        );
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn direct_completeness_runs_once_after_a_code_edit_when_enabled() {
@@ -19519,68 +19411,6 @@ mod tests {
                 .iter()
                 .any(|message| message.content == DIRECT_COMPLETENESS_PROMPT),
             "generic bug fixes must not receive the direct completeness prompt"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn direct_scope_review_runs_once_for_an_explicit_named_api() {
-        let dir = std::env::temp_dir().join(format!(
-            "forge-direct-named-api-scope-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("f.py");
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        let capture = CapturePresenter::default();
-        let events = capture.events.clone();
-        let mut session = Session::start(
-            Arc::clone(&store),
-            Arc::new(EditOnceThenDoneProvider {
-                calls: std::sync::atomic::AtomicUsize::new(0),
-                path: path.to_string_lossy().into_owned(),
-            }),
-            Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools_in(&dir),
-            Box::new(capture),
-            Config {
-                permission_mode: forge_types::PermissionMode::AcceptEdits,
-                ..Config::default()
-            },
-            dir.to_str().unwrap(),
-        )
-        .unwrap();
-
-        session
-            .run_turn("[Bug]: Figure.subfigures ignores explicit spacing")
-            .await
-            .unwrap();
-
-        let fired = events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    PresenterEvent::Warning(message)
-                        if message.contains("explicitly named API(s): Figure.subfigures")
-                )
-            })
-            .count();
-        assert_eq!(fired, 1, "the named-API scope review must run exactly once");
-        assert!(session.transcript.iter().any(|message| {
-            message.content.contains("shared lower-level helper")
-                && message.content.contains("Figure.subfigures")
-                && message.content.contains("outside the requested API")
-        }));
-        assert!(
-            !session
-                .transcript
-                .iter()
-                .any(|message| message.content == DIRECT_COMPLETENESS_PROMPT),
-            "the named-API review must not reactivate migration completeness"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
