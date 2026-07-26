@@ -6,6 +6,21 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Swiping between tabs flashed, buzzed and reloaded.** Three separate causes behind one symptom:
+  the peeked neighbour resolved its module through `React.lazy` *during* the drag, and Metro's
+  resolution costs a frame — visible as a blank page at the moment the swipe starts, so peeks are now
+  preloaded once the pager mounts; `useSessions` sets `refetchOnMount: "always"`, and a peek is a
+  second mount, so every swipe between Fleet and Inbox fired a round trip mid-gesture and another one
+  when the real screen arrived; and the commit fired a selection haptic, which nothing on a native
+  tab bar does when you tap it. A peek is now marked as such (`useIsPeeking`) and asks the network
+  for nothing, renders whatever is already cached, and no longer mirrors itself into the home-screen
+  widget. `sessionsRefetchPolicy` carries that decision as a plain function so it is testable without
+  a renderer — the original bug was invisible to every unit test and only showed up as a flicker on a
+  phone. The Suspense fallback is also opaque now rather than transparent, since a see-through gap
+  during a drag reads as a flicker of its own.
+
 ### Added
 
 - **Tabs page under the finger.** Dragging horizontally on Fleet / Inbox / History / Settings moves

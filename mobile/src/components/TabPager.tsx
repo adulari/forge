@@ -37,10 +37,9 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
-import { haptics } from "../lib/haptics";
 import { isNative } from "../lib/platform";
 import { tabHrefAt, TAB_SWIPE_ORDER } from "../lib/tabSwipe";
-import { TabPeek } from "./TabPeek";
+import { preloadTabPeeks, TabPeek } from "./TabPeek";
 
 /** Horizontal distance before the pager takes the drag — clear of SessionCard's 10px archive pan. */
 const ACTIVATE_X = 28;
@@ -63,10 +62,18 @@ export function TabPager({ index, children }: { index: number; children: React.R
   const hasPrev = index > 0;
   const hasNext = index < TAB_SWIPE_ORDER.length - 1;
 
+  // Resolve the neighbour modules before the first drag rather than during it — see
+  // `preloadTabPeeks`. One frame of nothing at the start of a swipe is exactly what it looks like.
+  React.useEffect(() => {
+    preloadTabPeeks();
+  }, []);
+
   const go = React.useCallback((target: number) => {
     const href = tabHrefAt(target);
     if (href === null) return;
-    haptics.select();
+    // No haptic here on purpose. Tapping a native tab bar does not buzz, so a swipe that reaches the
+    // same place should not either — landing on the tab you dragged to is not news.
+    //
     // The next route mounts its own pager at rest in the centre, so the row must be back at zero
     // before the swap or the incoming tab would start life translated by a screen width.
     drag.value = 0;
