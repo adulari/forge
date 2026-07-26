@@ -1,7 +1,7 @@
 # Forge vs native Codex CLI on GPT-5.6
 
-Status: in progress  
-Study date: 2026-07-26  
+Status: complete
+Study date: 2026-07-26
 Current branch: `bench/codex-oauth-gpt56-20260726`
 
 ## Executive summary
@@ -10,16 +10,23 @@ This study compares Forge's own coding harness with the user's installed native 
 holding the authenticated OpenAI account, model, reasoning effort, task, starting repository, and
 timeout constant.
 
-The completed controlled baseline supports two claims:
+The completed study supports a narrower, split conclusion:
 
-1. **Quality parity on the controlled suite:** both harnesses passed all 12 matched task pairs.
-2. **A large efficiency advantage on those fixtures:** Forge used 69.25% fewer total tokens and
-   36.8% less wall time in aggregate.
+1. **Controlled-fixture ceiling:** both harnesses passed all 12 post-fix matched task pairs. Forge
+   used 75.93% fewer tokens and 43.75% less wall time on those deterministic fixtures.
+2. **Official quality point estimate favors raw Codex:** on the predeclared six-instance
+   SWE-bench Verified subset across three models, Forge resolved 16/18 model-task pairs and raw
+   Codex resolved 18/18. Both discordances were raw-only Django solves. With only two discordances,
+   the exact two-sided paired p-value is 0.5, so the subset is too small to establish a reliable
+   quality difference.
+3. **Hard-task efficiency is mixed:** Forge used 32.72% fewer tokens in aggregate on the official
+   phase, but was lower-token in only 10/18 pairs (`p=0.81452942`) and its bootstrap interval for
+   median paired reduction spans zero. Forge took 58.64% more wall time in aggregate.
 
-It does **not** yet support a claim that Forge has better general coding intelligence or a higher
-SWE-bench resolve rate. The four controlled fixtures reached a quality ceiling: both arms passed
-every task. Official SWE-bench Verified evaluation is kept as a separate quality-discriminating
-phase.
+The evidence therefore does **not** support a claim that Forge has better general coding
+intelligence, a higher SWE-bench resolve rate, or a universal speed/token advantage. It does show a
+large and repeatable efficiency advantage on the controlled fixtures, plus an aggregate but
+statistically inconsistent token reduction on this small official subset.
 
 The historical Claude Sonnet benchmark worktree is stale, was built against a much older Forge,
 and is excluded from this study. None of its results are used below.
@@ -381,7 +388,106 @@ The matched official runner is
 It preserves raw JSONL, stderr, patches, process results, full Forge ledgers, fresh quota telemetry,
 and standard prediction files. Resolution is determined only by `swebench==4.1.0` in Docker.
 
-Results are pending.
+The official environment was first validated by scoring the dataset's gold patches: all 6/6
+resolved with zero evaluator errors. The matched generation then completed all 36 planned arms;
+every process exited successfully and produced a nonempty patch. "Produced a patch" was never
+treated as "resolved."
+
+Primary artifact root:
+
+```text
+/home/floris/.local/share/forge/harness-bench-20260726/swe-verified-stratified6-gpt56-native-v1/
+```
+
+Authoritative generated analysis:
+
+```text
+official-analysis.json
+official-analysis.md
+evaluation-v2/*.json
+```
+
+The committed analyzer is
+[`scripts/harness-bench/analyze_codex_oauth_swe.py`](../../scripts/harness-bench/analyze_codex_oauth_swe.py).
+It requires exactly one official report per arm/model, rejects evaluator errors or incomplete
+telemetry, and binds resolution back to each matched trial before computing aggregates.
+
+### Official overall result
+
+| Metric | Forge | Native Codex | Result |
+|---|---:|---:|---|
+| Official resolves | 16/18 | 18/18 | Raw-only on 2 pairs |
+| Evaluator errors | 0 | 0 | Complete |
+| Total generation tokens | 15,192,293 | 22,581,417 | Forge 32.72% lower |
+| Total tokens / official resolve | 949,518 | 1,254,523 | Forge 24.31% lower |
+| Total generation wall time | 8,257.542s | 5,205.356s | Forge 58.64% slower |
+| Lower-token pairs | 10/18 | 8/18 | Sign test `p=0.81452942` |
+| Faster pairs | 7/18 | 11/18 | Sign test `p=0.48068237` |
+
+Median paired Forge token reduction was 35.97%. Its seeded bootstrap 95% interval was
+−29.54%–68.60%, which includes zero. The two quality discordances both favored raw Codex; the exact
+two-sided paired McNemar/sign p-value is 0.5.
+
+The "tokens / official resolve" row divides all generation tokens—including unresolved attempts—by
+official resolves. It does not erase the cost of Forge's two failures.
+
+### Official result by model
+
+| Model | Forge resolves | Raw resolves | Forge tokens | Raw tokens | Forge token reduction | Forge wall change |
+|---|---:|---:|---:|---:|---:|---:|
+| GPT-5.6 Luna | 5/6 | 6/6 | 3,869,637 | 10,658,164 | 63.69% lower | 17.51% slower |
+| GPT-5.6 Sol | 5/6 | 6/6 | 6,098,243 | 6,599,897 | 7.60% lower | 51.11% slower |
+| GPT-5.6 Terra | 6/6 | 6/6 | 5,224,413 | 5,323,356 | 1.86% lower | 113.90% slower |
+
+Forge and raw Codex both resolved all 15 non-Django model-task pairs. On
+`django__django-14376`, raw Codex resolved all three models; Forge resolved Terra but not Luna or
+Sol.
+
+### Django failure analysis
+
+Both unresolved Forge patches changed the mysqlclient connection kwargs in
+`django/db/backends/mysql/base.py`, but omitted the related dbshell compatibility change in
+`django/db/backends/mysql/client.py`. The official evaluator applied both patches cleanly, preserved
+all PASS_TO_PASS tests, and failed the same three FAIL_TO_PASS dbshell tests:
+
+- `test_options_non_deprecated_keys_preferred`
+- `test_options_override_settings_proper_values`
+- `test_parameters`
+
+Both raw Codex patches updated both code paths and resolved the task. Forge/Terra also found the
+dbshell path and resolved it. The Forge system prompt already requires repository search and
+whole-problem verification, so these two outcomes do not isolate a safe general product change;
+changing global prompting based on one observed task would be benchmark overfitting.
+
+### Checkpoint-patch defect and post-hoc diagnostic
+
+Thirteen of the 18 predeclared Forge prediction patches contained internal
+`.forge/checkpoints/**` snapshot files. SWE-bench applied them without evaluator errors, so they did
+not explain the two failed tests, but they made the submitted patches noisy and could expose
+irrelevant internal state.
+
+Commit `aa337929` fixed the benchmark capture path to exclude only Forge checkpoint snapshots while
+preserving legitimate project files under `.forge/`. SWE workspaces also hide checkpoint/log
+artifacts through `.git/info/exclude`; two regression tests cover exclusion and idempotence.
+
+After observing the official result, Luna and Sol on Django were rerun through both arms as an
+explicitly **post-hoc diagnostic**:
+
+```text
+/home/floris/.local/share/forge/harness-bench-20260726/swe-postfix-checkpoint-hygiene-django-luna-sol-v1/
+```
+
+| Post-hoc metric | Forge | Native Codex |
+|---|---:|---:|
+| Official resolves | 0/2 | 2/2 |
+| Total tokens | 908,653 | 1,238,711 |
+| Total wall time | 358.925s | 315.693s |
+| Checkpoint-contaminated patches | 0/2 | 0/2 |
+
+The two Forge patches shrank from 18,290/23,491 bytes before the fix to 2,075/2,046 bytes after it,
+but still omitted the dbshell client change and remained unresolved. This confirms the hygiene fix
+without claiming a correctness improvement. The post-hoc outcomes do not replace or enlarge the
+predeclared 18-pair sample.
 
 ## Quota and stopping rule
 
@@ -390,24 +496,35 @@ Results are pending.
 - Corrected controlled baseline finished at 1%.
 - Targeted post-fix run finished at 2%.
 - Full post-fix controlled rerun finished at 4%.
+- Official 36-arm SWE-bench generation finished at 7%.
+- Post-hoc four-arm Django diagnostic also finished at 7%.
 - Each runner checks fresh response quota after every trial.
 - Missing telemetry fails closed before another trial.
 - Helm is queried as requested, but its Codex snapshot is marked stale and is not used to override
   newer response telemetry.
 
-## Verification completed so far
+## Verification
 
-After the first improvement wave and rebase onto current `origin/main`:
+After the improvement waves and rebase onto current `origin/main`:
 
 - focused Store/core/CLI regressions passed;
 - affected packages: 1,070 tests passed, 14 ignored;
 - Clippy passed for all affected packages, targets, and features with warnings denied;
 - Ruff and Python byte-compilation passed for benchmark scripts;
 - fresh debug Forge 2.10.2 built successfully; and
-- rescoring reproduced the corrected baseline totals exactly.
+- rescoring reproduced the corrected controlled totals exactly;
+- the official gold evaluator check resolved 6/6 with zero errors; and
+- the checkpoint-capture regression tests passed.
 
-Workspace-wide release checks and final report/audit remain pending until the benchmark phases
-finish.
+Final workspace verification:
+
+- `cargo fmt --all -- --check` passed;
+- `cargo clippy --locked --all-targets --all-features -- -D warnings` passed;
+- `cargo test --locked --all --all-features` passed: 2,288 tests, 26 ignored, 47 suites;
+- `cargo build --release --locked --bin forge` passed: 537 crates compiled;
+- Ruff passed over `scripts/harness-bench`;
+- Python byte-compilation passed over `scripts/harness-bench`; and
+- benchmark Python unit discovery passed: 2/2 tests.
 
 ## Limitations
 
@@ -419,5 +536,7 @@ finish.
   formula.
 - The official SWE-bench subset is intentionally small; report its exact `n`, confidence limits,
   and per-instance outcomes rather than generalizing to the full 500-instance Verified set.
+- The checkpoint rerun is post-hoc and has only two pairs. It validates artifact hygiene and
+  repeatability of the Django outcome, not a population-level effect.
 - Token efficiency is not intelligence. A quality-superiority claim requires a higher official
   resolution outcome, not merely fewer tokens on tasks both harnesses solve.

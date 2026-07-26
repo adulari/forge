@@ -85,7 +85,9 @@ scripts/harness-bench/compare_codex_oauth_swe.py \
 This runner uses the same `xhigh` model commands and per-trial quota gate as the controlled runner.
 It retains raw JSONL, stderr, patches, process results, and full Forge Store usage, then writes one
 standard prediction file per arm/model under `predictions/`. It deliberately leaves
-`official_resolution` unset.
+`official_resolution` unset. Forge's internal `.forge/checkpoints/**` snapshots are hidden from
+agent-visible Git status and excluded from submitted patches; legitimate project files elsewhere
+under `.forge/` remain eligible.
 
 Evaluate each prediction file with pinned `swebench` in Docker:
 
@@ -99,3 +101,16 @@ python -m swebench.harness.run_evaluation \
 
 Only those official reports support a resolved/unresolved claim. A non-empty patch, successful
 agent process, or model assertion is never treated as resolution.
+
+After all arm/model reports exist, bind them back to the matched telemetry and generate the
+authoritative aggregate:
+
+```bash
+scripts/harness-bench/analyze_codex_oauth_swe.py \
+  --run-dir /path/to/run \
+  --evaluation-dir /path/to/evaluator-working-directory
+```
+
+The analyzer fails on missing or duplicate reports, evaluator errors, incomplete outcomes,
+unmatched arms, or incomplete token/wall telemetry. It writes `official-analysis.{json,md}` under
+the run directory by default.
