@@ -33,7 +33,18 @@ const MAX_INLINE_BYTES = 256 * 1024;
 // 64 KiB worst-cases to ~229 KiB sealed, leaving room for headers, metadata and the envelope.
 const MAX_OUTBOUND_INLINE_BYTES = 64 * 1024;
 const MAX_BLOB_CIPHERTEXT_BYTES = 32 * 1024 * 1024;
+// The fallback deadline for a caller that supplies no signal of its own.
 const REQUEST_TIMEOUT_MS = 30_000;
+
+// A caller that DOES supply one owns the deadline, and this is only a backstop so that a signal
+// which never fires cannot leak a pending entry forever.
+//
+// It has to be this far apart from the fallback because a bridge request is not a proxy hop: the
+// host runs the work before it answers. `POST /api/voice/transcribe` transcribes the whole clip
+// synchronously — measured at ~4.5s for a 4s recording — so a voice memo of any real length blew
+// straight through a flat 30s cap and failed as "Forge Anywhere relay request timed out", while
+// the 120s budget its caller had asked for never applied to anything.
+const MAX_REQUEST_TIMEOUT_MS = 180_000;
 
 export interface RelayBlobReference {
   blob_id: string;
@@ -136,7 +147,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     } else {
       payload.body = Array.from(request.body);
     }
-    return this.sendBridgeRequest(request.hostId, payload);
+    return this.sendBridgeRequest(request.hostId, payload, request.signal);
   }
 
   openSessionSocket(request: {
@@ -188,6 +199,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
   private async sendBridgeRequest(
     hostId: string,
     payload: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<AnywhereBridgeResponse> {
     const requestId = new Uint8Array(payload.request_id as number[]);
     const key = bytesToHex(requestId);
@@ -195,16 +207,43 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     const envelope = await this.seal(1, hostId, plaintext);
     const connection = await this.ensureConnection();
     return new Promise<AnywhereBridgeResponse>((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      const budget = signal ? MAX_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+      let onAbort: (() => void) | undefined;
+      const settle = () => {
+        clearTimeout(timeout);
         this.pending.delete(key);
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
+      };
+      const timeout = setTimeout(() => {
+        settle();
         reject(new Error("Forge Anywhere relay request timed out"));
-      }, REQUEST_TIMEOUT_MS);
-      this.pending.set(key, { resolve, reject, timeout });
+      }, budget);
+      if (signal) {
+        onAbort = () => {
+          settle();
+          reject(asError(signal.reason ?? new Error("Forge Anywhere relay request was cancelled")));
+        };
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      this.pending.set(key, {
+        resolve: (response) => {
+          settle();
+          resolve(response);
+        },
+        reject: (error) => {
+          settle();
+          reject(error);
+        },
+        timeout,
+      });
       try {
         connection.send(envelope);
       } catch (error) {
-        clearTimeout(timeout);
-        this.pending.delete(key);
+        settle();
         reject(asError(error));
       }
     });

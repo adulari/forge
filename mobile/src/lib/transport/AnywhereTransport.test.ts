@@ -100,6 +100,24 @@ describe("AnywhereTransport", () => {
       .rejects.toThrow("not allowlisted");
   });
 
+  it("hands the caller's abort signal to the relay", async () => {
+    // Without this the relay imposed a deadline of its own on every route, so the 120s budget
+    // `transcribeAudio` asks for became 30s — and the host transcribes the whole clip before it
+    // answers, which is why long voice memos always came back as a relay timeout.
+    const captured: AnywhereBridgeRequest[] = [];
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        captured.push(request);
+        return { status: 200, body: new Uint8Array() };
+      },
+      openSessionSocket: socket,
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+    const controller = new AbortController();
+    await transport.fetch("fany://host-1/api/sessions", { signal: controller.signal });
+    expect(captured[0]?.signal).toBe(controller.signal);
+  });
+
   it("opens only a typed session WebSocket", () => {
     let request: { hostId: string; sessionId: string; revision: number } | null = null;
     const relay: AnywhereRelay = {
