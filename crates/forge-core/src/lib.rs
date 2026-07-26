@@ -7071,10 +7071,15 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // diff and perform one related-symbol/call-site search, and may edit only if that search
         // exposes a concrete omitted production path. That targets under-scoped fixes without the
         // unconstrained second-guessing that made always-on self-review regress.
-        let code_change_contract =
-            self.expect_code_change || self.last_turn_contract.requires_changed_artifact();
+        // Actual writes are authoritative even when a descriptive issue statement does not begin
+        // with one of TurnContract's deliberately narrow imperative verbs. Keep the explicit
+        // contract paths too: they preserve the intended audit when a provider changed the tree
+        // through a mechanism that the per-turn write counter cannot observe.
+        let code_change_turn = self.edits_this_turn > 0
+            || self.expect_code_change
+            || self.last_turn_contract.requires_changed_artifact();
         if self.config.mesh.verify_completeness
-            && code_change_contract
+            && code_change_turn
             && !forge_provider::is_cli_bridge(&active_model)
             && !self.past_turn_deadline()
             && !halted_by_loop_guard
@@ -18898,9 +18903,10 @@ mod tests {
             dir.to_str().unwrap(),
         )
         .unwrap();
-        session.set_expect_code_change(true);
-
-        session.run_turn("fix the bug").await.unwrap();
+        session
+            .run_turn("The parser currently returns the wrong value for deprecated aliases.")
+            .await
+            .unwrap();
 
         let fired = events
             .lock()
@@ -18915,6 +18921,10 @@ mod tests {
             })
             .count();
         assert_eq!(fired, 1, "direct completeness must run exactly once");
+        assert!(
+            !session.last_turn_contract().requires_changed_artifact(),
+            "the descriptive prompt must not make the contract trigger the audit"
+        );
         assert!(
             session
                 .transcript
