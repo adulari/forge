@@ -22,8 +22,7 @@
 //  · The bar's selected item updates when the swipe commits, not continuously with the finger. A
 //    native UITabBar exposes no partial-selection state to animate.
 //
-// Neighbours mount lazily and only while a drag is in flight, so the idle cost is zero pages and
-// the peak is two extra screens.
+// Neighbours mount on the first drag and stay, so only that first swipe waits on a render.
 import { router } from "expo-router";
 import React from "react";
 import { StyleSheet, useWindowDimensions, View } from "react-native";
@@ -38,26 +37,36 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { isNative } from "../lib/platform";
+import {
+  ACTIVATE_X,
+  COMMIT_FRACTION,
+  COMMIT_VELOCITY,
+  FAIL_Y,
+  OVERSCROLL,
+} from "../lib/tabGesture";
 import { tabHrefAt, TAB_SWIPE_ORDER } from "../lib/tabSwipe";
+import { useTokens } from "../theme/ThemeProvider";
 import { TabPeek } from "./TabPeek";
 
-/** Horizontal distance before the pager takes the drag — clear of SessionCard's 10px archive pan. */
-const ACTIVATE_X = 28;
-/** Vertical slop that hands the drag back to a scrolling list. */
-const FAIL_Y = 15;
-/** Fraction of the screen a drag must cross to complete on distance alone. */
-const COMMIT_FRACTION = 0.32;
-/** Or this much horizontal speed, so a short flick still completes. */
-const COMMIT_VELOCITY = 520;
-/** How much of a drag past the first/last tab is shown, as resistance rather than a dead stop. */
-const OVERSCROLL = 0.2;
+// A thumb swipe arcs. The thresholds first shipped demanded |dx| > 28 before |dy| > 15 — a ratio of
+// nearly 2:1 horizontal-to-vertical just to start — so an ordinary curved swipe crossed the vertical
+// limit first, the gesture failed, and the list underneath scrolled instead. That is the "sometimes
+// it scrolls the page" case.
+//
+// The numbers and the relationships between them live in lib/tabGesture.ts, where they are asserted:
+// the pager must cancel later vertically than it activates horizontally, and must stay clear of
+// SessionCard's own pan. Worklets below close over them, which is safe — constants capture by value.
 
 export function TabPager({ index, children }: { index: number; children: React.ReactNode }) {
   const { width } = useWindowDimensions();
+  const tokens = useTokens();
   const reduced = useReducedMotion();
   const drag = useSharedValue(0);
-  // Neighbours are only worth mounting while a drag can actually reveal them.
-  const [peeking, setPeeking] = React.useState(false);
+  // Sticky: mounted by the first drag and kept. Unmounting on every settle meant each swipe waited
+  // on `runOnJS` -> setState -> render before the neighbour existed, and the first frames of the drag
+  // exposed an empty slot. Keeping them costs two idle screens that ask the network for nothing (see
+  // `useIsPeeking`), which is what a pager would hold anyway.
+  const [peeked, setPeeked] = React.useState(false);
 
   const hasPrev = index > 0;
   const hasNext = index < TAB_SWIPE_ORDER.length - 1;
@@ -71,11 +80,8 @@ export function TabPager({ index, children }: { index: number; children: React.R
     // The next route mounts its own pager at rest in the centre, so the row must be back at zero
     // before the swap or the incoming tab would start life translated by a screen width.
     drag.value = 0;
-    setPeeking(false);
     router.navigate(href);
   }, [drag]);
-
-  const settle = React.useCallback(() => setPeeking(false), []);
 
   const pan = React.useMemo(
     () =>
@@ -84,7 +90,7 @@ export function TabPager({ index, children }: { index: number; children: React.R
         .activeOffsetX([-ACTIVATE_X, ACTIVATE_X])
         .failOffsetY([-FAIL_Y, FAIL_Y])
         .onBegin(() => {
-          runOnJS(setPeeking)(true);
+          runOnJS(setPeeked)(true);
         })
         .onUpdate((event) => {
           const x = event.translationX;
@@ -101,7 +107,6 @@ export function TabPager({ index, children }: { index: number; children: React.R
 
           if (!(far || fast) || !allowed) {
             drag.value = reduced ? 0 : withSpring(0, springBack);
-            runOnJS(settle)();
             return;
           }
 
@@ -118,22 +123,27 @@ export function TabPager({ index, children }: { index: number; children: React.R
             if (finished) runOnJS(go)(target);
           });
         }),
-    [drag, go, hasNext, hasPrev, index, reduced, settle, width],
+    [drag, go, hasNext, hasPrev, index, reduced, width],
   );
 
   const rowStyle = useAnimatedStyle(() => ({ transform: [{ translateX: drag.value }] }));
 
   return (
     <GestureDetector gesture={pan}>
-      <View style={styles.clip}>
+      {/* Opaque, and that is the fix for the flicker rather than a nicety. Anything this container
+          does not paint falls through to the native view behind it, which is a light #F0F0F0 — a
+          screen recording caught it as a full-frame flash for one frame at the handover and as light
+          strips down the incoming edge mid-drag. Painting the app's own background here means an
+          unfilled moment reads as the app, not as a light gap. */}
+      <View style={[styles.clip, { backgroundColor: tokens.bg0 }]}>
         <Animated.View style={[styles.layer, rowStyle]}>
-          {peeking && hasPrev ? (
+          {peeked && hasPrev ? (
             <View style={[styles.page, { width, left: -width }]}>
               <TabPeek at={index - 1} />
             </View>
           ) : null}
           <View style={[styles.page, { width, left: 0 }]}>{children}</View>
-          {peeking && hasNext ? (
+          {peeked && hasNext ? (
             <View style={[styles.page, { width, left: width }]}>
               <TabPeek at={index + 1} />
             </View>
