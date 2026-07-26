@@ -165,6 +165,30 @@ no concrete omission, make NO further edits and finish.
 Do not broadly re-explore or refactor, and do not modify existing tests to hide a failure. This is \
 one evidence check, not an invitation to second-guess a complete fix.";
 
+/// A direct audit that reports no matches after identifiers disappeared from the diff has not
+/// produced trustworthy evidence: path + glob duplication and over-narrow scopes are common model
+/// mistakes. Give that case one final, mechanically different search attempt rather than accepting
+/// an empty result as proof of completeness.
+const DIRECT_COMPLETENESS_EMPTY_SEARCH_RETRY_PROMPT: &str = "\
+Your required completeness search reported NO MATCHES even though the task/diff removed or replaced \
+old terms. Treat that as a likely search-scope or glob failure, NOT proof that no sibling path exists.
+Run ONE final fallback from the repository root with a plain-literal shell search such as \
+`git grep -n -F -e '<old-name>' -- <nearest-production-directory>` (add another `-e` for another \
+old name). Scope with a directory path OR a file glob, never duplicate the repo-relative prefix in \
+both. If it finds an old/deprecated term in an unedited production sibling, OPEN that code and \
+handle the concrete omission under the prior compatibility rule. If the fallback truly finds no \
+related production occurrence, make no edit and finish. Do not modify tests.";
+
+fn completeness_search_reported_no_matches(messages: &[Message]) -> bool {
+    messages.iter().any(|message| {
+        if message.role != Role::Tool {
+            return false;
+        }
+        let content = message.content.to_ascii_lowercase();
+        content.contains("no matches for") || content.contains("0 matches for")
+    })
+}
+
 /// Whether a `shell` tool result reports a failure (non-zero exit, signal, timeout, or spawn
 /// error). The tool's first line is `shell: exit N in …`, `shell: timed out …`, `shell: error: …`,
 /// or `shell: failed to start …`; only `exit 0` is success.
@@ -7114,6 +7138,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             )?;
             self.transcript
                 .push(Message::system(DIRECT_COMPLETENESS_PROMPT));
+            let audit_transcript_start = self.transcript.len();
+            let edits_before_audit = self.edits_this_turn;
             let review_specs = self.tool_specs();
             let review = self
                 .run_model_loop(
@@ -7129,6 +7155,47 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             active_model = review.active_model;
             hit_step_cap = review.hit_step_cap;
             halted_by_loop_guard = review.halted_by_loop_guard;
+
+            let empty_search =
+                completeness_search_reported_no_matches(&self.transcript[audit_transcript_start..]);
+            if empty_search
+                && self.edits_this_turn == edits_before_audit
+                && !self.past_turn_deadline()
+                && !hit_step_cap
+                && !halted_by_loop_guard
+            {
+                self.presenter.emit(PresenterEvent::Warning(
+                    "completeness search returned no matches — retrying once from the repository root"
+                        .to_string(),
+                ));
+                self.auto_compact_if_needed(&active_model).await;
+                let seq = self.next_seq();
+                self.store.add_message(
+                    &self.id,
+                    seq,
+                    Role::System,
+                    DIRECT_COMPLETENESS_EMPTY_SEARCH_RETRY_PROMPT,
+                    None,
+                )?;
+                self.transcript.push(Message::system(
+                    DIRECT_COMPLETENESS_EMPTY_SEARCH_RETRY_PROMPT,
+                ));
+                let retry_specs = self.tool_specs();
+                let retry = self
+                    .run_model_loop(
+                        active_model.clone(),
+                        &retry_specs,
+                        None,
+                        max_steps,
+                        stream_idle,
+                    )
+                    .await?;
+                adopt_redrive_text(&mut final_text, retry.final_text);
+                context_tokens = retry.context_tokens;
+                active_model = retry.active_model;
+                hit_step_cap = retry.hit_step_cap;
+                halted_by_loop_guard = retry.halted_by_loop_guard;
+            }
         }
 
         // ── Toolless-bridge classification (bridge MCP-tool health guard, wave 7) ─────────────
@@ -18774,6 +18841,53 @@ mod tests {
         }
     }
 
+    /// A direct turn writes once, then its completeness pass performs a valid search that returns
+    /// no matches. The outer policy must detect that tool evidence and issue exactly one fallback
+    /// search prompt; all other provider calls finish without tools.
+    #[cfg(unix)]
+    struct EditThenEmptySearchProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        path: String,
+        search_root: String,
+    }
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl Provider for EditThenEmptySearchProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_types::{new_id, ToolCall, Usage};
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let tool_calls = match n {
+                0 => vec![ToolCall {
+                    id: new_id(),
+                    name: "write_file".into(),
+                    args: serde_json::json!({"path": self.path, "content": "x = 1\n"}),
+                }],
+                2 => vec![ToolCall {
+                    id: new_id(),
+                    name: "search".into(),
+                    args: serde_json::json!({
+                        "path": self.search_root,
+                        "query": "__forge_missing_old_identifier__",
+                        "regex": false,
+                    }),
+                }],
+                _ => Vec::new(),
+            };
+            Ok(forge_provider::ModelResponse {
+                content: "done".into(),
+                tool_calls,
+                usage: Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn autofix_iteration_cap_halts_the_self_heal_loop() {
@@ -18953,6 +19067,72 @@ mod tests {
                     && message.content.contains("snippets are NOT inspection")
                     && message.content.contains("CONCRETE OMISSION")),
             "the audit must require a bounded, high-recall search rather than one narrow regex"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_completeness_retries_an_empty_search_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-direct-completeness-empty-search-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let base_mesh = Config::default().mesh;
+        let config = Config {
+            permission_mode: forge_types::PermissionMode::AcceptEdits,
+            mesh: forge_config::MeshConfig {
+                verify_completeness: true,
+                ..base_mesh
+            },
+            ..Config::default()
+        };
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditThenEmptySearchProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+                search_root: dir.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(capture),
+            config,
+            dir.to_str().unwrap(),
+        )
+        .unwrap();
+
+        session
+            .run_turn("The parser currently returns the wrong value for deprecated aliases.")
+            .await
+            .unwrap();
+
+        let retry_warnings = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("retrying once from the repository root")
+                )
+            })
+            .count();
+        assert_eq!(
+            retry_warnings, 1,
+            "an empty completeness search must trigger exactly one bounded fallback"
+        );
+        assert!(
+            session.transcript.iter().any(|message| message
+                .content
+                .contains("likely search-scope or glob failure")),
+            "the direct provider must receive the mechanically different fallback prompt"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
