@@ -95,7 +95,11 @@ describe("EncryptedAnywhereRelay blobs", () => {
     // retried through the blob path, because offload only began at that same 256 KiB.
     expect(sentEnvelopes[0]!.length).toBeLessThan(RELAY_ENVELOPE_LIMIT);
     expect(sentEnvelopes[1]!.length).toBeLessThan(RELAY_ENVELOPE_LIMIT);
-  });
+    // Real XChaCha20 + Ed25519 over ~230 KiB, twice, makes this the heaviest test in the file by
+    // 10x (521ms locally against vitest's 5s default). It timed out at 5859ms on a contended CI
+    // runner — one that reported 89s of transform and 143s of import — so the default budget is
+    // the wrong thing to be measuring machine load with.
+  }, 30_000);
 
   it("uploads WebSocket data above the threshold and sends only bytes_blob", async () => {
     let resolveFrame: (() => void) | undefined;
