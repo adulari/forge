@@ -179,6 +179,14 @@ both. If it finds an old/deprecated term in an unedited production sibling, OPEN
 handle the concrete omission under the prior compatibility rule. If the fallback truly finds no \
 related production occurrence, make no edit and finish. Do not modify tests.";
 
+const DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT: &str = "\
+Your completeness audit OPENED the related production path(s) listed below, but the final diff \
+still leaves them unchanged. That is unresolved evidence, not a completed audit. Re-open each \
+listed path and address the task there NOW. For a deprecation/rename, make the replacement name \
+preferred while preserving the old name only as a compatibility fallback. Do not run more broad \
+searches, do not edit tests, and do not finish with prose that merely repeats the changes already \
+made.";
+
 fn completeness_search_reported_no_matches(messages: &[Message]) -> bool {
     messages.iter().any(|message| {
         if message.role != Role::Tool {
@@ -187,6 +195,62 @@ fn completeness_search_reported_no_matches(messages: &[Message]) -> bool {
         let content = message.content.to_ascii_lowercase();
         content.contains("no matches for") || content.contains("0 matches for")
     })
+}
+
+fn changed_paths_from_status(status: Option<&[u8]>) -> std::collections::HashSet<String> {
+    status
+        .map(String::from_utf8_lossy)
+        .into_iter()
+        .flat_map(|status| {
+            status
+                .lines()
+                .filter_map(|line| {
+                    if line.len() < 4 {
+                        return None;
+                    }
+                    let raw_path = &line[3..];
+                    let path = raw_path
+                        .rsplit_once(" -> ")
+                        .map(|(_, destination)| destination)
+                        .unwrap_or(raw_path)
+                        .trim()
+                        .trim_matches('"')
+                        .replace('\\', "/");
+                    (!path.is_empty()).then_some(path)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn opened_unchanged_production_paths(
+    messages: &[Message],
+    workspace_root: &std::path::Path,
+    changed_paths: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut paths = std::collections::BTreeSet::new();
+    for call in messages.iter().flat_map(|message| &message.tool_calls) {
+        if call.name != "read_file" {
+            continue;
+        }
+        let Some(raw_path) = forge_types::extract_path_arg(&call.args) else {
+            continue;
+        };
+        let path = std::path::Path::new(raw_path);
+        let relative = if path.is_absolute() {
+            match path.strip_prefix(workspace_root) {
+                Ok(relative) => relative,
+                Err(_) => continue,
+            }
+        } else {
+            path
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if !relative.is_empty() && !is_test_path(&relative) && !changed_paths.contains(&relative) {
+            paths.insert(relative);
+        }
+    }
+    paths.into_iter().collect()
 }
 
 /// Whether a `shell` tool result reports a failure (non-zero exit, signal, timeout, or spawn
@@ -7190,6 +7254,50 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = retry.active_model;
                 hit_step_cap = retry.hit_step_cap;
                 halted_by_loop_guard = retry.halted_by_loop_guard;
+            }
+
+            let changed_paths = changed_paths_from_status(
+                working_tree_status(Some(self.workspace.root())).as_deref(),
+            );
+            let opened_unchanged = opened_unchanged_production_paths(
+                &self.transcript[audit_transcript_start..],
+                self.workspace.root(),
+                &changed_paths,
+            );
+            if !opened_unchanged.is_empty()
+                && !self.past_turn_deadline()
+                && !hit_step_cap
+                && !halted_by_loop_guard
+            {
+                self.presenter.emit(PresenterEvent::Warning(format!(
+                    "completeness audit opened {} unchanged production path(s) — requiring an \
+                     explicit fix before finishing",
+                    opened_unchanged.len()
+                )));
+                self.auto_compact_if_needed(&active_model).await;
+                let prompt = format!(
+                    "{DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT}\n\nOpened but unchanged production paths:\n- {}",
+                    opened_unchanged.join("\n- ")
+                );
+                let seq = self.next_seq();
+                self.store
+                    .add_message(&self.id, seq, Role::System, &prompt, None)?;
+                self.transcript.push(Message::system(&prompt));
+                let path_specs = self.tool_specs();
+                let path_review = self
+                    .run_model_loop(
+                        active_model.clone(),
+                        &path_specs,
+                        None,
+                        max_steps,
+                        stream_idle,
+                    )
+                    .await?;
+                adopt_redrive_text(&mut final_text, path_review.final_text);
+                context_tokens = path_review.context_tokens;
+                active_model = path_review.active_model;
+                hit_step_cap = path_review.hit_step_cap;
+                halted_by_loop_guard = path_review.halted_by_loop_guard;
             }
 
             // The existing-tests guard runs before this audit, but a weaker reviewer can ignore
@@ -18860,6 +18968,7 @@ mod tests {
         calls: std::sync::atomic::AtomicUsize,
         path: String,
         audit_path: String,
+        sibling_path: String,
         search_root: String,
     }
     #[cfg(unix)]
@@ -18899,6 +19008,15 @@ mod tests {
                         }),
                     },
                 ],
+                4 => vec![ToolCall {
+                    id: new_id(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({
+                        "path": self.sibling_path,
+                        "start_line": 1,
+                        "end_line": 20,
+                    }),
+                }],
                 _ => Vec::new(),
             };
             Ok(forge_provider::ModelResponse {
@@ -19103,6 +19221,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("f.py");
         let audit_path = dir.join("audit.txt");
+        let sibling_path = dir.join("sibling.py");
+        std::fs::write(&sibling_path, "old_name = True\n").unwrap();
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
@@ -19121,6 +19241,7 @@ mod tests {
                 calls: std::sync::atomic::AtomicUsize::new(0),
                 path: path.to_string_lossy().into_owned(),
                 audit_path: audit_path.to_string_lossy().into_owned(),
+                sibling_path: sibling_path.to_string_lossy().into_owned(),
                 search_root: dir.to_string_lossy().into_owned(),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
@@ -19157,6 +19278,25 @@ mod tests {
                 .content
                 .contains("likely search-scope or glob failure")),
             "the direct provider must receive the mechanically different fallback prompt"
+        );
+        assert!(
+            events.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("opened 1 unchanged production path")
+                )
+            }),
+            "an opened but unchanged production sibling must trigger the path-aware gate"
+        );
+        assert!(
+            session.transcript.iter().any(|message| {
+                message
+                    .content
+                    .contains("Opened but unchanged production paths")
+                    && message.content.contains("sibling.py")
+            }),
+            "the final re-drive must name the exact unresolved production path"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
