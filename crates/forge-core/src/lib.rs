@@ -194,6 +194,13 @@ preferred while preserving the old name only as a compatibility fallback. Do not
 searches, do not edit tests, and do not finish with prose that merely repeats the changes already \
 made.";
 
+const DIRECT_NAMED_API_SCOPE_GUIDANCE: &str = "\
+The task explicitly names the production API(s) below. Treat those API boundaries as the default \
+implementation scope. Before changing a shared lower-level helper instead, OPEN its production \
+callers and establish that behavior remains unchanged outside the requested API and when the new \
+option or condition is absent/default. Prefer the smallest conditional change at the named API \
+unless concrete caller evidence requires the shared helper.";
+
 fn completeness_search_reported_no_matches(messages: &[Message]) -> bool {
     messages.iter().any(|message| {
         if message.role != Role::Tool {
@@ -242,6 +249,40 @@ fn direct_completeness_is_identifier_migration(prompt: &str) -> bool {
     ]
     .iter()
     .any(|signal| prompt.contains(signal))
+}
+
+fn direct_scope_guidance_named_apis(prompt: &str) -> Vec<String> {
+    let mut names = prompt
+        .split_whitespace()
+        .filter_map(|token| {
+            let token = token
+                .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'));
+            let token = token.trim_matches('.');
+            let (owner, member) = token.split_once('.')?;
+            if owner.contains('.') || member.contains('.') {
+                return None;
+            }
+            let mut owner_chars = owner.chars();
+            let first = owner_chars.next()?;
+            let second = owner_chars.next()?;
+            let owner_is_class = first.is_ascii_uppercase()
+                && second.is_ascii_lowercase()
+                && owner
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            let member_is_method = member
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+                && member
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            (owner_is_class && member_is_method).then(|| token.to_string())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn changed_paths_from_status(status: Option<&[u8]>) -> std::collections::HashSet<String> {
@@ -6833,6 +6874,23 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 context_pack::ContextSource::TurnContract,
                 "explicit turn completion contract",
                 guidance,
+            )?;
+        }
+        let named_apis = direct_scope_guidance_named_apis(prompt);
+        if self.config.mesh.verify_completeness
+            && !direct_completeness_is_identifier_migration(prompt)
+            && !named_apis.is_empty()
+            && !forge_provider::is_cli_bridge(&routed_model)
+        {
+            let guidance = format!(
+                "{DIRECT_NAMED_API_SCOPE_GUIDANCE}\n\nNamed production APIs:\n- {}",
+                named_apis.join("\n- ")
+            );
+            self.inject_context(
+                &mut context_pack,
+                context_pack::ContextSource::TurnContract,
+                "explicit named-API implementation scope",
+                &guidance,
             )?;
         }
         let seq = self.next_seq();
@@ -19263,6 +19321,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn direct_scope_guidance_extracts_explicit_class_methods_only() {
+        assert_eq!(
+            direct_scope_guidance_named_apis(
+                "Fix `Figure.subfigures()` consistently with Function._eval_evalf."
+            ),
+            vec!["Figure.subfigures", "Function._eval_evalf"]
+        );
+        assert!(
+            direct_scope_guidance_named_apis(
+                "Preserve X_out.dtypes on 5.2.3; do not collect __init__.py or ExitCode.OK"
+            )
+            .is_empty(),
+            "variables, versions, filenames, and enum variants are not named production APIs"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn direct_completeness_runs_once_after_a_code_edit_when_enabled() {
@@ -19411,6 +19486,58 @@ mod tests {
                 .iter()
                 .any(|message| message.content == DIRECT_COMPLETENESS_PROMPT),
             "generic bug fixes must not receive the direct completeness prompt"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_named_api_scope_guidance_is_injected_before_solving() {
+        let dir =
+            std::env::temp_dir().join(format!("forge-direct-named-api-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditOnceThenDoneProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(CapturePresenter::default()),
+            Config {
+                permission_mode: forge_types::PermissionMode::AcceptEdits,
+                ..Config::default()
+            },
+            dir.to_str().unwrap(),
+        )
+        .unwrap();
+
+        session
+            .run_turn("[Bug]: Figure.subfigures ignores explicit spacing")
+            .await
+            .unwrap();
+
+        let scope_messages = session
+            .transcript
+            .iter()
+            .filter(|message| {
+                message.content.contains(DIRECT_NAMED_API_SCOPE_GUIDANCE)
+                    && message.content.contains("Figure.subfigures")
+            })
+            .count();
+        assert_eq!(
+            scope_messages, 1,
+            "named-API scope guidance must be injected exactly once before the solve"
+        );
+        assert!(
+            !session
+                .transcript
+                .iter()
+                .any(|message| message.content == DIRECT_COMPLETENESS_PROMPT),
+            "scope guidance must not reactivate the outer completeness review"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
