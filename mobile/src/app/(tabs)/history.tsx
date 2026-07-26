@@ -1,6 +1,7 @@
 // History — past-session browser + resurrection (FEATURES.md §1.1, §4). Infinite/
 // cursor scroll over usePastSessions() (`before` = last row's last_activity),
 // client-side search filter over title/cwd, tap-to-resume via useCreateSession.
+import { TabPager } from "../../components/TabPager";
 import { router } from "expo-router";
 import { Archive, History as HistoryIcon } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
@@ -173,7 +174,7 @@ const HistoryRow = React.memo(HistoryRowBase, (prev, next) => {
   );
 });
 
-export default function HistoryScreen() {
+export function HistoryScreen() {
   const tokens = useTokens();
   const toast = useToast();
   const [query, setQuery] = useState("");
@@ -377,3 +378,11 @@ const styles = StyleSheet.create({
   skeletonGap: { marginTop: space.space8 },
   resumeOverlay: { alignItems: "center", justifyContent: "center" },
 });
+
+export default function HistoryTab() {
+  return (
+    <TabPager index={2}>
+      <HistoryScreen />
+    </TabPager>
+  );
+}

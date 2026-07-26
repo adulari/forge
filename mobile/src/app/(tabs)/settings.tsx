@@ -22,6 +22,7 @@
 // is out of this builder's file scope (shared DS component), so density couldn't be
 // added there as a prop; this mirrors its press/hover/focus/separator behavior
 // instead of forking a parallel "ListRow v2".
+import { TabPager } from "../../components/TabPager";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
 import { Bell, ChevronRight, Pencil, Plus, Trash2 } from "lucide-react-native";
@@ -298,7 +299,7 @@ function NavListRow({ label, meta, onPress, showSeparator = true }: { label: str
   );
 }
 
-export default function SettingsScreen() {
+export function SettingsScreen() {
   const tokens = useTokens();
   const toast = useToast();
   const { preference, setScheme } = useTheme();
@@ -848,3 +849,11 @@ const railStyles = StyleSheet.create({
   version: { paddingHorizontal: space.space8 },
   pane: { flex: 1, minWidth: 0 },
 });
+
+export default function SettingsTab() {
+  return (
+    <TabPager index={3}>
+      <SettingsScreen />
+    </TabPager>
+  );
+}

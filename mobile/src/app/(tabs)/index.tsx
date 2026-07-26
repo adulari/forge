@@ -3,6 +3,7 @@
 // already sorts it that way (never re-sort here) — refreshed by fleet events with a slow
 // recovery poll. Forgeline entrance is a first-mount-only side effect of stable row keys +
 // stable indices across polls (see theme/motion.ts useForgeline) — nothing extra to wire here.
+import { TabPager } from "../../components/TabPager";
 import { router } from "expo-router";
 import { Flame, Search } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
@@ -191,7 +192,7 @@ function FleetHostFilter({ selected, onSelect }: { selected: string | null; onSe
   );
 }
 
-export default function FleetScreen() {
+export function FleetScreen() {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
   const { activeServerId } = useAuth();
@@ -399,3 +400,11 @@ const styles = StyleSheet.create({
   expandedComposerWrap: { position: "relative", width: 560, maxWidth: "100%" },
   expandedComposerHintWrap: { position: "absolute", right: 54, top: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
 });
+
+export default function FleetTab() {
+  return (
+    <TabPager index={0}>
+      <FleetScreen />
+    </TabPager>
+  );
+}

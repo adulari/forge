@@ -8,17 +8,34 @@ All notable changes to Forge are documented here. The format follows
 
 ### Added
 
-- **Swiping horizontally on a tab screen moves to the neighbouring tab**, so the bottom bar is no
-  longer the only way across Fleet / Inbox / History / Settings. Wrapping the tabs navigator scopes
-  it to exactly those four screens — `/floor`, `/plans` and `/session/[id]` live in the root stack,
-  so a swipe there cannot switch tabs. Three conflicts it has to lose: SessionCard's swipe-to-archive
-  pan activates at 10px against this gesture's 28px, and gesture-handler cancels an ancestor once a
-  descendant activates, so a card keeps its own drag; `failOffsetY` at 15px hands vertical scrolling
-  straight back; and horizontally scrollable rows are descendants, so the first rule covers them
-  too. Native-only, because a click-drag on web is a text selection and a trackpad swipe arrives as
-  wheel deltas. `TAB_SWIPE_ORDER` is asserted against the tab bar's own declaration order in both
-  navigators, since a swipe that moves to a tab other than the visible neighbour would be worse than
-  no swipe at all.
+- **Tabs page under the finger.** Dragging horizontally on Fleet / Inbox / History / Settings moves
+  the content with the drag and peeks the neighbouring tab in behind it; releasing either springs
+  back or completes, and dragging past the first or last tab resists instead of stopping dead. The
+  bottom bar is no longer the only way across.
+
+  The iOS bar stays the real one. `RNSTabBarController` is a genuine `UITabBarController` (verified
+  in react-native-screens' own sources) and it only keeps the SELECTED child's view laid out —
+  `NativeTabs` exposes no swipe surface at all, and react-native-screens' `gesture-handler/` support
+  is for stack transitions. So the pager is rendered *by each tab route* rather than around the
+  navigator: the selected tab draws itself in the middle of a three-page row with its neighbours to
+  either side, and the drag translates that row inside a clipping container. Liquid Glass,
+  scroll-to-minimize and native badges are all untouched, and nothing is reimplemented in JS.
+
+  Two artifacts follow from that and are not defects in the bar's favour: the neighbour drawn during
+  a drag is a second instance of that screen so it starts at the top of its list, and the bar's
+  selected item updates on commit rather than tracking the finger, because a native `UITabBar`
+  exposes no partial-selection state. Neighbours mount lazily and only while a drag is in flight.
+
+  Three conflicts the gesture has to lose: SessionCard's swipe-to-archive pan activates at 10px
+  against the pager's 28px, and gesture-handler cancels an ancestor once a descendant activates, so a
+  card keeps its own drag; `failOffsetY` at 15px hands vertical scrolling straight back; and
+  horizontally scrollable rows are descendants, so the first rule covers them. Native-only, since a
+  click-drag on web is a text selection and a trackpad swipe arrives as wheel deltas.
+
+  Guarded by two assertions, both verified to fail when deliberately broken: `TAB_SWIPE_ORDER`
+  matches the tab bar's declaration order in both navigators, and each route passes the index its
+  position implies — a wrapper wired to the wrong number would page to the wrong tab while looking
+  perfectly correct in the bar.
 
 ### Fixed
 
