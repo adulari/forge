@@ -45,6 +45,12 @@ All notable changes to Forge are documented here. The format follows
 
 ### Changed
 
+- Patched the four open high-severity advisories in the build toolchain: all ten transitive copies of
+  `brace-expansion` in the mobile lockfile (to 1.1.16 / 2.1.2 / 5.0.8) and `fast-uri` in the promo
+  video pipeline (3.1.4). None of them is reachable from the app bundle or the daemon — they hang off
+  eslint, sucrase, `@expo/prebuild-config` and `@bacons/apple-targets` — so this clears noise rather
+  than exposure. The mobile lockfile is regenerated with npm 10, which is what CI's `npm ci` reads;
+  npm 12 prunes entries it needs.
 - **Tab swiping no longer peeks; it switches immediately.** The peek rendered a second live instance
   of the neighbouring screen inside the current tab, because a `UITabBarController` only keeps the
   selected child's view laid out and iOS keeps its real tab bar here. That leaked in every direction,
