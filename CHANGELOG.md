@@ -68,6 +68,20 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **The tab you swiped away from no longer flashes when you arrive.** Four previous attempts moved a
+  corrective scroll earlier and earlier — onto a 150ms timer, then into a layout effect on arrival —
+  and each one made the flash shorter without removing it. Shortening it was the clue: the correction
+  was racing something rather than preventing it. A `UIScrollView` clamps its `contentOffset` into its
+  `contentSize`, and the pager's content width was left to be measured from its pages, so any layout
+  pass that measured it short pulled the offset to zero — and page zero is the neighbour on the LEFT,
+  which is the tab you just swiped away from. The clamp happens inside layout, earlier than any scroll
+  JS can schedule, which is why no delay could have been the answer. The content width is now pinned
+  from the page count, so there is no pass in which it is too narrow and no clamp to recover from. The
+  geometry moved to `pagerGeometry` in `lib/tabSwipe.ts`, where the invariant that makes the clamp
+  impossible — the resting page fits inside the pinned width, for every tab — is asserted rather than
+  reasoned about, along with the page-to-tab arithmetic that was previously inline and untested. The
+  timer is gone; the pager now returns home on focus change, which needs no tuning and covers leaving
+  a tab in the same commit that switches away from it.
 - **A light grey flashed through the tab pager.** Frame analysis of a screen recording found it four
   times in 18.7s: once filling the whole content area for a single 17ms frame at the moment a swipe
   committed, and otherwise as light strips down the incoming edge mid-drag, 6–20% of the area for

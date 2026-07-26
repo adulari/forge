@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { tabHrefAt, TAB_SWIPE_ORDER } from "./tabSwipe";
+import { landedTabHref, pagerGeometry, tabHrefAt, TAB_SWIPE_ORDER } from "./tabSwipe";
 
 describe("tab swipe order", () => {
   // A swipe order that disagrees with the tab bar is worse than no swipe: the gesture would page to
@@ -52,5 +52,52 @@ describe("tab swipe order", () => {
     }
     expect(tabHrefAt(-1)).toBeNull();
     expect(tabHrefAt(TAB_SWIPE_ORDER.length)).toBeNull();
+  });
+});
+
+describe("pagerGeometry", () => {
+  const width = 390;
+
+  it("gives the end tabs one neighbour and the middle ones two", () => {
+    expect(pagerGeometry(0, width)).toEqual({ pages: 2, homePage: 0, homeOffset: 0, contentWidth: 780 });
+    expect(pagerGeometry(1, width)).toEqual({ pages: 3, homePage: 1, homeOffset: 390, contentWidth: 1170 });
+    expect(pagerGeometry(TAB_SWIPE_ORDER.length - 1, width)).toEqual({
+      pages: 2, homePage: 1, homeOffset: 390, contentWidth: 780,
+    });
+  });
+
+  // THE FLASH. A UIScrollView clamps contentOffset into contentSize, so a content width measured
+  // short — which is what happens when it is left to the children's layout rather than pinned — drags
+  // the offset to zero, and page zero holds the tab to the LEFT: the one just swiped away from. The
+  // resting page must fit inside the pinned width for every tab, or the clamp is back.
+  it("always pins a width the resting page fits inside", () => {
+    for (const position of TAB_SWIPE_ORDER.keys()) {
+      const { homeOffset, contentWidth } = pagerGeometry(position, width);
+      expect(homeOffset + width).toBeLessThanOrEqual(contentWidth);
+    }
+  });
+
+  it("survives the first render before a width is known", () => {
+    expect(pagerGeometry(2, 0)).toMatchObject({ homeOffset: 0, contentWidth: 0 });
+  });
+});
+
+describe("landedTabHref", () => {
+  it("stays put when the settle came back to the resting page", () => {
+    expect(landedTabHref(1, 1, 1)).toBeNull();
+    expect(landedTabHref(0, 0, 0)).toBeNull();
+  });
+
+  it("maps a page either side to the neighbouring tab", () => {
+    expect(landedTabHref(1, 0, 1)).toBe("/");
+    expect(landedTabHref(1, 2, 1)).toBe("/history");
+    expect(landedTabHref(0, 1, 0)).toBe("/inbox");
+  });
+
+  it("refuses to page past either end", () => {
+    // Rubber-banding at the first and last tab can only ever settle back home, but the arithmetic
+    // must not invent a tab if it is ever asked to.
+    expect(landedTabHref(0, -1, 0)).toBeNull();
+    expect(landedTabHref(TAB_SWIPE_ORDER.length - 1, 2, 1)).toBeNull();
   });
 });
