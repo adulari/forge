@@ -7139,7 +7139,6 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             self.transcript
                 .push(Message::system(DIRECT_COMPLETENESS_PROMPT));
             let audit_transcript_start = self.transcript.len();
-            let edits_before_audit = self.edits_this_turn;
             let review_specs = self.tool_specs();
             let review = self
                 .run_model_loop(
@@ -7158,11 +7157,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 
             let empty_search =
                 completeness_search_reported_no_matches(&self.transcript[audit_transcript_start..]);
-            if empty_search
-                && self.edits_this_turn == edits_before_audit
-                && !self.past_turn_deadline()
-                && !hit_step_cap
-                && !halted_by_loop_guard
+            if empty_search && !self.past_turn_deadline() && !hit_step_cap && !halted_by_loop_guard
             {
                 self.presenter.emit(PresenterEvent::Warning(
                     "completeness search returned no matches — retrying once from the repository root"
@@ -7195,6 +7190,22 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = retry.active_model;
                 hit_step_cap = retry.hit_step_cap;
                 halted_by_loop_guard = retry.halted_by_loop_guard;
+            }
+
+            // The existing-tests guard runs before this audit, but a weaker reviewer can ignore
+            // the audit prompt's "do not modify tests" rule and introduce fresh expectation edits.
+            // There is no later model pass that needs those changes, so restore the original tests
+            // deterministically before patch capture. New tests remain allowed by
+            // `modified_test_files_in_tree`, matching the main guard's contract.
+            if self.config.mesh.guard_test_edits && self.expect_code_change {
+                let test_edits = modified_test_files_in_tree(Some(self.workspace.root()));
+                if !test_edits.is_empty() && stash_paths(Some(self.workspace.root()), &test_edits) {
+                    self.presenter.emit(PresenterEvent::Warning(format!(
+                        "completeness audit modified {} existing test file(s) — stashed those \
+                         edits so evaluation keeps the original specification",
+                        test_edits.len()
+                    )));
+                }
             }
         }
 
@@ -18848,6 +18859,7 @@ mod tests {
     struct EditThenEmptySearchProvider {
         calls: std::sync::atomic::AtomicUsize,
         path: String,
+        audit_path: String,
         search_root: String,
     }
     #[cfg(unix)]
@@ -18868,15 +18880,25 @@ mod tests {
                     name: "write_file".into(),
                     args: serde_json::json!({"path": self.path, "content": "x = 1\n"}),
                 }],
-                2 => vec![ToolCall {
-                    id: new_id(),
-                    name: "search".into(),
-                    args: serde_json::json!({
-                        "path": self.search_root,
-                        "query": "__forge_missing_old_identifier__",
-                        "regex": false,
-                    }),
-                }],
+                2 => vec![
+                    ToolCall {
+                        id: new_id(),
+                        name: "write_file".into(),
+                        args: serde_json::json!({
+                            "path": self.audit_path,
+                            "content": "audit changed something\n",
+                        }),
+                    },
+                    ToolCall {
+                        id: new_id(),
+                        name: "search".into(),
+                        args: serde_json::json!({
+                            "path": self.search_root,
+                            "query": "__forge_missing_old_identifier__",
+                            "regex": false,
+                        }),
+                    },
+                ],
                 _ => Vec::new(),
             };
             Ok(forge_provider::ModelResponse {
@@ -19080,6 +19102,7 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("f.py");
+        let audit_path = dir.join("audit.txt");
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
@@ -19097,6 +19120,7 @@ mod tests {
             Arc::new(EditThenEmptySearchProvider {
                 calls: std::sync::atomic::AtomicUsize::new(0),
                 path: path.to_string_lossy().into_owned(),
+                audit_path: audit_path.to_string_lossy().into_owned(),
                 search_root: dir.to_string_lossy().into_owned(),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
