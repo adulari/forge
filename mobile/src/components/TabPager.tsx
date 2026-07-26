@@ -78,6 +78,16 @@ export function TabPager({ index, children }: { index: number; children: React.R
   // under a fixed offset on both platforms.
   React.useEffect(home, [home]);
 
+  // The pager is left resting on a neighbour page after a swipe commits, because moving it while the
+  // outgoing tab is still on screen is visible as a flash of the page just swiped away from. It is
+  // put back on every focus change instead — after interactions, so a switch has finished animating
+  // first. Both directions are handled: leaving covers the ordinary case, and arriving covers a tab
+  // whose blur was never observed, which would otherwise reopen mid-swipe.
+  React.useEffect(() => {
+    const task = InteractionManager.runAfterInteractions(home);
+    return () => task.cancel();
+  }, [home, isFocused]);
+
   // Prepare the neighbours once this tab is settled, so the first drag already has something to
   // reveal — and drop them the moment the tab loses focus, so no tab holds a live copy of another.
   //
@@ -93,14 +103,13 @@ export function TabPager({ index, children }: { index: number; children: React.R
     return () => task.cancel();
   }, [isFocused]);
 
-  // NativeTabs keeps this tab mounted after the user leaves it, so a pager left resting on a
-  // neighbour page would still be there on return, showing the wrong screen.
+  // `peeking` is only the immediate fallback for a drag that beat the deferred mount; clearing it on
+  // blur is what stops `showPeeks` staying true and holding neighbours mounted in a tab the user has
+  // left. Putting the pager back on its own page is the effect above, deferred, for the flicker
+  // reason given there.
   React.useEffect(() => {
-    if (!isFocused) {
-      setPeeking(false);
-      home();
-    }
-  }, [home, isFocused]);
+    if (!isFocused) setPeeking(false);
+  }, [isFocused]);
 
   const onSettled = React.useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -113,11 +122,12 @@ export function TabPager({ index, children }: { index: number; children: React.R
       const href = tabHrefAt(index + (landed - homePage));
       if (href === null) return;
       router.navigate(href);
-      // Put this pager back on its own page before the tab is hidden, so returning to it later does
-      // not land mid-swipe.
-      home();
+      // Deliberately NOT scrolling back here. This tab is still on screen for the frames it takes the
+      // switch to happen, so snapping the pager home now shows the page the user just swiped away
+      // from, immediately before the new tab appears — which is the flicker. The focus effect below
+      // does it once nobody is looking.
     },
-    [hasPrev, home, index, width],
+    [hasPrev, index, width],
   );
 
   // A release almost always hands over to the paging animation, and `onMomentumScrollEnd` is the
