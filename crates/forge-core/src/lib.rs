@@ -150,10 +150,13 @@ a particular variable, container, call shape, or accessor: those can hide a sibl
 that uses the same name differently. Search the nearest production subsystem containing the edited \
 file AND its sibling files; if that finds matches only in files already edited, widen one directory \
 level once. Otherwise search for the directly affected callers/implementations.
-3. Inspect every distinct production file returned by that sweep, especially sibling clients, \
-adapters, serializers, commands, and alternate entry points. For each concrete related path, \
-confirm the diff handles the same requirement. Passing existing tests alone is not proof: hidden \
-tests often exercise an omitted sibling path.
+3. Search-result snippets are NOT inspection. You MUST open the relevant surrounding code in every \
+unedited production file returned with an old/deprecated name, especially sibling clients, \
+adapters, serializers, commands, and alternate entry points. Explicitly classify whether each path \
+implements the same behavior. For a deprecation, a public config/parser/CLI path that still consumes \
+the old name should normally prefer the replacement while retaining the old alias for compatibility, \
+unless the task requires removal. Passing existing tests alone is not proof: hidden tests often \
+exercise an omitted sibling path.
 4. If one is missing, fix that specific omission and run focused verification. If the sweep reveals \
 no concrete omission, make NO further edits and finish.
 
@@ -7095,7 +7098,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             )
         {
             self.presenter.emit(PresenterEvent::Warning(
-                "completeness check — searching once for omitted related production paths"
+                "completeness check — bounded search for omitted related production paths"
                     .to_string(),
             ));
             self.auto_compact_if_needed(&active_model).await;
@@ -18944,7 +18947,8 @@ mod tests {
                 .iter()
                 .any(|message| message.content.contains("plain literal")
                     && message.content.contains("sibling files")
-                    && message.content.contains("maximum THREE")),
+                    && message.content.contains("maximum THREE")
+                    && message.content.contains("snippets are NOT inspection")),
             "the audit must require a bounded, high-recall search rather than one narrow regex"
         );
         let _ = std::fs::remove_dir_all(&dir);
