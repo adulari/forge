@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.10.2] - 2026-07-26
+
 ### Fixed
 
 - **iOS notifications could not be enabled at all**, and the app blamed a permission the user had
@@ -69,6 +71,40 @@ All notable changes to Forge are documented here. The format follows
   The dock now detects the relay up front and explains that git review needs a direct connection.
   (Unlike the terminal dock, this never crashed: the git hooks reject a Promise where the terminal
   threw synchronously out of a `useEffect`.)
+- **Forge Anywhere's notification toggle drove the wrong backend.** Settings → Forge Anywhere →
+  Notifications called `lib/push` — the local-daemon subscription, `POST /api/push/subscribe`
+  against the paired server's `baseUrl` — while the Anywhere hub row one screen up has always read
+  the relay's `pushStatus`. So the toggle was disabled outright with no paired server, and otherwise
+  reached for the daemon over the LAN: away from it, which is the situation Anywhere exists for, it
+  failed with a reachability error and snapped back. It now registers through
+  `AnywhereProvider.enablePush` (`POST /v1/push/subscriptions`), which needs no `baseUrl`.
+  `enablePush`/`disablePush` also resolve with the resulting status instead of `void`, because
+  `denied` is an ordinary outcome rather than a thrown error and the screen has to tell it from
+  success.
+- **Voice over Forge Anywhere was refused by the relay for most clip lengths.** Bodies do not travel
+  as bytes: `body`/`bytes` are a JSON array of decimal literals — `Array.from(uint8array)` on the
+  client, `Vec<u8>` through serde on the host — which measures at **3.57x** for random bytes. The
+  relay caps an envelope at 300 KiB, and both sides offloaded to a blob only above 256 KiB, which
+  seals into 1,048,896 bytes. Everything from roughly 84 KiB to 256 KiB was rejected with
+  `relay_frame_too_large`, while both smaller **and larger** bodies went through; at 32 KB/s for
+  16 kHz mono WAV that is every voice clip between about 2.7s and 8s. The single threshold is now
+  two on both sides: still accept 256 KiB inline, since a peer on an older build offloads at its own
+  threshold, but send inline only up to 64 KiB. The client test asserted that a 256 KiB body stays
+  inline — true of the code and rejected by the real relay every time; it now asserts that the
+  sealed envelope fits through the relay.
+- **The Live Activity's forging card did not match its own design frame.** The frame draws one row —
+  a dot, `title — forging 4m`, then `2/4 · 64% · $1.84` pinned right — and it was built as two
+  stacked rows. A `Text` in `.timer` style reserves the width of the widest value it could ever
+  show rather than of what it shows now, so inside one flat run of `HStack` items that reserve
+  pushed everything after it to the trailing edge, leaving a stranded separator against the margin
+  with a hole mid-row. `contextLimit == 0` means the host never reported a context window, and the
+  `0% ctx` that fell out of it read as a measurement; segments now appear only when they mean
+  something.
+- **An untitled session's Live Activity read "Forge session" for its entire life.** `title` lives on
+  `Attributes`, which ActivityKit freezes at `Activity.request()`, so an activity started on the
+  idle→busy edge of a session that has not yet produced a title can never be corrected. `agentLabel`
+  (the session's cwd) was already carried in `Attributes` and never rendered — it is now the
+  fallback.
 
 ## [2.10.1] - 2026-07-25
 
@@ -2933,7 +2969,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.10.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.10.2...HEAD
+[2.10.2]: https://github.com/Adulari/forge/compare/v2.10.1...v2.10.2
 [2.10.1]: https://github.com/Adulari/forge/compare/v2.9.1...v2.10.1
 [2.10.0]: https://github.com/Adulari/forge/compare/v2.9.1...v2.10.0
 [2.9.1]: https://github.com/Adulari/forge/compare/v2.9.0...v2.9.1
