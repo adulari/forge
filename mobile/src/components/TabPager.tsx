@@ -39,7 +39,7 @@ import Animated, {
 
 import { isNative } from "../lib/platform";
 import { tabHrefAt, TAB_SWIPE_ORDER } from "../lib/tabSwipe";
-import { preloadTabPeeks, TabPeek } from "./TabPeek";
+import { TabPeek } from "./TabPeek";
 
 /** Horizontal distance before the pager takes the drag — clear of SessionCard's 10px archive pan. */
 const ACTIVATE_X = 28;
@@ -61,12 +61,6 @@ export function TabPager({ index, children }: { index: number; children: React.R
 
   const hasPrev = index > 0;
   const hasNext = index < TAB_SWIPE_ORDER.length - 1;
-
-  // Resolve the neighbour modules before the first drag rather than during it — see
-  // `preloadTabPeeks`. One frame of nothing at the start of a swipe is exactly what it looks like.
-  React.useEffect(() => {
-    preloadTabPeeks();
-  }, []);
 
   const go = React.useCallback((target: number) => {
     const href = tabHrefAt(target);

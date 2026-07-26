@@ -8,6 +8,16 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **The app failed to open** — `undefined is not a function`, caught by the root error boundary — on
+  the OTA that added tab-peek preloading. Preloading resolved all four tab route modules from an
+  effect when the pager mounted, to spend `React.lazy`'s promise frame before a drag rather than
+  during one. That was the only thing in that release which ran at app OPEN (the peek-aware refetch
+  and the dropped haptic can only take effect during a drag), and forcing four route modules to
+  evaluate inside the first mount — `settings.tsx` alone pulls some 25 local modules — reorders
+  initialisation for the whole app. Peeks resolve on first use again, which keeps module evaluation
+  where the code expects it: after the tree those modules depend on exists. The flash preloading was
+  meant to fix is covered by the opaque Suspense fallback, which cannot reorder anything.
+
 - **Swiping between tabs flashed, buzzed and reloaded.** Three separate causes behind one symptom:
   the peeked neighbour resolved its module through `React.lazy` *during* the drag, and Metro's
   resolution costs a frame — visible as a blank page at the moment the swipe starts, so peeks are now
