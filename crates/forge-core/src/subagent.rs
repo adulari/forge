@@ -49,11 +49,12 @@ pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
     ToolSpec {
         name: SPAWN_AGENTS_TOOL.to_string(),
         description: format!(
-            "Delegate one or more independent subtasks to child agents that work in their own \
-             isolated context and are routed to the cheapest capable model. Use this to fan out \
-             research/search/review across files instead of doing it all yourself. Up to \
-             {max_agents} agents per call. Each agent gets read-only tools and returns a concise \
-             result. Returns all results, labeled."
+            "Delegate independent deliverables to child agents that work in isolated contexts and \
+             are routed to the cheapest capable model. Use only when at least two child results \
+             are independently useful. Do not use for routine repository exploration, code \
+             search, test discovery, or review within one bug, feature, or refactor; direct tools \
+             share context and are faster. Up to {max_agents} agents per call. Each agent gets \
+             read-only tools and returns a concise result. Returns all results, labeled."
         ),
         schema: serde_json::json!({
             "type": "object",
@@ -1199,6 +1200,15 @@ mod tests {
         assert!(!SUBAGENT_TOOLS.contains(&SPAWN_AGENTS_TOOL));
         // And the read-only set is exactly investigation tools (no write/shell).
         assert_eq!(SUBAGENT_TOOLS, &["read_file", "list_dir", "search"]);
+    }
+
+    #[test]
+    fn spawn_tool_description_keeps_single_coding_tasks_direct() {
+        let description = spawn_agents_spec(8).description;
+
+        assert!(description.contains("at least two child results"));
+        assert!(description.contains("Do not use for routine repository exploration"));
+        assert!(description.contains("direct tools share context and are faster"));
     }
 
     // --- Subagent failover (docs/features/mesh-routing.md): a child whose model rate-limits must

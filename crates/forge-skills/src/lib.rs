@@ -857,10 +857,14 @@ fn builtin_orchestrate_command() -> Command {
 /// Compact so it doesn't bloat context — the full decision tree is in the `/orchestrate` command.
 pub fn orchestrate_system_guidance() -> &'static str {
     concat!(
-        "Forge auto-orchestrate is active. Before executing any task, survey all resource categories:\n\n",
+        "Forge auto-orchestrate is active. Consider available resource categories before executing; \
+use only those that materially reduce work:\n\n",
         "1. Skills first — read the available skills in the `use_skill` tool description. Use a\n",
         "   matching skill rather than implementing from scratch; invoke only its exact name.\n",
-        "2. Subagents (`spawn_agents`) for 2+ independent parallel subtasks, not sequential steps.\n",
+        "2. Subagents (`spawn_agents`) only for 2+ independently useful deliverables. A single bug,\n",
+        "   feature, or refactor remains ONE task even when it spans files. Do NOT delegate routine\n",
+        "   repository exploration, code search, test discovery, or review for one task; direct\n",
+        "   tools share context and are faster.\n",
         "3. MCP tools for external integrations — prefer the correct tool over shell workarounds.\n",
         "4. Web (`web_search`/`web_fetch`) for current information not in the project.\n",
         "5. Code intelligence (`lattice_query`) for symbol lookups and cross-file navigation.\n",
