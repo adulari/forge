@@ -39,6 +39,12 @@ export interface AnywhereBridgeRequest {
   method: string;
   headers: [string, string][];
   body: Uint8Array;
+  /**
+   * The caller's own deadline and cancellation. Without this the relay applied a flat cap of its
+   * own to every route, so `transcribeAudio`'s 120s budget silently became 30s — and a voice clip
+   * is transcribed on the host before it answers, so long recordings could never come back.
+   */
+  signal?: AbortSignal;
 }
 
 export interface AnywhereBridgeResponse {
@@ -91,6 +97,7 @@ export class AnywhereTransport implements RemoteTransport {
       method,
       headers: Array.from(headers.entries()),
       body: encoded.bytes,
+      signal: init?.signal ?? undefined,
     });
     return new Response(response.body as unknown as BodyInit, {
       status: response.status,

@@ -8,6 +8,15 @@ All notable changes to Forge are documented here. The format follows
 
 ### Added
 
+- **CI now reconciles what devices are running against what main contains.** Twice — #890 and #910 —
+  a merge to main created no workflow run at all, so no OTA was published and nothing said so; both
+  were found days later by a human noticing the fix had not arrived. A missing run cannot be caught
+  by anything keyed off that run, so a scheduled job now works the other end: it finds the newest
+  commit touching the OTA-safe paths, checks whether any successful `eas-update` run covers it (by
+  ancestry, since a push's head can be a later commit than the change itself), and dispatches the
+  publish for exactly the uncovered range if not. It reconciles against runs rather than the Expo
+  update list because a missing run is precisely the defect, and it passes the range as `base_ref`
+  so the existing OTA-safety guard still decides what may ship.
 - **The app now says when it has updated, and what changed.** An OTA is applied silently on the
   launch after it downloads and a TestFlight build arrives with nothing in-app to mark it, so "did it
   actually update?" was unanswerable without reading CI. A sheet now appears once per update with the
@@ -68,6 +77,21 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **One stale frame from a phone took the whole Anywhere connector offline.** The host's list of open
+  session streams is per relay connection, and that connection drops and reconnects on its own —
+  three times in the last two days' logs, from resets and heartbeats. The phone's socket survives
+  those drops, so it goes on sending frames for streams the reconnected host has no record of, and
+  the host treated an unknown stream id as fatal: it tore down the connector, reconnected, and died
+  again on the next frame. Every bridge request in those windows failed against a connector that had
+  just reported itself online. An unknown stream is a race, not an attack, so the host now answers it
+  with a close — telling the phone to stop using that socket — and keeps serving everything else.
+- **Voice over Anywhere timed out on anything but a short clip.** The relay applied a flat 30s
+  deadline to every bridge request, overriding whatever the caller asked for, so
+  `transcribeAudio`'s 120s budget was never in effect. A bridge request is not a proxy hop: the host
+  transcribes the entire clip before it answers — measured at ~4.5s for a 4s recording — so a voice
+  memo of any real length could not come back in time. The caller's `AbortSignal` now reaches the
+  relay and governs, which also means cancelling a recording actually cancels the request; the relay
+  keeps a deadline of its own only for callers that set none.
 - **The tab you swiped away from no longer flashes when you arrive.** Four previous attempts moved a
   corrective scroll earlier and earlier — onto a 150ms timer, then into a layout effect on arrival —
   and each one made the flash shorter without removing it. Shortening it was the clue: the correction

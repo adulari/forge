@@ -179,4 +179,49 @@ describe("EncryptedAnywhereRelay", () => {
     await expect(relay.request(request)).resolves.toMatchObject({ status: 204 });
     expect(connectionNumber).toBe(2);
   });
+
+  it("lets the caller's signal end a request the host has not answered", async () => {
+    // The relay used to cap every route at 30s regardless of what the caller asked for. A bridge
+    // request is not a proxy hop — `POST /api/voice/transcribe` transcribes the clip before it
+    // replies — so that cap, not the caller's 120s budget, decided when a voice memo failed.
+    const accountId = new Uint8Array(16).fill(0x11);
+    const controllerId = new Uint8Array(16).fill(0x22);
+    const hostId = new Uint8Array(16).fill(0x33);
+    const dataKey = new Uint8Array(32).fill(0x55);
+    const controllerSeed = new Uint8Array(32).fill(0x66);
+    const hostSeed = new Uint8Array(32).fill(0x77);
+    let sequence = 1n;
+    const credentials: AnywhereRelayCredentials = {
+      serviceUrl: "https://app.forge.test", accountId, deviceId: controllerId, dataKey, keyEpoch: 3,
+      signingPrivateKey: controllerSeed, accessToken: async () => "token",
+      reserveSequence: async () => sequence++, acceptSequences: async () => true,
+      signingPublicKey: async () => ed25519.getPublicKey(hostSeed),
+      randomBytes: (length) => new Uint8Array(length).fill(Number(sequence)),
+    };
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ ticket: "ticket" }), { status: 200 })) as typeof fetch;
+    class SilentWebSocket {
+      static readonly CONNECTING = 0; static readonly OPEN = 1; static readonly CLOSING = 2; static readonly CLOSED = 3;
+      readyState = SilentWebSocket.CONNECTING;
+      binaryType = "blob";
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: ArrayBuffer }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(readonly url: string) { queueMicrotask(() => { this.readyState = SilentWebSocket.OPEN; this.onopen?.(); }); }
+      send(): void {
+        // The host is busy transcribing and will not answer within this test.
+      }
+      close(): void { this.readyState = SilentWebSocket.CLOSED; this.onclose?.(); }
+    }
+    globalThis.WebSocket = SilentWebSocket as unknown as typeof WebSocket;
+    const relay = new EncryptedAnywhereRelay(credentials);
+    const controller = new AbortController();
+    const pending = relay.request({
+      hostId: Array.from(hostId, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+      route: "voice_transcribe", parameters: [""], method: "POST", headers: [],
+      body: new Uint8Array(), signal: controller.signal,
+    });
+    controller.abort(new Error("request timed out after 120000ms"));
+    await expect(pending).rejects.toThrow("timed out after 120000ms");
+  });
 });
