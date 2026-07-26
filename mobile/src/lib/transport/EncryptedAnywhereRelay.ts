@@ -14,7 +14,24 @@ import {
   type EnvelopeKind,
 } from "./anywhereEnvelope";
 
+// What we ACCEPT inline from the other side. Deliberately permissive: a host on an older build
+// still offloads at its own threshold, and rejecting its frames here would break it for no gain.
 const MAX_INLINE_BYTES = 256 * 1024;
+
+// What we SEND inline before offloading to a blob, which is a much smaller number than the above
+// and must be, because bodies do not travel as bytes. `body`/`bytes` are `Array.from(uint8array)`
+// inside a JSON payload, so every byte becomes a decimal literal plus a comma — measured at
+// **3.57x** for random bytes (a 256 KiB body seals into a 914 KiB envelope). The relay caps an
+// envelope at 300 KiB (`MAX_RELAY_ENVELOPE_BYTES` in forge-anywhere-service/src/relay.rs) and
+// answers anything larger with `relay_frame_too_large`.
+//
+// Sending at the 256 KiB acceptance limit therefore guaranteed rejection, and offload did not
+// kick in until 256 KiB — so every body between ~84 KiB and 256 KiB failed outright, while both
+// smaller and LARGER ones worked. That dead band is what broke voice over Anywhere: 16 kHz mono
+// 16-bit WAV is 32 KB/s, so clips from roughly 2.7s to 8s could never be sent.
+//
+// 64 KiB worst-cases to ~229 KiB sealed, leaving room for headers, metadata and the envelope.
+const MAX_OUTBOUND_INLINE_BYTES = 64 * 1024;
 const MAX_BLOB_CIPHERTEXT_BYTES = 32 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -114,7 +131,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       parameters: request.parameters,
       headers: request.headers,
     };
-    if (request.body.length > MAX_INLINE_BYTES) {
+    if (request.body.length > MAX_OUTBOUND_INLINE_BYTES) {
       payload.body_blob = await this.uploadBlob(request.hostId, request.body);
     } else {
       payload.body = Array.from(request.body);
@@ -151,7 +168,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
   async sendStreamFrame(hostId: string, payload: WebSocketPayload): Promise<void> {
     let wirePayload = payload;
     const frameBytes = new Uint8Array(payload.bytes ?? []);
-    if (payload.kind === "data" && frameBytes.length > MAX_INLINE_BYTES) {
+    if (payload.kind === "data" && frameBytes.length > MAX_OUTBOUND_INLINE_BYTES) {
       wirePayload = {
         stream_id: payload.stream_id,
         direction: payload.direction,

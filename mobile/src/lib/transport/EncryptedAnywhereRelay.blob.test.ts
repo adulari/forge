@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EncryptedAnywhereRelay, type AnywhereRelayCredentials } from "./EncryptedAnywhereRelay";
 import { bytesToHex, openEnvelope, sealEnvelope, type EnvelopeMetadata } from "./anywhereEnvelope";
 
-const INLINE_LIMIT = 256 * 1024;
+// The threshold above which the relay offloads to a blob instead of inlining. Much smaller than
+// the 256 KiB we ACCEPT inline, because a JSON numeric array inflates a body ~3.57x and the relay
+// caps an envelope at 300 KiB. This file used to assert that a 256 KiB body stayed inline — true
+// of the code, and rejected by the real relay every time with `relay_frame_too_large`.
+const INLINE_LIMIT = 64 * 1024;
+const RELAY_ENVELOPE_LIMIT = 300 * 1024;
 const accountId = new Uint8Array(16).fill(0x11);
 const controllerId = new Uint8Array(16).fill(0x22);
 const hostId = new Uint8Array(16).fill(0x33);
@@ -26,11 +31,13 @@ afterEach(() => {
 });
 
 describe("EncryptedAnywhereRelay blobs", () => {
-  it("keeps 256 KiB inline and uploads request bytes above the threshold", async () => {
+  it("keeps a threshold-sized body inline and uploads request bytes above it", async () => {
     const sentPayloads: Record<string, unknown>[] = [];
+    const sentEnvelopes: Uint8Array[] = [];
     const uploads: Uint8Array[] = [];
     let hostSequence = 40n;
     installWebSocket((socket, value) => {
+      sentEnvelopes.push(value);
       const request = openEnvelope(value, dataKey, ed25519.getPublicKey(controllerSeed));
       expect(request.metadata.kind).toBe(1);
       const payload = JSON.parse(new TextDecoder().decode(request.plaintext)) as Record<string, unknown> & {
@@ -72,7 +79,8 @@ describe("EncryptedAnywhereRelay blobs", () => {
     }) as typeof fetch;
 
     const relay = new EncryptedAnywhereRelay(credentials());
-    await relay.request(bridgeRequest(new Uint8Array(INLINE_LIMIT)));
+    // 0xff is the worst case for the encoding: three digits and a comma for every single byte.
+    await relay.request(bridgeRequest(new Uint8Array(INLINE_LIMIT).fill(0xff)));
     await relay.request(bridgeRequest(new Uint8Array(INLINE_LIMIT + 1).fill(7)));
 
     expect(sentPayloads[0]?.body).toHaveLength(INLINE_LIMIT);
@@ -80,6 +88,13 @@ describe("EncryptedAnywhereRelay blobs", () => {
     expect(sentPayloads[1]).not.toHaveProperty("body");
     expect(sentPayloads[1]?.body_blob).toMatchObject({ blob_id: blobId });
     expect(uploads).toHaveLength(1);
+
+    // The invariant that actually matters, and the one nothing checked before: what goes on the
+    // wire has to fit through the relay. A 256 KiB inline body sealed to ~914 KiB against a
+    // 300 KiB cap, so it was refused with `relay_frame_too_large` — never delivered, never
+    // retried through the blob path, because offload only began at that same 256 KiB.
+    expect(sentEnvelopes[0]!.length).toBeLessThan(RELAY_ENVELOPE_LIMIT);
+    expect(sentEnvelopes[1]!.length).toBeLessThan(RELAY_ENVELOPE_LIMIT);
   });
 
   it("uploads WebSocket data above the threshold and sends only bytes_blob", async () => {

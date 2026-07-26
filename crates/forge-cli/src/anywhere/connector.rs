@@ -30,7 +30,18 @@ use super::{
     CommandJournalState, DeviceList, LocalState, StateStore,
 };
 
+/// What this host ACCEPTS inline from a controller. Permissive on purpose — an app on an older
+/// build offloads at its own threshold, and rejecting its frames here would break it for no gain.
 const MAX_INLINE_BODY: usize = 256 * 1024;
+
+/// What this host SENDS inline before offloading to a blob, which must be far smaller than the
+/// acceptance limit above because bodies do not travel as bytes: `body`/`bytes` are `Vec<u8>`
+/// inside a `serde_json` payload, so every byte becomes a decimal literal plus a comma —
+/// measured at 3.57x for random bytes. The relay caps an envelope at 300 KiB
+/// (`MAX_RELAY_ENVELOPE_BYTES` in forge-anywhere-service) and answers anything larger with
+/// `relay_frame_too_large`, so sending at the 256 KiB acceptance limit guaranteed rejection while
+/// offload did not engage until that same 256 KiB. Everything in between simply failed.
+const MAX_OUTBOUND_INLINE_BODY: usize = 64 * 1024;
 const MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_QUERY_LEN: usize = 4096;
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
@@ -354,7 +365,7 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                     bytes,
                     bytes_blob: None,
                 };
-                if frame.bytes.len() > MAX_INLINE_BODY {
+                if frame.bytes.len() > MAX_OUTBOUND_INLINE_BODY {
                     let reference = upload_blob(
                         &store,
                         &blobs,
@@ -958,7 +969,7 @@ where
             if let Some(blob_id) = consumed_blob_id {
                 consume_blob_after_delivery(blobs, blob_id).await;
             }
-            if response.body.len() > MAX_INLINE_BODY {
+            if response.body.len() > MAX_OUTBOUND_INLINE_BODY {
                 match upload_blob(store, blobs, sender_device_id, &response.body).await {
                     Ok(reference) => {
                         response.body.clear();
@@ -1810,6 +1821,40 @@ mod tests {
         let pong_at = started + Duration::from_secs(30);
         heartbeat.record_pong(pong_at);
         assert!(!heartbeat.is_timed_out(pong_at + RELAY_HEARTBEAT_TIMEOUT));
+    }
+
+    /// The relay's own limit, from forge-anywhere-service/src/relay.rs. Duplicated rather than
+    /// imported because it lives in a different repository; if it ever moves, this test is the
+    /// thing that should fail.
+    const RELAY_ENVELOPE_LIMIT: usize = 300 * 1024;
+
+    #[test]
+    fn an_inline_body_at_the_send_threshold_still_fits_a_relay_envelope() {
+        // Worst case for the JSON encoding: every byte needs three digits and a comma.
+        let response = BridgeResponse {
+            request_id: [1; 16],
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: vec![0xff; MAX_OUTBOUND_INLINE_BODY],
+            body_blob: None,
+        };
+        let encoded = serde_json::to_vec(&response).expect("encode bridge response");
+        assert!(
+            encoded.len() < RELAY_ENVELOPE_LIMIT,
+            "a body sent inline at the threshold seals into {} bytes, over the relay's {RELAY_ENVELOPE_LIMIT}",
+            encoded.len(),
+        );
+
+        // And the acceptance limit is emphatically not a safe thing to send: this is the state
+        // that made every voice clip between ~2.7s and 8s fail with `relay_frame_too_large`.
+        let oversized = BridgeResponse {
+            body: vec![0xff; MAX_INLINE_BODY],
+            ..response
+        };
+        assert!(
+            serde_json::to_vec(&oversized).expect("encode").len() > RELAY_ENVELOPE_LIMIT,
+            "the acceptance limit is no longer oversized on the wire — re-derive the send threshold",
+        );
     }
 
     fn request(route: RouteId, method: &str, parameters: &[&str]) -> BridgeRequest {
