@@ -153,10 +153,12 @@ level once. Otherwise search for the directly affected callers/implementations.
 3. Search-result snippets are NOT inspection. You MUST open the relevant surrounding code in every \
 unedited production file returned with an old/deprecated name, especially sibling clients, \
 adapters, serializers, commands, and alternate entry points. Explicitly classify whether each path \
-implements the same behavior. For a deprecation, a public config/parser/CLI path that still consumes \
-the old name should normally prefer the replacement while retaining the old alias for compatibility, \
-unless the task requires removal. Passing existing tests alone is not proof: hidden tests often \
-exercise an omitted sibling path.
+implements the same behavior. For a deprecation or rename, any public config/parser/CLI path in the \
+affected subsystem that still consumes the old name is a CONCRETE OMISSION until it prefers the \
+replacement while retaining the old alias for compatibility (unless the task requires removal). A \
+different call shape or downstream consumer does not exempt that path. Do not finish with such an \
+unhandled occurrence. Passing existing tests alone is not proof: hidden tests often exercise an \
+omitted sibling path.
 4. If one is missing, fix that specific omission and run focused verification. If the sweep reveals \
 no concrete omission, make NO further edits and finish.
 
@@ -18948,7 +18950,8 @@ mod tests {
                 .any(|message| message.content.contains("plain literal")
                     && message.content.contains("sibling files")
                     && message.content.contains("maximum THREE")
-                    && message.content.contains("snippets are NOT inspection")),
+                    && message.content.contains("snippets are NOT inspection")
+                    && message.content.contains("CONCRETE OMISSION")),
             "the audit must require a bounded, high-recall search rather than one narrow regex"
         );
         let _ = std::fs::remove_dir_all(&dir);
