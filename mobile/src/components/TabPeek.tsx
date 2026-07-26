@@ -19,29 +19,30 @@ import { StyleSheet, View } from "react-native";
 import { PeekProvider } from "../lib/peek";
 import { useTokens } from "../theme/ThemeProvider";
 
-// Metro bundles every module up front, so these resolve without any network work — but resolution
-// is still a promise, which costs a frame. That frame is visible at the very start of a drag as a
-// flash of nothing where the neighbour should be, so `preloadTabPeeks` settles them in advance and
-// the loaders are kept separate from `React.lazy` to make that possible.
-const loaders = [
-  () => import("../app/(tabs)/index"),
-  () => import("../app/(tabs)/inbox"),
-  () => import("../app/(tabs)/history"),
-  () => import("../app/(tabs)/settings"),
-] as const;
-
-const FleetBody = React.lazy(() => loaders[0]().then((m) => ({ default: m.FleetScreen })));
-const InboxBody = React.lazy(() => loaders[1]().then((m) => ({ default: m.InboxScreen })));
-const HistoryBody = React.lazy(() => loaders[2]().then((m) => ({ default: m.HistoryScreen })));
-const SettingsBody = React.lazy(() => loaders[3]().then((m) => ({ default: m.SettingsScreen })));
-
-/**
- * Resolves every neighbour module ahead of the first drag. Idempotent and fire-and-forget: a failed
- * import is not worth reporting, because `React.lazy` will surface it if the peek is ever rendered.
- */
-export function preloadTabPeeks(): void {
-  for (const load of loaders) void load().catch(() => undefined);
-}
+// NOT preloaded, and that is deliberate. An earlier version resolved all four of these when the
+// pager mounted, to spend the promise's frame before a drag rather than during one. It shipped as
+// #903 and the app failed to open: "undefined is not a function" from the root error boundary.
+//
+// The eager preload was the only thing that release ran at app OPEN — the peek-aware refetch and the
+// dropped haptic can only take effect during a drag — and forcing four route modules (settings.tsx
+// alone pulls some 25 local modules) to evaluate inside the first mount reorders initialisation for
+// the whole app. Resolving them on first use instead keeps evaluation where the code was written to
+// expect it: after the tree that those modules depend on already exists.
+//
+// The flash it was meant to fix is handled by the opaque fallback below instead, which costs nothing
+// and cannot reorder anything.
+const FleetBody = React.lazy(() =>
+  import("../app/(tabs)/index").then((m) => ({ default: m.FleetScreen })),
+);
+const InboxBody = React.lazy(() =>
+  import("../app/(tabs)/inbox").then((m) => ({ default: m.InboxScreen })),
+);
+const HistoryBody = React.lazy(() =>
+  import("../app/(tabs)/history").then((m) => ({ default: m.HistoryScreen })),
+);
+const SettingsBody = React.lazy(() =>
+  import("../app/(tabs)/settings").then((m) => ({ default: m.SettingsScreen })),
+);
 
 export function TabPeek({ at }: { at: number }) {
   const tokens = useTokens();
