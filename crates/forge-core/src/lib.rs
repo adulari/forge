@@ -135,6 +135,25 @@ the first time. Re-read the original task, then check your diff against it:
 If you find a genuine problem, FIX it now with the tools. If the change is correct and complete, \
 say so in one line and stop — do NOT make changes for their own sake or second-guess a sound fix.";
 
+/// Direct-provider counterpart of the bridge completeness re-drive. Unlike the broad same-model
+/// self-review (which regressed when always-on), this requires one concrete repository search and
+/// permits another edit only when that evidence exposes an omitted production path.
+const DIRECT_COMPLETENESS_PROMPT: &str = "\
+Before finishing this code-change task, perform ONE bounded completeness audit grounded in \
+evidence:
+1. Run `git diff` once to inspect the COMPLETE current change, then re-read the original task.
+2. You MUST run ONE targeted repository search for related production paths. If the task or diff \
+renames, replaces, deprecates, or changes an identifier, option, API, format, or behavior, search \
+for the old AND new names and inspect the relevant matches. Otherwise search for the directly \
+affected callers/implementations. Passing existing tests alone is not proof: hidden tests often \
+exercise an omitted sibling path.
+3. For every concrete related production path found, confirm the diff handles the same requirement. \
+If one is missing, fix that specific omission and run focused verification. If the search reveals \
+no concrete omission, make NO further edits and finish.
+
+Do not broadly re-explore or refactor, and do not modify existing tests to hide a failure. This is \
+one evidence check, not an invitation to second-guess a complete fix.";
+
 /// Whether a `shell` tool result reports a failure (non-zero exit, signal, timeout, or spawn
 /// error). The tool's first line is `shell: exit N in …`, `shell: timed out …`, `shell: error: …`,
 /// or `shell: failed to start …`; only `exit 0` is success.
@@ -7040,6 +7059,60 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 hit_step_cap = guard_outcome.hit_step_cap;
                 halted_by_loop_guard = guard_outcome.halted_by_loop_guard;
             }
+        }
+
+        // ── Direct-provider completeness audit (mesh.verify_completeness) ─────────────────────
+        // The loop-gated completeness re-drive inside `run_model_loop` covers CLI bridges, whose
+        // subprocess yields back to Forge before the outer turn ends. Direct providers never pass
+        // through that bridge-yield branch, so the same opt-in quality lever was silently inert for
+        // `codex-oauth`/API models. Run one bounded evidence pass here after the edit/test guard.
+        //
+        // This is deliberately narrower than `mesh.self_review`: the model must inspect the final
+        // diff and perform one related-symbol/call-site search, and may edit only if that search
+        // exposes a concrete omitted production path. That targets under-scoped fixes without the
+        // unconstrained second-guessing that made always-on self-review regress.
+        let code_change_contract =
+            self.expect_code_change || self.last_turn_contract.requires_changed_artifact();
+        if self.config.mesh.verify_completeness
+            && code_change_contract
+            && !forge_provider::is_cli_bridge(&active_model)
+            && !self.past_turn_deadline()
+            && !halted_by_loop_guard
+            && working_tree_changed_since(
+                Some(self.workspace.root()),
+                working_tree_baseline.as_deref(),
+            )
+        {
+            self.presenter.emit(PresenterEvent::Warning(
+                "completeness check — searching once for omitted related production paths"
+                    .to_string(),
+            ));
+            self.auto_compact_if_needed(&active_model).await;
+            let seq = self.next_seq();
+            self.store.add_message(
+                &self.id,
+                seq,
+                Role::System,
+                DIRECT_COMPLETENESS_PROMPT,
+                None,
+            )?;
+            self.transcript
+                .push(Message::system(DIRECT_COMPLETENESS_PROMPT));
+            let review_specs = self.tool_specs();
+            let review = self
+                .run_model_loop(
+                    active_model.clone(),
+                    &review_specs,
+                    None,
+                    max_steps,
+                    stream_idle,
+                )
+                .await?;
+            adopt_redrive_text(&mut final_text, review.final_text);
+            context_tokens = review.context_tokens;
+            active_model = review.active_model;
+            hit_step_cap = review.hit_step_cap;
+            halted_by_loop_guard = review.halted_by_loop_guard;
         }
 
         // ── Toolless-bridge classification (bridge MCP-tool health guard, wave 7) ─────────────
@@ -18789,6 +18862,65 @@ mod tests {
         assert!(
             warned,
             "the self-review pass must run + announce itself when mesh.self_review is enabled"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_completeness_runs_once_after_a_code_edit_when_enabled() {
+        let dir =
+            std::env::temp_dir().join(format!("forge-direct-completeness-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let base_mesh = Config::default().mesh;
+        let config = Config {
+            permission_mode: forge_types::PermissionMode::AcceptEdits,
+            mesh: forge_config::MeshConfig {
+                verify_completeness: true,
+                ..base_mesh
+            },
+            ..Config::default()
+        };
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditOnceThenDoneProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(capture),
+            config,
+            dir.to_str().unwrap(),
+        )
+        .unwrap();
+        session.set_expect_code_change(true);
+
+        session.run_turn("fix the bug").await.unwrap();
+
+        let fired = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("omitted related production paths")
+                )
+            })
+            .count();
+        assert_eq!(fired, 1, "direct completeness must run exactly once");
+        assert!(
+            session
+                .transcript
+                .iter()
+                .any(|message| message.content.contains("targeted repository search")),
+            "the direct provider must receive the evidence-grounded completeness prompt"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

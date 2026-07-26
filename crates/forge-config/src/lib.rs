@@ -1527,10 +1527,11 @@ pub struct MeshConfig {
     /// no-op without a cached dataset / API key (falls back to the heuristic).
     #[serde(default = "default_benchmark_ranking")]
     pub benchmark_ranking: bool,
-    /// Opt-in "max-resolve" mode for CLI-bridge harness turns: append a completeness clause that
-    /// makes the model re-verify its change against EVERY requirement before finishing. Measured to
-    /// raise SWE-bench resolve (4/10 → 6/10, beating the raw CLI) at ~3× the tokens — so it's OFF by
-    /// default and turned on only when solve rate matters more than cost.
+    /// Opt-in "max-resolve" mode: run one bounded, evidence-grounded completeness pass before a
+    /// code-change turn finishes. CLI bridges re-check every stated requirement; direct providers
+    /// also inspect the final diff and search once for related production call sites. Measured to
+    /// raise bridge SWE-bench resolve (4/10 → 6/10, beating the raw CLI), but it costs an extra
+    /// model pass — so it remains OFF by default until the direct policy is validated.
     #[serde(default = "default_verify_completeness")]
     pub verify_completeness: bool,
     /// Empty-diff completion nudge (harness-robustness wave 2): when a headless code-change run
