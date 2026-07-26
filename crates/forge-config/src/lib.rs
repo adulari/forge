@@ -1527,13 +1527,13 @@ pub struct MeshConfig {
     /// no-op without a cached dataset / API key (falls back to the heuristic).
     #[serde(default = "default_benchmark_ranking")]
     pub benchmark_ranking: bool,
-    /// "Max-resolve" mode: run one bounded, evidence-grounded completeness pass before a
-    /// code-change turn finishes. CLI bridges re-check every stated requirement; direct providers
-    /// also inspect the final diff and run a bounded plain-literal search sweep across related
-    /// production siblings. Measured to raise bridge SWE-bench resolve (4/10 → 6/10, beating the
-    /// raw CLI), and direct same-model validation closed a reproducible omitted-sibling failure.
-    /// Default true; disable to skip the extra evidence pass when latency matters more than maximum
-    /// resolve quality.
+    /// "Max-resolve" mode: run a bounded, evidence-grounded completeness pass before a code-change
+    /// turn finishes. CLI bridges re-check every stated requirement. Direct providers run the
+    /// additional final-diff and related-production-sibling search only for prompts that explicitly
+    /// describe an identifier migration (for example a deprecation, rename, or compatibility
+    /// alias); matched same-model evaluation found that narrower policy avoids regressions on
+    /// unrelated bug fixes. Default true; disable to skip all extra completeness passes when
+    /// latency matters more than maximum resolve quality.
     #[serde(default = "default_verify_completeness")]
     pub verify_completeness: bool,
     /// Empty-diff completion nudge (harness-robustness wave 2): when a headless code-change run

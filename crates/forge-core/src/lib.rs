@@ -139,8 +139,8 @@ say so in one line and stop — do NOT make changes for their own sake or second
 /// self-review (which regressed when always-on), this requires a small, concrete repository-search
 /// sweep and permits another edit only when that evidence exposes an omitted production path.
 const DIRECT_COMPLETENESS_PROMPT: &str = "\
-Before finishing this code-change task, perform ONE bounded completeness audit grounded in \
-evidence:
+Before finishing this identifier-migration code-change task, perform ONE bounded completeness \
+audit grounded in evidence:
 1. Run `git diff` once to inspect the COMPLETE current change, then re-read the original task.
 2. You MUST run a targeted repository search sweep for related production paths (maximum THREE \
 search commands). If the task or removed diff lines rename, replace, deprecate, or change an \
@@ -179,6 +179,13 @@ both. If it finds an old/deprecated term in an unedited production sibling, OPEN
 handle the concrete omission under the prior compatibility rule. If the fallback truly finds no \
 related production occurrence, make no edit and finish. Do not modify tests.";
 
+const DIRECT_COMPLETENESS_MISSING_SEARCH_RETRY_PROMPT: &str = "\
+You skipped the REQUIRED repository search in the completeness audit. Do not finish yet. Run ONE \
+plain-literal search from the repository root for the old/deprecated identifier(s), using a command \
+such as `git grep -n -F -e '<old-name>' -- <nearest-production-directory>`. If it finds an \
+old/deprecated term in an unedited production sibling, OPEN that code and handle the concrete \
+omission under the prior compatibility rule. Do not modify tests.";
+
 const DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT: &str = "\
 Your completeness audit OPENED the related production path(s) listed below, but the final diff \
 still leaves them unchanged. That is unresolved evidence, not a completed audit. Re-open each \
@@ -195,6 +202,46 @@ fn completeness_search_reported_no_matches(messages: &[Message]) -> bool {
         let content = message.content.to_ascii_lowercase();
         content.contains("no matches for") || content.contains("0 matches for")
     })
+}
+
+fn completeness_repository_search_ran(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .any(|call| {
+            if call.name == "search" {
+                return true;
+            }
+            if call.name != "shell" {
+                return false;
+            }
+            call.args
+                .get("command")
+                .and_then(|command| command.as_str())
+                .map(|command| {
+                    let command = command.to_ascii_lowercase();
+                    command.contains("git grep")
+                        || command.contains("rg ")
+                        || command.contains("grep ")
+                })
+                .unwrap_or(false)
+        })
+}
+
+fn direct_completeness_is_identifier_migration(prompt: &str) -> bool {
+    let prompt = prompt.to_ascii_lowercase();
+    [
+        "deprecat",
+        "renam",
+        "old name",
+        "new name",
+        "alias",
+        "backward compat",
+        "backwards compat",
+        "compatibility fallback",
+    ]
+    .iter()
+    .any(|signal| prompt.contains(signal))
 }
 
 fn changed_paths_from_status(status: Option<&[u8]>) -> std::collections::HashSet<String> {
@@ -7164,7 +7211,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // The loop-gated completeness re-drive inside `run_model_loop` covers CLI bridges, whose
         // subprocess yields back to Forge before the outer turn ends. Direct providers never pass
         // through that bridge-yield branch, so the same opt-in quality lever was silently inert for
-        // `codex-oauth`/API models. Run one bounded evidence pass here after the edit/test guard.
+        // `codex-oauth`/API models. Run one bounded evidence pass here after the edit/test guard,
+        // but only for explicit identifier migrations. Matched same-model evaluation found the
+        // direct pass helpful for deprecation/rename work and harmful for unrelated bug fixes; the
+        // bridge pass above intentionally remains broad.
         //
         // This is deliberately narrower than `mesh.self_review`: the model must inspect the final
         // diff and perform one related-symbol/call-site search, and may edit only if that search
@@ -7179,6 +7229,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             || self.last_turn_contract.requires_changed_artifact();
         if self.config.mesh.verify_completeness
             && code_change_turn
+            && direct_completeness_is_identifier_migration(prompt)
             && !forge_provider::is_cli_bridge(&active_model)
             && !self.past_turn_deadline()
             && !halted_by_loop_guard
@@ -7219,9 +7270,49 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             hit_step_cap = review.hit_step_cap;
             halted_by_loop_guard = review.halted_by_loop_guard;
 
-            let empty_search =
-                completeness_search_reported_no_matches(&self.transcript[audit_transcript_start..]);
-            if empty_search && !self.past_turn_deadline() && !hit_step_cap && !halted_by_loop_guard
+            let audit_messages = &self.transcript[audit_transcript_start..];
+            let repository_search_ran = completeness_repository_search_ran(audit_messages);
+            let empty_search = completeness_search_reported_no_matches(audit_messages);
+            if !repository_search_ran
+                && !self.past_turn_deadline()
+                && !hit_step_cap
+                && !halted_by_loop_guard
+            {
+                self.presenter.emit(PresenterEvent::Warning(
+                    "completeness audit skipped its repository search — requiring one bounded retry"
+                        .to_string(),
+                ));
+                self.auto_compact_if_needed(&active_model).await;
+                let seq = self.next_seq();
+                self.store.add_message(
+                    &self.id,
+                    seq,
+                    Role::System,
+                    DIRECT_COMPLETENESS_MISSING_SEARCH_RETRY_PROMPT,
+                    None,
+                )?;
+                self.transcript.push(Message::system(
+                    DIRECT_COMPLETENESS_MISSING_SEARCH_RETRY_PROMPT,
+                ));
+                let retry_specs = self.tool_specs();
+                let retry = self
+                    .run_model_loop(
+                        active_model.clone(),
+                        &retry_specs,
+                        None,
+                        max_steps,
+                        stream_idle,
+                    )
+                    .await?;
+                adopt_redrive_text(&mut final_text, retry.final_text);
+                context_tokens = retry.context_tokens;
+                active_model = retry.active_model;
+                hit_step_cap = retry.hit_step_cap;
+                halted_by_loop_guard = retry.halted_by_loop_guard;
+            } else if empty_search
+                && !self.past_turn_deadline()
+                && !hit_step_cap
+                && !halted_by_loop_guard
             {
                 self.presenter.emit(PresenterEvent::Warning(
                     "completeness search returned no matches — retrying once from the repository root"
@@ -19144,6 +19235,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn direct_completeness_classifier_accepts_identifier_migrations() {
+        for prompt in [
+            "The db keyword is deprecated; use database instead.",
+            "Rename old_widget to widget throughout the parser.",
+            "Keep foo as a compatibility alias for bar.",
+        ] {
+            assert!(
+                direct_completeness_is_identifier_migration(prompt),
+                "expected identifier-migration classification for: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_completeness_classifier_rejects_unrelated_bug_reports() {
+        for prompt in [
+            "[Bug]: wspace and hspace in subfigures not working",
+            "Regression in 5.2.3: pytest tries to collect random __init__.py files",
+            "Subclassed SkyCoord gives misleading attribute access message",
+        ] {
+            assert!(
+                !direct_completeness_is_identifier_migration(prompt),
+                "unrelated bug report must not trigger direct completeness: {prompt}"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn direct_completeness_runs_once_after_a_code_edit_when_enabled() {
@@ -19194,6 +19313,22 @@ mod tests {
             })
             .count();
         assert_eq!(fired, 1, "direct completeness must run exactly once");
+        let missing_search_retries = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("skipped its repository search")
+                )
+            })
+            .count();
+        assert_eq!(
+            missing_search_retries, 1,
+            "a prose-only first audit must trigger exactly one mandatory-search retry"
+        );
         assert!(
             !session.last_turn_contract().requires_changed_artifact(),
             "the descriptive prompt must not make the contract trigger the audit"
@@ -19215,6 +19350,67 @@ mod tests {
                     && message.content.contains("snippets are NOT inspection")
                     && message.content.contains("CONCRETE OMISSION")),
             "the audit must require a bounded, high-recall search rather than one narrow regex"
+        );
+        assert!(
+            session.transcript.iter().any(|message| message
+                .content
+                .contains("skipped the REQUIRED repository search")),
+            "the direct provider must receive the missing-search retry prompt"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_completeness_skips_unrelated_bug_fixes() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-direct-completeness-unrelated-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditOnceThenDoneProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(capture),
+            Config {
+                permission_mode: forge_types::PermissionMode::AcceptEdits,
+                ..Config::default()
+            },
+            dir.to_str().unwrap(),
+        )
+        .unwrap();
+
+        session
+            .run_turn("[Bug]: wspace and hspace in subfigures not working")
+            .await
+            .unwrap();
+
+        assert!(
+            !events.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("omitted related production paths")
+                            || message.contains("skipped its repository search")
+                )
+            }),
+            "generic bug fixes must not run the direct completeness pass"
+        );
+        assert!(
+            !session
+                .transcript
+                .iter()
+                .any(|message| message.content == DIRECT_COMPLETENESS_PROMPT),
+            "generic bug fixes must not receive the direct completeness prompt"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
