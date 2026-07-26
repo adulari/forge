@@ -25,10 +25,11 @@
 // each tab rather than around the navigator, and a peeked neighbour is still a second instance of
 // that screen. Two consequences are handled deliberately:
 //
-//  · Peeks mount once this tab is settled and are dropped when it loses focus. Mounting them at the
-//    START of a drag was too late — a state update plus a lazy import cannot finish inside a quick
-//    swipe, so the neighbour slid past empty. Scoping them to the focused tab is what keeps them
-//    from outliving their usefulness: no tab holds a live copy of another while you are elsewhere.
+//  · Peeks mount once this tab is settled and then STAY. Mounting them at the start of a drag was
+//    too late — a state update plus a lazy import cannot finish inside a quick swipe, so the
+//    neighbour slid past empty. Dropping them on blur was worse: every arrival then re-mounted the
+//    previous tab's screen into the page beside this one, which is real work landing on the exact
+//    frame the tab becomes visible.
 //  · They render as peeks (`useIsPeeking`), so they show cached data and ask the network for
 //    nothing. A screen sliding past under a thumb is not an arrival.
 //
@@ -58,7 +59,9 @@ export function TabPager({ index, children }: { index: number; children: React.R
   // a lazy import had to complete inside the swipe itself, and a quick swipe is over first — so the
   // neighbour slid past empty and there was nothing to peek at.
   const [ready, setReady] = React.useState(false);
-  // Immediate fallback for a drag that starts before the deferred mount below has run.
+  // Immediate fallback for a drag that starts before the deferred mount below has run. Also a
+  // one-way latch: once neighbours exist there is nothing to turn off, and turning them off is what
+  // put a screen mount on the arrival frame.
   const [peeking, setPeeking] = React.useState(false);
   const isFocused = useIsFocused();
   // Window width rather than a measured layout, because it is known on the FIRST render. Measuring
@@ -94,32 +97,28 @@ export function TabPager({ index, children }: { index: number; children: React.R
     if (isFocused) home();
   }, [home, isFocused]);
 
-  // Prepare the neighbours once this tab is settled, so the first drag already has something to
-  // reveal — and drop them the moment the tab loses focus, so no tab holds a live copy of another.
+  // Prepare the neighbours once this tab is settled, and then LEAVE THEM MOUNTED. A one-way latch,
+  // not a focus toggle.
+  //
+  // Unmounting them on blur meant every arrival re-mounted the previous tab's screen into the page
+  // beside this one, and mounting a whole screen there is real work happening at the exact moment
+  // the tab becomes visible — which is when the flash was seen. Nothing mounts on arrival now.
+  //
+  // Keeping them was previously unsafe because a drag could tap through to a row and open a dialog
+  // that then outlived its tab. It cannot now: the scroll view cancels touches in its subviews the
+  // moment it scrolls, and an off-screen page receives none in the first place.
   //
   // `runAfterInteractions` rather than a plain effect on purpose: these are `React.lazy` imports, and
   // resolving four route modules inside a first mount is what stopped the app opening once already.
   // Deferring puts that work after the tree exists, where module evaluation expects to happen.
   React.useEffect(() => {
-    if (!isFocused) {
-      setReady(false);
-      return;
-    }
+    if (!isFocused || ready) return;
     const task = InteractionManager.runAfterInteractions(() => setReady(true));
     return () => task.cancel();
-  }, [isFocused]);
-
-  // `peeking` is only the immediate fallback for a drag that beat the deferred mount; clearing it on
-  // blur is what stops `showPeeks` staying true and holding neighbours mounted in a tab the user has
-  // left. Putting the pager back on its own page is the effect above, deferred, for the flicker
-  // reason given there.
-  React.useEffect(() => {
-    if (!isFocused) setPeeking(false);
-  }, [isFocused]);
+  }, [isFocused, ready]);
 
   const onSettled = React.useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      setPeeking(false);
       if (width === 0) return;
       const landed = Math.round(event.nativeEvent.contentOffset.x / width);
       const homePage = hasPrev ? 1 : 0;

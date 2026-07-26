@@ -8,6 +8,17 @@ All notable changes to Forge are documented here. The format follows
 
 ### Added
 
+- **The app now says when it has updated, and what changed.** An OTA is applied silently on the
+  launch after it downloads and a TestFlight build arrives with nothing in-app to mark it, so "did it
+  actually update?" was unanswerable without reading CI. A sheet now appears once per update with the
+  newest changelog section in it, distinguishing a native build from an OTA — a build that also
+  brings an OTA is reported as one event, not two, because that is what the user experienced. A fresh
+  install stays silent: there is no version it came from. The decision lives in `updateNotice()` as a
+  pure function of running-versus-last-seen, so it is testable without a device, and the seen build
+  is recorded when the sheet appears rather than when it is dismissed — a sheet swiped away is still
+  a sheet that was seen. The changelog is read from the daemon, so with no server paired it says so
+  rather than showing an empty panel.
+
 - **Tab paging, rebuilt on a scroll view.** The content follows the finger, the neighbouring tab
   peeks in, and a release settles back or lands on the next tab — but the pager is now a horizontal
   `ScrollView` with `pagingEnabled` rather than a hand-rolled `Gesture.Pan`, which is what makes the
@@ -25,7 +36,11 @@ All notable changes to Forge are documented here. The format follows
   immediately — resetting it while the outgoing tab is still on screen showed as a flash of the page
   just swiped away from — and again in a layout effect on arrival, because a pager still parked on a
   neighbour page draws the *previous* tab for a frame when you return to it. Neither path depends on
-  `useIsFocused` flipping or on `runAfterInteractions` firing inside `NativeTabs`. The iOS tab bar is
+  `useIsFocused` flipping or on `runAfterInteractions` firing inside `NativeTabs`. Peeks are mounted
+  once and then left alone: dropping them on blur meant every arrival re-mounted the previous tab's
+  screen into the page beside this one, which is real work landing on the exact frame the tab becomes
+  visible, and that was the last of the flicker. Keeping them is safe now that the scroll view cancels
+  touches — the accidental tap is what made a lingering peek dangerous before. The iOS tab bar is
   still the real `UITabBarController`.
 
 ### Changed

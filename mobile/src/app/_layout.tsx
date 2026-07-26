@@ -23,6 +23,7 @@ import { AppLock } from "../components/AppLock";
 import { AnonymousTelemetry } from "../components/AnonymousTelemetry";
 import { DesktopWindowChrome, DESKTOP_WINDOW_CHROME_HEIGHT } from "../components/DesktopWindowChrome";
 import { ErrorBoundary } from "../components/ErrorBoundary";
+import { UpdateNotice } from "../components/UpdateNotice";
 import { Screen } from "../components/ds/Screen";
 import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
@@ -304,6 +305,9 @@ export default function RootLayout() {
                   <ToastHost>
                     <AnonymousTelemetry />
                     <FleetWatcher />
+                    {/* Inside the query provider because it reads the daemon's changelog, and above
+                        the navigator so it is not tied to whichever tab happens to be open. */}
+                    <UpdateNotice />
                     {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
                         `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
                     <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
