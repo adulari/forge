@@ -6,6 +6,40 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Swiping horizontally on a tab screen moves to the neighbouring tab**, so the bottom bar is no
+  longer the only way across Fleet / Inbox / History / Settings. Wrapping the tabs navigator scopes
+  it to exactly those four screens — `/floor`, `/plans` and `/session/[id]` live in the root stack,
+  so a swipe there cannot switch tabs. Three conflicts it has to lose: SessionCard's swipe-to-archive
+  pan activates at 10px against this gesture's 28px, and gesture-handler cancels an ancestor once a
+  descendant activates, so a card keeps its own drag; `failOffsetY` at 15px hands vertical scrolling
+  straight back; and horizontally scrollable rows are descendants, so the first rule covers them
+  too. Native-only, because a click-drag on web is a text selection and a trackpad swipe arrives as
+  wheel deltas. `TAB_SWIPE_ORDER` is asserted against the tab bar's own declaration order in both
+  navigators, since a swipe that moves to a tab other than the visible neighbour would be worse than
+  no swipe at all.
+
+### Fixed
+
+- **A PR with every check green and auto-merge armed could sit unmergeable forever.** Two settings
+  combine into a deadlock: the `Protection branch` ruleset sets
+  `strict_required_status_checks_policy: true`, so a branch must be up to date with `main`, while the
+  repository has `allow_update_branch: false`, so GitHub never updates it. The PR parks at
+  `mergeStateStatus: BEHIND` and stays there until a human runs `gh pr update-branch` — and it looks
+  entirely healthy in the meantime, which is why it recurred unnoticed: #891 (left Homebrew pointing
+  at a v2.10.0 that was never published), #894 (package managers stranded on 2.9.1 while 2.10.1 was
+  current), #897 (an ordinary fix PR, so this was never specific to `dist/`), and #899. A new
+  `unstick-automerge.yml` runs on every push to `main` — the moment PRs become BEHIND — updates any
+  stalled auto-merge PR, and re-dispatches the required workflows afterwards, because a
+  GITHUB_TOKEN push creates no `pull_request` runs and the new head SHA would otherwise carry no
+  `CI` context and stall one state later.
+- **Corrects the 2.10.1 note below**, which blamed this on `workflow_dispatch` runs not satisfying
+  branch protection and on `pull_request` runs stuck at `action_required`. That was wrong. The
+  ruleset requires exactly one context, `CI`, and the dispatched run does provide it — verified
+  green on #899's stuck head SHA `af8371dc`, which was `BEHIND` and nothing else. The
+  `action_required` runs were real but irrelevant.
+
 ## [2.10.2] - 2026-07-26
 
 ### Fixed
