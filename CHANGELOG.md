@@ -6,6 +6,23 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Tab swiping no longer peeks; it switches immediately.** The peek rendered a second live instance
+  of the neighbouring screen inside the current tab, because a `UITabBarController` only keeps the
+  selected child's view laid out and iOS keeps its real tab bar here. That leaked in every direction,
+  and a screen recording caught the worst of it: a horizontal drag across a full-width row stays
+  inside that row's hit rect, so RN's `Pressable` retained the press and fired it on release —
+  swiping History → Settings opened History's "Resume this session?" confirm dialog, which then
+  floated **over** the Settings tab, because a peek that stays mounted keeps its state alive in a tab
+  it does not belong to. Duplicate fetches and loading states from screens never navigated to, and a
+  one-frame light flash at the handover, came from the same place. Each was fixable alone and the
+  next appeared; they share one cause, which is a screen rendered outside the tab that owns it. A
+  faithful interactive transition needs the platform to own it — a horizontal `ScrollView` with
+  `pagingEnabled`, whose UIScrollView cancels touches in its subviews the moment it scrolls, or an
+  interactive `UITabBarController` transition in Swift. The swipe, its thresholds and the absent
+  arrival haptic all stay.
+
 ### Fixed
 
 - **A light grey flashed through the tab pager.** Frame analysis of a screen recording found it four
