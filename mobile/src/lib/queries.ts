@@ -87,6 +87,8 @@ import {
   uploadFile,
 } from "./api";
 import { useAuth } from "./auth";
+import { useIsPeeking } from "./peek";
+import { pastSessionsRefetchPolicy, sessionsRefetchPolicy } from "./peekQueries";
 import type { Snapshot } from "./ws";
 import { syncWidgetSessions } from "./widgetData";
 import {
@@ -100,7 +102,6 @@ import { formatCwd } from "../theme/typography";
 
 // FleetWatcher receives immediate daemon invalidations over /ws/fleet. This slow poll is only a
 // recovery net for proxies/platforms that cannot keep a WebSocket alive.
-const SESSIONS_RECOVERY_POLL_MS = 60_000;
 const SERVER_FLEET_POLL_MS = 5000;
 const SERVER_FLEET_BACKOFF_MS = 15000;
 const PAST_PAGE_SIZE = 50;
@@ -161,18 +162,18 @@ export function useBrowseProjects(path?: string, enabled = true) {
 export function useSessions() {
   const { baseUrl } = useAuth();
   const isFocused = useIsFocused();
+  const peeking = useIsPeeking();
   const query = useQuery<SessionRow[]>({
     queryKey: keys(baseUrl).sessions,
     queryFn: () => getSessions(baseUrl as string),
     enabled: baseUrl != null,
-    refetchInterval: isFocused ? SESSIONS_RECOVERY_POLL_MS : false,
     refetchIntervalInBackground: false,
-    refetchOnMount: "always",
-    refetchOnWindowFocus: true,
+    ...sessionsRefetchPolicy({ peeking, isFocused }),
   });
   useEffect(() => {
-    if (query.data) syncWidgetSessions(query.data);
-  }, [query.data]);
+    // The widget mirrors what the user is looking at, not what slid past under a thumb.
+    if (query.data && !peeking) syncWidgetSessions(query.data);
+  }, [peeking, query.data]);
   return query;
 }
 
@@ -195,7 +196,9 @@ export function useServerFleets(servers: { id: string; baseUrl: string }[]) {
 /** Past (archived/finished) sessions, infinite by `before` = last row's last_activity. */
 export function usePastSessions() {
   const { baseUrl } = useAuth();
+  const peeking = useIsPeeking();
   return useInfiniteQuery<PastSessionRow[]>({
+    ...pastSessionsRefetchPolicy({ peeking }),
     queryKey: keys(baseUrl).pastSessions,
     queryFn: ({ pageParam }) =>
       getPastSessions(baseUrl as string, {

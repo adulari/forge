@@ -6,6 +6,22 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Tab paging, rebuilt on a scroll view.** The content follows the finger, the neighbouring tab
+  peeks in, and a release settles back or lands on the next tab — but the pager is now a horizontal
+  `ScrollView` with `pagingEnabled` rather than a hand-rolled `Gesture.Pan`, which is what makes the
+  difference. `canCancelContentTouches` means the moment the scroll view decides it is scrolling it
+  **cancels the touches it already delivered to its subviews**, so dragging across a row cannot press
+  it; there is no way to take that press back from RN's `Pressable` after the fact, which is why the
+  gesture version kept opening a session while swiping past it. `directionalLockEnabled` keeps a
+  vertical drag with the list inside the page instead of contesting it, and paging supplies the peek,
+  the rubber-band at the first and last tab, and the settle from the platform's own physics rather
+  than from numbers picked by hand. Peeks mount when a drag begins and unmount when it ends — never
+  sticky, since a peek that outlives its drag keeps its state, which is how one tab's confirm dialog
+  ended up over another — and they render as peeks, so they show cached data and ask the network for
+  nothing. The iOS tab bar is still the real `UITabBarController`.
+
 ### Changed
 
 - **Tab swiping no longer peeks; it switches immediately.** The peek rendered a second live instance
