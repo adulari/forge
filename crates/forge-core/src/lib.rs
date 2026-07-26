@@ -12593,10 +12593,18 @@ mod tests {
 
     #[tokio::test]
     async fn completeness_redrive_silent_when_verify_completeness_off() {
-        // Default (off): no completeness re-drive — the opt-in mode adds nothing to the default path.
+        // Explicit opt-out: no completeness re-drive when the quality policy is disabled.
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
+        let base_mesh = Config::default().mesh;
+        let config = Config {
+            mesh: forge_config::MeshConfig {
+                verify_completeness: false,
+                ..base_mesh
+            },
+            ..Config::default()
+        };
         let mut session = Session::start(
             Arc::clone(&store),
             Arc::new(CompletenessYieldProvider {
@@ -12608,7 +12616,7 @@ mod tests {
             }),
             ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
-            Config::default(),
+            config,
             test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();

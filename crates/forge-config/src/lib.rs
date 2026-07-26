@@ -1527,12 +1527,13 @@ pub struct MeshConfig {
     /// no-op without a cached dataset / API key (falls back to the heuristic).
     #[serde(default = "default_benchmark_ranking")]
     pub benchmark_ranking: bool,
-    /// Opt-in "max-resolve" mode: run one bounded, evidence-grounded completeness pass before a
+    /// "Max-resolve" mode: run one bounded, evidence-grounded completeness pass before a
     /// code-change turn finishes. CLI bridges re-check every stated requirement; direct providers
     /// also inspect the final diff and run a bounded plain-literal search sweep across related
     /// production siblings. Measured to raise bridge SWE-bench resolve (4/10 → 6/10, beating the
-    /// raw CLI), but it costs an extra model pass — so it remains OFF by default until the direct
-    /// policy is validated.
+    /// raw CLI), and direct same-model validation closed a reproducible omitted-sibling failure.
+    /// Default true; disable to skip the extra evidence pass when latency matters more than maximum
+    /// resolve quality.
     #[serde(default = "default_verify_completeness")]
     pub verify_completeness: bool,
     /// Empty-diff completion nudge (harness-robustness wave 2): when a headless code-change run
@@ -1707,7 +1708,7 @@ fn default_benchmark_ranking() -> bool {
 }
 
 fn default_verify_completeness() -> bool {
-    false
+    true
 }
 
 fn default_nudge_empty_diff() -> bool {
@@ -4364,6 +4365,11 @@ mod tests {
         let prior = std::env::current_dir().expect("reading config test process cwd");
         std::env::set_current_dir(target).expect("entering guarded config test cwd");
         TestCwdGuard { prior, _lock: lock }
+    }
+
+    #[test]
+    fn completeness_verification_defaults_to_on() {
+        assert!(Config::default().mesh.verify_completeness);
     }
 
     #[test]
