@@ -17,10 +17,11 @@ All notable changes to Forge are documented here. The format follows
   gesture version kept opening a session while swiping past it. `directionalLockEnabled` keeps a
   vertical drag with the list inside the page instead of contesting it, and paging supplies the peek,
   the rubber-band at the first and last tab, and the settle from the platform's own physics rather
-  than from numbers picked by hand. Peeks mount when a drag begins and unmount when it ends — never
-  sticky, since a peek that outlives its drag keeps its state, which is how one tab's confirm dialog
-  ended up over another — and they render as peeks, so they show cached data and ask the network for
-  nothing. The iOS tab bar is still the real `UITabBarController`.
+  than from numbers picked by hand. Peeks mount once the tab is settled — mounting them at the start
+  of a drag was too late, since a state update plus a lazy import cannot finish inside a quick swipe
+  and the neighbour slid past empty — and are dropped when the tab loses focus, so no tab holds a
+  live copy of another while you are elsewhere. They render as peeks, showing cached data and asking
+  the network for nothing. The iOS tab bar is still the real `UITabBarController`.
 
 ### Changed
 

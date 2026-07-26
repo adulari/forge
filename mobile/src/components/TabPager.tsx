@@ -25,9 +25,10 @@
 // each tab rather than around the navigator, and a peeked neighbour is still a second instance of
 // that screen. Two consequences are handled deliberately:
 //
-//  · Peeks mount when a drag starts and unmount when it ends. Never sticky — a peek that outlived
-//    its drag kept its state alive, and an open confirm dialog from one tab rendered on top of
-//    another.
+//  · Peeks mount once this tab is settled and are dropped when it loses focus. Mounting them at the
+//    START of a drag was too late — a state update plus a lazy import cannot finish inside a quick
+//    swipe, so the neighbour slid past empty. Scoping them to the focused tab is what keeps them
+//    from outliving their usefulness: no tab holds a live copy of another while you are elsewhere.
 //  · They render as peeks (`useIsPeeking`), so they show cached data and ask the network for
 //    nothing. A screen sliding past under a thumb is not an arrival.
 //
@@ -36,6 +37,7 @@
 import { router, useIsFocused } from "expo-router";
 import React from "react";
 import {
+  InteractionManager,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   ScrollView,
@@ -52,6 +54,11 @@ import { TabPeek } from "./TabPeek";
 export function TabPager({ index, children }: { index: number; children: React.ReactNode }) {
   const tokens = useTokens();
   const scroller = React.useRef<ScrollView>(null);
+  // Mounted BEFORE a drag, not during one. Waiting for `onScrollBeginDrag` meant a state update and
+  // a lazy import had to complete inside the swipe itself, and a quick swipe is over first — so the
+  // neighbour slid past empty and there was nothing to peek at.
+  const [ready, setReady] = React.useState(false);
+  // Immediate fallback for a drag that starts before the deferred mount below has run.
   const [peeking, setPeeking] = React.useState(false);
   const isFocused = useIsFocused();
   // Window width rather than a measured layout, because it is known on the FIRST render. Measuring
@@ -70,6 +77,21 @@ export function TabPager({ index, children }: { index: number; children: React.R
   // Android ignores the `contentOffset` prop, and a width change (rotation) moves the pages out from
   // under a fixed offset on both platforms.
   React.useEffect(home, [home]);
+
+  // Prepare the neighbours once this tab is settled, so the first drag already has something to
+  // reveal — and drop them the moment the tab loses focus, so no tab holds a live copy of another.
+  //
+  // `runAfterInteractions` rather than a plain effect on purpose: these are `React.lazy` imports, and
+  // resolving four route modules inside a first mount is what stopped the app opening once already.
+  // Deferring puts that work after the tree exists, where module evaluation expects to happen.
+  React.useEffect(() => {
+    if (!isFocused) {
+      setReady(false);
+      return;
+    }
+    const task = InteractionManager.runAfterInteractions(() => setReady(true));
+    return () => task.cancel();
+  }, [isFocused]);
 
   // NativeTabs keeps this tab mounted after the user leaves it, so a pager left resting on a
   // neighbour page would still be there on return, showing the wrong screen.
@@ -115,6 +137,7 @@ export function TabPager({ index, children }: { index: number; children: React.R
   if (!isNative) return <View style={styles.fill}>{children}</View>;
 
   const page = { width };
+  const showPeeks = ready || peeking;
 
   return (
     <ScrollView
@@ -133,9 +156,9 @@ export function TabPager({ index, children }: { index: number; children: React.R
       style={[styles.fill, { backgroundColor: tokens.bg0 }]}
       contentContainerStyle={styles.content}
     >
-      {hasPrev ? <View style={page}>{peeking ? <TabPeek at={index - 1} /> : null}</View> : null}
+      {hasPrev ? <View style={page}>{showPeeks ? <TabPeek at={index - 1} /> : null}</View> : null}
       <View style={page}>{children}</View>
-      {hasNext ? <View style={page}>{peeking ? <TabPeek at={index + 1} /> : null}</View> : null}
+      {hasNext ? <View style={page}>{showPeeks ? <TabPeek at={index + 1} /> : null}</View> : null}
     </ScrollView>
   );
 }
