@@ -1531,9 +1531,10 @@ pub struct MeshConfig {
     /// turn finishes. CLI bridges re-check every stated requirement. Direct providers run the
     /// additional final-diff and related-production-sibling search only for prompts that explicitly
     /// describe an identifier migration (for example a deprecation, rename, or compatibility
-    /// alias); matched same-model evaluation found that narrower policy avoids regressions on
-    /// unrelated bug fixes. Default true; disable to skip all extra completeness passes when
-    /// latency matters more than maximum resolve quality.
+    /// alias). When a prompt explicitly names a `Class.method` API, direct providers instead run a
+    /// focused caller-invariant scope review before accepting a shared-helper change. Default true;
+    /// disable to skip all extra completeness passes when latency matters more than maximum resolve
+    /// quality.
     #[serde(default = "default_verify_completeness")]
     pub verify_completeness: bool,
     /// Empty-diff completion nudge (harness-robustness wave 2): when a headless code-change run
