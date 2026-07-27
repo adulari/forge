@@ -1,5 +1,28 @@
 # Forge — measured results
 
+## Latest official matched result (2026-07-27)
+
+The current optimized Forge build matched native Codex on official quality and
+beat it on both elapsed time and whole-session token use in a fresh,
+predeclared GPT-5.6 run:
+
+| 18 matched SWE-bench Verified tasks | Forge | Native Codex | Result |
+|---|---:|---:|---|
+| Official Docker resolves | **18 / 18** | **18 / 18** | Quality parity |
+| Evaluator errors | 0 | 0 | Complete |
+| Generation wall time | **3,299.841s** | 5,574.566s | **Forge 40.81% faster** |
+| Whole-session tokens | **9,692,604** | 24,643,373 | **Forge 60.67% lower** |
+| Faster matched pairs | **13 / 18** | 5 / 18 | Forge advantage |
+| Lower-token matched pairs | **17 / 18** | 1 / 18 | `p=0.00014496` |
+
+All three GPT-5.6 model variants independently resolved 6/6 tasks in both
+harnesses. Read the
+**[full protocol, per-model results, artifacts, caveats, and historical
+pre-optimization comparison](codex-oauth-gpt56-2026-07.md)**.
+
+The sections below preserve earlier measurements and accounting corrections as
+the historical record.
+
 Forge's single most important job is the **harness**: be the best coding-agent harness, proven with
 metrics, on BOTH API and bridge/subscription models. This file records what has been **measured and
 reproduced** so far — honestly, including where the measurement turned out to contradict the goal.
