@@ -7416,8 +7416,16 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             || self.last_turn_contract.requires_changed_artifact();
         let primary_changed_paths =
             changed_paths_from_status(working_tree_status(Some(self.workspace.root())).as_deref());
+        // Overflow compaction can replace the transcript with a shorter summary while the
+        // primary model loop is running. In that case the old start offset is no longer a
+        // valid boundary, and the safe result is "no proof that the migration sweep was
+        // complete" so the bounded audit remains eligible.
+        let primary_turn_messages = self
+            .transcript
+            .get(primary_transcript_start..)
+            .unwrap_or_default();
         let primary_identifier_matches = completeness_production_identifier_search_matches(
-            &self.transcript[primary_transcript_start..],
+            primary_turn_messages,
             self.workspace.root(),
             prompt,
         );
@@ -16812,6 +16820,9 @@ mod tests {
         session.config.mesh.auto_memory = false;
         session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
+        // This test isolates the empty-diff recovery loop; completeness has its own
+        // bridge re-drive tests and would add one unrelated provider invocation.
+        session.config.mesh.verify_completeness = false;
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -16852,6 +16863,8 @@ mod tests {
         session.config.mesh.auto_memory = false;
         session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
+        // Isolate the empty-diff guard from the independent completeness review.
+        session.config.mesh.verify_completeness = false;
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -17206,6 +17219,8 @@ mod tests {
         session.config.mesh.auto_memory = false;
         session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
+        // Isolate the pristine-test guard from the independent completeness review.
+        session.config.mesh.verify_completeness = false;
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -18038,6 +18053,8 @@ mod tests {
         });
         let (store, mut session) = bridge_session(provider.clone());
         seed_tasks(&store, &session.id, &[("ship the release", false)]);
+        // This test counts task-continuation re-drives, not completeness review calls.
+        session.config.mesh.verify_completeness = false;
         let _ = session.run_turn("release it").await.unwrap();
         assert_eq!(
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -18060,6 +18077,8 @@ mod tests {
         let events = capture.events.clone();
         session.presenter = Box::new(capture);
         seed_tasks(&store, &session.id, &[("ship the release", true)]);
+        // Isolate completion verification from the separate completeness re-drive.
+        session.config.mesh.verify_completeness = false;
         let answer = session.run_turn("release it").await.unwrap();
         assert_eq!(answer, "working");
         assert_eq!(
@@ -18176,6 +18195,8 @@ mod tests {
         let events = capture.events.clone();
         session.presenter = Box::new(capture);
         seed_tasks(&store, &session.id, &[("ship the release", true)]);
+        // Isolate completion verification from the separate completeness re-drive.
+        session.config.mesh.verify_completeness = false;
         let _ = session.run_turn("release it").await.unwrap();
         // 1 work/claim turn + MAX_VERIFY_ATTEMPTS (2) verification turns = 3 invocations.
         assert_eq!(
