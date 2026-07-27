@@ -362,12 +362,15 @@ mod tests {
         let _watcher = spawn_watcher(Arc::clone(&lattice), &root, Duration::from_millis(150))
             .expect("watcher starts");
 
-        // Simulate an external editor writing a new symbol into the file.
-        std::fs::write(&file, "pub fn beta() {}\n").unwrap();
-
-        // Poll: the watcher should pick up the change and reindex within a few seconds.
+        // The edit is repeated every attempt rather than made once before the loop. `spawn_watcher`
+        // returning does not mean the OS watch is registered — registration happens on the watcher's
+        // own thread — so a single write can land in that gap, produce no event, and then no amount
+        // of waiting can recover it. Alone the gap is too small to notice; run beside the other
+        // watch tests, or on a loaded machine, and it is wide enough to fail. Re-writing until the
+        // watch exists tests what the test means to test, without weakening the assertion.
         let mut reindexed = false;
         for _ in 0..60 {
+            std::fs::write(&file, "pub fn beta() {}\n").unwrap();
             std::thread::sleep(Duration::from_millis(100));
             if lattice.query("beta", 5).unwrap().len() == 1 {
                 reindexed = true;
@@ -403,9 +406,12 @@ mod tests {
         )
         .expect("poll watcher starts");
 
-        std::fs::write(&file, "pub fn gamma() {}\n").unwrap();
+        // Repeated per attempt for the same reason as the inotify tests: the polling backend's first
+        // scan establishes the baseline it compares against, so an edit made before that scan is
+        // simply part of the baseline and is never seen as a change.
         let mut reindexed = false;
         for _ in 0..80 {
+            std::fs::write(&file, "pub fn gamma() {}\n").unwrap();
             std::thread::sleep(Duration::from_millis(100));
             if lattice.query("gamma", 5).unwrap().len() == 1 {
                 reindexed = true;
@@ -439,9 +445,11 @@ mod tests {
             spawn_watcher(Arc::clone(&lattice), &root, Duration::from_millis(100)).expect("starts");
         tx.send(watcher).unwrap(); // hand off to the channel; never received, kept alive by `rx`
 
-        std::fs::write(&file, "pub fn omega() {}\n").unwrap();
+        // Repeated per attempt for the registration race described in
+        // `external_edit_is_reindexed_automatically`.
         let mut reindexed = false;
         for _ in 0..60 {
+            std::fs::write(&file, "pub fn omega() {}\n").unwrap();
             std::thread::sleep(Duration::from_millis(100));
             if lattice.query("omega", 5).unwrap().len() == 1 {
                 reindexed = true;

@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-07-27
+
 ### Added
 
 - **CI now reconciles what devices are running against what main contains.** Twice — #890 and #910 —
@@ -28,29 +30,38 @@ All notable changes to Forge are documented here. The format follows
   a sheet that was seen. The changelog is read from the daemon, so with no server paired it says so
   rather than showing an empty panel.
 
-- **Tab paging, rebuilt on a scroll view.** The content follows the finger, the neighbouring tab
-  peeks in, and a release settles back or lands on the next tab — but the pager is now a horizontal
-  `ScrollView` with `pagingEnabled` rather than a hand-rolled `Gesture.Pan`, which is what makes the
-  difference. `canCancelContentTouches` means the moment the scroll view decides it is scrolling it
-  **cancels the touches it already delivered to its subviews**, so dragging across a row cannot press
-  it; there is no way to take that press back from RN's `Pressable` after the fact, which is why the
-  gesture version kept opening a session while swiping past it. `directionalLockEnabled` keeps a
-  vertical drag with the list inside the page instead of contesting it, and paging supplies the peek,
-  the rubber-band at the first and last tab, and the settle from the platform's own physics rather
-  than from numbers picked by hand. Peeks mount once the tab is settled — mounting them at the start
-  of a drag was too late, since a state update plus a lazy import cannot finish inside a quick swipe
-  and the neighbour slid past empty — and are dropped when the tab loses focus, so no tab holds a
-  live copy of another while you are elsewhere. They render as peeks, showing cached data and asking
-  the network for nothing. After a swipe commits the pager is unparked on a short delay rather than
-  immediately — resetting it while the outgoing tab is still on screen showed as a flash of the page
-  just swiped away from — and again in a layout effect on arrival, because a pager still parked on a
-  neighbour page draws the *previous* tab for a frame when you return to it. Neither path depends on
-  `useIsFocused` flipping or on `runAfterInteractions` firing inside `NativeTabs`. Peeks are mounted
-  once and then left alone: dropping them on blur meant every arrival re-mounted the previous tab's
-  screen into the page beside this one, which is real work landing on the exact frame the tab becomes
-  visible, and that was the last of the flicker. Keeping them is safe now that the scroll view cancels
-  touches — the accidental tap is what made a lingering peek dangerous before. The iOS tab bar is
-  still the real `UITabBarController`.
+- **Tabs page under the finger.** Dragging horizontally on Fleet / Inbox / History / Settings moves
+  the content with the drag and peeks the neighbouring tab in behind it; releasing either springs back
+  or completes, and dragging past the first or last tab resists instead of stopping dead. The bottom
+  bar is no longer the only way across, and it is still the real one — `RNSTabBarController` is a
+  genuine `UITabBarController`, so Liquid Glass, scroll-to-minimize and native badges are untouched
+  and nothing about the bar is reimplemented in JS.
+
+  The pager is a horizontal `ScrollView` with `pagingEnabled`, and that choice is the feature rather
+  than an implementation detail. `canCancelContentTouches` means the moment the scroll view decides it
+  is scrolling it **cancels the touches it has already delivered to its subviews**, so dragging across
+  a row cannot press it. A first attempt drove the translation from a hand-rolled `Gesture.Pan` and
+  could not achieve that: a horizontal drag across a full-width row stays inside that row's hit rect,
+  so RN's `Pressable` kept the press and fired it on release — swiping History → Settings opened
+  History's "Resume this session?" dialog, which then floated over Settings. There is no way to take
+  that press back after the fact. `directionalLockEnabled` settles the vertical axis with the same
+  owner instead of arm-wrestling the list, and paging supplies the peek, the rubber-band at the ends
+  and the settle from the platform's own physics rather than from numbers picked by hand.
+
+  Because a `UITabBarController` only keeps the SELECTED child's view laid out, the pager is rendered
+  *by each tab route* rather than around the navigator, so a peeked neighbour is a second instance of
+  that screen. Two consequences follow and are deliberate: neighbours mount once the tab is settled
+  and then stay mounted — mounting them at the start of a drag was too late, since a state update plus
+  a lazy import cannot finish inside a quick swipe and the neighbour slid past empty, while dropping
+  them on blur put a whole screen mount on the exact frame a tab became visible — and they render as
+  peeks (`useIsPeeking`), showing cached data and asking the network for nothing, because a screen
+  sliding past under a thumb is not an arrival.
+
+  Guarded by assertions that were each verified to fail when deliberately broken: `TAB_SWIPE_ORDER`
+  matches the tab bar's declaration order in both navigators, each route passes the index its position
+  implies — a wrapper wired to the wrong number would page to the wrong tab while looking perfectly
+  correct in the bar — and `pagerGeometry` always pins a content width the resting page fits inside,
+  which is what keeps the scroll view from clamping the offset onto the wrong tab.
 
 ### Changed
 
@@ -77,6 +88,14 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- Three `forge-index` watcher tests raced the watch they were testing. Each made its external edit
+  once, immediately after `spawn_watcher` returned — but registration happens on the watcher's own
+  thread, so the write could land before any watch existed, produce no event, and then no amount of
+  polling could recover it (the polling backend has the same shape: an edit made before its first
+  scan is simply part of the baseline). Alone the gap is too small to notice; run beside each other
+  under load, as `cargo test --workspace` does, and it was wide enough to fail the release gate. The
+  edit now repeats until the watch picks it up, which tests what the tests meant to test without
+  weakening either assertion.
 - **One stale frame from a phone took the whole Anywhere connector offline.** The host's list of open
   session streams is per relay connection, and that connection drops and reconnects on its own —
   three times in the last two days' logs, from resets and heartbeats. The phone's socket survives
@@ -149,39 +168,6 @@ All notable changes to Forge are documented here. The format follows
   a renderer — the original bug was invisible to every unit test and only showed up as a flicker on a
   phone. The Suspense fallback is also opaque now rather than transparent, since a see-through gap
   during a drag reads as a flicker of its own.
-
-### Added
-
-- **Tabs page under the finger.** Dragging horizontally on Fleet / Inbox / History / Settings moves
-  the content with the drag and peeks the neighbouring tab in behind it; releasing either springs
-  back or completes, and dragging past the first or last tab resists instead of stopping dead. The
-  bottom bar is no longer the only way across.
-
-  The iOS bar stays the real one. `RNSTabBarController` is a genuine `UITabBarController` (verified
-  in react-native-screens' own sources) and it only keeps the SELECTED child's view laid out —
-  `NativeTabs` exposes no swipe surface at all, and react-native-screens' `gesture-handler/` support
-  is for stack transitions. So the pager is rendered *by each tab route* rather than around the
-  navigator: the selected tab draws itself in the middle of a three-page row with its neighbours to
-  either side, and the drag translates that row inside a clipping container. Liquid Glass,
-  scroll-to-minimize and native badges are all untouched, and nothing is reimplemented in JS.
-
-  Two artifacts follow from that and are not defects in the bar's favour: the neighbour drawn during
-  a drag is a second instance of that screen so it starts at the top of its list, and the bar's
-  selected item updates on commit rather than tracking the finger, because a native `UITabBar`
-  exposes no partial-selection state. Neighbours mount lazily and only while a drag is in flight.
-
-  Three conflicts the gesture has to lose: SessionCard's swipe-to-archive pan activates at 10px
-  against the pager's 28px, and gesture-handler cancels an ancestor once a descendant activates, so a
-  card keeps its own drag; `failOffsetY` at 15px hands vertical scrolling straight back; and
-  horizontally scrollable rows are descendants, so the first rule covers them. Native-only, since a
-  click-drag on web is a text selection and a trackpad swipe arrives as wheel deltas.
-
-  Guarded by two assertions, both verified to fail when deliberately broken: `TAB_SWIPE_ORDER`
-  matches the tab bar's declaration order in both navigators, and each route passes the index its
-  position implies — a wrapper wired to the wrong number would page to the wrong tab while looking
-  perfectly correct in the bar.
-
-### Fixed
 
 - **A PR with every check green and auto-merge armed could sit unmergeable forever.** Two settings
   combine into a deadlock: the `Protection branch` ruleset sets
@@ -3164,7 +3150,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.10.2...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.11.0...HEAD
+[2.11.0]: https://github.com/Adulari/forge/compare/v2.10.2...v2.11.0
 [2.10.2]: https://github.com/Adulari/forge/compare/v2.10.1...v2.10.2
 [2.10.1]: https://github.com/Adulari/forge/compare/v2.9.1...v2.10.1
 [2.10.0]: https://github.com/Adulari/forge/compare/v2.9.1...v2.10.0
