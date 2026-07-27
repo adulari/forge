@@ -199,7 +199,10 @@ The task explicitly names the production API(s) below. Treat those API boundarie
 implementation scope. Before changing a shared lower-level helper instead, OPEN its production \
 callers and establish that behavior remains unchanged outside the requested API and when the new \
 option or condition is absent/default. Prefer the smallest conditional change at the named API \
-unless concrete caller evidence requires the shared helper.";
+unless concrete caller evidence requires the shared helper. Preserve the named API's existing \
+control-flow guards, indentation, post-processing, squeeze/shape behavior, and return paths outside \
+that smallest conditional. After editing, inspect the complete function and diff for any moved or \
+deleted guard.";
 
 /// First-pass scope guard for direct-provider identifier migrations. This is injected into the
 /// initial context pack, so it improves discovery without paying for a second provider round.
@@ -973,13 +976,20 @@ fn failover_policy(
 const EMPTY_DIFF_NUDGE: &str =
     "You have not modified any files. Implement the fix now — do not just describe it.";
 
-/// The env-fight nudge (quality guards wave 4, fix 4): injected once per turn after
-/// [`ENV_FIGHT_THRESHOLD`] consecutive failed environment-provisioning shell commands.
-const ENV_FIGHT_NUDGE: &str = "Environment setup keeps failing. Stop provisioning; verify your \
-change at the logic level (a targeted script or careful reasoning against the code) and finish.";
+/// The env-fight nudge (quality guards wave 4, fix 4): injected once per turn after the
+/// environment-setup spend cap is reached following a provisioning failure.
+const ENV_FIGHT_NUDGE: &str = "Environment setup/build verification hit its spend cap after a \
+provisioning failure. Stop installing dependencies, creating environments, or building native \
+extensions. Keep the code change, use compile/static/diff evidence that does not require more \
+provisioning, and finish; unavailable local dependencies are not a product-code failure.";
 
-/// Consecutive env-setup failures before the nudge fires.
-const ENV_FIGHT_THRESHOLD: usize = 4;
+/// Environment-setup attempts allowed in a turn before the cap fires, once any attempt failed.
+/// One alternate recovery attempt remains available; a third provisioning/native-build command is
+/// then blocked deterministically by [`Session::invoke_tool`].
+const ENV_FIGHT_ATTEMPT_THRESHOLD: usize = 2;
+
+const ENV_FIGHT_BLOCKED_RESULT: &str = "shell: blocked by environment setup/build spend cap; use \
+compile/static/diff evidence without installing dependencies or building native extensions";
 
 /// Repeated build/provision tool invocations within ONE bridge turn before the ceiling folds it
 /// into an early terminate (wave 5, fix 2). A CLI bridge runs its tools in a subprocess, so the
@@ -1057,28 +1067,29 @@ fn is_env_setup_command(cmd: &str) -> bool {
     c.split(' ').any(|tok| TOOLS.contains(&tok))
 }
 
-/// Consecutive-failure tracker + once-per-turn latch for the env-fight nudge. Pure state machine
-/// (unit-testable): only env-setup commands feed it — a failure extends the streak, a success
-/// resets it, and `observe` returns `true` exactly once, when the threshold-th consecutive
-/// failure lands.
+/// Per-turn setup-attempt tracker + latch for the environment spend cap. Only env-setup commands
+/// feed it. Successful attempts alone never arm the cap; once any attempt fails, the threshold-th
+/// setup attempt emits the nudge and subsequent setup/build commands are blocked.
 #[derive(Default)]
 struct EnvFightTracker {
-    streak: usize,
+    attempts: usize,
+    saw_failure: bool,
     nudged: bool,
 }
 
 impl EnvFightTracker {
     fn observe(&mut self, failed: bool) -> bool {
-        if !failed {
-            self.streak = 0;
-            return false;
-        }
-        self.streak += 1;
-        if self.streak >= ENV_FIGHT_THRESHOLD && !self.nudged {
+        self.attempts += 1;
+        self.saw_failure |= failed;
+        if self.saw_failure && self.attempts >= ENV_FIGHT_ATTEMPT_THRESHOLD && !self.nudged {
             self.nudged = true;
             return true;
         }
         false
+    }
+
+    fn should_block(&self) -> bool {
+        self.nudged
     }
 }
 
@@ -5299,7 +5310,7 @@ prompt text, nothing else.";
         let tools_ran = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         // Counts build/provision tool STARTS a bridge surfaces via the sink across the whole turn
         // (wave 5, fix 2). Per-command success/failure isn't available from the sink, so this
-        // approximates the direct-path env-fight streak with an invocation count; past
+        // approximates the direct-path env-fight spend cap with an invocation count; past
         // BRIDGE_BUILD_FIGHT_THRESHOLD it folds into the token-ceiling early-terminate.
         let bridge_build_fight = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         // Counts INSPECTION tools (anything except `update_tasks`/`present_plan`) — the verification
@@ -6616,20 +6627,19 @@ prompt text, nothing else.";
                         }
                     }
                     // Env-fight spend cap (quality guards wave 4, fix 4): shell commands that look
-                    // like environment provisioning and keep failing are venv archaeology — the
-                    // SWE-bench turns that burned minutes on host-python/repo-era mismatches. After
-                    // ENV_FIGHT_THRESHOLD consecutive failures, tell the model once (per turn) to
-                    // stop provisioning and verify at the logic level. Delivered via pending_hints
-                    // so it lands right after this failing result.
+                    // like environment provisioning after a failure are venv archaeology — the
+                    // SWE-bench turns that burned minutes on host-python/repo-era mismatches. Allow
+                    // one alternate recovery attempt, then tell the model once per turn to stop.
+                    // Delivered via pending_hints so it lands right after the threshold result.
                     if self.config.mesh.env_fight_nudge && call.name == "shell" {
                         if let Some(cmd) = call.args.get("command").and_then(|v| v.as_str()) {
                             if is_env_setup_command(cmd)
                                 && self.env_fight.observe(shell_command_failed(&result))
                             {
                                 self.presenter.emit(PresenterEvent::Warning(format!(
-                                    "environment setup failed {ENV_FIGHT_THRESHOLD}× in a row — \
-                                     nudging the model to stop provisioning and verify at the \
-                                     logic level"
+                                    "environment setup/build spend cap reached after a failure \
+                                     ({ENV_FIGHT_ATTEMPT_THRESHOLD} attempts) — blocking further \
+                                     provisioning this turn"
                                 )));
                                 self.pending_hints.push(ENV_FIGHT_NUDGE.to_string());
                             }
@@ -8391,6 +8401,34 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             });
             self.store
                 .record_tool_call(msg_id, &call.name, &args_json, &result, "denied", "error")?;
+            if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
+                self.presenter
+                    .emit(PresenterEvent::Warning(warning.clone()));
+                self.pending_hints.push(warning);
+            }
+            return Ok(result);
+        }
+
+        if self.config.mesh.env_fight_nudge
+            && self.env_fight.should_block()
+            && call.name == "shell"
+            && effective_args
+                .get("command")
+                .and_then(|command| command.as_str())
+                .is_some_and(is_env_setup_command)
+        {
+            let result = ENV_FIGHT_BLOCKED_RESULT.to_string();
+            self.presenter.emit(PresenterEvent::ToolStart {
+                name: call.name.clone(),
+                args: args_json.clone(),
+            });
+            self.presenter.emit(PresenterEvent::ToolResult {
+                name: call.name.clone(),
+                ok: false,
+                summary: "environment setup/build spend cap".to_string(),
+            });
+            self.store
+                .record_tool_call(msg_id, &call.name, &args_json, &result, "blocked", "error")?;
             if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
                 self.presenter
                     .emit(PresenterEvent::Warning(warning.clone()));
@@ -17515,34 +17553,30 @@ mod tests {
     }
 
     #[test]
-    fn env_fight_tracker_fires_once_at_the_threshold() {
+    fn env_fight_tracker_fires_once_after_failure_and_recovery_attempt() {
         let mut t = EnvFightTracker::default();
         assert!(!t.observe(true));
-        assert!(!t.observe(true));
-        assert!(!t.observe(true));
         assert!(
-            t.observe(true),
-            "the 4th consecutive failure fires the nudge"
+            t.observe(false),
+            "one failed setup plus one recovery attempt fires the spend cap"
         );
+        assert!(t.should_block());
         assert!(!t.observe(true), "latched — never re-fires this turn");
         assert!(!t.observe(true));
     }
 
     #[test]
-    fn env_fight_tracker_resets_on_success() {
+    fn env_fight_tracker_does_not_arm_on_successes_only() {
         let mut t = EnvFightTracker::default();
-        assert!(!t.observe(true));
-        assert!(!t.observe(true));
-        assert!(!t.observe(true));
-        assert!(!t.observe(false), "a success resets the streak");
-        assert!(!t.observe(true));
-        assert!(!t.observe(true));
-        assert!(!t.observe(true));
-        assert!(t.observe(true), "a fresh run of 4 failures fires");
+        for _ in 0..4 {
+            assert!(!t.observe(false));
+        }
+        assert!(!t.should_block(), "successful setup is not an env fight");
     }
 
     /// Scripted env-fighter: four DISTINCT failing env-setup shell commands (distinct args so the
-    /// identical-call doom-loop guard stays out of the way), then a final text sign-off.
+    /// identical-call doom-loop guard stays out of the way), then a final text sign-off. The first
+    /// two execute; the cap blocks later setup commands.
     struct EnvFighterProvider {
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -17588,7 +17622,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn four_env_setup_failures_inject_the_nudge_once() {
+    async fn env_setup_spend_cap_nudges_once_and_blocks_later_commands() {
         let provider = Arc::new(EnvFighterProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
@@ -17608,7 +17642,12 @@ mod tests {
         assert_eq!(
             msgs.iter().filter(|m| m.content == ENV_FIGHT_NUDGE).count(),
             1,
-            "exactly one env-fight nudge after 4 consecutive provisioning failures"
+            "exactly one env-fight nudge after the recovery attempt"
+        );
+        assert!(
+            msgs.iter()
+                .any(|message| message.content == ENV_FIGHT_BLOCKED_RESULT),
+            "later provisioning commands must be blocked without execution"
         );
     }
 
@@ -17631,8 +17670,9 @@ mod tests {
         session.run_turn("fix the bug").await.unwrap();
         let msgs = store.load_messages(session.id()).unwrap();
         assert!(
-            msgs.iter().all(|m| m.content != ENV_FIGHT_NUDGE),
-            "gate off → no nudge"
+            msgs.iter()
+                .all(|m| { m.content != ENV_FIGHT_NUDGE && m.content != ENV_FIGHT_BLOCKED_RESULT }),
+            "gate off → no nudge or block"
         );
     }
 
@@ -19769,6 +19809,14 @@ mod tests {
         assert_eq!(
             scope_messages, 1,
             "named-API scope guidance must be injected exactly once before the solve"
+        );
+        assert!(
+            session.transcript.iter().any(|message| {
+                message.content.contains("control-flow guards")
+                    && message.content.contains("squeeze/shape behavior")
+                    && message.content.contains("moved or deleted guard")
+            }),
+            "named-API guidance must preserve existing control flow and return semantics"
         );
         assert!(
             !session

@@ -1562,9 +1562,9 @@ pub struct MeshConfig {
     /// is set, so interactive use never sees it.
     #[serde(default = "default_deadline_reconcile")]
     pub deadline_reconcile: bool,
-    /// Env-fight spend cap (quality guards wave 4): when environment-provisioning shell commands
-    /// (pip install / venv / virtualenv / ensurepip / apt / uv …) fail 4 times in a row within a
-    /// turn, inject ONE nudge — stop provisioning, verify the change at the logic level instead.
+    /// Env-fight spend cap (quality guards wave 4): after an environment-provisioning command
+    /// (pip install / venv / virtualenv / ensurepip / apt / uv …) fails, allow one alternate
+    /// recovery attempt, inject ONE nudge, then block further provisioning/native builds that turn.
     /// SWE-bench turns burned minutes fighting host-python/repo-era mismatches (venv archaeology)
     /// that provisioning was never going to win. Default true; latched once per turn.
     #[serde(default = "default_env_fight_nudge")]
