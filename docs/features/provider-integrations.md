@@ -252,6 +252,16 @@ official CLI as a subprocess and consumes its output. The credential stays insid
 sanctioned tool. Anthropic's 2026-06-15 note that programmatic `claude -p` usage draws from
 a metered "Agent SDK credit" is evidence they *expect* headless subscription use.
 
+> **Current implementation (2026-07):** the v1 scope/design below is retained as history, but its
+> tool-disabled and no-session-reuse limitations have been superseded. Harness mode now serves
+> Forge's gated tools over MCP; Claude uses a persistent stream-json process by default, discovers
+> models/capabilities through the authoritative non-billing `initialize` control request, appends
+> Forge policy through `--append-system-prompt`, installs a bounded built-in→Forge tool alias map,
+> and streams `--include-partial-messages` with consolidated-block deduplication. A stalled turn is
+> replayed only if no tool ran. See
+> [Persistent bridge transport](persistent-bridge-transport.md) for the shipped protocol and safety
+> contract.
+
 ### B-agy. Antigravity (`agy`) — free Gemini, third bridge
 
 `CliKind::Antigravity` adds a third subscription bridge for Google's **Antigravity** CLI

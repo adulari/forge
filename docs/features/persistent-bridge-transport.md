@@ -29,29 +29,47 @@ claude 2.1.195). Forge spawns:
 
 ```
 claude -p --input-format stream-json --output-format stream-json --verbose \
-  --tools "" --mcp-config <forge mcp-serve> --strict-mcp-config --allowedTools mcp__forge
+  --include-partial-messages --tools "" --mcp-config <forge mcp-serve> \
+  --strict-mcp-config --allowedTools mcp__forge \
+  --append-system-prompt "<Forge harness policy>"
 ```
 
 and keeps stdin open. Each turn:
 
-1. Write one user line: `{"type":"user","message":{"role":"user","content":"<delta>"}}\n`.
-2. Read the NDJSON stream until the `{"type":"result"}` event (the turn boundary) — the process
+1. Before the first harness turn, send the streaming `initialize` control request. It installs a
+   bounded alias map (`Bash` → `mcp__forge__shell`, `Read` → `mcp__forge__read_file`, and the
+   corresponding write/edit/search/web/notebook aliases), then poll `mcp_status` until `forge` is
+   connected. This is the same control protocol used by Anthropic's Agent SDK.
+2. Write one user line: `{"type":"user","message":{"role":"user","content":"<delta>"}}\n`.
+   Harness policy is appended through Claude's system-prompt channel, not duplicated in this user
+   payload.
+3. Stream `stream_event.content_block_delta` text/thinking immediately. The later consolidated
+   `assistant` block is deduplicated by block index; only a previously unseen suffix is emitted.
+4. Read until the `{"type":"result"}` event (the turn boundary) — the process
    stays alive for the next turn.
 
 **Defaults & safety.** On by default for claude; `FORGE_PERSISTENT_BRIDGE=0` (or
 `CliProvider::with_persistent(false)`) opts out. The path falls back to the one-shot transport
 whenever the live session can't be established *before any turn output ran* (spawn failure,
-first-turn stdin-write failure, immediate exit with no tool executed), so a tool can never
-double-execute. Once a turn has started, errors propagate as retryable instead of re-running.
+first-turn stdin-write failure, immediate exit with no tool executed, or a stall before any tool
+ran). A stall carries `tool_ran` state: after a tool starts, Forge tears down the process and
+returns a retryable failure but **never automatically replays the turn**, so an irreversible side
+effect cannot execute twice.
+
+**Authoritative discovery.** Forge enumerates Claude models with a non-billing `initialize`
+control request rather than scraping `claude --help`. The sanitized record includes alias,
+resolved model and effort/adaptive/auto/fast-mode capabilities; account, email, PID and local
+configuration are discarded. `--help` parsing remains a fallback for older Claude versions.
 
 **Respawn triggers.** Model change, transcript shrink (compaction), and a `FORGE_CHECKPOINT_SEQ`
 change (a new user turn). Re-drives *within* a turn keep the same checkpoint seq and reuse the
 process; a new user turn respawns so bridge-edit `/undo` snapshots stay turn-accurate.
 
-**Proven.** `persistent_transport_reuses_one_process_across_turns` (deterministic: a 2nd turn on the
-same process answers "reply 2"; a fresh spawn says "reply 1"), `persistent_falls_back_to_one_shot_when_binary_is_missing`,
-framing + classifier unit tests, and a live `--ignored` e2e against real claude (codeword recalled
-across two turns on one process). Measured fixed overhead removed: **≈0.88s spawn→init per turn**
+**Proven.** Protocol fixtures cover initialization sanitization, the exact bounded alias map,
+partial-message assembly/deduplication and system-prompt argv. Deterministic fake-CLI tests cover
+MCP-before-prompt ordering, one-process reuse, safe pre-tool fallback, and the critical negative
+case: a post-tool stall records exactly one process invocation. A live `--ignored` e2e against real
+claude verifies context across two turns. Measured fixed overhead removed: **≈0.88s spawn→init per turn**
 (4 samples). Honest scope: model inference dominates total turn time, so this is a real
 per-re-drive latency saving that compounds with re-drive count, **not a headline multiplier**;
 token cost is unchanged (both transports already send deltas — one-shot via `--resume`, persistent
