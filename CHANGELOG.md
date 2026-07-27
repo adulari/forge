@@ -6,6 +6,187 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-07-27
+
+### Added
+
+- **CI now reconciles what devices are running against what main contains.** Twice — #890 and #910 —
+  a merge to main created no workflow run at all, so no OTA was published and nothing said so; both
+  were found days later by a human noticing the fix had not arrived. A missing run cannot be caught
+  by anything keyed off that run, so a scheduled job now works the other end: it finds the newest
+  commit touching the OTA-safe paths, checks whether any successful `eas-update` run covers it (by
+  ancestry, since a push's head can be a later commit than the change itself), and dispatches the
+  publish for exactly the uncovered range if not. It reconciles against runs rather than the Expo
+  update list because a missing run is precisely the defect, and it passes the range as `base_ref`
+  so the existing OTA-safety guard still decides what may ship.
+- **The app now says when it has updated, and what changed.** An OTA is applied silently on the
+  launch after it downloads and a TestFlight build arrives with nothing in-app to mark it, so "did it
+  actually update?" was unanswerable without reading CI. A sheet now appears once per update with the
+  newest changelog section in it, distinguishing a native build from an OTA — a build that also
+  brings an OTA is reported as one event, not two, because that is what the user experienced. A fresh
+  install stays silent: there is no version it came from. The decision lives in `updateNotice()` as a
+  pure function of running-versus-last-seen, so it is testable without a device, and the seen build
+  is recorded when the sheet appears rather than when it is dismissed — a sheet swiped away is still
+  a sheet that was seen. The changelog is read from the daemon, so with no server paired it says so
+  rather than showing an empty panel.
+
+- **Tabs page under the finger.** Dragging horizontally on Fleet / Inbox / History / Settings moves
+  the content with the drag and peeks the neighbouring tab in behind it; releasing either springs back
+  or completes, and dragging past the first or last tab resists instead of stopping dead. The bottom
+  bar is no longer the only way across, and it is still the real one — `RNSTabBarController` is a
+  genuine `UITabBarController`, so Liquid Glass, scroll-to-minimize and native badges are untouched
+  and nothing about the bar is reimplemented in JS.
+
+  The pager is a horizontal `ScrollView` with `pagingEnabled`, and that choice is the feature rather
+  than an implementation detail. `canCancelContentTouches` means the moment the scroll view decides it
+  is scrolling it **cancels the touches it has already delivered to its subviews**, so dragging across
+  a row cannot press it. A first attempt drove the translation from a hand-rolled `Gesture.Pan` and
+  could not achieve that: a horizontal drag across a full-width row stays inside that row's hit rect,
+  so RN's `Pressable` kept the press and fired it on release — swiping History → Settings opened
+  History's "Resume this session?" dialog, which then floated over Settings. There is no way to take
+  that press back after the fact. `directionalLockEnabled` settles the vertical axis with the same
+  owner instead of arm-wrestling the list, and paging supplies the peek, the rubber-band at the ends
+  and the settle from the platform's own physics rather than from numbers picked by hand.
+
+  Because a `UITabBarController` only keeps the SELECTED child's view laid out, the pager is rendered
+  *by each tab route* rather than around the navigator, so a peeked neighbour is a second instance of
+  that screen. Two consequences follow and are deliberate: neighbours mount once the tab is settled
+  and then stay mounted — mounting them at the start of a drag was too late, since a state update plus
+  a lazy import cannot finish inside a quick swipe and the neighbour slid past empty, while dropping
+  them on blur put a whole screen mount on the exact frame a tab became visible — and they render as
+  peeks (`useIsPeeking`), showing cached data and asking the network for nothing, because a screen
+  sliding past under a thumb is not an arrival.
+
+  Guarded by assertions that were each verified to fail when deliberately broken: `TAB_SWIPE_ORDER`
+  matches the tab bar's declaration order in both navigators, each route passes the index its position
+  implies — a wrapper wired to the wrong number would page to the wrong tab while looking perfectly
+  correct in the bar — and `pagerGeometry` always pins a content width the resting page fits inside,
+  which is what keeps the scroll view from clamping the offset onto the wrong tab.
+
+### Changed
+
+- Patched the four open high-severity advisories in the build toolchain: all ten transitive copies of
+  `brace-expansion` in the mobile lockfile (to 1.1.16 / 2.1.2 / 5.0.8) and `fast-uri` in the promo
+  video pipeline (3.1.4). None of them is reachable from the app bundle or the daemon — they hang off
+  eslint, sucrase, `@expo/prebuild-config` and `@bacons/apple-targets` — so this clears noise rather
+  than exposure. The mobile lockfile is regenerated with npm 10, which is what CI's `npm ci` reads;
+  npm 12 prunes entries it needs.
+- **Tab swiping no longer peeks; it switches immediately.** The peek rendered a second live instance
+  of the neighbouring screen inside the current tab, because a `UITabBarController` only keeps the
+  selected child's view laid out and iOS keeps its real tab bar here. That leaked in every direction,
+  and a screen recording caught the worst of it: a horizontal drag across a full-width row stays
+  inside that row's hit rect, so RN's `Pressable` retained the press and fired it on release —
+  swiping History → Settings opened History's "Resume this session?" confirm dialog, which then
+  floated **over** the Settings tab, because a peek that stays mounted keeps its state alive in a tab
+  it does not belong to. Duplicate fetches and loading states from screens never navigated to, and a
+  one-frame light flash at the handover, came from the same place. Each was fixable alone and the
+  next appeared; they share one cause, which is a screen rendered outside the tab that owns it. A
+  faithful interactive transition needs the platform to own it — a horizontal `ScrollView` with
+  `pagingEnabled`, whose UIScrollView cancels touches in its subviews the moment it scrolls, or an
+  interactive `UITabBarController` transition in Swift. The swipe, its thresholds and the absent
+  arrival haptic all stay.
+
+### Fixed
+
+- Three `forge-index` watcher tests raced the watch they were testing. Each made its external edit
+  once, immediately after `spawn_watcher` returned — but registration happens on the watcher's own
+  thread, so the write could land before any watch existed, produce no event, and then no amount of
+  polling could recover it (the polling backend has the same shape: an edit made before its first
+  scan is simply part of the baseline). Alone the gap is too small to notice; run beside each other
+  under load, as `cargo test --workspace` does, and it was wide enough to fail the release gate. The
+  edit now repeats until the watch picks it up, which tests what the tests meant to test without
+  weakening either assertion.
+- **One stale frame from a phone took the whole Anywhere connector offline.** The host's list of open
+  session streams is per relay connection, and that connection drops and reconnects on its own —
+  three times in the last two days' logs, from resets and heartbeats. The phone's socket survives
+  those drops, so it goes on sending frames for streams the reconnected host has no record of, and
+  the host treated an unknown stream id as fatal: it tore down the connector, reconnected, and died
+  again on the next frame. Every bridge request in those windows failed against a connector that had
+  just reported itself online. An unknown stream is a race, not an attack, so the host now answers it
+  with a close — telling the phone to stop using that socket — and keeps serving everything else.
+- **Voice over Anywhere timed out on anything but a short clip.** The relay applied a flat 30s
+  deadline to every bridge request, overriding whatever the caller asked for, so
+  `transcribeAudio`'s 120s budget was never in effect. A bridge request is not a proxy hop: the host
+  transcribes the entire clip before it answers — measured at ~4.5s for a 4s recording — so a voice
+  memo of any real length could not come back in time. The caller's `AbortSignal` now reaches the
+  relay and governs, which also means cancelling a recording actually cancels the request; the relay
+  keeps a deadline of its own only for callers that set none.
+- **The tab you swiped away from no longer flashes when you arrive.** Four previous attempts moved a
+  corrective scroll earlier and earlier — onto a 150ms timer, then into a layout effect on arrival —
+  and each one made the flash shorter without removing it. Shortening it was the clue: the correction
+  was racing something rather than preventing it. A `UIScrollView` clamps its `contentOffset` into its
+  `contentSize`, and the pager's content width was left to be measured from its pages, so any layout
+  pass that measured it short pulled the offset to zero — and page zero is the neighbour on the LEFT,
+  which is the tab you just swiped away from. The clamp happens inside layout, earlier than any scroll
+  JS can schedule, which is why no delay could have been the answer. The content width is now pinned
+  from the page count, so there is no pass in which it is too narrow and no clamp to recover from. The
+  geometry moved to `pagerGeometry` in `lib/tabSwipe.ts`, where the invariant that makes the clamp
+  impossible — the resting page fits inside the pinned width, for every tab — is asserted rather than
+  reasoned about, along with the page-to-tab arithmetic that was previously inline and untested. The
+  timer is gone; the pager now returns home on focus change, which needs no tuning and covers leaving
+  a tab in the same commit that switches away from it.
+- **A light grey flashed through the tab pager.** Frame analysis of a screen recording found it four
+  times in 18.7s: once filling the whole content area for a single 17ms frame at the moment a swipe
+  committed, and otherwise as light strips down the incoming edge mid-drag, 6–20% of the area for
+  33–100ms. The colour is a uniform `#F0F0F0` — measured exactly, against pure white reading 255 in
+  the same frame, so neither white nor the light theme's `#F5F4F1` — which makes it a native surface
+  behind the JS view rather than anything the app draws. The pager's clipping container had no
+  background of its own, so any moment it had not filled fell through to it: the frame between one
+  tab's screen unmounting and the next one painting, and the first frames of a drag before the
+  neighbour had mounted. It now paints `bg0`, so an unfilled moment reads as the app.
+- **A swipe sometimes scrolled the page instead of changing tabs.** The pager needed 28px of
+  horizontal travel before 15px of vertical cancelled it — a ratio of nearly 2:1 just to begin, and a
+  thumb swipe arcs, so an ordinary curved swipe crossed the vertical limit first and the list
+  underneath took the drag. Now 20px horizontal against 24px vertical, so intent that is even roughly
+  sideways pages while a genuinely vertical drag still scrolls. 20px stays clear of SessionCard's
+  10px archive pan, which is a descendant and so still claims a card drag first. The thresholds moved
+  to `lib/tabGesture.ts` where the relationships between them are asserted, since the ratio — not
+  either number alone — is what a thumb experiences.
+- Tab neighbours now mount on the first drag and stay mounted, rather than unmounting on every
+  settle. Each swipe previously waited on `runOnJS` → `setState` → render before the neighbour
+  existed, which is what left the incoming edge empty at the start of a drag.
+
+- **The app failed to open** — `undefined is not a function`, caught by the root error boundary — on
+  the OTA that added tab-peek preloading. Preloading resolved all four tab route modules from an
+  effect when the pager mounted, to spend `React.lazy`'s promise frame before a drag rather than
+  during one. That was the only thing in that release which ran at app OPEN (the peek-aware refetch
+  and the dropped haptic can only take effect during a drag), and forcing four route modules to
+  evaluate inside the first mount — `settings.tsx` alone pulls some 25 local modules — reorders
+  initialisation for the whole app. Peeks resolve on first use again, which keeps module evaluation
+  where the code expects it: after the tree those modules depend on exists. The flash preloading was
+  meant to fix is covered by the opaque Suspense fallback, which cannot reorder anything.
+
+- **Swiping between tabs flashed, buzzed and reloaded.** Three separate causes behind one symptom:
+  the peeked neighbour resolved its module through `React.lazy` *during* the drag, and Metro's
+  resolution costs a frame — visible as a blank page at the moment the swipe starts, so peeks are now
+  preloaded once the pager mounts; `useSessions` sets `refetchOnMount: "always"`, and a peek is a
+  second mount, so every swipe between Fleet and Inbox fired a round trip mid-gesture and another one
+  when the real screen arrived; and the commit fired a selection haptic, which nothing on a native
+  tab bar does when you tap it. A peek is now marked as such (`useIsPeeking`) and asks the network
+  for nothing, renders whatever is already cached, and no longer mirrors itself into the home-screen
+  widget. `sessionsRefetchPolicy` carries that decision as a plain function so it is testable without
+  a renderer — the original bug was invisible to every unit test and only showed up as a flicker on a
+  phone. The Suspense fallback is also opaque now rather than transparent, since a see-through gap
+  during a drag reads as a flicker of its own.
+
+- **A PR with every check green and auto-merge armed could sit unmergeable forever.** Two settings
+  combine into a deadlock: the `Protection branch` ruleset sets
+  `strict_required_status_checks_policy: true`, so a branch must be up to date with `main`, while the
+  repository has `allow_update_branch: false`, so GitHub never updates it. The PR parks at
+  `mergeStateStatus: BEHIND` and stays there until a human runs `gh pr update-branch` — and it looks
+  entirely healthy in the meantime, which is why it recurred unnoticed: #891 (left Homebrew pointing
+  at a v2.10.0 that was never published), #894 (package managers stranded on 2.9.1 while 2.10.1 was
+  current), #897 (an ordinary fix PR, so this was never specific to `dist/`), and #899. A new
+  `unstick-automerge.yml` runs on every push to `main` — the moment PRs become BEHIND — updates any
+  stalled auto-merge PR, and re-dispatches the required workflows afterwards, because a
+  GITHUB_TOKEN push creates no `pull_request` runs and the new head SHA would otherwise carry no
+  `CI` context and stall one state later.
+- **Corrects the 2.10.1 note below**, which blamed this on `workflow_dispatch` runs not satisfying
+  branch protection and on `pull_request` runs stuck at `action_required`. That was wrong. The
+  ruleset requires exactly one context, `CI`, and the dispatched run does provide it — verified
+  green on #899's stuck head SHA `af8371dc`, which was `BEHIND` and nothing else. The
+  `action_required` runs were real but irrelevant.
+
 ## [2.10.2] - 2026-07-26
 
 ### Fixed
@@ -2969,7 +3150,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.10.2...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.11.0...HEAD
+[2.11.0]: https://github.com/Adulari/forge/compare/v2.10.2...v2.11.0
 [2.10.2]: https://github.com/Adulari/forge/compare/v2.10.1...v2.10.2
 [2.10.1]: https://github.com/Adulari/forge/compare/v2.9.1...v2.10.1
 [2.10.0]: https://github.com/Adulari/forge/compare/v2.9.1...v2.10.0

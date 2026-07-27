@@ -1,0 +1,90 @@
+name: reconcile published OTA against main
+
+# `eas-update.yml` runs on push to main. Twice now, a merge to main produced NO workflow run at all
+# — #890 and #910 — so the OTA was never published and nothing anywhere said so. Both times the
+# phone silently kept running older JS while main had moved on, and both times it was found by a
+# human noticing the fix had not arrived, days later.
+#
+# A missing run cannot be detected by anything that keys off that run. This workflow closes the loop
+# from the other end: it compares what main contains against what was actually published, on a
+# schedule that does not depend on any push event firing.
+#
+# It reconciles against successful `eas-update` RUNS rather than the EAS update list, because a
+# missing run is precisely the defect: a run's head SHA ties a publication to a commit with no
+# schema guessing and no Expo credentials. A run that ran and deliberately skipped (native changes
+# in the range) still counts as covered — that case already warns loudly on the run itself, and the
+# owed native build is not something this can fix.
+
+on:
+  schedule:
+    - cron: "37 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # dispatches eas-update.yml for the range that never published
+
+# A second run would re-dispatch a publication the first one has already ordered.
+concurrency:
+  group: mobile-ota-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: publish anything main has that devices do not
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Ancestry checks below need real history, not a shallow clone.
+          fetch-depth: 0
+
+      - name: Compare main against the last successful publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # The newest commit on main that an OTA could carry. `eas-ota-safety.sh` defines the
+          # OTA-safe set as mobile/src/** and mobile/assets/**; anything else needs a native build
+          # and is not this workflow's business.
+          target="$(git log -1 --format=%H origin/main -- mobile/src mobile/assets)"
+          if [ -z "$target" ]; then
+            echo 'main contains no mobile source or asset history.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Newest first. A run's head SHA may be a DESCENDANT of the target rather than the target
+          # itself — a push can carry several commits, and only the last one is the head — so
+          # coverage is an ancestry question, not an equality one.
+          runs="$(gh run list --workflow eas-update.yml --branch main --limit 100 \
+            --json headSha,conclusion --jq '.[] | select(.conclusion == "success") | .headSha')"
+
+          published=""
+          for sha in $runs; do
+            # A run whose commit is gone (force-push, deleted branch) tells us nothing.
+            git cat-file -e "$sha^{commit}" 2>/dev/null || continue
+            git merge-base --is-ancestor "$sha" origin/main || continue
+            published="$sha"
+            break
+          done
+
+          if [ -z "$published" ]; then
+            echo "::error title=Cannot reconcile OTA state::No successful eas-update run on main has a commit still reachable from main, so there is no trustworthy base to classify an unpublished range against. Publish once by hand (RELEASING.md §6)."
+            exit 1
+          fi
+
+          if git merge-base --is-ancestor "$target" "$published"; then
+            echo "Up to date: $(git rev-parse --short "$target") is covered by the publication at $(git rev-parse --short "$published")." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # `base_ref` makes eas-update classify published..HEAD with the same safety guard a push
+          # would have applied, so this cannot ship JS that expects native code the installed binary
+          # does not have. It only replaces the push event that went missing.
+          message="main has mobile changes at $(git rev-parse --short "$target") that no successful eas-update run covers; the newest publication is $(git rev-parse --short "$published"). Dispatching eas-update over that range."
+          echo "::warning title=OTA behind main — dispatching::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          gh workflow run eas-update.yml --ref main -f base_ref="$published"

@@ -135,6 +135,8 @@ function StandardTabs() {
 export default function TabsLayout() {
   const { isExpanded } = useBreakpoint();
 
+  // Expanded layouts navigate by the persistent Fleet rail, not a tab bar. The swipe pager lives
+  // in each tab route (see components/TabPager.tsx for why it cannot wrap the navigator).
   if (isExpanded) return <Slot />;
   if (Platform.OS === "ios") return <IOSNativeTabs />;
   return <StandardTabs />;

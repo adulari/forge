@@ -1024,9 +1024,31 @@ where
                 frame.bytes = blob.plaintext;
                 frame.bytes_blob = None;
             }
-            let handle = streams
-                .get(&frame.stream_id)
-                .context("WebSocket frame refers to an unopened stream")?;
+            let Some(handle) = streams.get(&frame.stream_id) else {
+                // A frame for a stream this process does not know about is a race, not an attack.
+                // The host's relay connection drops and reconnects on its own (heartbeat, reset,
+                // service restart) and `streams` is per-connection, while the controller's socket
+                // survives — so the phone goes on sending frames for sessions this connector has
+                // forgotten. Treating that as fatal took the whole connector down, and because the
+                // phone reopened the same socket on reconnect it went down again on the next frame.
+                // Every bridge request in those windows — voice transcription especially, which is
+                // one large request — failed against a connector that reported itself online.
+                if let Some(close) = stale_stream_close(&frame) {
+                    let plaintext =
+                        serde_json::to_vec(&close).context("encode stale-stream close frame")?;
+                    let encoded = seal_outbound(
+                        store,
+                        EnvelopeKind::WebSocketFrame,
+                        sender_device_id,
+                        &plaintext,
+                    )?;
+                    relay_write.send(Message::Binary(encoded.into())).await?;
+                }
+                if let Some(blob_id) = consumed_blob_id {
+                    consume_blob_after_delivery(blobs, blob_id).await;
+                }
+                return Ok(());
+            };
             if handle.owner_device_id != sender_device_id {
                 bail!("WebSocket stream belongs to another controller device");
             }
@@ -1789,6 +1811,24 @@ async fn open_stream_inner(
     Ok(())
 }
 
+/// What to answer a controller that sent a frame for a stream this connector has forgotten.
+///
+/// `Some(close)` for data: the controller still believes the socket is live and will keep sending
+/// on it until something tells it otherwise, so silence would leave it wedged. A close it sent
+/// itself needs no reply — it is already tearing that socket down.
+fn stale_stream_close(frame: &WebSocketFrame) -> Option<WebSocketFrame> {
+    if frame.kind != WebSocketFrameKind::Data {
+        return None;
+    }
+    Some(WebSocketFrame {
+        stream_id: frame.stream_id,
+        direction: FrameDirection::HostToController,
+        kind: WebSocketFrameKind::Close,
+        bytes: Vec::new(),
+        bytes_blob: None,
+    })
+}
+
 fn bridge_error(request_id: [u8; 16], status: u16, message: &str) -> BridgeResponse {
     BridgeResponse {
         request_id,
@@ -1855,6 +1895,32 @@ mod tests {
             serde_json::to_vec(&oversized).expect("encode").len() > RELAY_ENVELOPE_LIMIT,
             "the acceptance limit is no longer oversized on the wire — re-derive the send threshold",
         );
+    }
+
+    fn frame(kind: WebSocketFrameKind) -> WebSocketFrame {
+        WebSocketFrame {
+            stream_id: [7; 16],
+            direction: FrameDirection::ControllerToHost,
+            kind,
+            bytes: b"{}".to_vec(),
+            bytes_blob: None,
+        }
+    }
+
+    #[test]
+    fn a_frame_for_a_forgotten_stream_closes_that_stream_instead_of_the_connector() {
+        // `streams` is per relay connection and the host's connection drops on its own, so the
+        // phone outlives it holding sockets this process no longer knows about. This used to be
+        // fatal, which took the connector offline every time the phone sent on one of them.
+        let close = stale_stream_close(&frame(WebSocketFrameKind::Data)).expect("data is answered");
+        assert_eq!(close.stream_id, [7; 16]);
+        assert_eq!(close.direction, FrameDirection::HostToController);
+        assert_eq!(close.kind, WebSocketFrameKind::Close);
+        assert!(close.bytes.is_empty());
+        assert_eq!(close.bytes_blob, None);
+
+        // A controller that is already closing needs no answer.
+        assert!(stale_stream_close(&frame(WebSocketFrameKind::Close)).is_none());
     }
 
     fn request(route: RouteId, method: &str, parameters: &[&str]) -> BridgeRequest {

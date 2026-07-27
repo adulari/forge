@@ -3,6 +3,7 @@
 // down). Hearth: every row IS the elevated decision card (core rule 2) — DecisionCard
 // carries its own live-question preview (short-lived socket attach) and Respond/Peek
 // actions; DecisionPeek (T4.3) still answers a prompt inline via the peek sheet.
+import { TabPager } from "../../components/TabPager";
 import { CircleCheck } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
@@ -35,7 +36,7 @@ function InboxHeader({ count }: { count: number }) {
   );
 }
 
-export default function InboxScreen() {
+export function InboxScreen() {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
   const query = useSessions();
@@ -120,3 +121,11 @@ const styles = StyleSheet.create({
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonGap: { marginTop: space.space8 },
 });
+
+export default function InboxTab() {
+  return (
+    <TabPager index={1}>
+      <InboxScreen />
+    </TabPager>
+  );
+}
