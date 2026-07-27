@@ -456,7 +456,7 @@ fn opened_unchanged_production_paths(
 }
 
 fn unresolved_completeness_production_paths(
-    primary_identifier_matches: &std::collections::BTreeSet<String>,
+    primary_opened_identifier_paths: &std::collections::BTreeSet<String>,
     audit_messages: &[Message],
     workspace_root: &std::path::Path,
     changed_paths: &std::collections::HashSet<String>,
@@ -466,7 +466,7 @@ fn unresolved_completeness_production_paths(
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
     paths.extend(
-        primary_identifier_matches
+        primary_opened_identifier_paths
             .iter()
             .filter(|path| !changed_paths.contains(path.as_str()))
             .cloned(),
@@ -7460,6 +7460,14 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && primary_identifier_matches
                 .iter()
                 .all(|path| primary_changed_paths.contains(path));
+        let primary_opened_identifier_paths = opened_unchanged_production_paths(
+            primary_turn_messages,
+            self.workspace.root(),
+            &primary_changed_paths,
+        )
+        .into_iter()
+        .filter(|path| primary_identifier_matches.contains(path))
+        .collect::<std::collections::BTreeSet<_>>();
         if self.config.mesh.verify_completeness
             && code_change_turn
             && direct_completeness_is_identifier_migration(prompt)
@@ -7585,7 +7593,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 working_tree_status(Some(self.workspace.root())).as_deref(),
             );
             let unresolved_paths = unresolved_completeness_production_paths(
-                &primary_identifier_matches,
+                &primary_opened_identifier_paths,
                 &self.transcript[audit_transcript_start..],
                 self.workspace.root(),
                 &changed_paths,
@@ -19726,20 +19734,39 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect::<std::collections::BTreeSet<_>>();
+        let primary_messages = vec![Message::assistant_tool_calls(
+            "",
+            ["src/parser.rs", "src/adapter.rs", "src/unrelated.rs"]
+                .into_iter()
+                .map(|path| forge_types::ToolCall {
+                    id: forge_types::new_id(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": path}),
+                })
+                .collect(),
+        )];
         let changed_paths = ["src/parser.rs"]
             .into_iter()
             .map(str::to_string)
             .collect::<std::collections::HashSet<_>>();
+        let primary_opened_identifier_paths = opened_unchanged_production_paths(
+            &primary_messages,
+            std::path::Path::new("/repo"),
+            &changed_paths,
+        )
+        .into_iter()
+        .filter(|path| primary_matches.contains(path))
+        .collect();
 
         assert_eq!(
             unresolved_completeness_production_paths(
-                &primary_matches,
+                &primary_opened_identifier_paths,
                 &[],
                 std::path::Path::new("/repo"),
                 &changed_paths,
             ),
             vec!["src/adapter.rs".to_string()],
-            "a sibling found before the audit remains unresolved until the final diff changes it"
+            "an opened sibling found before the audit remains unresolved until the diff changes it"
         );
     }
 
