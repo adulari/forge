@@ -179,13 +179,17 @@ const config: ExpoConfig = {
         // root with) instead of the dark bg — this was hardcoded to the dark color for
         // both variants, so light-theme users got a dark flash on every cold start.
         //
-        // Each variant gets its OWN mark. splash-icon.png is drawn in a light gray for the
-        // dark bg; on the light bg it measured 1.41:1 — effectively invisible, not merely
-        // dim. splash-icon-light.png is the same geometry re-inked in lightTokens.ink
-        // ("#1C1B19") at 15.65:1, matching the dark pairing's 14.69:1. Alpha carries each
-        // pixel's original brightness so the mark's internal weighting survives the
-        // inversion. Regenerate with scripts/gen-splash-light-variant.py if the source mark
-        // changes; both are baked in at prebuild, so an OTA can never update them.
+        // Each variant gets its OWN mark, because one ink cannot serve both backgrounds.
+        // splash-icon.png carries the mark's own ember ramp, which measures 7.13:1 against the
+        // dark bg at its darkest stop and 10.55:1 at its lightest. That same ramp on the light
+        // bg would be 2.54:1 — the mistake the previous pair shipped, where the dark mark
+        // measured 1.41:1 on light and was invisible rather than merely dim. So
+        // splash-icon-light.png re-inks the identical geometry in ember700 ("#964916") at
+        // 5.85:1, which keeps the brand colour instead of falling back to near-black.
+        //
+        // Both are generated from scripts/brand/forge-mark.svg by scripts/gen-brand-assets.py;
+        // do not edit them by hand. Both are baked in at prebuild, so an OTA can never update
+        // them — a native build is required for either to reach a device.
         backgroundColor: "#F5F4F1",
         image: "./assets/splash-icon-light.png",
         imageWidth: 200,

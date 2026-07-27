@@ -6,6 +6,25 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Forge has a logo.** Every icon the product shipped was the stock Expo placeholder — the blue "A"
+  on the iOS app icon, the Android adaptive icon, the desktop bundles, the PWA manifest and the
+  favicon, and the grid-and-circles placeholder on both splash screens, which is the "stock Expo
+  flash" visible on every cold start. The only real mark lived in `docs/` and no app target used it.
+  The new mark is a pair of tongs closing on a billet at welding heat; reduced to its silhouette it
+  also reads as `< >`, so it means smithing and code at once. Symmetric, flat single colour, and it
+  holds its shape down to 16px.
+- **One vector source for every icon.** `scripts/brand/forge-mark.svg` is now the only place the mark
+  is drawn, and `scripts/gen-brand-assets.py` renders all 25 shipped assets from it: iOS app icon,
+  Android foreground/background/monochrome, both splash marks plus the six committed native splash
+  images, the web manifest icons, two favicons, a multi-size `.ico` and a `.icns` (written directly,
+  since `iconutil` is macOS-only). There was previously no vector source anywhere and each target
+  carried its own hand-placed PNG, so changing the logo meant finding them all and missing some.
+  `scripts/gen-splash-light-variant.py` is superseded and removed.
+- The web root now serves a real `favicon.ico`. Browsers request `/favicon.ico` unprompted and there
+  was nothing there.
+
 ## [2.11.0] - 2026-07-27
 
 ### Added

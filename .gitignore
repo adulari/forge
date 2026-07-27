@@ -54,3 +54,6 @@ scripts/demo/.stage/
 
 # Local cargo config (absolute target-dir etc.) must never be committed
 .cargo/
+
+# Scratch output from scripts/gen-brand-assets.py
+.brand-build/
