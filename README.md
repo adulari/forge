@@ -157,26 +157,6 @@ solve better.
 **[Read the canonical history-safe benchmark →](docs/benchmarks/history-safe-pinned-mesh-2026-07.md)**
 · **[Audit all 83 formal cells →](docs/benchmarks/cell-validity-2026-07.md)**
 
-### Historical Sonnet results
-
-The honest test of a harness: run the **same model** Forge bridges (`claude sonnet`) *through* Forge vs.
-the raw `claude` CLI on **SWE-bench Lite** (real GitHub bug fixes), scored by the **official `swebench`
-Docker evaluator**. The only difference is the harness.
-
-| Same `sonnet` model · SWE-bench Lite | Bugs fixed | Tokens / fix |
-|---|--:|--:|
-| Raw `claude` CLI | 4 / 10 | 3.57M |
-| **Forge** (loop-gated completeness) | **6 / 10** | **2.83M** |
-
-**Forge fixes 50% more bugs (6 vs 4) at ~21% lower cost per fix** — and *strictly dominates*: every bug
-the raw CLI fixed, Forge also fixed, plus two more; zero the other way. Total tokens are at parity —
-Forge does more work because it solves more, not because it's wasteful. The larger N=20 run holds the
-same direction (11 vs 9).
-
-> Every number here is reproducible (`forge bench swe` + the official evaluator) and every reliability
-> claim has a test. Full method, the larger-N run, and an explicit "where Forge does *not* win yet"
-> section: **[Why Forge is a better harness →](docs/harness/why-forge-is-a-better-harness.md)**
-
 ---
 
 <a id="comparison"></a>
@@ -1029,8 +1009,6 @@ command = "bash -c 'jq .args <<< $FORGE_TOOL_INPUT >> audit.log'"
 | [**Canonical history-safe pinned + mesh benchmark**](./docs/benchmarks/history-safe-pinned-mesh-2026-07.md) | Same-model Codex and Claude comparisons plus genuine mesh auto; official quality, speed, tokens, quota, integrity, and exceptions |
 | [**83-cell benchmark validity ledger**](./docs/benchmarks/cell-validity-2026-07.md) | Every retained cell and the exact reason it is valid, invalid, or superseded |
 | [**Benchmark index**](./docs/benchmarks/README.md) | Current result, historical measurements, and reproduction guides |
-| [Historical Claude 5 benchmark](./docs/benchmarks/claude-code-claude5-2026-07.md) | Preserved but superseded for headline use because repository history was not isolated |
-| [Historical GPT-5.6 benchmark](./docs/benchmarks/codex-oauth-gpt56-2026-07.md) | Preserved but superseded for headline use; used `xhigh` and includes integrity-invalid cells |
 | [**Competitor comparison**](./docs/comparison.md) | Detailed, sourced breakdown of every alternative |
 | [**Why Forge is a better harness**](./docs/harness/why-forge-is-a-better-harness.md) | The test-backed case — incl. where Forge does *not* win |
 | [**Benchmark results**](./docs/benchmarks/results.md) | Measured SWE-bench numbers, method, and honest caveats |
