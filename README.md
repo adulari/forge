@@ -121,6 +121,29 @@ is spent only where it matters. Inspect any of these decisions live with `/mesh`
 
 ## 📊 Proof: same model, better results
 
+### Latest: Forge vs. native Codex on GPT-5.6
+
+The latest matched benchmark ran the **same GPT-5.6 Sol, Terra, and Luna models**
+with `xhigh` reasoning through Forge and native Codex on a predeclared,
+stratified **SWE-bench Verified** sample. The official `swebench` Docker evaluator
+scored both arms.
+
+| 18 matched SWE-bench Verified tasks | Forge | Native Codex | Result |
+|---|---:|---:|---|
+| Official Docker resolves | **18 / 18** | **18 / 18** | Quality parity |
+| Generation wall time | **3,299.841s** | 5,574.566s | **Forge 40.81% faster** |
+| Whole-session tokens | **9,692,604** | 24,643,373 | **Forge 60.67% lower** |
+| Faster matched pairs | **13 / 18** | 5 / 18 | Forge advantage |
+| Lower-token matched pairs | **17 / 18** | 1 / 18 | `p=0.00014496` |
+
+All six official reports completed with zero evaluator errors. The report records
+the controlled protocol, whole-session accounting, per-model results, caveats,
+artifacts, and historical pre-optimization runs.
+
+**[Read the full GPT-5.6 Forge vs. native Codex benchmark →](docs/benchmarks/codex-oauth-gpt56-2026-07.md)**
+
+### Historical Sonnet results
+
 The honest test of a harness: run the **same model** Forge bridges (`claude sonnet`) *through* Forge vs.
 the raw `claude` CLI on **SWE-bench Lite** (real GitHub bug fixes), scored by the **official `swebench`
 Docker evaluator**. The only difference is the harness.
@@ -988,6 +1011,8 @@ command = "bash -c 'jq .args <<< $FORGE_TOOL_INPUT >> audit.log'"
 
 | Doc | What |
 |-----|------|
+| [**Latest GPT-5.6 Forge vs. Codex benchmark**](./docs/benchmarks/codex-oauth-gpt56-2026-07.md) | 18/18 quality parity, 40.81% faster, 60.67% fewer tokens |
+| [**Benchmark index**](./docs/benchmarks/README.md) | Latest result, historical measurements, and reproduction guides |
 | [**Competitor comparison**](./docs/comparison.md) | Detailed, sourced breakdown of every alternative |
 | [**Why Forge is a better harness**](./docs/harness/why-forge-is-a-better-harness.md) | The test-backed case — incl. where Forge does *not* win |
 | [**Benchmark results**](./docs/benchmarks/results.md) | Measured SWE-bench numbers, method, and honest caveats |
