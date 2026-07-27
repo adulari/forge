@@ -1,0 +1,38 @@
+<!--
+  The Forge mark. Tongs closing on a billet at welding heat — and, reduced this far, `< >`.
+
+  This file is the SINGLE SOURCE for every icon the product ships. Nothing downstream is hand-drawn:
+  scripts/gen-brand-assets.py renders it into the iOS, Android, web, desktop and splash assets, so
+  the mark can be changed here and everything else regenerated. Before this existed, every target
+  carried its own PNG and all of them were the stock Expo placeholder.
+
+  Geometry notes:
+   · The jaws taper toward the work, as real tongs do — a constant-width chevron reads as a typeset
+     bracket rather than a tool.
+   · The gap between the jaws is deliberately wide. An earlier, tighter version crossed visually and
+     read as an X at every size below 64px.
+   · Flat colour, no gradient carrying the idea, so the monochrome and one-colour variants are the
+     same mark rather than an approximation of it.
+
+  Viewport is 1024 with the mark occupying the middle ~62%, which keeps it inside Android's adaptive
+  safe zone when the whole canvas is used as the foreground layer.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="ember" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFA96B"/>
+      <stop offset="1" stop-color="#F07A2E"/>
+    </linearGradient>
+    <linearGradient id="hot" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFC9A0"/>
+      <stop offset="1" stop-color="#FFA96B"/>
+    </linearGradient>
+  </defs>
+  <g id="mark">
+    <path d="M 196 268 L 384 470 L 384 554 L 196 756" fill="none" stroke="url(#ember)"
+          stroke-width="116" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 828 268 L 640 470 L 640 554 L 828 756" fill="none" stroke="url(#ember)"
+          stroke-width="116" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="470" y="462" width="84" height="100" rx="22" fill="url(#hot)"/>
+  </g>
+</svg>
