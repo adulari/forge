@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use forge_types::{Message, PermissionMode, Role, Usage};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -48,6 +49,64 @@ pub enum CliKind {
     /// Google Antigravity (`agy`) — free Gemini access (plus proxied Claude/GPT). Text-mode only
     /// (no MCP/`--tools` wiring), so it always runs as its own agent.
     Antigravity,
+}
+
+/// Sanitized model/capability record returned by Claude Code's authoritative streaming
+/// `initialize` control request. Deliberately excludes the response's `account`, process and
+/// user-configuration fields so callers can safely persist this in benchmark artifacts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeModelCapability {
+    pub value: String,
+    pub resolved_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub supports_effort: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_effort_levels: Vec<String>,
+    #[serde(default)]
+    pub supports_adaptive_thinking: bool,
+    #[serde(default)]
+    pub supports_auto_mode: bool,
+    #[serde(default)]
+    pub supports_fast_mode: bool,
+}
+
+/// Non-billing Claude Code runtime discovery. Model data comes from the same `initialize` control
+/// protocol used by the official Agent SDK; the version comes from `claude --version`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeInitialization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ClaudeModelCapability>,
+}
+
+impl ClaudeInitialization {
+    /// Resolve a requested CLI alias using the exact mapping advertised by this installation.
+    /// Empty / absent requests mean Claude's `default` entry.
+    pub fn model(&self, requested: Option<&str>) -> Option<&ClaudeModelCapability> {
+        let requested = requested.filter(|m| !m.is_empty()).unwrap_or("default");
+        self.models.iter().find(|model| {
+            model.value == requested
+                || model.resolved_model == requested
+                // Claude accepts short aliases that the initializer may advertise only with a
+                // context suffix (`opus` → `opus[1m]`) or as a display name (`fable` →
+                // "Fable" while value is `claude-fable-5[1m]`).
+                || model
+                    .value
+                    .split_once('[')
+                    .map(|(base, _)| base == requested)
+                    .unwrap_or(false)
+                || model
+                    .display_name
+                    .as_deref()
+                    .and_then(|name| name.split_whitespace().next())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(requested))
+        })
+    }
 }
 
 impl CliKind {
@@ -116,11 +175,28 @@ impl CliKind {
 
     /// Model aliases the installed CLI itself advertises — the primary, non-hardcoded source, so
     /// a model Anthropic/Google ships to subscribers appears in the mesh without a Forge release.
-    /// Best-effort and cheap: one non-interactive spawn (`claude --help` / `agy models`, never a
-    /// prompt), short-timed, empty on any failure. codex 0.141 exposes no model enumeration
+    /// Best-effort and cheap: Claude uses the non-billing streaming `initialize` control request
+    /// (the official Agent SDK's authoritative capability source), while agy uses `agy models`.
+    /// The legacy `claude --help` parser remains a fallback for older CLIs that do not implement
+    /// `initialize`. Empty on any failure. codex 0.141 exposes no model enumeration
     /// (`--model` is free-form, no `models` subcommand — verified against its full command list),
     /// so it always falls back to the static table; extend it via `[mesh.bridge_models]`.
     pub async fn detect_models(self) -> Vec<String> {
+        if self == CliKind::ClaudeCode {
+            if let Some(initialization) =
+                probe_claude_initialization_response(self.default_binary()).await
+            {
+                let advertised = initialization
+                    .models
+                    .into_iter()
+                    .map(|model| model.value)
+                    .filter(|value| value != "default" && !value.is_empty())
+                    .collect::<Vec<_>>();
+                if !advertised.is_empty() {
+                    return advertised;
+                }
+            }
+        }
         let args: &[&str] = match self {
             CliKind::ClaudeCode => &["--help"],
             CliKind::Antigravity => &["models"],
@@ -140,6 +216,28 @@ impl CliKind {
             CliKind::Antigravity => parse_agy_models(&out),
             CliKind::Codex => Vec::new(),
         }
+    }
+
+    /// Installed CLI version, without invoking a model. Returns `None` when the CLI is absent,
+    /// times out, exits unsuccessfully, or emits no version string.
+    pub async fn cli_version(self) -> Option<String> {
+        probe_cli_version(self.default_binary()).await
+    }
+
+    /// Probe Claude Code's authoritative initialization/capability response without sending a user
+    /// prompt (and therefore without starting a billable model turn). Non-Claude kinds return
+    /// `None`.
+    pub async fn claude_initialization(self) -> Option<ClaudeInitialization> {
+        if self != CliKind::ClaudeCode {
+            return None;
+        }
+        let (mut initialization, version) = tokio::join!(
+            probe_claude_initialization_response(self.default_binary()),
+            probe_cli_version(self.default_binary())
+        );
+        let initialization = initialization.as_mut()?;
+        initialization.cli_version = version;
+        Some(initialization.clone())
     }
 
     /// The model-alias list for this bridge: whatever the installed CLI itself advertises
@@ -188,6 +286,152 @@ impl CliKind {
             CliKind::ClaudeCode | CliKind::Antigravity => None,
         }
     }
+}
+
+const CLAUDE_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Minimal, settings-isolated argv for a non-billing Claude control-protocol probe. Keeping this
+/// separate from [`build_args`] prevents model discovery from wiring Forge MCP or inheriting a
+/// benchmark workspace's project settings.
+fn claude_control_probe_args() -> Vec<String> {
+    vec![
+        "-p".into(),
+        "--input-format".into(),
+        "stream-json".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+        "--no-session-persistence".into(),
+        "--tools".into(),
+        String::new(),
+        "--setting-sources".into(),
+        String::new(),
+    ]
+}
+
+fn claude_initialize_request(request_id: &str, tool_aliases: bool) -> Value {
+    let mut request = serde_json::json!({
+        "subtype": "initialize",
+        "hooks": {},
+        "sdkMcpServers": [],
+    });
+    if tool_aliases {
+        request["toolAliases"] = claude_tool_aliases();
+    }
+    serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": request,
+    })
+}
+
+/// Exact built-in-name redirects accepted by Forge's MCP registry. This is intentionally a small,
+/// auditable allowlist rather than a generated "alias every tool" map: it catches names Claude is
+/// commonly trained or instructed to emit while preserving normal resolution for everything else.
+fn claude_tool_aliases() -> Value {
+    serde_json::json!({
+        "Bash": "mcp__forge__shell",
+        "Read": "mcp__forge__read_file",
+        "Write": "mcp__forge__write_file",
+        "Edit": "mcp__forge__edit_file",
+        "Glob": "mcp__forge__glob",
+        "Grep": "mcp__forge__search",
+        "WebFetch": "mcp__forge__web_fetch",
+        "WebSearch": "mcp__forge__web_search",
+        "NotebookEdit": "mcp__forge__notebook_edit",
+    })
+}
+
+fn parse_claude_initialization_response(line: &str) -> Option<ClaudeInitialization> {
+    let event: Value = serde_json::from_str(line).ok()?;
+    let response = event
+        .get("response")
+        .filter(|_| event.get("type").and_then(Value::as_str) == Some("control_response"))?;
+    if response.get("subtype").and_then(Value::as_str) != Some("success") {
+        return None;
+    }
+    let models = response
+        .get("response")?
+        .get("models")?
+        .as_array()?
+        .iter()
+        .filter_map(|model| serde_json::from_value(model.clone()).ok())
+        .collect();
+    Some(ClaudeInitialization {
+        cli_version: None,
+        models,
+    })
+}
+
+async fn probe_claude_initialization_response(binary: &str) -> Option<ClaudeInitialization> {
+    use tokio::io::AsyncWriteExt;
+
+    let args = claude_control_probe_args();
+    let mut cmd = bridge_command(binary, &args);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    apply_claude_bridge_home(CliKind::ClaudeCode, &mut cmd);
+    let mut child = cmd.spawn().ok()?;
+    let mut stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let request_id = "forge-capabilities";
+    let request = claude_initialize_request(request_id, false).to_string();
+    if stdin.write_all(request.as_bytes()).await.is_err()
+        || stdin.write_all(b"\n").await.is_err()
+        || stdin.shutdown().await.is_err()
+    {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return None;
+    }
+
+    let mut lines = BufReader::new(stdout).lines();
+    let result = tokio::time::timeout(CLAUDE_CONTROL_TIMEOUT, async {
+        while let Some(line) = lines.next_line().await.ok()? {
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let matches_request = event
+                .get("response")
+                .and_then(|response| response.get("request_id"))
+                .and_then(Value::as_str)
+                == Some(request_id);
+            if matches_request {
+                return parse_claude_initialization_response(&line);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    result
+}
+
+async fn probe_cli_version(binary: &str) -> Option<String> {
+    let args = vec!["--version".to_string()];
+    let mut cmd = bridge_command(binary, &args);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let output = tokio::time::timeout(CLAUDE_CONTROL_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    (!version.is_empty()).then_some(version)
 }
 
 /// Resolve `bin` to an executable file on `PATH` (a lightweight `which`, no spawning). Windows-aware:
@@ -703,6 +947,17 @@ fn build_args(
             vec!["-p".into(), "--dangerously-skip-permissions".into()]
         }
     };
+    if kind == CliKind::ClaudeCode {
+        // Ask Claude to expose Anthropic stream deltas instead of waiting for each consolidated
+        // assistant message. [`ClaudeStreamState`] deduplicates the later full message.
+        args.push("--include-partial-messages".into());
+        if harness {
+            // Keep harness policy in the system-prompt channel. Putting this in the first user
+            // payload weakens instruction priority and re-sends it as ordinary transcript text.
+            args.push("--append-system-prompt".into());
+            args.push(CLAUDE_HARNESS_PREAMBLE.into());
+        }
+    }
     // codex hands its stdio MCP servers a CURATED env (only PATH/HOME/LANG/… survive — verified
     // live: a custom `FORGE_*` set on the codex process never reaches `forge mcp-serve`). So the
     // sink + checkpoint context the served tools need is injected explicitly as TOML overrides;
@@ -830,7 +1085,7 @@ const fn harness_preamble_for(kind: CliKind) -> &'static str {
 /// re-drive (forge-core), which is cheaper than an always-on preamble clause (it lets the model
 /// work the turn normally, then do a single final diff-review).
 fn apply_harness_preamble(harness: bool, kind: CliKind, prompt: String) -> String {
-    if harness {
+    if harness && kind != CliKind::ClaudeCode {
         format!("{}\n\n{prompt}", harness_preamble_for(kind))
     } else {
         prompt
@@ -841,8 +1096,8 @@ fn apply_harness_preamble(harness: bool, kind: CliKind, prompt: String) -> Strin
 /// saw the full variant on its FIRST invocation, and the bridged CLI re-ingests the whole prompt
 /// on every internal model call (30-80 per instance) — a full re-prepend cost ~30-90k tokens per
 /// instance measured.
-fn apply_resume_reminder(harness: bool, prompt: String) -> String {
-    if harness {
+fn apply_resume_reminder(harness: bool, kind: CliKind, prompt: String) -> String {
+    if harness && kind != CliKind::ClaudeCode {
         format!("{HARNESS_RESUME_REMINDER}\n\n{prompt}")
     } else {
         prompt
@@ -1169,135 +1424,216 @@ fn usage_from(v: &Value) -> Usage {
     }
 }
 
-/// Parse one Claude Code `--output-format stream-json` (NDJSON) line into zero or more items.
-/// Field-tolerant: unknown event types and shapes are ignored, so CLI drift degrades gracefully.
-fn parse_claude_line(line: &str) -> Vec<Parsed> {
-    let Ok(v) = serde_json::from_str::<Value>(line) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    match v.get("type").and_then(Value::as_str) {
-        // assistant message: content blocks of thinking / text / tool_use.
-        Some("assistant") => {
-            if let Some(blocks) = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_array)
-            {
-                for b in blocks {
-                    match b.get("type").and_then(Value::as_str) {
-                        Some("thinking") => {
-                            if let Some(t) = b.get("thinking").and_then(Value::as_str) {
-                                if !t.is_empty() {
-                                    out.push(Parsed::Reasoning(t.to_string()));
-                                }
+/// Stateful Claude stream decoder. With `--include-partial-messages`, Claude emits each text /
+/// thinking delta immediately and later repeats the assembled block in an `assistant` event.
+/// Tracking emitted bytes by content-block index lets Forge stream with low latency without
+/// duplicating the consolidated message.
+#[derive(Default)]
+struct ClaudeStreamState {
+    text: std::collections::HashMap<usize, String>,
+    reasoning: std::collections::HashMap<usize, String>,
+}
+
+impl ClaudeStreamState {
+    fn parse_line(&mut self, line: &str) -> Vec<Parsed> {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        match v.get("type").and_then(Value::as_str) {
+            Some("stream_event") => {
+                let Some(event) = v.get("event") else {
+                    return out;
+                };
+                if event.get("type").and_then(Value::as_str) != Some("content_block_delta") {
+                    return out;
+                }
+                let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let Some(delta) = event.get("delta") else {
+                    return out;
+                };
+                match delta.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => {
+                        if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                self.text.entry(index).or_default().push_str(text);
+                                out.push(Parsed::Text(text.to_string()));
                             }
                         }
-                        Some("text") => {
-                            if let Some(t) = b.get("text").and_then(Value::as_str) {
-                                if !t.is_empty() {
-                                    out.push(Parsed::Text(t.to_string()));
-                                }
+                    }
+                    Some("thinking_delta") => {
+                        if let Some(thinking) = delta.get("thinking").and_then(Value::as_str) {
+                            if !thinking.is_empty() {
+                                self.reasoning.entry(index).or_default().push_str(thinking);
+                                out.push(Parsed::Reasoning(thinking.to_string()));
                             }
                         }
-                        Some("tool_use") => {
-                            let id = b
-                                .get("id")
+                    }
+                    _ => {}
+                }
+            }
+            // Consolidated assistant message: emit only bytes that were not already streamed.
+            Some("assistant") => {
+                if let Some(blocks) = v
+                    .get("message")
+                    .and_then(|message| message.get("content"))
+                    .and_then(Value::as_array)
+                {
+                    for (index, block) in blocks.iter().enumerate() {
+                        match block.get("type").and_then(Value::as_str) {
+                            Some("thinking") => {
+                                if let Some(full) = block
+                                    .get("thinking")
+                                    .and_then(Value::as_str)
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    if let Some(unseen) =
+                                        unseen_consolidated_suffix(full, self.reasoning.get(&index))
+                                    {
+                                        out.push(Parsed::Reasoning(unseen.to_string()));
+                                    }
+                                }
+                            }
+                            Some("text") => {
+                                if let Some(full) = block
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    if let Some(unseen) =
+                                        unseen_consolidated_suffix(full, self.text.get(&index))
+                                    {
+                                        out.push(Parsed::Text(unseen.to_string()));
+                                    }
+                                }
+                            }
+                            Some("tool_use") => {
+                                let id = block
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                let name = block
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("tool")
+                                    .to_string();
+                                let args = block
+                                    .get("input")
+                                    .map(ToString::to_string)
+                                    .unwrap_or_default();
+                                out.push(Parsed::ToolStarted { id, name, args });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Block indices restart at zero for the next assistant message/tool round.
+                self.text.clear();
+                self.reasoning.clear();
+            }
+            // User message: tool_result blocks (the outcome of a tool the agent ran).
+            Some("user") => {
+                if let Some(blocks) = v
+                    .get("message")
+                    .and_then(|message| message.get("content"))
+                    .and_then(Value::as_array)
+                {
+                    for block in blocks {
+                        if block.get("type").and_then(Value::as_str) == Some("tool_result") {
+                            let id = block
+                                .get("tool_use_id")
                                 .and_then(Value::as_str)
                                 .unwrap_or("")
                                 .to_string();
-                            let name = b
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or("tool")
-                                .to_string();
-                            let args = b.get("input").map(|i| i.to_string()).unwrap_or_default();
-                            out.push(Parsed::ToolStarted { id, name, args });
+                            let ok = !block
+                                .get("is_error")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            let summary = tool_result_summary(block.get("content"));
+                            out.push(Parsed::ToolFinished { id, ok, summary });
                         }
-                        _ => {}
                     }
                 }
             }
-        }
-        // user message: tool_result blocks (the outcome of a tool the agent ran).
-        Some("user") => {
-            if let Some(blocks) = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_array)
-            {
-                for b in blocks {
-                    if b.get("type").and_then(Value::as_str) == Some("tool_result") {
-                        let id = b
-                            .get("tool_use_id")
+            Some("result") => {
+                if let Some(usage) = v.get("usage").map(usage_from) {
+                    out.push(Parsed::Usage(usage));
+                }
+                let result_text = v.get("result").and_then(Value::as_str).map(str::to_string);
+                if let Some(final_text) = &result_text {
+                    out.push(Parsed::Final(final_text.clone()));
+                }
+                if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+                    out.push(Parsed::Error(
+                        v.get("api_error_status")
                             .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        let ok = !b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-                        let summary = tool_result_summary(b.get("content"));
-                        out.push(Parsed::ToolFinished { id, ok, summary });
-                    }
+                            .map(str::to_string)
+                            .or(result_text)
+                            .unwrap_or_else(|| truncated_event_json(&v)),
+                    ));
                 }
             }
+            // Subscription quota window (Claude Code stream-json, L3). Defensive: any missing field
+            // degrades to Ok / None. `resetsAt` may arrive as secs or ms — normalise ms→secs.
+            Some("rate_limit_event") => {
+                if let Some(info) = v.get("rate_limit_info") {
+                    let status = info.get("status").and_then(Value::as_str).unwrap_or("");
+                    let using_overage = info
+                        .get("isUsingOverage")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let fraction = info
+                        .get("utilization")
+                        .or_else(|| info.get("usedFraction"))
+                        .or_else(|| info.get("fractionUsed"))
+                        .and_then(Value::as_f64);
+                    let resets_at = info.get("resetsAt").and_then(Value::as_i64).map(|time| {
+                        if time > 100_000_000_000 {
+                            time / 1000
+                        } else {
+                            time
+                        }
+                    });
+                    out.push(Parsed::Quota {
+                        window: normalize_window(
+                            info.get("rateLimitType")
+                                .and_then(Value::as_str)
+                                .unwrap_or(""),
+                        ),
+                        status: quota_status_from(status, using_overage, fraction),
+                        resets_at,
+                        fraction,
+                    });
+                }
+            }
+            _ => {}
         }
-        Some("result") => {
-            if let Some(u) = v.get("usage").map(usage_from) {
-                out.push(Parsed::Usage(u));
-            }
-            let result_text = v.get("result").and_then(Value::as_str).map(str::to_string);
-            if let Some(f) = &result_text {
-                out.push(Parsed::Final(f.clone()));
-            }
-            if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
-                out.push(Parsed::Error(
-                    v.get("api_error_status")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .or(result_text)
-                        .unwrap_or_else(|| truncated_event_json(&v)),
-                ));
-            }
-        }
-        // Subscription quota window (Claude Code stream-json, L3). Defensive: any missing field
-        // degrades to Ok / None. `resetsAt` may arrive as secs or ms — normalise ms→secs.
-        Some("rate_limit_event") => {
-            if let Some(info) = v.get("rate_limit_info") {
-                let status = info.get("status").and_then(Value::as_str).unwrap_or("");
-                let using_overage = info
-                    .get("isUsingOverage")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                // The live Claude Code field is `utilization` (0.0–1.0); older/synthetic schemas
-                // used `usedFraction`/`fractionUsed`. Try all so the fraction is actually captured.
-                let fraction = info
-                    .get("utilization")
-                    .or_else(|| info.get("usedFraction"))
-                    .or_else(|| info.get("fractionUsed"))
-                    .and_then(Value::as_f64);
-                let resets_at = info.get("resetsAt").and_then(Value::as_i64).map(|t| {
-                    if t > 100_000_000_000 {
-                        t / 1000
-                    } else {
-                        t
-                    }
-                });
-                out.push(Parsed::Quota {
-                    // Normalise the window name to Forge's vocabulary: Claude emits `seven_day`
-                    // for the weekly window and `five_hour` for the session window.
-                    window: normalize_window(
-                        info.get("rateLimitType")
-                            .and_then(Value::as_str)
-                            .unwrap_or(""),
-                    ),
-                    status: quota_status_from(status, using_overage, fraction),
-                    resets_at,
-                    fraction,
-                });
-            }
-        }
-        _ => {}
+        out
     }
-    out
+}
+
+fn unseen_consolidated_suffix<'a>(full: &'a str, streamed: Option<&String>) -> Option<&'a str> {
+    let Some(streamed) = streamed.filter(|text| !text.is_empty()) else {
+        return Some(full);
+    };
+    match full.strip_prefix(streamed.as_str()) {
+        Some("") => None,
+        Some(suffix) => Some(suffix),
+        None => {
+            // The protocol promises that consolidated blocks assemble the emitted deltas. If a
+            // future CLI violates that, suppressing the repeated block is safer than duplicating a
+            // whole answer in the UI. The authoritative `result.result` remains available.
+            tracing::debug!("Claude consolidated block diverged from its streamed prefix");
+            None
+        }
+    }
+}
+
+/// Parse one Claude line in isolation. Runtime paths retain a [`ClaudeStreamState`] across lines;
+/// this wrapper preserves deterministic single-line parsing for protocol/unit tests.
+fn parse_claude_line(line: &str) -> Vec<Parsed> {
+    ClaudeStreamState::default().parse_line(line)
 }
 
 /// Collapse a tool_result `content` (string, or array of {type:text,text}) into a short summary.
@@ -1478,6 +1814,13 @@ fn parse_line(kind: CliKind, line: &str) -> Vec<Parsed> {
     }
 }
 
+fn parse_stream_line(kind: CliKind, line: &str, claude: &mut ClaudeStreamState) -> Vec<Parsed> {
+    match kind {
+        CliKind::ClaudeCode => claude.parse_line(line),
+        CliKind::Codex | CliKind::Antigravity => parse_line(kind, line),
+    }
+}
+
 /// agy `-p` prints the answer as PLAIN TEXT (no JSON event stream like claude/codex), so every
 /// non-empty stdout line is answer text that accumulates into the final response. There are no
 /// tool/usage/quota events to parse — usage stays $0 (free Gemini tier) and the answer is the
@@ -1596,7 +1939,7 @@ impl CliProvider {
                     // re-prepending it here would be re-ingested by every internal model call, so
                     // a one-line reminder keeps the model on the mcp__forge__ tools instead.
                     (
-                        apply_resume_reminder(self.harness, delta),
+                        apply_resume_reminder(self.harness, self.kind, delta),
                         st.session_id.clone(),
                     )
                 }
@@ -1736,6 +2079,7 @@ impl CliProvider {
         // tool_use id → name, so a later tool_result can be labelled.
         let mut tool_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut claude_stream = ClaudeStreamState::default();
 
         // IDLE timeout, not a hard cap: the window resets on every event, so a long but PRODUCTIVE
         // bridge turn (claude/codex streaming reasoning + tool calls for many minutes on a hard
@@ -1774,7 +2118,7 @@ impl CliProvider {
                         if self.kind == CliKind::ClaudeCode && captured_session.is_none() {
                             captured_session = claude_session_id(&line);
                         }
-                        for item in parse_line(self.kind, &line) {
+                        for item in parse_stream_line(self.kind, &line, &mut claude_stream) {
                             match item {
                                 Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                                 Parsed::Text(t) => {
@@ -2092,7 +2436,11 @@ struct TurnData {
 /// Why a persistent turn's read loop ended without a `result`.
 enum TurnError {
     /// No output for the whole idle window — the process is wedged.
-    Stall,
+    Stall {
+        /// Whether a native tool already ran. A stalled turn may only be replayed when false;
+        /// otherwise replaying could repeat an irreversible side effect.
+        tool_ran: bool,
+    },
     /// stdout read errored.
     Read(std::io::Error),
     /// The process closed stdout before emitting the turn's `result`.
@@ -2107,7 +2455,7 @@ fn turn_error_to_provider(binary: &str, idle: Duration, e: TurnError) -> Provide
     match e {
         // A stalled / prematurely-closed persistent turn is retryable (fail over), like a stalled
         // one-shot bridge or genai stream.
-        TurnError::Stall => ProviderError::Unavailable(format!(
+        TurnError::Stall { .. } => ProviderError::Unavailable(format!(
             "`{binary}` produced no output for {}s — killed (stalled, persistent)",
             idle.as_secs()
         )),
@@ -2294,9 +2642,13 @@ impl LiveSession {
     /// `pending`, leaving the model with no tools and turning tool calls into inert prose.
     async fn initialize_forge_mcp(&mut self, timeout: Duration) -> std::io::Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
+        let initialize = claude_initialize_request("forge-init", true);
         self.write_control_request(
             "forge-init",
-            serde_json::json!({"subtype": "initialize", "hooks": {}, "sdkMcpServers": []}),
+            initialize
+                .get("request")
+                .cloned()
+                .expect("initialize request always has a request payload"),
         )
         .await?;
         self.read_control_response("forge-init", deadline).await?;
@@ -2361,6 +2713,8 @@ impl LiveSession {
         let mut data = TurnData::default();
         let mut tool_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut active_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut claude_stream = ClaudeStreamState::default();
         // Backstop against a wedged turn that never truly progresses (#714: a claude persistent-
         // bridge tool round-trip that deadlocks — claude goes silent on stdout while out-of-band
         // subagent-sink events keep trickling in, which reset the idle timer forever → the session
@@ -2376,9 +2730,21 @@ impl LiveSession {
         }
         loop {
             if last_line.elapsed() >= max_claude_silence {
-                return Err(TurnError::Stall);
+                return Err(TurnError::Stall {
+                    tool_ran: data.tool_ran,
+                });
             }
-            let tick = tokio::time::timeout(idle, async {
+            // A Forge MCP shell command has its own timeout at roughly the same boundary as this
+            // provider-idle watchdog. Give a positively identified in-flight tool one additional
+            // idle window so a legitimate long build can return its ToolFinished event instead of
+            // racing the stream watchdog. Truly silent model streams retain the original cutoff;
+            // the independent `max_claude_silence` backstop still bounds sink-event trickles.
+            let quiet_timeout = if active_tools.is_empty() {
+                idle
+            } else {
+                idle.saturating_mul(2)
+            };
+            let tick = tokio::time::timeout(quiet_timeout, async {
                 tokio::select! {
                     biased;
                     line = self.lines.next_line() => Ev::Line(line),
@@ -2387,7 +2753,11 @@ impl LiveSession {
             })
             .await;
             let line = match tick {
-                Err(_) => return Err(TurnError::Stall),
+                Err(_) => {
+                    return Err(TurnError::Stall {
+                        tool_ran: data.tool_ran,
+                    })
+                }
                 Ok(Ev::Sub(ev)) => {
                     on_event(ev);
                     continue;
@@ -2404,7 +2774,7 @@ impl LiveSession {
                 Ok(Ev::Line(Err(e))) => return Err(TurnError::Read(e)),
             };
             let mut turn_done = false;
-            for item in parse_line(kind, &line) {
+            for item in parse_stream_line(kind, &line, &mut claude_stream) {
                 match item {
                     Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                     Parsed::Text(t) => {
@@ -2413,10 +2783,12 @@ impl LiveSession {
                     }
                     Parsed::ToolStarted { id, name, args } => {
                         data.tool_ran = true;
+                        active_tools.insert(id.clone());
                         tool_names.insert(id, name.clone());
                         on_event(StreamEvent::ToolStarted { name, args });
                     }
                     Parsed::ToolFinished { id, ok, summary } => {
+                        active_tools.remove(&id);
                         let name = tool_names.get(&id).cloned().unwrap_or_default();
                         on_event(StreamEvent::ToolFinished { name, ok, summary });
                     }
@@ -2620,7 +2992,7 @@ impl CliProvider {
                 apply_harness_preamble(self.harness, self.kind, render_prompt(messages))
             } else {
                 // Live process already ingested the full preamble on its first turn.
-                apply_resume_reminder(self.harness, delta)
+                apply_resume_reminder(self.harness, self.kind, delta)
             }
         };
 
@@ -2699,11 +3071,9 @@ impl CliProvider {
                 }
                 Err(PersistentTurn::Fallback)
             }
-            // A wedged persistent process (a tool round-trip that never returned — #714) must not
-            // hard-fail the turn: tear it down and retry on the fresh one-shot transport, which
-            // re-sends the full transcript, so context is preserved and the bridge self-heals
-            // instead of hanging or erroring. Other errors stay hard failures.
-            Err(TurnError::Stall) => {
+            // A wedged process is safe to replay only before any tool ran. Once a tool starts,
+            // automatically re-sending the turn could repeat an irreversible side effect.
+            Err(TurnError::Stall { tool_ran: false }) => {
                 if let Some(old) = guard.take() {
                     old.teardown().await;
                 }
@@ -3551,6 +3921,11 @@ mod tests {
         let i = args.iter().position(|a| a == "--permission-mode").unwrap();
         assert_eq!(args[i + 1], "acceptEdits");
         assert!(args.contains(&"--model".to_string()) && args.contains(&"sonnet".to_string()));
+        assert!(args.contains(&"--include-partial-messages".to_string()));
+        assert!(
+            !args.contains(&"--append-system-prompt".to_string()),
+            "self-agent mode keeps Claude's own system prompt unchanged"
+        );
     }
 
     #[test]
@@ -3761,17 +4136,29 @@ mod tests {
     }
 
     #[test]
-    fn harness_preamble_nudges_to_forge_tools_only_in_harness_mode() {
-        let out = apply_harness_preamble(true, CliKind::ClaudeCode, "User: search the web".into());
-        assert!(out.contains("mcp__forge__web_search"));
-        assert!(out.contains("DISABLED"));
-        // Skills steering: point the bridged model at Forge's use_skill, not the filesystem.
-        assert!(out.contains("mcp__forge__use_skill"));
-        assert!(out.contains("~/.claude"));
-        // Tool-name mapping: bare names (update_tasks/spawn_agents) → their mcp__forge__ form.
-        assert!(out.contains("mcp__forge__update_tasks"));
-        assert!(out.contains("mcp__forge__spawn_agents"));
-        assert!(out.ends_with("User: search the web"));
+    fn claude_harness_preamble_uses_the_system_prompt_channel() {
+        let prompt = "User: search the web".to_string();
+        assert_eq!(
+            apply_harness_preamble(true, CliKind::ClaudeCode, prompt.clone()),
+            prompt,
+            "Claude's user payload must not contain the harness preamble"
+        );
+        let args = build_args(CliKind::ClaudeCode, "sonnet", true, "/bin/forge", &[], None);
+        let flag = args
+            .iter()
+            .position(|arg| arg == "--append-system-prompt")
+            .expect("Claude harness appends a system prompt");
+        let system = &args[flag + 1];
+        assert!(system.contains("mcp__forge__web_search"));
+        assert!(system.contains("DISABLED"));
+        assert!(system.contains("mcp__forge__use_skill"));
+        assert!(system.contains("~/.claude"));
+        assert!(system.contains("mcp__forge__update_tasks"));
+        assert!(system.contains("mcp__forge__spawn_agents"));
+        assert!(
+            args.contains(&"--include-partial-messages".to_string()),
+            "both Claude transports request partial stream events"
+        );
         // Phase-1 self-agent turns are untouched.
         assert_eq!(
             apply_harness_preamble(false, CliKind::ClaudeCode, "User: hi".into()),
@@ -3861,17 +4248,22 @@ mod tests {
     }
 
     #[test]
-    fn resume_invocations_get_a_one_line_reminder_not_the_full_preamble() {
-        let out = apply_resume_reminder(true, "User: continue".into());
+    fn codex_resume_invocations_get_a_one_line_reminder_not_the_full_preamble() {
+        let out = apply_resume_reminder(true, CliKind::Codex, "User: continue".into());
         assert_eq!(out, format!("{HARNESS_RESUME_REMINDER}\n\nUser: continue"));
         // One line, and a fraction of even the slim variant.
         assert!(!HARNESS_RESUME_REMINDER.contains('\n'));
         assert!(HARNESS_RESUME_REMINDER.len() < 128);
         // The full-preamble marker never rides along on a resume delta.
         assert!(!out.contains("[Forge harness] You are running inside"));
+        // Claude receives the full policy through --append-system-prompt on every process.
+        assert_eq!(
+            apply_resume_reminder(true, CliKind::ClaudeCode, "User: continue".into()),
+            "User: continue"
+        );
         // Non-harness (text-mode) deltas stay untouched.
         assert_eq!(
-            apply_resume_reminder(false, "User: continue".into()),
+            apply_resume_reminder(false, CliKind::Codex, "User: continue".into()),
             "User: continue"
         );
     }
@@ -3936,6 +4328,121 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn claude_initialize_protocol_is_sanitized_and_resolves_models() {
+        let line = r#"{
+          "type":"control_response",
+          "response":{
+            "subtype":"success",
+            "request_id":"forge-capabilities",
+            "response":{
+              "models":[{
+                "value":"sonnet",
+                "resolvedModel":"claude-sonnet-5",
+                "displayName":"Sonnet",
+                "description":"Efficient",
+                "supportsEffort":true,
+                "supportedEffortLevels":["low","high"],
+                "supportsAdaptiveThinking":true,
+                "supportsAutoMode":true
+              }],
+              "account":{"email":"must-not-be-persisted@example.com"},
+              "pid":123
+            }
+          }
+        }"#;
+        let mut initialization =
+            parse_claude_initialization_response(line).expect("valid initialize response");
+        let model = initialization
+            .model(Some("sonnet"))
+            .expect("advertised model");
+        assert_eq!(model.resolved_model, "claude-sonnet-5");
+        assert!(model.supports_effort);
+        assert_eq!(model.supported_effort_levels, ["low", "high"]);
+        assert!(model.supports_adaptive_thinking);
+        initialization.models.push(ClaudeModelCapability {
+            value: "opus[1m]".into(),
+            resolved_model: "claude-opus-5[1m]".into(),
+            display_name: Some("Opus (1M context)".into()),
+            ..ClaudeModelCapability::default()
+        });
+        assert_eq!(
+            initialization
+                .model(Some("opus"))
+                .expect("short context alias")
+                .resolved_model,
+            "claude-opus-5[1m]"
+        );
+        let persisted = serde_json::to_string(&initialization).unwrap();
+        assert!(!persisted.contains("account"));
+        assert!(!persisted.contains("email"));
+        assert!(!persisted.contains("must-not-be-persisted"));
+        assert!(!persisted.contains("\"pid\""));
+    }
+
+    #[test]
+    fn claude_initialize_protocol_uses_only_controlled_forge_aliases() {
+        let request = claude_initialize_request("forge-init", true);
+        assert_eq!(request["type"], "control_request");
+        assert_eq!(request["request_id"], "forge-init");
+        assert_eq!(request["request"]["subtype"], "initialize");
+        assert_eq!(
+            request["request"]["toolAliases"]["Bash"],
+            "mcp__forge__shell"
+        );
+        assert_eq!(
+            request["request"]["toolAliases"]["NotebookEdit"],
+            "mcp__forge__notebook_edit"
+        );
+        assert_eq!(
+            request["request"]["toolAliases"]
+                .as_object()
+                .expect("alias object")
+                .len(),
+            9,
+            "alias surface stays intentionally bounded"
+        );
+        assert!(
+            claude_initialize_request("probe", false)["request"]
+                .get("toolAliases")
+                .is_none(),
+            "capability-only probes do not alter tool resolution"
+        );
+    }
+
+    #[test]
+    fn claude_partial_messages_stream_without_consolidated_duplicates() {
+        let mut stream = ClaudeStreamState::default();
+        let first = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello "}}}"#;
+        let second = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"world"}}}"#;
+        let consolidated =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
+        assert_eq!(texts(&stream.parse_line(first)), "hello ");
+        assert_eq!(texts(&stream.parse_line(second)), "world");
+        assert!(
+            stream.parse_line(consolidated).is_empty(),
+            "the assembled assistant block was already emitted as deltas"
+        );
+    }
+
+    #[test]
+    fn claude_partial_messages_emit_an_unstreamed_suffix_and_thinking() {
+        let mut stream = ClaudeStreamState::default();
+        let thinking = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"consider"}}}"#;
+        assert_eq!(
+            stream.parse_line(thinking),
+            vec![Parsed::Reasoning("consider".into())]
+        );
+        let partial = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hel"}}}"#;
+        assert_eq!(texts(&stream.parse_line(partial)), "hel");
+        let consolidated = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"consider"},{"type":"text","text":"hello"}]}}"#;
+        assert_eq!(
+            stream.parse_line(consolidated),
+            vec![Parsed::Text("lo".into())],
+            "only bytes absent from partial delivery are emitted"
+        );
     }
 
     #[test]
@@ -4521,6 +5028,49 @@ done
         )
     }
 
+    /// A fake persistent Claude turn whose tool runs longer than the base provider-idle window but
+    /// finishes within the bounded in-flight-tool grace window.
+    #[cfg(unix)]
+    fn make_fake_slow_tool_cli() -> String {
+        install_fake_cli(
+            "forge-fake-slow-tool",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"slow-1","name":"mcp__forge__shell","input":{"command":"build"}}]}}\n'
+  sleep 1.2
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"slow-1","is_error":false,"content":"built"}]}}\n'
+  printf '{"type":"result","is_error":false,"result":"done","usage":{"input_tokens":5,"output_tokens":3}}\n'
+done
+"#,
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persistent_in_flight_tool_gets_one_bounded_extra_idle_window() {
+        let fake = make_fake_slow_tool_cli();
+        let provider = CliProvider::claude_code()
+            .with_harness(false)
+            .with_persistent(true)
+            .with_binary(&fake)
+            .with_timeout(Duration::from_secs(1));
+        let mut sink = |_event: StreamEvent| {};
+
+        let started = std::time::Instant::now();
+        let response = provider
+            .complete(
+                "claude-cli::sonnet",
+                &[Message::user("run the build")],
+                &[],
+                &mut sink,
+            )
+            .await
+            .expect("the tool result should arrive inside the extended tool window");
+        assert_eq!(response.content, "done");
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
     /// A fake persistent Claude process modelling the startup race in the real CLI: the streaming
     /// (`--input-format stream-json`) transport starts a turn the moment one is written, whether or
     /// not `initialize` + `mcp_status` have completed, so a turn sent too early runs without tools.
@@ -4653,6 +5203,32 @@ done
         )
     }
 
+    /// A fake whose first persistent turn executes a tool and then wedges. The one-shot branch
+    /// would succeed, making any unsafe automatic replay obvious both in the return value and log.
+    #[cfg(unix)]
+    fn make_fake_wedges_after_tool_cli(log: &std::path::Path) -> String {
+        install_fake_cli(
+            "forge-fake-side-effect-wedge",
+            &format!(
+                r#"#!/usr/bin/env bash
+printf 'spawn:%s\n' "$*" >> '{}'
+case " $* " in
+  *" --input-format stream-json "*)
+    IFS= read -r line
+    printf '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t1","name":"Bash","input":{{"command":"side-effect"}}}}]}}}}\n'
+    printf '{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"ran"}}]}}}}\n'
+    sleep 3600
+    ;;
+  *)
+    printf '{{"type":"result","is_error":false,"result":"UNSAFE REPLAY","usage":{{"input_tokens":1,"output_tokens":1}}}}\n'
+    ;;
+esac
+"#,
+                log.display()
+            ),
+        )
+    }
+
     /// #714: a persistent turn that wedges (a tool round-trip that never returns) must NOT hang the
     /// session `busy` forever. It stalls within the window and surfaces a RETRYABLE error — so the
     /// session's model-level failover recovers — instead of hanging or a hard, non-retryable fail.
@@ -4698,6 +5274,44 @@ done
         assert!(
             err.is_retryable(),
             "a wedged bridge turn must be retryable so the session fails over, got: {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persistent_stall_after_a_tool_never_replays_the_turn() {
+        let recorder = tempfile::tempdir().expect("spawn recorder");
+        let log = recorder.path().join("spawns.log");
+        let fake = make_fake_wedges_after_tool_cli(&log);
+        let provider = CliProvider::claude_code()
+            .with_harness(false)
+            .with_persistent(true)
+            .with_binary(&fake)
+            .with_timeout(Duration::from_secs(1));
+        let mut sink = |_event: StreamEvent| {};
+
+        let result = provider
+            .complete(
+                "claude-cli::sonnet",
+                &[Message::user("run one side effect")],
+                &[],
+                &mut sink,
+            )
+            .await;
+        let error = result.expect_err("a post-tool stall must fail, never replay");
+        assert!(
+            error.is_retryable(),
+            "failover remains available: {error:?}"
+        );
+        let spawns = std::fs::read_to_string(&log).expect("fake recorded its invocation");
+        assert_eq!(
+            spawns.lines().count(),
+            1,
+            "a one-shot fallback would execute the same turn a second time: {spawns}"
+        );
+        assert!(
+            spawns.contains("--input-format stream-json"),
+            "the sole invocation is the persistent transport"
         );
     }
 
@@ -4791,6 +5405,34 @@ done
             "the long-lived session must recall the codeword from turn 1; got: {}",
             r2.content
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "spawns the installed `claude` CLI for a non-billing initialize control request"]
+    async fn e2e_claude_initialize_discovers_sanitized_capabilities() {
+        let initialization = CliKind::ClaudeCode
+            .claude_initialization()
+            .await
+            .expect("installed Claude supports initialize");
+        assert!(
+            initialization
+                .cli_version
+                .as_deref()
+                .is_some_and(|version| version.contains("Claude Code")),
+            "version: {:?}",
+            initialization.cli_version
+        );
+        assert!(!initialization.models.is_empty());
+        assert!(
+            initialization
+                .model(Some("default"))
+                .is_some_and(|model| !model.resolved_model.is_empty()),
+            "default model resolves: {:?}",
+            initialization.models
+        );
+        let persisted = serde_json::to_string(&initialization).unwrap();
+        assert!(!persisted.contains("account"));
+        assert!(!persisted.contains("email"));
     }
 
     #[cfg(unix)]

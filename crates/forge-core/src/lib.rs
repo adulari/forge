@@ -4171,7 +4171,7 @@ Rules:\n\
                 // Empty tool slice — the planner must not call tools.
                 let fut =
                     provider.complete_with(&model, &planner_msgs, &[], &completion_opts, &mut sink);
-                stream_with_idle_timeout(fut, &activity, stream_idle).await
+                stream_with_idle_timeout(fut, &activity, None, stream_idle).await
             };
 
             match result {
@@ -5009,7 +5009,7 @@ prompt text, nothing else.";
             provider.complete_with(&model, &messages, &[], &completion_opts, &mut sink);
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(SHELL_DIAGNOSE_MAX_SECS),
-            stream_with_idle_timeout(completion, &activity, idle),
+            stream_with_idle_timeout(completion, &activity, None, idle),
         )
         .await;
         if let Ok(Ok(r)) = response {
@@ -5414,6 +5414,8 @@ prompt text, nothing else.";
                     // instead of hanging the turn forever.
                     let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                     let act = std::sync::Arc::clone(&activity);
+                    let active_tools = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let active = std::sync::Arc::clone(&active_tools);
                     let tools = std::sync::Arc::clone(&tools_ran);
                     let inspects = std::sync::Arc::clone(&inspect_ran);
                     let build_fight = std::sync::Arc::clone(&bridge_build_fight);
@@ -5436,6 +5438,7 @@ prompt text, nothing else.";
                                 presenter.emit(PresenterEvent::Reasoning(t))
                             }
                             StreamEvent::ToolStarted { name, args } => {
+                                active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 tools.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 // Bookkeeping tools don't count as a real inspection — the
                                 // verification gate needs an actual state CHECK (read/shell/…).
@@ -5459,6 +5462,11 @@ prompt text, nothing else.";
                                 presenter.emit(PresenterEvent::ToolStart { name, args })
                             }
                             StreamEvent::ToolFinished { name, ok, summary } => {
+                                let _ = active.fetch_update(
+                                    std::sync::atomic::Ordering::Relaxed,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                    |count| Some(count.saturating_sub(1)),
+                                );
                                 let observation = pending_observations
                                     .lock()
                                     .unwrap()
@@ -5532,7 +5540,7 @@ prompt text, nothing else.";
                         &completion_opts,
                         &mut sink,
                     );
-                    stream_with_idle_timeout(fut, &activity, stream_idle).await
+                    stream_with_idle_timeout(fut, &activity, Some(&active_tools), stream_idle).await
                 };
                 if let Err(error) = &result {
                     let error_kind = if error.is_auth() {
@@ -10300,6 +10308,7 @@ fn inject_budget(base: usize, status: BudgetStatus) -> usize {
 async fn stream_with_idle_timeout<F>(
     fut: F,
     activity: &std::sync::atomic::AtomicU64,
+    active_tools: Option<&std::sync::atomic::AtomicU64>,
     idle: std::time::Duration,
 ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError>
 where
@@ -10322,10 +10331,24 @@ where
                 if now != last_seen {
                     last_seen = now;
                     last_change = std::time::Instant::now();
-                } else if last_change.elapsed() >= idle {
+                } else {
+                    // A provider may go quiet while an MCP tool legitimately runs. Forge's shell
+                    // tool has its own bounded timeout near the base stream-idle boundary, so give
+                    // a positively identified in-flight tool one extra window to report its
+                    // ToolFinished event. Ordinary half-open streams keep the original cutoff.
+                    let effective_idle = if active_tools.is_some_and(|tools| {
+                        tools.load(std::sync::atomic::Ordering::Relaxed) > 0
+                    }) {
+                        idle.saturating_mul(2)
+                    } else {
+                        idle
+                    };
+                    if last_change.elapsed() < effective_idle {
+                        continue;
+                    }
                     return Err(forge_provider::ProviderError::Unavailable(format!(
                         "stream stalled — no data for {}s",
-                        idle.as_secs()
+                        effective_idle.as_secs()
                     )));
                 }
             }
@@ -14143,6 +14166,36 @@ mod tests {
         }
     }
 
+    /// Emits a real tool start, stays quiet longer than the base idle window while that tool runs,
+    /// then reports the result and completes. The watchdog should distinguish this bounded tool
+    /// execution from a half-open provider stream.
+    struct SlowToolThenFinishProvider;
+    #[async_trait::async_trait]
+    impl Provider for SlowToolThenFinishProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            on_event(StreamEvent::ToolStarted {
+                name: "shell".to_string(),
+                args: r#"{"command":"build"}"#.to_string(),
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+            on_event(StreamEvent::ToolFinished {
+                name: "shell".to_string(),
+                ok: true,
+                summary: "built".to_string(),
+            });
+            Ok(forge_provider::ModelResponse {
+                content: "tool completed".to_string(),
+                ..Default::default()
+            })
+        }
+    }
+
     #[tokio::test]
     async fn stalled_stream_times_out_instead_of_hanging() {
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -14200,6 +14253,33 @@ mod tests {
         .expect("heartbeat stream should finish within the test bound")
         .expect("provider heartbeats must prevent a false idle timeout");
         assert_eq!(result, "buffered stream completed");
+    }
+
+    #[tokio::test]
+    async fn in_flight_tool_gets_one_bounded_extra_stream_idle_window() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = Config::default();
+        config.mesh.stream_idle_timeout_secs = 1;
+        config.mesh.failover = false;
+        let mut session = Session::start(
+            store,
+            Arc::new(SlowToolThenFinishProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            session.run_turn("wait for the in-flight build tool"),
+        )
+        .await
+        .expect("bounded slow tool should finish")
+        .expect("the stream watchdog must not race a known in-flight tool");
+        assert_eq!(result, "tool completed");
     }
 
     #[tokio::test]
