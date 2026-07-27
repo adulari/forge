@@ -187,8 +187,8 @@ old/deprecated term in an unedited production sibling, OPEN that code and handle
 omission under the prior compatibility rule. Do not modify tests.";
 
 const DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT: &str = "\
-Your completeness audit OPENED the related production path(s) listed below, but the final diff \
-still leaves them unchanged. That is unresolved evidence, not a completed audit. Re-open each \
+Your completeness evidence identified the related production path(s) listed below, but the final \
+diff still leaves them unchanged. That is unresolved evidence, not a completed audit. Open each \
 listed path and address the task there NOW. For a deprecation/rename, make the replacement name \
 preferred while preserving the old name only as a compatibility fallback. Do not run more broad \
 searches, do not edit tests, and do not finish with prose that merely repeats the changes already \
@@ -452,6 +452,25 @@ fn opened_unchanged_production_paths(
             paths.insert(relative);
         }
     }
+    paths.into_iter().collect()
+}
+
+fn unresolved_completeness_production_paths(
+    primary_identifier_matches: &std::collections::BTreeSet<String>,
+    audit_messages: &[Message],
+    workspace_root: &std::path::Path,
+    changed_paths: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut paths =
+        opened_unchanged_production_paths(audit_messages, workspace_root, changed_paths)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+    paths.extend(
+        primary_identifier_matches
+            .iter()
+            .filter(|path| !changed_paths.contains(path.as_str()))
+            .cloned(),
+    );
     paths.into_iter().collect()
 }
 
@@ -7565,25 +7584,26 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             let changed_paths = changed_paths_from_status(
                 working_tree_status(Some(self.workspace.root())).as_deref(),
             );
-            let opened_unchanged = opened_unchanged_production_paths(
+            let unresolved_paths = unresolved_completeness_production_paths(
+                &primary_identifier_matches,
                 &self.transcript[audit_transcript_start..],
                 self.workspace.root(),
                 &changed_paths,
             );
-            if !opened_unchanged.is_empty()
+            if !unresolved_paths.is_empty()
                 && !self.past_turn_deadline()
                 && !hit_step_cap
                 && !halted_by_loop_guard
             {
                 self.presenter.emit(PresenterEvent::Warning(format!(
-                    "completeness audit opened {} unchanged production path(s) — requiring an \
-                     explicit fix before finishing",
-                    opened_unchanged.len()
+                    "completeness audit left {} evidence-backed production path(s) unchanged — \
+                     requiring an explicit fix before finishing",
+                    unresolved_paths.len()
                 )));
                 self.auto_compact_if_needed(&active_model).await;
                 let prompt = format!(
-                    "{DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT}\n\nOpened but unchanged production paths:\n- {}",
-                    opened_unchanged.join("\n- ")
+                    "{DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT}\n\nEvidence-backed but unchanged production paths:\n- {}",
+                    unresolved_paths.join("\n- ")
                 );
                 let seq = self.next_seq();
                 self.store
@@ -19701,6 +19721,29 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_completeness_carries_primary_matches_into_final_gate() {
+        let primary_matches = ["src/parser.rs", "src/adapter.rs"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        let changed_paths = ["src/parser.rs"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(
+            unresolved_completeness_production_paths(
+                &primary_matches,
+                &[],
+                std::path::Path::new("/repo"),
+                &changed_paths,
+            ),
+            vec!["src/adapter.rs".to_string()],
+            "a sibling found before the audit remains unresolved until the final diff changes it"
+        );
+    }
+
+    #[test]
     fn direct_scope_guidance_extracts_explicit_class_methods_only() {
         assert_eq!(
             direct_scope_guidance_named_apis(
@@ -20062,16 +20105,16 @@ mod tests {
                 matches!(
                     event,
                     PresenterEvent::Warning(message)
-                        if message.contains("opened 1 unchanged production path")
+                        if message.contains("left 1 evidence-backed production path")
                 )
             }),
-            "an opened but unchanged production sibling must trigger the path-aware gate"
+            "an evidence-backed unchanged production sibling must trigger the path-aware gate"
         );
         assert!(
             session.transcript.iter().any(|message| {
                 message
                     .content
-                    .contains("Opened but unchanged production paths")
+                    .contains("Evidence-backed but unchanged production paths")
                     && message.content.contains("sibling.py")
             }),
             "the final re-drive must name the exact unresolved production path"
