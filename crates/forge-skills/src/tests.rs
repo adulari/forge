@@ -632,6 +632,16 @@ fn orchestrate_never_invents_a_use_skill_list_operation() {
 }
 
 #[test]
+fn automatic_orchestration_keeps_single_coding_tasks_direct() {
+    let guidance = orchestrate_system_guidance();
+
+    assert!(guidance.contains("A single bug"));
+    assert!(guidance.contains("remains ONE task"));
+    assert!(guidance.contains("Do NOT delegate routine"));
+    assert!(guidance.contains("tools share context and are faster"));
+}
+
+#[test]
 fn subdir_command_gets_namespaced_name() {
     let t = Tmp::new();
     // Create commands/git/commit.md — should load as "git:commit"

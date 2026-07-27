@@ -135,6 +135,326 @@ the first time. Re-read the original task, then check your diff against it:
 If you find a genuine problem, FIX it now with the tools. If the change is correct and complete, \
 say so in one line and stop — do NOT make changes for their own sake or second-guess a sound fix.";
 
+/// Direct-provider counterpart of the bridge completeness re-drive. Unlike the broad same-model
+/// self-review (which regressed when always-on), this requires a small, concrete repository-search
+/// sweep and permits another edit only when that evidence exposes an omitted production path.
+const DIRECT_COMPLETENESS_PROMPT: &str = "\
+Before finishing this identifier-migration code-change task, perform ONE bounded completeness \
+audit grounded in evidence:
+1. Run `git diff` once to inspect the COMPLETE current change, then re-read the original task.
+2. You MUST run a targeted repository search sweep for related production paths (maximum THREE \
+search commands). If the task or removed diff lines rename, replace, deprecate, or change an \
+identifier, option, API, format, or behavior, search for EACH old/deprecated name as a plain \
+literal, separately or in a simple alternation. Do NOT add surrounding-syntax predicates such as \
+a particular variable, container, call shape, or accessor: those can hide a sibling implementation \
+that uses the same name differently. Search the nearest production subsystem containing the edited \
+file AND its sibling files; if that finds matches only in files already edited, widen one directory \
+level once. Otherwise search for the directly affected callers/implementations.
+3. Search-result snippets are NOT inspection. You MUST open the relevant surrounding code in every \
+unedited production file returned with an old/deprecated name, especially sibling clients, \
+adapters, serializers, commands, and alternate entry points. Explicitly classify whether each path \
+implements the same behavior. For a deprecation or rename, any public config/parser/CLI path in the \
+affected subsystem that still consumes the old name is a CONCRETE OMISSION until it prefers the \
+replacement while retaining the old alias for compatibility (unless the task requires removal). A \
+different call shape or downstream consumer does not exempt that path. Do not finish with such an \
+unhandled occurrence. Passing existing tests alone is not proof: hidden tests often exercise an \
+omitted sibling path.
+4. If one is missing, fix that specific omission and run focused verification. If the sweep reveals \
+no concrete omission, make NO further edits and finish.
+
+Do not broadly re-explore or refactor, and do not modify existing tests to hide a failure. This is \
+one evidence check, not an invitation to second-guess a complete fix.";
+
+/// A direct audit that reports no matches after identifiers disappeared from the diff has not
+/// produced trustworthy evidence: path + glob duplication and over-narrow scopes are common model
+/// mistakes. Give that case one final, mechanically different search attempt rather than accepting
+/// an empty result as proof of completeness.
+const DIRECT_COMPLETENESS_EMPTY_SEARCH_RETRY_PROMPT: &str = "\
+Your required completeness search reported NO MATCHES even though the task/diff removed or replaced \
+old terms. Treat that as a likely search-scope or glob failure, NOT proof that no sibling path exists.
+Run ONE final fallback from the repository root with a plain-literal shell search such as \
+`git grep -n -F -e '<old-name>' -- <nearest-production-directory>` (add another `-e` for another \
+old name). Scope with a directory path OR a file glob, never duplicate the repo-relative prefix in \
+both. If it finds an old/deprecated term in an unedited production sibling, OPEN that code and \
+handle the concrete omission under the prior compatibility rule. If the fallback truly finds no \
+related production occurrence, make no edit and finish. Do not modify tests.";
+
+const DIRECT_COMPLETENESS_MISSING_SEARCH_RETRY_PROMPT: &str = "\
+You skipped the REQUIRED repository search in the completeness audit. Do not finish yet. Run ONE \
+plain-literal search from the repository root for the old/deprecated identifier(s), using a command \
+such as `git grep -n -F -e '<old-name>' -- <nearest-production-directory>`. If it finds an \
+old/deprecated term in an unedited production sibling, OPEN that code and handle the concrete \
+omission under the prior compatibility rule. Do not modify tests.";
+
+const DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT: &str = "\
+Your completeness audit OPENED the related production path(s) listed below, but the final diff \
+still leaves them unchanged. That is unresolved evidence, not a completed audit. Re-open each \
+listed path and address the task there NOW. For a deprecation/rename, make the replacement name \
+preferred while preserving the old name only as a compatibility fallback. Do not run more broad \
+searches, do not edit tests, and do not finish with prose that merely repeats the changes already \
+made.";
+
+const DIRECT_NAMED_API_SCOPE_GUIDANCE: &str = "\
+The task explicitly names the production API(s) below. Treat those API boundaries as the default \
+implementation scope. Before changing a shared lower-level helper instead, OPEN its production \
+callers and establish that behavior remains unchanged outside the requested API and when the new \
+option or condition is absent/default. Prefer the smallest conditional change at the named API \
+unless concrete caller evidence requires the shared helper. Preserve the named API's existing \
+control-flow guards, indentation, post-processing, squeeze/shape behavior, and return paths outside \
+that smallest conditional. After editing, inspect the complete function and diff for any moved or \
+deleted guard.";
+
+/// First-pass scope guard for direct-provider identifier migrations. This is injected into the
+/// initial context pack, so it improves discovery without paying for a second provider round.
+const DIRECT_IDENTIFIER_MIGRATION_SCOPE_GUIDANCE: &str = "\
+This task migrates a deprecated/renamed identifier, option, or API. Before editing, do ONE bounded \
+production-scope sweep:
+- Search for EACH old/deprecated identifier as a plain literal in the nearest production subsystem \
+containing the named code (maximum TWO search commands). Do not search tests alone, and do not add \
+surrounding-syntax predicates that can hide a sibling implementation.
+- Open every unedited production sibling match that may implement the same behavior, especially \
+clients, adapters, serializers, commands, parsers, and alternate entry points. Search snippets are \
+not inspection.
+- Update every concrete same-behavior path. For a deprecation/rename, any config/parser/CLI path in \
+the affected subsystem that still consumes the old name is a CONCRETE OMISSION until it prefers \
+the replacement while retaining the old alias as a fallback unless removal is explicit. A \
+different call shape or downstream consumer does not exempt that path.
+
+Keep the sweep bounded; do not broadly review or refactor unrelated code.";
+
+fn completeness_search_reported_no_matches(messages: &[Message]) -> bool {
+    messages.iter().any(|message| {
+        if message.role != Role::Tool {
+            return false;
+        }
+        let content = message.content.to_ascii_lowercase();
+        content.contains("no matches for") || content.contains("0 matches for")
+    })
+}
+
+fn completeness_repository_search_ran(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .any(|call| {
+            if call.name == "search" {
+                return true;
+            }
+            if call.name != "shell" {
+                return false;
+            }
+            call.args
+                .get("command")
+                .and_then(|command| command.as_str())
+                .map(|command| {
+                    let command = command.to_ascii_lowercase();
+                    command.contains("git grep")
+                        || command.contains("rg ")
+                        || command.contains("grep ")
+                })
+                .unwrap_or(false)
+        })
+}
+
+/// Production files returned by the primary solve's required plain-literal identifier search.
+/// Test-only, unrelated, empty, and unparseable searches produce no evidence, keeping the
+/// turn-end completeness fallback enabled.
+fn completeness_production_identifier_search_matches(
+    messages: &[Message],
+    workspace_root: &std::path::Path,
+    prompt: &str,
+) -> std::collections::BTreeSet<String> {
+    let prompt_terms = prompt
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|term| term.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut matches = std::collections::BTreeSet::new();
+    for call in messages
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .filter(|call| call.name == "search")
+    {
+        let Some(raw_path) = call.args.get("path").and_then(|path| path.as_str()) else {
+            continue;
+        };
+        let path = std::path::Path::new(raw_path);
+        let relative_search_root = if path.is_absolute() {
+            match path.strip_prefix(workspace_root) {
+                Ok(relative) => relative,
+                Err(_) => continue,
+            }
+        } else {
+            path
+        };
+        let relative_search_root = relative_search_root
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches("./")
+            .to_string();
+        if is_test_path(&relative_search_root) {
+            continue;
+        }
+
+        let query_mentions_prompt_identifier = call
+            .args
+            .get("query")
+            .and_then(|query| query.as_str())
+            .into_iter()
+            .flat_map(|query| query.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')))
+            .filter(|term| term.len() >= 3)
+            .map(str::to_ascii_lowercase)
+            .any(|term| prompt_terms.contains(&term));
+        if !query_mentions_prompt_identifier {
+            continue;
+        }
+
+        let Some(result) = messages.iter().find(|message| {
+            message.role == Role::Tool && message.tool_call_id.as_deref() == Some(call.id.as_str())
+        }) else {
+            continue;
+        };
+        for line in result.content.lines() {
+            let Some((raw_match_path, _)) = line.split_once(':') else {
+                continue;
+            };
+            let raw_match_path = raw_match_path.trim();
+            if raw_match_path.is_empty() {
+                continue;
+            }
+            let match_path = std::path::Path::new(raw_match_path);
+            let relative_match = if match_path.is_absolute() {
+                match match_path.strip_prefix(workspace_root) {
+                    Ok(relative) => relative.to_path_buf(),
+                    Err(_) => continue,
+                }
+            } else if relative_search_root.is_empty()
+                || match_path.starts_with(std::path::Path::new(&relative_search_root))
+            {
+                match_path.to_path_buf()
+            } else {
+                std::path::Path::new(&relative_search_root).join(match_path)
+            };
+            let relative_match = relative_match
+                .to_string_lossy()
+                .replace('\\', "/")
+                .trim_start_matches("./")
+                .to_string();
+            if !relative_match.is_empty() && !is_test_path(&relative_match) {
+                matches.insert(relative_match);
+            }
+        }
+    }
+    matches
+}
+
+fn direct_completeness_is_identifier_migration(prompt: &str) -> bool {
+    let prompt = prompt.to_ascii_lowercase();
+    [
+        "deprecat",
+        "renam",
+        "old name",
+        "new name",
+        "alias",
+        "backward compat",
+        "backwards compat",
+        "compatibility fallback",
+    ]
+    .iter()
+    .any(|signal| prompt.contains(signal))
+}
+
+fn direct_scope_guidance_named_apis(prompt: &str) -> Vec<String> {
+    let mut names = prompt
+        .split_whitespace()
+        .filter_map(|token| {
+            let token = token
+                .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'));
+            let token = token.trim_matches('.');
+            let (owner, member) = token.split_once('.')?;
+            if owner.contains('.') || member.contains('.') {
+                return None;
+            }
+            let mut owner_chars = owner.chars();
+            let first = owner_chars.next()?;
+            let second = owner_chars.next()?;
+            let owner_is_class = first.is_ascii_uppercase()
+                && second.is_ascii_lowercase()
+                && owner
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            let member_is_method = member
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+                && member
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            (owner_is_class && member_is_method).then(|| token.to_string())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn changed_paths_from_status(status: Option<&[u8]>) -> std::collections::HashSet<String> {
+    status
+        .map(String::from_utf8_lossy)
+        .into_iter()
+        .flat_map(|status| {
+            status
+                .lines()
+                .filter_map(|line| {
+                    if line.len() < 4 {
+                        return None;
+                    }
+                    let raw_path = &line[3..];
+                    let path = raw_path
+                        .rsplit_once(" -> ")
+                        .map(|(_, destination)| destination)
+                        .unwrap_or(raw_path)
+                        .trim()
+                        .trim_matches('"')
+                        .replace('\\', "/");
+                    (!path.is_empty()).then_some(path)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn opened_unchanged_production_paths(
+    messages: &[Message],
+    workspace_root: &std::path::Path,
+    changed_paths: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut paths = std::collections::BTreeSet::new();
+    for call in messages.iter().flat_map(|message| &message.tool_calls) {
+        if call.name != "read_file" {
+            continue;
+        }
+        let Some(raw_path) = forge_types::extract_path_arg(&call.args) else {
+            continue;
+        };
+        let path = std::path::Path::new(raw_path);
+        let relative = if path.is_absolute() {
+            match path.strip_prefix(workspace_root) {
+                Ok(relative) => relative,
+                Err(_) => continue,
+            }
+        } else {
+            path
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if !relative.is_empty() && !is_test_path(&relative) && !changed_paths.contains(&relative) {
+            paths.insert(relative);
+        }
+    }
+    paths.into_iter().collect()
+}
+
 /// Whether a `shell` tool result reports a failure (non-zero exit, signal, timeout, or spawn
 /// error). The tool's first line is `shell: exit N in …`, `shell: timed out …`, `shell: error: …`,
 /// or `shell: failed to start …`; only `exit 0` is success.
@@ -656,13 +976,20 @@ fn failover_policy(
 const EMPTY_DIFF_NUDGE: &str =
     "You have not modified any files. Implement the fix now — do not just describe it.";
 
-/// The env-fight nudge (quality guards wave 4, fix 4): injected once per turn after
-/// [`ENV_FIGHT_THRESHOLD`] consecutive failed environment-provisioning shell commands.
-const ENV_FIGHT_NUDGE: &str = "Environment setup keeps failing. Stop provisioning; verify your \
-change at the logic level (a targeted script or careful reasoning against the code) and finish.";
+/// The env-fight nudge (quality guards wave 4, fix 4): injected once per turn after the
+/// environment-setup spend cap is reached following a provisioning failure.
+const ENV_FIGHT_NUDGE: &str = "Environment setup/build verification hit its spend cap after a \
+provisioning failure. Stop installing dependencies, creating environments, or building native \
+extensions. Keep the code change, use compile/static/diff evidence that does not require more \
+provisioning, and finish; unavailable local dependencies are not a product-code failure.";
 
-/// Consecutive env-setup failures before the nudge fires.
-const ENV_FIGHT_THRESHOLD: usize = 4;
+/// Environment-setup attempts allowed in a turn before the cap fires, once any attempt failed.
+/// One alternate recovery attempt remains available; a third provisioning/native-build command is
+/// then blocked deterministically by [`Session::invoke_tool`].
+const ENV_FIGHT_ATTEMPT_THRESHOLD: usize = 2;
+
+const ENV_FIGHT_BLOCKED_RESULT: &str = "shell: blocked by environment setup/build spend cap; use \
+compile/static/diff evidence without installing dependencies or building native extensions";
 
 /// Repeated build/provision tool invocations within ONE bridge turn before the ceiling folds it
 /// into an early terminate (wave 5, fix 2). A CLI bridge runs its tools in a subprocess, so the
@@ -740,28 +1067,29 @@ fn is_env_setup_command(cmd: &str) -> bool {
     c.split(' ').any(|tok| TOOLS.contains(&tok))
 }
 
-/// Consecutive-failure tracker + once-per-turn latch for the env-fight nudge. Pure state machine
-/// (unit-testable): only env-setup commands feed it — a failure extends the streak, a success
-/// resets it, and `observe` returns `true` exactly once, when the threshold-th consecutive
-/// failure lands.
+/// Per-turn setup-attempt tracker + latch for the environment spend cap. Only env-setup commands
+/// feed it. Successful attempts alone never arm the cap; once any attempt fails, the threshold-th
+/// setup attempt emits the nudge and subsequent setup/build commands are blocked.
 #[derive(Default)]
 struct EnvFightTracker {
-    streak: usize,
+    attempts: usize,
+    saw_failure: bool,
     nudged: bool,
 }
 
 impl EnvFightTracker {
     fn observe(&mut self, failed: bool) -> bool {
-        if !failed {
-            self.streak = 0;
-            return false;
-        }
-        self.streak += 1;
-        if self.streak >= ENV_FIGHT_THRESHOLD && !self.nudged {
+        self.attempts += 1;
+        self.saw_failure |= failed;
+        if self.saw_failure && self.attempts >= ENV_FIGHT_ATTEMPT_THRESHOLD && !self.nudged {
             self.nudged = true;
             return true;
         }
         false
+    }
+
+    fn should_block(&self) -> bool {
+        self.nudged
     }
 }
 
@@ -2936,9 +3264,9 @@ impl Session {
     /// Token and cost totals for the current session from the DB (reliable for bridge providers).
     pub fn session_usage_db(&self) -> (u64, u64, f64) {
         let id = self.session_id();
-        let (inp, out) = self.store.session_tokens(id).unwrap_or((0, 0));
+        let usage = self.store.session_token_usage(id).unwrap_or_default();
         let cost = self.store.session_cost(id).unwrap_or(0.0);
-        (inp, out, cost)
+        (usage.input_tokens, usage.output_tokens, cost)
     }
 
     /// Spend in the last 5 hours (rolling window). Returns 0.0 on store error.
@@ -3315,9 +3643,9 @@ impl Session {
                 schema: t.schema(),
             })
             .collect();
-        // Advertise the subagent virtual tool to the top-level model only (RFC
-        // subagent-orchestration). Children build their own registry without it, so the
-        // depth-1 recursion guard is structural.
+        // Advertise the subagent virtual tool to the top-level model (RFC
+        // subagent-orchestration). Children may receive it separately only when the explicitly
+        // configured recursion depth allows another generation.
         if self.config.mesh.subagents.enabled
             && self
                 .task_scope
@@ -4004,6 +4332,32 @@ Rules:\n\
             // The gauge denominator is the model's REAL window, not the transient overflow cap.
             context_limit: Some(self.base_context_window(model)),
         });
+    }
+
+    /// Emit the terminal accounting snapshot followed by the result event. Terminal accounting
+    /// uses the complete provider-consumption ledger; the context gauge above intentionally keeps
+    /// using only active transcript messages.
+    fn emit_terminal_events(
+        &mut self,
+        final_text: &str,
+        stop_reason: StopReason,
+        context_tokens: u64,
+        active_model: &str,
+    ) -> Result<(), CoreError> {
+        let usage = self.store.session_token_usage(&self.id)?;
+        self.presenter.emit(PresenterEvent::Cost {
+            session_total_usd: self.store.session_cost(&self.id)?,
+            session_in: usage.input_tokens,
+            session_cached_in: usage.cached_input_tokens,
+            session_out: usage.output_tokens,
+            context_tokens,
+            context_limit: Some(self.effective_context_window(active_model)),
+        });
+        self.presenter.emit(PresenterEvent::Done {
+            final_text: final_text.to_string(),
+            stop_reason,
+        });
+        Ok(())
     }
 
     /// Bench (or, for a permanent incapability, exclude) `model` after a retryable error and
@@ -4956,7 +5310,7 @@ prompt text, nothing else.";
         let tools_ran = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         // Counts build/provision tool STARTS a bridge surfaces via the sink across the whole turn
         // (wave 5, fix 2). Per-command success/failure isn't available from the sink, so this
-        // approximates the direct-path env-fight streak with an invocation count; past
+        // approximates the direct-path env-fight spend cap with an invocation count; past
         // BRIDGE_BUILD_FIGHT_THRESHOLD it folds into the token-ceiling early-terminate.
         let bridge_build_fight = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         // Counts INSPECTION tools (anything except `update_tasks`/`present_plan`) — the verification
@@ -6273,20 +6627,19 @@ prompt text, nothing else.";
                         }
                     }
                     // Env-fight spend cap (quality guards wave 4, fix 4): shell commands that look
-                    // like environment provisioning and keep failing are venv archaeology — the
-                    // SWE-bench turns that burned minutes on host-python/repo-era mismatches. After
-                    // ENV_FIGHT_THRESHOLD consecutive failures, tell the model once (per turn) to
-                    // stop provisioning and verify at the logic level. Delivered via pending_hints
-                    // so it lands right after this failing result.
+                    // like environment provisioning after a failure are venv archaeology — the
+                    // SWE-bench turns that burned minutes on host-python/repo-era mismatches. Allow
+                    // one alternate recovery attempt, then tell the model once per turn to stop.
+                    // Delivered via pending_hints so it lands right after the threshold result.
                     if self.config.mesh.env_fight_nudge && call.name == "shell" {
                         if let Some(cmd) = call.args.get("command").and_then(|v| v.as_str()) {
                             if is_env_setup_command(cmd)
                                 && self.env_fight.observe(shell_command_failed(&result))
                             {
                                 self.presenter.emit(PresenterEvent::Warning(format!(
-                                    "environment setup failed {ENV_FIGHT_THRESHOLD}× in a row — \
-                                     nudging the model to stop provisioning and verify at the \
-                                     logic level"
+                                    "environment setup/build spend cap reached after a failure \
+                                     ({ENV_FIGHT_ATTEMPT_THRESHOLD} attempts) — blocking further \
+                                     provisioning this turn"
                                 )));
                                 self.pending_hints.push(ENV_FIGHT_NUDGE.to_string());
                             }
@@ -6644,6 +6997,30 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 guidance,
             )?;
         }
+        if self.config.mesh.verify_completeness && !forge_provider::is_cli_bridge(&routed_model) {
+            if direct_completeness_is_identifier_migration(prompt) {
+                self.inject_context(
+                    &mut context_pack,
+                    context_pack::ContextSource::TurnContract,
+                    "identifier-migration production scope",
+                    DIRECT_IDENTIFIER_MIGRATION_SCOPE_GUIDANCE,
+                )?;
+            } else {
+                let named_apis = direct_scope_guidance_named_apis(prompt);
+                if !named_apis.is_empty() {
+                    let guidance = format!(
+                        "{DIRECT_NAMED_API_SCOPE_GUIDANCE}\n\nNamed production APIs:\n- {}",
+                        named_apis.join("\n- ")
+                    );
+                    self.inject_context(
+                        &mut context_pack,
+                        context_pack::ContextSource::TurnContract,
+                        "explicit named-API implementation scope",
+                        &guidance,
+                    )?;
+                }
+            }
+        }
         let seq = self.next_seq();
         self.current_turn_seq = seq;
         self.task_scope = Some(TaskScope::for_turn(
@@ -6806,6 +7183,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         } else {
             None
         };
+        let primary_transcript_start = self.transcript.len();
         let outcome = self
             .run_model_loop(edit_model, &specs, primary_decision, max_steps, stream_idle)
             .await?;
@@ -7016,6 +7394,227 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
         }
 
+        // ── Direct-provider completeness audit (mesh.verify_completeness) ─────────────────────
+        // The loop-gated completeness re-drive inside `run_model_loop` covers CLI bridges, whose
+        // subprocess yields back to Forge before the outer turn ends. Direct providers never pass
+        // through that bridge-yield branch, so the same opt-in quality lever was silently inert for
+        // `codex-oauth`/API models. Run one bounded evidence pass here after the edit/test guard,
+        // but only for explicit identifier migrations. Matched same-model evaluation found the
+        // direct pass helpful for deprecation/rename work and harmful for unrelated bug fixes; the
+        // bridge pass above intentionally remains broad.
+        //
+        // This is deliberately narrower than `mesh.self_review`: the model must inspect the final
+        // diff and perform one related-symbol/call-site search, and may edit only if that search
+        // exposes a concrete omitted production path. That targets under-scoped fixes without the
+        // unconstrained second-guessing that made always-on self-review regress.
+        // Actual writes are authoritative even when a descriptive issue statement does not begin
+        // with one of TurnContract's deliberately narrow imperative verbs. Keep the explicit
+        // contract paths too: they preserve the intended audit when a provider changed the tree
+        // through a mechanism that the per-turn write counter cannot observe.
+        let code_change_turn = self.edits_this_turn > 0
+            || self.expect_code_change
+            || self.last_turn_contract.requires_changed_artifact();
+        let primary_changed_paths =
+            changed_paths_from_status(working_tree_status(Some(self.workspace.root())).as_deref());
+        // Overflow compaction can replace the transcript with a shorter summary while the
+        // primary model loop is running. In that case the old start offset is no longer a
+        // valid boundary, and the safe result is "no proof that the migration sweep was
+        // complete" so the bounded audit remains eligible.
+        let primary_turn_messages = self
+            .transcript
+            .get(primary_transcript_start..)
+            .unwrap_or_default();
+        let primary_identifier_matches = completeness_production_identifier_search_matches(
+            primary_turn_messages,
+            self.workspace.root(),
+            prompt,
+        );
+        let primary_migration_sweep_complete = !primary_identifier_matches.is_empty()
+            && primary_identifier_matches
+                .iter()
+                .all(|path| primary_changed_paths.contains(path));
+        if self.config.mesh.verify_completeness
+            && code_change_turn
+            && direct_completeness_is_identifier_migration(prompt)
+            && !primary_migration_sweep_complete
+            && !forge_provider::is_cli_bridge(&active_model)
+            && !self.past_turn_deadline()
+            && !halted_by_loop_guard
+            && working_tree_changed_since(
+                Some(self.workspace.root()),
+                working_tree_baseline.as_deref(),
+            )
+        {
+            self.presenter.emit(PresenterEvent::Warning(
+                "completeness check — bounded search for omitted related production paths"
+                    .to_string(),
+            ));
+            self.auto_compact_if_needed(&active_model).await;
+            let seq = self.next_seq();
+            self.store.add_message(
+                &self.id,
+                seq,
+                Role::System,
+                DIRECT_COMPLETENESS_PROMPT,
+                None,
+            )?;
+            self.transcript
+                .push(Message::system(DIRECT_COMPLETENESS_PROMPT));
+            let audit_transcript_start = self.transcript.len();
+            let review_specs = self.tool_specs();
+            let review = self
+                .run_model_loop(
+                    active_model.clone(),
+                    &review_specs,
+                    None,
+                    max_steps,
+                    stream_idle,
+                )
+                .await?;
+            adopt_redrive_text(&mut final_text, review.final_text);
+            context_tokens = review.context_tokens;
+            active_model = review.active_model;
+            hit_step_cap = review.hit_step_cap;
+            halted_by_loop_guard = review.halted_by_loop_guard;
+
+            let audit_messages = &self.transcript[audit_transcript_start..];
+            let repository_search_ran = completeness_repository_search_ran(audit_messages);
+            let empty_search = completeness_search_reported_no_matches(audit_messages);
+            if !repository_search_ran
+                && !self.past_turn_deadline()
+                && !hit_step_cap
+                && !halted_by_loop_guard
+            {
+                self.presenter.emit(PresenterEvent::Warning(
+                    "completeness audit skipped its repository search — requiring one bounded retry"
+                        .to_string(),
+                ));
+                self.auto_compact_if_needed(&active_model).await;
+                let seq = self.next_seq();
+                self.store.add_message(
+                    &self.id,
+                    seq,
+                    Role::System,
+                    DIRECT_COMPLETENESS_MISSING_SEARCH_RETRY_PROMPT,
+                    None,
+                )?;
+                self.transcript.push(Message::system(
+                    DIRECT_COMPLETENESS_MISSING_SEARCH_RETRY_PROMPT,
+                ));
+                let retry_specs = self.tool_specs();
+                let retry = self
+                    .run_model_loop(
+                        active_model.clone(),
+                        &retry_specs,
+                        None,
+                        max_steps,
+                        stream_idle,
+                    )
+                    .await?;
+                adopt_redrive_text(&mut final_text, retry.final_text);
+                context_tokens = retry.context_tokens;
+                active_model = retry.active_model;
+                hit_step_cap = retry.hit_step_cap;
+                halted_by_loop_guard = retry.halted_by_loop_guard;
+            } else if empty_search
+                && !self.past_turn_deadline()
+                && !hit_step_cap
+                && !halted_by_loop_guard
+            {
+                self.presenter.emit(PresenterEvent::Warning(
+                    "completeness search returned no matches — retrying once from the repository root"
+                        .to_string(),
+                ));
+                self.auto_compact_if_needed(&active_model).await;
+                let seq = self.next_seq();
+                self.store.add_message(
+                    &self.id,
+                    seq,
+                    Role::System,
+                    DIRECT_COMPLETENESS_EMPTY_SEARCH_RETRY_PROMPT,
+                    None,
+                )?;
+                self.transcript.push(Message::system(
+                    DIRECT_COMPLETENESS_EMPTY_SEARCH_RETRY_PROMPT,
+                ));
+                let retry_specs = self.tool_specs();
+                let retry = self
+                    .run_model_loop(
+                        active_model.clone(),
+                        &retry_specs,
+                        None,
+                        max_steps,
+                        stream_idle,
+                    )
+                    .await?;
+                adopt_redrive_text(&mut final_text, retry.final_text);
+                context_tokens = retry.context_tokens;
+                active_model = retry.active_model;
+                hit_step_cap = retry.hit_step_cap;
+                halted_by_loop_guard = retry.halted_by_loop_guard;
+            }
+
+            let changed_paths = changed_paths_from_status(
+                working_tree_status(Some(self.workspace.root())).as_deref(),
+            );
+            let opened_unchanged = opened_unchanged_production_paths(
+                &self.transcript[audit_transcript_start..],
+                self.workspace.root(),
+                &changed_paths,
+            );
+            if !opened_unchanged.is_empty()
+                && !self.past_turn_deadline()
+                && !hit_step_cap
+                && !halted_by_loop_guard
+            {
+                self.presenter.emit(PresenterEvent::Warning(format!(
+                    "completeness audit opened {} unchanged production path(s) — requiring an \
+                     explicit fix before finishing",
+                    opened_unchanged.len()
+                )));
+                self.auto_compact_if_needed(&active_model).await;
+                let prompt = format!(
+                    "{DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT}\n\nOpened but unchanged production paths:\n- {}",
+                    opened_unchanged.join("\n- ")
+                );
+                let seq = self.next_seq();
+                self.store
+                    .add_message(&self.id, seq, Role::System, &prompt, None)?;
+                self.transcript.push(Message::system(&prompt));
+                let path_specs = self.tool_specs();
+                let path_review = self
+                    .run_model_loop(
+                        active_model.clone(),
+                        &path_specs,
+                        None,
+                        max_steps,
+                        stream_idle,
+                    )
+                    .await?;
+                adopt_redrive_text(&mut final_text, path_review.final_text);
+                context_tokens = path_review.context_tokens;
+                active_model = path_review.active_model;
+                hit_step_cap = path_review.hit_step_cap;
+                halted_by_loop_guard = path_review.halted_by_loop_guard;
+            }
+
+            // The existing-tests guard runs before this audit, but a weaker reviewer can ignore
+            // the audit prompt's "do not modify tests" rule and introduce fresh expectation edits.
+            // There is no later model pass that needs those changes, so restore the original tests
+            // deterministically before patch capture. New tests remain allowed by
+            // `modified_test_files_in_tree`, matching the main guard's contract.
+            if self.config.mesh.guard_test_edits && self.expect_code_change {
+                let test_edits = modified_test_files_in_tree(Some(self.workspace.root()));
+                if !test_edits.is_empty() && stash_paths(Some(self.workspace.root()), &test_edits) {
+                    self.presenter.emit(PresenterEvent::Warning(format!(
+                        "completeness audit modified {} existing test file(s) — stashed those \
+                         edits so evaluation keeps the original specification",
+                        test_edits.len()
+                    )));
+                }
+            }
+        }
+
         // ── Toolless-bridge classification (bridge MCP-tool health guard, wave 7) ─────────────
         // Forge serves the bridged CLI its write tools via `forge mcp-serve`. That server can FAIL
         // TO START under the sandbox — codex logs `resources/list failed: MCP startup failed: No
@@ -7083,19 +7682,22 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // off, or no edits happened, this block is a no-op (zero overhead).
         let mut af = self.config.autofix.clone();
 
-        // Auto-detect: fill in lint_cmd (and optionally test_cmd) from project structure when the
-        // user hasn't configured them. Activates on edits so there's no cost on read-only turns.
-        if af.auto_detect && self.edits_this_turn > 0 && af.lint_cmd.is_empty() {
+        // Auto-detect only fills commands the user explicitly enabled. It must not silently turn
+        // default-off autofix on: a missing project script would otherwise inject its failure and
+        // spend a whole additional model loop repairing an unrequested check.
+        let needs_detected_lint = af.auto_lint && af.lint_cmd.is_empty();
+        let needs_detected_test = af.auto_test && af.test_cmd.is_empty();
+        if af.auto_detect
+            && self.edits_this_turn > 0
+            && (needs_detected_lint || needs_detected_test)
+        {
             if let Some((lint, test)) = Self::detect_project_commands(self.workspace.root()) {
-                self.presenter.emit(PresenterEvent::Warning(format!(
-                    "autofix: auto-detected lint command from project structure: {lint}"
-                )));
-                af.lint_cmd = lint;
-                af.auto_lint = true;
-                if af.auto_test && af.test_cmd.is_empty() {
-                    if let Some(t) = test {
-                        af.test_cmd = t;
-                    }
+                let detected = Self::fill_detected_autofix_commands(&mut af, lint, test);
+                if !detected.is_empty() {
+                    self.presenter.emit(PresenterEvent::Warning(format!(
+                        "autofix: auto-detected project command(s): {}",
+                        detected.join("; ")
+                    )));
                 }
             }
         }
@@ -7273,27 +7875,18 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
         }
 
-        let (session_in, session_out) = self.store.session_tokens(&self.id)?;
-        self.presenter.emit(PresenterEvent::Cost {
-            session_total_usd: self.store.session_cost(&self.id)?,
-            session_in,
-            session_cached_in: self.store.session_cached_input_tokens(&self.id)?,
-            session_out,
-            context_tokens,
-            context_limit: Some(self.effective_context_window(&active_model)),
-        });
-        self.presenter.emit(PresenterEvent::Done {
-            final_text: final_text.clone(),
-            stop_reason: if hit_step_cap {
-                StopReason::MaxSteps
-            } else {
-                StopReason::FinalAnswer
-            },
-        });
+        let stop_reason = if hit_step_cap {
+            StopReason::MaxSteps
+        } else {
+            StopReason::FinalAnswer
+        };
         // A channel-backed interactive surface can keep receiving detached auxiliary results after
         // the main turn is done. Remember that capability before launching the side calls so the
         // input is never held hostage by recap/suggestion/memory provider latency.
         let detach_post_turn_work = self.presenter.recap_sink().is_some();
+        if detach_post_turn_work {
+            self.emit_terminal_events(&final_text, stop_reason, context_tokens, &active_model)?;
+        }
         self.generate_recap(prompt, &final_text, &recap_tasks_before)
             .await;
         self.generate_suggestion(prompt, &final_text).await;
@@ -7306,6 +7899,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             } else {
                 let _ = handle.await;
             }
+        }
+        if !detach_post_turn_work {
+            // Headless callers await auxiliary memory persistence, so emit their terminal usage
+            // only after those provider calls are in the Store ledger. Keep Done last: JSONL
+            // consumers commonly stop reading at the result event.
+            self.emit_terminal_events(&final_text, stop_reason, context_tokens, &active_model)?;
         }
         Ok(if hit_step_cap {
             LoopOutcome::max_steps(final_text)
@@ -7483,6 +8082,25 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
     /// Checks the current working directory — the project root where `forge chat` launched.
     /// Returns `(lint_cmd, test_cmd)` when a known project type is found; `test_cmd` is `None`
     /// when the project type has no obvious cheap test command.
+    fn fill_detected_autofix_commands(
+        config: &mut forge_config::AutofixConfig,
+        lint: String,
+        test: Option<String>,
+    ) -> Vec<String> {
+        let mut detected = Vec::with_capacity(2);
+        if config.auto_lint && config.lint_cmd.is_empty() && !lint.is_empty() {
+            detected.push(lint.clone());
+            config.lint_cmd = lint;
+        }
+        if config.auto_test && config.test_cmd.is_empty() {
+            if let Some(test) = test {
+                detected.push(test.clone());
+                config.test_cmd = test;
+            }
+        }
+        detected
+    }
+
     fn detect_project_commands(root: &std::path::Path) -> Option<(String, Option<String>)> {
         if root.join("Cargo.toml").exists() {
             return Some((
@@ -7491,10 +8109,18 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             ));
         }
         if root.join("package.json").exists() {
-            return Some((
-                "npm run lint 2>&1".to_string(),
-                Some("npm test 2>&1".to_string()),
-            ));
+            let package = std::fs::read_to_string(root.join("package.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())?;
+            let scripts = package.get("scripts").and_then(|value| value.as_object())?;
+            let lint = ["lint", "typecheck", "check"]
+                .into_iter()
+                .find(|name| scripts.contains_key(*name))
+                .map_or_else(String::new, |name| format!("npm run {name} 2>&1"));
+            let test = scripts
+                .contains_key("test")
+                .then(|| "npm test 2>&1".to_string());
+            return Some((lint, test));
         }
         if root.join("pyproject.toml").exists() || root.join("requirements.txt").exists() {
             return Some(("python -m pytest --tb=short -q 2>&1".to_string(), None));
@@ -7783,6 +8409,34 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             });
             self.store
                 .record_tool_call(msg_id, &call.name, &args_json, &result, "denied", "error")?;
+            if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
+                self.presenter
+                    .emit(PresenterEvent::Warning(warning.clone()));
+                self.pending_hints.push(warning);
+            }
+            return Ok(result);
+        }
+
+        if self.config.mesh.env_fight_nudge
+            && self.env_fight.should_block()
+            && call.name == "shell"
+            && effective_args
+                .get("command")
+                .and_then(|command| command.as_str())
+                .is_some_and(is_env_setup_command)
+        {
+            let result = ENV_FIGHT_BLOCKED_RESULT.to_string();
+            self.presenter.emit(PresenterEvent::ToolStart {
+                name: call.name.clone(),
+                args: args_json.clone(),
+            });
+            self.presenter.emit(PresenterEvent::ToolResult {
+                name: call.name.clone(),
+                ok: false,
+                summary: "environment setup/build spend cap".to_string(),
+            });
+            self.store
+                .record_tool_call(msg_id, &call.name, &args_json, &result, "blocked", "error")?;
             if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
                 self.presenter
                     .emit(PresenterEvent::Warning(warning.clone()));
@@ -12265,10 +12919,18 @@ mod tests {
 
     #[tokio::test]
     async fn completeness_redrive_silent_when_verify_completeness_off() {
-        // Default (off): no completeness re-drive — the opt-in mode adds nothing to the default path.
+        // Explicit opt-out: no completeness re-drive when the quality policy is disabled.
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
+        let base_mesh = Config::default().mesh;
+        let config = Config {
+            mesh: forge_config::MeshConfig {
+                verify_completeness: false,
+                ..base_mesh
+            },
+            ..Config::default()
+        };
         let mut session = Session::start(
             Arc::clone(&store),
             Arc::new(CompletenessYieldProvider {
@@ -12280,7 +12942,7 @@ mod tests {
             }),
             ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
-            Config::default(),
+            config,
             test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
@@ -14022,6 +14684,115 @@ mod tests {
         assert!(cost > 0.0, "expected a non-zero cost, got {cost}");
     }
 
+    #[derive(Default)]
+    struct TerminalUsageProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for TerminalUsageProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (content, input_tokens, cached_input_tokens, output_tokens) = if call == 0 {
+                ("main answer", 72, 20, 30)
+            } else {
+                ("", 30, 10, 12)
+            };
+            on_event(StreamEvent::Text(content.to_string()));
+            Ok(forge_provider::ModelResponse {
+                content: content.to_string(),
+                tool_calls: Vec::new(),
+                usage: forge_types::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cached_input_tokens,
+                    cost_usd: 0.0,
+                },
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn headless_terminal_cost_includes_awaited_memory_and_done_is_last() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = Config::default();
+        config.recap.enabled = false;
+        config.suggest.enabled = false;
+        config.mesh.auto_memory = true;
+        let capture = CapturePresenter::default();
+        let captured_events = Arc::clone(&capture.events);
+        let provider = Arc::new(TerminalUsageProvider::default());
+        let mut session = Session::start(
+            Arc::clone(&store),
+            provider.clone(),
+            Arc::new(FixedRouter {
+                model: "mock::terminal-usage".to_string(),
+                fallbacks: Vec::new(),
+            }),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        let outcome = session
+            .run_turn("check the project manifest")
+            .await
+            .unwrap();
+        assert!(outcome.contains("main answer"));
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one main completion plus one awaited memory completion"
+        );
+
+        // The provider spends 72/30 tokens on the main turn and 30/12 on the awaited memory
+        // extraction side call. The terminal event must reflect the complete Store ledger.
+        assert_eq!(
+            store.session_tokens(session.id()).unwrap(),
+            (72, 30),
+            "active-transcript usage intentionally excludes synthetic side calls"
+        );
+        let consumed = store.session_token_usage(session.id()).unwrap();
+        assert_eq!((consumed.input_tokens, consumed.output_tokens), (102, 42));
+        assert_eq!(consumed.cached_input_tokens, 30);
+        assert_eq!(session.session_usage_db(), (102, 42, 0.0));
+        let events = captured_events.lock().unwrap();
+        let done_index = events
+            .iter()
+            .rposition(|event| matches!(event, PresenterEvent::Done { .. }))
+            .expect("turn emits Done");
+        let (cost_index, event_tokens) = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                PresenterEvent::Cost {
+                    session_in,
+                    session_cached_in,
+                    session_out,
+                    ..
+                } => Some((index, (*session_in, *session_cached_in, *session_out))),
+                _ => None,
+            })
+            .next_back()
+            .expect("turn emits Cost");
+        assert_eq!(event_tokens, (102, 30, 42));
+        assert!(cost_index < done_index, "terminal Cost must precede Done");
+        assert_eq!(
+            done_index,
+            events.len() - 1,
+            "Done must remain the final headless event"
+        );
+    }
+
     #[tokio::test]
     async fn warns_when_budget_threshold_reached() {
         // Complex turn costs (30+12)/1k + (42+18)/1k = 0.102 USD (keyless priced model, so
@@ -14895,6 +15666,47 @@ mod tests {
         assert_eq!(
             generations, 4,
             "parent + 3 nested generations (depths 0,1,2), bounded by max_depth"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_subagent_depth_stops_after_one_child_generation() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = tiered_config();
+        assert_eq!(
+            config.mesh.subagents.max_depth, 0,
+            "recursive delegation must remain an explicit opt-in"
+        );
+        config.mesh.subagents.max_concurrency = 2;
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(AlwaysRecurseProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+        let parent_id = session.id().to_string();
+
+        session
+            .run_turn("kick off a default delegating turn")
+            .await
+            .unwrap();
+
+        fn max_gen(store: &Store, id: &str) -> usize {
+            let kids = store.child_sessions(id).unwrap();
+            1 + kids
+                .iter()
+                .map(|kid| max_gen(store, kid))
+                .max()
+                .unwrap_or(0)
+        }
+        assert_eq!(
+            max_gen(&store, &parent_id),
+            2,
+            "the parent may delegate once, but default children must not recurse"
         );
     }
 
@@ -16008,6 +16820,9 @@ mod tests {
         session.config.mesh.auto_memory = false;
         session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
+        // This test isolates the empty-diff recovery loop; completeness has its own
+        // bridge re-drive tests and would add one unrelated provider invocation.
+        session.config.mesh.verify_completeness = false;
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -16048,6 +16863,8 @@ mod tests {
         session.config.mesh.auto_memory = false;
         session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
+        // Isolate the empty-diff guard from the independent completeness review.
+        session.config.mesh.verify_completeness = false;
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -16402,6 +17219,8 @@ mod tests {
         session.config.mesh.auto_memory = false;
         session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
+        // Isolate the pristine-test guard from the independent completeness review.
+        session.config.mesh.verify_completeness = false;
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -16749,34 +17568,30 @@ mod tests {
     }
 
     #[test]
-    fn env_fight_tracker_fires_once_at_the_threshold() {
+    fn env_fight_tracker_fires_once_after_failure_and_recovery_attempt() {
         let mut t = EnvFightTracker::default();
         assert!(!t.observe(true));
-        assert!(!t.observe(true));
-        assert!(!t.observe(true));
         assert!(
-            t.observe(true),
-            "the 4th consecutive failure fires the nudge"
+            t.observe(false),
+            "one failed setup plus one recovery attempt fires the spend cap"
         );
+        assert!(t.should_block());
         assert!(!t.observe(true), "latched — never re-fires this turn");
         assert!(!t.observe(true));
     }
 
     #[test]
-    fn env_fight_tracker_resets_on_success() {
+    fn env_fight_tracker_does_not_arm_on_successes_only() {
         let mut t = EnvFightTracker::default();
-        assert!(!t.observe(true));
-        assert!(!t.observe(true));
-        assert!(!t.observe(true));
-        assert!(!t.observe(false), "a success resets the streak");
-        assert!(!t.observe(true));
-        assert!(!t.observe(true));
-        assert!(!t.observe(true));
-        assert!(t.observe(true), "a fresh run of 4 failures fires");
+        for _ in 0..4 {
+            assert!(!t.observe(false));
+        }
+        assert!(!t.should_block(), "successful setup is not an env fight");
     }
 
     /// Scripted env-fighter: four DISTINCT failing env-setup shell commands (distinct args so the
-    /// identical-call doom-loop guard stays out of the way), then a final text sign-off.
+    /// identical-call doom-loop guard stays out of the way), then a final text sign-off. The first
+    /// two execute; the cap blocks later setup commands.
     struct EnvFighterProvider {
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -16822,7 +17637,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn four_env_setup_failures_inject_the_nudge_once() {
+    async fn env_setup_spend_cap_nudges_once_and_blocks_later_commands() {
         let provider = Arc::new(EnvFighterProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
@@ -16842,7 +17657,12 @@ mod tests {
         assert_eq!(
             msgs.iter().filter(|m| m.content == ENV_FIGHT_NUDGE).count(),
             1,
-            "exactly one env-fight nudge after 4 consecutive provisioning failures"
+            "exactly one env-fight nudge after the recovery attempt"
+        );
+        assert!(
+            msgs.iter()
+                .any(|message| message.content == ENV_FIGHT_BLOCKED_RESULT),
+            "later provisioning commands must be blocked without execution"
         );
     }
 
@@ -16865,8 +17685,9 @@ mod tests {
         session.run_turn("fix the bug").await.unwrap();
         let msgs = store.load_messages(session.id()).unwrap();
         assert!(
-            msgs.iter().all(|m| m.content != ENV_FIGHT_NUDGE),
-            "gate off → no nudge"
+            msgs.iter()
+                .all(|m| { m.content != ENV_FIGHT_NUDGE && m.content != ENV_FIGHT_BLOCKED_RESULT }),
+            "gate off → no nudge or block"
         );
     }
 
@@ -17232,6 +18053,8 @@ mod tests {
         });
         let (store, mut session) = bridge_session(provider.clone());
         seed_tasks(&store, &session.id, &[("ship the release", false)]);
+        // This test counts task-continuation re-drives, not completeness review calls.
+        session.config.mesh.verify_completeness = false;
         let _ = session.run_turn("release it").await.unwrap();
         assert_eq!(
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -17254,6 +18077,8 @@ mod tests {
         let events = capture.events.clone();
         session.presenter = Box::new(capture);
         seed_tasks(&store, &session.id, &[("ship the release", true)]);
+        // Isolate completion verification from the separate completeness re-drive.
+        session.config.mesh.verify_completeness = false;
         let answer = session.run_turn("release it").await.unwrap();
         assert_eq!(answer, "working");
         assert_eq!(
@@ -17370,6 +18195,8 @@ mod tests {
         let events = capture.events.clone();
         session.presenter = Box::new(capture);
         seed_tasks(&store, &session.id, &[("ship the release", true)]);
+        // Isolate completion verification from the separate completeness re-drive.
+        session.config.mesh.verify_completeness = false;
         let _ = session.run_turn("release it").await.unwrap();
         // 1 work/claim turn + MAX_VERIFY_ATTEMPTS (2) verification turns = 3 invocations.
         assert_eq!(
@@ -18360,6 +19187,55 @@ mod tests {
 
     // ── Autofix tests ──────────────────────────────────────────────────────────────────────
 
+    #[test]
+    fn autofix_detection_does_not_enable_default_off_commands() {
+        let mut config = forge_config::AutofixConfig::default();
+        let detected = Session::fill_detected_autofix_commands(
+            &mut config,
+            "false".to_string(),
+            Some("false".to_string()),
+        );
+        assert!(detected.is_empty());
+        assert!(!config.auto_lint);
+        assert!(!config.auto_test);
+        assert!(config.lint_cmd.is_empty());
+        assert!(config.test_cmd.is_empty());
+    }
+
+    #[test]
+    fn autofix_detection_fills_only_explicitly_enabled_commands() {
+        let mut config = forge_config::AutofixConfig {
+            auto_lint: false,
+            auto_test: true,
+            ..forge_config::AutofixConfig::default()
+        };
+        let detected = Session::fill_detected_autofix_commands(
+            &mut config,
+            "npm run lint 2>&1".to_string(),
+            Some("npm test 2>&1".to_string()),
+        );
+        assert_eq!(detected, vec!["npm test 2>&1"]);
+        assert!(config.lint_cmd.is_empty());
+        assert_eq!(config.test_cmd, "npm test 2>&1");
+    }
+
+    #[test]
+    fn npm_autofix_detection_uses_only_scripts_that_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"build":"tsc -p tsconfig.json","test":"node --test"}}"#,
+        )
+        .unwrap();
+
+        let (lint, test) = Session::detect_project_commands(dir.path()).unwrap();
+        assert!(
+            lint.is_empty(),
+            "missing lint/typecheck/check must stay empty"
+        );
+        assert_eq!(test.as_deref(), Some("npm test 2>&1"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn autofix_stage_passes_when_commands_exit_zero() {
@@ -18474,6 +19350,74 @@ mod tests {
         }
     }
 
+    /// A direct turn writes once, then its completeness pass performs a valid search that returns
+    /// no matches. The outer policy must detect that tool evidence and issue exactly one fallback
+    /// search prompt; all other provider calls finish without tools.
+    #[cfg(unix)]
+    struct EditThenEmptySearchProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        path: String,
+        audit_path: String,
+        sibling_path: String,
+        search_root: String,
+    }
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl Provider for EditThenEmptySearchProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_types::{new_id, ToolCall, Usage};
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let tool_calls = match n {
+                0 => vec![ToolCall {
+                    id: new_id(),
+                    name: "write_file".into(),
+                    args: serde_json::json!({"path": self.path, "content": "x = 1\n"}),
+                }],
+                2 => vec![
+                    ToolCall {
+                        id: new_id(),
+                        name: "write_file".into(),
+                        args: serde_json::json!({
+                            "path": self.audit_path,
+                            "content": "audit changed something\n",
+                        }),
+                    },
+                    ToolCall {
+                        id: new_id(),
+                        name: "search".into(),
+                        args: serde_json::json!({
+                            "path": self.search_root,
+                            "query": "__forge_missing_old_identifier__",
+                            "regex": false,
+                        }),
+                    },
+                ],
+                4 => vec![ToolCall {
+                    id: new_id(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({
+                        "path": self.sibling_path,
+                        "start_line": 1,
+                        "end_line": 20,
+                    }),
+                }],
+                _ => Vec::new(),
+            };
+            Ok(forge_provider::ModelResponse {
+                content: "done".into(),
+                tool_calls,
+                usage: Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn autofix_iteration_cap_halts_the_self_heal_loop() {
@@ -18578,6 +19522,479 @@ mod tests {
         assert!(
             warned,
             "the self-review pass must run + announce itself when mesh.self_review is enabled"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn direct_completeness_classifier_accepts_identifier_migrations() {
+        for prompt in [
+            "The db keyword is deprecated; use database instead.",
+            "Rename old_widget to widget throughout the parser.",
+            "Keep foo as a compatibility alias for bar.",
+        ] {
+            assert!(
+                direct_completeness_is_identifier_migration(prompt),
+                "expected identifier-migration classification for: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_completeness_classifier_rejects_unrelated_bug_reports() {
+        for prompt in [
+            "[Bug]: wspace and hspace in subfigures not working",
+            "Regression in 5.2.3: pytest tries to collect random __init__.py files",
+            "Subclassed SkyCoord gives misleading attribute access message",
+        ] {
+            assert!(
+                !direct_completeness_is_identifier_migration(prompt),
+                "unrelated bug report must not trigger direct completeness: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_identifier_search_requires_production_scope_and_prompt_term() {
+        let search = |path: &str, query: &str, result: &str| {
+            let call_id = forge_types::new_id();
+            vec![
+                Message::assistant_tool_calls(
+                    "",
+                    vec![forge_types::ToolCall {
+                        id: call_id.clone(),
+                        name: "search".into(),
+                        args: serde_json::json!({
+                            "path": path,
+                            "query": query,
+                            "regex": false,
+                        }),
+                    }],
+                ),
+                Message::tool_result(call_id, result),
+            ]
+        };
+        let root = std::path::Path::new("/repo");
+        let prompt = "Replace deprecated db and passwd options with database and password.";
+
+        assert!(
+            completeness_production_identifier_search_matches(
+                &search("tests/backends/mysql", "passwd", "tests.py:10: old passwd",),
+                root,
+                prompt,
+            )
+            .is_empty(),
+            "a test-only search is not production completeness evidence"
+        );
+        assert!(
+            completeness_production_identifier_search_matches(
+                &search(
+                    "django/db/backends/base",
+                    "def copy(",
+                    "base.py:10:def copy(",
+                ),
+                root,
+                prompt,
+            )
+            .is_empty(),
+            "an unrelated production search is not identifier-migration evidence"
+        );
+        assert_eq!(
+            completeness_production_identifier_search_matches(
+                &search(
+                    "django/db/backends/mysql",
+                    "passwd",
+                    "base.py:203: kwargs['passwd']\nclient.py:15: get('passwd')",
+                ),
+                root,
+                prompt,
+            ),
+            [
+                "django/db/backends/mysql/base.py",
+                "django/db/backends/mysql/client.py"
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            "a production search for a prompt identifier is sufficient search evidence"
+        );
+    }
+
+    #[test]
+    fn direct_scope_guidance_extracts_explicit_class_methods_only() {
+        assert_eq!(
+            direct_scope_guidance_named_apis(
+                "Fix `Figure.subfigures()` consistently with Function._eval_evalf."
+            ),
+            vec!["Figure.subfigures", "Function._eval_evalf"]
+        );
+        assert!(
+            direct_scope_guidance_named_apis(
+                "Preserve X_out.dtypes on 5.2.3; do not collect __init__.py or ExitCode.OK"
+            )
+            .is_empty(),
+            "variables, versions, filenames, and enum variants are not named production APIs"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_completeness_runs_once_after_a_code_edit_when_enabled() {
+        let dir =
+            std::env::temp_dir().join(format!("forge-direct-completeness-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let base_mesh = Config::default().mesh;
+        let config = Config {
+            permission_mode: forge_types::PermissionMode::AcceptEdits,
+            mesh: forge_config::MeshConfig {
+                verify_completeness: true,
+                ..base_mesh
+            },
+            ..Config::default()
+        };
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditOnceThenDoneProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(capture),
+            config,
+            dir.to_str().unwrap(),
+        )
+        .unwrap();
+        session
+            .run_turn("The parser currently returns the wrong value for deprecated aliases.")
+            .await
+            .unwrap();
+
+        let fired = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("omitted related production paths")
+                )
+            })
+            .count();
+        assert_eq!(fired, 1, "direct completeness must run exactly once");
+        let missing_search_retries = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("skipped its repository search")
+                )
+            })
+            .count();
+        assert_eq!(
+            missing_search_retries, 1,
+            "a prose-only first audit must trigger exactly one mandatory-search retry"
+        );
+        assert!(
+            !session.last_turn_contract().requires_changed_artifact(),
+            "the descriptive prompt must not make the contract trigger the audit"
+        );
+        assert!(
+            session
+                .transcript
+                .iter()
+                .any(|message| message.content.contains("targeted repository search")),
+            "the direct provider must receive the evidence-grounded completeness prompt"
+        );
+        assert!(
+            session
+                .transcript
+                .iter()
+                .any(|message| message.content.contains("plain literal")
+                    && message.content.contains("sibling files")
+                    && message.content.contains("maximum THREE")
+                    && message.content.contains("snippets are NOT inspection")
+                    && message.content.contains("CONCRETE OMISSION")),
+            "the audit must require a bounded, high-recall search rather than one narrow regex"
+        );
+        assert!(
+            session.transcript.iter().any(|message| message
+                .content
+                .contains("skipped the REQUIRED repository search")),
+            "the direct provider must receive the missing-search retry prompt"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_completeness_skips_unrelated_bug_fixes() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-direct-completeness-unrelated-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditOnceThenDoneProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(capture),
+            Config {
+                permission_mode: forge_types::PermissionMode::AcceptEdits,
+                ..Config::default()
+            },
+            dir.to_str().unwrap(),
+        )
+        .unwrap();
+
+        session
+            .run_turn("[Bug]: wspace and hspace in subfigures not working")
+            .await
+            .unwrap();
+
+        assert!(
+            !events.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("omitted related production paths")
+                            || message.contains("skipped its repository search")
+                )
+            }),
+            "generic bug fixes must not run the direct completeness pass"
+        );
+        assert!(
+            !session
+                .transcript
+                .iter()
+                .any(|message| message.content == DIRECT_COMPLETENESS_PROMPT),
+            "generic bug fixes must not receive the direct completeness prompt"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_named_api_scope_guidance_is_injected_before_solving() {
+        let dir =
+            std::env::temp_dir().join(format!("forge-direct-named-api-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditOnceThenDoneProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(CapturePresenter::default()),
+            Config {
+                permission_mode: forge_types::PermissionMode::AcceptEdits,
+                ..Config::default()
+            },
+            dir.to_str().unwrap(),
+        )
+        .unwrap();
+
+        session
+            .run_turn("[Bug]: Figure.subfigures ignores explicit spacing")
+            .await
+            .unwrap();
+
+        let scope_messages = session
+            .transcript
+            .iter()
+            .filter(|message| {
+                message.content.contains(DIRECT_NAMED_API_SCOPE_GUIDANCE)
+                    && message.content.contains("Figure.subfigures")
+            })
+            .count();
+        assert_eq!(
+            scope_messages, 1,
+            "named-API scope guidance must be injected exactly once before the solve"
+        );
+        assert!(
+            session.transcript.iter().any(|message| {
+                message.content.contains("control-flow guards")
+                    && message.content.contains("squeeze/shape behavior")
+                    && message.content.contains("moved or deleted guard")
+            }),
+            "named-API guidance must preserve existing control flow and return semantics"
+        );
+        assert!(
+            !session
+                .transcript
+                .iter()
+                .any(|message| message.content == DIRECT_COMPLETENESS_PROMPT),
+            "scope guidance must not reactivate the outer completeness review"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_identifier_migration_scope_guidance_is_injected_before_solving() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-direct-identifier-migration-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditOnceThenDoneProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(CapturePresenter::default()),
+            Config {
+                permission_mode: forge_types::PermissionMode::AcceptEdits,
+                ..Config::default()
+            },
+            dir.to_str().unwrap(),
+        )
+        .unwrap();
+
+        session
+            .run_turn("Replace deprecated db and passwd options with database and password.")
+            .await
+            .unwrap();
+
+        let scope_messages = session
+            .transcript
+            .iter()
+            .filter(|message| {
+                message
+                    .content
+                    .contains(DIRECT_IDENTIFIER_MIGRATION_SCOPE_GUIDANCE)
+            })
+            .count();
+        assert_eq!(
+            scope_messages, 1,
+            "identifier-migration scope guidance must be injected exactly once before the solve"
+        );
+        assert!(
+            session.transcript.iter().any(|message| {
+                message.content.contains("maximum TWO search commands")
+                    && message.content.contains("Do not search tests alone")
+                    && message.content.contains("production sibling match")
+                    && message.content.contains("CONCRETE OMISSION")
+                    && message
+                        .content
+                        .contains("retaining the old alias as a fallback")
+            }),
+            "migration guidance must require bounded production discovery and compatibility"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_completeness_retries_an_empty_search_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-direct-completeness-empty-search-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let audit_path = dir.join("audit.txt");
+        let sibling_path = dir.join("sibling.py");
+        std::fs::write(&sibling_path, "old_name = True\n").unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let base_mesh = Config::default().mesh;
+        let config = Config {
+            permission_mode: forge_types::PermissionMode::AcceptEdits,
+            mesh: forge_config::MeshConfig {
+                verify_completeness: true,
+                ..base_mesh
+            },
+            ..Config::default()
+        };
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditThenEmptySearchProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+                audit_path: audit_path.to_string_lossy().into_owned(),
+                sibling_path: sibling_path.to_string_lossy().into_owned(),
+                search_root: dir.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(capture),
+            config,
+            dir.to_str().unwrap(),
+        )
+        .unwrap();
+
+        session
+            .run_turn("The parser currently returns the wrong value for deprecated aliases.")
+            .await
+            .unwrap();
+
+        let retry_warnings = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("retrying once from the repository root")
+                )
+            })
+            .count();
+        assert_eq!(
+            retry_warnings, 1,
+            "an empty completeness search must trigger exactly one bounded fallback"
+        );
+        assert!(
+            session.transcript.iter().any(|message| message
+                .content
+                .contains("likely search-scope or glob failure")),
+            "the direct provider must receive the mechanically different fallback prompt"
+        );
+        assert!(
+            events.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("opened 1 unchanged production path")
+                )
+            }),
+            "an opened but unchanged production sibling must trigger the path-aware gate"
+        );
+        assert!(
+            session.transcript.iter().any(|message| {
+                message
+                    .content
+                    .contains("Opened but unchanged production paths")
+                    && message.content.contains("sibling.py")
+            }),
+            "the final re-drive must name the exact unresolved production path"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

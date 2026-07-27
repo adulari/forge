@@ -11,10 +11,10 @@
 //!
 //! Children run **concurrently** (bounded by `max_concurrency`), each as a persisted child
 //! session linked to the parent. A child's toolset comes from its agent type (default:
-//! read-only `read_file`/`list_dir`/`search`) and **never** includes `spawn_agents` — a
-//! structural depth-1 guard against recursion. Named agent types load from `.forge/agents/*.md`
-//! (system prompt + optional tool subset + optional pinned tier); unknown/inline agents use the
-//! default read-only investigator and are mesh-routed.
+//! read-only `read_file`/`list_dir`/`search`). Recursive delegation is disabled by default and
+//! bounded by `mesh.subagents.max_depth` when explicitly enabled. Named agent types load from
+//! `.forge/agents/*.md` (system prompt + optional tool subset + optional pinned tier);
+//! unknown/inline agents use the default read-only investigator and are mesh-routed.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -49,11 +49,12 @@ pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
     ToolSpec {
         name: SPAWN_AGENTS_TOOL.to_string(),
         description: format!(
-            "Delegate one or more independent subtasks to child agents that work in their own \
-             isolated context and are routed to the cheapest capable model. Use this to fan out \
-             research/search/review across files instead of doing it all yourself. Up to \
-             {max_agents} agents per call. Each agent gets read-only tools and returns a concise \
-             result. Returns all results, labeled."
+            "Delegate independent deliverables to child agents that work in isolated contexts and \
+             are routed to the cheapest capable model. Use only when at least two child results \
+             are independently useful. Do not use for routine repository exploration, code \
+             search, test discovery, or review within one bug, feature, or refactor; direct tools \
+             share context and are faster. Up to {max_agents} agents per call. Each agent gets \
+             read-only tools and returns a concise result. Returns all results, labeled."
         ),
         schema: serde_json::json!({
             "type": "object",
@@ -1193,11 +1194,21 @@ mod tests {
     }
 
     #[test]
-    fn subagents_never_get_the_spawn_tool_depth_guard() {
-        // Structural depth-1 guard: a child's toolset excludes spawn_agents, so it cannot recurse.
+    fn default_subagent_toolset_is_read_only() {
+        // The base child toolset is read-only. The loop may separately add spawn_agents only when
+        // the explicitly configured recursion depth allows it.
         assert!(!SUBAGENT_TOOLS.contains(&SPAWN_AGENTS_TOOL));
         // And the read-only set is exactly investigation tools (no write/shell).
         assert_eq!(SUBAGENT_TOOLS, &["read_file", "list_dir", "search"]);
+    }
+
+    #[test]
+    fn spawn_tool_description_keeps_single_coding_tasks_direct() {
+        let description = spawn_agents_spec(8).description;
+
+        assert!(description.contains("at least two child results"));
+        assert!(description.contains("Do not use for routine repository exploration"));
+        assert!(description.contains("direct tools share context and are faster"));
     }
 
     // --- Subagent failover (docs/features/mesh-routing.md): a child whose model rate-limits must

@@ -340,7 +340,8 @@ classify each). Store mutex is not a bottleneck at these write volumes.
     into a new `StreamEvent::Subagent*`, which core maps to the same `PresenterEvent::Subagent*`
     as native turns — so bridge-spawned subagents render in the **native TUI panel** (verified
     live: mcp-serve emitted start + live progress deltas + done to the sink).
-  - *Recursion:* `mesh.subagents.max_depth` (default 2). `AgentCtx` carries `depth`/`max_depth`;
+  - *Recursion:* `mesh.subagents.max_depth` (default 0; recursive delegation is opt-in).
+    `AgentCtx` carries `depth`/`max_depth`;
     a native child advertises + intercepts `spawn_agents` while `depth < max_depth` and recurses
     via a boxed (`Pin<Box<dyn Future + Send>>`) `run_nested_spawn` (breaks the async opaque-type
     cycle). Across processes the depth rides the `FORGE_SUBAGENT_DEPTH` env var (replaces the

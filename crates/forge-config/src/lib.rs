@@ -1527,10 +1527,14 @@ pub struct MeshConfig {
     /// no-op without a cached dataset / API key (falls back to the heuristic).
     #[serde(default = "default_benchmark_ranking")]
     pub benchmark_ranking: bool,
-    /// Opt-in "max-resolve" mode for CLI-bridge harness turns: append a completeness clause that
-    /// makes the model re-verify its change against EVERY requirement before finishing. Measured to
-    /// raise SWE-bench resolve (4/10 → 6/10, beating the raw CLI) at ~3× the tokens — so it's OFF by
-    /// default and turned on only when solve rate matters more than cost.
+    /// "Max-resolve" mode: run a bounded, evidence-grounded completeness pass before a code-change
+    /// turn finishes. CLI bridges re-check every stated requirement. Direct providers run the
+    /// additional final-diff and related-production-sibling search only for prompts that explicitly
+    /// describe an identifier migration (for example a deprecation, rename, or compatibility
+    /// alias). Direct prompts that explicitly name a `Class.method` API receive lightweight
+    /// pre-solve scope guidance rather than another review loop. Default true; disable to skip all
+    /// extra completeness guidance and passes when latency matters more than maximum resolve
+    /// quality.
     #[serde(default = "default_verify_completeness")]
     pub verify_completeness: bool,
     /// Empty-diff completion nudge (harness-robustness wave 2): when a headless code-change run
@@ -1558,9 +1562,9 @@ pub struct MeshConfig {
     /// is set, so interactive use never sees it.
     #[serde(default = "default_deadline_reconcile")]
     pub deadline_reconcile: bool,
-    /// Env-fight spend cap (quality guards wave 4): when environment-provisioning shell commands
-    /// (pip install / venv / virtualenv / ensurepip / apt / uv …) fail 4 times in a row within a
-    /// turn, inject ONE nudge — stop provisioning, verify the change at the logic level instead.
+    /// Env-fight spend cap (quality guards wave 4): after an environment-provisioning command
+    /// (pip install / venv / virtualenv / ensurepip / apt / uv …) fails, allow one alternate
+    /// recovery attempt, inject ONE nudge, then block further provisioning/native builds that turn.
     /// SWE-bench turns burned minutes fighting host-python/repo-era mismatches (venv archaeology)
     /// that provisioning was never going to win. Default true; latched once per turn.
     #[serde(default = "default_env_fight_nudge")]
@@ -1705,7 +1709,7 @@ fn default_benchmark_ranking() -> bool {
 }
 
 fn default_verify_completeness() -> bool {
-    false
+    true
 }
 
 fn default_nudge_empty_diff() -> bool {
@@ -1806,8 +1810,9 @@ pub struct SubagentsConfig {
     /// Max child agents running concurrently (parallel fan-out is Phase 2).
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: usize,
-    /// How deep subagents may nest (1 = a top-level turn may spawn children, but those children
-    /// may not spawn their own). Bounds total fan-out; the per-call `max_agents`/`max_concurrency`
+    /// How many additional spawn generations children may create. `0` lets the top-level turn
+    /// spawn children but prevents those children from recursively delegating. Higher values are
+    /// opt-in because fan-out grows exponentially; the per-call `max_agents`/`max_concurrency`
     /// caps still apply at every level (RFC subagent-orchestration Phase 3c).
     #[serde(default = "default_max_depth")]
     pub max_depth: usize,
@@ -1838,7 +1843,7 @@ fn default_max_concurrency() -> usize {
     4
 }
 fn default_max_depth() -> usize {
-    2
+    0
 }
 fn default_max_per_provider() -> usize {
     2
@@ -4362,6 +4367,11 @@ mod tests {
         let prior = std::env::current_dir().expect("reading config test process cwd");
         std::env::set_current_dir(target).expect("entering guarded config test cwd");
         TestCwdGuard { prior, _lock: lock }
+    }
+
+    #[test]
+    fn completeness_verification_defaults_to_on() {
+        assert!(Config::default().mesh.verify_completeness);
     }
 
     #[test]
