@@ -96,14 +96,46 @@ Use the **same model family** across agents (e.g. Forge pinned to `anthropic::cl
 
 Resolve rate alone doesn't capture the goal "Forge gets **more out of a subscription** than the
 native CLI". Every `bench swe` run also writes a metrics sidecar `<out>.metrics.jsonl` — one row
-per instance with `input_tokens`, `output_tokens`, `cost_usd`, `wall_secs`, `patched`, and
-`metrics_complete`:
+per instance with `input_tokens`, `output_tokens`, `cost_usd`, `wall_secs`, `patched`,
+`metrics_complete`, and a reproducibility-focused `runtime` object:
 
 - **Forge agent:** tokens/cost are read from Forge's own usage DB (`session_usage_db`) — reliable,
   and it captures **bridge** usage too (subscription turns).
 - **External CLI:** best-effort from the CLI's machine output (`claude --output-format json`;
   `codex --json`). When nothing parseable comes back, the row is flagged `metrics_complete=false`
   so the report never invents a number.
+- **Runtime identity:** `cli_version`, requested and resolved model, transport, persistent/partial
+  streaming, tool-alias and appended-system-prompt flags, plus MCP required/connected state. For
+  Claude, `model_capabilities` comes from Claude Code's authoritative non-billing `initialize`
+  control response (effort levels and adaptive/auto/fast-mode support). Account identifiers are
+  never retained.
+
+Runtime discovery happens once before the sweep and outside every instance's measured
+`wall_secs`, then the record is copied into each row so a standalone metrics file remains
+self-describing. Example:
+
+```json
+{
+  "instance_id": "astropy__astropy-12907",
+  "agent": "forge",
+  "wall_secs": 54.2,
+  "runtime": {
+    "cli_version": "2.1.220 (Claude Code)",
+    "requested_model": "claude-cli::sonnet",
+    "resolved_model": "claude-sonnet-5",
+    "transport": "claude-stream-json-persistent",
+    "persistent": true,
+    "partial_streaming": true,
+    "tool_aliases": true,
+    "appended_system_prompt": true,
+    "mcp_required": true,
+    "mcp_connected": true
+  }
+}
+```
+
+Older sidecars without `runtime`, `timed_out`, or `tools_unavailable` still load with safe
+defaults.
 
 Join the metrics with the official eval reports to get the headline table:
 

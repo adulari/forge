@@ -1,6 +1,24 @@
 # Forge — measured results
 
-## Latest official matched result (2026-07-27)
+## Latest official matched result: Claude 5 (2026-07-27)
+
+The current Forge build beat native Claude Code on official quality and was
+faster and more token-efficient when comparing pairs with the same official
+outcome:
+
+| 6 matched SWE-bench Verified pairs | Forge | Native Claude Code | Result |
+|---|---:|---:|---|
+| Official Docker resolves | **5 / 6** | 4 / 6 | **Forge +1 solve** |
+| Evaluator errors | 0 | 0 | Complete |
+| Quality-matched wall time (5 pairs) | **1,242.588s** | 1,547.852s | **Forge 19.72% faster** |
+| Quality-matched processed tokens | **7,175,961** | 11,600,158 | **Forge 38.14% lower** |
+| Quality-matched cache-adjusted tokens | **2,010,283.50** | 3,177,565.00 | **Forge 36.74% lower** |
+
+Both Opus 5 harnesses resolved 3/3; Forge Sonnet resolved 2/3 versus native
+Sonnet's 1/3. Read the **[full protocol, per-pair results, artifacts, exclusions,
+and caveats](claude-code-claude5-2026-07.md)**.
+
+## Previous official matched result: GPT-5.6 (2026-07-27)
 
 The current optimized Forge build matched native Codex on official quality and
 beat it on both elapsed time and whole-session token use in a fresh,

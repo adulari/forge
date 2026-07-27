@@ -98,6 +98,33 @@ pub struct InstanceMetric {
     /// toolless run as a clean miss. Defaults false for older sidecars.
     #[serde(default)]
     pub tools_unavailable: bool,
+    /// Exact CLI/model/transport configuration for this run. Added after the first Codex sweep;
+    /// absent in older sidecars. Collected once before the measured sweep and cloned per instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<BenchmarkRuntimeMetadata>,
+}
+
+/// Reproducibility metadata for one benchmark arm. Capability fields are authoritative only for
+/// Claude, where they come from Claude Code's non-billing `initialize` control response.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BenchmarkRuntimeMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_capabilities: Option<forge_provider::ClaudeModelCapability>,
+    pub transport: String,
+    pub persistent: bool,
+    pub partial_streaming: bool,
+    pub tool_aliases: bool,
+    pub appended_system_prompt: bool,
+    pub mcp_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_connected: Option<bool>,
 }
 
 /// Outcome of running one instance: the patch plus the resources it took.
@@ -307,6 +334,92 @@ pub async fn run_swe(
     Ok(())
 }
 
+async fn collect_runtime_metadata(
+    agent: Agent,
+    requested: Option<&str>,
+) -> Option<BenchmarkRuntimeMetadata> {
+    let normalized = requested.map(forge_provider::normalize_model_id);
+    let bridge_kind = match agent {
+        Agent::ClaudeCode => Some(forge_provider::CliKind::ClaudeCode),
+        Agent::Codex => Some(forge_provider::CliKind::Codex),
+        Agent::Forge => normalized.as_deref().and_then(|model| {
+            if model.starts_with("claude-cli::") {
+                Some(forge_provider::CliKind::ClaudeCode)
+            } else if model.starts_with("codex-cli::") {
+                Some(forge_provider::CliKind::Codex)
+            } else if model.starts_with("agy-cli::") {
+                Some(forge_provider::CliKind::Antigravity)
+            } else {
+                None
+            }
+        }),
+    };
+
+    let requested_model = match (agent, requested) {
+        (Agent::ClaudeCode | Agent::Codex, None) => Some("default".to_string()),
+        (_, value) => value.map(str::to_string),
+    };
+    let claude = if bridge_kind == Some(forge_provider::CliKind::ClaudeCode) {
+        forge_provider::CliKind::ClaudeCode
+            .claude_initialization()
+            .await
+    } else {
+        None
+    };
+    let bare_requested = normalized
+        .as_deref()
+        .and_then(|model| model.split_once("::").map(|(_, bare)| bare).or(Some(model)));
+    let capability = claude
+        .as_ref()
+        .and_then(|initialization| initialization.model(bare_requested))
+        .cloned();
+    let resolved_model = capability
+        .as_ref()
+        .map(|model| model.resolved_model.clone());
+    let cli_version = match (bridge_kind, claude.as_ref()) {
+        (Some(forge_provider::CliKind::ClaudeCode), Some(initialization)) => {
+            initialization.cli_version.clone()
+        }
+        (Some(kind), _) => kind.cli_version().await,
+        (None, _) => None,
+    };
+    let forge_bridge = agent == Agent::Forge && bridge_kind.is_some();
+    let forge_claude = forge_bridge && bridge_kind == Some(forge_provider::CliKind::ClaudeCode);
+    let persistent = forge_claude && std::env::var("FORGE_PERSISTENT_BRIDGE").as_deref() != Ok("0");
+    let transport = match (agent, bridge_kind, persistent) {
+        (Agent::Forge, Some(forge_provider::CliKind::ClaudeCode), true) => {
+            "claude-stream-json-persistent"
+        }
+        (Agent::Forge, Some(forge_provider::CliKind::ClaudeCode), false) => {
+            "claude-stream-json-oneshot"
+        }
+        (Agent::Forge, Some(forge_provider::CliKind::Codex), _) => "codex-exec-json",
+        (Agent::Forge, Some(forge_provider::CliKind::Antigravity), _) => "agy-print",
+        (Agent::ClaudeCode, _, _) => "claude-print-json",
+        (Agent::Codex, _, _) => "codex-exec-json",
+        (Agent::Forge, None, _) => "forge-provider",
+    }
+    .to_string();
+
+    Some(BenchmarkRuntimeMetadata {
+        cli_version,
+        requested_model,
+        resolved_model,
+        model_capabilities: capability,
+        transport,
+        persistent,
+        partial_streaming: forge_claude,
+        tool_aliases: forge_claude && persistent,
+        appended_system_prompt: forge_claude,
+        mcp_required: forge_bridge
+            && matches!(
+                bridge_kind,
+                Some(forge_provider::CliKind::ClaudeCode | forge_provider::CliKind::Codex)
+            ),
+        mcp_connected: None,
+    })
+}
+
 /// One full sweep over `instances`, writing predictions to `out`. A failed instance records an empty
 /// patch (counts as unresolved) rather than aborting the sweep.
 async fn run_one_sweep(
@@ -325,6 +438,9 @@ async fn run_one_sweep(
         workdir.display()
     );
 
+    // Runtime discovery is deliberately outside every instance timer: it is run metadata, not task
+    // latency. Claude's control request does not send a user prompt or invoke a model.
+    let runtime = collect_runtime_metadata(agent, model.as_deref()).await;
     let orig_cwd = std::env::current_dir().context("reading current dir")?;
     let mut preds = Vec::with_capacity(instances.len());
     let mut metrics = Vec::with_capacity(instances.len());
@@ -359,6 +475,14 @@ async fn run_one_sweep(
         // Always restore CWD so the next instance (and the final write) resolve correctly.
         let _ = std::env::set_current_dir(&orig_cwd);
         let patched = !outcome.patch.is_empty();
+        let mut instance_runtime = runtime.clone();
+        if let Some(runtime) = &mut instance_runtime {
+            if runtime.mcp_required {
+                runtime.mcp_connected = outcome
+                    .metrics_complete
+                    .then_some(!outcome.tools_unavailable);
+            }
+        }
         metrics.push(InstanceMetric {
             instance_id: inst.instance_id.clone(),
             agent: agent.label().to_string(),
@@ -371,6 +495,7 @@ async fn run_one_sweep(
             metrics_complete: outcome.metrics_complete,
             timed_out: outcome.timed_out,
             tools_unavailable: outcome.tools_unavailable,
+            runtime: instance_runtime,
         });
         preds.push(Prediction {
             instance_id: inst.instance_id.clone(),
@@ -984,6 +1109,19 @@ mod tests {
                 metrics_complete: true,
                 timed_out: false,
                 tools_unavailable: false,
+                runtime: Some(BenchmarkRuntimeMetadata {
+                    cli_version: Some("2.1.220 (Claude Code)".into()),
+                    requested_model: Some("claude-cli::sonnet".into()),
+                    resolved_model: Some("claude-sonnet-5".into()),
+                    model_capabilities: None,
+                    transport: "claude-stream-json-persistent".into(),
+                    persistent: true,
+                    partial_streaming: true,
+                    tool_aliases: true,
+                    appended_system_prompt: true,
+                    mcp_required: true,
+                    mcp_connected: Some(true),
+                }),
             },
             InstanceMetric {
                 instance_id: "a-2".into(),
@@ -997,6 +1135,7 @@ mod tests {
                 metrics_complete: false,
                 timed_out: true,
                 tools_unavailable: true,
+                runtime: None,
             },
         ];
         let jsonl = metrics_to_jsonl(&m);
@@ -1025,6 +1164,10 @@ mod tests {
             !loaded[0].tools_unavailable,
             "a sidecar without the wave-7 field defaults tools_unavailable to false"
         );
+        assert!(
+            loaded[0].runtime.is_none(),
+            "a sidecar predating runtime metadata remains readable"
+        );
     }
 
     fn mk(id: &str, patched: bool, complete: bool, tokens: u64) -> InstanceMetric {
@@ -1040,6 +1183,7 @@ mod tests {
             metrics_complete: complete,
             timed_out: false,
             tools_unavailable: false,
+            runtime: None,
         }
     }
 
