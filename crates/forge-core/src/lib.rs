@@ -212,8 +212,10 @@ surrounding-syntax predicates that can hide a sibling implementation.
 - Open every unedited production sibling match that may implement the same behavior, especially \
 clients, adapters, serializers, commands, parsers, and alternate entry points. Search snippets are \
 not inspection.
-- Update every concrete same-behavior path. At compatibility-facing config/parser/CLI boundaries, \
-prefer the replacement name while retaining the old alias as a fallback unless removal is explicit.
+- Update every concrete same-behavior path. For a deprecation/rename, any config/parser/CLI path in \
+the affected subsystem that still consumes the old name is a CONCRETE OMISSION until it prefers \
+the replacement while retaining the old alias as a fallback unless removal is explicit. A \
+different call shape or downstream consumer does not exempt that path.
 
 Keep the sweep bounded; do not broadly review or refactor unrelated code.";
 
@@ -249,6 +251,99 @@ fn completeness_repository_search_ran(messages: &[Message]) -> bool {
                 })
                 .unwrap_or(false)
         })
+}
+
+/// Production files returned by the primary solve's required plain-literal identifier search.
+/// Test-only, unrelated, empty, and unparseable searches produce no evidence, keeping the
+/// turn-end completeness fallback enabled.
+fn completeness_production_identifier_search_matches(
+    messages: &[Message],
+    workspace_root: &std::path::Path,
+    prompt: &str,
+) -> std::collections::BTreeSet<String> {
+    let prompt_terms = prompt
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|term| term.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut matches = std::collections::BTreeSet::new();
+    for call in messages
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .filter(|call| call.name == "search")
+    {
+        let Some(raw_path) = call.args.get("path").and_then(|path| path.as_str()) else {
+            continue;
+        };
+        let path = std::path::Path::new(raw_path);
+        let relative_search_root = if path.is_absolute() {
+            match path.strip_prefix(workspace_root) {
+                Ok(relative) => relative,
+                Err(_) => continue,
+            }
+        } else {
+            path
+        };
+        let relative_search_root = relative_search_root
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches("./")
+            .to_string();
+        if is_test_path(&relative_search_root) {
+            continue;
+        }
+
+        let query_mentions_prompt_identifier = call
+            .args
+            .get("query")
+            .and_then(|query| query.as_str())
+            .into_iter()
+            .flat_map(|query| query.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')))
+            .filter(|term| term.len() >= 3)
+            .map(str::to_ascii_lowercase)
+            .any(|term| prompt_terms.contains(&term));
+        if !query_mentions_prompt_identifier {
+            continue;
+        }
+
+        let Some(result) = messages.iter().find(|message| {
+            message.role == Role::Tool && message.tool_call_id.as_deref() == Some(call.id.as_str())
+        }) else {
+            continue;
+        };
+        for line in result.content.lines() {
+            let Some((raw_match_path, _)) = line.split_once(':') else {
+                continue;
+            };
+            let raw_match_path = raw_match_path.trim();
+            if raw_match_path.is_empty() {
+                continue;
+            }
+            let match_path = std::path::Path::new(raw_match_path);
+            let relative_match = if match_path.is_absolute() {
+                match match_path.strip_prefix(workspace_root) {
+                    Ok(relative) => relative.to_path_buf(),
+                    Err(_) => continue,
+                }
+            } else if relative_search_root.is_empty()
+                || match_path.starts_with(std::path::Path::new(&relative_search_root))
+            {
+                match_path.to_path_buf()
+            } else {
+                std::path::Path::new(&relative_search_root).join(match_path)
+            };
+            let relative_match = relative_match
+                .to_string_lossy()
+                .replace('\\', "/")
+                .trim_start_matches("./")
+                .to_string();
+            if !relative_match.is_empty() && !is_test_path(&relative_match) {
+                matches.insert(relative_match);
+            }
+        }
+    }
+    matches
 }
 
 fn direct_completeness_is_identifier_migration(prompt: &str) -> bool {
@@ -7078,6 +7173,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         } else {
             None
         };
+        let primary_transcript_start = self.transcript.len();
         let outcome = self
             .run_model_loop(edit_model, &specs, primary_decision, max_steps, stream_idle)
             .await?;
@@ -7308,9 +7404,21 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let code_change_turn = self.edits_this_turn > 0
             || self.expect_code_change
             || self.last_turn_contract.requires_changed_artifact();
+        let primary_changed_paths =
+            changed_paths_from_status(working_tree_status(Some(self.workspace.root())).as_deref());
+        let primary_identifier_matches = completeness_production_identifier_search_matches(
+            &self.transcript[primary_transcript_start..],
+            self.workspace.root(),
+            prompt,
+        );
+        let primary_migration_sweep_complete = !primary_identifier_matches.is_empty()
+            && primary_identifier_matches
+                .iter()
+                .all(|path| primary_changed_paths.contains(path));
         if self.config.mesh.verify_completeness
             && code_change_turn
             && direct_completeness_is_identifier_migration(prompt)
+            && !primary_migration_sweep_complete
             && !forge_provider::is_cli_bridge(&active_model)
             && !self.past_turn_deadline()
             && !halted_by_loop_guard
@@ -19386,6 +19494,72 @@ mod tests {
     }
 
     #[test]
+    fn production_identifier_search_requires_production_scope_and_prompt_term() {
+        let search = |path: &str, query: &str, result: &str| {
+            let call_id = forge_types::new_id();
+            vec![
+                Message::assistant_tool_calls(
+                    "",
+                    vec![forge_types::ToolCall {
+                        id: call_id.clone(),
+                        name: "search".into(),
+                        args: serde_json::json!({
+                            "path": path,
+                            "query": query,
+                            "regex": false,
+                        }),
+                    }],
+                ),
+                Message::tool_result(call_id, result),
+            ]
+        };
+        let root = std::path::Path::new("/repo");
+        let prompt = "Replace deprecated db and passwd options with database and password.";
+
+        assert!(
+            completeness_production_identifier_search_matches(
+                &search("tests/backends/mysql", "passwd", "tests.py:10: old passwd",),
+                root,
+                prompt,
+            )
+            .is_empty(),
+            "a test-only search is not production completeness evidence"
+        );
+        assert!(
+            completeness_production_identifier_search_matches(
+                &search(
+                    "django/db/backends/base",
+                    "def copy(",
+                    "base.py:10:def copy(",
+                ),
+                root,
+                prompt,
+            )
+            .is_empty(),
+            "an unrelated production search is not identifier-migration evidence"
+        );
+        assert_eq!(
+            completeness_production_identifier_search_matches(
+                &search(
+                    "django/db/backends/mysql",
+                    "passwd",
+                    "base.py:203: kwargs['passwd']\nclient.py:15: get('passwd')",
+                ),
+                root,
+                prompt,
+            ),
+            [
+                "django/db/backends/mysql/base.py",
+                "django/db/backends/mysql/client.py"
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            "a production search for a prompt identifier is sufficient search evidence"
+        );
+    }
+
+    #[test]
     fn direct_scope_guidance_extracts_explicit_class_methods_only() {
         assert_eq!(
             direct_scope_guidance_named_apis(
@@ -19656,6 +19830,7 @@ mod tests {
                 message.content.contains("maximum TWO search commands")
                     && message.content.contains("Do not search tests alone")
                     && message.content.contains("production sibling match")
+                    && message.content.contains("CONCRETE OMISSION")
                     && message
                         .content
                         .contains("retaining the old alias as a fallback")
