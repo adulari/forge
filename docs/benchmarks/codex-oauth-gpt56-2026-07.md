@@ -1,5 +1,13 @@
 # Forge vs native Codex CLI on GPT-5.6
 
+> **Historical report, superseded for headline use.** This study used `xhigh`,
+> and retained traces prove that many cells could inspect non-isolated Git
+> history or external solution sources. Use the
+> [canonical regular-`high`, history-safe report](history-safe-pinned-mesh-2026-07.md)
+> and [cell-validity ledger](cell-validity-2026-07.md) for current claims. The
+> later 6/6-to-0/6 change is not attributed solely to contamination because
+> effort, prompts, harness code, and stochasticity also changed.
+
 Status: complete — optimized matched rerun passed
 Study date: 2026-07-26–27
 Current branch: `bench/codex-oauth-gpt56-20260726`

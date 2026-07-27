@@ -67,6 +67,16 @@ To answer "does a model do as well in Forge as in its native CLI", run the **sam
 through each agent and score all three. `--agent` swaps the harness; everything else (repo state,
 task, evaluator) is identical.
 
+For a published history-sensitive comparison, use the hardened runners under
+`scripts/harness-bench/` rather than treating the convenient commands below as
+a complete protocol. The hardened path recreates the official base tree as one
+synthetic commit, removes remotes and future objects, prepends an integrity
+rule, captures committed and uncommitted edits against that base, scopes state
+per cell, audits the trace, enforces one quota-bearing arm per external refresh,
+and binds exactly one official result to each cell. See the
+[current history-safe report](history-safe-pinned-mesh-2026-07.md) and
+[cell audit](cell-validity-2026-07.md).
+
 ```bash
 # Forge's harness (mesh-routed, or pin --model provider::model)
 forge bench swe --dataset swe-lite.jsonl --agent forge       --out preds-forge.jsonl  --limit 20

@@ -2,15 +2,54 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import compare_claude_swe as claude
 
 
 class ClaudeBenchmarkTests(unittest.TestCase):
+    def test_cli_rejects_multiple_paid_arms_per_refresh(self) -> None:
+        argv = [
+            "compare_claude_swe.py",
+            "--dataset",
+            "dataset.jsonl",
+            "--out",
+            "out",
+            "--worktree-root",
+            "worktrees",
+            "--baseline-weekly-pct",
+            "20",
+            "--observed-weekly-pct",
+            "20",
+            "--max-new-trials",
+            "2",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            claude.main()
+
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_single_native_arm_is_a_complete_selected_arm_set(self) -> None:
+        trials = claude.swe.plan_trials(
+            ("sonnet",),
+            ({"instance_id": "owner__repo-1"},),
+            ("raw-claude",),
+            42,
+        )
+        self.assertEqual(len(trials), 1)
+        self.assertEqual(trials[0].arm, "raw-claude")
+
     def test_claude_cache_counters_are_additive(self) -> None:
         metrics = claude.claude_token_metrics(
             {

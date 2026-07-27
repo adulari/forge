@@ -354,13 +354,13 @@ def run_trial(
     out_root: Path,
     worktree_root: Path,
     forge_bin: Path,
-    forge_db: Path,
     timeout_seconds: int,
 ) -> dict[str, Any]:
     trial_dir = out_root / "trials" / trial.slug
     trial_dir.mkdir(parents=True, exist_ok=False)
+    forge_db = swe.trial_forge_db(trial_dir)
     workspace = swe.prepare_repo(instance, worktree_root)
-    prompt = str(instance["problem_statement"])
+    prompt = swe.benchmark_prompt(str(instance["problem_statement"]))
     (trial_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     manifest = {
         "trial": dataclasses.asdict(trial),
@@ -412,7 +412,11 @@ def run_trial(
                 if stream_total is not None and ledger_total is not None
                 else None
             )
-    patch = bench.capture_patch(workspace, trial_dir)
+    patch = bench.capture_patch(
+        workspace,
+        trial_dir,
+        base_ref=swe.benchmark_base_ref(workspace),
+    )
     patch_text = (trial_dir / "changes.patch").read_text(
         encoding="utf-8",
         errors="replace",
@@ -531,7 +535,8 @@ def main() -> int:
     parser.add_argument(
         "--max-new-trials",
         type=int,
-        help="run at most this many additional arms; the segment must end on a pair boundary",
+        default=1,
+        help="run exactly one additional provider arm before an external refresh",
     )
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
@@ -540,10 +545,15 @@ def main() -> int:
     arms = bench.parse_csv(args.arms)
     if set(models) - set(DEFAULT_MODELS):
         parser.error(f"unsupported models: {sorted(set(models) - set(DEFAULT_MODELS))}")
-    if set(arms) != set(DEFAULT_ARMS):
-        parser.error(f"arms must be exactly {list(DEFAULT_ARMS)}")
-    if args.max_new_trials is not None and args.max_new_trials <= 0:
-        parser.error("--max-new-trials must be positive")
+    unknown_arms = set(arms) - set(DEFAULT_ARMS)
+    if unknown_arms:
+        parser.error(f"unsupported arms: {sorted(unknown_arms)}")
+    if not arms:
+        parser.error("at least one arm is required")
+    if args.max_new_trials != 1:
+        parser.error(
+            "--max-new-trials must be 1 so external quotas refresh after every arm"
+        )
     if not args.forge_bin.is_file():
         parser.error(f"Forge binary does not exist: {args.forge_bin}")
 
@@ -572,7 +582,6 @@ def main() -> int:
     trials = swe.plan_trials(models, instances, arms, args.seed)
     cap_pct = args.baseline_weekly_pct + args.max_weekly_increase_pct
     args.out.mkdir(parents=True, exist_ok=True)
-    forge_db = args.out / "forge-benchmark.db"
     manifest_path = args.out / "suite-manifest.json"
     index_path = args.out / "trial-index.jsonl"
 
@@ -639,13 +648,7 @@ def main() -> int:
     if completed_trials != planned_prefix:
         parser.error("completed trial order does not match the suite manifest")
     remaining = trials[len(summaries) :]
-    if args.max_new_trials is not None:
-        remaining = remaining[: args.max_new_trials]
-    if (len(summaries) + len(remaining)) % 2 != 0:
-        parser.error(
-            "the requested segment would end inside a matched pair; choose a "
-            "--max-new-trials value that reaches the next pair boundary"
-        )
+    remaining = remaining[: args.max_new_trials]
 
     quota_check = {
         "observed_at": bench.utc_now(),
@@ -687,7 +690,6 @@ def main() -> int:
             out_root=args.out,
             worktree_root=args.worktree_root,
             forge_bin=args.forge_bin.resolve(),
-            forge_db=forge_db,
             timeout_seconds=args.timeout_seconds,
         )
         summaries.append(summary)

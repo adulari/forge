@@ -1048,7 +1048,11 @@ through the `mcp__forge__` write tools, which run OUTSIDE that sandbox and CAN m
 workspace, so do NOT probe writability (`test -w`, `touch`), do NOT inspect the sandbox or \
 approval mode, and never refuse or report a build as impossible because the filesystem looks \
 read-only. Never say a tool is unavailable without first checking its `mcp__forge__`-prefixed \
-form.",
+    form.",
+    "Verification budget: after editing, if the first relevant test/import fails because \
+compiled extensions, build dependencies, or a compatible runtime are missing, do NOT build, \
+install, probe alternatives, or read/copy another checkout. Run only available lightweight \
+checks (syntax and diff), report the limitation, and finish.",
     "Skills: Forge has its OWN skills library — load a skill ONLY via `mcp__forge__use_skill` \
 (its description lists every skill, e.g. `orchestrate`). Do NOT look for skills, commands, or \
 agents on the filesystem (`~/.claude`, `~/.codex`, `~/.cursor`, any `SKILL.md`/`commands/` \
@@ -4216,6 +4220,7 @@ mod tests {
             // skills come from Forge's library, not the filesystem
             "~/.claude",
             "mcp__forge__use_skill",
+            "Verification budget",
         ] {
             assert!(
                 CLAUDE_HARNESS_PREAMBLE.contains(guard),

@@ -215,21 +215,33 @@ def forge_argv(forge_bin: Path, model: str, prompt: str) -> list[str]:
     ]
 
 
-def forge_environment(forge_db: Path) -> dict[str, str]:
+def forge_environment(
+    forge_db: Path,
+    reasoning_effort: str = "xhigh",
+) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
             "FORGE_DB": str(forge_db),
-            "FORGE_MESH__DEFAULT_EFFORT": "xhigh",
+            "FORGE_MESH__DEFAULT_EFFORT": reasoning_effort,
             "FORGE_MESH__AUTO_DISCOVER": "false",
             "FORGE_MESH__PIN_FAILOVER": "false",
-            "FORGE_MESH__FAILOVER": "false",
+            # Keep same-model transient retries enabled. The explicit model pin plus
+            # pin_failover=false prevents cross-model substitution without disabling
+            # Forge's outage/rate-limit resilience for the requested model.
+            "FORGE_MESH__FAILOVER": "true",
         }
     )
     return env
 
 
-def raw_codex_argv(model: str, workspace: Path, prompt: str, profile: str) -> list[str]:
+def raw_codex_argv(
+    model: str,
+    workspace: Path,
+    prompt: str,
+    profile: str,
+    reasoning_effort: str = "xhigh",
+) -> list[str]:
     argv = [
         "codex",
         "exec",
@@ -239,7 +251,7 @@ def raw_codex_argv(model: str, workspace: Path, prompt: str, profile: str) -> li
         "-m",
         model,
         "-c",
-        'model_reasoning_effort="xhigh"',
+        f'model_reasoning_effort="{reasoning_effort}"',
         "-C",
         str(workspace),
     ]
@@ -476,7 +488,12 @@ def verify_scenario(
     return {"passed": all_passed, "steps": steps}
 
 
-def capture_patch(workspace: Path, trial_dir: Path) -> dict[str, Any]:
+def capture_patch(
+    workspace: Path,
+    trial_dir: Path,
+    *,
+    base_ref: str = "HEAD",
+) -> dict[str, Any]:
     subprocess.run(
         ("git", "add", "-N", "--", ".", FORGE_CHECKPOINT_PATHSPEC),
         cwd=workspace,
@@ -491,7 +508,7 @@ def capture_patch(workspace: Path, trial_dir: Path) -> dict[str, Any]:
             "diff",
             "--binary",
             "--no-ext-diff",
-            "HEAD",
+            base_ref,
             "--",
             ".",
             FORGE_CHECKPOINT_PATHSPEC,
@@ -504,12 +521,34 @@ def capture_patch(workspace: Path, trial_dir: Path) -> dict[str, Any]:
     )
     (trial_dir / "changes.patch").write_bytes(patch.stdout)
     (trial_dir / "changes.patch.stderr.log").write_bytes(patch.stderr)
-    status = tiny_command(
-        ("git", "status", "--short", "--", ".", FORGE_CHECKPOINT_PATHSPEC),
-        cwd=workspace,
-    )
+    if base_ref == "HEAD":
+        status = tiny_command(
+            ("git", "status", "--short", "--", ".", FORGE_CHECKPOINT_PATHSPEC),
+            cwd=workspace,
+        )
+    else:
+        status = tiny_command(
+            (
+                "git",
+                "diff",
+                "--name-status",
+                base_ref,
+                "--",
+                ".",
+                FORGE_CHECKPOINT_PATHSPEC,
+            ),
+            cwd=workspace,
+        )
     diffstat = tiny_command(
-        ("git", "diff", "--stat", "HEAD", "--", ".", FORGE_CHECKPOINT_PATHSPEC),
+        (
+            "git",
+            "diff",
+            "--stat",
+            base_ref,
+            "--",
+            ".",
+            FORGE_CHECKPOINT_PATHSPEC,
+        ),
         cwd=workspace,
     )
     return {

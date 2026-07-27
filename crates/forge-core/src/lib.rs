@@ -187,12 +187,22 @@ old/deprecated term in an unedited production sibling, OPEN that code and handle
 omission under the prior compatibility rule. Do not modify tests.";
 
 const DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT: &str = "\
-Your completeness audit OPENED the related production path(s) listed below, but the final diff \
-still leaves them unchanged. That is unresolved evidence, not a completed audit. Re-open each \
+Your completeness evidence identified the related production path(s) listed below, but the final \
+diff still leaves them unchanged. That is unresolved evidence, not a completed audit. Open each \
 listed path and address the task there NOW. For a deprecation/rename, make the replacement name \
 preferred while preserving the old name only as a compatibility fallback. Do not run more broad \
-searches, do not edit tests, and do not finish with prose that merely repeats the changes already \
-made.";
+searches. Leaving a listed path unchanged is allowed ONLY when its current text contains none of \
+the old/deprecated identifiers; a different consumer or call shape is not an exemption. If it \
+reads an old identifier from configuration/options, edit it to prefer the replacement. Do not edit \
+tests, and do not finish with prose that merely repeats the changes already made.";
+
+const DIRECT_COMPLETENESS_UNRESOLVED_RETRY_PROMPT: &str = "\
+The mandatory reconciliation ended without changing the evidence-backed production path(s) listed \
+below. Final prose cannot override repository state. Re-open each path and make the concrete edit \
+NOW. For a deprecation/rename, any path that reads an old identifier from configuration/options \
+must prefer the replacement and keep the old name only as fallback compatibility; a different \
+consumer or call shape is not an exemption. Inspect the final diff and run focused verification. \
+Do not edit tests or repeat the prior summary without acting.";
 
 const DIRECT_NAMED_API_SCOPE_GUIDANCE: &str = "\
 The task explicitly names the production API(s) below. Treat those API boundaries as the default \
@@ -452,6 +462,25 @@ fn opened_unchanged_production_paths(
             paths.insert(relative);
         }
     }
+    paths.into_iter().collect()
+}
+
+fn unresolved_completeness_production_paths(
+    primary_opened_identifier_paths: &std::collections::BTreeSet<String>,
+    audit_messages: &[Message],
+    workspace_root: &std::path::Path,
+    changed_paths: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut paths =
+        opened_unchanged_production_paths(audit_messages, workspace_root, changed_paths)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+    paths.extend(
+        primary_opened_identifier_paths
+            .iter()
+            .filter(|path| !changed_paths.contains(path.as_str()))
+            .cloned(),
+    );
     paths.into_iter().collect()
 }
 
@@ -7441,6 +7470,14 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && primary_identifier_matches
                 .iter()
                 .all(|path| primary_changed_paths.contains(path));
+        let primary_opened_identifier_paths = opened_unchanged_production_paths(
+            primary_turn_messages,
+            self.workspace.root(),
+            &primary_changed_paths,
+        )
+        .into_iter()
+        .filter(|path| primary_identifier_matches.contains(path))
+        .collect::<std::collections::BTreeSet<_>>();
         if self.config.mesh.verify_completeness
             && code_change_turn
             && direct_completeness_is_identifier_migration(prompt)
@@ -7565,25 +7602,26 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             let changed_paths = changed_paths_from_status(
                 working_tree_status(Some(self.workspace.root())).as_deref(),
             );
-            let opened_unchanged = opened_unchanged_production_paths(
+            let unresolved_paths = unresolved_completeness_production_paths(
+                &primary_opened_identifier_paths,
                 &self.transcript[audit_transcript_start..],
                 self.workspace.root(),
                 &changed_paths,
             );
-            if !opened_unchanged.is_empty()
+            if !unresolved_paths.is_empty()
                 && !self.past_turn_deadline()
                 && !hit_step_cap
                 && !halted_by_loop_guard
             {
                 self.presenter.emit(PresenterEvent::Warning(format!(
-                    "completeness audit opened {} unchanged production path(s) — requiring an \
-                     explicit fix before finishing",
-                    opened_unchanged.len()
+                    "completeness audit left {} evidence-backed production path(s) unchanged — \
+                     requiring an explicit fix before finishing",
+                    unresolved_paths.len()
                 )));
                 self.auto_compact_if_needed(&active_model).await;
                 let prompt = format!(
-                    "{DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT}\n\nOpened but unchanged production paths:\n- {}",
-                    opened_unchanged.join("\n- ")
+                    "{DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT}\n\nEvidence-backed but unchanged production paths:\n- {}",
+                    unresolved_paths.join("\n- ")
                 );
                 let seq = self.next_seq();
                 self.store
@@ -7604,6 +7642,50 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = path_review.active_model;
                 hit_step_cap = path_review.hit_step_cap;
                 halted_by_loop_guard = path_review.halted_by_loop_guard;
+
+                let post_review_changed_paths = changed_paths_from_status(
+                    working_tree_status(Some(self.workspace.root())).as_deref(),
+                );
+                let still_unresolved = unresolved_paths
+                    .iter()
+                    .filter(|path| !post_review_changed_paths.contains(path.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !still_unresolved.is_empty()
+                    && !self.past_turn_deadline()
+                    && !hit_step_cap
+                    && !halted_by_loop_guard
+                {
+                    self.presenter.emit(PresenterEvent::Warning(format!(
+                        "completeness reconciliation left {} named production path(s) unchanged — \
+                         retrying once with repository-state enforcement",
+                        still_unresolved.len()
+                    )));
+                    self.auto_compact_if_needed(&active_model).await;
+                    let prompt = format!(
+                        "{DIRECT_COMPLETENESS_UNRESOLVED_RETRY_PROMPT}\n\nStill-unchanged production paths:\n- {}",
+                        still_unresolved.join("\n- ")
+                    );
+                    let seq = self.next_seq();
+                    self.store
+                        .add_message(&self.id, seq, Role::System, &prompt, None)?;
+                    self.transcript.push(Message::system(&prompt));
+                    let retry_specs = self.tool_specs();
+                    let retry = self
+                        .run_model_loop(
+                            active_model.clone(),
+                            &retry_specs,
+                            None,
+                            max_steps,
+                            stream_idle,
+                        )
+                        .await?;
+                    adopt_redrive_text(&mut final_text, retry.final_text);
+                    context_tokens = retry.context_tokens;
+                    active_model = retry.active_model;
+                    hit_step_cap = retry.hit_step_cap;
+                    halted_by_loop_guard = retry.halted_by_loop_guard;
+                }
             }
 
             // The existing-tests guard runs before this audit, but a weaker reviewer can ignore
@@ -19701,6 +19783,48 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_completeness_carries_primary_matches_into_final_gate() {
+        let primary_matches = ["src/parser.rs", "src/adapter.rs"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        let primary_messages = vec![Message::assistant_tool_calls(
+            "",
+            ["src/parser.rs", "src/adapter.rs", "src/unrelated.rs"]
+                .into_iter()
+                .map(|path| forge_types::ToolCall {
+                    id: forge_types::new_id(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": path}),
+                })
+                .collect(),
+        )];
+        let changed_paths = ["src/parser.rs"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::HashSet<_>>();
+        let primary_opened_identifier_paths = opened_unchanged_production_paths(
+            &primary_messages,
+            std::path::Path::new("/repo"),
+            &changed_paths,
+        )
+        .into_iter()
+        .filter(|path| primary_matches.contains(path))
+        .collect();
+
+        assert_eq!(
+            unresolved_completeness_production_paths(
+                &primary_opened_identifier_paths,
+                &[],
+                std::path::Path::new("/repo"),
+                &changed_paths,
+            ),
+            vec!["src/adapter.rs".to_string()],
+            "an opened sibling found before the audit remains unresolved until the diff changes it"
+        );
+    }
+
+    #[test]
     fn direct_scope_guidance_extracts_explicit_class_methods_only() {
         assert_eq!(
             direct_scope_guidance_named_apis(
@@ -20062,19 +20186,36 @@ mod tests {
                 matches!(
                     event,
                     PresenterEvent::Warning(message)
-                        if message.contains("opened 1 unchanged production path")
+                        if message.contains("left 1 evidence-backed production path")
                 )
             }),
-            "an opened but unchanged production sibling must trigger the path-aware gate"
+            "an evidence-backed unchanged production sibling must trigger the path-aware gate"
         );
         assert!(
             session.transcript.iter().any(|message| {
                 message
                     .content
-                    .contains("Opened but unchanged production paths")
+                    .contains("Evidence-backed but unchanged production paths")
                     && message.content.contains("sibling.py")
             }),
             "the final re-drive must name the exact unresolved production path"
+        );
+        assert!(
+            events.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    PresenterEvent::Warning(message)
+                        if message.contains("retrying once with repository-state enforcement")
+                )
+            }),
+            "an unchanged path after reconciliation must trigger one state-verified retry"
+        );
+        assert!(
+            session.transcript.iter().any(|message| {
+                message.content.contains("Still-unchanged production paths")
+                    && message.content.contains("sibling.py")
+            }),
+            "the retry must name the exact path whose repository state did not change"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
