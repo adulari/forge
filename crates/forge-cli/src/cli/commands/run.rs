@@ -147,8 +147,10 @@ fn should_refresh_codex_quota(mock: bool, pin: Option<&str>) -> bool {
     }
     match pin.map(forge_config::provider_of) {
         // Unpinned/bare ids may route through Codex, so preserve the routing-pressure refresh.
-        None | Some("") | Some("codex-cli" | "codex-oauth") => true,
-        // A fully-qualified non-Codex pin cannot use Codex during this session.
+        None | Some("") => true,
+        // Any fully-qualified pin bypasses mesh selection. A Codex response carries fresh quota
+        // headers itself, so a separate pre-turn Luna probe cannot affect the decision and only
+        // adds subscription burn plus startup latency.
         Some(_) => false,
     }
 }
@@ -6023,11 +6025,11 @@ mod tests {
     fn codex_quota_refresh_only_runs_when_the_session_can_use_codex() {
         assert!(should_refresh_codex_quota(false, None));
         assert!(should_refresh_codex_quota(false, Some("bare-model")));
-        assert!(should_refresh_codex_quota(
+        assert!(!should_refresh_codex_quota(
             false,
             Some("codex-cli::gpt-5.4-mini")
         ));
-        assert!(should_refresh_codex_quota(
+        assert!(!should_refresh_codex_quota(
             false,
             Some("codex-oauth::gpt-5.6-luna")
         ));

@@ -865,7 +865,9 @@ fn parse_external_usage(agent: Agent, stdout: &str) -> (u64, u64, f64, bool) {
         keys.iter().find_map(|k| v.get(k).and_then(|x| x.as_u64()))
     }
     // Pull token/cost out of a single JSON object that may nest usage under a few known keys.
-    fn from_obj(v: &serde_json::Value) -> Option<(u64, u64, f64)> {
+    // Claude's `input_tokens` excludes its cache read/write counters. Current Codex JSONL reports
+    // cached/write input as subsets of `input_tokens`, matching the Responses API.
+    fn from_obj(v: &serde_json::Value, cached_input_is_subset: bool) -> Option<(u64, u64, f64)> {
         let usage = ["usage", "token_usage", "info", "tokens"]
             .iter()
             .find_map(|k| v.get(k))
@@ -873,24 +875,28 @@ fn parse_external_usage(agent: Agent, stdout: &str) -> (u64, u64, f64, bool) {
         let inp = u(usage, &["input_tokens", "prompt_tokens", "input"]);
         let out = u(usage, &["output_tokens", "completion_tokens", "output"]);
         let (inp, out) = (inp?, out?);
-        // Count the FULL input the model processed — uncached `input_tokens` PLUS cache reads PLUS
-        // cache writes — so this matches what the Forge bridge now records (cli_provider `usage_from`)
-        // and the two agents' token totals are apples-to-apples. (Cache reads/writes are billed at a
-        // fraction, but they are real input the model saw; omitting them flatters whichever side
-        // caches more.)
         let cache = u(usage, &["cache_read_input_tokens", "cached_input_tokens"]).unwrap_or(0);
-        let cache_write = u(usage, &["cache_creation_input_tokens"]).unwrap_or(0);
+        let cache_write = u(
+            usage,
+            &["cache_creation_input_tokens", "cache_write_input_tokens"],
+        )
+        .unwrap_or(0);
         let cost = ["total_cost_usd", "cost_usd", "cost"]
             .iter()
             .find_map(|k| v.get(k).and_then(|x| x.as_f64()))
             .unwrap_or(0.0);
-        Some((inp + cache + cache_write, out, cost))
+        let full_input = if cached_input_is_subset {
+            inp
+        } else {
+            inp + cache + cache_write
+        };
+        Some((full_input, out, cost))
     }
 
     match agent {
         Agent::ClaudeCode => serde_json::from_str::<serde_json::Value>(stdout.trim())
             .ok()
-            .and_then(|v| from_obj(&v))
+            .and_then(|v| from_obj(&v, false))
             .map(|(i, o, c)| (i, o, c, true))
             .unwrap_or((0, 0, 0.0, false)),
         Agent::Codex => {
@@ -898,7 +904,7 @@ fn parse_external_usage(agent: Agent, stdout: &str) -> (u64, u64, f64, bool) {
             let last = stdout
                 .lines()
                 .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
-                .filter_map(|v| from_obj(&v))
+                .filter_map(|v| from_obj(&v, true))
                 .next_back();
             match last {
                 Some((i, o, c)) => (i, o, c, true),
@@ -1142,6 +1148,18 @@ mod tests {
         let (i, o, _c, ok) = parse_external_usage(Agent::Codex, out);
         assert!(ok);
         assert_eq!((i, o), (900, 120), "last tally wins");
+    }
+
+    #[test]
+    fn parse_codex_cached_input_is_a_subset_not_an_addend() {
+        let out = r#"{"type":"turn.completed","usage":{"input_tokens":16646,"cached_input_tokens":9984,"cache_write_input_tokens":512,"output_tokens":8}}"#;
+        let (i, o, _c, ok) = parse_external_usage(Agent::Codex, out);
+        assert!(ok);
+        assert_eq!(
+            (i, o),
+            (16646, 8),
+            "Codex input already includes cached/write subsets"
+        );
     }
 
     #[test]
