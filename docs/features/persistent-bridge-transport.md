@@ -56,6 +56,12 @@ ran). A stall carries `tool_ran` state: after a tool starts, Forge tears down th
 returns a retryable failure but **never automatically replays the turn**, so an irreversible side
 effect cannot execute twice.
 
+Both the bridge decoder and Forge's outer stream watchdog track tool start/finish state. An
+identified in-flight MCP tool gets one additional idle window (2× total) so a legitimate build
+near the shell tool's own timeout can return its result instead of racing the ordinary stream
+silence cutoff. A stream with no active tool keeps the base cutoff, and a stuck tool remains
+bounded; the extra window is not a general timeout increase.
+
 **Authoritative discovery.** Forge enumerates Claude models with a non-billing `initialize`
 control request rather than scraping `claude --help`. The sanitized record includes alias,
 resolved model and effort/adaptive/auto/fast-mode capabilities; account, email, PID and local

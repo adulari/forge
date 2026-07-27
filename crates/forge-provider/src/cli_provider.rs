@@ -2713,6 +2713,7 @@ impl LiveSession {
         let mut data = TurnData::default();
         let mut tool_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut active_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut claude_stream = ClaudeStreamState::default();
         // Backstop against a wedged turn that never truly progresses (#714: a claude persistent-
         // bridge tool round-trip that deadlocks — claude goes silent on stdout while out-of-band
@@ -2733,7 +2734,17 @@ impl LiveSession {
                     tool_ran: data.tool_ran,
                 });
             }
-            let tick = tokio::time::timeout(idle, async {
+            // A Forge MCP shell command has its own timeout at roughly the same boundary as this
+            // provider-idle watchdog. Give a positively identified in-flight tool one additional
+            // idle window so a legitimate long build can return its ToolFinished event instead of
+            // racing the stream watchdog. Truly silent model streams retain the original cutoff;
+            // the independent `max_claude_silence` backstop still bounds sink-event trickles.
+            let quiet_timeout = if active_tools.is_empty() {
+                idle
+            } else {
+                idle.saturating_mul(2)
+            };
+            let tick = tokio::time::timeout(quiet_timeout, async {
                 tokio::select! {
                     biased;
                     line = self.lines.next_line() => Ev::Line(line),
@@ -2772,10 +2783,12 @@ impl LiveSession {
                     }
                     Parsed::ToolStarted { id, name, args } => {
                         data.tool_ran = true;
+                        active_tools.insert(id.clone());
                         tool_names.insert(id, name.clone());
                         on_event(StreamEvent::ToolStarted { name, args });
                     }
                     Parsed::ToolFinished { id, ok, summary } => {
+                        active_tools.remove(&id);
                         let name = tool_names.get(&id).cloned().unwrap_or_default();
                         on_event(StreamEvent::ToolFinished { name, ok, summary });
                     }
@@ -5013,6 +5026,49 @@ while IFS= read -r line; do
 done
 "#,
         )
+    }
+
+    /// A fake persistent Claude turn whose tool runs longer than the base provider-idle window but
+    /// finishes within the bounded in-flight-tool grace window.
+    #[cfg(unix)]
+    fn make_fake_slow_tool_cli() -> String {
+        install_fake_cli(
+            "forge-fake-slow-tool",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"slow-1","name":"mcp__forge__shell","input":{"command":"build"}}]}}\n'
+  sleep 1.2
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"slow-1","is_error":false,"content":"built"}]}}\n'
+  printf '{"type":"result","is_error":false,"result":"done","usage":{"input_tokens":5,"output_tokens":3}}\n'
+done
+"#,
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persistent_in_flight_tool_gets_one_bounded_extra_idle_window() {
+        let fake = make_fake_slow_tool_cli();
+        let provider = CliProvider::claude_code()
+            .with_harness(false)
+            .with_persistent(true)
+            .with_binary(&fake)
+            .with_timeout(Duration::from_secs(1));
+        let mut sink = |_event: StreamEvent| {};
+
+        let started = std::time::Instant::now();
+        let response = provider
+            .complete(
+                "claude-cli::sonnet",
+                &[Message::user("run the build")],
+                &[],
+                &mut sink,
+            )
+            .await
+            .expect("the tool result should arrive inside the extended tool window");
+        assert_eq!(response.content, "done");
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     /// A fake persistent Claude process modelling the startup race in the real CLI: the streaming
