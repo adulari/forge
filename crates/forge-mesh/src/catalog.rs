@@ -474,11 +474,20 @@ fn conserve_probability(tier: TaskTier, fraction: f64, plan: &str, code_heavy: b
     }
     let base = match tier {
         TaskTier::Trivial => unreachable!(),
+        TaskTier::Standard if code_heavy => 0.15,
         TaskTier::Standard => 0.65,
         TaskTier::Complex if code_heavy => 0.15, // code-heavy complex: subscriptions earn their keep
         TaskTier::Complex => 0.30,
     };
-    let ramp = (fraction / 0.80).clamp(0.0, 1.0) * (1.0 - base);
+    // Forge's harness already reduces subscription token burn substantially on coding work. Keep
+    // its quality advantage while the plan is healthy, then conserve increasingly between 50% and
+    // the 80% warning threshold. Non-code work retains the original linear pressure ramp.
+    let pressure = if code_heavy {
+        ((fraction - 0.50) / 0.30).clamp(0.0, 1.0)
+    } else {
+        (fraction / 0.80).clamp(0.0, 1.0)
+    };
+    let ramp = pressure * (1.0 - base);
     ((base + ramp) * plan_factor(plan)).clamp(0.0, 1.0)
 }
 
@@ -2335,6 +2344,29 @@ mod tests {
             ),
             0.0
         );
+    }
+
+    #[test]
+    fn code_conservation_stays_low_until_half_the_plan_is_used() {
+        assert_eq!(
+            conserve_probability(TaskTier::Standard, 0.49, "", true),
+            0.15
+        );
+        assert_eq!(
+            conserve_probability(TaskTier::Complex, 0.49, "", true),
+            0.15
+        );
+        assert!(
+            conserve_probability(TaskTier::Standard, 0.49, "", false) > 0.65,
+            "non-code standard work keeps the original pressure ramp"
+        );
+    }
+
+    #[test]
+    fn code_conservation_still_reaches_one_at_the_warning_line() {
+        for tier in [TaskTier::Standard, TaskTier::Complex] {
+            assert_eq!(conserve_probability(tier, 0.80, "", true), 1.0);
+        }
     }
 
     #[test]

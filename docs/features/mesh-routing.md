@@ -672,12 +672,20 @@ exhaust the plan even while every window is still green. `conserve_decision`
 
    ```
    base(tier) = 1.0  Trivial          (subscriptions are never worth spending on it)
-                0.65 Standard
+                0.65 Standard          (0.15 when code_heavy)
                 0.30 Complex          (0.15 when code_heavy — subs earn their keep on code)
-   ramp       = (fraction / 0.80).clamp(0, 1) * (1 - base)      # fraction is pace-projected
+   pressure   = (fraction / 0.80).clamp(0, 1)                   # ordinary work
+                ((fraction - 0.50) / 0.30).clamp(0, 1)         # code-heavy work
+   ramp       = pressure * (1 - base)                           # fraction is pace-projected
     P          = 1.0                                                 # Trivial
                  ((base + ramp) * plan_factor(plan)).clamp(0, 1)     # Standard / Complex
    ```
+
+   Code-heavy Standard and Complex work stays at the low base probability while utilization is
+   below 50%, then ramps to full conservation at the same 80% Warning line. Forge's own harness
+   already cuts subscription-token burn materially on coding tasks, so early-plan conservation
+   should not trade away coding quality merely to substitute a free model. Ordinary Standard and
+   Complex work retains the original pressure ramp from zero.
 
    `plan_factor` (`catalog.rs:342`): slug containing "20x" → 0.8; "max" or "pro" → 0.85;
    anything else (plus/team/unknown) → 1.0. A bigger plan has more headroom, so it is conserved
