@@ -1,4 +1,59 @@
-# Forge OAuth vs raw Codex benchmark
+# Harness benchmark runners
+
+## Forge vs. native Claude Code
+
+`compare_claude_swe.py` runs matched SWE-bench arms through Forge's Claude CLI
+bridge and native Claude Code. It supports only the live aliases advertised by
+Claude's non-billing `initialize` response and requires both models to advertise
+regular `high` effort.
+
+```bash
+PYTHONPATH=scripts/harness-bench \
+python3 scripts/harness-bench/compare_claude_swe.py \
+  --dataset /path/to/swe-verified.jsonl \
+  --out /path/to/run \
+  --worktree-root /path/to/reusable-clones \
+  --forge-bin ./target/release/forge \
+  --models 'opus[1m],sonnet' \
+  --arms forge,raw-claude \
+  --baseline-weekly-pct 21 \
+  --max-weekly-increase-pct 9 \
+  --observed-weekly-pct 21
+```
+
+The runner:
+
+- sets both harnesses to `high`, never `xhigh`;
+- records Claude CLI version, resolved model IDs, supported effort levels, Forge
+  commit, and binary hash;
+- uses additive Claude cache accounting and a separate 0.25 cache-read
+  sensitivity measure;
+- records one prediction file per arm/model for official Docker evaluation;
+- fails closed before another provider call when weekly telemetry is absent;
+- accepts a forced external reading through `--observed-weekly-pct`;
+- resumes only a manifest-compatible prefix with `--resume`.
+
+Run the official evaluator with `swebench==4.1.0`; a process exit, non-empty
+patch, or model assertion is not a resolve. When a study spans multiple
+quota-gated run roots, combine them with:
+
+```bash
+PYTHONPATH=scripts/harness-bench \
+python3 scripts/harness-bench/analyze_claude_swe.py \
+  --run-dir /path/to/sonnet-hard-run \
+  --run-dir /path/to/opus-hard-run \
+  --run-dir /path/to/easy-medium-run \
+  --out-json /path/to/official-analysis.json \
+  --out-markdown /path/to/official-analysis.md
+```
+
+The analyzer binds only explicit `resolved_ids`, `unresolved_ids`, and
+`empty_patch_ids`. SWE-bench can list unevaluated prediction rows under
+`submitted_ids`, so that field must never be treated as an outcome. Missing or
+duplicate outcomes, evaluator errors, incomplete pairs, and missing wall/token
+telemetry fail the analysis.
+
+## Forge OAuth vs. raw Codex
 
 This runner performs paired, isolated coding trials through:
 

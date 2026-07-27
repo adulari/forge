@@ -121,7 +121,31 @@ is spent only where it matters. Inspect any of these decisions live with `/mesh`
 
 ## 📊 Proof: same model, better results
 
-### Latest: Forge vs. native Codex on GPT-5.6
+### Latest: Forge vs. native Claude Code on Claude 5
+
+The latest matched benchmark ran the **same Claude Opus 5 and Sonnet 5 models**
+at regular `high` effort through Forge and native Claude Code on six stratified
+**SWE-bench Verified** model-task pairs. The official `swebench==4.1.0` Docker
+evaluator scored every prediction.
+
+| 6 matched SWE-bench Verified pairs | Forge | Native Claude Code | Result |
+|---|---:|---:|---|
+| Official Docker resolves | **5 / 6** | 4 / 6 | **Forge +1 solve** |
+| Quality-matched wall time (5 pairs) | **1,242.588s** | 1,547.852s | **Forge 19.72% faster** |
+| Quality-matched processed tokens | **7,175,961** | 11,600,158 | **Forge 38.14% lower** |
+| Quality-matched cache-adjusted tokens | **2,010,283.50** | 3,177,565.00 | **Forge 36.74% lower** |
+| Opus official resolves | **3 / 3** | **3 / 3** | Quality parity |
+| Sonnet official resolves | **2 / 3** | 1 / 3 | **Forge +1 solve** |
+
+The efficiency comparison uses pairs with the same official outcome. The
+unconditional totals are also disclosed in the report: native Sonnet returned
+an eight-second empty patch on the hard task Forge solved, and treating that
+failure as a speed/token win would be misleading. Weekly Claude use moved only
+from 21% to 22%, within the 31% absolute cap.
+
+**[Read the full Claude 5 Forge vs. native Claude Code benchmark →](docs/benchmarks/claude-code-claude5-2026-07.md)**
+
+### Previous: Forge vs. native Codex on GPT-5.6
 
 The latest matched benchmark ran the **same GPT-5.6 Sol, Terra, and Luna models**
 with `xhigh` reasoning through Forge and native Codex on a predeclared,
@@ -1011,6 +1035,7 @@ command = "bash -c 'jq .args <<< $FORGE_TOOL_INPUT >> audit.log'"
 
 | Doc | What |
 |-----|------|
+| [**Latest Claude 5 Forge vs. Claude Code benchmark**](./docs/benchmarks/claude-code-claude5-2026-07.md) | 5/6 vs. 4/6 resolves; 19.72% faster and 38.14% fewer tokens on quality-matched pairs |
 | [**Latest GPT-5.6 Forge vs. Codex benchmark**](./docs/benchmarks/codex-oauth-gpt56-2026-07.md) | 18/18 quality parity, 40.81% faster, 60.67% fewer tokens |
 | [**Benchmark index**](./docs/benchmarks/README.md) | Latest result, historical measurements, and reproduction guides |
 | [**Competitor comparison**](./docs/comparison.md) | Detailed, sourced breakdown of every alternative |

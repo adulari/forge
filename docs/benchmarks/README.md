@@ -3,7 +3,24 @@
 Forge benchmarks compare harnesses with the same underlying models, matched
 tasks, explicit accounting, and official evaluators wherever available.
 
-## Latest result: Forge vs. native Codex on GPT-5.6
+## Latest result: Forge vs. native Claude Code on Claude 5
+
+A quota-bounded 2026-07-27 run used Claude Opus 5 and Sonnet 5 at regular
+`high` effort on six matched SWE-bench Verified model-task pairs.
+
+| Metric | Forge | Native Claude Code | Result |
+|---|---:|---:|---|
+| Official Docker resolves | **5 / 6** | 4 / 6 | **Forge +1 solve** |
+| Quality-matched wall time | **1,242.588s** | 1,547.852s | **Forge 19.72% faster** |
+| Quality-matched processed tokens | **7,175,961** | 11,600,158 | **Forge 38.14% lower** |
+| Quality-matched cache-adjusted tokens | **2,010,283.50** | 3,177,565.00 | **Forge 36.74% lower** |
+
+All official reports completed with zero evaluator errors. The
+**[complete Claude 5 Forge vs. native Claude Code report](claude-code-claude5-2026-07.md)**
+includes the unconditional totals, per-model and per-pair results, quota
+accounting, artifacts, exclusions, and caveats.
+
+## Previous result: Forge vs. native Codex on GPT-5.6
 
 The fresh, predeclared 2026-07-26–27 run used GPT-5.6 Sol, Terra, and Luna at
 `xhigh` reasoning on 18 stratified SWE-bench Verified tasks.
