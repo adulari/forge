@@ -1,10 +1,78 @@
 # Forge vs native Codex CLI on GPT-5.6
 
-Status: complete
-Study date: 2026-07-26
+Status: complete — optimized matched rerun passed
+Study date: 2026-07-26–27
 Current branch: `bench/codex-oauth-gpt56-20260726`
 
 ## Executive summary
+
+The current optimized Forge build matches native raw Codex on official quality and beats it
+on both elapsed time and whole-session token use on the fresh, predeclared matched run:
+
+| Metric | Forge | Native raw Codex | Result |
+|---|---:|---:|---|
+| Official Docker resolves | 18/18 | 18/18 | Quality parity |
+| Evaluator errors | 0 | 0 | Complete |
+| Generation wall time | 3,299.841s | 5,574.566s | Forge 40.81% faster |
+| Whole-session tokens | 9,692,604 | 24,643,373 | Forge 60.67% lower |
+| Tokens per resolve | 538,478.00 | 1,369,076.28 | Forge 60.67% lower |
+| Faster matched pairs | 13/18 | 5/18 | Forge median reduction 40.19% |
+| Lower-token matched pairs | 17/18 | 1/18 | Exact sign-test `p=0.00014496` |
+
+All three models independently resolved 6/6 tasks for both harnesses. Forge's advantage was
+also consistent by model:
+
+| Model | Forge wall | Raw wall | Forge wall reduction | Forge tokens | Raw tokens | Forge token reduction |
+|---|---:|---:|---:|---:|---:|---:|
+| GPT-5.6 Luna | 1,116.496s | 1,668.046s | 33.07% | 3,763,504 | 10,387,906 | 63.77% |
+| GPT-5.6 Sol | 1,258.841s | 2,106.314s | 40.23% | 2,693,232 | 7,324,162 | 63.23% |
+| GPT-5.6 Terra | 924.504s | 1,800.206s | 48.64% | 3,235,868 | 6,931,305 | 53.32% |
+
+The matched analyzer reports a weighted 40.81% wall-time reduction and 60.67% token
+reduction. Its paired median reductions are 40.19% for wall time and 57.06% for tokens;
+the seeded bootstrap 95% interval for median token reduction is 42.95%–67.29%.
+
+The run used the same account, GPT-5.6 Sol/Terra/Luna models, `xhigh` reasoning, official
+commits, prompts, 1,500-second generation timeout, seed `20260726`, and native raw-Codex
+profile. It completed 36/36 arms with 36 non-empty patches, zero agent timeouts, 18 Forge
+root sessions, and zero child or fork sessions. Two Forge processes ended after provider
+availability failures, but retained their patches; official Docker evaluation resolved
+both. Weekly usage finished at 25%, below the absolute 30% stop.
+
+Authoritative artifact root:
+
+```text
+/home/floris/.local/share/forge/harness-bench-20260726/swe-verified-stratified6-gpt56-native-v2-direct-env-cap/
+```
+
+The suite manifest pins Forge commit `f816368d1e50dcfdaf919bcc747b193fb05eb899`,
+binary SHA-256 `1039d36f31b39c8b7454a0061dc0a392bdd6161c9f9242a1d54b06b3796f35df`,
+and dataset SHA-256 `3624682a509d9c9b75723a35d54e211ed62c99c5897a96de36f5a2118c10da61`.
+The six official `swebench==4.1.0` reports are under `evaluation/`.
+
+The stale Claude/Sonnet worktree, its patches, results, and baselines were not used.
+
+### Final verification of the optimized rerun
+
+- Exactly six unique official reports were present: Forge and raw Codex for Sol, Terra,
+  and Luna. Every report contained six submitted, six completed, six resolved, zero
+  unresolved, zero empty patches, and zero evaluator errors.
+- `analyze_codex_oauth_swe.py` bound all 18 matched pairs and reproduced the aggregate
+  quality, wall-time, and whole-session token totals above.
+- `cargo fmt --all -- --check` passed.
+- `cargo clippy --locked --all-targets --all-features -- -D warnings` passed.
+- `cargo test --locked --all --all-features` passed.
+- `cargo build --release --locked --bin forge` passed.
+- Ruff and Python byte-compilation passed for `scripts/harness-bench`.
+- Benchmark-script unit discovery passed all four tests.
+
+The first full test attempt encountered a shared `/tmp` user-quota failure caused by
+multi-day stale temporary state, not a Forge assertion. After removing only a rebuildable
+2.23 GB test fixture and terminating 48 orphaned CPU stress processes from the stale Claude
+worktree, the exact failed test and the complete workspace suite passed. No repository,
+benchmark report, prediction, evaluator log, or SWE-bench artifact was removed.
+
+## Historical pre-optimization result
 
 This study compares Forge's own coding harness with the user's installed native Codex CLI while
 holding the authenticated OpenAI account, model, reasoning effort, task, starting repository, and
