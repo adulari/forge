@@ -201,6 +201,22 @@ callers and establish that behavior remains unchanged outside the requested API 
 option or condition is absent/default. Prefer the smallest conditional change at the named API \
 unless concrete caller evidence requires the shared helper.";
 
+/// First-pass scope guard for direct-provider identifier migrations. This is injected into the
+/// initial context pack, so it improves discovery without paying for a second provider round.
+const DIRECT_IDENTIFIER_MIGRATION_SCOPE_GUIDANCE: &str = "\
+This task migrates a deprecated/renamed identifier, option, or API. Before editing, do ONE bounded \
+production-scope sweep:
+- Search for EACH old/deprecated identifier as a plain literal in the nearest production subsystem \
+containing the named code (maximum TWO search commands). Do not search tests alone, and do not add \
+surrounding-syntax predicates that can hide a sibling implementation.
+- Open every unedited production sibling match that may implement the same behavior, especially \
+clients, adapters, serializers, commands, parsers, and alternate entry points. Search snippets are \
+not inspection.
+- Update every concrete same-behavior path. At compatibility-facing config/parser/CLI boundaries, \
+prefer the replacement name while retaining the old alias as a fallback unless removal is explicit.
+
+Keep the sweep bounded; do not broadly review or refactor unrelated code.";
+
 fn completeness_search_reported_no_matches(messages: &[Message]) -> bool {
     messages.iter().any(|message| {
         if message.role != Role::Tool {
@@ -6876,22 +6892,29 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 guidance,
             )?;
         }
-        let named_apis = direct_scope_guidance_named_apis(prompt);
-        if self.config.mesh.verify_completeness
-            && !direct_completeness_is_identifier_migration(prompt)
-            && !named_apis.is_empty()
-            && !forge_provider::is_cli_bridge(&routed_model)
-        {
-            let guidance = format!(
-                "{DIRECT_NAMED_API_SCOPE_GUIDANCE}\n\nNamed production APIs:\n- {}",
-                named_apis.join("\n- ")
-            );
-            self.inject_context(
-                &mut context_pack,
-                context_pack::ContextSource::TurnContract,
-                "explicit named-API implementation scope",
-                &guidance,
-            )?;
+        if self.config.mesh.verify_completeness && !forge_provider::is_cli_bridge(&routed_model) {
+            if direct_completeness_is_identifier_migration(prompt) {
+                self.inject_context(
+                    &mut context_pack,
+                    context_pack::ContextSource::TurnContract,
+                    "identifier-migration production scope",
+                    DIRECT_IDENTIFIER_MIGRATION_SCOPE_GUIDANCE,
+                )?;
+            } else {
+                let named_apis = direct_scope_guidance_named_apis(prompt);
+                if !named_apis.is_empty() {
+                    let guidance = format!(
+                        "{DIRECT_NAMED_API_SCOPE_GUIDANCE}\n\nNamed production APIs:\n- {}",
+                        named_apis.join("\n- ")
+                    );
+                    self.inject_context(
+                        &mut context_pack,
+                        context_pack::ContextSource::TurnContract,
+                        "explicit named-API implementation scope",
+                        &guidance,
+                    )?;
+                }
+            }
         }
         let seq = self.next_seq();
         self.current_turn_seq = seq;
@@ -19579,6 +19602,65 @@ mod tests {
                 .iter()
                 .any(|message| message.content == DIRECT_COMPLETENESS_PROMPT),
             "scope guidance must not reactivate the outer completeness review"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_identifier_migration_scope_guidance_is_injected_before_solving() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-direct-identifier-migration-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditOnceThenDoneProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(CapturePresenter::default()),
+            Config {
+                permission_mode: forge_types::PermissionMode::AcceptEdits,
+                ..Config::default()
+            },
+            dir.to_str().unwrap(),
+        )
+        .unwrap();
+
+        session
+            .run_turn("Replace deprecated db and passwd options with database and password.")
+            .await
+            .unwrap();
+
+        let scope_messages = session
+            .transcript
+            .iter()
+            .filter(|message| {
+                message
+                    .content
+                    .contains(DIRECT_IDENTIFIER_MIGRATION_SCOPE_GUIDANCE)
+            })
+            .count();
+        assert_eq!(
+            scope_messages, 1,
+            "identifier-migration scope guidance must be injected exactly once before the solve"
+        );
+        assert!(
+            session.transcript.iter().any(|message| {
+                message.content.contains("maximum TWO search commands")
+                    && message.content.contains("Do not search tests alone")
+                    && message.content.contains("production sibling match")
+                    && message
+                        .content
+                        .contains("retaining the old alias as a fallback")
+            }),
+            "migration guidance must require bounded production discovery and compatibility"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
