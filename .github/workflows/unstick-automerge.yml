@@ -21,11 +21,36 @@ name: unstick stalled auto-merge PRs
 # this workflow performs, so after every update it must re-dispatch those workflows, or the new SHA
 # would carry no `CI` check and the PR would merely stall for a different reason.
 #
-# Triggered on push to main because that is the exact moment PRs become BEHIND (proven to fire after
-# an auto-merge squash: eas-update.yml runs on the same event). The schedule is a backstop for a
-# dropped push event — #890 is the reason that is not treated as hypothetical.
+# WHEN THIS RUNS IS THE HARD PART, AND BOTH ORIGINAL TRIGGERS WERE MEASURED TO BE UNRELIABLE.
+#
+# The remediation below is proven — it recovered a live BEHIND PR (#916, v2.11.0's manifests) on
+# demand. What failed was reaching it in time, because the two triggers it originally had are both
+# weaker than they read:
+#
+#  · push to main is DROPPED, and not occasionally. On 2026-07-27 #917 (08:43), #918 (09:16) and
+#    #919 (13:19) all merged to main and NONE produced a push-event run here — the last one was #915
+#    at 00:02. Three consecutive misses. This is the same loss that left #890 and #910 with no
+#    eas-update run at all, so it is not specific to one workflow.
+#  · the schedule is DEPRIORITISED. The cron below asks for every 30 minutes; the runs actually
+#    delivered that day were 23:31, 03:43, 07:39 and 11:31 — roughly every four hours. GitHub drops
+#    scheduled runs on busy repositories.
+#
+# Between them, #916 spent thirteen hours unmergeable with every check on it green, because each
+# time main advanced it fell BEHIND again and nothing arrived to notice.
+#
+# So the real trigger is `workflow_run`: reconcile every time one of the workflows that run
+# constantly finishes, on any branch. That is frequent, driven by activity rather than by a clock,
+# and — unlike the push event — keyed on a run this repository can see completing. It also fires at
+# exactly the moment a manifests PR needs it, since `release`/`app-desktop` complete just as that PR
+# is opened. push and schedule stay as extra chances, not as the mechanism.
+#
+# This converges rather than looping: an update dispatches CI, CI's completion re-triggers this, and
+# by then the PR is no longer BEHIND, so nothing further is dispatched.
 
 on:
+  workflow_run:
+    workflows: [CI, security, mobile-typecheck, release, app-desktop]
+    types: [completed]
   push:
     branches:
       - main
@@ -71,9 +96,23 @@ jobs:
             exit 0
           fi
 
+          # A PR armed this long that still has not merged is not waiting for CI; it is stuck on
+          # something this workflow cannot fix. Saying so is the point — every incident above was
+          # invisible precisely because the PR looked healthy while nothing moved it. Roughly three
+          # times the slowest pipeline, so an ordinary release does not trip it.
+          STALE_AFTER_SECONDS=7200
+
           for pr in $numbers; do
             read -r state branch < <(gh pr view "$pr" \
               --json mergeStateStatus,headRefName --jq '"\(.mergeStateStatus) \(.headRefName)"')
+
+            armed_at=$(gh pr view "$pr" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // empty')
+            if [ -n "$armed_at" ] && [ "$state" != "CLEAN" ] && [ "$state" != "HAS_HOOKS" ]; then
+              armed_for=$(( $(date -u +%s) - $(date -u -d "$armed_at" +%s) ))
+              if [ "$armed_for" -gt "$STALE_AFTER_SECONDS" ]; then
+                echo "::warning title=Auto-merge has not advanced::#$pr has had auto-merge armed for $(( armed_for / 3600 ))h and is still $state. If this survives a branch update, it needs a human."
+              fi
+            fi
 
             if [ "$state" != "BEHIND" ]; then
               # A `dist/` branch is bot-authored, so GitHub creates no `pull_request` runs for it and
