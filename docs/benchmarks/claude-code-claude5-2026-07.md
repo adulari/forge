@@ -1,5 +1,11 @@
 # Forge vs. native Claude Code on Claude 5
 
+> **Historical report, superseded for headline use.** The repositories in this
+> study were not prepared with the later one-commit history-isolation path.
+> Preserve these artifacts, but use the
+> [canonical history-safe pinned and mesh-auto report](history-safe-pinned-mesh-2026-07.md)
+> and [cell-validity ledger](cell-validity-2026-07.md) for current claims.
+
 **Run date:** 2026-07-27
 
 **Models:** `claude-opus-5[1m]` and `claude-sonnet-5`

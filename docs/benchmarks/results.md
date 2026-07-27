@@ -1,42 +1,31 @@
 # Forge — measured results
 
-## Latest official matched result: Claude 5 (2026-07-27)
+## Latest official history-safe result (2026-07-27)
 
-The current Forge build beat native Claude Code on official quality and was
-faster and more token-efficient when comparing pairs with the same official
-outcome:
+The canonical two-task, quota-bounded study removed remotes and future Git
+objects, used regular `high` for pinned comparisons, audited every trace, and
+scored every prediction with official `swebench==4.1.0`.
 
-| 6 matched SWE-bench Verified pairs | Forge | Native Claude Code | Result |
-|---|---:|---:|---|
-| Official Docker resolves | **5 / 6** | 4 / 6 | **Forge +1 solve** |
-| Evaluator errors | 0 | 0 | Complete |
-| Quality-matched wall time (5 pairs) | **1,242.588s** | 1,547.852s | **Forge 19.72% faster** |
-| Quality-matched processed tokens | **7,175,961** | 11,600,158 | **Forge 38.14% lower** |
-| Quality-matched cache-adjusted tokens | **2,010,283.50** | 3,177,565.00 | **Forge 36.74% lower** |
+| Comparison | Quality | Wall-time result | Raw-token result | Cache-adjusted result |
+|---|---:|---:|---:|---:|
+| Forge pinned vs. native Codex, 6 pairs | **3/6 vs. 0/6** | **24.78% faster** | **55.61% lower** | **21.98% lower** |
+| Forge pinned vs. native Claude Code, 4 pairs | **2/4 vs. 1/4** | **16.80% faster** | **45.45% lower** | **42.87% lower** |
+| Full-mesh auto vs. average native model pair | **1/2; equal best native** | **44.26% faster** | **69.45% lower** | **56.33% lower** |
 
-Both Opus 5 harnesses resolved 3/3; Forge Sonnet resolved 2/3 versus native
-Sonnet's 1/3. Read the **[full protocol, per-pair results, artifacts, exclusions,
-and caveats](claude-code-claude5-2026-07.md)**.
+Full-mesh auto ran once per unique task, with no model pin or effort override.
+It was faster than every native model pair. The complete report discloses the
+small sample and individual exceptions, including mesh using 12.45% more
+cache-adjusted tokens than native Terra.
 
-## Previous official matched result: GPT-5.6 (2026-07-27)
+Read the **[canonical report](history-safe-pinned-mesh-2026-07.md)** and
+**[83-cell validity ledger](cell-validity-2026-07.md)**.
 
-The current optimized Forge build matched native Codex on official quality and
-beat it on both elapsed time and whole-session token use in a fresh,
-predeclared GPT-5.6 run:
-
-| 18 matched SWE-bench Verified tasks | Forge | Native Codex | Result |
-|---|---:|---:|---|
-| Official Docker resolves | **18 / 18** | **18 / 18** | Quality parity |
-| Evaluator errors | 0 | 0 | Complete |
-| Generation wall time | **3,299.841s** | 5,574.566s | **Forge 40.81% faster** |
-| Whole-session tokens | **9,692,604** | 24,643,373 | **Forge 60.67% lower** |
-| Faster matched pairs | **13 / 18** | 5 / 18 | Forge advantage |
-| Lower-token matched pairs | **17 / 18** | 1 / 18 | `p=0.00014496` |
-
-All three GPT-5.6 model variants independently resolved 6/6 tasks in both
-harnesses. Read the
-**[full protocol, per-model results, artifacts, caveats, and historical
-pre-optimization comparison](codex-oauth-gpt56-2026-07.md)**.
+The former July Claude and GPT-5.6 headlines are preserved in
+[the Claude report](claude-code-claude5-2026-07.md) and
+[the Codex report](codex-oauth-gpt56-2026-07.md), but are superseded where
+repository history was not isolated or Codex used `xhigh`. The old 6/6-to-0/6
+change is not attributed solely to contamination because effort, prompts,
+harness code, and stochasticity also changed.
 
 The sections below preserve earlier measurements and accounting corrections as
 the historical record.

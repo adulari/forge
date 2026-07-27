@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,27 +32,38 @@ def write_analysis(
             f"{raw_prefix}_resolved": index % 2 == 0,
             f"{raw_prefix}_wall_seconds": 10 + index,
             f"{raw_prefix}_total_tokens": 100 + index,
+            f"{raw_prefix}_cache_adjusted_tokens_025": 50 + index,
         }
-        if family == "claude":
-            row["raw_claude_cache_adjusted_tokens_025"] = 50 + index
         rows.append(row)
     path.write_text(json.dumps({"pairs": rows}), encoding="utf-8")
 
 
 class MeshBenchmarkTests(unittest.TestCase):
-    def test_baseline_cells_require_published_study_sizes(self) -> None:
+    def test_baseline_cells_accept_quota_sized_clean_studies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             codex = root / "codex.json"
             claude = root / "claude.json"
-            write_analysis(codex, family="codex", count=18)
-            write_analysis(claude, family="claude", count=6)
+            write_analysis(codex, family="codex", count=6)
+            write_analysis(claude, family="claude", count=4)
 
             cells = mesh.baseline_cells(codex, claude)
 
-        self.assertEqual(len(cells), 24)
-        self.assertEqual(sum(cell["family"] == "codex" for cell in cells), 18)
-        self.assertEqual(sum(cell["family"] == "claude" for cell in cells), 6)
+        self.assertEqual(len(cells), 10)
+        self.assertEqual(sum(cell["family"] == "codex" for cell in cells), 6)
+        self.assertEqual(sum(cell["family"] == "claude" for cell in cells), 4)
+        self.assertEqual(cells[0]["baseline"]["cache_adjusted_tokens_025"], 50.0)
+
+    def test_baseline_cells_require_both_native_families(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex = root / "codex.json"
+            claude = root / "claude.json"
+            write_analysis(codex, family="codex", count=2)
+            claude.write_text(json.dumps({"pairs": []}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "missing non-empty pairs"):
+                mesh.baseline_cells(codex, claude)
 
     def test_plan_is_seeded_and_runs_each_unique_task_once(self) -> None:
         cells = [
@@ -177,6 +189,62 @@ class MeshBenchmarkTests(unittest.TestCase):
                 mesh.selected_model(events),
                 "codex-oauth::gpt-5.6-terra",
             )
+
+    def test_mesh_patch_capture_includes_committed_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            trial = root / "trial"
+            workspace.mkdir()
+            trial.mkdir()
+            for args in (
+                ("init", "--quiet"),
+                ("config", "user.email", "test@forge.invalid"),
+                ("config", "user.name", "Forge Test"),
+            ):
+                subprocess.run(
+                    ("git", *args),
+                    cwd=workspace,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            (workspace / "value.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(
+                ("git", "add", "value.txt"),
+                cwd=workspace,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ("git", "commit", "--quiet", "-m", "base"),
+                cwd=workspace,
+                check=True,
+            )
+            base = subprocess.run(
+                ("git", "rev-parse", "HEAD"),
+                cwd=workspace,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                ("git", "update-ref", mesh.swe.BENCHMARK_BASE_REF, base),
+                cwd=workspace,
+                check=True,
+            )
+            (workspace / "value.txt").write_text("committed\n", encoding="utf-8")
+            subprocess.run(
+                ("git", "commit", "--quiet", "-am", "agent commit"),
+                cwd=workspace,
+                check=True,
+            )
+
+            summary = mesh.capture_mesh_patch(workspace, trial)
+            patch = (trial / "changes.patch").read_text(encoding="utf-8")
+
+            self.assertIn("+committed", patch)
+            self.assertIn("M\tvalue.txt", summary["status"])
 
     def test_route_usage_recovers_model_and_provider_from_message(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

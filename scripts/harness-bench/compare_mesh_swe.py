@@ -59,7 +59,7 @@ def baseline_cells(
             "raw_codex_resolved",
             "raw_codex_wall_seconds",
             "raw_codex_total_tokens",
-            None,
+            "raw_codex_cache_adjusted_tokens_025",
         ),
         (
             "claude",
@@ -84,9 +84,7 @@ def baseline_cells(
                 "resolved": bool(row[resolved_key]),
                 "wall_seconds": float(row[wall_key]),
                 "total_tokens": int(row[token_key]),
-                "cache_adjusted_tokens_025": (
-                    float(row[adjusted_key]) if adjusted_key else None
-                ),
+                "cache_adjusted_tokens_025": float(row[adjusted_key]),
                 "source_analysis": str(path.resolve()),
                 "source_pair_id": row.get("pair_id"),
             }
@@ -102,14 +100,12 @@ def baseline_cells(
                 }
             )
 
-    expected_counts = {"codex": 18, "claude": 6}
     counts = {
         family: sum(cell["family"] == family for cell in cells) for family in FAMILIES
     }
-    if counts != expected_counts:
-        raise ValueError(
-            f"unexpected baseline cell counts: {counts}, expected {expected_counts}"
-        )
+    missing_families = [family for family, count in counts.items() if count == 0]
+    if missing_families:
+        raise ValueError(f"missing baseline cells for families: {missing_families}")
     ids = {
         (cell["family"], cell["comparator_model"], cell["instance_id"])
         for cell in cells
@@ -301,7 +297,16 @@ def capture_mesh_patch(workspace: Path, trial_dir: Path) -> dict[str, Any]:
         timeout=30,
     )
     patch = subprocess.run(
-        ("git", "diff", "--binary", "--no-ext-diff", "HEAD", "--", ".", *excludes),
+        (
+            "git",
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            swe.benchmark_base_ref(workspace),
+            "--",
+            ".",
+            *excludes,
+        ),
         cwd=workspace,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -311,11 +316,27 @@ def capture_mesh_patch(workspace: Path, trial_dir: Path) -> dict[str, Any]:
     (trial_dir / "changes.patch").write_bytes(patch.stdout)
     (trial_dir / "changes.patch.stderr.log").write_bytes(patch.stderr)
     status = bench.tiny_command(
-        ("git", "status", "--short", "--", ".", *excludes),
+        (
+            "git",
+            "diff",
+            "--name-status",
+            swe.benchmark_base_ref(workspace),
+            "--",
+            ".",
+            *excludes,
+        ),
         cwd=workspace,
     )
     diffstat = bench.tiny_command(
-        ("git", "diff", "--stat", "HEAD", "--", ".", *excludes),
+        (
+            "git",
+            "diff",
+            "--stat",
+            swe.benchmark_base_ref(workspace),
+            "--",
+            ".",
+            *excludes,
+        ),
         cwd=workspace,
     )
     return {
@@ -334,18 +355,18 @@ def run_trial(
     out_root: Path,
     worktree_root: Path,
     forge_bin: Path,
-    forge_db: Path,
     timeout_seconds: int,
 ) -> dict[str, Any]:
     trial_dir = out_root / "trials" / trial.slug
     trial_dir.mkdir(parents=True, exist_ok=False)
+    forge_db = swe.trial_forge_db(trial_dir)
     tmp_dir = trial_dir / "tmp"
     tmp_dir.mkdir()
 
     # One clone root per cell prevents auto-orchestrated child worktrees or build
     # scratch from leaking into another comparator cell.
     workspace = swe.prepare_repo(instance, worktree_root / trial.slug)
-    prompt = str(instance["problem_statement"])
+    prompt = swe.benchmark_prompt(str(instance["problem_statement"]))
     (trial_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     manifest = {
         "trial": dataclasses.asdict(trial),
@@ -544,6 +565,16 @@ def main() -> int:
     missing_instances = sorted({cell["instance_id"] for cell in cells} - set(by_id))
     if missing_instances:
         parser.error(f"dataset missing baseline instances: {missing_instances}")
+    disabled_capabilities = [
+        key
+        for key in ("auto_discover", "auto_orchestrate", "failover")
+        if mesh_config["effective"].get(key) is not True
+    ]
+    if disabled_capabilities:
+        parser.error(
+            "regular full-mesh benchmark requires enabled capabilities: "
+            + ", ".join(disabled_capabilities)
+        )
 
     trials = plan_trials(cells, args.seed)
     claude_stop = args.claude_baseline_weekly_pct + args.claude_max_weekly_increase_pct
@@ -557,6 +588,8 @@ def main() -> int:
         "claude_analysis": str(args.claude_analysis.resolve()),
         "claude_analysis_sha256": bench.sha256_file(args.claude_analysis),
         "forge_binary_sha256": bench.sha256_file(forge_bin),
+        "runner_sha256": bench.sha256_file(Path(__file__)),
+        "history_preparation_sha256": bench.sha256_file(Path(swe.__file__)),
         "forge_config": mesh_config,
         "seed": args.seed,
         "timeout_seconds": args.timeout_seconds,
@@ -569,7 +602,6 @@ def main() -> int:
     }
 
     args.out.mkdir(parents=True, exist_ok=True)
-    forge_db = args.out / "forge-benchmark.db"
     manifest_path = args.out / "suite-manifest.json"
     index_path = args.out / "trial-index.jsonl"
     if manifest_path.exists():
@@ -671,7 +703,6 @@ def main() -> int:
             out_root=args.out,
             worktree_root=args.worktree_root,
             forge_bin=forge_bin,
-            forge_db=forge_db,
             timeout_seconds=args.timeout_seconds,
         )
         with index_path.open("a", encoding="utf-8") as handle:

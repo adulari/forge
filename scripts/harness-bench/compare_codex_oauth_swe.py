@@ -16,12 +16,24 @@ import hashlib
 import json
 import os
 import random
+import shutil
 import subprocess
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
 import compare_codex_oauth as bench
+
+
+BENCHMARK_BASE_REF = "refs/forge-benchmark/base"
+BENCHMARK_ORIGIN_MARKER = "forge-benchmark-origin-base"
+BENCHMARK_INTEGRITY_PREAMBLE = """\
+Benchmark integrity rules:
+- Solve the task from the checked-out repository contents and the problem statement.
+- Do not access the network, remote repositories, issue trackers, pull requests, or external search.
+- Do not search Git history for a later fix. This repository intentionally contains only a
+  synthetic base commit; treat it as the complete available history.
+"""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -120,8 +132,82 @@ def require_git_success(
         raise RuntimeError(f"{operation} failed ({result.returncode}): {stderr}")
 
 
+def benchmark_prompt(problem_statement: str) -> str:
+    return f"{BENCHMARK_INTEGRITY_PREAMBLE}\n{problem_statement}"
+
+
+def benchmark_base_ref(workspace: Path) -> str:
+    exists = run_git(("show-ref", "--verify", "--quiet", BENCHMARK_BASE_REF), cwd=workspace)
+    if exists.returncode != 0:
+        raise RuntimeError(f"{workspace}: missing isolated benchmark base ref")
+    return BENCHMARK_BASE_REF
+
+
+def trial_forge_db(trial_dir: Path) -> Path:
+    """Return a fresh Forge state database path scoped to one benchmark cell."""
+
+    return trial_dir / "forge-benchmark.db"
+
+
+def isolate_repo_history(workspace: Path, original_base: str) -> None:
+    """Replace the upstream object database with one synthetic base-tree commit."""
+
+    original_tree = bench.tiny_command(
+        ("git", "rev-parse", f"{original_base}^{{tree}}"),
+        cwd=workspace,
+    )
+    git_dir = workspace / ".git"
+    if not git_dir.is_dir():
+        raise RuntimeError(f"refusing to replace non-directory Git metadata: {git_dir}")
+    shutil.rmtree(git_dir)
+
+    require_git_success(run_git(("init", "--quiet"), cwd=workspace), operation="initializing")
+    require_git_success(
+        run_git(("config", "user.email", "benchmark@forge.invalid"), cwd=workspace),
+        operation="configuring benchmark Git email",
+    )
+    require_git_success(
+        run_git(("config", "user.name", "Forge Benchmark"), cwd=workspace),
+        operation="configuring benchmark Git name",
+    )
+    require_git_success(
+        run_git(("add", "--force", "--all"), cwd=workspace),
+        operation="staging isolated benchmark base",
+    )
+    require_git_success(
+        run_git(
+            ("commit", "--quiet", "--no-gpg-sign", "-m", "benchmark: isolated base"),
+            cwd=workspace,
+            timeout_seconds=900,
+        ),
+        operation="committing isolated benchmark base",
+    )
+    synthetic_base = bench.tiny_command(("git", "rev-parse", "HEAD"), cwd=workspace)
+    synthetic_tree = bench.tiny_command(
+        ("git", "rev-parse", f"{synthetic_base}^{{tree}}"),
+        cwd=workspace,
+    )
+    if synthetic_tree != original_tree:
+        raise RuntimeError(
+            f"isolated base tree mismatch for {workspace}: "
+            f"{synthetic_tree} != {original_tree}"
+        )
+    require_git_success(
+        run_git(("update-ref", BENCHMARK_BASE_REF, synthetic_base), cwd=workspace),
+        operation="recording isolated benchmark base",
+    )
+    (workspace / ".git" / BENCHMARK_ORIGIN_MARKER).write_text(
+        f"{original_base}\n",
+        encoding="utf-8",
+    )
+    require_git_success(
+        run_git(("checkout", "--quiet", "--detach", synthetic_base), cwd=workspace),
+        operation="detaching isolated benchmark base",
+    )
+
+
 def prepare_repo(instance: dict[str, Any], worktree_root: Path) -> Path:
-    """Clone once, then restore the exact official base commit before every arm."""
+    """Create a history-isolated base tree, then restore it before every arm."""
 
     worktree_root.mkdir(parents=True, exist_ok=True)
     root = worktree_root.resolve()
@@ -152,28 +238,55 @@ def prepare_repo(instance: dict[str, Any], worktree_root: Path) -> Path:
         raise RuntimeError(f"refusing to reset non-Git path: {workspace}")
 
     base_commit = str(instance["base_commit"])
-    exists = run_git(("cat-file", "-e", f"{base_commit}^{{commit}}"), cwd=workspace)
-    if exists.returncode != 0:
-        fetched = run_git(
-            ("fetch", "--quiet", "origin", base_commit),
-            cwd=workspace,
-            timeout_seconds=900,
-        )
-        require_git_success(fetched, operation=f"fetching {base_commit}")
-    checkout = run_git(("checkout", "--quiet", "--detach", base_commit), cwd=workspace)
-    require_git_success(checkout, operation=f"checking out {base_commit}")
-    reset = run_git(("reset", "--hard", "--quiet", base_commit), cwd=workspace)
-    require_git_success(reset, operation=f"resetting {base_commit}")
+    marker = workspace / ".git" / BENCHMARK_ORIGIN_MARKER
+    if marker.exists():
+        recorded_base = marker.read_text(encoding="utf-8").strip()
+        if recorded_base != base_commit:
+            raise RuntimeError(
+                f"isolated base mismatch for {instance['instance_id']}: "
+                f"{recorded_base} != {base_commit}"
+            )
+        reset = run_git(("reset", "--hard", "--quiet", BENCHMARK_BASE_REF), cwd=workspace)
+        require_git_success(reset, operation=f"resetting isolated base {base_commit}")
+    else:
+        exists = run_git(("cat-file", "-e", f"{base_commit}^{{commit}}"), cwd=workspace)
+        if exists.returncode != 0:
+            fetched = run_git(
+                ("fetch", "--quiet", "origin", base_commit),
+                cwd=workspace,
+                timeout_seconds=900,
+            )
+            require_git_success(fetched, operation=f"fetching {base_commit}")
+        checkout = run_git(("checkout", "--quiet", "--detach", base_commit), cwd=workspace)
+        require_git_success(checkout, operation=f"checking out {base_commit}")
+        reset = run_git(("reset", "--hard", "--quiet", base_commit), cwd=workspace)
+        require_git_success(reset, operation=f"resetting {base_commit}")
+        clean = run_git(("clean", "-ffdx", "--quiet"), cwd=workspace)
+        require_git_success(clean, operation=f"cleaning {workspace}")
+        isolate_repo_history(workspace, base_commit)
+
     clean = run_git(("clean", "-ffdx", "--quiet"), cwd=workspace)
-    require_git_success(clean, operation=f"cleaning {workspace}")
+    require_git_success(clean, operation=f"cleaning isolated workspace {workspace}")
+    head = bench.tiny_command(("git", "rev-parse", "HEAD"), cwd=workspace)
+    isolated_base = bench.tiny_command(
+        ("git", "rev-parse", BENCHMARK_BASE_REF),
+        cwd=workspace,
+    )
+    if head != isolated_base:
+        checkout = run_git(
+            ("checkout", "--quiet", "--detach", BENCHMARK_BASE_REF),
+            cwd=workspace,
+        )
+        require_git_success(checkout, operation=f"detaching isolated base {base_commit}")
     bench.add_local_git_excludes(
         workspace,
         (".forge/checkpoints/", ".forge/forge.log"),
     )
-    actual = bench.tiny_command(("git", "rev-parse", "HEAD"), cwd=workspace)
-    if actual != base_commit:
+    reachable = bench.tiny_command(("git", "rev-list", "--all", "--count"), cwd=workspace)
+    if reachable != "1":
         raise RuntimeError(
-            f"base commit mismatch for {instance['instance_id']}: {actual} != {base_commit}"
+            f"history isolation failed for {instance['instance_id']}: "
+            f"{reachable} reachable commits"
         )
     return workspace
 
@@ -209,6 +322,41 @@ def write_predictions(
                     handle.write(json.dumps(prediction, sort_keys=True) + "\n")
 
 
+def load_summaries(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    summaries: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                summaries.append(json.loads(line))
+            except json.JSONDecodeError as error:
+                raise ValueError(f"{path}:{line_number}: invalid JSON: {error}") from error
+    return summaries
+
+
+def effective_quota(
+    summaries: Sequence[dict[str, Any]],
+    observed_weekly_pct: float,
+) -> float:
+    values = [observed_weekly_pct]
+    for summary in summaries:
+        value = bench.quota_used_percent(summary.get("quota"))
+        if value is not None:
+            values.append(value)
+    return max(values)
+
+
+def validate_resume(manifest: dict[str, Any], expected: dict[str, Any]) -> None:
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            raise ValueError(
+                f"resume manifest mismatch for {key}: {manifest.get(key)!r} != {value!r}"
+            )
+
+
 def run_trial(
     trial: SweTrial,
     *,
@@ -217,13 +365,14 @@ def run_trial(
     out_root: Path,
     worktree_root: Path,
     forge_bin: Path,
-    forge_db: Path,
     timeout_seconds: int,
+    reasoning_effort: str,
 ) -> dict[str, Any]:
     trial_dir = out_root / "trials" / trial.slug
     trial_dir.mkdir(parents=True, exist_ok=False)
+    forge_db = trial_forge_db(trial_dir)
     workspace = prepare_repo(instance, worktree_root)
-    prompt = str(instance["problem_statement"])
+    prompt = benchmark_prompt(str(instance["problem_statement"]))
     (trial_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     manifest = {
         "trial": dataclasses.asdict(trial),
@@ -240,10 +389,18 @@ def run_trial(
     argv = (
         bench.forge_argv(forge_bin, trial.model, prompt)
         if trial.arm == "forge"
-        else bench.raw_codex_argv(trial.model, workspace, prompt, "native")
+        else bench.raw_codex_argv(
+            trial.model,
+            workspace,
+            prompt,
+            "native",
+            reasoning_effort,
+        )
     )
     environment = (
-        bench.forge_environment(forge_db) if trial.arm == "forge" else os.environ.copy()
+        bench.forge_environment(forge_db, reasoning_effort)
+        if trial.arm == "forge"
+        else os.environ.copy()
     )
     command_result = bench.run_capture(
         argv,
@@ -271,7 +428,11 @@ def run_trial(
                 if stream_total is not None and ledger_total is not None
                 else None
             )
-    patch = bench.capture_patch(workspace, trial_dir)
+    patch = bench.capture_patch(
+        workspace,
+        trial_dir,
+        base_ref=benchmark_base_ref(workspace),
+    )
     patch_text = (trial_dir / "changes.patch").read_text(
         encoding="utf-8",
         errors="replace",
@@ -326,8 +487,16 @@ def main() -> int:
     parser.add_argument("--arms", default=",".join(bench.DEFAULT_ARMS))
     parser.add_argument("--seed", type=int, default=20260726)
     parser.add_argument("--timeout-seconds", type=int, default=1500)
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high", "xhigh"),
+        default="high",
+    )
     parser.add_argument("--baseline-weekly-pct", required=True, type=float)
     parser.add_argument("--max-weekly-increase-pct", type=float, default=30.0)
+    parser.add_argument("--observed-weekly-pct", required=True, type=float)
+    parser.add_argument("--max-new-trials", type=int, default=1)
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
     models = bench.parse_csv(args.models)
@@ -338,10 +507,12 @@ def main() -> int:
         parser.error(f"unsupported models: {sorted(unknown_models)}")
     if unknown_arms:
         parser.error(f"unsupported arms: {sorted(unknown_arms)}")
+    if args.max_new_trials != 1:
+        parser.error(
+            "--max-new-trials must be 1 so external quotas refresh after every arm"
+        )
     if not args.forge_bin.is_file():
         parser.error(f"Forge binary does not exist: {args.forge_bin}")
-    if args.out.exists() and any(args.out.iterdir()):
-        parser.error(f"output directory must be absent or empty: {args.out}")
 
     instances = load_dataset(args.dataset)
     by_id = {str(instance["instance_id"]): instance for instance in instances}
@@ -352,10 +523,8 @@ def main() -> int:
     trials = plan_trials(models, instances, arms, args.seed)
     cap_pct = args.baseline_weekly_pct + args.max_weekly_increase_pct
     args.out.mkdir(parents=True, exist_ok=True)
-    forge_db = args.out / "forge-benchmark.db"
-    suite_manifest = {
+    expected_manifest = {
         "schema_version": 1,
-        "created_at": bench.utc_now(),
         "dataset": str(args.dataset.resolve()),
         "dataset_sha256": bench.sha256_file(args.dataset),
         "instances": [
@@ -374,7 +543,7 @@ def main() -> int:
         "models": models,
         "arms": arms,
         "seed": args.seed,
-        "reasoning_effort": "xhigh",
+        "reasoning_effort": args.reasoning_effort,
         "raw_profile": "native",
         "timeout_seconds": args.timeout_seconds,
         "baseline_weekly_pct": args.baseline_weekly_pct,
@@ -382,27 +551,64 @@ def main() -> int:
         "hard_stop_weekly_pct": cap_pct,
         "trial_order": [dataclasses.asdict(trial) for trial in trials],
     }
-    bench.json_dump(args.out / "suite-manifest.json", suite_manifest)
-
-    summaries: list[dict[str, Any]] = []
-    stop_reason: str | None = None
+    manifest_path = args.out / "suite-manifest.json"
     index_path = args.out / "trial-index.jsonl"
-    for trial in trials:
-        prior_quota = next(
-            (
-                summary.get("quota")
-                for summary in reversed(summaries)
-                if summary.get("quota") is not None
-            ),
-            None,
-        )
-        prior_pct = bench.quota_used_percent(prior_quota)
-        if prior_pct is not None and prior_pct >= cap_pct:
-            stop_reason = (
-                f"weekly hard stop reached before {trial.slug}: "
-                f"{prior_pct:.3f}% >= {cap_pct:.3f}%"
+    if args.resume:
+        if not manifest_path.is_file():
+            parser.error("--resume requires an existing suite-manifest.json")
+        try:
+            validate_resume(
+                json.loads(manifest_path.read_text(encoding="utf-8")),
+                expected_manifest,
             )
-            break
+        except (ValueError, json.JSONDecodeError) as error:
+            parser.error(str(error))
+    else:
+        unexpected = list(args.out.iterdir())
+        if unexpected:
+            parser.error(f"output directory is not empty: {args.out}")
+        bench.json_dump(
+            manifest_path,
+            {"created_at": bench.utc_now(), **expected_manifest},
+        )
+
+    try:
+        summaries = load_summaries(index_path)
+    except ValueError as error:
+        parser.error(str(error))
+    completed_order = [
+        (
+            summary["trial"]["model"],
+            summary["trial"]["instance_id"],
+            summary["trial"]["arm"],
+        )
+        for summary in summaries
+    ]
+    planned_order = [
+        (trial.model, trial.instance_id, trial.arm)
+        for trial in trials[: len(summaries)]
+    ]
+    if completed_order != planned_order:
+        parser.error("completed trial order does not match suite manifest")
+    write_predictions(args.out, summaries, models, arms)
+
+    quota_check = {
+        "checked_at": bench.utc_now(),
+        "observed_weekly_pct": args.observed_weekly_pct,
+        "hard_stop_weekly_pct": cap_pct,
+    }
+    with (args.out / "quota-checks.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(quota_check, sort_keys=True) + "\n")
+
+    stop_reason: str | None = None
+    prior_pct = effective_quota(summaries, args.observed_weekly_pct)
+    if prior_pct >= cap_pct:
+        stop_reason = (
+            f"weekly hard stop reached before next arm: "
+            f"{prior_pct:.3f}% >= {cap_pct:.3f}%"
+        )
+    elif len(summaries) < len(trials):
+        trial = trials[len(summaries)]
         print(
             json.dumps(
                 {
@@ -422,14 +628,14 @@ def main() -> int:
             out_root=args.out,
             worktree_root=args.worktree_root,
             forge_bin=args.forge_bin.resolve(),
-            forge_db=forge_db,
             timeout_seconds=args.timeout_seconds,
+            reasoning_effort=args.reasoning_effort,
         )
         summaries.append(summary)
         with index_path.open("a", encoding="utf-8") as index:
             index.write(json.dumps(summary, sort_keys=True) + "\n")
         write_predictions(args.out, summaries, models, arms)
-        current_pct = bench.quota_used_percent(summary.get("quota"))
+        current_pct = effective_quota(summaries, args.observed_weekly_pct)
         print(
             json.dumps(
                 {
@@ -443,39 +649,35 @@ def main() -> int:
             ),
             flush=True,
         )
-        if current_pct is None:
-            stop_reason = (
-                f"quota telemetry missing after {trial.slug}; failing closed before "
-                "another provider call"
-            )
-            break
         if current_pct >= cap_pct:
             stop_reason = (
                 f"weekly hard stop reached after {trial.slug}: "
                 f"{current_pct:.3f}% >= {cap_pct:.3f}%"
             )
-            break
+        elif len(summaries) < len(trials):
+            stop_reason = (
+                f"external quota refresh required after {trial.slug}; "
+                "failing closed before another provider call"
+            )
 
+    complete = len(summaries) == len(trials)
     final = {
         "schema_version": 1,
-        "completed_at": bench.utc_now(),
+        "updated_at": bench.utc_now(),
         "planned_trials": len(trials),
         "completed_trials": len(summaries),
         "patched_trials": sum(summary["patched"] for summary in summaries),
+        "complete": complete,
         "stop_reason": stop_reason,
-        "last_quota": next(
-            (
-                summary.get("quota")
-                for summary in reversed(summaries)
-                if summary.get("quota") is not None
-            ),
-            None,
+        "last_effective_weekly_pct": effective_quota(
+            summaries,
+            args.observed_weekly_pct,
         ),
         "official_evaluation_required": True,
     }
     bench.json_dump(args.out / "run-final.json", final)
     print(json.dumps({"event": "run_complete", **final}), flush=True)
-    return 0 if stop_reason is None else 2
+    return 0 if complete else 2
 
 
 if __name__ == "__main__":

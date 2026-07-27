@@ -18,18 +18,26 @@ python3 scripts/harness-bench/compare_claude_swe.py \
   --arms forge,raw-claude \
   --baseline-weekly-pct 21 \
   --max-weekly-increase-pct 9 \
-  --observed-weekly-pct 21
+  --observed-weekly-pct 21 \
+  --max-new-trials 1
 ```
 
 The runner:
 
 - sets both harnesses to `high`, never `xhigh`;
+- recreates the official base tree as one synthetic reachable commit with no
+  remotes or upstream history;
+- prepends the benchmark integrity rule and captures patches relative to the
+  synthetic base, including agent commits;
+- scopes Forge state to one cell so sessions and usage cannot leak across arms;
 - records Claude CLI version, resolved model IDs, supported effort levels, Forge
   commit, and binary hash;
 - uses additive Claude cache accounting and a separate 0.25 cache-read
   sensitivity measure;
 - records one prediction file per arm/model for official Docker evaluation;
 - fails closed before another provider call when weekly telemetry is absent;
+- enforces exactly one new provider arm per invocation so Helm can be refreshed
+  externally before every resume;
 - accepts a forced external reading through `--observed-weekly-pct`;
 - resumes only a manifest-compatible prefix with `--resume`.
 
@@ -137,12 +145,26 @@ scripts/harness-bench/compare_codex_oauth_swe.py \
   --max-weekly-increase-pct 28
 ```
 
-This runner uses the same `xhigh` model commands and per-trial quota gate as the controlled runner.
+This runner defaults to regular `high`; pass `--reasoning-effort high`
+explicitly in a published run. It uses a one-arm segment and requires an
+external quota refresh before resume.
 It retains raw JSONL, stderr, patches, process results, and full Forge Store usage, then writes one
 standard prediction file per arm/model under `predictions/`. It deliberately leaves
 `official_resolution` unset. Forge's internal `.forge/checkpoints/**` snapshots are hidden from
 agent-visible Git status and excluded from submitted patches; legitimate project files elsewhere
 under `.forge/` remain eligible.
+
+Before the provider starts, the runner:
+
+- clones/checks out the exact official base;
+- replaces Git metadata with one synthetic commit having the same tree;
+- removes remotes and unreachable upstream objects;
+- verifies that only one commit is reachable;
+- adds an integrity preamble forbidding network, external solution sources, and
+  later Git history;
+- records a separate Forge database for each cell; and
+- captures both committed and uncommitted changes relative to the synthetic
+  base.
 
 Evaluate each prediction file with pinned `swebench` in Docker:
 
@@ -169,3 +191,61 @@ scripts/harness-bench/analyze_codex_oauth_swe.py \
 The analyzer fails on missing or duplicate reports, evaluator errors, incomplete outcomes,
 unmatched arms, or incomplete token/wall telemetry. It writes `official-analysis.{json,md}` under
 the run directory by default.
+
+## Cell audit and clean native baselines
+
+Audit every retained formal run before buying another arm:
+
+```bash
+PYTHONPATH=scripts/harness-bench \
+python3 scripts/harness-bench/audit_benchmark_cells.py \
+  /path/to/run-a /path/to/run-b \
+  --out-json /path/to/cell-evidence.json \
+  --out-markdown /path/to/cell-ledger.md \
+  --codex-native-out /path/to/clean-codex-native.json \
+  --claude-native-out /path/to/clean-claude-native.json
+```
+
+A reusable cell must have a dataset-verified task and official base, the
+declared model and recorded CLI/binary version, the 1,500-second comparable
+timeout, regular `high` effort (or genuine mesh auto with no model or effort
+override), the integrity preamble, a clean trace, a successful provider
+process, a non-empty patch whose byte count and hash match its metadata, and
+exactly one official evaluator result whose patch applied. Legacy or
+non-isolated suites remain in the ledger but are invalid for the current
+headline.
+
+Trace auditing is operation-aware. A URL literal written into source code is
+not a network access; an external-search tool or an actual `curl`, `wget`, `gh`,
+Git-history, or Git-remote command is.
+
+## Regular full-mesh auto
+
+`compare_mesh_swe.py` consumes only the clean native baseline files emitted by
+the auditor. It deduplicates by task and runs Forge once per unique instance.
+
+```bash
+PYTHONPATH=scripts/harness-bench \
+python3 scripts/harness-bench/compare_mesh_swe.py \
+  --dataset /path/to/swe-verified.jsonl \
+  --codex-analysis /path/to/clean-codex-native.json \
+  --claude-analysis /path/to/clean-claude-native.json \
+  --out /path/to/mesh-run \
+  --worktree-root /path/to/mesh-worktrees \
+  --forge-bin ./target/release/forge \
+  --timeout-seconds 1500 \
+  --claude-baseline-weekly-pct 23 \
+  --claude-max-weekly-increase-pct 5 \
+  --observed-claude-weekly-pct 26 \
+  --codex-baseline-weekly-pct 26 \
+  --codex-max-weekly-increase-pct 10 \
+  --observed-codex-weekly-pct 33 \
+  --max-new-trials 1
+```
+
+The mesh command deliberately has no model or effort flag. The runner clears
+inherited `FORGE_MESH__*` overrides and rejects configurations where automatic
+discovery, automatic orchestration, or failover is disabled. It hashes the
+binary, runner, history-preparation code, configuration, dataset, and native
+baseline inputs into the resume manifest. It always stops after one paid arm so
+Helm can be refreshed externally before `--resume`.

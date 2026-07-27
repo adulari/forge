@@ -121,50 +121,41 @@ is spent only where it matters. Inspect any of these decisions live with `/mesh`
 
 ## 📊 Proof: same model, better results
 
-### Latest: Forge vs. native Claude Code on Claude 5
+### Latest: history-safe pinned models and full-mesh auto
 
-The latest matched benchmark ran the **same Claude Opus 5 and Sonnet 5 models**
-at regular `high` effort through Forge and native Claude Code on six stratified
-**SWE-bench Verified** model-task pairs. The official `swebench==4.1.0` Docker
-evaluator scored every prediction.
+The current quota-bounded study used **Claude Opus 5, Claude Sonnet 5, and
+GPT-5.6 Sol, Terra, and Luna** on two SWE-bench Verified tasks. Pinned
+comparisons used the same model at regular `high` effort. Every repository was
+recreated as one synthetic base commit with no remotes or future objects, every
+trace passed an integrity audit, and `swebench==4.1.0` scored every prediction.
 
-| 6 matched SWE-bench Verified pairs | Forge | Native Claude Code | Result |
+| Same-model pinned comparison | Forge | Native CLI | Result |
 |---|---:|---:|---|
-| Official Docker resolves | **5 / 6** | 4 / 6 | **Forge +1 solve** |
-| Quality-matched wall time (5 pairs) | **1,242.588s** | 1,547.852s | **Forge 19.72% faster** |
-| Quality-matched processed tokens | **7,175,961** | 11,600,158 | **Forge 38.14% lower** |
-| Quality-matched cache-adjusted tokens | **2,010,283.50** | 3,177,565.00 | **Forge 36.74% lower** |
-| Opus official resolves | **3 / 3** | **3 / 3** | Quality parity |
-| Sonnet official resolves | **2 / 3** | 1 / 3 | **Forge +1 solve** |
+| GPT-5.6 official resolves | **3 / 6** | 0 / 6 | **Forge +3** |
+| GPT-5.6 wall time | **1,049.335s** | 1,395.112s | **24.78% faster** |
+| GPT-5.6 raw tokens | **2,315,497** | 5,216,740 | **55.61% lower** |
+| Claude 5 official resolves | **2 / 4** | 1 / 4 | **Forge +1** |
+| Claude 5 wall time | **650.260s** | 781.563s | **16.80% faster** |
+| Claude 5 raw tokens | **4,456,211** | 8,168,748 | **45.45% lower** |
 
-The efficiency comparison uses pairs with the same official outcome. The
-unconditional totals are also disclosed in the report: native Sonnet returned
-an eight-second empty patch on the hard task Forge solved, and treating that
-failure as a speed/token win would be misleading. Weekly Claude use moved only
-from 21% to 22%, within the 31% absolute cap.
+Forge then ran **regular full-mesh auto once per unique task**—no model pin and
+no effort override—and reused those two results against all five native model
+pairs:
 
-**[Read the full Claude 5 Forge vs. native Claude Code benchmark →](docs/benchmarks/claude-code-claude5-2026-07.md)**
-
-### Previous: Forge vs. native Codex on GPT-5.6
-
-The latest matched benchmark ran the **same GPT-5.6 Sol, Terra, and Luna models**
-with `xhigh` reasoning through Forge and native Codex on a predeclared,
-stratified **SWE-bench Verified** sample. The official `swebench` Docker evaluator
-scored both arms.
-
-| 18 matched SWE-bench Verified tasks | Forge | Native Codex | Result |
+| Mesh auto | Forge | Native reference | Result |
 |---|---:|---:|---|
-| Official Docker resolves | **18 / 18** | **18 / 18** | Quality parity |
-| Generation wall time | **3,299.841s** | 5,574.566s | **Forge 40.81% faster** |
-| Whole-session tokens | **9,692,604** | 24,643,373 | **Forge 60.67% lower** |
-| Faster matched pairs | **13 / 18** | 5 / 18 | Forge advantage |
-| Lower-token matched pairs | **17 / 18** | 1 / 18 | `p=0.00014496` |
+| Official resolves | **1 / 2** | Best native pair: **1 / 2** | Quality parity at the top |
+| Wall time | **242.643s** | Fastest native pair: 284.381s | **14.68% faster** |
+| Raw tokens | **817,733** | Native-pair mean: 2,677,097.60 | **69.45% lower** |
+| Cache-adjusted tokens | **339,269.00** | Native-pair mean: 776,845.40 | **56.33% lower** |
 
-All six official reports completed with zero evaluator errors. The report records
-the controlled protocol, whole-session accounting, per-model results, caveats,
-artifacts, and historical pre-optimization runs.
+The report includes every cell and the exceptions: Forge does not win every
+individual pinned cell, and mesh used 12.45% more cache-adjusted tokens than
+native Terra while still being faster, slightly lower in raw tokens, and one
+solve better.
 
-**[Read the full GPT-5.6 Forge vs. native Codex benchmark →](docs/benchmarks/codex-oauth-gpt56-2026-07.md)**
+**[Read the canonical history-safe benchmark →](docs/benchmarks/history-safe-pinned-mesh-2026-07.md)**
+· **[Audit all 83 formal cells →](docs/benchmarks/cell-validity-2026-07.md)**
 
 ### Historical Sonnet results
 
@@ -1035,9 +1026,11 @@ command = "bash -c 'jq .args <<< $FORGE_TOOL_INPUT >> audit.log'"
 
 | Doc | What |
 |-----|------|
-| [**Latest Claude 5 Forge vs. Claude Code benchmark**](./docs/benchmarks/claude-code-claude5-2026-07.md) | 5/6 vs. 4/6 resolves; 19.72% faster and 38.14% fewer tokens on quality-matched pairs |
-| [**Latest GPT-5.6 Forge vs. Codex benchmark**](./docs/benchmarks/codex-oauth-gpt56-2026-07.md) | 18/18 quality parity, 40.81% faster, 60.67% fewer tokens |
-| [**Benchmark index**](./docs/benchmarks/README.md) | Latest result, historical measurements, and reproduction guides |
+| [**Canonical history-safe pinned + mesh benchmark**](./docs/benchmarks/history-safe-pinned-mesh-2026-07.md) | Same-model Codex and Claude comparisons plus genuine mesh auto; official quality, speed, tokens, quota, integrity, and exceptions |
+| [**83-cell benchmark validity ledger**](./docs/benchmarks/cell-validity-2026-07.md) | Every retained cell and the exact reason it is valid, invalid, or superseded |
+| [**Benchmark index**](./docs/benchmarks/README.md) | Current result, historical measurements, and reproduction guides |
+| [Historical Claude 5 benchmark](./docs/benchmarks/claude-code-claude5-2026-07.md) | Preserved but superseded for headline use because repository history was not isolated |
+| [Historical GPT-5.6 benchmark](./docs/benchmarks/codex-oauth-gpt56-2026-07.md) | Preserved but superseded for headline use; used `xhigh` and includes integrity-invalid cells |
 | [**Competitor comparison**](./docs/comparison.md) | Detailed, sourced breakdown of every alternative |
 | [**Why Forge is a better harness**](./docs/harness/why-forge-is-a-better-harness.md) | The test-backed case — incl. where Forge does *not* win |
 | [**Benchmark results**](./docs/benchmarks/results.md) | Measured SWE-bench numbers, method, and honest caveats |
