@@ -77,6 +77,46 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # THE STALL THIS WORKFLOW CAUSED ITSELF.
+      #
+      # `gh pr update-branch` below writes a merge commit authored by `github-actions[bot]`, and this
+      # repository's fork-PR policy is `all_external_contributors`, which counts that bot as external.
+      # So every branch update parks its own PR's `pull_request` checks in "3 workflows awaiting
+      # approval", and the required `CI` context never arrives — the fix creating the next stall.
+      # #912, #916 and #920 each hit it, and the dispatched runs below exist only to work around it.
+      #
+      # THE POLICY MUST NOT BE LOOSENED TO FIX THIS. This repository is public and every CI job runs
+      # on self-hosted runners on a personal machine, so `all_external_contributors` is the only thing
+      # between a stranger's fork PR and arbitrary code execution there. Relaxing it to stop the
+      # prompts would trade a merge annoyance for remote code execution.
+      #
+      # Approving is safe for exactly one case, which is the case that actually occurs: a run whose
+      # HEAD REPOSITORY IS THIS ONE. A branch here can only be pushed by someone with write access, so
+      # it carries no untrusted code, and the approval prompt protects nothing. A run from a fork is
+      # deliberately left alone for a human — that is what the policy is for.
+      - name: Approve runs GitHub parked for approval that carry no external code
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          runs=$(gh api "repos/$GH_REPO/actions/runs?status=action_required&per_page=50" \
+            --jq '.workflow_runs[] | select(.head_repository.full_name == env.GH_REPO) | .id')
+
+          if [ -z "$runs" ]; then
+            echo "no run from this repository is waiting for approval"
+            exit 0
+          fi
+
+          for run in $runs; do
+            if gh api -X POST "repos/$GH_REPO/actions/runs/$run/approve" >/dev/null; then
+              echo "approved run $run — its head is this repository, so it runs no external code"
+            else
+              echo "::warning title=Could not approve a parked run::run $run is waiting for approval and could not be approved automatically; a maintainer has to press the button."
+            fi
+          done
+
       - name: Update every stalled auto-merge PR and re-arm its checks
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
