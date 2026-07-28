@@ -74,6 +74,7 @@ pub fn classify_stream_error(message: String) -> ProviderError {
         || lower.contains("unavailable")
         || lower.contains("temporarily")
         || lower.contains("provider request failed")
+        || lower.contains("an error occurred while processing your request")
         || lower.contains(" 500")
         || lower.contains("500 ")
         || lower.contains(" 502")
@@ -106,18 +107,29 @@ pub fn build_responses_request(
 ) -> serde_json::Value {
     let mut instructions = String::new();
     let mut input = Vec::new();
+    let mut leading_system_prefix = true;
     for m in messages {
         match m.role {
-            Role::System => {
+            Role::System if leading_system_prefix => {
                 if !instructions.is_empty() {
                     instructions.push_str("\n\n");
                 }
                 instructions.push_str(&m.content);
             }
+            Role::System => {
+                // Responses API hoists `instructions` ahead of every input item.
+                // Putting turn-local recap/memory/guard state there rewrites the
+                // earliest cache key on every continuation. Keep only the initial,
+                // deterministic system run in `instructions`; later dynamic state
+                // remains at its transcript position after the reusable prefix.
+                input.push(serde_json::json!({"role": "system", "content": m.content}));
+            }
             Role::User => {
+                leading_system_prefix = false;
                 input.push(serde_json::json!({"role": "user", "content": m.content}));
             }
             Role::Assistant => {
+                leading_system_prefix = false;
                 if !m.content.is_empty() {
                     input.push(serde_json::json!({"role": "assistant", "content": m.content}));
                 }
@@ -131,6 +143,7 @@ pub fn build_responses_request(
                 }
             }
             Role::Tool => {
+                leading_system_prefix = false;
                 input.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": m.tool_call_id.clone().unwrap_or_default(),
@@ -181,6 +194,12 @@ pub struct ResponseAccumulator {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Usage,
+    /// Backend response id used by the Responses WebSocket transport to append only the
+    /// incremental tool result on the next request in the same user turn.
+    pub response_id: Option<String>,
+    /// Provider output items normalized to the representation used by the next full request.
+    /// Incremental reuse is allowed only when these items exactly bridge two request transcripts.
+    pub output_items: Vec<serde_json::Value>,
     /// Whether a `response.completed` (or `.failed`) event arrived.
     pub saw_terminal: bool,
 }
@@ -229,12 +248,41 @@ pub fn apply_sse_event(
                     .and_then(|v| v.as_str())
                     .unwrap_or("{}");
                 let args = serde_json::from_str(args_str).unwrap_or_else(|_| serde_json::json!({}));
+                acc.output_items.push(serde_json::json!({
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                    "arguments": args.to_string(),
+                }));
                 acc.tool_calls.push(ToolCall { id, name, args });
+            } else if item.get("type").and_then(|t| t.as_str()) == Some("message") {
+                let text = item
+                    .get("content")
+                    .and_then(|content| content.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part.get("text").and_then(|text| text.as_str()))
+                    .collect::<String>();
+                if !text.is_empty() {
+                    acc.output_items.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": text,
+                    }));
+                }
             }
         }
+    } else if event == "response.created" {
+        acc.response_id = data
+            .get("response")
+            .and_then(|response| response.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
     } else if event == "response.completed" {
         acc.saw_terminal = true;
         if let Some(resp) = data.get("response") {
+            if let Some(response_id) = resp.get("id").and_then(serde_json::Value::as_str) {
+                acc.response_id = Some(response_id.to_owned());
+            }
             if let Some(u) = resp.get("usage") {
                 let input_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                 let output_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -465,6 +513,71 @@ pub async fn execute_responses_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_leading_system_run_is_hoisted_into_stable_instructions() {
+        let messages = vec![
+            Message::system("stable system"),
+            Message::system("stable tool policy"),
+            Message::user("first task"),
+            Message::assistant("working"),
+            Message::system("dynamic recap"),
+            Message::user("continue"),
+        ];
+        let body = build_responses_request(
+            "codex-oauth::gpt-5.6-sol",
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            8_192,
+        );
+
+        assert_eq!(
+            body["instructions"],
+            serde_json::json!("stable system\n\nstable tool policy")
+        );
+        assert_eq!(
+            body["input"],
+            serde_json::json!([
+                {"role": "user", "content": "first task"},
+                {"role": "assistant", "content": "working"},
+                {"role": "system", "content": "dynamic recap"},
+                {"role": "user", "content": "continue"}
+            ])
+        );
+    }
+
+    #[test]
+    fn appending_dynamic_system_state_does_not_rewrite_instruction_cache_key() {
+        let base = vec![
+            Message::system("stable system"),
+            Message::user("task"),
+            Message::assistant("done"),
+        ];
+        let base_body = build_responses_request(
+            "codex-oauth::gpt-5.6-sol",
+            &base,
+            &[],
+            &CompletionOptions::default(),
+            8_192,
+        );
+        let mut continued = base;
+        continued.push(Message::system("turn-local guard"));
+        continued.push(Message::user("verify"));
+        let continued_body = build_responses_request(
+            "codex-oauth::gpt-5.6-sol",
+            &continued,
+            &[],
+            &CompletionOptions::default(),
+            8_192,
+        );
+
+        assert_eq!(base_body["instructions"], continued_body["instructions"]);
+        assert_eq!(
+            continued_body["input"][2],
+            serde_json::json!({"role": "system", "content": "turn-local guard"})
+        );
+    }
 
     #[test]
     fn bare_model_strips_namespace() {

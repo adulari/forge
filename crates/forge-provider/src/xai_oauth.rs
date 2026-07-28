@@ -611,8 +611,12 @@ impl Provider for XaiOauthProvider {
         let url = self.responses_url();
         self.ensure_pinned(&url);
 
-        let mut body =
-            build_responses_request(model, messages, tools, opts, self.max_output_tokens);
+        let max_output_tokens = crate::effective_output_token_cap(
+            (self.max_output_tokens > 0).then_some(self.max_output_tokens),
+            opts.max_output_tokens,
+        )
+        .unwrap_or(0);
+        let mut body = build_responses_request(model, messages, tools, opts, max_output_tokens);
 
         // Set once an attempt below puts text/reasoning on screen; from then on a hop would
         // replay it into the same sink — see `watch_visible_output`.

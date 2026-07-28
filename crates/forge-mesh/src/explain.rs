@@ -10,7 +10,7 @@ use forge_types::{
 };
 
 use crate::catalog::{self, ConserveDecision, ScoreRow};
-use crate::{score_prompt, BudgetState, HeuristicRouter, RouteHints};
+use crate::{score_prompt, BudgetState, HeuristicRouter, RouteHints, RoutingContext};
 
 /// One model in the ranked candidate table, with the router's usability overlay.
 #[derive(Debug, Clone)]
@@ -107,7 +107,61 @@ impl HeuristicRouter {
         quota: &SubscriptionQuota,
         effort: Option<EffortLevel>,
     ) -> RoutingExplanation {
-        let hints = RouteHints::from_prompt(self.classification_activity(prompt));
+        self.explain_classified_with_context(
+            prompt,
+            tier,
+            classify_reasons,
+            budget,
+            health,
+            quota,
+            effort,
+            None,
+        )
+    }
+
+    /// Explain a classified live-session turn with the same continuation and cache-affinity inputs
+    /// used by execution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn explain_contextual_classified(
+        &self,
+        prompt: &str,
+        tier: TaskTier,
+        classify_reasons: Vec<String>,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        context: &RoutingContext,
+    ) -> RoutingExplanation {
+        self.explain_classified_with_context(
+            prompt,
+            tier,
+            classify_reasons,
+            budget,
+            health,
+            quota,
+            effort,
+            Some(context),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn explain_classified_with_context(
+        &self,
+        prompt: &str,
+        tier: TaskTier,
+        classify_reasons: Vec<String>,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        context: Option<&RoutingContext>,
+    ) -> RoutingExplanation {
+        let activity = self.classification_activity(prompt);
+        let hints = context.map_or_else(
+            || RouteHints::from_prompt(activity),
+            |context| RouteHints::from_context(activity, context),
+        );
 
         // The authoritative decision (pin / budget / fallback handling all live here). Compute it
         // FIRST: `decide` can downshift the tier (e.g. budget exhausted → Trivial), and the candidate
@@ -126,6 +180,20 @@ impl HeuristicRouter {
             effort,
             false,
         );
+        let decision = if let Some(context) = context {
+            self.apply_session_affinity(
+                decision,
+                context,
+                hints,
+                health,
+                quota,
+                effort,
+                budget.min_context_tokens,
+                false,
+            )
+        } else {
+            decision
+        };
         let routed_tier = decision.tier;
 
         let (conserve, rows) = if self.auto_active() {
@@ -159,10 +227,13 @@ impl HeuristicRouter {
             budget.min_context_tokens,
             false,
         );
-        let effective_rank: std::collections::HashMap<&str, usize> = ordered_visible
+        let effective_order: Vec<&str> = std::iter::once(decision.model.as_str())
+            .chain(decision.fallbacks.iter().map(String::as_str))
+            .collect();
+        let effective_rank: std::collections::HashMap<&str, usize> = effective_order
             .iter()
             .enumerate()
-            .map(|(rank, model)| (model.as_str(), rank))
+            .map(|(rank, model)| (*model, rank))
             .collect();
         let visible_models: std::collections::HashSet<&str> =
             ordered_visible.iter().map(String::as_str).collect();

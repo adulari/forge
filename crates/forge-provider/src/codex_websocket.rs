@@ -1,9 +1,8 @@
-//! WebSocket transport for `codex-oauth::` "v1"-tagged models — currently just
-//! `gpt-5.6-luna` — which the ChatGPT backend serves ONLY over
-//! `wss://chatgpt.com/backend-api/codex/responses`; the plain HTTPS POST path in
-//! `codex_oauth.rs` 404s them ("Model not found"). Every other `codex-oauth::` model keeps
-//! using that battle-tested HTTP path UNCHANGED — this module is a narrow, additive transport
-//! gated by [`CODEX_WEBSOCKET_MODELS`], not a rewrite.
+//! Responses WebSocket transport for `codex-oauth::` models. `gpt-5.6-luna` requires
+//! `wss://chatgpt.com/backend-api/codex/responses` because the plain HTTPS path 404s it. Sol and
+//! Terra use the same transport for session-scoped incremental response chains when Forge supplies
+//! a checkpoint, with the battle-tested HTTPS path retained as their no-output fallback. Mandatory
+//! WebSocket-only models remain gated by [`CODEX_WEBSOCKET_MODELS`].
 //!
 //! Protocol (reverse-engineered from the vendored codex Rust source):
 //! - Auth on the upgrade request is IDENTICAL to HTTP: `Authorization: Bearer <token>` +
@@ -25,9 +24,13 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::ClientRequestBuilder;
 use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+use tokio_tungstenite::MaybeTlsStream;
+use tokio_tungstenite::WebSocketStream;
 
 use crate::oauth_responses::{apply_sse_event, ResponseAccumulator, CONNECT_TIMEOUT, IDLE_TIMEOUT};
 use crate::{EventSink, ModelResponse, ProviderError};
+
+type CodexWsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// `codex-oauth::` model ids the ChatGPT backend serves ONLY over WebSocket. Keep this list, and
 /// only this list, on the WS path — greppable + extensible for future "v1"-tagged models.
@@ -65,6 +68,241 @@ fn to_ws_frame(body: &serde_json::Value) -> serde_json::Value {
     let mut framed = body.clone();
     framed["type"] = serde_json::json!("response.create");
     framed
+}
+
+/// Models known to accept the Responses WebSocket protocol used by native Codex. Luna requires
+/// it; Sol and Terra can fall back to HTTPS if the optional incremental path is unavailable.
+pub fn supports_incremental_session(model: &str) -> bool {
+    matches!(
+        crate::oauth_responses::bare_model(model),
+        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+    )
+}
+
+fn request_properties_match(previous: &serde_json::Value, current: &serde_json::Value) -> bool {
+    let mut previous = previous.clone();
+    let mut current = current.clone();
+    previous
+        .as_object_mut()
+        .map(|object| object.remove("input"));
+    current.as_object_mut().map(|object| object.remove("input"));
+    previous == current
+}
+
+fn incremental_input(
+    previous: &serde_json::Value,
+    previous_response_items: &[serde_json::Value],
+    current: &serde_json::Value,
+) -> Option<Vec<serde_json::Value>> {
+    if !request_properties_match(previous, current) {
+        return None;
+    }
+    let previous_input = previous.get("input")?.as_array()?;
+    let current_input = current.get("input")?.as_array()?;
+    let expected_len = previous_input.len() + previous_response_items.len();
+    if current_input.len() < expected_len
+        || current_input[..previous_input.len()] != previous_input[..]
+        || current_input[previous_input.len()..expected_len] != *previous_response_items
+    {
+        return None;
+    }
+    Some(current_input[expected_len..].to_vec())
+}
+
+/// One session-scoped Codex Responses WebSocket chain. Requests inside the agent/tool loop append
+/// only new items through `previous_response_id`; Forge may retain the same connection for a
+/// classifier-confirmed dependent user continuation on the exact session/model/account. The
+/// provider boundary is replaced for independent turns and every identity change.
+pub struct CodexTurnWebsocket {
+    stream: CodexWsStream,
+    turn_state: Option<String>,
+    last_request: Option<serde_json::Value>,
+    last_response_id: Option<String>,
+    last_response_items: Vec<serde_json::Value>,
+}
+
+/// Last fully acknowledged point in one turn's incremental response chain. A transport reconnect
+/// may safely resume from this state because it excludes the failed/in-flight request. The backend
+/// still validates the response id; `previous_response_not_found` resets to a full logical request.
+#[derive(Clone, Debug)]
+pub(crate) struct IncrementalHistory {
+    last_request: serde_json::Value,
+    last_response_id: String,
+    last_response_items: Vec<serde_json::Value>,
+}
+
+impl CodexTurnWebsocket {
+    pub async fn connect(
+        ws_url: &str,
+        token: &str,
+        chatgpt_account_id: &str,
+        prior_turn_state: Option<&str>,
+        classify: &impl Fn(u16, &str, Option<std::time::Duration>) -> ProviderError,
+    ) -> Result<Self, ProviderError> {
+        let uri: Uri = ws_url.parse().map_err(|error| {
+            ProviderError::Request(format!("codex WS transport: bad URL {ws_url:?}: {error}"))
+        })?;
+        let mut request = ClientRequestBuilder::new(uri)
+            .with_header("Authorization", format!("Bearer {token}"))
+            .with_header("ChatGPT-Account-Id", chatgpt_account_id.to_string())
+            .with_header("OpenAI-Beta", OPENAI_BETA_WEBSOCKETS.to_string())
+            .with_header("originator", "codex_cli_rs".to_string())
+            .with_header("User-Agent", user_agent());
+        if let Some(turn_state) = prior_turn_state {
+            request = request.with_header("x-codex-turn-state", turn_state.to_string());
+        }
+        let (stream, response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request))
+            .await
+            .map_err(|_| {
+                ProviderError::Unavailable(format!(
+                    "codex WS: no response while connecting (no data for {}s)",
+                    CONNECT_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(|error| ws_error_to_provider_error(error, classify))?;
+        let turn_state = response
+            .headers()
+            .get("x-codex-turn-state")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .or_else(|| prior_turn_state.map(str::to_owned));
+        Ok(Self {
+            stream,
+            turn_state,
+            last_request: None,
+            last_response_id: None,
+            last_response_items: Vec::new(),
+        })
+    }
+
+    pub fn turn_state(&self) -> Option<&str> {
+        self.turn_state.as_deref()
+    }
+
+    pub(crate) fn incremental_history(&self) -> Option<IncrementalHistory> {
+        Some(IncrementalHistory {
+            last_request: self.last_request.clone()?,
+            last_response_id: self.last_response_id.clone()?,
+            last_response_items: self.last_response_items.clone(),
+        })
+    }
+
+    pub(crate) fn restore_incremental_history(&mut self, history: IncrementalHistory) {
+        self.last_request = Some(history.last_request);
+        self.last_response_id = Some(history.last_response_id);
+        self.last_response_items = history.last_response_items;
+    }
+
+    /// Keep the authenticated live socket and turn-state route, but start the next logical request
+    /// from its full visible transcript. This drops hidden reasoning carried by
+    /// `previous_response_id` without paying another WebSocket handshake.
+    pub(crate) fn reset_incremental_history(&mut self) {
+        self.last_request = None;
+        self.last_response_id = None;
+        self.last_response_items.clear();
+    }
+
+    fn frame_for(&self, body: &serde_json::Value) -> serde_json::Value {
+        let mut frame = to_ws_frame(body);
+        let incremental = self
+            .last_request
+            .as_ref()
+            .zip(self.last_response_id.as_ref())
+            .and_then(|(previous, response_id)| {
+                incremental_input(previous, &self.last_response_items, body)
+                    .map(|input| (response_id, input))
+            });
+        if let Some((response_id, input)) = incremental {
+            frame["previous_response_id"] = serde_json::json!(response_id);
+            frame["input"] = serde_json::Value::Array(input);
+        }
+        frame
+    }
+
+    pub async fn complete(
+        &mut self,
+        body: &serde_json::Value,
+        on_event: &mut EventSink<'_>,
+        classify: impl Fn(u16, &str, Option<std::time::Duration>) -> ProviderError,
+    ) -> Result<ModelResponse, ProviderError> {
+        let frame = self.frame_for(body);
+        let frame_json = serde_json::to_string(&frame)
+            .map_err(|error| ProviderError::Request(error.to_string()))?;
+        self.stream
+            .send(Message::Text(frame_json.into()))
+            .await
+            .map_err(|error| ws_error_to_provider_error(error, &classify))?;
+
+        let mut acc = ResponseAccumulator::default();
+        let mut quotas: Vec<QuotaHint> = Vec::new();
+        loop {
+            let next = tokio::time::timeout(IDLE_TIMEOUT, self.stream.next())
+                .await
+                .map_err(|_| {
+                    ProviderError::Unavailable(format!(
+                        "codex WS: stream stalled (no data for {}s)",
+                        IDLE_TIMEOUT.as_secs()
+                    ))
+                })?;
+            let Some(message) = next else { break };
+            let message = message.map_err(|error| ws_error_to_provider_error(error, &classify))?;
+            match message {
+                Message::Text(text) => {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                        continue;
+                    };
+                    let Some(event_type) = value.get("type").and_then(|event| event.as_str())
+                    else {
+                        continue;
+                    };
+                    match event_type {
+                        "codex.rate_limits" => quotas = parse_rate_limits_frame(&value),
+                        "error" => return Err(classify_error_frame(&value, &classify)),
+                        "response.completed" => {
+                            apply_sse_event(&mut acc, event_type, &value, on_event)?;
+                            break;
+                        }
+                        other => apply_sse_event(&mut acc, other, &value, on_event)?,
+                    }
+                }
+                Message::Close(_) => {
+                    return Err(ProviderError::Unavailable(
+                        "codex WS connection closed by server".to_string(),
+                    ));
+                }
+                Message::Ping(payload) => {
+                    self.stream
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|error| ws_error_to_provider_error(error, &classify))?;
+                }
+                Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+            }
+        }
+
+        if !acc.saw_terminal
+            && acc.tool_calls.is_empty()
+            && acc.usage.input_tokens == 0
+            && acc.usage.output_tokens == 0
+        {
+            return Err(ProviderError::Unavailable(
+                "codex WS stream closed without a completion signal (truncated mid-generation)"
+                    .to_string(),
+            ));
+        }
+
+        let last_response_items = std::mem::take(&mut acc.output_items);
+        let response = ModelResponse {
+            content: acc.content,
+            tool_calls: acc.tool_calls,
+            usage: acc.usage,
+            quotas,
+        };
+        self.last_request = Some(body.clone());
+        self.last_response_id = acc.response_id;
+        self.last_response_items = last_response_items;
+        Ok(response)
+    }
 }
 
 fn user_agent() -> String {
@@ -111,6 +349,15 @@ fn classify_error_frame(
         );
     }
     let status = value.get("status").and_then(|s| s.as_u64()).unwrap_or(0) as u16;
+    if status == 0 {
+        // Some backend-internal failures arrive without an HTTP-style status. Reuse the
+        // in-stream classifier so a generic retryable server failure does not become a hard
+        // `Request` merely because the frame omitted `status`; malformed/schema errors remain
+        // non-retryable.
+        return crate::oauth_responses::classify_stream_error(
+            crate::oauth_responses::error_message(&error_obj.to_string()),
+        );
+    }
     classify(status, &error_obj.to_string(), None)
 }
 
@@ -300,6 +547,510 @@ mod tests {
     }
 
     #[test]
+    fn incremental_session_support_is_explicitly_model_bounded() {
+        assert!(supports_incremental_session("codex-oauth::gpt-5.6-sol"));
+        assert!(supports_incremental_session("codex-oauth::gpt-5.6-terra"));
+        assert!(supports_incremental_session("codex-oauth::gpt-5.6-luna"));
+        assert!(!supports_incremental_session("codex-oauth::gpt-5.5"));
+    }
+
+    #[test]
+    fn incremental_input_requires_an_exact_logical_extension() {
+        let previous = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [{"role": "user", "content": "task"}],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+        });
+        let response = vec![serde_json::json!({
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "shell",
+            "arguments": "{\"command\":\"true\"}",
+        })];
+        let tool_result = serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": "ok",
+        });
+        let current = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"role": "user", "content": "task"},
+                response[0].clone(),
+                tool_result.clone(),
+            ],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+        });
+        assert_eq!(
+            incremental_input(&previous, &response, &current),
+            Some(vec![tool_result])
+        );
+
+        let changed_tools = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": current["input"].clone(),
+            "tools": [{"type": "function", "name": "different"}],
+            "store": false,
+        });
+        assert_eq!(
+            incremental_input(&previous, &response, &changed_tools),
+            None,
+            "a changed reusable prefix must force a full request"
+        );
+
+        let compacted = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"role": "system", "content": "Earlier conversation summarized."},
+                {"role": "user", "content": "continue"},
+            ],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+        });
+        assert_eq!(
+            incremental_input(&previous, &response, &compacted),
+            None,
+            "compaction that rewrites the logical prefix must send a full request"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::result_large_err,
+        reason = "tungstenite's required handshake callback owns its large HTTP error response"
+    )]
+    async fn turn_websocket_reuses_response_id_and_sends_only_incremental_items() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (frames_tx, frames_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                response.headers_mut().insert(
+                    "x-codex-turn-state",
+                    tokio_tungstenite::tungstenite::http::HeaderValue::from_static("turn-state-1"),
+                );
+                Ok(response)
+            },
+            )
+            .await
+            .unwrap();
+            let mut frames = Vec::new();
+            for (response_id, with_tool_call) in [("resp-1", true), ("resp-2", false)] {
+                let Message::Text(frame) = websocket.next().await.unwrap().unwrap() else {
+                    panic!("expected text request");
+                };
+                frames.push(serde_json::from_str::<serde_json::Value>(&frame).unwrap());
+                if with_tool_call {
+                    websocket
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "type": "response.output_item.done",
+                                "item": {
+                                    "type": "function_call",
+                                    "call_id": "call-1",
+                                    "name": "shell",
+                                    "arguments": "{\"command\":\"true\"}",
+                                }
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+                websocket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "response.completed",
+                            "response": {
+                                "id": response_id,
+                                "usage": {
+                                    "input_tokens": 1200,
+                                    "output_tokens": 10,
+                                    "input_tokens_details": {"cached_tokens": 1024}
+                                },
+                                "output": []
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            frames_tx.send(frames).unwrap();
+        });
+
+        let url = format!("ws://{address}/responses");
+        let mut session = CodexTurnWebsocket::connect(
+            &url,
+            "test-token",
+            "test-account",
+            None,
+            &|status, body, _| ProviderError::Request(format!("{status}: {body}")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.turn_state(), Some("turn-state-1"));
+        let first = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [{"role": "user", "content": "task"}],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+            "stream": true,
+            "prompt_cache_key": "session-1",
+        });
+        let mut sink = |_: crate::StreamEvent| {};
+        let first_response = session
+            .complete(&first, &mut sink, |status, body, _| {
+                ProviderError::Request(format!("{status}: {body}"))
+            })
+            .await
+            .unwrap();
+        assert_eq!(first_response.tool_calls.len(), 1);
+
+        let second = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"role": "user", "content": "task"},
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "shell",
+                    "arguments": "{\"command\":\"true\"}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "ok",
+                }
+            ],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+            "stream": true,
+            "prompt_cache_key": "session-1",
+        });
+        session
+            .complete(&second, &mut sink, |status, body, _| {
+                ProviderError::Request(format!("{status}: {body}"))
+            })
+            .await
+            .unwrap();
+
+        let frames = frames_rx.await.unwrap();
+        server.await.unwrap();
+        assert_eq!(frames[0].get("previous_response_id"), None);
+        assert_eq!(frames[0]["input"], first["input"]);
+        assert_eq!(frames[1]["previous_response_id"], "resp-1");
+        assert_eq!(
+            frames[1]["input"],
+            serde_json::json!([{
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "ok",
+            }])
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::result_large_err,
+        reason = "tungstenite's required handshake callback owns its large HTTP error response"
+    )]
+    async fn dependent_user_turn_reuses_live_socket_and_sends_only_new_user_input() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (frames_tx, frames_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert(
+                        "x-codex-turn-state",
+                        tokio_tungstenite::tungstenite::http::HeaderValue::from_static(
+                            "turn-state-1",
+                        ),
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            let mut frames = Vec::new();
+            for (response_id, answer) in [
+                ("resp-1", "The initial implementation is complete."),
+                ("resp-2", "The continuation is complete."),
+            ] {
+                let Message::Text(frame) = websocket.next().await.unwrap().unwrap() else {
+                    panic!("expected text request");
+                };
+                frames.push(serde_json::from_str::<serde_json::Value>(&frame).unwrap());
+                websocket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "response.output_text.delta",
+                            "delta": answer,
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                websocket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "response.output_item.done",
+                            "item": {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": answer,
+                                }],
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                websocket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "response.completed",
+                            "response": {
+                                "id": response_id,
+                                "usage": {
+                                    "input_tokens": 1200,
+                                    "output_tokens": 10,
+                                    "input_tokens_details": {"cached_tokens": 1024}
+                                }
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            frames_tx.send(frames).unwrap();
+        });
+
+        let url = format!("ws://{address}/responses");
+        let mut session = CodexTurnWebsocket::connect(
+            &url,
+            "test-token",
+            "test-account",
+            None,
+            &|status, body, _| ProviderError::Request(format!("{status}: {body}")),
+        )
+        .await
+        .unwrap();
+        let first = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [{"role": "user", "content": "implement the scheduler fix"}],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+            "stream": true,
+            "prompt_cache_key": "session-1",
+        });
+        let mut sink = |_: crate::StreamEvent| {};
+        let first_response = session
+            .complete(&first, &mut sink, |status, body, _| {
+                ProviderError::Request(format!("{status}: {body}"))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            first_response.content,
+            "The initial implementation is complete."
+        );
+
+        let second = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"role": "user", "content": "implement the scheduler fix"},
+                {"role": "assistant", "content": "The initial implementation is complete."},
+                {"role": "user", "content": "continue"},
+            ],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+            "stream": true,
+            "prompt_cache_key": "session-1",
+        });
+        session
+            .complete(&second, &mut sink, |status, body, _| {
+                ProviderError::Request(format!("{status}: {body}"))
+            })
+            .await
+            .unwrap();
+
+        let frames = frames_rx.await.unwrap();
+        server.await.unwrap();
+        assert_eq!(frames[0].get("previous_response_id"), None);
+        assert_eq!(frames[0]["input"], first["input"]);
+        assert_eq!(frames[1]["previous_response_id"], "resp-1");
+        assert_eq!(
+            frames[1]["input"],
+            serde_json::json!([{"role": "user", "content": "continue"}])
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::result_large_err,
+        reason = "tungstenite's required handshake callback owns its large HTTP error response"
+    )]
+    async fn reconnect_restores_last_acknowledged_incremental_chain() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (frames_tx, frames_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            for connection in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut websocket = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        response.headers_mut().insert(
+                            "x-codex-turn-state",
+                            tokio_tungstenite::tungstenite::http::HeaderValue::from_static(
+                                "turn-state-1",
+                            ),
+                        );
+                        Ok(response)
+                    },
+                )
+                .await
+                .unwrap();
+                let Message::Text(frame) = websocket.next().await.unwrap().unwrap() else {
+                    panic!("expected text request");
+                };
+                frames.push(serde_json::from_str::<serde_json::Value>(&frame).unwrap());
+                if connection == 0 {
+                    websocket
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "type": "response.output_item.done",
+                                "item": {
+                                    "type": "function_call",
+                                    "call_id": "call-1",
+                                    "name": "shell",
+                                    "arguments": "{\"command\":\"true\"}",
+                                }
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+                websocket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "response.completed",
+                            "response": {
+                                "id": if connection == 0 { "resp-1" } else { "resp-2" },
+                                "usage": {
+                                    "input_tokens": 1200,
+                                    "output_tokens": 10,
+                                    "input_tokens_details": {"cached_tokens": 1024}
+                                },
+                                "output": []
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            frames_tx.send(frames).unwrap();
+        });
+
+        let url = format!("ws://{address}/responses");
+        let classify = |status, body: &str, _| ProviderError::Request(format!("{status}: {body}"));
+        let mut first_socket =
+            CodexTurnWebsocket::connect(&url, "test-token", "test-account", None, &classify)
+                .await
+                .unwrap();
+        let first = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [{"role": "user", "content": "task"}],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+            "stream": true,
+            "prompt_cache_key": "session-1",
+        });
+        let mut sink = |_: crate::StreamEvent| {};
+        first_socket
+            .complete(&first, &mut sink, classify)
+            .await
+            .unwrap();
+        let history = first_socket.incremental_history().unwrap();
+        let turn_state = first_socket.turn_state().map(str::to_owned);
+        drop(first_socket);
+
+        let second = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"role": "user", "content": "task"},
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "shell",
+                    "arguments": "{\"command\":\"true\"}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "ok",
+                }
+            ],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+            "stream": true,
+            "prompt_cache_key": "session-1",
+        });
+        let mut second_socket = CodexTurnWebsocket::connect(
+            &url,
+            "test-token",
+            "test-account",
+            turn_state.as_deref(),
+            &classify,
+        )
+        .await
+        .unwrap();
+        second_socket.restore_incremental_history(history);
+        second_socket
+            .complete(&second, &mut sink, classify)
+            .await
+            .unwrap();
+
+        let frames = frames_rx.await.unwrap();
+        server.await.unwrap();
+        assert_eq!(frames[0].get("previous_response_id"), None);
+        assert_eq!(frames[1]["previous_response_id"], "resp-1");
+        assert_eq!(
+            frames[1]["input"],
+            serde_json::json!([{
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "ok",
+            }])
+        );
+    }
+
+    #[test]
     fn to_ws_url_swaps_scheme_only() {
         assert_eq!(
             to_ws_url("https://chatgpt.com/backend-api/codex/responses").unwrap(),
@@ -467,5 +1218,35 @@ mod tests {
         });
         let err = classify_error_frame(&frame, &classify);
         assert!(matches!(err, ProviderError::Auth(_)));
+    }
+
+    #[test]
+    fn statusless_backend_error_is_retryable_but_schema_error_is_not() {
+        let classify = |status: u16, _body: &str, _retry: Option<std::time::Duration>| {
+            ProviderError::Request(format!("unexpected classify call ({status})"))
+        };
+        let backend = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "server_error",
+                "message": "An error occurred while processing your request. You can retry your request."
+            }
+        });
+        assert!(matches!(
+            classify_error_frame(&backend, &classify),
+            ProviderError::Unavailable(_)
+        ));
+
+        let schema = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "invalid tool schema"
+            }
+        });
+        assert!(matches!(
+            classify_error_frame(&schema, &classify),
+            ProviderError::Request(_)
+        ));
     }
 }

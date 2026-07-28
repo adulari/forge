@@ -57,6 +57,773 @@ impl Default for BudgetState {
     }
 }
 
+#[cfg(test)]
+mod session_affinity_tests {
+    use super::*;
+    use forge_types::QuotaStatus;
+    use std::collections::{HashMap, HashSet};
+
+    const BEST: &str = "codex-oauth::affinity-best";
+    const WARM: &str = "anthropic::affinity-warm";
+    const WEAK: &str = "openrouter::affinity-weak";
+
+    fn affinity_router(warm_coding: f64) -> HeuristicRouter {
+        let mut bench = BenchmarkScores::new();
+        bench.insert("affinity best", 60.0, 77.4);
+        bench.insert("affinity warm", 59.0, warm_coding);
+        bench.insert("affinity weak", 50.0, 68.0);
+        let catalog = ModelCatalog::new(vec![BEST.into(), WARM.into(), WEAK.into()])
+            .with_benchmarks(Some(bench));
+        let mut config = Config::default();
+        config.mesh.auto_discover = true;
+        HeuristicRouter::new(config)
+            .with_catalog(catalog)
+            .with_availability(|_| true)
+    }
+
+    fn dependent_context(model: &str, tier: TaskTier, prefix_tokens: u64) -> RoutingContext {
+        RoutingContext::from_messages(&[
+            Message::user(
+                "Diagnose and fix the concurrent reservation algorithm, prove correctness, and \
+                 run the complete stress suite.",
+            ),
+            Message::assistant("The implementation is in progress; continue with verification."),
+        ])
+        .with_session_affinity(
+            Some(SessionAffinity {
+                model: model.into(),
+                tier,
+                code_heavy: true,
+            }),
+            prefix_tokens,
+        )
+    }
+
+    async fn contextual_route(
+        router: &HeuristicRouter,
+        context: &RoutingContext,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        tier: TaskTier,
+        min_context_tokens: Option<u32>,
+    ) -> RoutingDecision {
+        router
+            .route_contextual(
+                "Continue the current implementation and verification.",
+                false,
+                BudgetState {
+                    min_context_tokens,
+                    ..BudgetState::default()
+                },
+                health,
+                quota,
+                Some(tier),
+                None,
+                &ProjectContext::default(),
+                context,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn first_complex_task_still_uses_strongest_quality_anchor() {
+        let decision = affinity_router(76.8)
+            .route_contextual(
+                "Diagnose and fix the concurrent reservation algorithm, prove correctness, and \
+                 run the complete stress suite.",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                Some(TaskTier::Complex),
+                None,
+                &ProjectContext::default(),
+                &RoutingContext::default(),
+            )
+            .await;
+
+        assert_eq!(decision.model, BEST, "{}", decision.rationale);
+        assert!(!decision.rationale.contains("session affinity"));
+    }
+
+    #[tokio::test]
+    async fn first_complex_task_uses_faster_calibrated_member_of_top_quality_band() {
+        let mut bench = BenchmarkScores::new();
+        bench.insert("affinity best", 60.0, 77.4);
+        bench.insert("affinity warm", 59.0, 76.8);
+        let catalog = ModelCatalog::new(vec![BEST.into(), WARM.into()])
+            .with_benchmarks(Some(bench))
+            .with_runtime_calibration(HashMap::from([
+                (
+                    BEST.to_string(),
+                    RuntimeCalibration {
+                        samples: 40,
+                        success_rate: 0.99,
+                        mean_latency_ms: 20_000.0,
+                    },
+                ),
+                (
+                    WARM.to_string(),
+                    RuntimeCalibration {
+                        samples: 40,
+                        success_rate: 0.99,
+                        mean_latency_ms: 10_000.0,
+                    },
+                ),
+            ]));
+        let mut config = Config::default();
+        config.mesh.auto_discover = true;
+        let router = HeuristicRouter::new(config)
+            .with_catalog(catalog)
+            .with_availability(|_| true);
+        let hints = RouteHints::from_context(
+            "Implement and fix the concurrent reservation algorithm, prove correctness, \
+             and run the complete stress suite.",
+            &RoutingContext::default(),
+        );
+        assert!(hints.code_heavy);
+        assert!(!hints.continuation);
+        assert_eq!(
+            router
+                .catalog
+                .as_ref()
+                .and_then(|catalog| dependable_calibrated_latency(catalog, WARM)),
+            Some(10_000.0)
+        );
+
+        let decision = router
+            .route_contextual(
+                "Implement and fix the concurrent reservation algorithm, prove correctness, \
+                 and run the complete stress suite.",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                Some(TaskTier::Complex),
+                None,
+                &ProjectContext::default(),
+                &RoutingContext::default(),
+            )
+            .await;
+
+        assert_eq!(decision.model, WARM, "{}", decision.rationale);
+        assert!(decision.rationale.contains(
+            "calibrated low-latency quality anchor: anthropic::affinity-warm is 0.60 points"
+        ));
+        assert!(decision.rationale.contains("10000ms faster per model call"));
+    }
+
+    #[tokio::test]
+    async fn dependent_continuation_prefers_warm_model_inside_quality_band() {
+        let context = dependent_context(WARM, TaskTier::Complex, 48_000);
+        let decision = contextual_route(
+            &affinity_router(76.8),
+            &context,
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            TaskTier::Complex,
+            None,
+        )
+        .await;
+
+        assert_eq!(decision.model, WARM, "{}", decision.rationale);
+        assert_eq!(decision.fallbacks.first().map(String::as_str), Some(BEST));
+        assert!(decision.rationale.contains("quality gap 0.60"));
+        assert!(decision.rationale.contains("48000-token cold prefix"));
+    }
+
+    #[test]
+    fn affinity_rationale_reports_warm_quality_advantage_without_clamping_it() {
+        assert_eq!(
+            describe_affinity_quality(Some(-6.0), 1.0),
+            "warm model quality advantage 6.00"
+        );
+    }
+
+    #[tokio::test]
+    async fn long_adversarial_continuation_uses_tighter_quality_band() {
+        let context = dependent_context(WARM, TaskTier::Complex, 48_000);
+        let decision = affinity_router(76.8)
+            .route_contextual(
+                "Continue from the current implementation. A small green suite is not enough: \
+                 add adversarial coverage for 100 concurrent requests against one unit of stock \
+                 and for many concurrent duplicate request IDs. Diagnose and fix any race or \
+                 idempotency weakness you expose, preserve the public API, and rerun the complete \
+                 suite.",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                Some(TaskTier::Complex),
+                None,
+                &ProjectContext::default(),
+                &context,
+            )
+            .await;
+
+        assert_eq!(decision.model, BEST, "{}", decision.rationale);
+        assert!(decision
+            .rationale
+            .contains("0.50-point quality-critical band"));
+        assert!(decision.rationale.contains("48000 tokens"));
+    }
+
+    #[tokio::test]
+    async fn meaningful_quality_gap_overrides_affinity() {
+        let context = dependent_context(WARM, TaskTier::Complex, 48_000);
+        let decision = contextual_route(
+            &affinity_router(70.0),
+            &context,
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            TaskTier::Complex,
+            None,
+        )
+        .await;
+
+        assert_eq!(decision.model, BEST, "{}", decision.rationale);
+        assert!(decision.rationale.contains("quality advantage"));
+    }
+
+    #[test]
+    fn significant_quality_gap_restores_anchor_after_transient_failover() {
+        let router = affinity_router(71.4);
+        let context = dependent_context(WARM, TaskTier::Complex, 51_061);
+        let decision = router.apply_session_affinity(
+            RoutingDecision {
+                tier: TaskTier::Complex,
+                model: WARM.into(),
+                rationale: "normal continuation order".into(),
+                fallbacks: vec![BEST.into(), WEAK.into()],
+                pinned: false,
+            },
+            &context,
+            RouteHints {
+                code_heavy: true,
+                seed: 0,
+                continuation: true,
+                quality_critical: true,
+            },
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            None,
+            None,
+            false,
+        );
+
+        assert_eq!(decision.model, BEST, "{}", decision.rationale);
+        assert_eq!(decision.fallbacks.first().map(String::as_str), Some(WARM));
+        assert!(decision.rationale.contains(
+            "affinity-best offers measured quality advantage 6.00, exceeding 0.50-point \
+             quality-critical band"
+        ));
+        assert!(decision.rationale.contains("51061 tokens"));
+    }
+
+    #[test]
+    fn missing_quality_evidence_never_creates_speculative_stickiness() {
+        let router = HeuristicRouter::new(Config::default()).with_availability(|_| true);
+        let context = dependent_context(WARM, TaskTier::Complex, 48_000);
+        let decision = router.apply_session_affinity(
+            RoutingDecision {
+                tier: TaskTier::Complex,
+                model: BEST.into(),
+                rationale: "normal mesh order".into(),
+                fallbacks: vec![WARM.into()],
+                pinned: false,
+            },
+            &context,
+            RouteHints {
+                code_heavy: true,
+                seed: 0,
+                continuation: true,
+                quality_critical: false,
+            },
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            None,
+            None,
+            false,
+        );
+
+        assert_eq!(decision.model, BEST);
+        assert!(decision
+            .rationale
+            .contains("lack comparable measured quality evidence"));
+    }
+
+    #[tokio::test]
+    async fn health_quota_context_and_task_class_override_affinity() {
+        let router = affinity_router(76.8);
+        let context = dependent_context(WARM, TaskTier::Complex, 48_000);
+
+        let unhealthy = contextual_route(
+            &router,
+            &context,
+            &ModelHealth::new(HashSet::from([WARM.to_string()])),
+            &SubscriptionQuota::default(),
+            TaskTier::Complex,
+            None,
+        )
+        .await;
+        assert_eq!(unhealthy.model, BEST);
+        assert!(unhealthy.rationale.contains("unhealthy or degraded"));
+
+        let pressured_quota = SubscriptionQuota::new(HashMap::from([(
+            "anthropic".to_string(),
+            QuotaStatus::Warning,
+        )]));
+        let pressured = contextual_route(
+            &router,
+            &context,
+            &ModelHealth::default(),
+            &pressured_quota,
+            TaskTier::Complex,
+            None,
+        )
+        .await;
+        assert_eq!(pressured.model, BEST);
+        assert!(pressured.rationale.contains("quota under pressure"));
+
+        let context_limited = affinity_router(76.8).with_context_windows(HashMap::from([
+            (BEST.to_string(), 200_000),
+            (WARM.to_string(), 16_000),
+            (WEAK.to_string(), 200_000),
+        ]));
+        let exhausted = contextual_route(
+            &context_limited,
+            &context,
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            TaskTier::Complex,
+            Some(32_000),
+        )
+        .await;
+        assert_eq!(exhausted.model, BEST);
+        assert!(exhausted.rationale.contains("context window exhausted"));
+
+        let changed_context = dependent_context(WARM, TaskTier::Standard, 48_000);
+        let changed = contextual_route(
+            &router,
+            &changed_context,
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            TaskTier::Complex,
+            None,
+        )
+        .await;
+        assert_eq!(changed.model, BEST);
+        assert!(changed.rationale.contains("task-class change"));
+
+        let code_class_changed = RoutingContext::from_messages(&[
+            Message::user(
+                "Diagnose and fix the concurrent reservation algorithm, prove correctness.",
+            ),
+            Message::assistant("The implementation is in progress."),
+        ])
+        .with_session_affinity(
+            Some(SessionAffinity {
+                model: WARM.into(),
+                tier: TaskTier::Complex,
+                code_heavy: false,
+            }),
+            48_000,
+        );
+        let code_changed = contextual_route(
+            &router,
+            &code_class_changed,
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            TaskTier::Complex,
+            None,
+        )
+        .await;
+        assert_eq!(code_changed.model, BEST);
+        assert!(code_changed.rationale.contains("task-class change"));
+    }
+
+    #[tokio::test]
+    async fn unrelated_task_and_new_session_do_not_inherit_affinity() {
+        let router = affinity_router(76.8);
+        let context = dependent_context(WARM, TaskTier::Complex, 48_000);
+        let unrelated = router
+            .route_contextual(
+                "Design a new unrelated distributed scheduler from scratch.",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                Some(TaskTier::Complex),
+                None,
+                &ProjectContext::default(),
+                &context,
+            )
+            .await;
+        assert_eq!(unrelated.model, BEST, "{}", unrelated.rationale);
+        assert!(!unrelated.rationale.contains("session affinity retained"));
+
+        let new_session = contextual_route(
+            &router,
+            &RoutingContext::from_messages(&[
+                Message::user("Diagnose the existing concurrency bug."),
+                Message::assistant("Initial diagnosis complete."),
+            ]),
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            TaskTier::Complex,
+            None,
+        )
+        .await;
+        assert_eq!(new_session.model, BEST, "{}", new_session.rationale);
+        assert!(!new_session.rationale.contains("session affinity"));
+    }
+
+    #[test]
+    fn detailed_continuations_use_general_references_not_benchmark_sentences() {
+        let context = RoutingContext::from_messages(&[
+            Message::user(
+                "Implement the asynchronous inventory reservation service with atomic concurrency \
+                 and verify every repository test.",
+            ),
+            Message::assistant("The initial implementation is complete."),
+        ]);
+
+        for prompt in [
+            "Audit the current implementation for concurrency defects and correct what remains.",
+            "Review the whole solution for state drift after repeated operations.",
+            "Inspect the actual diff and finish the remaining work with fresh verification.",
+            "Complete the task list and summarize the final state.",
+        ] {
+            assert!(context.is_dependent_turn(prompt), "{prompt:?}");
+        }
+        for prompt in [
+            "Design a new unrelated distributed scheduler from scratch.",
+            "New task: review the whole solution in the sibling payments repository.",
+            "Create a task list for a new deployment project.",
+        ] {
+            assert!(!context.is_dependent_turn(prompt), "{prompt:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn calibrated_latency_gain_can_pay_for_cold_start() {
+        let mut bench = BenchmarkScores::new();
+        bench.insert("affinity best", 60.0, 77.4);
+        bench.insert("affinity warm", 59.0, 76.8);
+        let catalog = ModelCatalog::new(vec![BEST.into(), WARM.into()])
+            .with_benchmarks(Some(bench))
+            .with_runtime_calibration(HashMap::from([
+                (
+                    BEST.to_string(),
+                    RuntimeCalibration {
+                        samples: 40,
+                        success_rate: 0.99,
+                        mean_latency_ms: 5_000.0,
+                    },
+                ),
+                (
+                    WARM.to_string(),
+                    RuntimeCalibration {
+                        samples: 40,
+                        success_rate: 0.99,
+                        mean_latency_ms: 60_000.0,
+                    },
+                ),
+            ]));
+        let mut config = Config::default();
+        config.mesh.auto_discover = true;
+        let router = HeuristicRouter::new(config)
+            .with_catalog(catalog)
+            .with_availability(|_| true);
+        let decision = contextual_route(
+            &router,
+            &dependent_context(WARM, TaskTier::Complex, 40_000),
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            TaskTier::Complex,
+            None,
+        )
+        .await;
+
+        assert_eq!(decision.model, BEST, "{}", decision.rationale);
+        assert!(decision
+            .rationale
+            .contains("calibrated latency advantage 55000ms"));
+        assert!(decision.rationale.contains("10000ms cold-prefix estimate"));
+    }
+
+    #[tokio::test]
+    async fn measured_runtime_degradation_overrides_affinity() {
+        let mut bench = BenchmarkScores::new();
+        bench.insert("affinity best", 60.0, 77.4);
+        bench.insert("affinity warm", 59.0, 76.8);
+        let catalog = ModelCatalog::new(vec![BEST.into(), WARM.into()])
+            .with_benchmarks(Some(bench))
+            .with_runtime_calibration(HashMap::from([(
+                WARM.to_string(),
+                RuntimeCalibration {
+                    samples: 40,
+                    success_rate: 0.75,
+                    mean_latency_ms: 10_000.0,
+                },
+            )]));
+        let mut config = Config::default();
+        config.mesh.auto_discover = true;
+        let router = HeuristicRouter::new(config)
+            .with_catalog(catalog)
+            .with_availability(|_| true);
+        let decision = contextual_route(
+            &router,
+            &dependent_context(WARM, TaskTier::Complex, 40_000),
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            TaskTier::Complex,
+            None,
+        )
+        .await;
+
+        assert_eq!(decision.model, BEST, "{}", decision.rationale);
+        assert!(decision.rationale.contains("runtime reliability degraded"));
+    }
+
+    #[tokio::test]
+    async fn contextual_route_inspection_matches_execution_order() {
+        let router = affinity_router(76.8);
+        let context = dependent_context(WARM, TaskTier::Complex, 48_000);
+        let decision = contextual_route(
+            &router,
+            &context,
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            TaskTier::Complex,
+            None,
+        )
+        .await;
+        let explanation = router.explain_contextual_classified(
+            "Continue the current implementation and verification.",
+            TaskTier::Complex,
+            vec!["test classifier".into()],
+            BudgetState::default(),
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            None,
+            &context,
+        );
+
+        assert_eq!(explanation.pick, decision.model);
+        assert_eq!(explanation.fallbacks, decision.fallbacks);
+        assert_eq!(
+            explanation
+                .candidates
+                .first()
+                .map(|row| row.row.model.as_str()),
+            Some(decision.model.as_str())
+        );
+        assert!(explanation
+            .candidates
+            .first()
+            .is_some_and(|row| row.selected));
+        let affinity_reason = "session affinity retained anthropic::affinity-warm: dependent \
+                               continuation, quality gap 0.60 within 1.00-point band; avoiding \
+                               estimated 48000-token cold prefix";
+        assert!(decision.rationale.contains(affinity_reason));
+        assert!(explanation.rationale.contains(affinity_reason));
+    }
+
+    #[tokio::test]
+    async fn retained_six_turn_replay_recognizes_long_continuations_and_avoids_luna() {
+        const TERRA: &str = "codex-oauth::gpt-5.6-terra";
+        const SOL: &str = "codex-oauth::gpt-5.6-sol";
+        const LUNA: &str = "codex-oauth::gpt-5.6-luna";
+
+        let mut bench = BenchmarkScores::new();
+        bench.insert("gpt-5.6-sol", 58.9, 77.4);
+        bench.insert("gpt-5.6-terra", 55.0, 76.7);
+        bench.insert("gpt-5.6-luna", 51.2, 71.4);
+        let mut config = Config::default();
+        config.mesh.auto_discover = true;
+        let router = HeuristicRouter::new(config)
+            .with_catalog(
+                ModelCatalog::new(vec![SOL.into(), TERRA.into(), LUNA.into()])
+                    .with_benchmarks(Some(bench))
+                    .with_runtime_calibration(HashMap::from([
+                        (
+                            SOL.to_string(),
+                            RuntimeCalibration {
+                                samples: 120,
+                                success_rate: 0.958,
+                                mean_latency_ms: 13_459.8,
+                            },
+                        ),
+                        (
+                            TERRA.to_string(),
+                            RuntimeCalibration {
+                                samples: 54,
+                                success_rate: 0.963,
+                                mean_latency_ms: 10_416.4,
+                            },
+                        ),
+                        (
+                            LUNA.to_string(),
+                            RuntimeCalibration {
+                                samples: 120,
+                                success_rate: 1.0,
+                                mean_latency_ms: 7_296.2,
+                            },
+                        ),
+                    ])),
+            )
+            .with_availability(|_| true);
+        let base_routes = [SOL, SOL, LUNA, SOL, SOL, SOL];
+        let old_completed_routes = [TERRA, TERRA, LUNA, SOL, SOL, SOL];
+        let prefix_tokens = [0, 12_000, 30_000, 55_000, 75_000, 95_000];
+        let prompts = [
+            "Benchmark integrity: solve only from this checked-out repository and these prompts. \
+             Fix this repository's asynchronous inventory reservation service completely. Read \
+             README.md and the full test suite, diagnose the cross-file bugs, implement the \
+             contract without changing public method signatures, and run all tests.",
+            "Continue from the current implementation. A small green suite is not enough: add \
+             adversarial coverage for 100 concurrent requests against one unit of stock and for \
+             many concurrent duplicate request IDs. Diagnose and fix any race or idempotency \
+             weakness you expose, preserve the public API, and rerun the complete suite.",
+            "Now scrutinize rollback and cancellation across the work already done. Exercise an \
+             injected storage failure, repeated cancellation, and concurrent reserve/cancel \
+             interleavings. Strengthen tests where useful, fix real defects rather than papering \
+             over them, and verify inventory is restored exactly once.",
+            "Review the whole multi-file solution for long-running-session mistakes: stale \
+             assumptions, ordering drift, lock-scope errors, exception mismatches, or state that \
+             can become inconsistent after many operations. Make the smallest robust corrections, \
+             then run the full tests repeatedly enough to catch scheduling-sensitive failures.",
+            "Do a skeptical final code review against every README invariant and the task list. \
+             Inspect the actual diff, run the suite from a fresh interpreter, and fix anything \
+             incomplete, overcomplicated, flaky, or unverified. Do not stop at a prose review when \
+             a code or test correction is needed.",
+            "Finish the goal end to end. Run one final complete verification, confirm no tests \
+             were weakened and no public signatures changed, ensure the task list is fully done, \
+             then give a concise evidence-based summary of the final state.",
+        ];
+        let first = router
+            .route_contextual(
+                prompts[0],
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                Some(TaskTier::Complex),
+                None,
+                &ProjectContext::default(),
+                &RoutingContext::default(),
+            )
+            .await;
+        assert_eq!(first.model, TERRA, "{}", first.rationale);
+        assert!(first
+            .rationale
+            .contains("calibrated low-latency quality anchor"));
+
+        let mut affinity = SessionAffinity {
+            model: first.model.clone(),
+            tier: TaskTier::Complex,
+            code_heavy: true,
+        };
+        let mut replayed = vec![first.model];
+        let mut transcript = vec![
+            Message::user(prompts[0]),
+            Message::assistant("Initial implementation completed; continue with the same task."),
+        ];
+
+        for (turn, base) in base_routes.iter().enumerate().skip(1) {
+            let fallbacks = [SOL, TERRA, LUNA]
+                .into_iter()
+                .filter(|candidate| candidate != base)
+                .map(str::to_string)
+                .collect();
+            let context = RoutingContext::from_messages(&transcript)
+                .with_session_affinity(Some(affinity.clone()), prefix_tokens[turn]);
+            let hints = RouteHints::from_context(prompts[turn], &context);
+            assert!(
+                hints.continuation,
+                "turn {} must be recognized as a dependent continuation",
+                turn + 1
+            );
+            let decision = router.apply_session_affinity(
+                RoutingDecision {
+                    tier: TaskTier::Complex,
+                    model: (*base).into(),
+                    rationale: "retained route replay".into(),
+                    fallbacks,
+                    pinned: false,
+                },
+                &context,
+                hints,
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                None,
+                false,
+            );
+            replayed.push(decision.model.clone());
+            affinity.model = decision.model;
+            transcript.push(Message::user(prompts[turn]));
+            transcript.push(Message::assistant("Continuation completed."));
+        }
+
+        let switch_count =
+            |models: &[String]| models.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        let old_routes: Vec<String> = old_completed_routes
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(switch_count(&old_routes), 2);
+        assert_eq!(switch_count(&replayed), 1);
+        assert_eq!(
+            replayed,
+            [TERRA, SOL, SOL, SOL, SOL, SOL].map(str::to_string)
+        );
+
+        let measured_first_use_uncached = [55_953_u64, 65_082, 149_400];
+        let avoided_cold_prefix_cost = measured_first_use_uncached[2];
+        assert_eq!(avoided_cold_prefix_cost, 149_400);
+        assert_eq!(451_483_u64 - avoided_cold_prefix_cost, 302_083);
+
+        // Confirmation v3 completed turn 3 on Luna only after Sol failed
+        // transiently. Replaying its next retained decision must restore Sol:
+        // Luna is warm, but six measured coding points behind the now-healthy
+        // quality anchor. The full 30,804-token cold estimate remains visible
+        // and does not conceal that quality override.
+        let post_failover_context = RoutingContext::from_messages(&transcript)
+            .with_session_affinity(
+                Some(SessionAffinity {
+                    model: LUNA.into(),
+                    tier: TaskTier::Complex,
+                    code_heavy: true,
+                }),
+                30_804,
+            );
+        let restored = router.apply_session_affinity(
+            RoutingDecision {
+                tier: TaskTier::Complex,
+                model: LUNA.into(),
+                rationale: "confirmation-v3 turn-4 replay".into(),
+                fallbacks: vec![SOL.into(), TERRA.into()],
+                pinned: false,
+            },
+            &post_failover_context,
+            RouteHints::from_context(prompts[3], &post_failover_context),
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(restored.model, SOL, "{}", restored.rationale);
+        assert_eq!(restored.fallbacks.first().map(String::as_str), Some(LUNA));
+        assert!(restored
+            .rationale
+            .contains("measured quality advantage 6.00"));
+        assert!(restored.rationale.contains("30804 tokens"));
+    }
+}
+
 /// Where spending sits relative to a cap. Ordered `Ok < Warning < Exhausted` so the stricter
 /// of two axes can be taken with `.max()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -124,6 +891,17 @@ const ROUTING_REFINEMENT_TURNS: usize = 3;
 const COMPACTION_SUMMARY_PREFIX: &str = "[Earlier conversation summarized to save context]";
 const ROUTING_TOOL_RESULT_MARKER: &str = "\nTOOL RESULT:\n";
 
+/// The model that most recently completed useful work in this live session.
+///
+/// This is deliberately supplied by the caller for each route instead of being stored in the
+/// router: router instances are shared, while cache warmth belongs to one conversation only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionAffinity {
+    pub model: String,
+    pub tier: TaskTier,
+    pub code_heavy: bool,
+}
+
 /// Bounded prior-turn material used to classify referential follow-ups such as "continue" without
 /// feeding the entire transcript into the mesh classifier. UI-only chrome and tool messages are
 /// excluded; a compaction summary is retained because it may be the only surviving task anchor.
@@ -133,6 +911,8 @@ pub struct RoutingContext {
     recent_refinements: Vec<String>,
     last_assistant: Option<String>,
     compaction_summary: Option<String>,
+    session_affinity: Option<SessionAffinity>,
+    reusable_prefix_tokens: u64,
 }
 
 impl RoutingContext {
@@ -189,7 +969,25 @@ impl RoutingContext {
             recent_refinements,
             last_assistant,
             compaction_summary,
+            session_affinity: None,
+            reusable_prefix_tokens: 0,
         }
+    }
+
+    /// Attach cache warmth from this same live session.
+    ///
+    /// `reusable_prefix_tokens` is the caller's deterministic estimate of the prior transcript
+    /// that another model would need to ingest cold. Exact cache hits remain provider telemetry;
+    /// this estimate never assumes cache sharing between model ids or providers.
+    #[must_use]
+    pub fn with_session_affinity(
+        mut self,
+        session_affinity: Option<SessionAffinity>,
+        reusable_prefix_tokens: u64,
+    ) -> Self {
+        self.session_affinity = session_affinity;
+        self.reusable_prefix_tokens = reusable_prefix_tokens;
+        self
     }
 
     /// Whether `prompt` depends on earlier turns rather than introducing a standalone task.
@@ -333,6 +1131,40 @@ fn is_contextual_followup(prompt: &str) -> bool {
             | "yep"
             | "yeah"
     ) {
+        return true;
+    }
+    // Long-session follow-ups are often detailed rather than terse. Recognize general references
+    // to established work instead of task- or benchmark-specific sentences. An explicit
+    // new/unrelated-task marker above still wins.
+    let starts_with_continuation_verb = [
+        "continue ",
+        "proceed ",
+        "resume ",
+        "retry ",
+        "finish ",
+        "complete ",
+    ]
+    .iter()
+    .any(|prefix| normalized.starts_with(prefix));
+    let references_established_work = [
+        "current implementation",
+        "existing implementation",
+        "current solution",
+        "existing solution",
+        "work already done",
+        "work done so far",
+        "previous work",
+        "actual diff",
+        "current diff",
+        "remaining work",
+    ]
+    .iter()
+    .any(|reference| normalized.contains(reference))
+        || (normalized.contains("whole")
+            && ["solution", "implementation", "change set"]
+                .iter()
+                .any(|subject| normalized.contains(subject)));
+    if starts_with_continuation_verb || references_established_work {
         return true;
     }
     if TRIVIAL_PATTERNS
@@ -675,7 +1507,25 @@ pub struct RouteHints {
     pub seed: u64,
     /// Whether this turn depends on an already-established task.
     pub continuation: bool,
+    /// Whether the user explicitly requested adversarial or skeptical review. These turns use a
+    /// tighter affinity quality band because a small measured quality edge matters more near the
+    /// acceptance boundary than it does during ordinary implementation work.
+    pub quality_critical: bool,
 }
+
+/// A measured score gap above this is a material quality improvement and defeats affinity.
+const AFFINITY_QUALITY_BAND: f64 = 1.0;
+/// Explicitly adversarial/review-critical turns trade cache warmth for a smaller measured edge.
+const AFFINITY_CRITICAL_QUALITY_BAND: f64 = 0.5;
+/// Below this much reusable context, switching is cheap enough to keep normal mesh ordering.
+const AFFINITY_MIN_COLD_PREFIX_TOKENS: u64 = 4_096;
+/// Conservative prefill estimate used only to compare a calibrated latency advantage with a cold
+/// model switch. It is not provider billing or a claim about a particular backend.
+const AFFINITY_ESTIMATED_PREFILL_TOKENS_PER_SECOND: f64 = 4_000.0;
+const AFFINITY_LATENCY_MIN_SAMPLES: u32 = 20;
+const AFFINITY_MIN_SUCCESS_RATE: f64 = 0.90;
+const AFFINITY_LATENCY_MARGIN_MS: f64 = 5_000.0;
+const INITIAL_ANCHOR_LATENCY_MARGIN_MS: f64 = 1_000.0;
 
 impl RouteHints {
     /// Documented in docs/features/mesh-routing.md.
@@ -684,6 +1534,7 @@ impl RouteHints {
             code_heavy: is_code_heavy(prompt),
             seed: catalog::stable_hash(prompt),
             continuation: false,
+            quality_critical: is_quality_critical(prompt),
         }
     }
 
@@ -702,8 +1553,27 @@ impl RouteHints {
             code_heavy: is_code_heavy(&active_task) || is_code_heavy(prompt),
             seed: catalog::stable_hash(&seeded),
             continuation: true,
+            quality_critical: is_quality_critical(prompt),
         }
     }
+}
+
+fn is_quality_critical(prompt: &str) -> bool {
+    let normalized = normalized_turn(prompt);
+    [
+        "adversarial",
+        "skeptical",
+        "scrutinize",
+        "code review",
+        "final verification",
+        "stress test",
+        "audit",
+        "review the whole",
+        "hidden acceptance",
+        "hidden invariant",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 /// Scale the minimum required context window by the active effort level. HIGH effort inflates it
@@ -1304,8 +2174,10 @@ impl HeuristicRouter {
         usable.sort_by_key(|m| quota.is_pressured(forge_config::provider_of(m)));
 
         // The first turn defines the implementation every later continuation inherits. On a
-        // complex coding task, prefer the strongest measured and actually usable model for that
-        // anchor even when plan conservation is active. The old catalog-only guard could see a
+        // complex coding task, constrain the anchor to the strongest measured quality band.
+        // Within that band, sufficiently sampled latency chooses the faster anchor; without
+        // comparable calibration, the exact strongest score still leads. The old catalog-only
+        // guard could see a
         // high-quality but unavailable alternative, fire conservation, and then let a much weaker
         // healthy model lead the real chain. Follow-up turns retain the normal score/pressure
         // order, preserving mesh's speed and quota benefits after the task foundation is sound.
@@ -1316,16 +2188,39 @@ impl HeuristicRouter {
             && effort != Some(EffortLevel::Low)
         {
             if let Some(catalog) = self.catalog.as_ref() {
-                usable.sort_by(|a, b| {
-                    let metric =
-                        |model: &str| catalog.benchmark_for(model).map(|(_, coding)| coding);
-                    match (metric(a), metric(b)) {
-                        (Some(a_score), Some(b_score)) => b_score.total_cmp(&a_score),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => std::cmp::Ordering::Equal,
-                    }
-                });
+                let metric = |model: &str| catalog.benchmark_for(model).map(|(_, coding)| coding);
+                if let Some(max_quality) = usable
+                    .iter()
+                    .filter_map(|model| metric(model))
+                    .max_by(f64::total_cmp)
+                {
+                    usable.sort_by(|a, b| {
+                        let a_score = metric(a);
+                        let b_score = metric(b);
+                        match (a_score, b_score) {
+                            (Some(a_score), Some(b_score)) => {
+                                let a_in_band = max_quality - a_score <= AFFINITY_QUALITY_BAND;
+                                let b_in_band = max_quality - b_score <= AFFINITY_QUALITY_BAND;
+                                if a_in_band && b_in_band {
+                                    if let (Some(a_latency), Some(b_latency)) = (
+                                        dependable_calibrated_latency(catalog, a),
+                                        dependable_calibrated_latency(catalog, b),
+                                    ) {
+                                        if (a_latency - b_latency).abs()
+                                            >= INITIAL_ANCHOR_LATENCY_MARGIN_MS
+                                        {
+                                            return a_latency.total_cmp(&b_latency);
+                                        }
+                                    }
+                                }
+                                b_score.total_cmp(&a_score)
+                            }
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        }
+                    });
+                }
             }
         }
         // Failover follows the mesh ranking verbatim: the Nth model Forge tries is the Nth-best
@@ -1384,6 +2279,344 @@ impl HeuristicRouter {
         Self::suppress_usable_oauth_superseded_bridges(&mut chain);
         chain
     }
+
+    fn affinity_quality(&self, model: &str, code_heavy: bool) -> Option<f64> {
+        self.catalog
+            .as_ref()
+            .and_then(|catalog| catalog.benchmark_for(model))
+            .map(|(intelligence, coding)| if code_heavy { coding } else { intelligence })
+    }
+
+    fn estimated_cold_prefix_ms(prefix_tokens: u64) -> f64 {
+        prefix_tokens as f64 / AFFINITY_ESTIMATED_PREFILL_TOKENS_PER_SECOND * 1_000.0
+    }
+
+    /// Quality-bounded, session-local reordering over the normal usable/failover chain.
+    ///
+    /// Reorder an already-classified decision with the same cache-affinity policy used by
+    /// [`Router::route_contextual`].
+    ///
+    /// Classifier wrappers must call this after replacing the heuristic tier decision; otherwise
+    /// rebuilding the candidate order silently discards the live session's affinity inputs. The
+    /// normal mesh decision remains authoritative unless the exact model that completed the
+    /// previous dependent turn is still usable, in the same task tier, sufficiently close in
+    /// measured quality, and not beaten by enough calibrated latency to pay for a cold prefix.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_session_affinity(
+        &self,
+        mut decision: RoutingDecision,
+        context: &RoutingContext,
+        hints: RouteHints,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        min_context: Option<u32>,
+        has_images: bool,
+    ) -> RoutingDecision {
+        let Some(affinity) = context.session_affinity.as_ref() else {
+            return decision;
+        };
+        if !hints.continuation || decision.pinned {
+            return decision;
+        }
+
+        let warm = affinity.model.as_str();
+        let provider = forge_config::provider_of(warm);
+        let cold_tokens = context.reusable_prefix_tokens;
+        let append_override = |decision: &mut RoutingDecision, reason: &str| {
+            decision.rationale.push_str(&format!(
+                " — session affinity overridden for {warm}: {reason}; estimated cold prefix \
+                 {cold_tokens} tokens"
+            ));
+        };
+
+        if decision.tier != affinity.tier {
+            append_override(&mut decision, "material task-class change");
+            return decision;
+        }
+        if hints.code_heavy != affinity.code_heavy {
+            append_override(&mut decision, "material task-class change");
+            return decision;
+        }
+        if !(self.model_available)(warm) {
+            append_override(&mut decision, "model unavailable");
+            return decision;
+        }
+        if health.is_benched(warm) {
+            append_override(&mut decision, "model unhealthy or degraded");
+            return decision;
+        }
+        if quota.is_exhausted(provider) {
+            append_override(&mut decision, "provider quota exhausted");
+            return decision;
+        }
+        if quota.is_pressured(provider) {
+            append_override(&mut decision, "provider quota under pressure");
+            return decision;
+        }
+        if !self.allowed_under_credit_mode(warm) {
+            append_override(&mut decision, "credit policy excludes model");
+            return decision;
+        }
+        if !self.context_fits(warm, effective_min_context(min_context, effort)) {
+            append_override(&mut decision, "context window exhausted");
+            return decision;
+        }
+        if has_images && !catalog::supports_vision(warm) {
+            append_override(
+                &mut decision,
+                "current turn requires unsupported capability",
+            );
+            return decision;
+        }
+
+        let warm_is_candidate =
+            decision.model == warm || decision.fallbacks.iter().any(|candidate| candidate == warm);
+        if !warm_is_candidate {
+            append_override(
+                &mut decision,
+                "model is outside the current usable routing chain",
+            );
+            return decision;
+        }
+
+        if self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.runtime_calibration_for(warm))
+            .is_some_and(|calibration| {
+                calibration.samples >= AFFINITY_LATENCY_MIN_SAMPLES
+                    && (!calibration.success_rate.is_finite()
+                        || calibration.success_rate < AFFINITY_MIN_SUCCESS_RATE)
+            })
+        {
+            append_override(&mut decision, "measured runtime reliability degraded");
+            return decision;
+        }
+
+        let quality_band = if hints.quality_critical {
+            AFFINITY_CRITICAL_QUALITY_BAND
+        } else {
+            AFFINITY_QUALITY_BAND
+        };
+
+        // Normal continuation ranking deliberately values speed and conservation,
+        // so its primary is not necessarily the strongest measured alternative.
+        // Compare the warm model with the whole usable chain. This also restores
+        // the quality anchor after a transient failover made a weaker fallback
+        // warm, without imposing frontier models on standard/trivial work.
+        if decision.tier == TaskTier::Complex {
+            let stronger = self
+                .affinity_quality(warm, hints.code_heavy)
+                .and_then(|warm_score| {
+                    std::iter::once(&decision.model)
+                        .chain(decision.fallbacks.iter())
+                        .filter(|candidate| (self.model_available)(candidate))
+                        .filter(|candidate| !health.is_benched(candidate))
+                        .filter(|candidate| {
+                            let candidate_provider = forge_config::provider_of(candidate);
+                            !quota.is_exhausted(candidate_provider)
+                                && !quota.is_pressured(candidate_provider)
+                        })
+                        .filter(|candidate| self.allowed_under_credit_mode(candidate))
+                        .filter(|candidate| self.context_fits(candidate, min_context))
+                        .filter_map(|candidate| {
+                            self.affinity_quality(candidate, hints.code_heavy)
+                                .map(|score| (candidate.clone(), score))
+                        })
+                        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                        .filter(|(_, score)| *score - warm_score > quality_band)
+                        .map(|(model, score)| (model, score - warm_score))
+                });
+
+            if let Some((stronger_model, advantage)) = stronger {
+                let previous_primary =
+                    std::mem::replace(&mut decision.model, stronger_model.clone());
+                decision.fallbacks.retain(|candidate| {
+                    candidate != &stronger_model
+                        && candidate != warm
+                        && candidate != &previous_primary
+                });
+                if previous_primary != stronger_model && previous_primary != warm {
+                    decision.fallbacks.insert(0, previous_primary);
+                }
+                decision.fallbacks.insert(0, warm.to_string());
+                append_override(
+                    &mut decision,
+                    &format!(
+                        "{stronger_model} offers measured quality advantage {advantage:.2}, \
+                         exceeding {quality_band:.2}-point {}band",
+                        if hints.quality_critical {
+                            "quality-critical "
+                        } else {
+                            ""
+                        }
+                    ),
+                );
+                return decision;
+            }
+        }
+
+        if decision.model == warm {
+            decision.rationale.push_str(&format!(
+                " — session affinity retained {warm}: already best usable route; avoiding \
+                 estimated {cold_tokens}-token cold prefix"
+            ));
+            return decision;
+        }
+
+        if cold_tokens < AFFINITY_MIN_COLD_PREFIX_TOKENS {
+            append_override(
+                &mut decision,
+                "reusable prefix is too small to justify reordering",
+            );
+            return decision;
+        }
+
+        let best = decision.model.clone();
+        let quality_gap = match (
+            self.affinity_quality(&best, hints.code_heavy),
+            self.affinity_quality(warm, hints.code_heavy),
+        ) {
+            (Some(best_score), Some(warm_score)) => Some(best_score - warm_score),
+            (Some(_), None) => {
+                append_override(
+                    &mut decision,
+                    "warm model lacks comparable quality evidence",
+                );
+                return decision;
+            }
+            (None, Some(_)) | (None, None) => {
+                append_override(
+                    &mut decision,
+                    "models lack comparable measured quality evidence",
+                );
+                return decision;
+            }
+        };
+        if let Some(gap) = quality_gap {
+            if gap > quality_band {
+                append_override(
+                    &mut decision,
+                    &format!(
+                        "alternative quality advantage {gap:.2} exceeds \
+                         {quality_band:.2}-point {}band",
+                        if hints.quality_critical {
+                            "quality-critical "
+                        } else {
+                            ""
+                        }
+                    ),
+                );
+                return decision;
+            }
+        }
+
+        if let Some(catalog) = self.catalog.as_ref() {
+            let warm_calibration = catalog.runtime_calibration_for(warm);
+            let best_calibration = catalog.runtime_calibration_for(&best);
+            if let (Some(warm_latency), Some(best_latency)) = (warm_calibration, best_calibration) {
+                if warm_latency.samples >= AFFINITY_LATENCY_MIN_SAMPLES
+                    && best_latency.samples >= AFFINITY_LATENCY_MIN_SAMPLES
+                    && warm_latency.mean_latency_ms.is_finite()
+                    && best_latency.mean_latency_ms.is_finite()
+                    && warm_latency.mean_latency_ms > 0.0
+                    && best_latency.mean_latency_ms > 0.0
+                {
+                    let improvement_ms =
+                        warm_latency.mean_latency_ms - best_latency.mean_latency_ms;
+                    let cold_ms = Self::estimated_cold_prefix_ms(cold_tokens);
+                    if improvement_ms > cold_ms + AFFINITY_LATENCY_MARGIN_MS {
+                        append_override(
+                            &mut decision,
+                            &format!(
+                                "calibrated latency advantage {:.0}ms pays {:.0}ms cold-prefix \
+                                 estimate plus {:.0}ms margin",
+                                improvement_ms, cold_ms, AFFINITY_LATENCY_MARGIN_MS
+                            ),
+                        );
+                        return decision;
+                    }
+                }
+            }
+        }
+
+        let previous_primary = std::mem::replace(&mut decision.model, affinity.model.clone());
+        decision.fallbacks.retain(|candidate| candidate != warm);
+        decision.fallbacks.insert(0, previous_primary);
+        let quality_reason = describe_affinity_quality(quality_gap, quality_band);
+        decision.rationale.push_str(&format!(
+            " — session affinity retained {warm}: dependent continuation, {quality_reason}; \
+             avoiding estimated {cold_tokens}-token cold prefix"
+        ));
+        decision
+    }
+}
+
+fn dependable_calibrated_latency(catalog: &ModelCatalog, model: &str) -> Option<f64> {
+    catalog
+        .runtime_calibration_for(model)
+        .filter(|calibration| {
+            calibration.samples >= AFFINITY_LATENCY_MIN_SAMPLES
+                && calibration.success_rate.is_finite()
+                && calibration.success_rate >= AFFINITY_MIN_SUCCESS_RATE
+                && calibration.mean_latency_ms.is_finite()
+                && calibration.mean_latency_ms > 0.0
+        })
+        .map(|calibration| calibration.mean_latency_ms)
+}
+
+fn initial_anchor_speed_note(
+    catalog: &ModelCatalog,
+    candidates: &[String],
+    selected: &str,
+) -> Option<String> {
+    let (strongest_model, strongest_quality) = candidates
+        .iter()
+        .filter_map(|model| {
+            catalog
+                .benchmark_for(model)
+                .map(|(_, coding)| (model, coding))
+        })
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))?;
+    if strongest_model == selected {
+        return None;
+    }
+
+    let selected_quality = catalog.benchmark_for(selected)?.1;
+    let quality_gap = strongest_quality - selected_quality;
+    if !(0.0..=AFFINITY_QUALITY_BAND).contains(&quality_gap) {
+        return None;
+    }
+
+    let selected_latency = dependable_calibrated_latency(catalog, selected)?;
+    let strongest_latency = dependable_calibrated_latency(catalog, strongest_model)?;
+    let latency_advantage = strongest_latency - selected_latency;
+    if latency_advantage < INITIAL_ANCHOR_LATENCY_MARGIN_MS {
+        return None;
+    }
+
+    Some(format!(
+        "calibrated low-latency quality anchor: {selected} is {quality_gap:.2} points \
+         from {strongest_model} within {AFFINITY_QUALITY_BAND:.2}-point band and \
+         {latency_advantage:.0}ms faster per model call"
+    ))
+}
+
+fn describe_affinity_quality(quality_gap: Option<f64>, quality_band: f64) -> String {
+    quality_gap.map_or_else(
+        || "warm model has measured quality advantage".to_string(),
+        |gap| {
+            if gap < 0.0 {
+                format!("warm model quality advantage {:.2}", -gap)
+            } else {
+                format!(
+                    "quality gap {:.2} within {:.2}-point band",
+                    gap, quality_band
+                )
+            }
+        },
+    )
 }
 
 /// A `(u8, f64)`-comparable cost key. `f64` isn't `Ord`, so wrap it for use inside tuple
@@ -1511,6 +2744,17 @@ impl HeuristicRouter {
                             " — auto-selected best of {n} usable {} models: {model}",
                             tier.as_str()
                         ));
+                        if tier == TaskTier::Complex
+                            && hints.code_heavy
+                            && !hints.continuation
+                            && effort != Some(EffortLevel::Low)
+                        {
+                            if let Some(note) = self.catalog.as_ref().and_then(|catalog| {
+                                initial_anchor_speed_note(catalog, &routed_usable, &model)
+                            }) {
+                                why.push_str(&format!(" — {note}"));
+                            }
+                        }
                     } else if n > 1 {
                         why.push_str(&format!(
                             " — cheapest of {n} usable {} models: {model}",
@@ -1647,7 +2891,7 @@ impl Router for HeuristicRouter {
     ) -> RoutingDecision {
         let activity = self.classification_activity(prompt);
         let hints = RouteHints::from_context(activity, context);
-        match tier_override {
+        let decision = match tier_override {
             Some(tier) => self.decide(
                 tier,
                 format!("tier hint: {}", tier.as_str()),
@@ -1664,7 +2908,17 @@ impl Router for HeuristicRouter {
                     tier, reason, budget, health, hints, quota, effort, has_images,
                 )
             }
-        }
+        };
+        self.apply_session_affinity(
+            decision,
+            context,
+            hints,
+            health,
+            quota,
+            effort,
+            budget.min_context_tokens,
+            has_images,
+        )
     }
 
     async fn route_candidates(
@@ -1993,6 +3247,7 @@ mod tests {
                 code_heavy: true,
                 seed,
                 continuation: false,
+                quality_critical: false,
             },
             &quota,
             None,
@@ -2012,6 +3267,7 @@ mod tests {
                 code_heavy: true,
                 seed,
                 continuation: true,
+                quality_critical: false,
             },
             &quota,
             None,
