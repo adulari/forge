@@ -19,6 +19,8 @@ forge.db-*
 *.sqlite-*
 
 # Editor / OS
+__pycache__/
+*.py[cod]
 .idea/
 .vscode/
 *.swp
