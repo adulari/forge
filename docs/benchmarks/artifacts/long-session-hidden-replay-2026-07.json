@@ -56,6 +56,17 @@
       "failure": "Conflict precedence: a reused request ID with an unknown different SKU raised NotFound before Conflict.",
       "valid": false,
       "superseded": true
+    },
+    {
+      "cell": "native-claude-opus-5-high-clean",
+      "source_artifact": "long-session-reservations-native-claude-20260728T040927Z-2201418",
+      "patch_sha256": "caa9a0b9353d3f54f24f94d89536332fe41217ccb7f1b2fe9f29eb5e8deea3a3",
+      "synthetic_base_tree": "7d17bf17bcd5f9467a305edf6a0a5a50dfa1582b",
+      "exit_code": 1,
+      "failure": "Conflict precedence: a reused request ID with an unknown different SKU raised NotFound before Conflict.",
+      "valid": true,
+      "quality_acceptance_passed": false,
+      "superseded": false
     }
   ]
 }
