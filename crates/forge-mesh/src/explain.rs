@@ -10,7 +10,8 @@ use forge_types::{
 };
 
 use crate::catalog::{self, ConserveDecision, ScoreRow};
-use crate::{score_prompt, BudgetState, HeuristicRouter, RouteHints, RoutingContext};
+use crate::classification::score_prompt;
+use crate::{BudgetState, HeuristicRouter, RouteHints, RoutingContext};
 
 /// One model in the ranked candidate table, with the router's usability overlay.
 #[derive(Debug, Clone)]

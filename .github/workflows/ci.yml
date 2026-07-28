@@ -45,6 +45,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash scripts/ci/changed-groups.sh
+      - name: Test architecture size guard
+        run: python3 scripts/ci/test_architecture_size.py
+      - name: Enforce architecture size guard
+        run: python3 scripts/ci/architecture_size.py
       - name: Test EAS OTA safety classifier
         run: bash scripts/ci/test-eas-ota-safety.sh
       - name: Test runner resource budgets
