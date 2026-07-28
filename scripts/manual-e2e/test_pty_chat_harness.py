@@ -3,6 +3,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -11,8 +13,48 @@ from pty_chat_harness import (
     prompt_persisted,
     session_state,
     surface_state,
+    terminal_turn_failure,
     timeout_kind,
+    wait_for_turn_permit,
 )
+
+
+class QuotaTurnGateTests(unittest.TestCase):
+    def permit(self, *, codex: float = 12.0, claude: float = 29.0) -> dict[str, object]:
+        return {
+            "allow": True,
+            "observed_at": "2026-07-28T12:00:00Z",
+            "codex_weekly_percent": codex,
+            "codex_hard_stop_percent": 22.0,
+            "claude_weekly_percent": claude,
+            "claude_hard_stop_percent": 32.0,
+        }
+
+    def test_permit_records_fresh_observation_and_wait_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            gate_dir = Path(temp)
+            (gate_dir / "permit-turn-02.json").write_text(
+                json.dumps(self.permit()) + "\n", encoding="utf-8"
+            )
+
+            waited, observation = wait_for_turn_permit(
+                gate_dir, 2, "session-affinity"
+            )
+
+            self.assertGreaterEqual(waited, 0.0)
+            self.assertEqual(observation["turn"], 2)
+            self.assertEqual(observation["session_id"], "session-affinity")
+            self.assertTrue((gate_dir / "waiting-turn-02.json").is_file())
+
+    def test_permit_fails_closed_at_provider_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            gate_dir = Path(temp)
+            (gate_dir / "permit-turn-01.json").write_text(
+                json.dumps(self.permit(codex=23.0)) + "\n", encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "denied by quota gate"):
+                wait_for_turn_permit(gate_dir, 1, None)
 
 
 class SessionStateTests(unittest.TestCase):
@@ -28,12 +70,16 @@ class SessionStateTests(unittest.TestCase):
                 agent_active INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE message (
+                id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 seq INTEGER NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 model TEXT,
                 visibility TEXT NOT NULL DEFAULT 'llm'
+            );
+            CREATE TABLE tool_call (
+                message_id TEXT NOT NULL
             );
             INSERT INTO session (id, cwd, created_at) VALUES ('session-1', '/workspace', 10);
             """
@@ -65,8 +111,9 @@ class SessionStateTests(unittest.TestCase):
     ) -> None:
         self.database.execute(
             "INSERT INTO message "
-            "(session_id, seq, role, content, model, visibility) VALUES (?, ?, ?, ?, ?, ?)",
-            ("session-1", seq, role, content, model, visibility),
+            "(id, session_id, seq, role, content, model, visibility) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (f"message-{seq}", "session-1", seq, role, content, model, visibility),
         )
 
     def test_delayed_previous_turn_marker_does_not_complete_new_prompt(self) -> None:
@@ -75,7 +122,7 @@ class SessionStateTests(unittest.TestCase):
 
         self.assertFalse(self.state(0))
 
-    def test_current_final_response_and_later_marker_complete_turn(self) -> None:
+    def test_current_final_response_completes_when_agent_is_idle(self) -> None:
         self.insert(
             1,
             "assistant",
@@ -83,7 +130,6 @@ class SessionStateTests(unittest.TestCase):
             model="codex-oauth::gpt-5.6-luna",
             visibility="llm_only",
         )
-        self.insert(2, "system", "recap")
 
         self.assertTrue(self.state(0))
 
@@ -100,7 +146,7 @@ class SessionStateTests(unittest.TestCase):
 
         self.assertFalse(self.state(0))
 
-    def test_marker_must_follow_current_final_response(self) -> None:
+    def test_detached_marker_order_does_not_delay_idle_final_response(self) -> None:
         self.insert(1, "system", "memory")
         self.insert(
             2,
@@ -110,9 +156,20 @@ class SessionStateTests(unittest.TestCase):
             visibility="llm_only",
         )
 
-        self.assertFalse(self.state(0))
-        self.insert(3, "system", "memory")
         self.assertTrue(self.state(0))
+
+    def test_nonempty_tool_call_response_does_not_complete_turn(self) -> None:
+        self.insert(
+            1,
+            "assistant",
+            "intermediate text",
+            model="codex-oauth::gpt-5.6-sol",
+        )
+        self.database.execute(
+            "INSERT INTO tool_call (message_id) VALUES ('message-1')"
+        )
+
+        self.assertFalse(self.state(0))
 
     def test_agent_returning_idle_is_not_completion_without_response(self) -> None:
         self.database.execute(
@@ -161,6 +218,15 @@ class TimeoutTests(unittest.TestCase):
             "a modal must win over stale composer text retained from the previous frame",
         )
 
+    def test_terminal_turn_failure_extracts_visible_error(self) -> None:
+        self.assertEqual(
+            terminal_turn_failure(
+                "status chrome\nTurn failed: provider request failed: retry later\ncomposer"
+            ),
+            "provider request failed: retry later",
+        )
+        self.assertIsNone(terminal_turn_failure("turn finished normally"))
+
 
 class HarnessIntegrationTests(unittest.TestCase):
     def test_workflow_modal_is_backgrounded_before_the_next_prompt(self) -> None:
@@ -178,6 +244,7 @@ class HarnessIntegrationTests(unittest.TestCase):
                         agent_active INTEGER NOT NULL DEFAULT 0
                     );
                     CREATE TABLE message (
+                        id TEXT PRIMARY KEY,
                         session_id TEXT NOT NULL,
                         seq INTEGER NOT NULL,
                         role TEXT NOT NULL,
@@ -185,12 +252,41 @@ class HarnessIntegrationTests(unittest.TestCase):
                         model TEXT,
                         visibility TEXT NOT NULL DEFAULT 'llm'
                     );
+                    CREATE TABLE tool_call (
+                        message_id TEXT NOT NULL
+                    );
                     """
                 )
             prompts = root / "prompts.json"
             prompts.write_text(
                 json.dumps(["first prompt", "second prompt"]), encoding="utf-8"
             )
+            gate_dir = root / "quota-gates"
+            gate_dir.mkdir()
+            permit = {
+                "allow": True,
+                "observed_at": "2026-07-28T12:00:00Z",
+                "codex_weekly_percent": 12.0,
+                "codex_hard_stop_percent": 22.0,
+                "claude_weekly_percent": 29.0,
+                "claude_hard_stop_percent": 32.0,
+            }
+            (gate_dir / "permit-turn-02.json").write_text(
+                json.dumps(permit) + "\n", encoding="utf-8"
+            )
+            def write_delayed_permit() -> None:
+                waiting = gate_dir / "waiting-turn-01.json"
+                deadline = time.monotonic() + 5.0
+                while not waiting.is_file():
+                    if time.monotonic() >= deadline:
+                        return
+                    time.sleep(0.01)
+                time.sleep(0.3)
+                (gate_dir / "permit-turn-01.json").write_text(
+                    json.dumps(permit) + "\n", encoding="utf-8"
+                )
+
+            delayed_permit = threading.Thread(target=write_delayed_permit)
             child = root / "fake_tui.py"
             child.write_text(
                 r"""
@@ -250,41 +346,49 @@ database.close()
                 encoding="utf-8",
             )
             harness = Path(__file__).with_name("pty_chat_harness.py")
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(harness),
-                    "--cwd",
-                    str(root),
-                    "--prompt-sequence-file",
-                    str(prompts),
-                    "--log-prefix",
-                    str(root / "live"),
-                    "--db",
-                    str(database_path),
-                    "--timeout",
-                    "8",
-                    "--turn-timeout",
-                    "3",
-                    "--settle",
-                    "0.05",
-                    "--",
-                    sys.executable,
-                    str(child),
-                    str(database_path),
-                    str(root),
-                ],
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=12,
-            )
+            delayed_permit.start()
+            try:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(harness),
+                        "--cwd",
+                        str(root),
+                        "--prompt-sequence-file",
+                        str(prompts),
+                        "--log-prefix",
+                        str(root / "live"),
+                        "--db",
+                        str(database_path),
+                        "--timeout",
+                        "8",
+                        "--turn-timeout",
+                        "3",
+                        "--settle",
+                        "0.05",
+                        "--turn-gate-dir",
+                        str(gate_dir),
+                        "--",
+                        sys.executable,
+                        str(child),
+                        str(database_path),
+                        str(root),
+                    ],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=12,
+                )
+            finally:
+                delayed_permit.join()
 
             self.assertEqual(completed.returncode, 0, completed.stdout)
             summary = json.loads(completed.stdout.splitlines()[-1])
             self.assertEqual(summary["turns_completed"], 2)
             self.assertFalse(summary["prompt_dispatch_failed"])
+            self.assertGreaterEqual(summary["quota_gate_wait_s"], 0.2)
+            self.assertEqual(len(summary["quota_gates"]), 2)
             timeline = (root / "live.timeline.tsv").read_text(encoding="utf-8")
             self.assertIn("MODAL_DISMISS turn=1 kind=workflow", timeline)
             with sqlite3.connect(database_path) as database:
