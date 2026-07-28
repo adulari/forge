@@ -172,7 +172,15 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
 }
 
 fn has_untrustworthy_control_flow(command: &str) -> bool {
-    if command.contains(';') || command.contains('\n') || command.contains("||") {
+    if command.contains(';')
+        || command.contains("||")
+        || has_standalone_background_operator(command)
+    {
+        return true;
+    }
+    if command.contains('\n')
+        && (!starts_with_errexit(command) || later_disables_or_masks_errexit(command))
+    {
         return true;
     }
     let bytes = command.as_bytes();
@@ -181,7 +189,101 @@ fn has_untrustworthy_control_flow(command: &str) -> bool {
             && index.checked_sub(1).and_then(|i| bytes.get(i)) != Some(&b'|')
             && bytes.get(index + 1) != Some(&b'|')
     });
-    has_pipeline && !command.contains("pipefail")
+    has_pipeline && !enables_pipefail(command)
+}
+
+fn starts_with_errexit(command: &str) -> bool {
+    let Some(first) = command
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+    else {
+        return false;
+    };
+    let words = first.split_whitespace().collect::<Vec<_>>();
+    if words.first() != Some(&"set") {
+        return false;
+    }
+    words
+        .iter()
+        .skip(1)
+        .any(|word| word.starts_with('-') && !word.starts_with("--") && word.contains('e'))
+        || words.windows(2).any(|pair| pair == ["-o", "errexit"])
+}
+
+fn later_disables_or_masks_errexit(command: &str) -> bool {
+    command
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .skip(1)
+        .any(|line| {
+            let words = line.split_whitespace().collect::<Vec<_>>();
+            let disables_errexit = words.first() == Some(&"set")
+                && (words
+                    .iter()
+                    .skip(1)
+                    .any(|word| word.starts_with('+') && word.contains('e'))
+                    || words.windows(2).any(|pair| pair == ["+o", "errexit"]));
+            let masks_status = matches!(
+                words.first().copied(),
+                Some("!") | Some("if") | Some("while") | Some("until")
+            );
+            disables_errexit || masks_status
+        })
+}
+
+fn enables_pipefail(command: &str) -> bool {
+    let mut enabled = false;
+    for line in command
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let words = line.split_whitespace().collect::<Vec<_>>();
+        if words
+            .first()
+            .and_then(|word| word.rsplit('/').next())
+            .is_some_and(|shell| matches!(shell, "bash" | "zsh" | "ksh" | "sh"))
+            && words.windows(2).any(|pair| pair == ["-o", "pipefail"])
+        {
+            enabled = true;
+            continue;
+        }
+        if words.first() != Some(&"set") {
+            continue;
+        }
+        if words.windows(2).any(|pair| pair == ["+o", "pipefail"]) {
+            enabled = false;
+            continue;
+        }
+        if words.windows(2).any(|pair| pair == ["-o", "pipefail"])
+            || (words
+                .iter()
+                .skip(1)
+                .any(|word| word.starts_with('-') && word.contains('o'))
+                && words.contains(&"pipefail"))
+        {
+            enabled = true;
+        }
+    }
+    enabled
+}
+
+fn has_standalone_background_operator(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        if *byte != b'&' {
+            return false;
+        }
+        let previous = index.checked_sub(1).and_then(|i| bytes.get(i));
+        let next = bytes.get(index + 1);
+        previous != Some(&b'&')
+            && next != Some(&b'&')
+            && previous != Some(&b'>')
+            && previous != Some(&b'<')
+            && next != Some(&b'>')
+    })
 }
 
 /// Evidence observed while a model claims that every tracked task is complete.
@@ -427,6 +529,52 @@ mod tests {
             ),
             VerificationObservation::Check(VerificationFamily::Lint),
             "a fail-fast AND chain preserves failure"
+        );
+    }
+
+    #[test]
+    fn fail_fast_multiline_checks_are_trusted_without_accepting_masked_failures() {
+        assert_eq!(
+            classify_tool(
+                "shell",
+                &serde_json::json!({
+                    "command": "set -eu\npython -m unittest discover -v\npython verify_signatures.py"
+                })
+                .to_string()
+            ),
+            VerificationObservation::Check(VerificationFamily::Test),
+            "an errexit-guarded sequence preserves the first failing exit status"
+        );
+        for command in [
+            "set -e\ncargo test || true",
+            "set -e\ncargo test | tail -20",
+            "cargo test\ncargo fmt --check",
+            "set -e\nset +e\ncargo test\ntrue",
+            "set -e\n! cargo test",
+            "set -e\nif cargo test\nthen\n  true\nfi",
+            "set -e\ncargo test &\ntrue",
+            "set -e\n# mentioning pipefail is not enabling it\ncargo test | tail -20",
+            "set -eo pipefail\ncargo test | tail -20\nset +o pipefail\ncargo test | tail -20",
+        ] {
+            assert_eq!(
+                classify_tool(
+                    "shell",
+                    &serde_json::json!({ "command": command }).to_string()
+                ),
+                VerificationObservation::Ignore,
+                "masked or non-fail-fast sequence was accepted: {command}"
+            );
+        }
+        assert_eq!(
+            classify_tool(
+                "shell",
+                &serde_json::json!({
+                    "command": "set -euo pipefail\ncargo test 2>&1 | tee test.log"
+                })
+                .to_string()
+            ),
+            VerificationObservation::Check(VerificationFamily::Test),
+            "a pipeline with active pipefail preserves the test exit status"
         );
     }
 

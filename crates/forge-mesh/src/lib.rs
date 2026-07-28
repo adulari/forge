@@ -673,6 +673,8 @@ struct Classification {
 pub struct RouteHints {
     pub code_heavy: bool,
     pub seed: u64,
+    /// Whether this turn depends on an already-established task.
+    pub continuation: bool,
 }
 
 impl RouteHints {
@@ -681,6 +683,7 @@ impl RouteHints {
         Self {
             code_heavy: is_code_heavy(prompt),
             seed: catalog::stable_hash(prompt),
+            continuation: false,
         }
     }
 
@@ -698,6 +701,7 @@ impl RouteHints {
         Self {
             code_heavy: is_code_heavy(&active_task) || is_code_heavy(prompt),
             seed: catalog::stable_hash(&seeded),
+            continuation: true,
         }
     }
 }
@@ -1298,6 +1302,32 @@ impl HeuristicRouter {
         // Demote a near-limit subscription (Warning, L3) to the back — still a fallback, but the
         // mesh tries everything else first. Stable, so it preserves the order within each group.
         usable.sort_by_key(|m| quota.is_pressured(forge_config::provider_of(m)));
+
+        // The first turn defines the implementation every later continuation inherits. On a
+        // complex coding task, prefer the strongest measured and actually usable model for that
+        // anchor even when plan conservation is active. The old catalog-only guard could see a
+        // high-quality but unavailable alternative, fire conservation, and then let a much weaker
+        // healthy model lead the real chain. Follow-up turns retain the normal score/pressure
+        // order, preserving mesh's speed and quota benefits after the task foundation is sound.
+        if self.auto_active()
+            && tier == TaskTier::Complex
+            && hints.code_heavy
+            && !hints.continuation
+            && effort != Some(EffortLevel::Low)
+        {
+            if let Some(catalog) = self.catalog.as_ref() {
+                usable.sort_by(|a, b| {
+                    let metric =
+                        |model: &str| catalog.benchmark_for(model).map(|(_, coding)| coding);
+                    match (metric(a), metric(b)) {
+                        (Some(a_score), Some(b_score)) => b_score.total_cmp(&a_score),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
+        }
         // Failover follows the mesh ranking verbatim: the Nth model Forge tries is the Nth-best
         // ranked model, not the top model of the Nth provider. (A previous round-robin interleave
         // destroyed cross-provider rank order — e.g. it sent release work to a low-ranked free
@@ -1926,6 +1956,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn complex_coding_anchor_uses_best_measured_usable_model_before_conserving_followups() {
+        let mut bench = BenchmarkScores::new();
+        bench.insert("gpt-5.6-sol", 58.9, 77.4);
+        bench.insert("qwen3.6-flash", 50.1, 69.2);
+        bench.insert("kimi-k3", 57.1, 76.2);
+        let models = vec![
+            "codex-cli::gpt-5.6-sol".to_string(),
+            "qwencloud::qwen3.6-flash".to_string(),
+            "opencode_go::kimi-k3".to_string(),
+        ];
+        let catalog = ModelCatalog::new(models.clone()).with_benchmarks(Some(bench.clone()));
+        let router = HeuristicRouter::new(Config::default())
+            .with_availability(|model| !model.starts_with("opencode_go::"))
+            .with_catalog(catalog);
+        let quota = conserve_quota(0.7, "plus", "plus");
+        let seed = (0..10_000)
+            .find(|seed| {
+                catalog::conserve_decision(
+                    &models,
+                    TaskTier::Complex,
+                    true,
+                    *seed,
+                    &quota,
+                    Some(&bench),
+                )
+                .fired
+            })
+            .expect("test setup must exercise active conservation");
+
+        let anchor = router.ordered_usable_for_tier(
+            TaskTier::Complex,
+            &ModelHealth::default(),
+            RouteHints {
+                code_heavy: true,
+                seed,
+                continuation: false,
+            },
+            &quota,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            anchor.first().map(String::as_str),
+            Some("codex-cli::gpt-5.6-sol"),
+            "an unavailable near-peer must not let conservation weaken the task-defining turn"
+        );
+
+        let continuation = router.ordered_usable_for_tier(
+            TaskTier::Complex,
+            &ModelHealth::default(),
+            RouteHints {
+                code_heavy: true,
+                seed,
+                continuation: true,
+            },
+            &quota,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            continuation.first().map(String::as_str),
+            Some("qwencloud::qwen3.6-flash"),
+            "continuations should retain normal quota-aware mesh ordering"
+        );
+    }
+
     #[tokio::test]
     async fn usable_oauth_twin_removes_cli_bridge_from_routing_and_failover() {
         // A bridge is only a recovery path when its native OAuth twin is unavailable. Keeping
@@ -2135,6 +2234,55 @@ mod tests {
         ))];
         let decision = contextual_decision(&history, "continue").await;
         assert_eq!(decision.tier, TaskTier::Complex, "{}", decision.rationale);
+    }
+
+    #[tokio::test]
+    async fn endurance_history_keeps_followup_routing_bounded_and_complex() {
+        let mut history = vec![Message::system(format!(
+            "{COMPACTION_SUMMARY_PREFIX}\nActive task: debug a race condition in the scheduler, \
+             prove the concurrency fix, and run stress tests."
+        ))];
+        for turn in 0..650 {
+            history.push(Message::user("continue"));
+            history.push(Message::assistant(format!(
+                "still working through concurrency invariant {turn}"
+            )));
+            for tool in 0..10 {
+                history.push(Message::tool_result(
+                    format!("call-{turn}-{tool}"),
+                    "bounded tool output",
+                ));
+            }
+        }
+
+        let started = std::time::Instant::now();
+        let context = RoutingContext::from_messages(&history);
+        let classifier_prompt = context.classifier_prompt("continue");
+        let decision = router()
+            .route_contextual(
+                "continue",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                None,
+                &ProjectContext::default(),
+                &context,
+            )
+            .await;
+
+        assert_eq!(decision.tier, TaskTier::Complex, "{}", decision.rationale);
+        assert!(
+            classifier_prompt.chars().count() <= 16_000,
+            "classifier input must remain bounded, got {} chars",
+            classifier_prompt.chars().count()
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "routing a 7,800-message endurance history became pathologically slow: {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

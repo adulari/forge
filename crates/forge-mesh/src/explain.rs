@@ -150,33 +150,44 @@ impl HeuristicRouter {
         // context window doesn't fit, is something `decide()` would NEVER actually pick; showing
         // it as `usable: true` here made the real pick (further down the list, first genuinely
         // eligible row) look inconsistent with the table, when the pick was correct all along.
-        let min_context = crate::effective_min_context(budget.min_context_tokens, effort);
-        let visible_models: std::collections::HashSet<String> = self
-            .ordered_usable_for_tier(
-                routed_tier,
-                health,
-                hints,
-                quota,
-                effort,
-                budget.min_context_tokens,
-                false,
-            )
-            .into_iter()
+        let ordered_visible = self.ordered_usable_for_tier(
+            routed_tier,
+            health,
+            hints,
+            quota,
+            effort,
+            budget.min_context_tokens,
+            false,
+        );
+        let effective_rank: std::collections::HashMap<&str, usize> = ordered_visible
+            .iter()
+            .enumerate()
+            .map(|(rank, model)| (model.as_str(), rank))
             .collect();
+        let visible_models: std::collections::HashSet<&str> =
+            ordered_visible.iter().map(String::as_str).collect();
+        let mut rows = rows;
+        // Put real, usable routing order first. Unavailable diagnostic rows remain visible after
+        // it in their catalog order. Without this overlay, a quality-anchor or health decision
+        // could correctly select a model while `/mesh` misleadingly labelled it rank 19.
+        rows.sort_by_key(|row| {
+            effective_rank
+                .get(row.model.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
         let candidates = rows
             .into_iter()
             // Keep unavailable rows visible for diagnosis, but never present an available CLI
             // bridge as a normal choice when its paired OAuth surface is usable this turn.
             .filter(|row| {
                 catalog::oauth_twin_for_bridge(&row.model)
-                    .is_none_or(|oauth_twin| !visible_models.contains(&oauth_twin))
+                    .is_none_or(|oauth_twin| !visible_models.contains(oauth_twin.as_str()))
             })
             .enumerate()
             .map(|(i, row)| CandidateRow {
                 rank: i + 1,
-                usable: self.is_usable(&row.model, health, quota)
-                    && self.allowed_under_credit_mode(&row.model)
-                    && self.context_fits(&row.model, min_context),
+                usable: visible_models.contains(row.model.as_str()),
                 selected: row.model == decision.model,
                 row,
             })
@@ -282,6 +293,11 @@ mod tests {
         // row must be the pick (the table is the decision, made legible).
         let selected = e.candidates.iter().find(|c| c.selected).unwrap();
         assert_eq!(selected.row.model, e.pick);
+        assert_eq!(
+            selected.rank, 1,
+            "the real pick must be the first effective row"
+        );
+        assert!(selected.usable);
         assert!(!e.candidates.is_empty());
         assert_eq!(e.classified_tier, TaskTier::Complex);
     }

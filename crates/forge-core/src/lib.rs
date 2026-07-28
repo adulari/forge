@@ -7026,6 +7026,14 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let contract =
             turn_contract::TurnContract::derive(prompt, self.mode, self.expect_code_change);
         self.last_turn_contract = contract.clone();
+        if let Some(guidance) = contract.public_api_guidance() {
+            self.inject_context(
+                &mut context_pack,
+                context_pack::ContextSource::TurnContract,
+                "public-API preservation contract",
+                guidance,
+            )?;
+        }
         if let Some(guidance) = contract.guidance() {
             self.inject_context(
                 &mut context_pack,

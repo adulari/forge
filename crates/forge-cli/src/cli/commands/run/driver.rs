@@ -559,13 +559,6 @@ async fn drive_session(
     let _ = snapshot_tx.send(closed);
 }
 
-fn take_next_queued_prompt(queue: &mut Vec<String>, app: &mut App) -> Option<String> {
-    let next = queue.first().cloned()?;
-    queue.remove(0);
-    app.set_queued(queue);
-    Some(next)
-}
-
 impl DriverState {
     /// One remote input — the headless mirror of `run_chat_tui`'s remote drain, minus the
     /// host-terminal cases (`/remote` toggling, host clipboard).
@@ -864,7 +857,11 @@ impl DriverState {
     }
 
     fn take_next_queued_prompt(&mut self) -> Option<String> {
-        take_next_queued_prompt(&mut self.queued_prompts, &mut self.app)
+        dequeue_prompt(
+            &mut self.queued_prompts,
+            &mut self.app,
+            &mut self.prompt_history,
+        )
     }
 
     /// Act on a [`DispatchOutcome`] — the headless twin of the TUI's outcome match arms.
@@ -1479,13 +1476,17 @@ impl DriverState {
                 match loop_stop_reason(last.as_deref(), ls.iter) {
                     Some(reason) => self.app.note(reason),
                     None => {
+                        let prompt = self
+                            .take_next_queued_prompt()
+                            .unwrap_or_else(|| "Continue toward completion.".to_string());
+                        self.last_prompt = Some(prompt.clone());
                         self.turn_gen += 1;
                         self.loop_state = Some(LoopState {
                             gen: self.turn_gen,
                             iter: ls.iter + 1,
                         });
                         self.turn_handle = Some(spawn_turn_with(
-                            "Continue toward completion.".to_string(),
+                            prompt,
                             vec![LOOP_GUIDANCE.to_string()],
                             None,
                             &self.session,
@@ -1528,6 +1529,10 @@ impl DriverState {
                     Some(reason) if is_goal_complete_reason(reason) => {}
                     Some(reason) => self.app.note(reason),
                     None => {
+                        let prompt = self
+                            .take_next_queued_prompt()
+                            .unwrap_or_else(|| GOAL_CONTINUE_PROMPT.to_string());
+                        self.last_prompt = Some(prompt.clone());
                         self.turn_gen += 1;
                         self.goal_state = Some(GoalState {
                             gen: self.turn_gen,
@@ -1537,7 +1542,7 @@ impl DriverState {
                             goal: gs.goal,
                         });
                         self.turn_handle = Some(spawn_turn_with(
-                            GOAL_CONTINUE_PROMPT.to_string(),
+                            prompt,
                             vec![GOAL_GUIDANCE.to_string()],
                             Some(forge_types::TaskTier::Complex),
                             &self.session,
@@ -1780,6 +1785,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_reprompt_steers_the_next_loop_iteration() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.loop_state = Some(LoopState { gen: 10, iter: 1 });
+        state.queued_prompts = vec!["apply the correction".into(), "then verify".into()];
+
+        state.on_turn_done(10).await;
+
+        assert_eq!(state.last_prompt.as_deref(), Some("apply the correction"));
+        assert_eq!(state.queued_prompts, vec!["then verify"]);
+        assert_eq!(state.prompt_history, vec!["apply the correction"]);
+        assert!(matches!(
+            state.loop_state,
+            Some(LoopState { gen: 11, iter: 2 })
+        ));
+        assert!(state.busy);
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn queued_reprompt_steers_the_next_goal_iteration() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.goal_state = Some(GoalState {
+            gen: 10,
+            iter: 1,
+            prev_done: 0,
+            no_progress: 0,
+            goal: "finish the goal".into(),
+        });
+        state.queued_prompts = vec!["prioritize the regression".into()];
+
+        state.on_turn_done(10).await;
+
+        assert_eq!(
+            state.last_prompt.as_deref(),
+            Some("prioritize the regression")
+        );
+        assert!(state.queued_prompts.is_empty());
+        assert_eq!(state.prompt_history, vec!["prioritize the regression"]);
+        assert!(matches!(
+            state.goal_state,
+            Some(GoalState {
+                gen: 11,
+                iter: 2,
+                no_progress: 1,
+                ..
+            })
+        ));
+        assert!(state.busy);
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
     async fn interrupt_without_queue_leaves_driver_idle() {
         let mut state = test_driver_state().await;
         state.busy = true;
@@ -1791,5 +1850,40 @@ mod tests {
         assert!(state.turn_handle.is_none());
         assert!(!state.busy);
         assert_eq!(state.turn_gen, 11);
+    }
+
+    #[tokio::test]
+    async fn over_a_thousand_queued_reprompts_drain_fifo_without_stale_done_corruption() {
+        // More than the largest real Codex/Claude history observed by the aggregate-only
+        // history profiler (654 user turns).
+        const PROMPTS: usize = 1_024;
+
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+        state.queued_prompts = (0..PROMPTS)
+            .map(|index| format!("reprompt-{index:03}"))
+            .collect();
+
+        state.interrupt_turn();
+        for index in 0..PROMPTS {
+            assert_eq!(
+                state.last_prompt.as_deref(),
+                Some(format!("reprompt-{index:03}").as_str())
+            );
+            let generation = state.turn_gen;
+            state.turn_handle.take().unwrap().abort();
+            state.on_turn_done(generation).await;
+        }
+
+        assert!(state.queued_prompts.is_empty());
+        assert!(state.turn_handle.is_none());
+        assert!(!state.busy);
+        assert_eq!(state.prompt_history.len(), PROMPTS);
+        assert_eq!(state.prompt_history.first().unwrap(), "reprompt-000");
+        assert_eq!(
+            state.prompt_history.last().unwrap(),
+            &format!("reprompt-{:03}", PROMPTS - 1)
+        );
     }
 }

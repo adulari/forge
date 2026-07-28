@@ -29,16 +29,19 @@ pub struct TurnContract {
     intent: TaskIntent,
     source: ContractSource,
     requires_changed_artifact: bool,
+    preserves_public_api: bool,
 }
 
 impl TurnContract {
     /// Derive the contract without a model call or I/O.
     pub fn derive(prompt: &str, mode: PermissionMode, expect_code_change: bool) -> Self {
+        let preserves_public_api = explicitly_preserves_public_api(prompt);
         if mode == PermissionMode::Plan {
             return Self {
                 intent: TaskIntent::PlanOnly,
                 source: ContractSource::PermissionMode,
                 requires_changed_artifact: false,
+                preserves_public_api,
             };
         }
         // A harness expectation is an explicit caller contract. It must win over incidental
@@ -48,6 +51,7 @@ impl TurnContract {
                 intent: TaskIntent::Mutating,
                 source: ContractSource::HarnessExpectation,
                 requires_changed_artifact: true,
+                preserves_public_api,
             };
         }
         if explicitly_read_only(prompt) {
@@ -55,6 +59,7 @@ impl TurnContract {
                 intent: TaskIntent::ReadOnlyReview,
                 source: ContractSource::ExplicitReadOnly,
                 requires_changed_artifact: false,
+                preserves_public_api,
             };
         }
         let explicit_change = explicitly_requests_change(prompt);
@@ -66,6 +71,7 @@ impl TurnContract {
                 ContractSource::Unspecified
             },
             requires_changed_artifact: explicit_change,
+            preserves_public_api,
         }
     }
 
@@ -76,6 +82,7 @@ impl TurnContract {
             intent,
             source: ContractSource::Unspecified,
             requires_changed_artifact: false,
+            preserves_public_api: false,
         }
     }
 
@@ -92,6 +99,21 @@ impl TurnContract {
     /// Whether a direct implementation request must leave an inspectable changed artifact.
     pub fn requires_changed_artifact(&self) -> bool {
         self.requires_changed_artifact
+    }
+
+    /// Whether the user explicitly forbade changes to the public API/signature surface.
+    pub fn preserves_public_api(&self) -> bool {
+        self.preserves_public_api
+    }
+
+    /// Provider-visible clarification for an easy-to-misread preservation constraint.
+    pub(crate) fn public_api_guidance(&self) -> Option<&'static str> {
+        self.preserves_public_api.then_some(
+            "Public-API preservation contract: additions are changes too. Do not add, remove, \
+             rename, or alter any public function, method, type, or export. Before claiming \
+             completion, compare the complete public surface against the task's base state; do \
+             not audit only the methods you edited.",
+        )
     }
 
     /// Short provider-visible guidance, emitted only for explicit non-default contracts.
@@ -127,6 +149,23 @@ fn explicitly_read_only(prompt: &str) -> bool {
         "read only",
         "do not make changes",
         "without changing files",
+    ]
+    .iter()
+    .any(|needle| prompt.contains(needle))
+}
+
+fn explicitly_preserves_public_api(prompt: &str) -> bool {
+    let prompt = prompt.to_ascii_lowercase();
+    [
+        "without changing public method signatures",
+        "without changing public signatures",
+        "no public signatures changed",
+        "public signatures unchanged",
+        "unchanged public signatures",
+        "preserve the public api",
+        "preserve public api",
+        "do not change the public api",
+        "do not change public api",
     ]
     .iter()
     .any(|needle| prompt.contains(needle))
@@ -200,5 +239,18 @@ mod tests {
         assert_eq!(contract.intent(), TaskIntent::Mutating);
         assert_eq!(contract.source(), ContractSource::HarnessExpectation);
         assert!(contract.requires_changed_artifact());
+    }
+
+    #[test]
+    fn public_api_preservation_treats_additions_as_changes() {
+        let contract = TurnContract::derive(
+            "Finish and confirm no public signatures changed.",
+            PermissionMode::Default,
+            false,
+        );
+        assert!(contract.preserves_public_api());
+        let guidance = contract.public_api_guidance().unwrap();
+        assert!(guidance.contains("additions are changes too"));
+        assert!(guidance.contains("complete public surface"));
     }
 }

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import sqlite3
 from collections import Counter
 from pathlib import Path
@@ -19,7 +21,59 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="reject sessions containing a failed/denied tool outcome",
     )
+    parser.add_argument(
+        "--deny-external-sources",
+        action="store_true",
+        help="reject persisted web/GitHub tools and shell commands that access external sources",
+    )
     return parser.parse_args()
+
+
+EXTERNAL_COMMAND_PATTERNS = {
+    "url": re.compile(r"https?://", re.IGNORECASE),
+    "network_cli": re.compile(
+        r"(^|[\s;&|])(?:/usr/bin/|/bin/)?(?:curl|wget|aria2c|ftp|ssh|scp)\b",
+        re.IGNORECASE,
+    ),
+    "remote_git": re.compile(
+        r"\bgit\s+(?:clone|fetch|pull|ls-remote)\b|\bgh\s+",
+        re.IGNORECASE,
+    ),
+    "package_network": re.compile(
+        r"\b(?:pip|pip3|npm|pnpm|yarn)\s+(?:install|add)\b|"
+        r"\bcargo\s+(?:install|update)\b",
+        re.IGNORECASE,
+    ),
+}
+
+
+def external_source_findings(
+    sequence: int, tool_name: str, arguments: dict[str, object]
+) -> list[dict[str, object]]:
+    rendered = json.dumps(arguments, sort_keys=True, default=str)
+    lowered_name = tool_name.lower()
+    kinds: list[str] = []
+    if (
+        re.search(r"\b(web_search|web_fetch|browser(?:_use)?)\b", lowered_name)
+        or "github" in lowered_name
+        or "gitlab" in lowered_name
+    ):
+        kinds.append("external_tool")
+    if lowered_name in {"shell", "bash"}:
+        command = str(arguments.get("command", arguments.get("cmd", rendered)))
+        for kind, pattern in EXTERNAL_COMMAND_PATTERNS.items():
+            if pattern.search(command):
+                kinds.append(kind)
+    digest = hashlib.sha256(f"{tool_name}\n{rendered}".encode()).hexdigest()
+    return [
+        {
+            "message_seq": sequence,
+            "tool_name": tool_name,
+            "kind": kind,
+            "invocation_sha256": digest,
+        }
+        for kind in kinds
+    ]
 
 
 def main() -> int:
@@ -28,6 +82,7 @@ def main() -> int:
     envelope_count = 0
     execution_count = 0
     non_ok_execution_count = 0
+    integrity_findings: list[dict[str, object]] = []
     tool_result_ids: set[str] = set()
     messages: list[tuple[object, ...]] = []
 
@@ -103,7 +158,13 @@ def main() -> int:
                     )
                     continue
                 if not isinstance(persisted_args, dict):
-                    errors.append(f"message {seq} execution {row_index} args are not an object")
+                    errors.append(
+                        f"message {seq} execution {row_index} args are not an object"
+                    )
+                elif args.deny_external_sources:
+                    integrity_findings.extend(
+                        external_source_findings(seq, tool_name, persisted_args)
+                    )
                 if status != "ok":
                     non_ok_execution_count += 1
                 if args.require_all_ok and status != "ok":
@@ -117,10 +178,16 @@ def main() -> int:
                 )
             missing_results = expected_ids - tool_result_ids
             if missing_results:
-                errors.append(f"message {seq} has {len(missing_results)} unmatched tool result(s)")
+                errors.append(
+                    f"message {seq} has {len(missing_results)} unmatched tool result(s)"
+                )
 
     if envelope_count == 0:
         errors.append("session persisted no tool-call envelopes")
+    if integrity_findings:
+        errors.append(
+            f"session used {len(integrity_findings)} external-solution-like tool invocation(s)"
+        )
 
     report = {
         "valid": not errors,
@@ -130,6 +197,7 @@ def main() -> int:
         "tool_envelope_count": envelope_count,
         "tool_execution_count": execution_count,
         "non_ok_tool_execution_count": non_ok_execution_count,
+        "external_source_findings": integrity_findings,
         "errors": errors,
     }
     print(json.dumps(report, indent=2))

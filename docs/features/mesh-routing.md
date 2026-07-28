@@ -656,15 +656,32 @@ exhaust the plan even while every window is still green. `conserve_decision`
 1. **Enabled?** `quota.conserve_enabled()` ← `mesh.subscription_conserve` (default `true`,
    `crates/forge-config/src/lib.rs:1331`).
 2. **Eligible?** At least one subscription is present in the catalog AND a *capable*
-   non-subscription alternative exists for the tier (`has_nonsub_alternative`,
-   `catalog.rs:396`). The capability bar is bench-aware (`is_capable_alternative`,
-   `catalog.rs:381`): Complex requires a frontier alternative (`is_frontier_b`,
+   non-subscription alternative exists for the tier (`has_nonsub_alternative`). The capability
+   bar is bench-aware (`is_capable_alternative`): Complex requires a frontier alternative
+   (`is_frontier_b`,
    `crates/forge-mesh/src/capability.rs:168` — measured intelligence ≥
    `FRONTIER_BENCH_THRESHOLD` = 20.0, `capability.rs:133`, else name-heuristic class 3);
    Standard requires a capable mid (intelligence ≥ `CAPABLE_BENCH_THRESHOLD` = 8.0,
    `capability.rs:138`, else class ≥ 2); Trivial always passes. This guard is why conservation
    never drops a hard task onto a nominally-large but measurably-weak model (Hermes 405B
    scores 9.0 — fails the frontier bar).
+
+   Complex adds a second, relative-quality guard. When both a candidate and the best available
+   subscription have benchmark data, the candidate must be within
+   `COMPLEX_CONSERVE_MAX_BENCH_GAP` = 5 points on the prompt's coding/intelligence metric. If the
+   subscription is measured but the candidate is not, the candidate is ineligible. This preserves
+   genuine near peers while preventing a broad "frontier" threshold from hiding a material
+   quality gap. The 2026-07 long-session stress run is the motivating case: both GLM 5.2 at a
+   9.2-point coding gap and MiniMax M3 at a 19.4-point gap are now rejected; measured alternatives
+within five points remain eligible.
+
+The first turn of a Complex coding task has an additional live-usability quality anchor. After
+health, context-window, credit-mode, image, and OAuth-twin filtering, Forge promotes the strongest
+measured candidate that can actually run. This prevents a high-scoring but unavailable model from
+making conservation look safe while a materially weaker healthy model becomes the real pick.
+Dependent continuation turns return to normal score, pressure, and conservation ordering so long
+sessions can still diversify for speed and quota efficiency. `/mesh` overlays this effective order,
+so the actual pick is shown as rank 1.
 3. **Probability.** For each subscription provider present, `conserve_probability`
    (`catalog.rs:364`) computes a spread probability; the decision takes the **max** across
     provider. Each provider compares that same deterministic roll against its own probability, so a
@@ -673,7 +690,7 @@ exhaust the plan even while every window is still green. `conserve_decision`
    ```
    base(tier) = 1.0  Trivial          (subscriptions are never worth spending on it)
                 0.65 Standard          (0.15 when code_heavy)
-                0.30 Complex          (0.15 when code_heavy — subs earn their keep on code)
+                0.30 Complex          (0.0 when code_heavy — no conservation before pressure)
    pressure   = (fraction / 0.80).clamp(0, 1)                   # ordinary work
                 ((fraction - 0.50) / 0.30).clamp(0, 1)         # code-heavy work
    ramp       = pressure * (1 - base)                           # fraction is pace-projected
@@ -681,8 +698,9 @@ exhaust the plan even while every window is still green. `conserve_decision`
                  ((base + ramp) * plan_factor(plan)).clamp(0, 1)     # Standard / Complex
    ```
 
-   Code-heavy Standard and Complex work stays at the low base probability while utilization is
-   below 50%, then ramps to full conservation at the same 80% Warning line. Forge's own harness
+   Code-heavy Standard work stays at its low base probability while utilization is below 50%.
+   Code-heavy Complex work stays at zero conservation until the 50%-to-80% pressure ramp begins,
+   then reaches full conservation at the same 80% Warning line. Forge's own harness
    already cuts subscription-token burn materially on coding tasks, so early-plan conservation
    should not trade away coding quality merely to substitute a free model. Ordinary Standard and
    Complex work retains the original pressure ramp from zero.
@@ -694,10 +712,12 @@ exhaust the plan even while every window is still green. `conserve_decision`
 4. **The roll.** `roll = stable_hash("{seed}:conserve") % 10000 / 10000` — deterministic per
    prompt. `fired = roll < P`.
 
-When it fires, every subscription model takes a **soft** score demotion of
-`CONSERVE_PENALTY` = 4.0 (`catalog.rs:336`, applied in `ranked_seeded`/`ranked_rows`): large
-enough to drop an `Ok` subscription below the best free-frontier alternative, small enough that
-the subscriptions stay in the shortlist as fallbacks if every alternative fails.
+When it fires, each subscription whose provider-specific probability beats the shared roll takes a
+**soft** score demotion of `CONSERVE_PENALTY` = 4.0 (applied in
+`ranked_seeded`/`ranked_rows`). Non-subscription models that fail the capable/near-peer guard take
+the same demotion, so conservation cannot promote a weak alternative merely by demoting a
+subscription. The penalty is large enough to put an eligible alternative first and small enough
+that subscriptions remain in the shortlist as fallbacks.
 
 Division of labour, restated: **conservation** moves whole prompts off subscriptions;
 the **burn penalty** (§4.6) chooses *which sibling* pays when a prompt does stay on one;
