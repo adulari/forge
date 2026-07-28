@@ -58,6 +58,61 @@ async def verify(workspace: Path) -> dict[str, int | bool]:
     assert all(not reservation.active for reservation in cancellations)
     assert store.inventory["widget"] == 10
 
+    class InterleavingStore(InMemoryStore):
+        def __init__(self) -> None:
+            super().__init__({"widget": 100})
+            self.persistence_order: list[str] = []
+
+        async def save_reservation(self, reservation):
+            self.persistence_order.append("reserve")
+            await super().save_reservation(reservation)
+
+        async def save_cancellation(self, reservation):
+            self.persistence_order.append("cancel")
+            await super().save_cancellation(reservation)
+
+    interleaved_store = InterleavingStore()
+    interleaved_service = ReservationService(interleaved_store)
+    await asyncio.gather(
+        *(
+            interleaved_service.reserve(f"existing-{index}", "widget", 1)
+            for index in range(50)
+        )
+    )
+    interleaved_store.persistence_order.clear()
+
+    # Hold the service's shared lock while queueing calls in an exact alternating order. Releasing
+    # it makes 100 already-overlapping operations enter their critical sections cancel/reserve,
+    # cancel/reserve, ... rather than relying on scheduler luck that could group every reserve
+    # before every cancellation.
+    await interleaved_store.lock.acquire()
+    interleaved_calls: list[asyncio.Task] = []
+    try:
+        for index in range(50):
+            interleaved_calls.append(
+                asyncio.create_task(interleaved_service.cancel(f"existing-{index}"))
+            )
+            await asyncio.sleep(0)
+            interleaved_calls.append(
+                asyncio.create_task(
+                    interleaved_service.reserve(f"replacement-{index}", "widget", 1)
+                )
+            )
+            await asyncio.sleep(0)
+    finally:
+        interleaved_store.lock.release()
+    await asyncio.gather(*interleaved_calls)
+
+    expected_order = ["cancel", "reserve"] * 50
+    assert interleaved_store.persistence_order == expected_order
+    assert interleaved_store.inventory["widget"] == 50
+    assert len(interleaved_store.reservations) == 100
+    assert all(
+        not interleaved_store.reservations[f"existing-{index}"].active
+        and interleaved_store.reservations[f"replacement-{index}"].active
+        for index in range(50)
+    )
+
     failure_store = InMemoryStore({"widget": 2})
     failure_service = ReservationService(failure_store)
     failure_store.fail_next_save = True
@@ -70,12 +125,28 @@ async def verify(workspace: Path) -> dict[str, int | bool]:
     assert failure_store.inventory == {"widget": 2}
     assert failure_store.reservations == {}
 
+    cancellation_failure_store = InMemoryStore({"widget": 2})
+    cancellation_failure_service = ReservationService(cancellation_failure_store)
+    await cancellation_failure_service.reserve("cancel-fails", "widget", 1)
+    cancellation_failure_store.fail_next_save = True
+    try:
+        await cancellation_failure_service.cancel("cancel-fails")
+    except StorageError:
+        pass
+    else:
+        raise AssertionError("injected cancellation write failure unexpectedly succeeded")
+    assert cancellation_failure_store.inventory == {"widget": 1}
+    assert cancellation_failure_store.reservations["cancel-fails"].active
+
     return {
         "contention_requests": len(contention),
         "contention_winners": len(successes),
         "duplicate_requests": len(duplicates),
         "concurrent_cancellations": len(cancellations),
+        "interleaved_reserve_cancels": len(interleaved_calls),
+        "interleaving_verified": True,
         "rollback_verified": True,
+        "cancellation_rollback_verified": True,
     }
 
 

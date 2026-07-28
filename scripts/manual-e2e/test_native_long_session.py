@@ -196,6 +196,46 @@ class NativeLongSessionTests(unittest.TestCase):
             "an actual cap overshoot must invalidate finalization",
         )
 
+    def test_quota_gate_rejects_decreasing_and_out_of_order_ledgers(self) -> None:
+        now = native.parse_observed_at(native.utc_now(), "now")
+        state = {
+            "turns": [],
+            "quota_baseline_percent": 35,
+            "quota_cap_delta_points": 5,
+            "quota_observations": [
+                {
+                    "recorded_at": (now - native.dt.timedelta(seconds=2)).isoformat(),
+                    "external_observed_at": (
+                        now - native.dt.timedelta(seconds=3)
+                    ).isoformat(),
+                    "weekly_utilization_percent": 36,
+                    "after_turn": 0,
+                },
+                {
+                    "recorded_at": now.isoformat(),
+                    "external_observed_at": (
+                        now - native.dt.timedelta(seconds=1)
+                    ).isoformat(),
+                    "weekly_utilization_percent": 37,
+                    "after_turn": 0,
+                },
+            ],
+        }
+        self.assertTrue(native.quota_is_fresh(state, 900)[0])
+
+        state["quota_observations"][-1]["weekly_utilization_percent"] = 35.5
+        valid, reason = native.quota_is_fresh(state, 900)
+        self.assertFalse(valid)
+        self.assertIn("decreased", reason)
+
+        state["quota_observations"][-1]["weekly_utilization_percent"] = 37
+        state["quota_observations"][-1]["external_observed_at"] = (
+            now - native.dt.timedelta(seconds=4)
+        ).isoformat()
+        valid, reason = native.quota_is_fresh(state, 900)
+        self.assertFalse(valid)
+        self.assertIn("out of order", reason)
+
     def test_integrity_audit_hashes_evidence_without_echoing_private_commands(
         self,
     ) -> None:
@@ -310,6 +350,17 @@ class NativeLongSessionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "refusing to loosen"):
                 native.record_quota(args)
 
+            args.quota_cap = None
+            args.weekly = 40.0
+            args.external_observed_at = native.utc_now()
+            with self.assertRaisesRegex(ValueError, "decreased"):
+                native.record_quota(args)
+            self.assertEqual(
+                len(native.load_json(state_path)["quota_observations"]),
+                2,
+                "a rejected observation must not corrupt the retained ledger",
+            )
+
     def test_api_and_test_preservation_detect_real_signature_and_skip_changes(
         self,
     ) -> None:
@@ -395,6 +446,58 @@ class NativeLongSessionTests(unittest.TestCase):
         self.assertIsNone(totals["total_tokens"])
         self.assertFalse(totals["complete"])
         self.assertEqual(totals["turns_reported"], 1)
+
+    def test_codex_cumulative_usage_is_deltad_before_aggregation(self) -> None:
+        turns = [
+            {
+                "agent": {
+                    "tokens": native.token_metrics(1000, 800, 100),
+                }
+            },
+            {
+                "agent": {
+                    "tokens": native.token_metrics(1600, 1300, 180),
+                }
+            },
+            {
+                "agent": {
+                    "tokens": native.token_metrics(2200, 1800, 250),
+                }
+            },
+        ]
+
+        self.assertTrue(native.normalize_codex_turn_tokens(turns))
+        self.assertFalse(native.normalize_codex_turn_tokens(turns))
+        self.assertEqual(
+            [turn["agent"]["tokens"]["total_tokens"] for turn in turns],
+            [1100, 680, 670],
+        )
+        self.assertEqual(
+            native.aggregate_tokens(turns)["total_tokens"],
+            2450,
+            "deltas must telescope to the final cumulative snapshot, not sum snapshots",
+        )
+        self.assertEqual(
+            turns[-1]["agent"]["cumulative_tokens"]["total_tokens"], 2450
+        )
+        turns[-1]["agent"]["cumulative_tokens"] = native.token_metrics(
+            900, 700, 90
+        )
+        self.assertTrue(native.normalize_codex_turn_tokens(turns))
+        self.assertIsNone(turns[-1]["agent"]["tokens"]["total_tokens"])
+        self.assertIn(
+            "decreased", turns[-1]["agent"]["token_accounting_error"]
+        )
+
+        decreasing = [
+            {"agent": {"tokens": native.token_metrics(100, 80, 10)}},
+            {"agent": {"tokens": native.token_metrics(90, 70, 9)}},
+        ]
+        native.normalize_codex_turn_tokens(decreasing)
+        self.assertIsNone(decreasing[-1]["agent"]["tokens"]["total_tokens"])
+        self.assertIn(
+            "decreased", decreasing[-1]["agent"]["token_accounting_error"]
+        )
 
     def test_zero_event_preflight_failure_is_preserved_but_does_not_block_retry(
         self,
@@ -533,6 +636,37 @@ class NativeLongSessionTests(unittest.TestCase):
             state = native.load_json(run_dir / native.STATE_FILE)
             self.assertNotIn("paid_failure", state)
             self.assertEqual(state["authentication_failures"], [failure])
+
+    def test_logged_out_claude_is_denied_before_a_provider_process_starts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            native.dump_json(
+                run_dir / native.STATE_FILE,
+                {
+                    "provider": "claude",
+                    "next_turn": 0,
+                    "turns": [],
+                    "preflight_failures": [],
+                },
+            )
+            with (
+                mock.patch.object(native, "quota_is_fresh", return_value=(True, "")),
+                mock.patch.object(
+                    native, "claude_authenticated", return_value=False
+                ),
+                mock.patch.object(native, "run_capture") as capture,
+                self.assertRaisesRegex(RuntimeError, "Claude CLI is logged out"),
+            ):
+                native.run_turn(
+                    argparse.Namespace(
+                        run_dir=run_dir,
+                        timeout=10,
+                        quota_max_age=900,
+                    )
+                )
+            capture.assert_not_called()
 
     def test_six_mocked_turns_preserve_one_session_and_never_duplicate_a_call(
         self,

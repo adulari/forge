@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "evaluated_at": "2026-07-28T05:15:27Z",
+  "cell": "native-codex-sol-high",
+  "source_artifact": "long-session-reservations-native-codex-20260728T003310Z-1842067",
+  "cli_version": "codex-cli 0.145.0",
+  "session_id": "019fa624-091b-7140-bfd0-a400b66ccf8d",
+  "source_hashes": {
+    "run_state_sha256": "d7983ac90f8e405a791b222287a56dda8bfa9beb6199b2de22984e43e016606b",
+    "superseded_final_summary_sha256": "97e64120dad52c16f87b4abf07127e52a53dc2cfceec061bc5f8bdcd6a3018f6",
+    "rollout_sha256": "cca7148022856fc40e744733ae0f0391c4408d6fe69e8ad87d9230c000c08471",
+    "turn_event_sha256": [
+      "903def9ca46bd42663fbdc3aa9d6532a4965e4e9db1cea20303610d51f976cc7",
+      "124a39a8a5b10386121b178f419eb84bf2499ea9b8406c127013adbca5096a31",
+      "1771f2040ead8e7ef3788e03f53c7f80621cab5c27c15f60b698a2c2d01e32de",
+      "c400121464c7b8322158ab2a632cc46969085aedc0804aa2f045947592062752",
+      "fd7acd1ea9d6a68bfcccdf59b4eec27494c2a261d0171d58163bbf20690315ad",
+      "a99c87341e55d3e6c3cb51b5ae3ae681c0977398b90423c5e3bd473c7990af5f"
+    ]
+  },
+  "usage_semantics": {
+    "scope": "thread_cumulative",
+    "evidence": "Each retained turn.completed.usage snapshot exactly matches the rollout token_count.info.total_token_usage at that turn boundary.",
+    "normalization": "Turn 1 uses its cumulative snapshot. Turns 2-6 subtract the preceding cumulative snapshot field by field before aggregation."
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "wall_seconds": 239.607,
+      "cumulative": {
+        "input_tokens": 562697,
+        "cached_input_tokens": 515328,
+        "output_tokens": 7276
+      },
+      "incremental": {
+        "raw_tokens": 569973,
+        "cache_adjusted_tokens_025": 183477,
+        "cache_zero_credit_tokens": 54645
+      }
+    },
+    {
+      "turn": 2,
+      "wall_seconds": 151.181,
+      "cumulative": {
+        "input_tokens": 997460,
+        "cached_input_tokens": 940544,
+        "output_tokens": 10478
+      },
+      "incremental": {
+        "raw_tokens": 437965,
+        "cache_adjusted_tokens_025": 119053,
+        "cache_zero_credit_tokens": 12749
+      }
+    },
+    {
+      "turn": 3,
+      "wall_seconds": 301.033,
+      "cumulative": {
+        "input_tokens": 1870512,
+        "cached_input_tokens": 1785344,
+        "output_tokens": 20570
+      },
+      "incremental": {
+        "raw_tokens": 883144,
+        "cache_adjusted_tokens_025": 249544,
+        "cache_zero_credit_tokens": 38344
+      }
+    },
+    {
+      "turn": 4,
+      "wall_seconds": 286.647,
+      "cumulative": {
+        "input_tokens": 2991673,
+        "cached_input_tokens": 2869760,
+        "output_tokens": 29028
+      },
+      "incremental": {
+        "raw_tokens": 1129619,
+        "cache_adjusted_tokens_025": 316307,
+        "cache_zero_credit_tokens": 45203
+      }
+    },
+    {
+      "turn": 5,
+      "wall_seconds": 242.608,
+      "cumulative": {
+        "input_tokens": 4226214,
+        "cached_input_tokens": 4077568,
+        "output_tokens": 36418
+      },
+      "incremental": {
+        "raw_tokens": 1241931,
+        "cache_adjusted_tokens_025": 336075,
+        "cache_zero_credit_tokens": 34123
+      }
+    },
+    {
+      "turn": 6,
+      "wall_seconds": 112.225,
+      "cumulative": {
+        "input_tokens": 5089291,
+        "cached_input_tokens": 4931328,
+        "output_tokens": 39886
+      },
+      "incremental": {
+        "raw_tokens": 866545,
+        "cache_adjusted_tokens_025": 226225,
+        "cache_zero_credit_tokens": 12785
+      }
+    }
+  ],
+  "corrected_totals": {
+    "raw_tokens": 5129177,
+    "cache_adjusted_tokens_025": 1430681,
+    "cache_zero_credit_tokens": 197849
+  },
+  "superseded_totals": {
+    "raw_tokens": 15881503,
+    "cache_adjusted_tokens_025": 4541599,
+    "cache_zero_credit_tokens": 761631,
+    "reason": "These values summed six thread-cumulative snapshots and are invalid."
+  },
+  "corrected_forge_relative_result": {
+    "forge_raw_tokens": 1698715,
+    "forge_cache_adjusted_tokens_025": 763291,
+    "forge_cache_zero_credit_tokens": 451483,
+    "raw_reduction_percent": 66.88,
+    "cache_adjusted_reduction_percent": 46.65,
+    "cache_zero_credit_increase_percent": 128.20
+  }
+}

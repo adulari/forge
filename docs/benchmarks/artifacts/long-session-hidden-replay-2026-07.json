@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "evaluated_at": "2026-07-28T05:08:51Z",
+  "verifier": {
+    "path": "scripts/manual-e2e/scenarios/long-session-reservations/verify.py",
+    "sha256": "60ce74fecb70c849395290ad37895691a14434f916cd1ba7e5cdc77cac7258da"
+  },
+  "added_acceptance": {
+    "interleaved_reserve_cancels": 100,
+    "interleaving_verified": true,
+    "cancellation_rollback_verified": true
+  },
+  "cells": [
+    {
+      "cell": "forge-full-mesh-auto-attempt-3",
+      "source_artifact": "long-session-reservations-20260728T033850Z-2143979",
+      "patch_sha256": "071dd3e349633e48bb7ec08c798ea450b42cd6aec50052e575e93e88494878d5",
+      "synthetic_base_tree": "7d17bf17bcd5f9467a305edf6a0a5a50dfa1582b",
+      "exit_code": 0,
+      "result": {
+        "cancellation_rollback_verified": true,
+        "concurrent_cancellations": 100,
+        "contention_requests": 100,
+        "contention_winners": 1,
+        "duplicate_requests": 100,
+        "interleaved_reserve_cancels": 100,
+        "interleaving_verified": true,
+        "rollback_verified": true
+      },
+      "valid": true
+    },
+    {
+      "cell": "native-codex-sol-high",
+      "source_artifact": "long-session-reservations-native-codex-20260728T003310Z-1842067",
+      "patch_sha256": "6c75d90cf973cea699965ef2bb49da844933ece53b589ccaa888fbc08ee036dc",
+      "synthetic_base_tree": "7d17bf17bcd5f9467a305edf6a0a5a50dfa1582b",
+      "exit_code": 0,
+      "result": {
+        "cancellation_rollback_verified": true,
+        "concurrent_cancellations": 100,
+        "contention_requests": 100,
+        "contention_winners": 1,
+        "duplicate_requests": 100,
+        "interleaved_reserve_cancels": 100,
+        "interleaving_verified": true,
+        "rollback_verified": true
+      },
+      "valid": true
+    },
+    {
+      "cell": "native-claude-opus-5-high-superseded",
+      "source_artifact": "long-session-reservations-native-claude-20260728T013433Z-1925615",
+      "patch_sha256": "073de2050ce9ef1d6bc43915a322407d04492502a9c8fad7c85a94acc07931a2",
+      "synthetic_base_tree": "2a8ae4c24c3464cbdd4e34dcc905720bd1ff957d",
+      "exit_code": 1,
+      "failure": "Conflict precedence: a reused request ID with an unknown different SKU raised NotFound before Conflict.",
+      "valid": false,
+      "superseded": true
+    }
+  ]
+}

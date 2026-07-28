@@ -131,15 +131,17 @@ and native Codex CLI. A clean native Claude replacement is pending authenticatio
 |---|---:|---:|---:|
 | Quality acceptance | **Passed** | Passed | Clean rerun pending |
 | Wall time | **559.469s** | 1,333.317s | — |
-| Raw tokens | **1,698,715** | 15,881,503 | — |
-| Cache-adjusted tokens | **763,291** | 4,541,599 | — |
+| Raw tokens | **1,698,715** | 5,129,177 | — |
+| Cache-adjusted tokens | **763,291** | 1,430,681 | — |
 | Integrity and public-API audit | **Passed** | Passed | — |
 
-Forge matched Codex quality, ran **58.04% faster**, and used **83.19% fewer cache-adjusted
-tokens**. Honest review excluded the first Claude cell because its synthetic base contained one
-generated `.pyc`; the exact-tree replacement reached zero model tokens before expired OAuth stopped
-it. The report retains both artifacts and does not claim a clean Claude comparison. This is one
-workload, not a population estimate.
+Forge matched Codex quality, ran **58.04% faster**, used **66.88% fewer raw tokens**, and used
+**46.65% fewer cache-adjusted tokens**. Honest review excluded the first Claude cell because its
+synthetic base contained one generated `.pyc`; the exact-tree replacement reached zero model tokens
+before expired OAuth stopped it. A follow-up audit strengthened hidden acceptance with 100
+deterministically alternating reserve/cancel operations and cancellation-write rollback; both
+retained valid workspaces passed the free replay. The report retains every artifact and fix and does
+not claim a clean Claude comparison. This is one workload, not a population estimate.
 
 **[Read the matched long-session report and failed-attempt ledger →](docs/benchmarks/forge-long-session-stress-2026-07.md)**
 

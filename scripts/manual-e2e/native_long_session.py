@@ -14,6 +14,7 @@ import ast
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -314,6 +315,87 @@ def token_metrics(
     }
 
 
+def incremental_codex_tokens(
+    cumulative: dict[str, Any],
+    previous_cumulative: dict[str, Any] | None,
+) -> tuple[dict[str, float | int | None], str | None]:
+    """Delta Codex CLI's thread-cumulative `turn.completed.usage` snapshot."""
+
+    fields = ("input_tokens", "cached_input_tokens", "output_tokens")
+    if any(cumulative.get(field) is None for field in fields):
+        return empty_tokens(), "Codex cumulative token snapshot is incomplete"
+    current = {field: int(cumulative[field]) for field in fields}
+    if any(value < 0 for value in current.values()):
+        return empty_tokens(), "Codex cumulative token snapshot contains a negative value"
+    if current["cached_input_tokens"] > current["input_tokens"]:
+        return (
+            empty_tokens(),
+            "Codex cumulative cached input exceeds cumulative input",
+        )
+    previous = {
+        field: (
+            int(previous_cumulative[field])
+            if previous_cumulative is not None
+            and previous_cumulative.get(field) is not None
+            else 0
+        )
+        for field in fields
+    }
+    decreases = [
+        field for field in fields if current[field] < previous[field]
+    ]
+    if decreases:
+        return (
+            empty_tokens(),
+            "Codex cumulative token snapshot decreased for "
+            + ", ".join(decreases),
+        )
+    input_delta = current["input_tokens"] - previous["input_tokens"]
+    cached_delta = current["cached_input_tokens"] - previous["cached_input_tokens"]
+    if cached_delta > input_delta:
+        return empty_tokens(), "Codex cached-input delta exceeds input delta"
+    return (
+        token_metrics(
+            input_delta,
+            cached_delta,
+            current["output_tokens"] - previous["output_tokens"],
+        ),
+        None,
+    )
+
+
+def normalize_codex_turn_tokens(turns: list[dict[str, Any]]) -> bool:
+    """Persist per-turn deltas while retaining every authoritative cumulative snapshot."""
+
+    changed = False
+    previous_cumulative: dict[str, Any] | None = None
+    for turn in turns:
+        agent = turn["agent"]
+        cumulative = agent.get("cumulative_tokens")
+        if cumulative is None:
+            cumulative = agent.get("tokens") or empty_tokens()
+            agent["cumulative_tokens"] = cumulative
+            changed = True
+        incremental, error = incremental_codex_tokens(
+            cumulative, previous_cumulative
+        )
+        if agent.get("tokens") != incremental:
+            agent["tokens"] = incremental
+            changed = True
+        if agent.get("token_accounting") != "codex-thread-cumulative-delta-v1":
+            agent["token_accounting"] = "codex-thread-cumulative-delta-v1"
+            changed = True
+        if error:
+            if agent.get("token_accounting_error") != error:
+                agent["token_accounting_error"] = error
+                changed = True
+        elif "token_accounting_error" in agent:
+            agent.pop("token_accounting_error")
+            changed = True
+        previous_cumulative = cumulative
+    return changed
+
+
 def summarize_codex(path: Path) -> dict[str, Any]:
     events, malformed = parse_jsonl(path)
     started = next(
@@ -461,6 +543,62 @@ def parse_observed_at(value: Any, label: str) -> dt.datetime:
     return observed.astimezone(dt.timezone.utc)
 
 
+def quota_ledger_error(state: dict[str, Any]) -> str | None:
+    """Return why the retained external quota sequence is not trustworthy."""
+
+    observations = state.get("quota_observations") or []
+    baseline = float(state["quota_baseline_percent"])
+    cap = float(state["quota_cap_delta_points"])
+    if not math.isfinite(baseline) or not 0 <= baseline <= 100:
+        return f"quota baseline is out of range: {baseline!r}"
+    if not math.isfinite(cap) or cap <= 0 or baseline + cap > 100:
+        return f"quota cap is invalid for baseline {baseline:g}: {cap!r}"
+
+    previous_recorded: dt.datetime | None = None
+    previous_external: dt.datetime | None = None
+    previous_weekly: float | None = None
+    previous_after_turn = -1
+    for index, observation in enumerate(observations):
+        label = f"quota observation {index + 1}"
+        try:
+            recorded = parse_observed_at(
+                observation.get("recorded_at"), f"{label} recorded_at"
+            )
+            externally_observed = parse_observed_at(
+                observation.get("external_observed_at"),
+                f"{label} external_observed_at",
+            )
+            weekly = float(observation["weekly_utilization_percent"])
+            after_turn = int(observation["after_turn"])
+        except (KeyError, TypeError, ValueError) as error:
+            return f"invalid {label}: {error}"
+        if not math.isfinite(weekly) or not 0 <= weekly <= 100:
+            return f"{label} utilization is out of range: {weekly!r}"
+        if weekly < baseline:
+            return (
+                f"{label} utilization {weekly:g}% predates or contradicts "
+                f"the recorded {baseline:g}% baseline"
+            )
+        if previous_recorded is not None and recorded < previous_recorded:
+            return f"{label} recorded_at is out of order"
+        if previous_external is not None and externally_observed < previous_external:
+            return f"{label} external_observed_at is out of order"
+        if previous_weekly is not None and weekly < previous_weekly:
+            return (
+                f"{label} utilization decreased within one weekly window "
+                f"({previous_weekly:g}% to {weekly:g}%)"
+            )
+        if after_turn < previous_after_turn:
+            return f"{label} after_turn is out of order"
+        if after_turn < 0 or after_turn > len(state.get("turns") or []):
+            return f"{label} after_turn {after_turn} is outside retained turn history"
+        previous_recorded = recorded
+        previous_external = externally_observed
+        previous_weekly = weekly
+        previous_after_turn = after_turn
+    return None
+
+
 def quota_is_fresh(
     state: dict[str, Any],
     max_age_seconds: int,
@@ -470,6 +608,8 @@ def quota_is_fresh(
     observations = state.get("quota_observations") or []
     if not observations:
         return False, "no external quota observation recorded"
+    if error := quota_ledger_error(state):
+        return False, error
     latest = observations[-1]
     if int(latest.get("after_turn", -1)) != len(state.get("turns") or []):
         return (
@@ -523,8 +663,6 @@ def quota_is_fresh(
             False,
             f"weekly utilization {weekly:.1f}% reached hard stop {hard_stop:.1f}%",
         )
-    if weekly < float(state["quota_baseline_percent"]):
-        return False, "quota observation predates or contradicts the recorded baseline"
     if state.get("quota_cap_violation"):
         return False, "a prior external observation exceeded the cumulative quota cap"
     if for_paid_call and state.get("quota_cap_reached"):
@@ -733,6 +871,8 @@ def record_quota(args: argparse.Namespace) -> int:
         "after_turn": len(state["turns"]),
     }
     state["quota_observations"].append(observation)
+    if error := quota_ledger_error(state):
+        raise ValueError(f"refusing invalid quota observation: {error}")
     hard_stop = float(state["quota_baseline_percent"]) + float(
         state["quota_cap_delta_points"]
     )
@@ -757,7 +897,10 @@ def run_turn(args: argparse.Namespace) -> int:
     run_dir = args.run_dir.resolve()
     state_path = run_dir / STATE_FILE
     state = load_json(state_path)
-    if recover_preflight_failures(state):
+    state_changed = recover_preflight_failures(state)
+    if state["provider"] == "codex" and normalize_codex_turn_tokens(state["turns"]):
+        state_changed = True
+    if state_changed:
         dump_json(state_path, state)
     if state.get("paid_failure"):
         raise RuntimeError(
@@ -766,6 +909,10 @@ def run_turn(args: argparse.Namespace) -> int:
     valid, reason = quota_is_fresh(state, args.quota_max_age)
     if not valid:
         raise RuntimeError(f"paid call denied: {reason}")
+    if state["provider"] == "claude" and not claude_authenticated():
+        raise RuntimeError(
+            "paid call denied: Claude CLI is logged out; restore authentication first"
+        )
     turn_index = int(state["next_turn"])
     prompts = load_json(SUITE / "scenarios" / state["scenario"] / "prompts.json")
     if turn_index >= len(prompts):
@@ -830,6 +977,7 @@ def run_turn(args: argparse.Namespace) -> int:
         state["session_id"] = agent.get("session_id")
     if state["provider"] == "codex":
         agent.update(codex_rollout_context(state.get("session_id")))
+        normalize_codex_turn_tokens([*state["turns"], {"agent": agent}])
     same_session = bool(state.get("session_id")) and agent.get(
         "session_id"
     ) == state.get("session_id")
@@ -1179,6 +1327,8 @@ def finalize(args: argparse.Namespace) -> int:
         raise RuntimeError("cannot finalize an incomplete six-turn native session")
     if not all(turn["success"] for turn in state["turns"]):
         raise RuntimeError("cannot finalize: at least one retained turn failed")
+    if state["provider"] == "codex" and normalize_codex_turn_tokens(state["turns"]):
+        dump_json(run_dir / STATE_FILE, state)
     fresh, reason = quota_is_fresh(state, 86_400, for_paid_call=False)
     if not fresh:
         raise RuntimeError(f"cannot finalize before the final quota refresh: {reason}")
