@@ -184,3 +184,12 @@ module must not own transcript persistence or change context limits.
 - Whether moving `score_prompt` changes privacy assumptions in `explain.rs`.
 - Whether compile/test iteration stays neutral after the additional module.
 
+## Resolution after extraction
+
+- Documentation sync asserts live constants rather than source locations. The
+  normative guide's moved classification/router references were updated and the
+  sync test passes.
+- `score_prompt` is crate-private, with direct sibling use from `explain`; its result
+  fields are crate-private and the public classifier surface did not grow.
+- Same-condition clean and incremental focused checks are neutral (12.14→12.20 s
+  clean; 0.17→0.17 s incremental), with the focused suite unchanged.

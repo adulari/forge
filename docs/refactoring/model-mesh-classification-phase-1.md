@@ -163,3 +163,81 @@ model-visible context, request ordering, persistence, or runtime routing behavio
 - Stop before any policy or compatibility cleanup; those require separate later
   phases.
 
+## Completed result
+
+Measured against the frozen `9a40bbb0551e2dde96f895b75267da63882a139a`
+baseline:
+
+| Measure | Baseline | After phase | Result |
+|---|---:|---:|---|
+| Owned Rust implementation files | 180 | 181 | One deep policy owner added |
+| Owned Rust implementation lines | 123,760 | 123,775 | +15 lines of module/visibility scaffolding |
+| Owned Rust test lines | 65,588 | 65,593 | +5 lines of test-module scaffolding |
+| Implementation files ≤500 lines | 115/180 (63.9%) | 116/181 (64.1%) | Improved |
+| Implementation files ≤800 lines | 145/180 (80.6%) | 146/181 (80.7%) | Improved |
+| Implementation files >2,000 lines | 10 | 9 | Improved |
+| Implementation files >5,000 lines | 4 | 4 | No regression |
+| Implementation files >10,000 lines | 1 | 1 | No regression |
+| `forge-mesh/src/lib.rs` physical lines | 5,588 | 4,931 | Below the 5,000 physical-line milestone |
+| `forge-mesh/src/lib.rs` implementation lines | 2,214 | 1,742 | 21.3% lower concentration |
+| `classification.rs` implementation lines | — | 486 | Inside the 500-line target |
+| `classification/tests.rs` test lines | — | 188 | Tests remain visible and separately counted |
+
+The increase in aggregate lines is reported rather than hidden: this phase improves
+ownership and concentration, not repository size. The new module passes the deletion
+test—removing it would spread classification constants, matching, scoring, public
+hints, and no-downgrade policy back across the router and inspector.
+
+### Performance and dependency evidence
+
+The before/after checks used fresh Cargo target directories and the same command:
+`cargo check --locked -p forge-agent-mesh --all-features`.
+
+| Check | Baseline | After phase |
+|---|---:|---:|
+| Clean focused check | 12.14 s | 12.20 s |
+| Immediate incremental focused check | 0.17 s | 0.17 s |
+| Focused test execution | 0.43 s | 0.43 s |
+| Focused test build/run command wall time | 16.47 s | 15.55 s |
+
+These are single local samples. The clean-check difference is approximately 0.5%
+and is treated as neutral; the lower test command time is recorded without claiming
+the extraction caused it. The crate dependency graph is unchanged and no dependency,
+trait, crate, protocol, persistence type, or public import path was added. The locked
+release build produced a 97,686,512-byte binary in 2m52s; no baseline binary-size
+claim is made because this phase added no dependency.
+
+### Verification evidence
+
+- Architecture guard unit tests: 7 passed.
+- Architecture guard against current tree: passed.
+- `cargo fmt --all -- --check`: passed.
+- Workspace warnings-denied Clippy across all targets/features: passed.
+- Focused Mesh lib suite: 211 passed, 1 ignored, unchanged from baseline.
+- Workspace all-features suite: 2,372 passed, 27 ignored across 49 suites.
+- Manual-E2E/harness unit suite: 45 passed, covering retained capture,
+  terminal-turn, quota/integrity, and summarization machinery.
+- Changed-file and runner-resource CI contract tests: passed.
+- `cargo build --release --locked --bin forge`: passed.
+
+No paid model benchmark ran. The extraction changed no model request, prompt, context,
+tool schema/order, routing policy, persistence behavior, or provider runtime path, so
+the retained PR #930 benchmark evidence remains the applicable runtime baseline.
+
+### Scorecard assessment
+
+- **Module size and depth:** root concentration falls materially; the new 486-line
+  owner is under the strict target and owns behavior rather than forwarding calls.
+- **Dependency/interface health:** module is private; existing public
+  `forge_mesh::RouteHints` and `forge_mesh::max_tier` paths are deliberate
+  re-exports; no speculative trait or dependency was introduced.
+- **Change locality:** classifier signals, matching, scoring, and focused tests now
+  have one discoverable owner. `explain` explicitly consumes that same scorer.
+- **Verification quality:** pure classification corpus/self-hosting tests moved to
+  the owner; cross-policy routing, affinity, quota, and failover tests remain at the
+  crate boundary.
+- **Runtime product performance:** compile/test iteration is neutral and all retained
+  behavior/replay suites pass.
+- **AI navigability:** the owning file is named for the domain concept, under 500
+  implementation lines, documented at module level, and referenced by the normative
+  routing guide.
