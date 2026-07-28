@@ -3188,8 +3188,7 @@ pub(crate) async fn run_chat_tui(
                     // A live workflow run's WorkflowFinished will never arrive (its emitting
                     // task just died with the turn) — close it out as interrupted so the status
                     // band doesn't freeze and later turns don't inherit `active`.
-                    app.workflow.on_interrupt();
-                    app.apply(forge_tui::PresenterEvent::AssistantDone); // flush any partial reply
+                    finish_interrupted_presenter(&mut app); // flush any partial reply
                     if let Some(next) =
                         dequeue_prompt(&mut queued_prompts, &mut app, &mut prompt_history)
                     {
@@ -4208,7 +4207,10 @@ pub(crate) async fn run_chat_tui(
                             pending_question = None;
                             app.prompt = None;
                             app.clear_question();
-                            app.apply(forge_tui::PresenterEvent::AssistantDone);
+                            // Match the local interrupt path: the task that would have emitted
+                            // WorkflowFinished was just aborted, so close the active workflow
+                            // before a queued replacement turn starts.
+                            finish_interrupted_presenter(&mut app);
                             if let Some(next) =
                                 dequeue_prompt(&mut queued_prompts, &mut app, &mut prompt_history)
                             {
@@ -5106,6 +5108,14 @@ pub(crate) fn dequeue_prompt(
         prompt_history.push(history_entry.to_string());
     }
     Some(next)
+}
+
+/// Close every presenter surface owned by an aborted turn. Local and remote interrupts must share
+/// this path: the task that would emit `WorkflowFinished` no longer exists, so leaving its workflow
+/// active would poison the queued replacement turn.
+pub(crate) fn finish_interrupted_presenter(app: &mut forge_tui::App) {
+    app.workflow.on_interrupt();
+    app.apply(forge_tui::PresenterEvent::AssistantDone);
 }
 
 /// A model-skip retries the same logical autonomous turn under a fresh generation. Keep `/loop`
@@ -6814,6 +6824,27 @@ mod tests {
         );
         assert_eq!(queue, vec!["second"]);
         assert_eq!(history, vec!["older", "first correction"]);
+    }
+
+    #[test]
+    fn interrupted_presenter_closes_an_active_workflow_before_reprompt() {
+        let mut app = forge_tui::App::default();
+        app.apply(forge_tui::PresenterEvent::WorkflowStarted {
+            name: Some("stress".to_string()),
+        });
+        assert!(app.workflow.active);
+
+        finish_interrupted_presenter(&mut app);
+
+        assert!(!app.workflow.active);
+        assert!(!app.workflow.open);
+        assert_eq!(
+            app.workflow
+                .finished
+                .as_ref()
+                .map(|(ok, reason)| (*ok, reason.as_str())),
+            Some((false, "interrupted by user"))
+        );
     }
 
     #[test]

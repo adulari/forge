@@ -70,17 +70,41 @@ class ForgeLongSessionSummaryTests(unittest.TestCase):
         self.assertFalse(decreasing["valid"])
         self.assertIn("decreased", " ".join(decreasing["errors"]))
 
+        for baseline, cap, before, after in [
+            (96, 5, 96, 96),
+            (36, float("nan"), 36, 36),
+            (36, 5, float("nan"), 36),
+        ]:
+            with self.subTest(
+                baseline=baseline, cap=cap, before=before, after=after
+            ):
+                self.assertFalse(
+                    summary.quota_result(
+                        baseline=baseline,
+                        cap=cap,
+                        before=before,
+                        after=after,
+                        before_observed_at=observed,
+                        after_observed_at=observed,
+                    )["valid"]
+                )
+
     def test_hidden_result_requires_every_adversarial_invariant(self) -> None:
         complete = {
             "contention_requests": 100,
             "contention_winners": 1,
             "duplicate_requests": 100,
             "concurrent_cancellations": 100,
+            "interleaved_reserve_cancels": 100,
+            "interleaving_verified": True,
             "rollback_verified": True,
+            "cancellation_rollback_verified": True,
         }
         self.assertTrue(summary.hidden_result_passed(complete))
         incomplete = {**complete, "contention_winners": 2}
         self.assertFalse(summary.hidden_result_passed(incomplete))
+        not_interleaved = {**complete, "interleaving_verified": False}
+        self.assertFalse(summary.hidden_result_passed(not_interleaved))
 
     def test_original_test_evidence_requires_replay_methods_and_support(self) -> None:
         base = {

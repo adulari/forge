@@ -41,7 +41,7 @@ a specific binary, `FORGE_E2E_TIMEOUT` to change the 1,500-second turn timeout, 
 | `typescript-config-recovery` | Broken build config, package exports, secure deep merge, public API | Strictly typed package with passing Node tests |
 | `rust-transaction-ledger` | Transactional rollback, overflow, idempotency conflicts, stable ordering | Corrected standard-library Rust crate |
 | `interrupt-resume-large-write` | Forced mid-turn interruption, large tool arguments, same-session recovery | Strictly verified 321-line artifact retained with the run |
-| `long-session-reservations` | Six FIFO reprompts in one mesh-auto session: concurrency, rollback, cancellation, skeptical review, final verification | Live-only; visible suite plus exact hidden 100-way contention checks |
+| `long-session-reservations` | Six FIFO reprompts in one mesh-auto session: concurrency, rollback, cancellation, skeptical review, final verification | Live-only; visible suite plus exact hidden 100-way contention, duplicate, cancellation, deterministic reserve/cancel interleaving, and rollback checks |
 
 The reference directory is evidence and something to inspect or run manually; the fixture is the
 replayable pre-fix starting point. Aetherfront intentionally starts from an empty workspace because
@@ -59,7 +59,10 @@ when comparing development binaries so routing and failover remain part of the t
 refresh can be recorded before and after every provider call. `prepare` creates one synthetic base
 commit, removes remotes and generated caches, records the exact Git tree hash, and writes a
 resumable `run-state.json`. `turn` fails closed when quota evidence is missing, stale, out of order,
-or at the cap; a provider-started failure is retained and blocks duplicate calls.
+decreasing within the same weekly window, or at the cap; it also denies a native Claude call while
+the local CLI is logged out. A provider-started failure is retained and blocks duplicate calls.
+Codex CLI's thread-cumulative usage snapshots are retained verbatim and differenced before per-turn
+or aggregate token reporting.
 
 ```bash
 python3 scripts/manual-e2e/native_long_session.py prepare \

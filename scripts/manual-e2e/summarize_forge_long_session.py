@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import sys
@@ -152,11 +153,16 @@ def quota_result(
     after_time = shared.parse_observed_at(after_observed_at, "after_observed_at")
     hard_stop = baseline + cap
     errors: list[str] = []
-    if not 0.0 <= baseline <= 100.0:
+    if not math.isfinite(baseline) or not 0.0 <= baseline <= 100.0:
         errors.append("baseline is outside 0..100")
-    if cap <= 0.0:
-        errors.append("cap delta is not positive")
-    if not 0.0 <= before <= 100.0 or not 0.0 <= after <= 100.0:
+    if not math.isfinite(cap) or cap <= 0.0 or hard_stop > 100.0:
+        errors.append("cap delta is invalid for the baseline")
+    if (
+        not math.isfinite(before)
+        or not math.isfinite(after)
+        or not 0.0 <= before <= 100.0
+        or not 0.0 <= after <= 100.0
+    ):
         errors.append("quota observation is outside 0..100")
     if before < baseline or after < baseline:
         errors.append("quota observation predates or contradicts the baseline")
@@ -188,7 +194,10 @@ def hidden_result_passed(hidden: dict[str, Any]) -> bool:
         and hidden.get("contention_winners") == 1
         and hidden.get("duplicate_requests") == 100
         and hidden.get("concurrent_cancellations") == 100
+        and hidden.get("interleaved_reserve_cancels") == 100
+        and hidden.get("interleaving_verified") is True
         and hidden.get("rollback_verified") is True
+        and hidden.get("cancellation_rollback_verified") is True
     )
 
 

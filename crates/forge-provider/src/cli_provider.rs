@@ -1436,6 +1436,8 @@ fn usage_from(v: &Value) -> Usage {
 struct ClaudeStreamState {
     text: std::collections::HashMap<usize, String>,
     reasoning: std::collections::HashMap<usize, String>,
+    tool_ids: std::collections::HashSet<String>,
+    stream_message_active: bool,
 }
 
 impl ClaudeStreamState {
@@ -1449,8 +1451,20 @@ impl ClaudeStreamState {
                 let Some(event) = v.get("event") else {
                     return out;
                 };
-                if event.get("type").and_then(Value::as_str) != Some("content_block_delta") {
-                    return out;
+                match event.get("type").and_then(Value::as_str) {
+                    Some("message_start") => {
+                        self.text.clear();
+                        self.reasoning.clear();
+                        self.tool_ids.clear();
+                        self.stream_message_active = true;
+                        return out;
+                    }
+                    Some("message_stop") => {
+                        self.stream_message_active = false;
+                        return out;
+                    }
+                    Some("content_block_delta") => {}
+                    _ => return out,
                 }
                 let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let Some(delta) = event.get("delta") else {
@@ -1478,6 +1492,7 @@ impl ClaudeStreamState {
             }
             // Consolidated assistant message: emit only bytes that were not already streamed.
             Some("assistant") => {
+                let belongs_to_stream_message = self.stream_message_active;
                 if let Some(blocks) = v
                     .get("message")
                     .and_then(|message| message.get("content"))
@@ -1492,7 +1507,7 @@ impl ClaudeStreamState {
                                     .filter(|s| !s.is_empty())
                                 {
                                     if let Some(unseen) =
-                                        unseen_consolidated_suffix(full, &self.reasoning, index)
+                                        unseen_consolidated_suffix(full, &mut self.reasoning, index)
                                     {
                                         out.push(Parsed::Reasoning(unseen.to_string()));
                                     }
@@ -1505,7 +1520,7 @@ impl ClaudeStreamState {
                                     .filter(|s| !s.is_empty())
                                 {
                                     if let Some(unseen) =
-                                        unseen_consolidated_suffix(full, &self.text, index)
+                                        unseen_consolidated_suffix(full, &mut self.text, index)
                                     {
                                         out.push(Parsed::Text(unseen.to_string()));
                                     }
@@ -1526,15 +1541,27 @@ impl ClaudeStreamState {
                                     .get("input")
                                     .map(ToString::to_string)
                                     .unwrap_or_default();
+                                if belongs_to_stream_message
+                                    && !id.is_empty()
+                                    && !self.tool_ids.insert(id.clone())
+                                {
+                                    continue;
+                                }
                                 out.push(Parsed::ToolStarted { id, name, args });
                             }
                             _ => {}
                         }
                     }
                 }
-                // Block indices restart at zero for the next assistant message/tool round.
-                self.text.clear();
-                self.reasoning.clear();
+                // With partial streaming, Claude emits one block-level assistant snapshot before
+                // the message's later blocks and `message_stop`; retain state so a duplicate
+                // snapshot cannot repeat streamed bytes. A non-streamed standalone assistant event
+                // has no trustworthy message boundary, so keep the conservative legacy reset.
+                if !belongs_to_stream_message {
+                    self.text.clear();
+                    self.reasoning.clear();
+                    self.tool_ids.clear();
+                }
             }
             // User message: tool_result blocks (the outcome of a tool the agent ran).
             Some("user") => {
@@ -1561,6 +1588,10 @@ impl ClaudeStreamState {
                 }
             }
             Some("result") => {
+                self.stream_message_active = false;
+                self.text.clear();
+                self.reasoning.clear();
+                self.tool_ids.clear();
                 if let Some(usage) = v.get("usage").map(usage_from) {
                     out.push(Parsed::Usage(usage));
                 }
@@ -1619,14 +1650,15 @@ impl ClaudeStreamState {
 
 fn unseen_consolidated_suffix<'a>(
     full: &'a str,
-    streamed: &std::collections::HashMap<usize, String>,
+    streamed: &mut std::collections::HashMap<usize, String>,
     consolidated_index: usize,
 ) -> Option<&'a str> {
     if let Some(preferred) = streamed
         .get(&consolidated_index)
         .filter(|text| !text.is_empty())
+        .cloned()
     {
-        return match full.strip_prefix(preferred.as_str()) {
+        let unseen = match full.strip_prefix(preferred.as_str()) {
             Some("") => None,
             Some(suffix) => Some(suffix),
             None => {
@@ -1637,6 +1669,8 @@ fn unseen_consolidated_suffix<'a>(
                 None
             }
         };
+        streamed.insert(consolidated_index, full.to_string());
+        return unseen;
     }
 
     // Claude Code 2.1.220 emits block-level `assistant` snapshots: `message.content` contains only
@@ -1645,15 +1679,23 @@ fn unseen_consolidated_suffix<'a>(
     // Match the streamed value itself when the array position is therefore not an identity. Choose
     // the longest prefix so a shorter earlier block cannot steal a later block's suffix.
     let matching = streamed
-        .values()
-        .filter(|text| !text.is_empty() && full.starts_with(text.as_str()))
-        .max_by_key(|text| text.len());
+        .iter()
+        .filter(|(_, text)| !text.is_empty() && full.starts_with(text.as_str()))
+        .max_by_key(|(_, text)| text.len())
+        .map(|(index, text)| (*index, text.clone()));
     match matching {
-        Some(text) => match full.strip_prefix(text.as_str()) {
-            Some("") => None,
-            suffix => suffix,
-        },
-        None => Some(full),
+        Some((index, text)) => {
+            let unseen = match full.strip_prefix(text.as_str()) {
+                Some("") => None,
+                suffix => suffix,
+            };
+            streamed.insert(index, full.to_string());
+            unseen
+        }
+        None => {
+            streamed.insert(consolidated_index, full.to_string());
+            Some(full)
+        }
     }
 }
 
@@ -4458,6 +4500,9 @@ mod tests {
     #[test]
     fn claude_partial_messages_emit_an_unstreamed_suffix_and_thinking() {
         let mut stream = ClaudeStreamState::default();
+        assert!(stream
+            .parse_line(r#"{"type":"stream_event","event":{"type":"message_start"}}"#)
+            .is_empty());
         let thinking = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"consider"}}}"#;
         assert_eq!(
             stream.parse_line(thinking),
@@ -4471,11 +4516,18 @@ mod tests {
             vec![Parsed::Text("lo".into())],
             "only bytes absent from partial delivery are emitted"
         );
+        assert!(
+            stream.parse_line(consolidated).is_empty(),
+            "a repeated consolidated snapshot must not repeat its unstreamed suffix"
+        );
     }
 
     #[test]
     fn claude_block_level_assistant_snapshot_deduplicates_original_stream_index() {
         let mut stream = ClaudeStreamState::default();
+        assert!(stream
+            .parse_line(r#"{"type":"stream_event","event":{"type":"message_start"}}"#)
+            .is_empty());
         let thinking = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"consider"}}}"#;
         assert_eq!(
             stream.parse_line(thinking),
@@ -4494,6 +4546,44 @@ mod tests {
         assert!(
             stream.parse_line(consolidated_text).is_empty(),
             "the block-level assistant snapshot uses array position zero but stream index one"
+        );
+    }
+
+    #[test]
+    fn claude_repeated_unstreamed_assistant_snapshot_emits_once() {
+        let mut stream = ClaudeStreamState::default();
+        let start = r#"{"type":"stream_event","event":{"type":"message_start"}}"#;
+        let stop = r#"{"type":"stream_event","event":{"type":"message_stop"}}"#;
+        let consolidated =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#;
+        assert!(stream.parse_line(start).is_empty());
+        assert_eq!(texts(&stream.parse_line(consolidated)), "hello");
+        assert!(
+            stream.parse_line(consolidated).is_empty(),
+            "an identical repeated assistant snapshot must be deduplicated"
+        );
+        assert!(stream.parse_line(stop).is_empty());
+        assert!(stream.parse_line(start).is_empty());
+        assert_eq!(
+            texts(&stream.parse_line(consolidated)),
+            "hello",
+            "the same content in a new stream message is not a duplicate"
+        );
+    }
+
+    #[test]
+    fn claude_repeated_tool_snapshot_emits_one_activity_start() {
+        let mut stream = ClaudeStreamState::default();
+        let start = r#"{"type":"stream_event","event":{"type":"message_start"}}"#;
+        let tool = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"x"}}]}}"#;
+        assert!(stream.parse_line(start).is_empty());
+        assert!(matches!(
+            stream.parse_line(tool).as_slice(),
+            [Parsed::ToolStarted { id, .. }] if id == "tool-1"
+        ));
+        assert!(
+            stream.parse_line(tool).is_empty(),
+            "a repeated block snapshot must not duplicate tool activity"
         );
     }
 
