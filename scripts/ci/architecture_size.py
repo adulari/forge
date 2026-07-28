@@ -24,7 +24,10 @@ DEFAULT_SMALL_FILE_TARGET = 500
 TRACKED_THRESHOLDS = (2_000, 5_000, 10_000)
 
 ATTRIBUTE_START = re.compile(r"(?m)^[ \t]*#\s*\[")
-TEST_WORD = re.compile(r"\btest\b")
+CFG_TEST_ATTRIBUTE = re.compile(
+    r"^\s*#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$",
+    re.DOTALL,
+)
 EXTERNAL_TEST_MODULE = re.compile(
     r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]"
     r"(?:\s*#\s*\[[^\]]*\])*\s*"
@@ -212,7 +215,8 @@ def cfg_test_line_numbers(text: str) -> set[int]:
         attribute_end = _matching_delimiter(code, bracket, "[", "]")
         if attribute_end is None:
             continue
-        if TEST_WORD.search(code[bracket : attribute_end + 1]) is None:
+        attribute = code[match.start() : attribute_end + 1]
+        if CFG_TEST_ATTRIBUTE.fullmatch(attribute) is None:
             continue
 
         item_end = _next_item_end(code, attribute_end + 1)

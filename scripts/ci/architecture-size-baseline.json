@@ -11,7 +11,7 @@
     "crates/forge-mcp/src/lib.rs": 1291,
     "crates/forge-mesh/src/lib.rs": 2214,
     "crates/forge-provider/src/lib.rs": 770,
-    "crates/forge-relay/src/main.rs": 381,
+    "crates/forge-relay/src/main.rs": 383,
     "crates/forge-skills/src/lib.rs": 886,
     "crates/forge-store/src/lib.rs": 8298,
     "crates/forge-tools/src/lib.rs": 286,
@@ -28,8 +28,8 @@
     "at_or_below_500": 115,
     "at_or_below_800": 145,
     "implementation_files": 180,
-    "implementation_lines": 123760,
-    "test_lines": 65588
+    "implementation_lines": 123795,
+    "test_lines": 65553
   },
   "guardrails": {
     "max_implementation_lines": 800,
@@ -66,7 +66,7 @@
     "crates/forge-mcp/src/lib.rs": 1291,
     "crates/forge-mesh/src/catalog.rs": 1299,
     "crates/forge-mesh/src/lib.rs": 2214,
-    "crates/forge-provider/src/cli_provider.rs": 3371,
+    "crates/forge-provider/src/cli_provider.rs": 3381,
     "crates/forge-provider/src/codex_oauth.rs": 1125,
     "crates/forge-provider/src/genai_provider.rs": 1670,
     "crates/forge-skills/src/lib.rs": 886,

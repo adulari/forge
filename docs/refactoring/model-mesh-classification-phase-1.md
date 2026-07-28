@@ -171,8 +171,8 @@ baseline:
 | Measure | Baseline | After phase | Result |
 |---|---:|---:|---|
 | Owned Rust implementation files | 180 | 181 | One deep policy owner added |
-| Owned Rust implementation lines | 123,760 | 123,775 | +15 lines of module/visibility scaffolding |
-| Owned Rust test lines | 65,588 | 65,593 | +5 lines of test-module scaffolding |
+| Owned Rust implementation lines | 123,795 | 123,810 | +15 lines of module/visibility scaffolding |
+| Owned Rust test lines | 65,553 | 65,558 | +5 lines of test-module scaffolding |
 | Implementation files ≤500 lines | 115/180 (63.9%) | 116/181 (64.1%) | Improved |
 | Implementation files ≤800 lines | 145/180 (80.6%) | 146/181 (80.7%) | Improved |
 | Implementation files >2,000 lines | 10 | 9 | Improved |

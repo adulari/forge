@@ -53,6 +53,22 @@ mod tests {
         self.assertEqual(test_lines, set(range(3, 10)))
         self.assertEqual(len(source.splitlines()) - len(test_lines), 3)
 
+    def test_cfg_not_test_and_cfg_attr_test_remain_implementation(self) -> None:
+        source = """\
+#[cfg(not(test))]
+fn production_only() {
+}
+
+#[cfg_attr(test, derive(Debug))]
+struct ProductionType;
+
+#[cfg(any(windows, test))]
+fn windows_or_test() {
+}
+"""
+
+        self.assertEqual(architecture_size.cfg_test_line_numbers(source), set())
+
     def test_discovers_external_cfg_test_module(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
