@@ -37,6 +37,7 @@ pub mod select;
 mod surface;
 mod transcript;
 mod tui;
+mod voice;
 mod workflow_view;
 pub use app::{
     banner_lines, handle_key, input_cursor_up, insert_voice_transcript, lattice_view_lines,
