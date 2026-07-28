@@ -52,6 +52,8 @@ def merge_harness_records(records: list[dict[str, Any]]) -> dict[str, Any]:
             "timeout_kind": record.get("timeout_kind"),
             "operator_interrupted": bool(record.get("operator_interrupted")),
             "prompt_dispatch_failed": bool(record.get("prompt_dispatch_failed")),
+            "quota_gate_wait_s": float(record.get("quota_gate_wait_s") or 0.0),
+            "quota_gates": record.get("quota_gates") or [],
             "turns": [
                 {
                     "turn": turn.get("turn"),
@@ -75,6 +77,14 @@ def merge_harness_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "attempt_elapsed_s": round(
             sum(float(record.get("elapsed_s") or 0.0) for record in records), 3
         ),
+        "quota_gate_wait_s": round(
+            sum(float(record.get("quota_gate_wait_s") or 0.0) for record in records), 3
+        ),
+        "quota_gates": [
+            gate
+            for record in records
+            for gate in (record.get("quota_gates") or [])
+        ],
         "attempts": attempts,
     }
 
@@ -199,6 +209,23 @@ def hidden_result_passed(hidden: dict[str, Any]) -> bool:
         and hidden.get("rollback_verified") is True
         and hidden.get("cancellation_rollback_verified") is True
     )
+
+
+def hidden_result(path: Path) -> dict[str, Any]:
+    """Load a successful verifier record or retain a structured failed-verifier result."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for line in reversed(text.splitlines()):
+        try:
+            result = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(result, dict):
+            return result
+    return {
+        "verification_completed": False,
+        "error": "hidden verifier exited before emitting its JSON acceptance record",
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
 
 
 def original_test_evidence(
@@ -333,10 +360,7 @@ def main() -> int:
     totals = token_totals(usage)
     tool_integrity = shared.load_json(run_dir / "session-tool-integrity.json")
     visible = visible_result(run_dir / "visible-tests.log")
-    hidden_text = (run_dir / "hidden-tests.log").read_text(
-        encoding="utf-8", errors="replace"
-    )
-    hidden = json.loads(hidden_text.splitlines()[-1])
+    hidden = hidden_result(run_dir / "hidden-tests.log")
     workspace = Path(manifest["workspace"])
     scenario_dir = shared.SUITE / "scenarios" / manifest["scenario"]
     marker = scenario_dir / "fixture.source"
@@ -425,6 +449,8 @@ def main() -> int:
         "same_session_all_turns": True,
         "harness_attempts": harness["attempts"],
         "total_harness_attempt_wall_seconds": harness["attempt_elapsed_s"],
+        "quota_gate_wait_seconds": harness["quota_gate_wait_s"],
+        "quota_gates": harness["quota_gates"],
         "turns": turns,
         "total_turn_wall_seconds": round(
             sum(float(turn["wall_seconds"]) for turn in turns), 3

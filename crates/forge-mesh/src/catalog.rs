@@ -931,6 +931,15 @@ impl ModelCatalog {
             .map(|score| (score.intelligence, score.coding))
     }
 
+    /// Bounded local execution evidence for one exact provider/model id.
+    ///
+    /// Calibration is keyed by the full id because provider and model-variant caches are not
+    /// assumed to be shared. Callers must still enforce the minimum sample size appropriate to
+    /// their policy before treating latency as predictive.
+    pub fn runtime_calibration_for(&self, model: &str) -> Option<RuntimeCalibration> {
+        self.calibration.get(model).copied()
+    }
+
     /// How many of the catalog's models have a benchmark score (for `forge benchmarks` coverage).
     pub fn benchmark_coverage(&self) -> (usize, usize) {
         match &self.bench {

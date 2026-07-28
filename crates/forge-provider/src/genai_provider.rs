@@ -1249,8 +1249,11 @@ impl Provider for GenAiProvider {
             .with_capture_usage(true)
             .with_capture_content(true)
             .with_capture_tool_calls(true);
-        // Only an explicitly positive mesh.max_output_tokens value may bound model output.
-        if let Some(cap) = self.max_output_tokens {
+        // A narrow per-call cap (used by tiny auxiliary calls) may tighten but never loosen the
+        // provider-wide mesh cap. With neither configured, preserve the provider's native limit.
+        if let Some(cap) =
+            crate::effective_output_token_cap(self.max_output_tokens, opts.max_output_tokens)
+        {
             options = options.with_max_tokens(cap);
         }
         // Keep this scoped to the preview model whose endpoint contract we have verified. Other
@@ -1679,6 +1682,28 @@ mod tests {
             free: false,
             label: String::new(),
         }
+    }
+
+    #[test]
+    fn per_call_output_cap_tightens_but_never_loosens_provider_cap() {
+        assert_eq!(
+            crate::effective_output_token_cap(None, Some(128)),
+            Some(128)
+        );
+        assert_eq!(
+            crate::effective_output_token_cap(Some(64), Some(128)),
+            Some(64)
+        );
+        assert_eq!(
+            crate::effective_output_token_cap(Some(512), Some(128)),
+            Some(128)
+        );
+        assert_eq!(
+            crate::effective_output_token_cap(Some(512), None),
+            Some(512)
+        );
+        assert_eq!(crate::effective_output_token_cap(None, None), None);
+        assert_eq!(crate::effective_output_token_cap(None, Some(0)), None);
     }
 
     #[test]

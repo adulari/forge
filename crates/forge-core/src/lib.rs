@@ -13,7 +13,8 @@ use forge_config::Config;
 use forge_index::Lattice;
 use forge_mesh::pricing::Pricing;
 use forge_mesh::{
-    BudgetState, BudgetStatus, HeuristicRouter, ModelCatalog, Router, RoutingContext,
+    BudgetState, BudgetStatus, HeuristicRouter, ModelCatalog, RouteHints, Router, RoutingContext,
+    SessionAffinity,
 };
 use forge_provider::{CompletionOptions, Provider, StreamEvent, ToolSpec};
 use forge_store::{MeshOutcome, Store};
@@ -51,6 +52,30 @@ pub fn auto_compact_trigger_tokens(window: u64, cap: u64, fraction: f64) -> u64 
     frac.min(cap)
 }
 
+fn should_reuse_response_chain(
+    prompt: &str,
+    routing_context: &RoutingContext,
+    affinity: Option<&SessionAffinity>,
+    routed_model: &str,
+) -> bool {
+    routing_context.is_dependent_turn(prompt)
+        && affinity.is_some_and(|affinity| affinity.model == routed_model)
+}
+
+fn completion_prefix_tokens(messages: &[Message], tools: &[ToolSpec]) -> u64 {
+    let message_tokens = messages.iter().map(message_tokens).sum::<usize>();
+    let tool_tokens = tools
+        .iter()
+        .map(|spec| {
+            tokens::count_text(&spec.name)
+                + tokens::count_text(&spec.description)
+                + tokens::count_text(&spec.schema.to_string())
+                + 8
+        })
+        .sum::<usize>();
+    message_tokens.saturating_add(tool_tokens) as u64
+}
+
 /// Compaction (`/compact`): keep this many of the most recent messages verbatim; summarize the
 /// rest. Only compact when there are at least `COMPACT_MIN_OLDER` older messages to fold.
 pub(crate) const COMPACT_KEEP_RECENT: usize = 6;
@@ -68,7 +93,9 @@ Omit line 2 if no single command fixes it.";
 /// Shell diagnosis is optional context, never part of the user's requested work. Bound both its
 /// silent-stream interval and total wall time so an unhealthy auxiliary provider cannot hold the
 /// primary model loop (and therefore the entire TUI) hostage.
-const SHELL_DIAGNOSE_MAX_SECS: u64 = 30;
+// This side-call is optional and the main model already receives the original failing output.
+// A slow auxiliary must not add a provider-sized latency bubble to the critical turn path.
+const SHELL_DIAGNOSE_MAX_SECS: u64 = 12;
 
 /// Default sampling temperature for coding turns: low, so edits/patches are deterministic rather
 /// than creatively varied. Only takes effect when reasoning/effort isn't engaged (thinking models
@@ -90,14 +117,19 @@ codebase so your change fits the existing structure, naming, and conventions.
 - Keep verification exit codes trustworthy: run checks separately or join them with `&&`; do not \
 mask failures behind `;`, `||`, or a pipeline into `head`/`tail`/`tee` without pipe-failure handling.
 - For any non-trivial task, make a short plan and keep it current with the update_tasks tool. \
-Do the work; don't just describe it.
+Plan bookkeeping is non-blocking: NEVER call update_tasks by itself when an independent read, edit, \
+or check can advance the work. Request both in the same response. A standalone update is only for \
+when no substantive next action exists, such as immediately before the final answer. Do the work; \
+don't just describe it.
 - Make the smallest change that fully solves the task. Match the surrounding code's style. Do NOT \
 add comments unless the code's intent is genuinely non-obvious. Don't reformat unrelated code.
 - Solve the general case, not just the tests or examples in front of you — don't hardcode to \
 specific inputs. If a test or the task itself looks wrong or infeasible, say so rather than routing \
 around it.
-- After editing, verify: run the project's build/tests/linters via the shell when available, and \
-fix what you broke before reporting done.
+- After editing, verify: run focused checks after the relevant change and one final complete \
+build/test/lint pass when available. Reuse still-current successful evidence; do not rerun an \
+unchanged check or print verbose passing output merely for reassurance. Fix failures before \
+reporting done.
 
 Tools:
 - Prefer read_file / search / list_dir / glob over shelling out to cat / grep / ls / find.
@@ -108,7 +140,9 @@ places at once, multi_edit applies a list of edits atomically. For a large or mu
 apply_patch takes a unified diff. For a Jupyter notebook (.ipynb) use notebook_edit (cell-level) \
 — edit_file would corrupt its JSON. Use write_file for new files or full rewrites. When generated \
 content is too large for one reliable tool call, write the first coherent chunk and use append_file \
-for the rest. Don't blind-overwrite a file you haven't read.
+for the rest. Keep source files syntactically balanced after every write; after a truncated-edit \
+rejection, do not retry the same edit shape—switch immediately to a smaller complete edit, \
+append_file, or a complete write_file. Don't blind-overwrite a file you haven't read.
 - A tool result starting with `error:` means it failed — read the message, fix the cause, and \
 retry differently rather than repeating the same call.
 
@@ -1164,6 +1198,26 @@ uses the ORIGINAL tests. Re-verify your core change against the pristine tests (
 restored); if they fail, shrink your fix rather than editing tests. Your test edits are stashed \
 (`git stash pop` re-applies them); re-apply only if genuinely justified by the issue text.";
 
+/// Proactive counterpart to [`TEST_EDIT_GUARD`]. When the user explicitly requires pristine
+/// existing tests, make the recoverable post-hoc guard exceptional rather than the normal path:
+/// models may still add useful coverage, but must put it in a new file so the original contract
+/// remains byte-identical and no paid restore/reverification loop is needed.
+const PRISTINE_TEST_GUIDANCE: &str = "Existing tracked test files are immutable for this session. \
+Read and run them, but do not edit, delete, or rename them—even to add coverage. Put useful new \
+coverage in a new test file, and fix production code so the original pristine tests still pass.";
+
+/// Prevent a common false-positive completion on rollback work: a model proves a hand-written test
+/// double but never checks whether the repository's actual fault-injection seam covers the sibling
+/// production path named by the task. The guidance is semantic and repository-agnostic; it is
+/// injected only when the current prompt explicitly asks for fault injection or an injected
+/// failure, then remains stable for the rest of that session.
+const FAULT_SEAM_GUIDANCE: &str = "Fault-injection and rollback coverage must exercise the \
+repository's real production seams. If an existing flag, hook, or stub models a failure, inspect \
+every analogous write/save path and make that same seam behave consistently before adding \
+special-case test doubles. A bespoke subclass may add coverage, but it cannot replace a test of \
+the base hook. Before declaring complete, search the affected subsystem for sibling persistence \
+paths and verify that each injected failure leaves state unchanged.";
+
 /// Whether `path` looks like a test file — the small, extensible pattern list the
 /// existing-tests-are-spec guard keys on. Matches by basename (`test_*.py`, `*_test.py`,
 /// `*_tests.rs`, `*_test.rs`, `*.test.js/ts`, `*.spec.js/ts`, `test_*.rs`) or by living under a
@@ -1191,6 +1245,37 @@ fn is_test_path(path: &str) -> bool {
         .skip(1) // the basename is not a directory component
         .any(|c| c == "tests" || c == "test" || c == "testing");
     by_name || by_dir
+}
+
+fn prompt_requires_pristine_existing_tests(prompt: &str) -> bool {
+    let prompt = prompt.to_ascii_lowercase();
+    prompt.contains("test")
+        && (prompt.contains("do not weaken")
+            || prompt.contains("no tests weakened")
+            || prompt.contains("do not modify existing tests")
+            || prompt.contains("keep existing tests unchanged"))
+}
+
+fn session_requires_pristine_existing_tests(messages: &[Message]) -> bool {
+    messages.iter().any(|message| {
+        message.role == Role::User && prompt_requires_pristine_existing_tests(&message.content)
+    })
+}
+
+fn prompt_requires_fault_seam_audit(prompt: &str) -> bool {
+    let prompt = prompt.to_ascii_lowercase();
+    let requests_injection = prompt.contains("fault injection")
+        || prompt.contains("fault-injection")
+        || prompt.contains("injected failure")
+        || prompt.contains("injected storage")
+        || prompt.contains("inject a failure")
+        || prompt.contains("inject failure");
+    requests_injection
+        && (prompt.contains("rollback")
+            || prompt.contains("storage")
+            || prompt.contains("persist")
+            || prompt.contains("write")
+            || prompt.contains("save"))
 }
 
 /// Parse `git status --porcelain` output into the list of MODIFIED (or deleted) existing test
@@ -1974,8 +2059,10 @@ pub struct RoutingInspector {
     budget: BudgetState,
     health: ModelHealth,
     quota: SubscriptionQuota,
+    tier_override: Option<TaskTier>,
     effort: Option<EffortLevel>,
     project: ProjectContext,
+    routing_context: RoutingContext,
 }
 
 impl RoutingInspector {
@@ -1983,14 +2070,16 @@ impl RoutingInspector {
     pub async fn explain(&self, prompt: &str) -> forge_mesh::RoutingExplanation {
         let decision = self
             .router
-            .route(
+            .route_contextual(
                 prompt,
                 false,
                 self.budget,
                 &self.health,
                 &self.quota,
+                self.tier_override,
                 self.effort,
                 &self.project,
+                &self.routing_context,
             )
             .await;
         let classifier_reason = decision
@@ -2000,7 +2089,7 @@ impl RoutingInspector {
             .unwrap_or(&decision.rationale)
             .to_string();
         let fallback = decision.rationale.contains("llm classify unavailable");
-        let mut explanation = self.selection_router.explain_classified(
+        let mut explanation = self.selection_router.explain_contextual_classified(
             prompt,
             decision.tier,
             vec![classifier_reason],
@@ -2008,6 +2097,7 @@ impl RoutingInspector {
             &self.health,
             &self.quota,
             self.effort,
+            &self.routing_context,
         );
         explanation.classifier_label = if fallback {
             "heuristic fallback (all LLM candidates unavailable)".to_string()
@@ -2096,6 +2186,10 @@ pub struct Session {
     /// per-turn `tier_override` (a command/skill `tier:` hint) is passed, which still wins. `None`
     /// = normal classification.
     pinned_tier: Option<TaskTier>,
+    /// The exact model that most recently completed this session's main task turn. This is
+    /// session-local cache warmth, not a model pin: contextual mesh routing may retain it within a
+    /// quality band, while health, quota, context, task-class changes, and failover still win.
+    route_affinity: Option<SessionAffinity>,
     /// Per-session immutable workspace root. Every runtime filesystem operation must
     /// use this instead of the daemon's process working directory.
     workspace: WorkspaceContext,
@@ -2533,6 +2627,7 @@ impl Session {
             overflow_window_cap: None,
             whitehot_guidance_injected: false,
             pinned_tier: None,
+            route_affinity: None,
             workspace_binding: Arc::new(std::sync::RwLock::new(workspace.root().to_path_buf())),
             workspace,
             pending_hints: vec![],
@@ -3878,8 +3973,13 @@ impl Session {
             budget: self.budget_snapshot(),
             health,
             quota: readiness.quota,
+            tier_override: self.pinned_tier,
             effort: self.pinned_effort(),
             project: self.project.clone(),
+            routing_context: RoutingContext::from_messages(&self.transcript).with_session_affinity(
+                self.route_affinity.clone(),
+                self.estimated_reusable_prefix_tokens(),
+            ),
         })
     }
 
@@ -4096,13 +4196,20 @@ Rules:\n\
         (!forge_provider::is_cli_bridge(&model)).then_some(model)
     }
 
-    /// Side calls are deliberately cheap/low-reasoning, but their answer length remains native and
-    /// uncapped. A stable purpose-scoped key enables the same automatic provider prefix caching as
-    /// the main loop instead of silently bypassing it for compaction, memory, recap, and diagnosis.
+    /// Side calls are deliberately cheap/low-reasoning. Tiny fixed-shape results also receive a
+    /// narrow output ceiling so a model that ignores "one line" cannot spend thousands of hidden
+    /// reasoning/output tokens. Compaction remains uncapped because its necessary answer length
+    /// scales with the conversation. A stable purpose-scoped key enables provider prefix caching.
     fn auxiliary_completion_options(session_id: &str, purpose: &str) -> CompletionOptions {
+        let max_output_tokens = match purpose {
+            "recap" | "suggest" => Some(128),
+            "memory" | "shell-diagnose" => Some(256),
+            _ => None,
+        };
         CompletionOptions {
             effort: Some(EffortLevel::Low),
             prompt_cache_key: Some(format!("{session_id}:{purpose}")),
+            max_output_tokens,
             ..CompletionOptions::default()
         }
     }
@@ -4158,6 +4265,9 @@ Rules:\n\
             // Planning repeatedly reuses the same standing prompt/transcript. Keep it in a
             // session-specific provider cache shard even though the planner has no tool checkpoint.
             prompt_cache_key: Some(format!("{}:architect", self.id)),
+            max_output_tokens: None,
+            reuse_response_chain: false,
+            response_chain_prefix_tokens: 0,
             response_format: None,
         };
 
@@ -4255,6 +4365,32 @@ Rules:\n\
             .filter(|m| m.visibility.is_llm())
             .map(|m| message_tokens(m) as u64)
             .sum()
+    }
+
+    /// Estimated request prefix another exact provider/model id would ingest cold.
+    ///
+    /// Provider telemetry exposes cached input only after a call and does not prove cache sharing,
+    /// so routing uses a conservative deterministic estimate: live transcript + system preamble +
+    /// stable ordered tool schemas. This is an affinity input, not billing accounting.
+    fn estimated_reusable_prefix_tokens(&self) -> u64 {
+        let preamble = self
+            .system_preamble()
+            .iter()
+            .map(|message| message_tokens(message) as u64)
+            .sum::<u64>();
+        let tools = self
+            .tool_specs()
+            .iter()
+            .map(|spec| {
+                tokens::count_text(&spec.name)
+                    + tokens::count_text(&spec.description)
+                    + tokens::count_text(&spec.schema.to_string())
+                    + 8
+            })
+            .sum::<usize>() as u64;
+        self.estimated_transcript_tokens()
+            .saturating_add(preamble)
+            .saturating_add(tools)
     }
 
     /// Context-window floor to hand the router for the next turn, so mesh auto-rotation never picks
@@ -5204,6 +5340,7 @@ prompt text, nothing else.";
         mut active_model: String,
         specs: &[ToolSpec],
         decision: Option<&forge_mesh::RoutingDecision>,
+        reuse_response_chain: bool,
         max_steps: usize,
         stream_idle: std::time::Duration,
     ) -> Result<ModelLoopOutcome, CoreError> {
@@ -5560,6 +5697,9 @@ prompt text, nothing else.";
                         temperature: Some(CODING_TEMPERATURE),
                         checkpoint: Some(checkpoint_ctx.clone()),
                         prompt_cache_key: Some(checkpoint_ctx.session.clone()),
+                        max_output_tokens: None,
+                        reuse_response_chain,
+                        response_chain_prefix_tokens: completion_prefix_tokens(&sent, specs),
                         response_format: None,
                     };
                     let fut = provider.complete_with(
@@ -6781,6 +6921,12 @@ prompt text, nothing else.";
         let mode = format!("{:?}", self.mode);
         self.store
             .ensure_session(&self.id, &self.workspace.display(), &mode)?;
+        // A completed turn's bulky tool logs remain available in the store/replay and in the
+        // working tree they inspected, but repeatedly resending them on every later model step
+        // makes long sessions grow quadratically. Reclaim them at every user-turn boundary instead
+        // of waiting until the model is already near context exhaustion. The newest messages stay
+        // verbatim; current-turn tool results are added only after this boundary.
+        let _ = prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT);
         let recap_tasks_before = self.tasks.clone();
         let working_tree_baseline = working_tree_status(Some(self.workspace.root()));
         self.last_context_pack = context_pack::ContextPack::default();
@@ -6855,7 +7001,11 @@ prompt text, nothing else.";
         let has_images = !self.pending_images.is_empty();
         // Routing happens before the current user message is appended, so the transcript is
         // exactly the bounded prior-turn context needed to interpret "continue", "fix that", etc.
-        let routing_context = RoutingContext::from_messages(&self.transcript);
+        let routing_context = RoutingContext::from_messages(&self.transcript)
+            .with_session_affinity(
+                self.route_affinity.clone(),
+                self.estimated_reusable_prefix_tokens(),
+            );
         let decision = self
             .router
             .route_contextual(
@@ -6874,6 +7024,12 @@ prompt text, nothing else.";
         // classifies (for tier stats) but the actual call uses the pin.
         let pinned = self.pinned_model.clone();
         let routed_model = pinned.unwrap_or_else(|| decision.model.clone());
+        let reuse_response_chain = should_reuse_response_chain(
+            prompt,
+            &routing_context,
+            self.route_affinity.as_ref(),
+            &routed_model,
+        );
 
         // No usable model: the router filters unkeyed models out of the chain (is_usable →
         // has_api_key), so the routed pick belongs to a key-needing provider with no key ONLY when
@@ -7032,6 +7188,32 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 context_pack::ContextSource::TurnContract,
                 "public-API preservation contract",
                 guidance,
+            )?;
+        }
+        let pristine_tests_required = prompt_requires_pristine_existing_tests(prompt)
+            || session_requires_pristine_existing_tests(&self.transcript);
+        let pristine_guidance_present = self.transcript.iter().any(|message| {
+            message.role == Role::System && message.content == PRISTINE_TEST_GUIDANCE
+        });
+        if pristine_tests_required && !pristine_guidance_present {
+            self.inject_context(
+                &mut context_pack,
+                context_pack::ContextSource::TurnContract,
+                "pristine existing-test contract",
+                PRISTINE_TEST_GUIDANCE,
+            )?;
+        }
+        let fault_seam_required = prompt_requires_fault_seam_audit(prompt);
+        let fault_seam_guidance_present = self
+            .transcript
+            .iter()
+            .any(|message| message.role == Role::System && message.content == FAULT_SEAM_GUIDANCE);
+        if fault_seam_required && !fault_seam_guidance_present {
+            self.inject_context(
+                &mut context_pack,
+                context_pack::ContextSource::TurnContract,
+                "production fault-injection seam contract",
+                FAULT_SEAM_GUIDANCE,
             )?;
         }
         if let Some(guidance) = contract.guidance() {
@@ -7230,7 +7412,14 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         };
         let primary_transcript_start = self.transcript.len();
         let outcome = self
-            .run_model_loop(edit_model, &specs, primary_decision, max_steps, stream_idle)
+            .run_model_loop(
+                edit_model,
+                &specs,
+                primary_decision,
+                reuse_response_chain,
+                max_steps,
+                stream_idle,
+            )
             .await?;
         let turn_tools_ran = outcome.tools_ran;
         let mut final_text = outcome.final_text;
@@ -7363,6 +7552,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                 active_model.clone(),
                                 &nudge_specs,
                                 primary_decision,
+                                reuse_response_chain,
                                 max_steps,
                                 stream_idle,
                             )
@@ -7400,8 +7590,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // BEFORE self-review/autofix so whatever state the model settles on is still checked.
         // Skipped past the soft deadline: no budget for a guard turn (same rationale as the
         // empty-diff nudge gate above).
+        let preserve_existing_tests =
+            self.expect_code_change || session_requires_pristine_existing_tests(&self.transcript);
         if self.config.mesh.guard_test_edits
-            && self.expect_code_change
+            && preserve_existing_tests
             && !self.past_turn_deadline()
             && !halted_by_loop_guard
         {
@@ -7426,6 +7618,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         active_model.clone(),
                         &guard_specs,
                         primary_decision,
+                        reuse_response_chain,
                         max_steps,
                         stream_idle,
                     )
@@ -7520,6 +7713,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     active_model.clone(),
                     &review_specs,
                     None,
+                    reuse_response_chain,
                     max_steps,
                     stream_idle,
                 )
@@ -7560,6 +7754,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         active_model.clone(),
                         &retry_specs,
                         None,
+                        reuse_response_chain,
                         max_steps,
                         stream_idle,
                     )
@@ -7596,6 +7791,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         active_model.clone(),
                         &retry_specs,
                         None,
+                        reuse_response_chain,
                         max_steps,
                         stream_idle,
                     )
@@ -7641,6 +7837,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         active_model.clone(),
                         &path_specs,
                         None,
+                        reuse_response_chain,
                         max_steps,
                         stream_idle,
                     )
@@ -7684,6 +7881,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                             active_model.clone(),
                             &retry_specs,
                             None,
+                            reuse_response_chain,
                             max_steps,
                             stream_idle,
                         )
@@ -7701,7 +7899,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             // There is no later model pass that needs those changes, so restore the original tests
             // deterministically before patch capture. New tests remain allowed by
             // `modified_test_files_in_tree`, matching the main guard's contract.
-            if self.config.mesh.guard_test_edits && self.expect_code_change {
+            if self.config.mesh.guard_test_edits && preserve_existing_tests {
                 let test_edits = modified_test_files_in_tree(Some(self.workspace.root()));
                 if !test_edits.is_empty() && stash_paths(Some(self.workspace.root()), &test_edits) {
                     self.presenter.emit(PresenterEvent::Warning(format!(
@@ -7762,6 +7960,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     active_model.clone(),
                     &rv_specs,
                     None,
+                    reuse_response_chain,
                     max_steps,
                     stream_idle,
                 )
@@ -7845,6 +8044,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                 active_model.clone(),
                                 &fix_specs,
                                 None,
+                                reuse_response_chain,
                                 max_steps,
                                 stream_idle,
                             )
@@ -7959,6 +8159,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     active_model.clone(),
                     &cont_specs,
                     None,
+                    reuse_response_chain,
                     max_steps,
                     stream_idle,
                 )
@@ -7978,6 +8179,14 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         } else {
             StopReason::FinalAnswer
         };
+        // Cache warmth follows the model that actually completed the turn after any failover and
+        // guard re-drive. It is intentionally in-memory/session-local and remains only an input to
+        // the next contextual mesh decision, never a pin.
+        self.route_affinity = Some(SessionAffinity {
+            model: active_model.clone(),
+            tier: decision.tier,
+            code_heavy: RouteHints::from_context(prompt, &routing_context).code_heavy,
+        });
         // A channel-backed interactive surface can keep receiving detached auxiliary results after
         // the main turn is done. Remember that capability before launching the side calls so the
         // input is never held hostage by recap/suggestion/memory provider latency.
@@ -10209,9 +10418,12 @@ pub fn update_tasks_spec() -> ToolSpec {
         name: UPDATE_TASKS_TOOL.to_string(),
         description: "Maintain a visible task list for multi-step work. Call it when you start a \
             task with 2+ steps and again whenever a step's state changes — pass the FULL ordered \
-            list each time (it replaces the previous one). Mark exactly one task `in_progress` \
-            while you work it, `done` the moment it's finished. Keep titles short and concrete. \
-            Skip it for trivial single-step requests."
+            list each time (it replaces the previous one). This is non-blocking bookkeeping: NEVER \
+            call this tool by itself when an independent read, edit, or check can advance the work; \
+            request both in the same response. A standalone update is only appropriate when no \
+            substantive next action exists, such as immediately before the final answer. Mark \
+            exactly one task `in_progress` while you work it and mark completed steps `done`. Keep \
+            titles short and concrete. Skip it for trivial single-step requests."
             .to_string(),
         schema: serde_json::json!({
             "type": "object",
@@ -10596,6 +10808,53 @@ mod tests {
     use forge_tui::HeadlessPresenter;
     use forge_types::SideEffect;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn response_chain_reuse_is_scoped_to_dependent_same_model_continuations() {
+        let context = RoutingContext::from_messages(&[
+            Message::user("debug the scheduler race condition and prove the fix"),
+            Message::assistant("I found the unsafe interleaving and am implementing the fix."),
+        ]);
+        let affinity = SessionAffinity {
+            model: "codex-oauth::gpt-5.6-sol".into(),
+            tier: TaskTier::Complex,
+            code_heavy: true,
+        };
+
+        assert!(should_reuse_response_chain(
+            "continue",
+            &context,
+            Some(&affinity),
+            "codex-oauth::gpt-5.6-sol",
+        ));
+        assert!(
+            !should_reuse_response_chain(
+                "continue",
+                &context,
+                Some(&affinity),
+                "codex-oauth::gpt-5.6-terra",
+            ),
+            "a model switch must not inherit another model's response chain"
+        );
+        assert!(
+            !should_reuse_response_chain(
+                "How many tasks are due today?",
+                &context,
+                Some(&affinity),
+                "codex-oauth::gpt-5.6-sol",
+            ),
+            "an unrelated task must start a fresh provider boundary"
+        );
+        assert!(
+            !should_reuse_response_chain(
+                "continue",
+                &RoutingContext::default(),
+                Some(&affinity),
+                "codex-oauth::gpt-5.6-sol",
+            ),
+            "a new session without an active task must not inherit affinity"
+        );
+    }
 
     #[tokio::test]
     async fn saved_workflow_persists_a_parent_replay_audit() {
@@ -12413,14 +12672,33 @@ mod tests {
     }
 
     #[test]
-    fn auxiliary_calls_use_low_effort_and_a_stable_cache_key() {
+    fn auxiliary_calls_use_low_effort_stable_cache_keys_and_bounded_outputs() {
         let opts = Session::auxiliary_completion_options("session-7", "shell-diagnose");
         assert_eq!(opts.effort, Some(EffortLevel::Low));
         assert_eq!(
             opts.prompt_cache_key.as_deref(),
             Some("session-7:shell-diagnose")
         );
+        assert_eq!(opts.max_output_tokens, Some(256));
         assert!(opts.response_format.is_none());
+
+        assert_eq!(
+            Session::auxiliary_completion_options("session-7", "recap").max_output_tokens,
+            Some(128)
+        );
+        assert_eq!(
+            Session::auxiliary_completion_options("session-7", "suggest").max_output_tokens,
+            Some(128)
+        );
+        assert_eq!(
+            Session::auxiliary_completion_options("session-7", "memory").max_output_tokens,
+            Some(256)
+        );
+        assert_eq!(
+            Session::auxiliary_completion_options("session-7", "compact").max_output_tokens,
+            None,
+            "conversation summaries scale with history and must keep the native limit"
+        );
     }
 
     #[test]
@@ -17296,6 +17574,137 @@ mod tests {
         );
     }
 
+    #[test]
+    fn explicit_no_weaken_contract_persists_across_session_transcript() {
+        let messages = vec![
+            Message::user(
+                "Fix the implementation. Do not weaken, skip, or delete tests; add coverage.",
+            ),
+            Message::assistant("Implementation in progress."),
+            Message::user("Continue the same work."),
+        ];
+        assert!(session_requires_pristine_existing_tests(&messages));
+        assert!(!session_requires_pristine_existing_tests(&[
+            Message::user("Add and update the tests for the new API."),
+            Message::assistant("Working."),
+        ]));
+    }
+
+    #[test]
+    fn fault_seam_audit_requires_an_explicit_production_failure_task() {
+        assert!(prompt_requires_fault_seam_audit(
+            "Exercise an injected storage failure and rollback every partial write."
+        ));
+        assert!(prompt_requires_fault_seam_audit(
+            "Use fault-injection to verify the persistence save path."
+        ));
+        assert!(!prompt_requires_fault_seam_audit(
+            "Review error handling and add ordinary edge-case tests."
+        ));
+        assert!(!prompt_requires_fault_seam_audit(
+            "Inject a clock so time-based tests are deterministic."
+        ));
+    }
+
+    #[tokio::test]
+    async fn pristine_test_guidance_is_proactive_and_injected_only_once_per_session() {
+        let provider = Arc::new(CountingFinalProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+
+        session
+            .run_turn("Review the suite and keep existing tests unchanged.")
+            .await
+            .unwrap();
+        session.run_turn("Continue the same review.").await.unwrap();
+
+        let guidance_positions = session
+            .transcript
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                (message.role == Role::System && message.content == PRISTINE_TEST_GUIDANCE)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            guidance_positions.len(),
+            1,
+            "the stable contract must not accumulate on continuation turns"
+        );
+        let first_user = session
+            .transcript
+            .iter()
+            .position(|message| message.role == Role::User)
+            .unwrap();
+        assert!(
+            guidance_positions[0] < first_user,
+            "the model must see the preventive contract before the task-defining prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn fault_seam_guidance_starts_on_triggering_turn_and_is_injected_once() {
+        let provider = Arc::new(CountingFinalProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+
+        let first_prompt = "Fix the persistence implementation and run its tests.";
+        let triggering_prompt =
+            "Now exercise an injected storage failure, rollback partial writes, and verify it.";
+        let continuation_prompt = "Continue the same rollback review.";
+        session.run_turn(first_prompt).await.unwrap();
+        session.run_turn(triggering_prompt).await.unwrap();
+        session.run_turn(continuation_prompt).await.unwrap();
+
+        let guidance_positions = session
+            .transcript
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                (message.role == Role::System && message.content == FAULT_SEAM_GUIDANCE)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            guidance_positions.len(),
+            1,
+            "the fault-seam contract must not accumulate on continuation turns"
+        );
+        let prompt_position = |prompt: &str| {
+            session
+                .transcript
+                .iter()
+                .position(|message| message.role == Role::User && message.content == prompt)
+                .unwrap()
+        };
+        let first_user = prompt_position(first_prompt);
+        let triggering_user = prompt_position(triggering_prompt);
+        let continuation_user = prompt_position(continuation_prompt);
+        assert!(
+            first_user < guidance_positions[0]
+                && guidance_positions[0] < triggering_user
+                && guidance_positions[0] < continuation_user,
+            "guidance must begin immediately before the first triggering turn"
+        );
+    }
+
     /// A throwaway git repo with a committed test file (plus a source file) whose test is then
     /// MODIFIED in the working tree — the xarray-3364 shape the guard exists for.
     fn repo_with_modified_test() -> std::path::PathBuf {
@@ -17362,6 +17771,41 @@ mod tests {
             !stashes.stdout.is_empty(),
             "the test edits must be stashed, not discarded"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn explicit_no_weaken_contract_arms_test_guard_in_regular_chat() {
+        let dir = repo_with_modified_test();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+
+        session
+            .run_turn("Fix the bug. Do not weaken, skip, or delete tests.")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+            "assert fix() == 1\n",
+            "explicit session contract must restore committed tests without bench mode"
+        );
+        let stashes = std::process::Command::new("git")
+            .args(["stash", "list"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(!stashes.stdout.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -17604,6 +18048,19 @@ mod tests {
     }
 
     // --- Minimal-diff bias (quality guards wave 4, fix 3) ---
+
+    #[test]
+    fn base_prompt_requires_evidence_without_redundant_verification() {
+        assert!(FORGE_SYSTEM.contains("one final complete"));
+        assert!(FORGE_SYSTEM.contains("Reuse still-current successful evidence"));
+        assert!(FORGE_SYSTEM.contains("do not rerun an unchanged check"));
+        assert!(FORGE_SYSTEM.contains("Fix failures before"));
+        assert!(FORGE_SYSTEM.contains("Plan bookkeeping is non-blocking"));
+        assert!(FORGE_SYSTEM.contains("NEVER call update_tasks by itself"));
+        assert!(update_tasks_spec()
+            .description
+            .contains("NEVER call this tool by itself"));
+    }
 
     #[test]
     fn minimal_diff_bias_stays_small() {
@@ -17939,6 +18396,14 @@ mod tests {
         let (store, mut session) = fixed_session(provider, router);
         let answer = session.run_turn("hi").await.unwrap();
         assert_eq!(answer, "good::model");
+        assert_eq!(
+            session
+                .route_affinity
+                .as_ref()
+                .map(|affinity| affinity.model.as_str()),
+            Some("good::model"),
+            "affinity must follow the model that actually completed after failover"
+        );
         assert!(store.current_benched().unwrap().is_benched("bad::model"));
     }
 
@@ -18559,6 +19024,52 @@ mod tests {
         assert!(msgs[0].content.contains("METHODOLOGY"));
         assert_eq!(msgs[1].role, Role::User);
         assert_eq!(msgs[1].content, "do the thing");
+    }
+
+    #[tokio::test]
+    async fn dependent_turn_proactively_prunes_bulky_completed_tool_output() {
+        let provider = Arc::new(FlakyProvider {
+            bad: std::collections::HashSet::new(),
+            err: rate_limited,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "good::model".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        let full_result = "diagnostic output ".repeat(1_000);
+        session.transcript = vec![
+            Message::user("first turn"),
+            Message::assistant_tool_calls(
+                "",
+                vec![forge_types::ToolCall {
+                    id: "old-shell".into(),
+                    name: "shell".into(),
+                    args: serde_json::json!({"command": "tests"}),
+                }],
+            ),
+            Message::tool_result("old-shell", full_result.clone()),
+            Message::assistant("first turn complete"),
+        ];
+        for note in ["recap", "suggest", "memory", "cost", "status", "done"] {
+            session.transcript.push(Message::system(note).ui_only());
+        }
+
+        session
+            .run_turn("continue the implementation")
+            .await
+            .unwrap();
+
+        let retained = session
+            .transcript
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("old-shell"))
+            .expect("old tool result remains represented");
+        assert!(retained.content.ends_with(PRUNE_MARKER));
+        assert!(retained.content.len() < full_result.len() / 5);
     }
 
     #[tokio::test]

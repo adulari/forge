@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SUITE="$ROOT/scripts/manual-e2e"
+source "$SUITE/capture_git_changes.sh"
 
 usage() {
   echo "usage: $0 <scenario> [--manual|--reference]"
@@ -34,6 +35,10 @@ else
   HARNESS_PROMPT_ARGS=(--prompt-file "$PROMPT_SOURCE")
   E2E_TOTAL_TIMEOUT="${FORGE_E2E_TIMEOUT:-1500}"
   HARNESS_TURN_TIMEOUT_ARGS=()
+fi
+HARNESS_GATE_ARGS=()
+if [[ -n "${FORGE_E2E_TURN_GATE_DIR:-}" ]]; then
+  HARNESS_GATE_ARGS=(--turn-gate-dir "$FORGE_E2E_TURN_GATE_DIR")
 fi
 
 if [[ "$MODE" == "--reference" ]]; then
@@ -224,6 +229,7 @@ else
     --log-prefix "$RUN_DIR/live" \
     --timeout "$E2E_TOTAL_TIMEOUT" \
     "${HARNESS_TURN_TIMEOUT_ARGS[@]}" \
+    "${HARNESS_GATE_ARGS[@]}" \
     -- "${FORGE_CHAT_COMMAND[@]}" | tee "$RUN_SUMMARY"
 
   SESSION_ID="$(python3 - "$RUN_SUMMARY" <<'PY'
@@ -256,6 +262,7 @@ PY
     | tee "$RUN_DIR/session-tool-integrity.json"
 fi
 
+VERIFICATION_STATUS=0
 case "$SCENARIO" in
   aetherfront)
     node "$SCENARIO_DIR/verify.js" "$WORKSPACE/index.html" "$RUN_DIR/screenshot.png"
@@ -283,10 +290,14 @@ case "$SCENARIO" in
     (cd "$WORKSPACE" && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets)
     ;;
   long-session-reservations)
-    (cd "$WORKSPACE" && python3 -m unittest discover -v 2>&1) \
-      | tee "$RUN_DIR/visible-tests.log"
-    python3 "$SCENARIO_DIR/verify.py" "$WORKSPACE" 2>&1 \
-      | tee "$RUN_DIR/hidden-tests.log"
+    if ! (cd "$WORKSPACE" && python3 -m unittest discover -v 2>&1) \
+      | tee "$RUN_DIR/visible-tests.log"; then
+      VERIFICATION_STATUS=1
+    fi
+    if ! python3 "$SCENARIO_DIR/verify.py" "$WORKSPACE" 2>&1 \
+      | tee "$RUN_DIR/hidden-tests.log"; then
+      VERIFICATION_STATUS=1
+    fi
     ;;
   interrupt-resume-large-write)
     python3 "$SCENARIO_DIR/verify.py" "$WORKSPACE/interrupted.txt"
@@ -301,10 +312,9 @@ PATCH_PATHS=(
   ':(exclude)**/*.pyc'
   ':(exclude)**/*.pyo'
 )
-git -C "$WORKSPACE" add -N -- "${PATCH_PATHS[@]}"
-git -C "$WORKSPACE" diff --binary "$BASE_COMMIT" -- "${PATCH_PATHS[@]}" \
-  >"$RUN_DIR/changes.patch"
-git -C "$WORKSPACE" diff --check "$BASE_COMMIT" -- "${PATCH_PATHS[@]}"
-git -C "$WORKSPACE" status --short -- "${PATCH_PATHS[@]}" >"$RUN_DIR/git-status.txt"
+if ! capture_git_changes "$WORKSPACE" "$BASE_COMMIT" "$RUN_DIR" "${PATCH_PATHS[@]}"; then
+  VERIFICATION_STATUS=1
+fi
 
 echo "saved run: $RUN_DIR"
+exit "$VERIFICATION_STATUS"

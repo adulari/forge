@@ -1,5 +1,6 @@
 import datetime as dt
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -106,6 +107,21 @@ class ForgeLongSessionSummaryTests(unittest.TestCase):
         not_interleaved = {**complete, "interleaving_verified": False}
         self.assertFalse(summary.hidden_result_passed(not_interleaved))
 
+    def test_failed_hidden_verifier_is_retained_as_structured_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "hidden-tests.log"
+            log.write_text(
+                "Traceback (most recent call last):\n"
+                "reservations.models.NotFound: unknown\n",
+                encoding="utf-8",
+            )
+
+            result = summary.hidden_result(log)
+
+            self.assertFalse(result["verification_completed"])
+            self.assertIn("before emitting", result["error"])
+            self.assertEqual(len(result["sha256"]), 64)
+
     def test_original_test_evidence_requires_replay_methods_and_support(self) -> None:
         base = {
             "test:test_service.py:Tests.test_contract": "original body",
@@ -164,6 +180,8 @@ class ForgeLongSessionSummaryTests(unittest.TestCase):
                 {
                     "session_id": "session-1",
                     "elapsed_s": 700,
+                    "quota_gate_wait_s": 12.5,
+                    "quota_gates": [{"turn": 2, "codex_weekly_percent": 8.0}],
                     "turns_expected": 6,
                     "turns": [
                         {"turn": number, "completed": True, "elapsed_s": 100}
@@ -178,6 +196,8 @@ class ForgeLongSessionSummaryTests(unittest.TestCase):
             [turn["turn"] for turn in merged["turns"]], [1, 2, 3, 4, 5, 6]
         )
         self.assertEqual(merged["attempt_elapsed_s"], 1_001)
+        self.assertEqual(merged["quota_gate_wait_s"], 12.5)
+        self.assertEqual(merged["quota_gates"][0]["turn"], 2)
         self.assertTrue(merged["attempts"][0]["operator_interrupted"])
         self.assertTrue(merged["attempts"][0]["prompt_dispatch_failed"])
 

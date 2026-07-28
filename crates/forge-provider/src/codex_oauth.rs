@@ -166,6 +166,59 @@ enum AccountSource {
     Memory(std::sync::Mutex<forge_config::oauth::OAuthAccountStore>),
 }
 
+struct TurnWebsocketState {
+    socket: Option<codex_websocket::CodexTurnWebsocket>,
+    turn_state: Option<String>,
+    resume_history: Option<codex_websocket::IncrementalHistory>,
+    turn_seq: i64,
+    chain_output_tokens: u64,
+    last_input_tokens: u64,
+    last_cached_input_tokens: u64,
+}
+
+struct TurnWebsocketEntry {
+    turn_seq: i64,
+    model: String,
+    account_id: Option<String>,
+    last_used: u64,
+    state: std::sync::Arc<tokio::sync::Mutex<TurnWebsocketState>>,
+}
+
+/// Keep a useful working set without retaining every historical Forge session and its live socket
+/// for the lifetime of a daemon. Busy entries are never evicted; a temporary overage is trimmed
+/// when a later session arrives after one becomes idle.
+const MAX_TURN_WEBSOCKET_SESSIONS: usize = 64;
+
+#[derive(Clone, Copy)]
+struct TurnWebsocketCall<'a> {
+    ws_url: &'a str,
+    account_id: Option<&'a str>,
+    token: &'a str,
+    chatgpt_account_id: &'a str,
+    model: &'a str,
+    checkpoint: &'a crate::CheckpointContext,
+    reuse_across_turns: bool,
+    response_chain_prefix_tokens: u64,
+    body: &'a serde_json::Value,
+}
+
+fn should_reuse_hidden_response_chain(
+    requested: bool,
+    chain_output_tokens: u64,
+    last_input_tokens: u64,
+    last_cached_input_tokens: u64,
+    reusable_prefix_tokens: u64,
+) -> bool {
+    if !requested || last_input_tokens == 0 || reusable_prefix_tokens == 0 {
+        return false;
+    }
+    let uncached = last_input_tokens.saturating_sub(last_cached_input_tokens);
+    let estimated_cold_prefix = reusable_prefix_tokens
+        .saturating_mul(uncached)
+        .div_ceil(last_input_tokens);
+    chain_output_tokens <= estimated_cold_prefix
+}
+
 /// Per-account ChatGPT account id (from the access-token JWT), keyed by store account id.
 /// Production loads it from the access token on each pick; tests inject via the store tokens.
 pub struct CodexOauthProvider {
@@ -182,6 +235,11 @@ pub struct CodexOauthProvider {
     /// `invalid_grant`).
     refresh_locks:
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    /// Incremental Responses WebSocket state keyed by Forge session. A dependent continuation may
+    /// retain the connection-local chain on the same model/account; an independent turn, model
+    /// switch, OAuth-account switch, or new Forge session replaces it.
+    turn_websockets: std::sync::Mutex<std::collections::HashMap<String, TurnWebsocketEntry>>,
+    turn_websocket_use_seq: std::sync::atomic::AtomicU64,
 }
 
 impl Default for CodexOauthProvider {
@@ -200,6 +258,8 @@ impl CodexOauthProvider {
             accounts: AccountSource::Keyring,
             test_account_header: None,
             refresh_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            turn_websockets: std::sync::Mutex::new(std::collections::HashMap::new()),
+            turn_websocket_use_seq: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -403,6 +463,173 @@ impl CodexOauthProvider {
         let account_id = pool.next();
         let (token, chatgpt_id) = self.access_token_for(account_id.as_deref()).await?;
         Ok((account_id, token, chatgpt_id))
+    }
+
+    fn turn_websocket_state(
+        &self,
+        checkpoint: &crate::CheckpointContext,
+        model: &str,
+        account_id: Option<&str>,
+        reuse_across_turns: bool,
+    ) -> std::sync::Arc<tokio::sync::Mutex<TurnWebsocketState>> {
+        let last_used = self
+            .turn_websocket_use_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut sessions = self
+            .turn_websockets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let reusable = sessions.get(&checkpoint.session).is_some_and(|entry| {
+            entry.model == model
+                && entry.account_id.as_deref() == account_id
+                && (entry.turn_seq == checkpoint.seq || reuse_across_turns)
+        });
+        if !reusable {
+            if !sessions.contains_key(&checkpoint.session) {
+                // A burst may temporarily exceed the soft bound when every prior entry is busy.
+                // Once entries become idle, remove enough of the oldest ones that inserting this
+                // session restores the configured bound instead of preserving the overage.
+                while sessions.len() >= MAX_TURN_WEBSOCKET_SESSIONS {
+                    let idle_lru = sessions
+                        .iter()
+                        .filter(|(_, entry)| std::sync::Arc::strong_count(&entry.state) == 1)
+                        .min_by_key(|(_, entry)| entry.last_used)
+                        .map(|(session, _)| session.clone());
+                    let Some(session) = idle_lru else {
+                        break;
+                    };
+                    sessions.remove(&session);
+                }
+            }
+            sessions.insert(
+                checkpoint.session.clone(),
+                TurnWebsocketEntry {
+                    turn_seq: checkpoint.seq,
+                    model: model.to_string(),
+                    account_id: account_id.map(str::to_owned),
+                    last_used,
+                    state: std::sync::Arc::new(tokio::sync::Mutex::new(TurnWebsocketState {
+                        socket: None,
+                        turn_state: None,
+                        resume_history: None,
+                        turn_seq: checkpoint.seq,
+                        chain_output_tokens: 0,
+                        last_input_tokens: 0,
+                        last_cached_input_tokens: 0,
+                    })),
+                },
+            );
+        } else if let Some(entry) = sessions.get_mut(&checkpoint.session) {
+            // A dependent continuation on the exact same session/model/account keeps the live
+            // connection-local Responses chain. Independent turns arrive with
+            // `reuse_across_turns=false` and replace the entry above even when the model matches.
+            entry.turn_seq = checkpoint.seq;
+            entry.last_used = last_used;
+        }
+        sessions
+            .get(&checkpoint.session)
+            .expect("turn websocket entry was inserted")
+            .state
+            .clone()
+    }
+
+    async fn execute_turn_websocket(
+        &self,
+        call: TurnWebsocketCall<'_>,
+        on_event: &mut EventSink<'_>,
+    ) -> Result<ModelResponse, ProviderError> {
+        let state = self.turn_websocket_state(
+            call.checkpoint,
+            call.model,
+            call.account_id,
+            call.reuse_across_turns,
+        );
+        let mut state = state.lock().await;
+        if state.turn_seq != call.checkpoint.seq {
+            let retain_hidden_chain = should_reuse_hidden_response_chain(
+                call.reuse_across_turns,
+                state.chain_output_tokens,
+                state.last_input_tokens,
+                state.last_cached_input_tokens,
+                call.response_chain_prefix_tokens,
+            );
+            if !retain_hidden_chain {
+                if let Some(socket) = state.socket.as_mut() {
+                    socket.reset_incremental_history();
+                }
+                state.resume_history = None;
+                state.chain_output_tokens = 0;
+            }
+            state.turn_seq = call.checkpoint.seq;
+        }
+        if state.socket.is_none() {
+            let mut socket = codex_websocket::CodexTurnWebsocket::connect(
+                call.ws_url,
+                call.token,
+                call.chatgpt_account_id,
+                state.turn_state.as_deref(),
+                &classify_codex_status,
+            )
+            .await?;
+            state.turn_state = socket.turn_state().map(str::to_owned);
+            if let Some(history) = state.resume_history.take() {
+                socket.restore_incremental_history(history);
+            }
+            state.socket = Some(socket);
+        }
+        let mut result = state
+            .socket
+            .as_mut()
+            .expect("turn websocket was connected")
+            .complete(call.body, on_event, classify_codex_status)
+            .await;
+        if result.as_ref().is_err_and(|error| {
+            error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("previous_response_not_found")
+        }) {
+            // The backend can evict an incremental response id while the turn is still alive.
+            // Reconnect on the same turn-state route and resend the full logical request once.
+            let socket = codex_websocket::CodexTurnWebsocket::connect(
+                call.ws_url,
+                call.token,
+                call.chatgpt_account_id,
+                state.turn_state.as_deref(),
+                &classify_codex_status,
+            )
+            .await?;
+            state.turn_state = socket.turn_state().map(str::to_owned);
+            state.resume_history = None;
+            state.socket = Some(socket);
+            result = state
+                .socket
+                .as_mut()
+                .expect("turn websocket was reconnected")
+                .complete(call.body, on_event, classify_codex_status)
+                .await;
+        }
+        if result.is_err() {
+            // Keep only the last fully acknowledged response chain. If this request failed before
+            // visible output, the caller reconnects once and resends its pending incremental suffix
+            // rather than paying for the full transcript again. The failed request itself is never
+            // recorded in this history, so replay cannot skip unacknowledged work.
+            state.resume_history = state
+                .socket
+                .as_ref()
+                .and_then(codex_websocket::CodexTurnWebsocket::incremental_history);
+            state.socket = None;
+        } else if let Ok(response) = &result {
+            state.chain_output_tokens = state
+                .chain_output_tokens
+                .saturating_add(response.usage.output_tokens);
+            state.last_input_tokens = response.usage.input_tokens;
+            state.last_cached_input_tokens = response
+                .usage
+                .cached_input_tokens
+                .min(response.usage.input_tokens);
+        }
+        result
     }
 
     async fn execute(
@@ -704,6 +931,10 @@ fn watch_visible_output<'a>(
     })
 }
 
+fn should_retry_incremental_websocket(error: &ProviderError, streamed: bool) -> bool {
+    !streamed && matches!(error, ProviderError::Unavailable(_))
+}
+
 fn fill_subscription_usage(mut response: ModelResponse, body: &serde_json::Value) -> ModelResponse {
     if response.usage.input_tokens == 0 {
         let request_chars = serde_json::to_string(body).map_or(0, |json| json.chars().count());
@@ -755,6 +986,83 @@ impl Provider for CodexOauthProvider {
         // Set once the first attempt puts text/reasoning on screen; from then on a hop would replay
         // it — see `watch_visible_output`.
         let mut streamed = false;
+
+        // Responses WebSocket mode appends tool results through `previous_response_id`. Forge keeps
+        // that connection-local chain across a user-turn boundary only when core classified the new
+        // turn as a dependent continuation on the same warm model; independent turns and identity
+        // changes start fresh. Sol/Terra retain HTTPS as a no-output fallback; Luna remains
+        // WebSocket-only. Auxiliary calls have no checkpoint and deliberately stay stateless.
+        if let Some(checkpoint) = opts
+            .checkpoint
+            .as_ref()
+            .filter(|_| codex_websocket::supports_incremental_session(model))
+            .filter(|_| !self.skip_host_pin)
+        {
+            let ws_url = codex_websocket::to_ws_url(&url)?;
+            let call = TurnWebsocketCall {
+                ws_url: &ws_url,
+                account_id: account_id.as_deref(),
+                token: &token,
+                chatgpt_account_id: &chatgpt_id,
+                model,
+                checkpoint,
+                reuse_across_turns: opts.reuse_response_chain,
+                response_chain_prefix_tokens: opts.response_chain_prefix_tokens,
+                body: &body,
+            };
+            let first = {
+                let mut watched = watch_visible_output(on_event, &mut streamed);
+                self.execute_turn_websocket(call, &mut *watched).await
+            };
+            let reconnected = match first {
+                Err(ref error) if should_retry_incremental_websocket(error, streamed) => {
+                    tracing::warn!(
+                        model,
+                        error = %error,
+                        "incremental Codex websocket dropped before visible output; reconnecting \
+                         once with the last acknowledged response chain"
+                    );
+                    let mut watched = watch_visible_output(on_event, &mut streamed);
+                    self.execute_turn_websocket(call, &mut *watched).await
+                }
+                other => other,
+            };
+            let ws_result = match reconnected {
+                Ok(response) => Ok(response),
+                Err(ref error) if should_hop_account(error) && pool.has_rotation() && !streamed => {
+                    let (account_id2, token2, id2) = self.pick_access_token(&pool).await?;
+                    self.execute_turn_websocket(
+                        TurnWebsocketCall {
+                            ws_url: &ws_url,
+                            account_id: account_id2.as_deref(),
+                            token: &token2,
+                            chatgpt_account_id: &id2,
+                            model,
+                            checkpoint,
+                            reuse_across_turns: opts.reuse_response_chain,
+                            response_chain_prefix_tokens: opts.response_chain_prefix_tokens,
+                            body: &body,
+                        },
+                        on_event,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            match ws_result {
+                Ok(response) => return Ok(fill_subscription_usage(response, &body)),
+                Err(error) if codex_websocket::is_websocket_model(model) || streamed => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        model,
+                        error = %error,
+                        "incremental Codex websocket unavailable; falling back to full HTTPS request"
+                    );
+                }
+            }
+        }
 
         // "v1"-tagged models (currently just Luna) 404 ("Model not found") over the plain HTTPS
         // path above — the ChatGPT backend serves them ONLY over WebSocket. Everything else keeps
@@ -819,6 +1127,7 @@ impl Provider for CodexOauthProvider {
 mod tests {
     use super::*;
     use forge_types::Role;
+    use futures::{SinkExt, StreamExt};
 
     #[tokio::test]
     #[ignore = "uses the real ChatGPT subscription; run explicitly with network + codex-oauth auth"]
@@ -894,6 +1203,425 @@ mod tests {
         apply_codex_body_overrides(&mut bare, &Default::default());
         assert!(bare.get("prompt_cache_key").is_none());
         assert!(bare.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn incremental_websocket_state_is_bounded_by_turn_model_and_account() {
+        let provider = CodexOauthProvider::new();
+        let checkpoint = crate::CheckpointContext {
+            session: "session-1".into(),
+            seq: 10,
+            root: "/tmp/checkpoints".into(),
+            workspace: "/tmp/workspace".into(),
+            mode: "ask".into(),
+        };
+        let first = provider.turn_websocket_state(
+            &checkpoint,
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-a"),
+            false,
+        );
+        let same = provider.turn_websocket_state(
+            &checkpoint,
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-a"),
+            false,
+        );
+        assert!(std::sync::Arc::ptr_eq(&first, &same));
+
+        let dependent_turn = provider.turn_websocket_state(
+            &crate::CheckpointContext {
+                seq: 11,
+                ..checkpoint.clone()
+            },
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-a"),
+            true,
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &dependent_turn),
+            "a classified dependent continuation keeps the connection-local response chain"
+        );
+
+        let independent_turn = provider.turn_websocket_state(
+            &crate::CheckpointContext {
+                seq: 12,
+                ..checkpoint.clone()
+            },
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-a"),
+            false,
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &independent_turn),
+            "an independent turn must start a fresh provider boundary"
+        );
+
+        let next_model = provider.turn_websocket_state(
+            &checkpoint,
+            "codex-oauth::gpt-5.6-terra",
+            Some("account-a"),
+            true,
+        );
+        assert!(!std::sync::Arc::ptr_eq(&independent_turn, &next_model));
+
+        let next_account = provider.turn_websocket_state(
+            &checkpoint,
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-b"),
+            true,
+        );
+        assert!(!std::sync::Arc::ptr_eq(&next_model, &next_account));
+
+        let next_session = provider.turn_websocket_state(
+            &crate::CheckpointContext {
+                session: "session-2".into(),
+                ..checkpoint
+            },
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-b"),
+            true,
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&next_account, &next_session),
+            "a new Forge session must never inherit another session's response chain"
+        );
+    }
+
+    #[test]
+    fn hidden_response_chain_reuse_is_bounded_by_observed_carry_cost() {
+        assert!(should_reuse_hidden_response_chain(
+            true, 2_000, 10_000, 5_000, 8_000,
+        ));
+        assert!(!should_reuse_hidden_response_chain(
+            true, 4_001, 10_000, 5_000, 8_000,
+        ));
+        assert!(!should_reuse_hidden_response_chain(
+            true, 500, 10_000, 9_500, 8_000,
+        ));
+        assert!(!should_reuse_hidden_response_chain(
+            false, 1, 10_000, 0, 8_000,
+        ));
+        assert!(!should_reuse_hidden_response_chain(true, 1, 0, 0, 8_000));
+        assert!(!should_reuse_hidden_response_chain(true, 1, 10_000, 0, 0,));
+    }
+
+    #[test]
+    fn incremental_websocket_state_evicts_idle_lru_sessions_but_not_busy_ones() {
+        let provider = CodexOauthProvider::new();
+        let checkpoint = |session: usize| crate::CheckpointContext {
+            session: format!("session-{session}"),
+            seq: 10,
+            root: "/tmp/checkpoints".into(),
+            workspace: "/tmp/workspace".into(),
+            mode: "ask".into(),
+        };
+        let busy = provider.turn_websocket_state(
+            &checkpoint(0),
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-a"),
+            false,
+        );
+        for session in 1..MAX_TURN_WEBSOCKET_SESSIONS {
+            drop(provider.turn_websocket_state(
+                &checkpoint(session),
+                "codex-oauth::gpt-5.6-sol",
+                Some("account-a"),
+                false,
+            ));
+        }
+
+        drop(provider.turn_websocket_state(
+            &checkpoint(MAX_TURN_WEBSOCKET_SESSIONS),
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-a"),
+            false,
+        ));
+        {
+            let sessions = provider.turn_websockets.lock().expect("session map");
+            assert_eq!(sessions.len(), MAX_TURN_WEBSOCKET_SESSIONS);
+            assert!(sessions.contains_key("session-0"));
+            assert!(!sessions.contains_key("session-1"));
+            assert!(sessions.contains_key(&format!("session-{}", MAX_TURN_WEBSOCKET_SESSIONS)));
+        }
+
+        drop(busy);
+        drop(provider.turn_websocket_state(
+            &checkpoint(MAX_TURN_WEBSOCKET_SESSIONS + 1),
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-a"),
+            false,
+        ));
+        let sessions = provider.turn_websockets.lock().expect("session map");
+        assert_eq!(sessions.len(), MAX_TURN_WEBSOCKET_SESSIONS);
+        assert!(!sessions.contains_key("session-0"));
+    }
+
+    #[test]
+    fn incremental_websocket_state_trims_all_busy_overage_once_entries_are_idle() {
+        let provider = CodexOauthProvider::new();
+        let checkpoint = |session: usize| crate::CheckpointContext {
+            session: format!("busy-session-{session}"),
+            seq: 10,
+            root: "/tmp/checkpoints".into(),
+            workspace: "/tmp/workspace".into(),
+            mode: "ask".into(),
+        };
+        let busy = (0..MAX_TURN_WEBSOCKET_SESSIONS)
+            .map(|session| {
+                provider.turn_websocket_state(
+                    &checkpoint(session),
+                    "codex-oauth::gpt-5.6-sol",
+                    Some("account-a"),
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        drop(provider.turn_websocket_state(
+            &checkpoint(MAX_TURN_WEBSOCKET_SESSIONS),
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-a"),
+            false,
+        ));
+        assert_eq!(
+            provider.turn_websockets.lock().expect("session map").len(),
+            MAX_TURN_WEBSOCKET_SESSIONS + 1,
+            "all-busy state may temporarily exceed the soft bound"
+        );
+
+        drop(busy);
+        drop(provider.turn_websocket_state(
+            &checkpoint(MAX_TURN_WEBSOCKET_SESSIONS + 1),
+            "codex-oauth::gpt-5.6-sol",
+            Some("account-a"),
+            false,
+        ));
+        assert_eq!(
+            provider.turn_websockets.lock().expect("session map").len(),
+            MAX_TURN_WEBSOCKET_SESSIONS,
+            "a later insertion must fully trim idle overage"
+        );
+    }
+
+    #[test]
+    fn incremental_websocket_reconnect_is_bounded_by_visible_output_and_error_kind() {
+        assert!(should_retry_incremental_websocket(
+            &ProviderError::Unavailable("socket closed".into()),
+            false
+        ));
+        assert!(
+            !should_retry_incremental_websocket(
+                &ProviderError::Unavailable("socket closed".into()),
+                true
+            ),
+            "visible partial output must never be replayed automatically"
+        );
+        assert!(!should_retry_incremental_websocket(
+            &ProviderError::RateLimited {
+                message: "quota".into(),
+                retry_after: None,
+            },
+            false
+        ));
+        assert!(!should_retry_incremental_websocket(
+            &ProviderError::Request("invalid response id".into()),
+            false
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::result_large_err,
+        reason = "tungstenite's required handshake callback owns its large HTTP error response"
+    )]
+    async fn turn_state_reconnect_replays_only_the_pending_incremental_suffix() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (frames_tx, frames_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            let handshake =
+                |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert(
+                        "x-codex-turn-state",
+                        tokio_tungstenite::tungstenite::http::HeaderValue::from_static(
+                            "turn-state-1",
+                        ),
+                    );
+                    Ok(response)
+                };
+
+            let (first_stream, _) = listener.accept().await.unwrap();
+            let mut first_socket = tokio_tungstenite::accept_hdr_async(first_stream, handshake)
+                .await
+                .unwrap();
+            let tokio_tungstenite::tungstenite::Message::Text(frame) =
+                first_socket.next().await.unwrap().unwrap()
+            else {
+                panic!("expected first text request");
+            };
+            frames.push(serde_json::from_str::<serde_json::Value>(&frame).unwrap());
+            first_socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({
+                        "type": "response.output_item.done",
+                        "item": {
+                            "type": "function_call",
+                            "call_id": "call-1",
+                            "name": "shell",
+                            "arguments": "{\"command\":\"true\"}",
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            first_socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp-1",
+                            "usage": {
+                                "input_tokens": 1200,
+                                "output_tokens": 10,
+                                "input_tokens_details": {"cached_tokens": 1024}
+                            },
+                            "output": []
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            let tokio_tungstenite::tungstenite::Message::Text(frame) =
+                first_socket.next().await.unwrap().unwrap()
+            else {
+                panic!("expected pending incremental request");
+            };
+            frames.push(serde_json::from_str::<serde_json::Value>(&frame).unwrap());
+            first_socket.close(None).await.unwrap();
+
+            let (retry_stream, _) = listener.accept().await.unwrap();
+            let mut retry_socket = tokio_tungstenite::accept_hdr_async(retry_stream, handshake)
+                .await
+                .unwrap();
+            let tokio_tungstenite::tungstenite::Message::Text(frame) =
+                retry_socket.next().await.unwrap().unwrap()
+            else {
+                panic!("expected retried incremental request");
+            };
+            frames.push(serde_json::from_str::<serde_json::Value>(&frame).unwrap());
+            retry_socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp-2",
+                            "usage": {
+                                "input_tokens": 1300,
+                                "output_tokens": 10,
+                                "input_tokens_details": {"cached_tokens": 1024}
+                            },
+                            "output": []
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            frames_tx.send(frames).unwrap();
+        });
+
+        let provider = CodexOauthProvider::new();
+        let checkpoint = crate::CheckpointContext {
+            session: "reconnect-session".into(),
+            seq: 42,
+            root: "/tmp/checkpoints".into(),
+            workspace: "/tmp/workspace".into(),
+            mode: "ask".into(),
+        };
+        let ws_url = format!("ws://{address}/responses");
+        let first = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [{"role": "user", "content": "task"}],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+            "stream": true,
+            "prompt_cache_key": "session-1",
+        });
+        let second = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"role": "user", "content": "task"},
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "shell",
+                    "arguments": "{\"command\":\"true\"}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "ok",
+                }
+            ],
+            "tools": [{"type": "function", "name": "shell"}],
+            "store": false,
+            "stream": true,
+            "prompt_cache_key": "session-1",
+        });
+        let first_call = TurnWebsocketCall {
+            ws_url: &ws_url,
+            account_id: Some("account-1"),
+            token: "test-token",
+            chatgpt_account_id: "test-chatgpt-account",
+            model: "codex-oauth::gpt-5.6-sol",
+            checkpoint: &checkpoint,
+            reuse_across_turns: false,
+            response_chain_prefix_tokens: 0,
+            body: &first,
+        };
+        let mut sink = |_: StreamEvent| {};
+        provider
+            .execute_turn_websocket(first_call, &mut sink)
+            .await
+            .unwrap();
+
+        let second_call = TurnWebsocketCall {
+            body: &second,
+            ..first_call
+        };
+        let error = provider
+            .execute_turn_websocket(second_call, &mut sink)
+            .await
+            .unwrap_err();
+        assert!(should_retry_incremental_websocket(&error, false));
+        provider
+            .execute_turn_websocket(second_call, &mut sink)
+            .await
+            .unwrap();
+
+        let frames = frames_rx.await.unwrap();
+        server.await.unwrap();
+        assert_eq!(frames[0].get("previous_response_id"), None);
+        assert_eq!(frames[1]["previous_response_id"], "resp-1");
+        assert_eq!(frames[2]["previous_response_id"], "resp-1");
+        assert_eq!(frames[1]["input"], frames[2]["input"]);
+        assert_eq!(
+            frames[2]["input"],
+            serde_json::json!([{
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "ok",
+            }])
+        );
     }
 
     #[test]

@@ -144,6 +144,34 @@ impl LlmRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn decide_contextual(
+        &self,
+        tier: TaskTier,
+        rationale: String,
+        budget: BudgetState,
+        health: &ModelHealth,
+        hints: RouteHints,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        has_images: bool,
+        context: &RoutingContext,
+    ) -> RoutingDecision {
+        let decision = self.fallback.decide(
+            tier, rationale, budget, health, hints, quota, effort, has_images,
+        );
+        self.fallback.apply_session_affinity(
+            decision,
+            context,
+            hints,
+            health,
+            quota,
+            effort,
+            budget.min_context_tokens,
+            has_images,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn route_with_context(
         &self,
         prompt: &str,
@@ -168,7 +196,7 @@ impl LlmRouter {
         let key = prompt_hash(activity, &classifier_prompt);
         if let Some(llm_tier) = self.cached(key) {
             let tier = guard_tier(llm_tier, deterministic_tier, hints.code_heavy);
-            return self.fallback.decide(
+            return self.decide_contextual(
                 tier,
                 format!(
                     "cached classifier result: {}; deterministic floor: {}",
@@ -181,6 +209,7 @@ impl LlmRouter {
                 quota,
                 effort,
                 has_images,
+                context,
             );
         }
 
@@ -223,7 +252,7 @@ impl LlmRouter {
             Some((model, llm_tier)) => {
                 self.store(key, llm_tier);
                 let tier = guard_tier(llm_tier, deterministic_tier, hints.code_heavy);
-                self.fallback.decide(
+                self.decide_contextual(
                     tier,
                     format!(
                         "classified by {model} as {}; deterministic floor: {}",
@@ -236,6 +265,7 @@ impl LlmRouter {
                     quota,
                     effort,
                     has_images,
+                    context,
                 )
             }
             None => {
@@ -325,16 +355,20 @@ impl Router for LlmRouter {
         context: &RoutingContext,
     ) -> RoutingDecision {
         match tier_override {
-            Some(tier) => self.fallback.decide(
-                tier,
-                format!("tier hint: {}", tier.as_str()),
-                budget,
-                health,
-                RouteHints::from_context(prompt, context),
-                quota,
-                effort,
-                has_images,
-            ),
+            Some(tier) => {
+                let hints = RouteHints::from_context(prompt, context);
+                self.decide_contextual(
+                    tier,
+                    format!("tier hint: {}", tier.as_str()),
+                    budget,
+                    health,
+                    hints,
+                    quota,
+                    effort,
+                    has_images,
+                    context,
+                )
+            }
             None => {
                 self.route_with_context(
                     prompt, has_images, budget, health, quota, effort, project, context,
@@ -353,6 +387,7 @@ impl Router for LlmRouter {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use forge_mesh::{BenchmarkScores, ModelCatalog, SessionAffinity};
     use forge_provider::{EventSink, ModelResponse, ProviderError, ToolSpec};
 
     /// A provider that returns a fixed classification reply, or an error.
@@ -450,6 +485,94 @@ mod tests {
         let provider = Arc::new(FakeProvider(reply.map(String::from)));
         let fallback = HeuristicRouter::new(forge_config::Config::default());
         LlmRouter::new(provider, vec!["ollama::tiny".into()], fallback)
+    }
+
+    fn affinity_llm_router(reply: &str) -> LlmRouter {
+        let mut scores = BenchmarkScores::new();
+        scores.insert("wrapper best", 60.0, 77.4);
+        scores.insert("wrapper warm", 59.0, 76.8);
+        let mut config = forge_config::Config::default();
+        config.mesh.auto_discover = true;
+        let fallback = HeuristicRouter::new(config).with_catalog(
+            ModelCatalog::new(vec![
+                "ollama::wrapper-best".into(),
+                "ollama::wrapper-warm".into(),
+            ])
+            .with_benchmarks(Some(scores)),
+        );
+        LlmRouter::new(
+            Arc::new(FakeProvider(Ok(reply.into()))),
+            vec!["classifier::model".into()],
+            fallback,
+        )
+    }
+
+    fn affinity_context() -> RoutingContext {
+        RoutingContext::from_messages(&[
+            Message::user(
+                "Diagnose and fix the concurrent reservation algorithm, prove correctness, and \
+                 run the complete stress suite.",
+            ),
+            Message::assistant("The implementation is in progress; continue with verification."),
+        ])
+        .with_session_affinity(
+            Some(SessionAffinity {
+                model: "ollama::wrapper-warm".into(),
+                tier: TaskTier::Complex,
+                code_heavy: true,
+            }),
+            48_000,
+        )
+    }
+
+    #[tokio::test]
+    async fn llm_classifier_wrapper_preserves_long_continuation_affinity() {
+        let decision = affinity_llm_router("complex")
+            .route_contextual(
+                "Continue from the current implementation. Keep working through the existing \
+                 concurrency cases, preserve the public API, and rerun the complete suite before \
+                 reporting the result.",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                None,
+                &ProjectContext::default(),
+                &affinity_context(),
+            )
+            .await;
+
+        assert_eq!(decision.model, "ollama::wrapper-warm");
+        assert!(decision
+            .rationale
+            .contains("classified by classifier::model"));
+        assert!(decision.rationale.contains("session affinity retained"));
+        assert!(decision.rationale.contains("48000-token cold prefix"));
+    }
+
+    #[tokio::test]
+    async fn llm_classifier_wrapper_applies_quality_critical_override() {
+        let decision = affinity_llm_router("complex")
+            .route_contextual(
+                "Continue from the current implementation. Add adversarial coverage for one \
+                 hundred concurrent requests, inspect every failure path, and rerun the complete \
+                 suite.",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                None,
+                &ProjectContext::default(),
+                &affinity_context(),
+            )
+            .await;
+
+        assert_eq!(decision.model, "ollama::wrapper-best");
+        assert!(decision
+            .rationale
+            .contains("0.50-point quality-critical band"));
     }
 
     #[tokio::test]

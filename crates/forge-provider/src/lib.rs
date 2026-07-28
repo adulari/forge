@@ -824,8 +824,36 @@ pub struct CompletionOptions {
     /// [`CheckpointContext::session`]; Forge's auxiliary calls use a purpose-scoped derivative so
     /// compaction/recap/diagnosis prefixes cache automatically without colliding with the main loop.
     pub prompt_cache_key: Option<String>,
+    /// Per-call output ceiling. This is intentionally narrower than the provider-wide
+    /// `mesh.max_output_tokens` setting: tiny auxiliary calls such as recap and suggestion can
+    /// bound a misbehaving model without constraining the main coding turn. Providers that reject
+    /// output caps may omit it.
+    pub max_output_tokens: Option<u32>,
+    /// A provider may retain a stateful response chain across this user-turn boundary. Main-loop
+    /// callers set this only for a mesh-classified dependent continuation on the same warm model;
+    /// the provider must still scope reuse to the exact session/model/account and verify that the
+    /// new logical input extends the acknowledged chain. `false` starts a fresh turn boundary.
+    pub reuse_response_chain: bool,
+    /// Visible reusable request prefix at this completion boundary. Stateful providers compare
+    /// this with observed cache and hidden-chain carry costs before retaining a response id across
+    /// user turns. Zero means the caller has no defensible estimate.
+    pub response_chain_prefix_tokens: u64,
     /// Structured-output request (OpenAI `response_format`). `None` = provider default (free text).
     pub response_format: Option<ResponseFormat>,
+}
+
+pub(crate) fn effective_output_token_cap(
+    provider_cap: Option<u32>,
+    per_call_cap: Option<u32>,
+) -> Option<u32> {
+    match (
+        provider_cap.filter(|cap| *cap > 0),
+        per_call_cap.filter(|cap| *cap > 0),
+    ) {
+        (Some(global), Some(per_call)) => Some(global.min(per_call)),
+        (Some(global), None) => Some(global),
+        (None, per_call) => per_call,
+    }
 }
 
 /// A model backend. Implement this trait (and nothing in the core) to add a provider.

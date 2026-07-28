@@ -172,24 +172,163 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
 }
 
 fn has_untrustworthy_control_flow(command: &str) -> bool {
-    if command.contains(';')
-        || command.contains("||")
-        || has_standalone_background_operator(command)
+    let shell = strip_heredoc_bodies(command);
+    let operators = strip_quoted_literals(&shell);
+    if operators.contains(';')
+        || operators.contains("||")
+        || has_standalone_background_operator(&operators)
     {
         return true;
     }
-    if command.contains('\n')
-        && (!starts_with_errexit(command) || later_disables_or_masks_errexit(command))
+    if shell.lines().filter(|line| !line.trim().is_empty()).count() > 1
+        && (!starts_with_errexit(&shell) || later_disables_or_masks_errexit(&shell))
     {
         return true;
     }
-    let bytes = command.as_bytes();
+    let bytes = operators.as_bytes();
     let has_pipeline = bytes.iter().enumerate().any(|(index, byte)| {
         *byte == b'|'
             && index.checked_sub(1).and_then(|i| bytes.get(i)) != Some(&b'|')
             && bytes.get(index + 1) != Some(&b'|')
     });
-    has_pipeline && !enables_pipefail(command)
+    has_pipeline && !enables_pipefail(&shell)
+}
+
+/// Remove heredoc payloads before evaluating shell control flow. Python/Ruby/SQL embedded in a
+/// fail-fast shell command can legitimately contain `if`, `while`, pipes, and semicolons; those
+/// tokens are data consumed by the heredoc command and cannot mask the shell command's exit code.
+fn strip_heredoc_bodies(command: &str) -> String {
+    let mut output = String::with_capacity(command.len());
+    let mut delimiter: Option<String> = None;
+    for line in command.lines() {
+        if let Some(expected) = delimiter.as_deref() {
+            if line.trim() == expected {
+                delimiter = None;
+            }
+            output.push('\n');
+            continue;
+        }
+        output.push_str(line);
+        output.push('\n');
+        delimiter = heredoc_delimiter(line);
+    }
+    output
+}
+
+fn heredoc_delimiter(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' && quote != Some(b'\'') {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            if quote == Some(byte) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(byte);
+            }
+            index += 1;
+            continue;
+        }
+        if quote.is_none()
+            && byte == b'<'
+            && bytes.get(index + 1) == Some(&b'<')
+            && bytes.get(index + 2) != Some(&b'<')
+        {
+            index += 2;
+            if bytes.get(index) == Some(&b'-') {
+                index += 1;
+            }
+            while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                index += 1;
+            }
+            let delimiter_quote = bytes
+                .get(index)
+                .copied()
+                .filter(|byte| matches!(byte, b'\'' | b'"'));
+            if delimiter_quote.is_some() {
+                index += 1;
+            }
+            let start = index;
+            while let Some(byte) = bytes.get(index) {
+                if delimiter_quote == Some(*byte)
+                    || (delimiter_quote.is_none()
+                        && (byte.is_ascii_whitespace()
+                            || matches!(*byte, b';' | b'|' | b'&' | b'<' | b'>')))
+                {
+                    break;
+                }
+                index += 1;
+            }
+            return (index > start).then(|| line[start..index].to_string());
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Mask single-quoted literal contents before looking for shell operators.
+///
+/// Double-quoted text is deliberately preserved: command substitutions (`$(...)` and backticks)
+/// execute inside double quotes and can mask a failing verification. Treating an inert semicolon
+/// in a double-quoted label as suspicious is a safe false negative; accepting a masked check is not.
+fn strip_quoted_literals(command: &str) -> String {
+    let first_line_words = command
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let invokes_shell_command_string = first_line_words
+        .iter()
+        .enumerate()
+        .find(|(_, word)| {
+            word.rsplit('/')
+                .next()
+                .is_some_and(|shell| matches!(shell, "bash" | "zsh" | "ksh" | "sh"))
+        })
+        .is_some_and(|(shell_index, _)| {
+            first_line_words[shell_index + 1..].iter().any(|word| {
+                word.strip_prefix('-')
+                    .is_some_and(|flags| !flags.starts_with('-') && flags.contains('c'))
+            })
+        });
+    if invokes_shell_command_string {
+        // Quotes delimit executable shell source after `-c`, not inert data. Preserve its
+        // operators so `sh -c 'tests; true'` cannot be accepted as trustworthy evidence.
+        return command.to_string();
+    }
+    let bytes = command.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut quote: Option<u8> = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' && quote != Some(b'\'') {
+            output.push(byte);
+            if let Some(next) = bytes.get(index + 1) {
+                output.push(*next);
+            }
+            index += 2;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            if quote == Some(byte) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(byte);
+            }
+            output.push(b' ');
+        } else {
+            output.push(if quote == Some(b'\'') { b' ' } else { byte });
+        }
+        index += 1;
+    }
+    String::from_utf8(output).expect("shell command began as UTF-8")
 }
 
 fn starts_with_errexit(command: &str) -> bool {
@@ -575,6 +714,91 @@ mod tests {
             ),
             VerificationObservation::Check(VerificationFamily::Test),
             "a pipeline with active pipefail preserves the test exit status"
+        );
+    }
+
+    #[test]
+    fn heredoc_program_syntax_does_not_hide_trustworthy_shell_verification() {
+        let benchmark_shape = r#"set -eu
+python - <<'PY'
+for filename in files:
+    if filename.endswith(".py"):
+        print("tests passed; signatures unchanged")
+PY
+python -m compileall -q reservations tests
+python -m unittest discover -v
+git diff --check
+"#;
+        assert_eq!(
+            classify_tool(
+                "shell",
+                &serde_json::json!({ "command": benchmark_shape }).to_string()
+            ),
+            VerificationObservation::Check(VerificationFamily::Test),
+            "control-flow tokens inside a heredoc are not shell status masking"
+        );
+
+        let one_fail_fast_chain = r#"python -m compileall -q reservations tests && python -m unittest discover -v && python - <<'PY'
+if tests_are_pristine:
+    print("public surface matches base; tests unchanged")
+PY
+"#;
+        assert_eq!(
+            classify_tool(
+                "shell",
+                &serde_json::json!({ "command": one_fail_fast_chain }).to_string()
+            ),
+            VerificationObservation::Check(VerificationFamily::Test),
+            "one top-level AND chain remains fail-fast even when its final command uses a heredoc"
+        );
+
+        let masked_after_heredoc = r#"set -e
+python - <<'PY'
+print("probe")
+PY
+python -m unittest discover -v || true
+"#;
+        assert_eq!(
+            classify_tool(
+                "shell",
+                &serde_json::json!({ "command": masked_after_heredoc }).to_string()
+            ),
+            VerificationObservation::Ignore
+        );
+        assert_eq!(
+            classify_tool(
+                "shell",
+                &serde_json::json!({
+                    "command": "bash -c 'python -m unittest discover -v; true'"
+                })
+                .to_string()
+            ),
+            VerificationObservation::Ignore,
+            "quoted source passed to a shell -c remains executable control flow"
+        );
+        for command in [
+            "bash -ec 'python -m unittest discover -v; true'",
+            "env VERIFY=1 /bin/sh -lc 'python -m unittest discover -v; true'",
+        ] {
+            assert_eq!(
+                classify_tool(
+                    "shell",
+                    &serde_json::json!({ "command": command }).to_string()
+                ),
+                VerificationObservation::Ignore,
+                "combined shell flags and env wrappers must not hide executable control flow"
+            );
+        }
+        assert_eq!(
+            classify_tool(
+                "shell",
+                &serde_json::json!({
+                    "command": "echo \"$(python -m unittest discover -v; true)\""
+                })
+                .to_string()
+            ),
+            VerificationObservation::Ignore,
+            "command substitution inside double quotes can still mask a failed verification"
         );
     }
 
