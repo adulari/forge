@@ -1,11 +1,12 @@
 # Forge matched long-session stress benchmark — 2026-07-28
 
-This is the current long-session result. It contains a fully matched comparison between regular
-full-mesh Forge auto, native Codex CLI, and native Claude Code on the same six-prompt workload.
-Honest review excluded the first native Claude cell because its synthetic base accidentally tracked
-one generated `tests/__pycache__/*.pyc` file. The clean Claude replacement used the exact accepted
-tree, completed all six Opus 5 turns after authentication was restored, and is the only Claude cell
-used in the headline.
+This is the current long-session result. It contains a fully matched comparison between
+cache-aware regular full-mesh Forge auto, native Codex CLI, and native Claude Code on the same
+six-prompt workload. Native cells were retained rather than rerun. Honest review excluded the first
+native Claude cell because its synthetic base accidentally tracked one generated
+`tests/__pycache__/*.pyc` file. The clean Claude replacement used the exact accepted tree, completed
+all six Opus 5 turns after authentication was restored, and is the only Claude cell used in the
+headline.
 
 A follow-up skeptical review strengthened the hidden acceptance with 100 deterministically
 alternating reserve/cancel operations and injected cancellation-write rollback. Free replays passed
@@ -13,37 +14,52 @@ on the retained valid Forge and Codex workspaces; no paid rerun was needed. The 
 interrupt state leak, repeated Claude stream-snapshot output, and weak native quota-ledger
 validation. Those fixes and replays are recorded below.
 
+The cache-aware follow-up adds quality-bounded, session-local affinity; stable reusable request
+prefixes; incremental Codex response-chain reuse; proactive old tool-log pruning; and non-blocking
+task-list updates batched with independent substantive tools. The final clean confirmation passed
+the 16-test visible suite, hidden acceptance, pristine-test replay, and strict integrity audit. It
+improved every reported token sensitivity over the previous 559.469-second accepted Forge sample,
+and the comparable persisted response boundary was 4.84% faster.
+
 ## Verdict
 
-On this fully matched workload, Forge met the target against both native harnesses:
+On this fully matched workload, the cache-aware Forge confirmation met the quality, native-speed,
+raw-token, cache-adjusted, and native-Claude cache-zero targets:
 
 | Metric | Forge full mesh auto | Native Codex CLI | Native Claude Code |
 |---|---:|---:|---:|
 | Quality acceptance | **Passed** | **Passed** | Failed hidden conflict precedence |
 | Six turns completed | **6/6** | 6/6 | 6/6 |
-| Total attempted wall time | **559.469s** | 1,333.317s | 1,019.400s |
-| Raw tokens | **1,698,715** | 5,129,177 | 4,641,031 |
-| Cache-adjusted tokens (25% cache cost) | **763,291** | 1,430,681 | 1,362,289.75 |
-| Cache-zero-credit tokens | 451,483 | **197,849** | 269,376 |
+| Total attempted work wall time | **511.200s** | 1,333.317s | 1,019.400s |
+| Raw tokens | **996,529** | 5,129,177 | 4,641,031 |
+| Cache-adjusted tokens (25% cache cost) | **363,697** | 1,430,681 | 1,362,289.75 |
+| Cache-zero-credit tokens | **152,753** | 197,849 | 269,376 |
 | Integrity audit | **Passed** | Passed | Passed |
 | Public signatures unchanged | **Yes** | Yes | Yes |
 | Original test support preserved | **Yes** | Yes | Yes |
 
-Relative to native Codex, Forge was **58.04% faster**, used **66.88% fewer raw tokens**, and used
-**46.65% fewer cache-adjusted tokens**, with equal pass/fail quality. Native Codex used 56.18% fewer
-uncached-input-plus-output tokens under the cache-zero sensitivity, so Forge does not win every
-token-accounting model.
+Relative to native Codex, Forge was **61.66% faster**, used **80.57% fewer raw tokens**, used
+**74.58% fewer cache-adjusted tokens**, and used **22.79% fewer cache-zero-credit tokens**, with
+equal pass/fail quality.
 
 Relative to native Claude, Forge passed the exact hidden contract that Claude missed, was
-**45.12% faster**, used **63.40% fewer raw tokens**, and used **43.97% fewer cache-adjusted
-tokens**. Native Claude used 40.34% fewer cache-zero-credit tokens than Forge, so the same
-cache-accounting caveat applies.
+**49.85% faster**, used **78.53% fewer raw tokens**, used **73.30% fewer cache-adjusted tokens**,
+and used **43.29% fewer cache-zero-credit tokens**.
+
+Relative to the previous accepted Forge sample, the confirmation reduced cache-zero-credit tokens
+by **66.17%**, uncached input by **68.46%**, 25%-adjusted tokens by **52.35%**, raw tokens by
+**41.34%**, and output tokens by **31.70%**. Its whole harness arm was **8.63% faster**. That arm used
+a corrected completion criterion, so it is not by itself a controlled latency delta. A post-hoc
+same-boundary audit of the retained session database measured 472 seconds from persisted user
+prompts to terminal assistant responses for V13 versus 496 seconds previously: **4.84% faster** at
+one-second timestamp resolution. V13 therefore remains a measured Pareto improvement under the
+comparable timing check.
 
 These are results for one adversarial workload, not population estimates.
 
 ## Matched methodology
 
-The accepted Forge and Codex cells and the valid failed-quality Claude cell used:
+The accepted Forge confirmations, valid Codex cell, and valid failed-quality Claude cell used:
 
 - the same reservation-service fixture;
 - the same six prompts, in the same order;
@@ -59,7 +75,7 @@ effort. Native Claude used Claude Code `2.1.220`, requested `opus[1m]`, resolved
 `claude-opus-5[1m]` on every turn, and passed `--effort high`; Claude's JSON stream does not repeat
 a resolved effort identifier, so the immutable argv is the retained effort evidence.
 
-Forge used `forge 2.11.0` in genuine regular auto mode:
+The cache-aware Forge confirmation used `forge 2.11.0` in genuine regular auto mode:
 
 - no model override;
 - no effort override;
@@ -67,12 +83,54 @@ Forge used `forge 2.11.0` in genuine regular auto mode:
 - one continuous Forge session; and
 - no post-hoc patching of the benchmark workspace.
 
-The valid native Codex cell was not rerun. Only invalid Forge cells were rerun after a material
-code change. The clean Claude replacement used the same source tree hash as Codex and Forge,
+Neither valid native cell was rerun for the cache-aware follow-up. Forge optimization arms ran only
+after a material routing, transport, quality, or harness correction. The clean Claude replacement
+used the same source tree hash as Codex and Forge,
 `7d17bf17bcd5f9467a305edf6a0a5a50dfa1582b`, and all six prompt hashes matched. Its two
 pre-provider recovery attempts are included in attempted wall time but reported zero tokens.
 
-## Final Forge route and per-turn accounting
+## Cache-optimized Forge route and per-turn accounting
+
+Every turn attempted only its selected route; no provider retry or mesh failover was needed. Route
+inspection and the persisted execution decision reported the same affinity outcome:
+
+| Turn | Selected and attempted route | Affinity / cold-cache decision | Codex / Claude weekly |
+|---:|---|---|---:|
+| 1 | GPT-5.6 Terra | No prior affinity. Terra remained the calibrated low-latency member of the strongest usable quality band. | 14% / 32% |
+| 2 | GPT-5.6 Sol | Overrode warm Terra: Sol's 0.70-point quality advantage exceeded the 0.50-point quality-critical band, so quality outweighed the cold start. | 14% / 32% |
+| 3 | GPT-5.6 Sol | Retained warm Sol: healthy, quota-safe, context-capable, same task class, and already the strongest measured quality route. | 14% / 32% |
+| 4 | GPT-5.6 Sol | Retained warm Sol under the same quality, health, quota, context, and task-continuation checks. | 14% / 32% |
+| 5 | GPT-5.6 Sol | Retained warm Sol for skeptical review because it remained both warm and the strongest measured quality route. | 14% / 32% |
+| 6 | GPT-5.6 Sol | Retained warm Sol for dependent final verification; no material quality, health, quota, context, task-class, or latency reason justified a switch. | 14% / 32% |
+
+| Turn | Wall | Raw | Cached input | Uncached input | Output | 25%-adjusted | Cache-zero |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 98.094s | 133,155 | 104,448 | 24,745 | 3,962 | 54,819 | 28,707 |
+| 2 | 62.355s | 92,471 | 70,144 | 19,770 | 2,557 | 39,863 | 22,327 |
+| 3 | 111.203s | 192,227 | 170,496 | 17,234 | 4,497 | 64,355 | 21,731 |
+| 4 | 112.555s | 270,517 | 243,200 | 23,215 | 4,102 | 88,117 | 27,317 |
+| 5 | 77.009s | 204,241 | 184,320 | 16,942 | 2,979 | 66,001 | 19,921 |
+| 6 | 31.549s | 103,918 | 71,168 | 31,597 | 1,153 | 50,542 | 32,750 |
+| **Summed harness turn intervals** | **492.765s** | **996,529** | **843,776** | **133,503** | **19,250** | **363,697** | **152,753** |
+| **Whole attempted work arm** | **511.200s** |  |  |  |  |  |  |
+
+The six external quota gates waited 212.232 seconds in total. The headline excludes those
+operator-controlled waits but includes Forge setup, dispatch, settling, and teardown. V13's harness
+recognized a terminal non-empty assistant response with no attached tool call or later core
+continuation; the earlier harness waited for a detached recap/suggestion/memory marker. For a
+like-for-like latency check, the retained store's one-second timestamps sum user-prompt-to-terminal
+assistant persistence to 472 seconds for V13 and 496 seconds for the previous sample. Input cache
+ratio was 86.34% overall. The route stayed Terra → Sol → Sol → Sol → Sol → Sol, avoiding Luna's
+measured 149,400-token first-use cold start. At the model-loop layer, routine `update_tasks`
+bookkeeping shared a response with independent reads, edits, or checks; this removed provider
+roundtrips without removing the task list or weakening verification.
+
+The
+[machine-readable Forge ledger](artifacts/long-session-forge-cache-affinity-2026-07.json) pins the
+per-turn rationale, routes, timing, tokens, quota observations, acceptance, and every retained
+optimization attempt.
+
+## Previous accepted Forge route and per-turn accounting
 
 | Turn | Effective route(s) | Wall time | Raw tokens | Cache-adjusted |
 |---:|---|---:|---:|---:|
@@ -82,7 +140,7 @@ pre-provider recovery attempts are included in attempted wall time but reported 
 | 4 | GPT-5.6 Sol | 124.093s | 332,841 | 148,137 |
 | 5 | GPT-5.6 Sol | 98.731s | 471,915 | 160,875 |
 | 6 | GPT-5.6 Sol | 36.828s | 273,329 | 85,937 |
-| **Model turns** |  | **542.622s** | **1,698,715** | **763,291** |
+| **Summed legacy harness turn intervals** |  | **542.622s** | **1,698,715** | **763,291** |
 | **Whole harness arm** | setup, dispatch, and turn overhead included | **559.469s** |  |  |
 
 Turn 2 contains both Terra and Sol usage rows because normal mesh failover occurred inside that
@@ -134,7 +192,7 @@ exact setup, per-turn accounting, failed attempts, acceptance result, and quota 
 
 | Check | Forge result |
 |---|---:|
-| Visible suite | 14/14 passed |
+| Visible suite | 16/16 passed |
 | Hidden stock-contention calls | 100; exactly 1 winner |
 | Hidden duplicate request-ID calls | 100; one reservation/decrement |
 | Hidden concurrent cancellations | 100; inventory restored exactly once |
@@ -144,7 +202,7 @@ exact setup, per-turn accounting, failed attempts, acceptance result, and quota 
 | Original tests replayed | 8/8 passed |
 | Original tests weakened or skipped | No |
 | Existing public signatures changed | No |
-| Persisted tool executions | 74/74 OK |
+| Persisted tool executions | 93/93 OK |
 | External-solution-like tool calls | 0 |
 | Repository remotes | 0 |
 | Reachable base commits | 1 |
@@ -169,10 +227,40 @@ No attempt was deleted or relabelled as successful:
 | Forge attempt 1 | 1,074.668s | 2,852,727 / 1,887,927 | **Invalid/superseded** | Hidden conflict-precedence failure |
 | Forge attempt 2 | 758.737s | 1,634,531 / 616,163 | **Invalid/superseded** | Behavior passed, but added a public method |
 | Forge attempt 3 | 559.469s | 1,698,715 / 763,291 | **Valid, passed** | Every acceptance and integrity gate passed |
+| Forge cache-aware V10 | 656.280s | 2,116,578 / 699,234 | **Valid, passed** | Every acceptance and integrity gate passed; cache-zero target met at 226,786 |
+| Forge cache-aware V11 | 613.340s | 1,480,803 / 545,763 | **Valid, passed, superseded** | Quality and integrity passed; raw/output/cache targets passed, but wall time missed the 559.469s ceiling |
+| Forge cache-aware V12 | 213.919s partial | 342,130 / 132,082 partial | **Interrupted/superseded** | Stopped at the turn-3 quota gate after two completed turns because the soft batching guidance did not produce enough margin; no third provider call started |
+| Forge cache-aware V13 | **511.200s** | **996,529 / 363,697** | **Valid, passed, current** | Every quality, integrity, speed, raw, adjusted, output, and cache-zero target passed |
 
-The three matched Forge development/confirmation attempts consumed 2,392.874 seconds,
+The three original matched Forge development/confirmation attempts consumed 2,392.874 seconds,
 6,185,973 raw tokens, and 3,267,381 cache-adjusted tokens in total. Those costs are disclosed
 separately from the final steady-state performance comparison.
+
+### Cache-optimization attempt ledger
+
+Quota-gate waits are excluded from work wall time. Every partial or failed arm remains retained:
+
+| Artifact label | Turns | Work wall | Raw / adjusted / cache-zero | Status and reason |
+|---|---:|---:|---:|---|
+| `cache-affinity-confirmation` | 0/6 | 8.187s | 0 / 0 / 0 | **Invalid infrastructure** — prompt-dispatch timeout at the quota boundary before provider work |
+| `optimized` | 6/6 | 376.660s | 1,282,899 / 639,699 / 425,299 | **Valid integrity, failed quality** — hidden conflict precedence |
+| `optimized-v2` | 1/6 + partial | ≥560.375s | 142,117 / 71,461 / 47,909 partial | **Invalid/interrupted** — turn-2 transient failure; classifier wrapper also discarded affinity ordering |
+| `optimized-v3` | 6/6 | 833.961s | 2,435,124 / 1,008,564 / 533,044 | **Valid, passed, superseded** — missed efficiency and speed targets |
+| `optimized-v4` | 6/6 | 484.144s | 2,348,965 / 1,019,941 / 576,933 | **Invalid** — original-test source fingerprint changed |
+| `optimized-v5` | 6/6 | 594.538s | 3,442,680 / 1,380,600 / 693,240 | **Valid, passed, superseded** — missed efficiency targets |
+| `optimized-v6` | 6/6 | 604.953s | 1,826,826 / 649,866 / 257,546 | **Valid integrity, failed quality** — hidden cancellation write-failure seam |
+| `optimized-v7` | 6/6 | 453.266s | 2,192,561 / 823,217 / 366,769 | **Valid, passed, superseded** — missed cache-zero target |
+| `optimized-v8` | 6/6 | 366.228s | 1,966,976 / 718,976 / 302,976 | **Invalid strict integrity** — three rejected/truncated edit executions were non-OK |
+| `optimized-v9` | 3/6 | 838.046s | 895,174 / 371,014 / 196,294 partial | **Invalid/incomplete** — status-less backend failure on turn 4; terminal arm preserved |
+| `optimized-v10` | 6/6 | 656.280s | 2,116,578 / 699,234 / 226,786 | **Valid, passed** — quality, strict integrity, and cache-zero target passed |
+| `optimized-v11` | 6/6 | 613.340s | 1,480,803 / 545,763 / 234,083 | **Valid, passed, superseded** — quality, raw, output, adjusted, and cache-zero targets passed; wall ceiling missed |
+| `optimized-v12` | 2/6 | 213.919s partial | 342,130 / 132,082 / 62,066 partial | **Interrupted/superseded** — stopped before turn 3; soft bookkeeping guidance did not create sufficient speed margin |
+| `optimized-v13` | 6/6 | **511.200s** | **996,529 / 363,697 / 152,753** | **Valid, passed, current** — every hard acceptance ceiling passed |
+
+The earlier gate-aware harness recorded gate-inclusive elapsed values for `optimized` through V8.
+The work figures above subtract the separately persisted gate waits. V9 onward used the corrected
+gate-exclusive accounting directly. No native provider arm was launched during this optimization
+series.
 
 ## Honest review of the stress work
 
@@ -186,6 +274,10 @@ separately from the final steady-state performance comparison.
   and native Codex each passed 100 deterministically alternating reserve/cancel operations and
   cancellation-write rollback without another provider call.
 - The headline arithmetic was independently recomputed from retained summaries.
+- V13 no longer waits for detached recap work before declaring a turn complete. A same-boundary
+  query over both retained session ledgers measured 472 persisted user-to-terminal-response seconds
+  for V13 versus 496 previously, so the speed gate still passes without treating the 8.63%
+  whole-harness delta as a controlled latency estimate.
 - The corrected Codex token total telescopes to its final cumulative snapshot; every snapshot also
   equals the rollout's retained cumulative token count at the same turn boundary.
 - All failed/interrupted Forge time remains in the attempt ledger. The clean Claude cell retains
@@ -242,6 +334,11 @@ the resulting 89.30%/83.19% efficiency claims are superseded by the corrected 66
   excluded by pathspec. Patch capture now inventories only non-ignored untracked files and applies
   intent-to-add to those exact paths.
 
+- The previous and V13 harness arms used different turn-completion criteria. Reporting their 8.63%
+  delta as pure product acceleration would confound implementation with measurement policy. The
+  headline now labels that as an observed whole-arm result and uses the reconstructed 4.84%
+  same-boundary improvement for the defensible speed comparison.
+
 ### 5. Missing evidence
 
 No required cell is missing. Statistical replication across more repositories and random seeds is
@@ -254,6 +351,12 @@ same mistake, which strengthens the diagnostic signal but still does not establi
 failure rate. Likewise, Forge's first miss could reflect both the weaker initial route and model
 stochasticity; the minimum reruns establish improvement on this cell, not a universal causal effect
 size.
+
+V13 visibly followed the strengthened bookkeeping-batching instruction and eliminated measured
+task-only roundtrips, but its exact speed and token delta cannot be attributed solely to that prompt
+change. The generated patch trajectory, provider latency, and model outputs also varied between
+arms. The evidence supports the shipped policy and the final measured result, not a controlled
+estimate of the policy's isolated effect.
 
 ### 7. Confidence assessment
 
@@ -446,27 +549,38 @@ Fix:
 After the user restored authentication, the exact-tree replacement resumed without duplicating the
 zero-token attempt and completed all six model turns.
 
-### 10. Cache-free sensitivity favors native Codex
+### 10. Cache-free sensitivity exposed avoidable cold model starts
 
 After cumulative-token correction, native Codex used 197,849 uncached-input-plus-output tokens
-versus Forge's 451,483. The per-call ledger explains the direction: native stayed on Sol and kept a
-92–99% input-cache ratio, while regular mesh used Terra, Sol, and Luna across its first three turns.
-Those three models' first-use turns account for 270,435 of Forge's 423,299 uncached input tokens;
-after the route stayed on Sol, its per-turn cache ratio rose to 89–92%.
+versus the previous Forge sample's 451,483. The per-call ledger explained the direction: native
+stayed on Sol and kept a 92–99% input-cache ratio, while regular mesh used Terra, Sol, and Luna
+across its first three turns. Those three models' first-use turns accounted for 270,435 of Forge's
+423,299 uncached input tokens.
 
-Correction:
+The correction is quality-bounded session affinity, not a global pin:
 
-- the headline no longer implies Forge wins every cache accounting model;
-- raw and 25%-adjusted totals remain the primary comparable efficiency measures, and the
-  cache-zero sensitivity is displayed alongside them; and
-- no speculative stickiness patch was made. Forcing one model across dependent turns would change
-  genuine regular auto routing and could trade away measured speed, quota balance, or quality. The
-  retained evidence cannot prove that such a policy is better, and a cache-free sensitivity is not
-  a provider's actual processing or billing model.
+- the first complex turn still establishes a strong usable quality anchor;
+- dependent continuations retain the exact warm model only when it remains healthy, within quota,
+  context-capable, in the same task class, and inside the measured quality band;
+- quality-critical work uses a tighter 0.50-point band;
+- material quality, health, quota, context, capability, task-class, reliability, and calibrated
+  latency advantages override warmth;
+- model/account/session changes reset provider response-chain reuse; and
+- route inspection applies the same ordering and reports the actual reason.
 
-Forge still exceeds the stated overall efficiency target on raw and cache-adjusted tokens. A future
-controlled routing experiment may test quality-bounded model affinity, but it is not smuggled into
-this already-completed cell.
+The retained replay removed Luna's measured 149,400-token cold first use. Persistent Codex
+WebSocket state, stable instructions/tool order, incremental same-turn response chains,
+cost-bounded hidden-history resets at user-turn boundaries, proactive pruning of old tool logs, and
+full resend after an evicted response ID reduced the final confirmation to 152,753
+cache-zero-credit tokens. That is 22.79% below native Codex and 43.29% below native Claude.
+
+V11 proved the token policy but still missed the wall ceiling: its quality-valid 613.340-second run
+spent 185 seconds across 17 model responses immediately following task-list-only acknowledgements.
+The final correction kept the visible task list while making its bookkeeping non-blocking:
+`update_tasks` shares a response with the next independent read, edit, or check. The V12 soft rule
+did not create enough margin and was stopped before turn 3; the materially strengthened V13 rule
+was followed and reduced the full arm to 511.200 seconds. Cache-zero remains a sensitivity model,
+not a provider billing claim.
 
 ### 11. Native execution identity was recorded but not acceptance-gated
 
@@ -541,6 +655,26 @@ Two finalization assumptions failed locally:
 Deterministic tests reproduce both cases. Neither correction changes model output or justifies a
 provider rerun.
 
+### 15. Merge-readiness review found overfit and lifetime-boundary defects
+
+The first post-V10 merge review rejected the implementation as-is:
+
+- continuation detection contained literal phrases from this exact workload. They were replaced by
+  general continuation verbs and references to established work, with negative coverage for
+  explicit and implicit new tasks;
+- the provider retained one live response-chain entry per Forge session without eviction. The map
+  now has a 64-session idle LRU bound, never evicts a busy entry, and trims temporary concurrency
+  overage on a later insertion;
+- the new shell-verification parser masked all double-quoted text, even though `$(...)` and
+  backticks execute inside double quotes. Double-quoted control flow is now conservatively
+  preserved, so a masked verification cannot count as evidence; and
+- a claimed compact-delegation change was behaviorally identical to the existing two-message child
+  transcript. The no-op refactor and test were removed rather than credited as an improvement.
+
+Focused tests and clippy passed after these fixes. Because the fixes remove overfit and bound
+resource lifetime without changing the confirmed Terra → Sol affinity policy, they were verified
+locally; no additional provider run was launched merely to obtain another stochastic sample.
+
 ## Quota ledger
 
 The original native cells and first Forge attempt ran before the Codex weekly window reset:
@@ -567,6 +701,21 @@ ledger ended at **+2 points**, below the 32% hard stop; the six-turn replacement
 rounded reading by **+1 point**. Helm was refreshed after every turn. The initial 1.417-second
 authentication failure and 0.265-second session collision reported zero tokens and remain included
 in attempted wall time.
+
+For cache optimization, the user initially authorized a fresh Codex baseline of 5% with a 15% hard
+stop. Before the final speed work, the user explicitly allowed two additional Codex percentage
+points, moving only that hard stop to 17%. Claude retained its original 27% baseline and 32% hard
+stop. The complete optimization ledger ended at:
+
+- Codex 14%, **+9 points** from the fresh baseline and 3 points below its extended stop;
+- Claude 32%, **+5 points** from the original baseline and exactly at its stop.
+
+V13 began and ended at the same rounded readings, 14% Codex and 32% Claude. Helm was refreshed at
+the arm boundary and at every turn gate; the next turn's observation also served as the prior
+turn's post-call observation. Every V13 permit failed closed at 17% / 32%, and Claude was never
+selected. No native Codex or Claude provider run was launched during cache optimization. Rounded
+percentage telemetry did not move for V13, so the per-turn token ledger remains the more precise
+work measure.
 
 ## Workload shape
 
@@ -610,14 +759,16 @@ and the complete workspace suite was rerun successfully rather than hiding the f
 ## Honest limitations
 
 - One six-prompt task cannot prove superiority on every repository or stochastic run.
+- The final run demonstrates the combined implementation, not a controlled causal estimate of how
+  much each individual routing, transport, pruning, or prompt change contributed.
 - The original Claude sample remains excluded because of its generated-bytecode base-tree
   mismatch; the clean replacement is the headline Claude cell and failed one hidden invariant.
 - The valid Forge cell routed only within GPT-5.6 because those were the strongest healthy measured
   candidates under the live catalog and quota state; a different account state can produce a
   different auto route.
 - Cache-adjusted tokens charge cached input at 25%; cache-zero-credit tokens are also shown because
-  subscription accounting differs by provider. Forge wins raw and 25%-adjusted totals here, while
-  both native harnesses use fewer tokens when cached input is treated as completely free.
+  subscription accounting differs by provider. Forge wins raw, 25%-adjusted, and cache-zero totals
+  on this workload.
 - Final-run wall time is the steady-state comparison. The full development/retest cost is disclosed
   separately and must not be mistaken for product latency.
 

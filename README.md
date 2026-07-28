@@ -121,28 +121,41 @@ is spent only where it matters. Inspect any of these decisions live with `/mesh`
 
 ## 📊 Proof: same model, better results
 
-### Latest: matched six-turn long-session stress
+### Latest: cache-aware matched six-turn long-session stress
 
-The 2026-07-28 stress run used the same synthetic one-commit repository, six escalating prompts,
-continuous session history, hidden acceptance checks, and integrity audit for Forge full-mesh auto
-and native Codex CLI and Claude Code:
+The 2026-07-28 confirmation used the same synthetic one-commit repository, six escalating prompts,
+continuous session history, hidden acceptance checks, and integrity audit as the retained native
+Codex CLI and Claude Code cells. Forge stayed in regular full-mesh auto mode with no model or effort
+override:
 
 | Long-session comparison | Forge mesh auto | Native Codex | Native Claude |
 |---|---:|---:|---:|
 | Quality acceptance | **Passed** | Passed | Failed hidden conflict precedence |
-| Attempted wall time | **559.469s** | 1,333.317s | 1,019.400s |
-| Raw tokens | **1,698,715** | 5,129,177 | 4,641,031 |
-| Cache-adjusted tokens | **763,291** | 1,430,681 | 1,362,289.75 |
+| Attempted work wall time | **511.200s** | 1,333.317s | 1,019.400s |
+| Raw tokens | **996,529** | 5,129,177 | 4,641,031 |
+| Cache-adjusted tokens (25% cache cost) | **363,697** | 1,430,681 | 1,362,289.75 |
+| Cache-zero-credit tokens | **152,753** | 197,849 | 269,376 |
 | Integrity and public-API audit | **Passed** | Passed | Passed |
 
-Forge matched Codex quality, ran **58.04% faster**, used **66.88% fewer raw tokens**, and used
-**46.65% fewer cache-adjusted tokens**. Against clean native Claude, Forge passed the hidden
-contract Claude missed, ran **45.12% faster**, used **63.40% fewer raw tokens**, and used
-**43.97% fewer cache-adjusted tokens**. Honest review still excludes the older Claude cell whose
-base contained one generated `.pyc`; the exact-tree replacement above is the current result. The
-report retains every failure, quota refresh, artifact, and harness correction. This is one workload,
-not a population estimate, and native Codex/Claude remain more efficient only under the
-cache-zero-credit sensitivity.
+Quality-bounded session affinity routed Terra once, switched to stronger Sol when a measured
+quality-critical gap justified the cold start, then retained warm Sol for turns 3–6. Non-blocking
+task-list updates were batched with independent substantive tools instead of consuming a separate
+model roundtrip. Forge matched Codex quality, ran **61.66% faster**, used **80.57% fewer raw
+tokens**, used **74.58% fewer cache-adjusted tokens**, and used **22.79% fewer cache-zero-credit
+tokens**. Against clean native Claude, Forge passed the hidden contract Claude missed, ran **49.85%
+faster**, used **78.53% fewer raw tokens**, used **73.30% fewer cache-adjusted tokens**, and used
+**43.29% fewer cache-zero-credit tokens**.
+
+The confirmation also beats the previous passing Forge sample: its whole harness arm was **8.63%
+faster**, with **41.34% fewer raw tokens**, **52.35% fewer 25%-adjusted tokens**, **66.17% fewer
+cache-zero-credit tokens**, and **31.70% fewer output tokens**. Because the corrected harness now
+stops at the terminal assistant response instead of waiting for detached recap work, the controlled
+latency claim uses the same persisted response boundary for both runs: **472s versus 496s, or 4.84%
+faster**, at one-second timestamp resolution. Cache-zero is a sensitivity model, not necessarily
+provider billing.
+Honest review still excludes the older Claude cell whose base contained one generated `.pyc`; the
+exact-tree replacement above is the current native result. The report retains every failure, quota
+refresh, artifact, and harness correction. This is one workload, not a population estimate.
 
 **[Read the matched long-session report and failed-attempt ledger →](docs/benchmarks/forge-long-session-stress-2026-07.md)**
 

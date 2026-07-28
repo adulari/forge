@@ -93,3 +93,16 @@
 | mesh-auto-history-safe-v1 | 002__matplotlib__matplotlib-25960__forge-mesh-auto | valid | false | 169.942 | 581771 | 246539.0 | none | clean and comparable |
 
 The earlier contaminated headline outcomes are not a controlled estimate of contamination's effect. The clean replacement also changed Codex effort from `xhigh` to `high`, added an integrity preamble, isolated Git history, and is subject to model stochasticity.
+
+## Matched long-session cache-affinity addendum
+
+These stress cells are outside the 83 SWE-bench cells counted above. They use the same isolated
+reservation-service tree and six-turn acceptance contract documented in the
+[long-session report](forge-long-session-stress-2026-07.md).
+
+| Cell | Status | Work wall | Raw / adjusted / cache-zero | Integrity and reuse decision |
+|---|---|---:|---:|---|
+| Forge cache-aware V10 | valid, superseded | 656.280s | 2,116,578 / 699,234 / 226,786 | Quality and strict integrity passed; superseded by a later clean implementation |
+| Forge cache-aware V11 | valid, superseded | 613.340s | 1,480,803 / 545,763 / 234,083 | Quality and strict integrity passed, but wall time missed the 559.469s ceiling |
+| Forge cache-aware V12 | interrupted, superseded | 213.919s partial | 342,130 / 132,082 / 62,066 partial | Two turns completed; stopped at the turn-3 quota gate before another provider call |
+| Forge cache-aware V13 | **valid, current** | **511.200s** | **996,529 / 363,697 / 152,753** | Clean 6/6 cell; quality, strict integrity, whole-arm wall, like-for-like response speed, raw, output, adjusted, and both native cache-zero targets passed |

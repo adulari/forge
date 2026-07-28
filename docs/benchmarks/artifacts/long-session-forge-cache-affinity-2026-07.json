@@ -1,0 +1,443 @@
+{
+  "schema_version": 1,
+  "study": "forge-cache-aware-session-affinity",
+  "date": "2026-07-28",
+  "scenario": "long-session-reservations",
+  "status": "valid_passed_pareto_confirmation",
+  "source_artifact": "cache-affinity-confirmation-optimized-v13-20260728/long-session-reservations-20260728T172259Z-3773565",
+  "session_id": "74d1530b-45fd-4865-abaa-da63f2b8fa9a",
+  "configuration": {
+    "forge_version": "forge 2.11.0",
+    "forge_binary_sha256": "0c7aae6db8720f10621111414e29e8276b999fee1f4a14f17ab875d6e005a35f",
+    "mode": "forge-full-mesh-auto",
+    "model_override": null,
+    "effort_override": null,
+    "synthetic_base_tree": "7d17bf17bcd5f9467a305edf6a0a5a50dfa1582b",
+    "reachable_commit_count": 1,
+    "remote_count": 0,
+    "turn_timeout_seconds": 1500
+  },
+  "retained_baselines": {
+    "forge_previous_accepted": {
+      "quality": "passed",
+      "attempted_wall_seconds": 559.469,
+      "raw_tokens": 1698715,
+      "cache_adjusted_tokens_025": 763291,
+      "cache_zero_credit_tokens": 451483,
+      "uncached_input_tokens": 423299,
+      "output_tokens": 28184
+    },
+    "native_codex_sol_high": {
+      "quality": "passed",
+      "attempted_wall_seconds": 1333.317,
+      "raw_tokens": 5129177,
+      "cache_adjusted_tokens_025": 1430681,
+      "cache_zero_credit_tokens": 197849
+    },
+    "native_claude_opus_5_high": {
+      "quality": "failed_hidden_conflict_precedence",
+      "attempted_wall_seconds": 1019.4,
+      "raw_tokens": 4641031,
+      "cache_adjusted_tokens_025": 1362289.75,
+      "cache_zero_credit_tokens": 269376,
+      "uncached_input_tokens": 204878,
+      "output_tokens": 64498
+    }
+  },
+  "confirmation": {
+    "quality": "passed",
+    "integrity": "passed",
+    "turns_completed": 6,
+    "turns_expected": 6,
+    "attempted_work_wall_seconds": 511.2,
+    "summed_harness_turn_seconds": 492.765,
+    "external_quota_gate_wait_seconds": 212.232,
+    "raw_process_span_seconds": 723.432,
+    "raw_tokens": 996529,
+    "input_tokens": 977279,
+    "cached_input_tokens": 843776,
+    "uncached_input_tokens": 133503,
+    "output_tokens": 19250,
+    "cache_adjusted_tokens_025": 363697.0,
+    "cache_zero_credit_tokens": 152753,
+    "input_cache_ratio_percent": 86.3393,
+    "patch_sha256": "d5b395798ffd7f8e780c30e21cce09b7d76338666783b2d2079e62c2fa706cbe"
+  },
+  "per_turn": [
+    {
+      "turn": 1,
+      "selected_route": "codex-oauth::gpt-5.6-terra",
+      "attempted_routes": [
+        "codex-oauth::gpt-5.6-terra"
+      ],
+      "affinity_reason": "No prior affinity. Terra was the calibrated low-latency member of the strongest usable quality band.",
+      "wall_seconds": 98.094,
+      "raw_tokens": 133155,
+      "input_tokens": 129193,
+      "cached_input_tokens": 104448,
+      "uncached_input_tokens": 24745,
+      "output_tokens": 3962,
+      "cache_adjusted_tokens_025": 54819.0,
+      "cache_zero_credit_tokens": 28707,
+      "codex_weekly_percent": 14,
+      "claude_weekly_percent": 32,
+      "quota_gate_wait_seconds": 9.013
+    },
+    {
+      "turn": 2,
+      "selected_route": "codex-oauth::gpt-5.6-sol",
+      "attempted_routes": [
+        "codex-oauth::gpt-5.6-sol"
+      ],
+      "affinity_reason": "Warm Terra was overridden because Sol's 0.70-point measured quality advantage exceeded the 0.50-point quality-critical band.",
+      "wall_seconds": 62.355,
+      "raw_tokens": 92471,
+      "input_tokens": 89914,
+      "cached_input_tokens": 70144,
+      "uncached_input_tokens": 19770,
+      "output_tokens": 2557,
+      "cache_adjusted_tokens_025": 39863.0,
+      "cache_zero_credit_tokens": 22327,
+      "codex_weekly_percent": 14,
+      "claude_weekly_percent": 32,
+      "quota_gate_wait_seconds": 48.577
+    },
+    {
+      "turn": 3,
+      "selected_route": "codex-oauth::gpt-5.6-sol",
+      "attempted_routes": [
+        "codex-oauth::gpt-5.6-sol"
+      ],
+      "affinity_reason": "Dependent continuation retained warm Sol: healthy, quota-safe, context-capable, same task class, and already the strongest measured quality route.",
+      "wall_seconds": 111.203,
+      "raw_tokens": 192227,
+      "input_tokens": 187730,
+      "cached_input_tokens": 170496,
+      "uncached_input_tokens": 17234,
+      "output_tokens": 4497,
+      "cache_adjusted_tokens_025": 64355.0,
+      "cache_zero_credit_tokens": 21731,
+      "codex_weekly_percent": 14,
+      "claude_weekly_percent": 32,
+      "quota_gate_wait_seconds": 42.462
+    },
+    {
+      "turn": 4,
+      "selected_route": "codex-oauth::gpt-5.6-sol",
+      "attempted_routes": [
+        "codex-oauth::gpt-5.6-sol"
+      ],
+      "affinity_reason": "Dependent continuation retained warm Sol under the quality, health, quota, context, and task-class checks.",
+      "wall_seconds": 112.555,
+      "raw_tokens": 270517,
+      "input_tokens": 266415,
+      "cached_input_tokens": 243200,
+      "uncached_input_tokens": 23215,
+      "output_tokens": 4102,
+      "cache_adjusted_tokens_025": 88117.0,
+      "cache_zero_credit_tokens": 27317,
+      "codex_weekly_percent": 14,
+      "claude_weekly_percent": 32,
+      "quota_gate_wait_seconds": 40.759
+    },
+    {
+      "turn": 5,
+      "selected_route": "codex-oauth::gpt-5.6-sol",
+      "attempted_routes": [
+        "codex-oauth::gpt-5.6-sol"
+      ],
+      "affinity_reason": "Skeptical review retained warm Sol because it remained both warm and the strongest measured quality route.",
+      "wall_seconds": 77.009,
+      "raw_tokens": 204241,
+      "input_tokens": 201262,
+      "cached_input_tokens": 184320,
+      "uncached_input_tokens": 16942,
+      "output_tokens": 2979,
+      "cache_adjusted_tokens_025": 66001.0,
+      "cache_zero_credit_tokens": 19921,
+      "codex_weekly_percent": 14,
+      "claude_weekly_percent": 32,
+      "quota_gate_wait_seconds": 43.268
+    },
+    {
+      "turn": 6,
+      "selected_route": "codex-oauth::gpt-5.6-sol",
+      "attempted_routes": [
+        "codex-oauth::gpt-5.6-sol"
+      ],
+      "affinity_reason": "Dependent final verification retained warm Sol; no material quality, health, quota, context, task-class, or latency reason justified a switch.",
+      "wall_seconds": 31.549,
+      "raw_tokens": 103918,
+      "input_tokens": 102765,
+      "cached_input_tokens": 71168,
+      "uncached_input_tokens": 31597,
+      "output_tokens": 1153,
+      "cache_adjusted_tokens_025": 50542.0,
+      "cache_zero_credit_tokens": 32750,
+      "codex_weekly_percent": 14,
+      "claude_weekly_percent": 32,
+      "quota_gate_wait_seconds": 28.152
+    }
+  ],
+  "route_replay": {
+    "old_routes": [
+      "codex-oauth::gpt-5.6-terra",
+      "codex-oauth::gpt-5.6-sol",
+      "codex-oauth::gpt-5.6-luna",
+      "codex-oauth::gpt-5.6-sol",
+      "codex-oauth::gpt-5.6-sol",
+      "codex-oauth::gpt-5.6-sol"
+    ],
+    "new_policy_routes": [
+      "codex-oauth::gpt-5.6-terra",
+      "codex-oauth::gpt-5.6-sol",
+      "codex-oauth::gpt-5.6-sol",
+      "codex-oauth::gpt-5.6-sol",
+      "codex-oauth::gpt-5.6-sol",
+      "codex-oauth::gpt-5.6-sol"
+    ],
+    "old_switch_count": 3,
+    "new_switch_count": 1,
+    "avoided_measured_first_use_uncached_tokens": 149400,
+    "final_cache_zero_credit_tokens": 152753
+  },
+  "acceptance": {
+    "visible_tests": {
+      "passed": true,
+      "tests_run": 16,
+      "tests_skipped": 0
+    },
+    "hidden": {
+      "cancellation_rollback_verified": true,
+      "concurrent_cancellations": 100,
+      "contention_requests": 100,
+      "contention_winners": 1,
+      "duplicate_requests": 100,
+      "interleaved_reserve_cancels": 100,
+      "interleaving_verified": true,
+      "rollback_verified": true,
+      "passed": true
+    },
+    "original_tests_replayed": 8,
+    "original_tests_not_weakened": true,
+    "public_signatures_unchanged": true,
+    "tool_executions_ok": 93,
+    "tool_executions_total": 93,
+    "external_source_findings": 0,
+    "workspace_remotes": 0,
+    "reachable_commits": 1,
+    "patch_diff_check": true
+  },
+  "quota": {
+    "codex": {
+      "baseline_percent": 5,
+      "before_arm_percent": 14,
+      "after_arm_percent": 14,
+      "cumulative_delta_points": 9,
+      "cap_delta_points": 12,
+      "hard_stop_percent": 17
+    },
+    "claude": {
+      "baseline_percent": 27,
+      "before_arm_percent": 32,
+      "after_arm_percent": 32,
+      "cumulative_delta_points": 5,
+      "cap_delta_points": 5,
+      "hard_stop_percent": 32
+    },
+    "native_reruns_started": false
+  },
+  "comparison": {
+    "versus_previous_forge_percent": {
+      "attempted_wall": -8.6276,
+      "raw_tokens": -41.3363,
+      "cache_adjusted_tokens_025": -52.3515,
+      "cache_zero_credit_tokens": -66.1664,
+      "uncached_input_tokens": -68.4613,
+      "output_tokens": -31.6988
+    },
+    "versus_native_codex_percent": {
+      "attempted_wall": -61.6595,
+      "raw_tokens": -80.5714,
+      "cache_adjusted_tokens_025": -74.5787,
+      "cache_zero_credit_tokens": -22.7931
+    },
+    "versus_native_claude_percent": {
+      "attempted_wall": -49.8529,
+      "raw_tokens": -78.5279,
+      "cache_adjusted_tokens_025": -73.3025,
+      "cache_zero_credit_tokens": -43.2938
+    }
+  },
+  "timing_comparability": {
+    "harness_completion_policy_changed": true,
+    "previous_policy": "Waited for a detached recap, suggestion, or memory marker after the terminal assistant response.",
+    "v13_policy": "Stopped after a non-empty terminal assistant response with no attached tool call or later core continuation.",
+    "persisted_user_to_terminal_assistant_seconds": {
+      "previous_forge": 496,
+      "v13": 472,
+      "timestamp_resolution_seconds": 1,
+      "change_percent": -4.8387
+    },
+    "interpretation": "The 8.63% whole-harness-arm delta is an observed end-to-end result, not a controlled product-latency estimate. Reconstructing the same persisted response boundary for both retained sessions still puts V13 4.84% below the previous sample."
+  },
+  "target_assessment": {
+    "quality_preserved": true,
+    "regular_full_mesh_auto_preserved": true,
+    "faster_than_native_codex": true,
+    "faster_than_native_claude": true,
+    "faster_than_previous_forge_sample": true,
+    "raw_efficiency_better_than_both_native_harnesses": true,
+    "cache_adjusted_efficiency_better_than_both_native_harnesses": true,
+    "cache_zero_at_or_below_native_claude": true,
+    "cache_zero_at_or_below_native_codex": true,
+    "output_at_or_below_previous_forge_sample": true
+  },
+  "optimization_attempts": [
+    {
+      "artifact": "cache-affinity-confirmation-20260728",
+      "turns_completed": 0,
+      "status": "invalid_infrastructure",
+      "reason": "Prompt-dispatch timeout at the quota-gate boundary before provider work."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-20260728",
+      "turns_completed": 6,
+      "attempted_wall_seconds": 666.284,
+      "raw_tokens": 1282899,
+      "cache_adjusted_tokens_025": 639699,
+      "cache_zero_credit_tokens": 425299,
+      "status": "valid_integrity_failed_quality",
+      "reason": "Hidden conflict-precedence failure."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v2-20260728",
+      "turns_completed": 1,
+      "partial_raw_tokens": 142117,
+      "partial_cache_adjusted_tokens_025": 71461,
+      "partial_cache_zero_credit_tokens": 47909,
+      "status": "invalid_interrupted_partial",
+      "reason": "Turn 2 transient provider failure; audit also proved the classifier wrapper discarded affinity ordering."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v3-20260728",
+      "turns_completed": 6,
+      "attempted_wall_seconds": 1181.449,
+      "raw_tokens": 2435124,
+      "cache_adjusted_tokens_025": 1008564,
+      "cache_zero_credit_tokens": 533044,
+      "status": "valid_passed_superseded",
+      "reason": "Passed all acceptance gates but missed the efficiency and speed targets."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v4-20260728",
+      "turns_completed": 6,
+      "attempted_wall_seconds": 904.664,
+      "raw_tokens": 2348965,
+      "cache_adjusted_tokens_025": 1019941,
+      "cache_zero_credit_tokens": 576933,
+      "status": "invalid_original_tests_weakened",
+      "reason": "Original-test source fingerprint changed."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v5-20260728",
+      "turns_completed": 6,
+      "attempted_wall_seconds": 1021.696,
+      "raw_tokens": 3442680,
+      "cache_adjusted_tokens_025": 1380600,
+      "cache_zero_credit_tokens": 693240,
+      "status": "valid_passed_superseded",
+      "reason": "Passed all acceptance gates but missed the efficiency and speed targets."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v6-20260728",
+      "turns_completed": 6,
+      "attempted_wall_seconds": 807.748,
+      "raw_tokens": 1826826,
+      "cache_adjusted_tokens_025": 649866,
+      "cache_zero_credit_tokens": 257546,
+      "status": "valid_integrity_failed_quality",
+      "reason": "Hidden cancellation write-failure seam failed."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v7-20260728",
+      "turns_completed": 6,
+      "corrected_work_wall_seconds": 453.266,
+      "raw_tokens": 2192561,
+      "cache_adjusted_tokens_025": 823217,
+      "cache_zero_credit_tokens": 366769,
+      "status": "valid_passed_superseded",
+      "reason": "Passed quality and integrity but missed the cache-zero target."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v8-20260728",
+      "turns_completed": 6,
+      "corrected_work_wall_seconds": 366.228,
+      "raw_tokens": 1966976,
+      "cache_adjusted_tokens_025": 718976,
+      "cache_zero_credit_tokens": 302976,
+      "status": "invalid_strict_integrity",
+      "reason": "Visible and hidden quality passed, but three rejected or truncated edit executions were non-OK under the strict tool audit."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v9-20260728",
+      "turns_completed": 3,
+      "attempted_work_wall_seconds": 838.046,
+      "partial_raw_tokens": 895174,
+      "partial_cache_adjusted_tokens_025": 371014,
+      "partial_cache_zero_credit_tokens": 196294,
+      "status": "invalid_incomplete",
+      "reason": "Turn 4 ended on a status-less backend error; the pre-fix harness was manually ended after the terminal failure."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v10-20260728",
+      "turns_completed": 6,
+      "attempted_work_wall_seconds": 656.28,
+      "raw_tokens": 2116578,
+      "cache_adjusted_tokens_025": 699234,
+      "cache_zero_credit_tokens": 226786,
+      "status": "valid_passed_cache_optimized_confirmation",
+      "reason": "Full quality and strict integrity passed; cache-zero target met."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v11-20260728",
+      "turns_completed": 6,
+      "attempted_work_wall_seconds": 613.340,
+      "raw_tokens": 1480803,
+      "cache_adjusted_tokens_025": 545763,
+      "cache_zero_credit_tokens": 234083,
+      "output_tokens": 21107,
+      "status": "valid_passed_superseded",
+      "reason": "Quality, strict integrity, raw, output, adjusted, and cache-zero targets passed; wall time missed the 559.469-second ceiling."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v12-20260728",
+      "turns_completed": 2,
+      "partial_work_wall_seconds": 213.919,
+      "partial_raw_tokens": 342130,
+      "partial_cache_adjusted_tokens_025": 132082,
+      "partial_cache_zero_credit_tokens": 62066,
+      "partial_output_tokens": 7442,
+      "status": "interrupted_superseded",
+      "reason": "Stopped at the turn-3 quota gate after two completed turns because soft batching guidance did not provide sufficient speed margin; no third provider call started."
+    },
+    {
+      "artifact": "cache-affinity-confirmation-optimized-v13-20260728",
+      "turns_completed": 6,
+      "attempted_work_wall_seconds": 511.200,
+      "raw_tokens": 996529,
+      "cache_adjusted_tokens_025": 363697,
+      "cache_zero_credit_tokens": 152753,
+      "output_tokens": 19250,
+      "status": "valid_passed_current",
+      "reason": "Full quality and strict integrity passed; wall, raw, output, adjusted, native-Claude cache-zero, and native-Codex cache-zero targets all passed."
+    }
+  ],
+  "limitations": [
+    "Cache-zero credit is a sensitivity model, not proof of provider billing or actual processing cost.",
+    "V13's whole harness arm was 8.63% faster and used 41.34% fewer raw tokens than the previous accepted Forge sample while passing the same quality and integrity gates; because the harness completion criterion changed, the like-for-like persisted response-boundary check is the defensible latency comparison and was 4.84% faster at one-second timestamp resolution.",
+    "The previous 559.469-second Forge result and every failed, interrupted, or superseded optimization attempt remain retained.",
+    "One stochastic six-turn workload is not a population estimate.",
+    "V13 visibly followed the batching rule, but provider latency, model output, and patch trajectory also varied; the run does not isolate the causal effect of any single change."
+  ]
+}
