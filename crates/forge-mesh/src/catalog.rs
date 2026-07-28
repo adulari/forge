@@ -476,7 +476,10 @@ fn conserve_probability(tier: TaskTier, fraction: f64, plan: &str, code_heavy: b
         TaskTier::Trivial => unreachable!(),
         TaskTier::Standard if code_heavy => 0.15,
         TaskTier::Standard => 0.65,
-        TaskTier::Complex if code_heavy => 0.15, // code-heavy complex: subscriptions earn their keep
+        // Complex coding is where a weaker substitute is most likely to erase the harness's
+        // quality advantage. Spend the configured subscription while the plan is healthy;
+        // conservation begins only on the 50%-to-80% pressure ramp.
+        TaskTier::Complex if code_heavy => 0.0,
         TaskTier::Complex => 0.30,
     };
     // Forge's harness already reduces subscription token burn substantially on coding work. Keep
@@ -512,14 +515,63 @@ fn is_capable_alternative(id: &str, tier: TaskTier, bench: Option<&BenchmarkScor
 /// guard so conservation never drops a hard task onto a weak model when the only capable option
 /// IS the subscription. Complex needs a frontier alternative; Standard a capable (mid+) one.
 /// Documented in docs/features/mesh-routing.md.
+/// Maximum measured-quality gap a non-subscription model may have from the best available
+/// subscription model when conservation moves a Complex turn off-plan. Five points is deliberately
+/// narrower than the broad "frontier" threshold: conservation may rotate among measured close
+/// peers, but it must not turn a difficult agentic task into a quality trade merely to save healthy
+/// subscription quota.
+const COMPLEX_CONSERVE_MAX_BENCH_GAP: f64 = 5.0;
+
+fn benchmark_metric(id: &str, code_heavy: bool, bench: Option<&BenchmarkScores>) -> Option<f64> {
+    bench.and_then(|scores| scores.score_for(id)).map(|score| {
+        if code_heavy {
+            score.coding
+        } else {
+            score.intelligence
+        }
+    })
+}
+
+fn is_conservation_alternative(
+    id: &str,
+    models: &[String],
+    tier: TaskTier,
+    code_heavy: bool,
+    bench: Option<&BenchmarkScores>,
+) -> bool {
+    if is_subscription(id) || !is_routable(id) || !is_capable_alternative(id, tier, bench) {
+        return false;
+    }
+    if tier != TaskTier::Complex {
+        return true;
+    }
+    let Some(bench) = bench else {
+        return true;
+    };
+
+    let best_subscription = models
+        .iter()
+        .filter(|model| is_subscription(model) && is_routable(model))
+        .filter_map(|model| benchmark_metric(model, code_heavy, Some(bench)))
+        .max_by(f64::total_cmp);
+    match (
+        benchmark_metric(id, code_heavy, Some(bench)),
+        best_subscription,
+    ) {
+        (Some(alternative), Some(best)) => alternative + COMPLEX_CONSERVE_MAX_BENCH_GAP >= best,
+        _ => false,
+    }
+}
+
 fn has_nonsub_alternative(
     models: &[String],
     tier: TaskTier,
+    code_heavy: bool,
     bench: Option<&BenchmarkScores>,
 ) -> bool {
     models
         .iter()
-        .any(|m| !is_subscription(m) && is_routable(m) && is_capable_alternative(m, tier, bench))
+        .any(|model| is_conservation_alternative(model, models, tier, code_heavy, bench))
 }
 
 /// One model's scored row for the routing inspector: the score broken out so a human can see WHY
@@ -593,7 +645,8 @@ pub(crate) fn conserve_decision(
         .collect();
     sub_providers.sort_unstable();
     sub_providers.dedup();
-    d.eligible = !sub_providers.is_empty() && has_nonsub_alternative(models, tier, bench);
+    d.eligible =
+        !sub_providers.is_empty() && has_nonsub_alternative(models, tier, code_heavy, bench);
     if !d.eligible {
         return d;
     }
@@ -628,6 +681,27 @@ pub(crate) fn provider_conservation_fired(
                 quota.plan_for(provider),
                 code_heavy,
             )
+}
+
+fn conservation_penalty(
+    id: &str,
+    models: &[String],
+    tier: TaskTier,
+    code_heavy: bool,
+    decision: ConserveDecision,
+    quota: &forge_types::SubscriptionQuota,
+    bench: Option<&BenchmarkScores>,
+) -> f64 {
+    let demoted = if is_subscription(id) {
+        provider_conservation_fired(provider_of(id), tier, code_heavy, decision, quota)
+    } else {
+        decision.fired && !is_conservation_alternative(id, models, tier, code_heavy, bench)
+    };
+    if demoted {
+        CONSERVE_PENALTY
+    } else {
+        0.0
+    }
 }
 
 /// A per-prompt provider ordering key: hashing `seed:provider` means different prompts rotate
@@ -945,17 +1019,17 @@ impl ModelCatalog {
                     superseded.contains(m),
                 );
                 score += calibration_adjustment(self.calibration.get(m));
-                let conserved = is_subscription(m)
-                    && provider_conservation_fired(
-                        provider_of(m),
-                        tier,
-                        code_heavy,
-                        conservation,
-                        quota,
-                    );
-                if conserved {
-                    score -= CONSERVE_PENALTY;
-                }
+                let penalty = conservation_penalty(
+                    m,
+                    &self.models,
+                    tier,
+                    code_heavy,
+                    conservation,
+                    quota,
+                    self.bench.as_ref(),
+                );
+                let conserved = penalty > 0.0;
+                score -= penalty;
                 let bench_score = self.bench.as_ref().and_then(|b| b.score_for(m)).map(|s| {
                     if code_heavy {
                         s.coding
@@ -1069,18 +1143,15 @@ impl ModelCatalog {
                     superseded.contains(m),
                 ) + calibration_adjustment(self.calibration.get(m));
                 let sub = is_subscription(m);
-                let penalty = if sub
-                    && provider_conservation_fired(
-                        provider_of(m),
-                        tier,
-                        code_heavy,
-                        decision,
-                        quota,
-                    ) {
-                    CONSERVE_PENALTY
-                } else {
-                    0.0
-                };
+                let penalty = conservation_penalty(
+                    m,
+                    &self.models,
+                    tier,
+                    code_heavy,
+                    decision,
+                    quota,
+                    self.bench.as_ref(),
+                );
                 let bench_score = self.bench.as_ref().and_then(|b| b.score_for(m)).map(|s| {
                     if code_heavy {
                         s.coding
@@ -1671,6 +1742,128 @@ mod tests {
         assert!(
             !d.eligible,
             "hermes 405B bench score 9.0 < FRONTIER_BENCH_THRESHOLD — not a frontier alternative: {d:?}"
+        );
+    }
+
+    #[test]
+    fn complex_conservation_keeps_only_close_measured_alternatives() {
+        use crate::bench::BenchmarkScores;
+
+        let models = vec![
+            "claude-cli::opus[1m]".to_string(),
+            "nvidia::minimaxai/minimax-m3".to_string(),
+            "nvidia::z-ai/glm-5.2".to_string(),
+        ];
+        let mut bench = BenchmarkScores::new();
+        bench.insert("Claude Opus 5", 60.7, 78.0);
+        bench.insert("MiniMax M3", 44.4, 58.6);
+        bench.insert("GLM 5.2", 51.1, 68.8);
+
+        assert!(
+            !is_conservation_alternative(
+                "nvidia::minimaxai/minimax-m3",
+                &models,
+                TaskTier::Complex,
+                true,
+                Some(&bench),
+            ),
+            "a 19.4-point coding gap is too large for a complex conservation route"
+        );
+        assert!(
+            !is_conservation_alternative(
+                "nvidia::z-ai/glm-5.2",
+                &models,
+                TaskTier::Complex,
+                true,
+                Some(&bench),
+            ),
+            "a 9.2-point coding gap is still a material quality trade"
+        );
+
+        let mut close_bench = BenchmarkScores::new();
+        close_bench.insert("Claude Opus 5", 60.7, 78.0);
+        close_bench.insert("GLM 5.2", 58.0, 74.0);
+        assert!(
+            is_conservation_alternative(
+                "nvidia::z-ai/glm-5.2",
+                &models,
+                TaskTier::Complex,
+                true,
+                Some(&close_bench),
+            ),
+            "a measured four-point peer remains eligible once quota pressure rises"
+        );
+
+        let mut incomplete_bench = BenchmarkScores::new();
+        incomplete_bench.insert("GLM 5.2", 58.0, 74.0);
+        assert!(
+            !is_conservation_alternative(
+                "nvidia::z-ai/glm-5.2",
+                &models,
+                TaskTier::Complex,
+                true,
+                Some(&incomplete_bench),
+            ),
+            "a measured candidate cannot be called a near-peer when the subscription is unmeasured"
+        );
+        let heuristic_models = vec![
+            "claude-cli::opus[1m]".to_string(),
+            "openrouter::meta-llama/llama-3.1-405b-instruct".to_string(),
+        ];
+        assert!(
+            is_conservation_alternative(
+                "openrouter::meta-llama/llama-3.1-405b-instruct",
+                &heuristic_models,
+                TaskTier::Complex,
+                true,
+                None,
+            ),
+            "installations without benchmark data retain the conservative name heuristic"
+        );
+
+        let fired = ConserveDecision {
+            enabled: true,
+            eligible: true,
+            probability: 1.0,
+            roll: 0.0,
+            fired: true,
+        };
+        let quota = forge_types::SubscriptionQuota::default();
+        assert_eq!(
+            conservation_penalty(
+                "nvidia::minimaxai/minimax-m3",
+                &models,
+                TaskTier::Complex,
+                true,
+                fired,
+                &quota,
+                Some(&bench),
+            ),
+            CONSERVE_PENALTY
+        );
+        assert_eq!(
+            conservation_penalty(
+                "nvidia::z-ai/glm-5.2",
+                &models,
+                TaskTier::Complex,
+                true,
+                fired,
+                &quota,
+                Some(&bench),
+            ),
+            CONSERVE_PENALTY
+        );
+        assert_eq!(
+            conservation_penalty(
+                "nvidia::z-ai/glm-5.2",
+                &models,
+                TaskTier::Complex,
+                true,
+                fired,
+                &quota,
+                Some(&close_bench),
+            ),
+            0.0
         );
     }
 
@@ -2294,7 +2487,7 @@ mod tests {
         let mut bench = BenchmarkScores::new();
         bench.insert("sonnet", 60.0, 60.0);
         bench.insert("gpt-5.5", 60.0, 60.0);
-        bench.insert("llama-3.3-70b-versatile", 20.0, 20.0);
+        bench.insert("llama-3.3-70b-versatile", 55.0, 55.0);
         let cat = ModelCatalog::new(vec![
             "claude-cli::sonnet".into(),
             "codex-cli::gpt-5.5".into(),
@@ -2347,15 +2540,12 @@ mod tests {
     }
 
     #[test]
-    fn code_conservation_stays_low_until_half_the_plan_is_used() {
+    fn code_conservation_waits_for_pressure_on_complex_work() {
         assert_eq!(
             conserve_probability(TaskTier::Standard, 0.49, "", true),
             0.15
         );
-        assert_eq!(
-            conserve_probability(TaskTier::Complex, 0.49, "", true),
-            0.15
-        );
+        assert_eq!(conserve_probability(TaskTier::Complex, 0.49, "", true), 0.0);
         assert!(
             conserve_probability(TaskTier::Standard, 0.49, "", false) > 0.65,
             "non-code standard work keeps the original pressure ramp"

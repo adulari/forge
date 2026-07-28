@@ -243,6 +243,12 @@ fn elide_old_tool_results(
 }
 
 fn elide_tool_result(message: &Message, token_budget: usize) -> Message {
+    // A tokenizer cannot emit more tokens than the UTF-8 byte length it consumes. This cheap
+    // bound avoids BPE-tokenizing thousands of small persisted tool results just to prove that
+    // each one is already below a much larger per-result budget.
+    if message.content.len() <= token_budget {
+        return message.clone();
+    }
     if tokens::count_text(&message.content) <= token_budget {
         return message.clone();
     }
@@ -328,10 +334,9 @@ pub(crate) fn fit_messages(messages: &[Message], budget_tokens: usize) -> Vec<Me
 }
 
 fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Message> {
-    let total: usize = messages.iter().map(message_tokens).sum();
-    if total <= budget_tokens {
-        return messages;
-    }
+    // Count standing system context once, then walk ordinary history newest-first. Long sessions
+    // normally overflow on a relatively small recent suffix; an eager total over the entire
+    // transcript needlessly tokenized every old tool result before immediately discarding it.
     let system_cost: usize = messages
         .iter()
         .filter(|m| m.role == Role::System)
@@ -339,6 +344,7 @@ fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Messa
         .sum();
     let mut remaining = budget_tokens.saturating_sub(system_cost);
     let mut keep_idx = std::collections::HashSet::new();
+    let mut saw_overflow = false;
 
     for i in (0..messages.len()).rev() {
         if messages[i].role == Role::System {
@@ -377,8 +383,13 @@ fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Messa
             }
             return out;
         } else {
+            saw_overflow = true;
             break;
         }
+    }
+
+    if !saw_overflow {
+        return messages;
     }
 
     let mut ordered: Vec<usize> = keep_idx.iter().copied().collect();
@@ -831,5 +842,50 @@ mod tests {
         let reclaimed = prune_and_inject(&mut msgs, 2);
         assert!(reclaimed > 0);
         assert!(msgs[0].content.ends_with(PRUNE_MARKER));
+    }
+
+    #[test]
+    fn native_history_sized_tool_pressure_stays_bounded_and_responsive() {
+        let mut messages = Vec::with_capacity(14_000);
+        // More turns and tool results than the largest real Codex/Claude history observed by the
+        // aggregate-only history profiler (654 user turns / 6,995 tool calls).
+        for turn in 0..1_024 {
+            messages.push(Message::user(format!("continue checkpoint {turn}")));
+            for tool in 0..10 {
+                let id = format!("call-{turn}-{tool}");
+                messages.push(Message::assistant_tool_calls("", vec![tool_call(&id)]));
+                messages.push(Message::tool_result(
+                    id,
+                    format!("result {turn}-{tool}: {}", "x".repeat(1_024)),
+                ));
+            }
+        }
+
+        let started = std::time::Instant::now();
+        let output = to_llm(&messages, 50_000, 4_096, 2);
+        let output_tokens: usize = output.iter().map(message_tokens).sum();
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "fitting 10,240 persisted tool results became pathologically slow: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            output_tokens <= 50_000,
+            "provider view exceeded its token budget: {output_tokens}"
+        );
+        assert!(
+            output.len() < messages.len() / 10,
+            "old tool pressure should collapse to a small provider view: {} of {} messages",
+            output.len(),
+            messages.len()
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.role == Role::Tool)
+                .all(|message| message.content.len() > 1_024),
+            "request fitting must not mutate the persisted full-history messages"
+        );
     }
 }

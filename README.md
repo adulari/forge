@@ -56,9 +56,9 @@ It is **model-agnostic by design**: connect Anthropic, OpenAI, Google, Groq, NVI
 or just the Claude/Codex/Gemini subscription you already pay for — and Forge's routing engine sends
 **each task to the cheapest model that can do it well**, fails over to the next-best provider when one
 is rate-limited or down, and conserves your metered subscriptions by spreading load onto free frontier
-models. And because Forge can drive the *same* model you'd run with `claude` or `codex` directly, its
-reliability layer is a **measured** advantage, not a marketing one: on SWE-bench Lite, the same `claude
-sonnet` fixes **50% more bugs through Forge than through the raw CLI**.
+models. And because Forge can drive the *same* model you'd run with `claude` or `codex` directly,
+its reliability layer can be measured with matched, history-isolated comparisons rather than
+assumed from different-model runs.
 
 - **Model Mesh** — one agent, every provider. Task-tier routing (trivial / standard / complex) to the
   cheapest capable model, benchmark-ranked, with cross-provider capability-aware failover.
@@ -121,7 +121,29 @@ is spent only where it matters. Inspect any of these decisions live with `/mesh`
 
 ## 📊 Proof: same model, better results
 
-### Latest: history-safe pinned models and full-mesh auto
+### Latest: matched six-turn long-session stress
+
+The 2026-07-28 stress run used the same synthetic one-commit repository, six escalating prompts,
+continuous session history, hidden acceptance checks, and integrity audit for Forge full-mesh auto
+and native Codex CLI. A clean native Claude replacement is pending authentication:
+
+| Long-session comparison | Forge mesh auto | Native Codex | Native Claude |
+|---|---:|---:|---:|
+| Quality acceptance | **Passed** | Passed | Clean rerun pending |
+| Wall time | **559.469s** | 1,333.317s | — |
+| Raw tokens | **1,698,715** | 15,881,503 | — |
+| Cache-adjusted tokens | **763,291** | 4,541,599 | — |
+| Integrity and public-API audit | **Passed** | Passed | — |
+
+Forge matched Codex quality, ran **58.04% faster**, and used **83.19% fewer cache-adjusted
+tokens**. Honest review excluded the first Claude cell because its synthetic base contained one
+generated `.pyc`; the exact-tree replacement reached zero model tokens before expired OAuth stopped
+it. The report retains both artifacts and does not claim a clean Claude comparison. This is one
+workload, not a population estimate.
+
+**[Read the matched long-session report and failed-attempt ledger →](docs/benchmarks/forge-long-session-stress-2026-07.md)**
+
+### SWE-bench: history-safe pinned models and full-mesh auto
 
 The current quota-bounded study used **Claude Opus 5, Claude Sonnet 5, and
 GPT-5.6 Sol, Terra, and Luna** on two SWE-bench Verified tasks. Pinned
@@ -156,6 +178,7 @@ solve better.
 
 **[Read the canonical history-safe benchmark →](docs/benchmarks/history-safe-pinned-mesh-2026-07.md)**
 · **[Audit all 83 formal cells →](docs/benchmarks/cell-validity-2026-07.md)**
+· **[Read the long-session stress/readiness report →](docs/benchmarks/forge-long-session-stress-2026-07.md)**
 
 ---
 
@@ -1008,6 +1031,7 @@ command = "bash -c 'jq .args <<< $FORGE_TOOL_INPUT >> audit.log'"
 |-----|------|
 | [**Canonical history-safe pinned + mesh benchmark**](./docs/benchmarks/history-safe-pinned-mesh-2026-07.md) | Same-model Codex and Claude comparisons plus genuine mesh auto; official quality, speed, tokens, quota, integrity, and exceptions |
 | [**83-cell benchmark validity ledger**](./docs/benchmarks/cell-validity-2026-07.md) | Every retained cell and the exact reason it is valid, invalid, or superseded |
+| [**Long-session stress and readiness**](./docs/benchmarks/forge-long-session-stress-2026-07.md) | Real-history workload profile, live six-prompt mesh recovery, endurance regressions, fixes, capability health, and limitations |
 | [**Benchmark index**](./docs/benchmarks/README.md) | Current result, historical measurements, and reproduction guides |
 | [**Competitor comparison**](./docs/comparison.md) | Detailed, sourced breakdown of every alternative |
 | [**Why Forge is a better harness**](./docs/harness/why-forge-is-a-better-harness.md) | The test-backed case — incl. where Forge does *not* win |

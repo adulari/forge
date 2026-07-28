@@ -41,6 +41,7 @@ a specific binary, `FORGE_E2E_TIMEOUT` to change the 1,500-second turn timeout, 
 | `typescript-config-recovery` | Broken build config, package exports, secure deep merge, public API | Strictly typed package with passing Node tests |
 | `rust-transaction-ledger` | Transactional rollback, overflow, idempotency conflicts, stable ordering | Corrected standard-library Rust crate |
 | `interrupt-resume-large-write` | Forced mid-turn interruption, large tool arguments, same-session recovery | Strictly verified 321-line artifact retained with the run |
+| `long-session-reservations` | Six FIFO reprompts in one mesh-auto session: concurrency, rollback, cancellation, skeptical review, final verification | Live-only; visible suite plus exact hidden 100-way contention checks |
 
 The reference directory is evidence and something to inspect or run manually; the fixture is the
 replayable pre-fix starting point. Aetherfront intentionally starts from an empty workspace because
@@ -51,6 +52,33 @@ beside the PNG.
 
 Provider-backed runs consume real quota. The default is mesh-unpinned; set `FORGE_BIN`, not a model,
 when comparing development binaries so routing and failover remain part of the test.
+
+## Matched native long-session runner
+
+`native_long_session.py` drives Codex CLI or Claude Code one turn at a time so an external quota
+refresh can be recorded before and after every provider call. `prepare` creates one synthetic base
+commit, removes remotes and generated caches, records the exact Git tree hash, and writes a
+resumable `run-state.json`. `turn` fails closed when quota evidence is missing, stale, out of order,
+or at the cap; a provider-started failure is retained and blocks duplicate calls.
+
+```bash
+python3 scripts/manual-e2e/native_long_session.py prepare \
+  --provider claude --model 'opus[1m]' --effort high \
+  --out-root /absolute/artifact/root --quota-baseline 27 --quota-cap 5
+
+python3 scripts/manual-e2e/native_long_session.py record-quota \
+  --run-dir /absolute/run/dir --weekly 28 \
+  --external-observed-at 2026-07-28T04:11:08Z
+
+python3 scripts/manual-e2e/native_long_session.py turn \
+  --run-dir /absolute/run/dir --timeout 1500
+```
+
+Repeat the external refresh, `record-quota`, and `turn` sequence for all six prompts, then refresh
+and record quota once more before `finalize`. A zero-token expired-OAuth failure is never retried
+automatically. After the operator restores Claude login, `recover-auth` unlocks only that narrowly
+proven failure and retains its time in the final attempt ledger. Zero-event transport failures do
+not qualify as free parser failures.
 
 ## Provider cache probe
 

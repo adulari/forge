@@ -123,7 +123,9 @@ fn drive_pty(script: &[(&str, u64)]) -> (bool, String) {
 fn tui_autocheckpoints_then_undo_picker_rewinds_over_a_pty() {
     // A real turn auto-checkpoints; /undo opens the rewind picker; Enter rewinds.
     let (clean, plain) = drive_pty(&[
-        ("say hi\r", 1200),
+        // Debug/CI builds can take longer than one second to finish the first mock tool round-trip.
+        // Do not race the idle-only /undo command against the still-running turn.
+        ("say hi\r", 2500),
         ("/undo\r", 800),
         ("\r", 800),
         ("\x1b", 0),

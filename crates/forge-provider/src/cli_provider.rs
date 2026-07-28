@@ -1492,7 +1492,7 @@ impl ClaudeStreamState {
                                     .filter(|s| !s.is_empty())
                                 {
                                     if let Some(unseen) =
-                                        unseen_consolidated_suffix(full, self.reasoning.get(&index))
+                                        unseen_consolidated_suffix(full, &self.reasoning, index)
                                     {
                                         out.push(Parsed::Reasoning(unseen.to_string()));
                                     }
@@ -1505,7 +1505,7 @@ impl ClaudeStreamState {
                                     .filter(|s| !s.is_empty())
                                 {
                                     if let Some(unseen) =
-                                        unseen_consolidated_suffix(full, self.text.get(&index))
+                                        unseen_consolidated_suffix(full, &self.text, index)
                                     {
                                         out.push(Parsed::Text(unseen.to_string()));
                                     }
@@ -1617,20 +1617,43 @@ impl ClaudeStreamState {
     }
 }
 
-fn unseen_consolidated_suffix<'a>(full: &'a str, streamed: Option<&String>) -> Option<&'a str> {
-    let Some(streamed) = streamed.filter(|text| !text.is_empty()) else {
-        return Some(full);
-    };
-    match full.strip_prefix(streamed.as_str()) {
-        Some("") => None,
-        Some(suffix) => Some(suffix),
-        None => {
-            // The protocol promises that consolidated blocks assemble the emitted deltas. If a
-            // future CLI violates that, suppressing the repeated block is safer than duplicating a
-            // whole answer in the UI. The authoritative `result.result` remains available.
-            tracing::debug!("Claude consolidated block diverged from its streamed prefix");
-            None
-        }
+fn unseen_consolidated_suffix<'a>(
+    full: &'a str,
+    streamed: &std::collections::HashMap<usize, String>,
+    consolidated_index: usize,
+) -> Option<&'a str> {
+    if let Some(preferred) = streamed
+        .get(&consolidated_index)
+        .filter(|text| !text.is_empty())
+    {
+        return match full.strip_prefix(preferred.as_str()) {
+            Some("") => None,
+            Some(suffix) => Some(suffix),
+            None => {
+                // The protocol promises that consolidated blocks assemble the emitted deltas. If a
+                // future CLI violates that, suppressing the repeated block is safer than duplicating
+                // a whole answer in the UI. The authoritative `result.result` remains available.
+                tracing::debug!("Claude consolidated block diverged from its streamed prefix");
+                None
+            }
+        };
+    }
+
+    // Claude Code 2.1.220 emits block-level `assistant` snapshots: `message.content` contains only
+    // the just-finished block at array position zero, while the preceding `stream_event` retains
+    // that block's original message index (for example text index 1 after thinking index 0).
+    // Match the streamed value itself when the array position is therefore not an identity. Choose
+    // the longest prefix so a shorter earlier block cannot steal a later block's suffix.
+    let matching = streamed
+        .values()
+        .filter(|text| !text.is_empty() && full.starts_with(text.as_str()))
+        .max_by_key(|text| text.len());
+    match matching {
+        Some(text) => match full.strip_prefix(text.as_str()) {
+            Some("") => None,
+            suffix => suffix,
+        },
+        None => Some(full),
     }
 }
 
@@ -4447,6 +4470,30 @@ mod tests {
             stream.parse_line(consolidated),
             vec![Parsed::Text("lo".into())],
             "only bytes absent from partial delivery are emitted"
+        );
+    }
+
+    #[test]
+    fn claude_block_level_assistant_snapshot_deduplicates_original_stream_index() {
+        let mut stream = ClaudeStreamState::default();
+        let thinking = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"consider"}}}"#;
+        assert_eq!(
+            stream.parse_line(thinking),
+            vec![Parsed::Reasoning("consider".into())]
+        );
+        let consolidated_thinking = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"consider"}]}}"#;
+        assert!(
+            stream.parse_line(consolidated_thinking).is_empty(),
+            "the thinking snapshot was already streamed"
+        );
+
+        let text = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hello world"}}}"#;
+        assert_eq!(texts(&stream.parse_line(text)), "hello world");
+        let consolidated_text =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
+        assert!(
+            stream.parse_line(consolidated_text).is_empty(),
+            "the block-level assistant snapshot uses array position zero but stream index one"
         );
     }
 

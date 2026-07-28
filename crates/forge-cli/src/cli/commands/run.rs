@@ -1488,7 +1488,8 @@ pub(crate) async fn run_chat_tui(
     // and re-run it at the shifted routing tier. Set whenever a plain user turn is spawned.
     let mut last_prompt: Option<String> = None;
     // Prompts typed while a turn is running, queued to run one-per-turn after it finishes
-    // (like Claude Code / aider). Drained in the done-handler below; cleared on interrupt.
+    // (like Claude Code / aider). An interrupt cancels only the active response; queued user work
+    // remains valid and starts immediately under a fresh generation.
     let mut queued_prompts: Vec<String> = Vec::new();
     // Identity of the currently pending permission/question prompt, bumped every time a new one
     // is installed. Broadcast as `Snapshot::prompt_seq`; remote Allow/Answer must echo it back,
@@ -2248,12 +2249,6 @@ pub(crate) async fn run_chat_tui(
                         }
                         turn_gen += 1;
                         busy = false;
-                        loop_state = None;
-                        goal_state = None;
-                        if !queued_prompts.is_empty() {
-                            queued_prompts.clear();
-                            app.set_queued(&queued_prompts);
-                        }
                         pending = None;
                         pending_question = None;
                         app.prompt = None;
@@ -2265,6 +2260,11 @@ pub(crate) async fn run_chat_tui(
                                 None => "⏭ retrying on next model".to_string(),
                             });
                             turn_gen += 1;
+                            rebind_autonomous_generation(
+                                &mut loop_state,
+                                &mut goal_state,
+                                turn_gen,
+                            );
                             // A custom spawn (not `spawn_turn_with`): the exclusions MUST be
                             // benched inside the SAME lock acquisition that `run_turn_with` uses
                             // to classify/route, immediately before it — not from the render loop
@@ -2298,6 +2298,8 @@ pub(crate) async fn run_chat_tui(
                                 }
                             }));
                         } else {
+                            loop_state = None;
+                            goal_state = None;
                             app.note("⏭ turn aborted — no prompt to retry");
                         }
                     } else {
@@ -3179,10 +3181,6 @@ pub(crate) async fn run_chat_tui(
                     busy = false;
                     loop_state = None; // a `/loop` in progress stops on interrupt
                     goal_state = None; // a `/goal` in progress stops on interrupt
-                    if !queued_prompts.is_empty() {
-                        queued_prompts.clear(); // interrupting drops the queued prompts too
-                        app.set_queued(&queued_prompts);
-                    }
                     pending = None;
                     pending_question = None;
                     app.prompt = None;
@@ -3192,7 +3190,24 @@ pub(crate) async fn run_chat_tui(
                     // band doesn't freeze and later turns don't inherit `active`.
                     app.workflow.on_interrupt();
                     app.apply(forge_tui::PresenterEvent::AssistantDone); // flush any partial reply
-                    app.note("⏹ interrupted — stopped responding");
+                    if let Some(next) =
+                        dequeue_prompt(&mut queued_prompts, &mut app, &mut prompt_history)
+                    {
+                        last_prompt = Some(next.clone());
+                        turn_gen += 1;
+                        turn_handle = Some(spawn_turn(
+                            &next,
+                            &session,
+                            &done_tx,
+                            turn_gen,
+                            &mut app,
+                            &mut busy,
+                            &mut busy_since,
+                        ));
+                        app.note("⏹ interrupted — continuing with the next queued prompt");
+                    } else {
+                        app.note("⏹ interrupted — stopped responding");
+                    }
                     dirty = true;
                     continue;
                 }
@@ -4194,7 +4209,26 @@ pub(crate) async fn run_chat_tui(
                             app.prompt = None;
                             app.clear_question();
                             app.apply(forge_tui::PresenterEvent::AssistantDone);
-                            app.note("⏹ remote interrupted — stopped responding");
+                            if let Some(next) =
+                                dequeue_prompt(&mut queued_prompts, &mut app, &mut prompt_history)
+                            {
+                                last_prompt = Some(next.clone());
+                                turn_gen += 1;
+                                turn_handle = Some(spawn_turn(
+                                    &next,
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                ));
+                                app.note(
+                                    "⏹ remote interrupted — continuing with the next queued prompt",
+                                );
+                            } else {
+                                app.note("⏹ remote interrupted — stopped responding");
+                            }
                         }
                     }
                     remote::RemoteInput::Dequeue { index, text } => {
@@ -4309,13 +4343,20 @@ pub(crate) async fn run_chat_tui(
                         match loop_stop_reason(last.as_deref(), ls.iter) {
                             Some(reason) => app.note(reason),
                             None => {
+                                let prompt = dequeue_prompt(
+                                    &mut queued_prompts,
+                                    &mut app,
+                                    &mut prompt_history,
+                                )
+                                .unwrap_or_else(|| "Continue toward completion.".to_string());
+                                last_prompt = Some(prompt.clone());
                                 turn_gen += 1;
                                 loop_state = Some(LoopState {
                                     gen: turn_gen,
                                     iter: ls.iter + 1,
                                 });
                                 turn_handle = Some(spawn_turn_with(
-                                    "Continue toward completion.".to_string(),
+                                    prompt,
                                     vec![LOOP_GUIDANCE.to_string()],
                                     None,
                                     &session,
@@ -4360,6 +4401,13 @@ pub(crate) async fn run_chat_tui(
                             Some(reason) if is_goal_complete_reason(reason) => {}
                             Some(reason) => app.note(reason),
                             None => {
+                                let prompt = dequeue_prompt(
+                                    &mut queued_prompts,
+                                    &mut app,
+                                    &mut prompt_history,
+                                )
+                                .unwrap_or_else(|| GOAL_CONTINUE_PROMPT.to_string());
+                                last_prompt = Some(prompt.clone());
                                 turn_gen += 1;
                                 goal_state = Some(GoalState {
                                     gen: turn_gen,
@@ -4369,7 +4417,7 @@ pub(crate) async fn run_chat_tui(
                                     goal: gs.goal,
                                 });
                                 turn_handle = Some(spawn_turn_with(
-                                    GOAL_CONTINUE_PROMPT.to_string(),
+                                    prompt,
                                     vec![GOAL_GUIDANCE.to_string()],
                                     Some(forge_types::TaskTier::Complex),
                                     &session,
@@ -4387,22 +4435,22 @@ pub(crate) async fn run_chat_tui(
                 }
                 // Drain a queued prompt (typed while this turn was running): run it as the next
                 // turn, ahead of auto-compaction (the queued turn auto-compacts itself if needed).
-                if turn_handle.is_none() && !queued_prompts.is_empty() {
-                    let next = queued_prompts.remove(0);
-                    app.set_queued(&queued_prompts);
-                    if prompt_history.last() != Some(&next) {
-                        prompt_history.push(next.clone());
+                if turn_handle.is_none() {
+                    if let Some(next) =
+                        dequeue_prompt(&mut queued_prompts, &mut app, &mut prompt_history)
+                    {
+                        last_prompt = Some(next.clone());
+                        turn_gen += 1;
+                        turn_handle = Some(spawn_turn(
+                            &next,
+                            &session,
+                            &done_tx,
+                            turn_gen,
+                            &mut app,
+                            &mut busy,
+                            &mut busy_since,
+                        ));
                     }
-                    turn_gen += 1;
-                    turn_handle = Some(spawn_turn(
-                        &next,
-                        &session,
-                        &done_tx,
-                        turn_gen,
-                        &mut app,
-                        &mut busy,
-                        &mut busy_since,
-                    ));
                 }
                 // Auto-compact: when no new turn was spawned (not a loop iteration) and the
                 // context gauge is above AUTO_COMPACT_THRESHOLD, quietly run /compact so the
@@ -5040,6 +5088,40 @@ pub(crate) const GOAL_COMPLETE_REASON: &str = "🎯 goal complete";
 
 pub(crate) fn is_goal_complete_reason(reason: &str) -> bool {
     reason == GOAL_COMPLETE_REASON || reason == "🎯 goal complete — all tasks done"
+}
+
+/// Remove the oldest prompt submitted while a turn was active, refresh the visible queue, and
+/// retain it in prompt history exactly like an idle submission. Shared by ordinary FIFO drain and
+/// `/loop`/`/goal` steering so a user correction always owns the very next iteration.
+pub(crate) fn dequeue_prompt(
+    queue: &mut Vec<String>,
+    app: &mut forge_tui::App,
+    prompt_history: &mut Vec<String>,
+) -> Option<String> {
+    let next = queue.first().cloned()?;
+    queue.remove(0);
+    app.set_queued(queue);
+    let history_entry = next.trim();
+    if prompt_history.last().map(String::as_str) != Some(history_entry) {
+        prompt_history.push(history_entry.to_string());
+    }
+    Some(next)
+}
+
+/// A model-skip retries the same logical autonomous turn under a fresh generation. Keep `/loop`
+/// or `/goal` attached to that replacement so its completion advances the mode normally; queued
+/// user corrections remain untouched and drain after the retried turn.
+pub(crate) fn rebind_autonomous_generation(
+    loop_state: &mut Option<LoopState>,
+    goal_state: &mut Option<GoalState>,
+    generation: u64,
+) {
+    if let Some(state) = loop_state {
+        state.gen = generation;
+    }
+    if let Some(state) = goal_state {
+        state.gen = generation;
+    }
 }
 
 /// Decide whether a goal should stop after a turn. Returns `Some(reason)` to stop (shown to the
@@ -6718,5 +6800,45 @@ mod tests {
     #[test]
     fn goal_stop_reason_continues_with_open_tasks_and_progress() {
         assert_eq!(goal_stop_reason(false, 1, 3, 2, 0), None);
+    }
+
+    #[test]
+    fn dequeue_prompt_drains_fifo_and_records_trimmed_history() {
+        let mut queue = vec!["  first correction  ".to_string(), "second".to_string()];
+        let mut app = forge_tui::App::default();
+        let mut history = vec!["older".to_string()];
+
+        assert_eq!(
+            dequeue_prompt(&mut queue, &mut app, &mut history).as_deref(),
+            Some("  first correction  ")
+        );
+        assert_eq!(queue, vec!["second"]);
+        assert_eq!(history, vec!["older", "first correction"]);
+    }
+
+    #[test]
+    fn model_skip_rebinds_autonomous_state_without_consuming_queued_work() {
+        let mut loop_state = Some(LoopState { gen: 7, iter: 3 });
+        let mut goal_state = Some(GoalState {
+            gen: 7,
+            iter: 4,
+            prev_done: 2,
+            no_progress: 1,
+            goal: "finish".to_string(),
+        });
+        let queue = vec!["apply correction".to_string(), "then verify".to_string()];
+
+        rebind_autonomous_generation(&mut loop_state, &mut goal_state, 9);
+
+        assert!(matches!(loop_state, Some(LoopState { gen: 9, iter: 3 })));
+        assert!(matches!(
+            goal_state,
+            Some(GoalState {
+                gen: 9,
+                iter: 4,
+                ..
+            })
+        ));
+        assert_eq!(queue, vec!["apply correction", "then verify"]);
     }
 }
