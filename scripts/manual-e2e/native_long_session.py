@@ -127,6 +127,19 @@ def prompt_digest(prompt: str) -> str:
     return hashlib.sha256(prompt.encode()).hexdigest()
 
 
+def current_cli_version(provider: str) -> str:
+    if provider == "codex":
+        argv = ("codex", "--version")
+    elif provider == "claude":
+        argv = ("claude", "--version")
+    else:
+        raise ValueError(f"unsupported native provider: {provider!r}")
+    version = tiny_command(argv)
+    if not version:
+        raise RuntimeError(f"{provider} CLI did not report a version")
+    return version
+
+
 def prepare_workspace(scenario_dir: Path, workspace: Path) -> str:
     source_marker = scenario_dir / "fixture.source"
     fixture = scenario_dir / "fixture"
@@ -394,6 +407,57 @@ def normalize_codex_turn_tokens(turns: list[dict[str, Any]]) -> bool:
             changed = True
         previous_cumulative = cumulative
     return changed
+
+
+def execution_evidence_error(
+    state: dict[str, Any], agent: dict[str, Any]
+) -> str | None:
+    """Fail closed when the CLI did not prove the configured model/effort ran."""
+
+    expected_model = str(state.get("expected_resolved_model") or "").strip()
+    if not expected_model:
+        return "expected resolved model is not configured"
+    expected_effort = str(state.get("effort") or "").strip()
+    if expected_effort != "high":
+        return (
+            f"configured effort {expected_effort or '<missing>'!r} "
+            "is not the required regular 'high'"
+        )
+
+    provider = state.get("provider")
+    if provider == "codex":
+        resolved_model = str(agent.get("resolved_model") or "").strip()
+        if resolved_model != expected_model:
+            return (
+                f"resolved Codex model {resolved_model or '<missing>'!r} "
+                f"did not match expected {expected_model!r}"
+            )
+        resolved_effort = str(agent.get("resolved_effort") or "").strip()
+        if resolved_effort != expected_effort:
+            return (
+                f"resolved Codex effort {resolved_effort or '<missing>'!r} "
+                f"did not match expected {expected_effort!r}"
+            )
+        return None
+
+    if provider == "claude":
+        resolved_models = sorted(
+            {
+                str(model).strip()
+                for model in agent.get("resolved_models") or []
+                if str(model).strip()
+            }
+        )
+        if resolved_models != [expected_model]:
+            return (
+                f"resolved Claude models {resolved_models!r} "
+                f"did not match sole expected model {expected_model!r}"
+            )
+        # Claude Code 2.1.220 does not repeat an effort identifier in stream-json.
+        # The immutable run-state effort and retained argv are the available evidence.
+        return None
+
+    return f"unsupported provider in execution evidence: {provider!r}"
 
 
 def summarize_codex(path: Path) -> dict[str, Any]:
@@ -777,6 +841,22 @@ def recover_auth(args: argparse.Namespace) -> int:
         raise RuntimeError("no proven zero-token authentication failure is retained")
     if state.get("provider") != "claude" or not claude_authenticated():
         raise RuntimeError("Claude authentication is not restored")
+    expected_model = str(
+        getattr(args, "expected_resolved_model", None)
+        or state.get("expected_resolved_model")
+        or ""
+    ).strip()
+    if not expected_model:
+        raise RuntimeError(
+            "an exact --expected-resolved-model is required before recovery"
+        )
+    retained_expected = str(state.get("expected_resolved_model") or "").strip()
+    if retained_expected and retained_expected != expected_model:
+        raise RuntimeError(
+            "refusing to change the retained expected resolved model "
+            f"from {retained_expected!r} to {expected_model!r}"
+        )
+    state["expected_resolved_model"] = expected_model
     failures = state.setdefault("authentication_failures", [])
     if not any(item.get("turn_dir") == failure.get("turn_dir") for item in failures):
         failures.append(failure)
@@ -805,6 +885,17 @@ def prepare(args: argparse.Namespace) -> int:
         or not all(isinstance(prompt, str) and prompt.strip() for prompt in prompts)
     ):
         raise ValueError("the matched stress scenario must contain exactly six prompts")
+    if args.effort != "high":
+        raise ValueError("the matched stress benchmark requires regular high effort")
+    expected_model = str(
+        getattr(args, "expected_resolved_model", None)
+        or (args.model if args.provider == "codex" else "")
+    ).strip()
+    if not expected_model:
+        raise ValueError(
+            "Claude benchmarks require --expected-resolved-model so an alias "
+            "cannot silently resolve to a different model/version"
+        )
 
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = (
@@ -815,13 +906,12 @@ def prepare(args: argparse.Namespace) -> int:
     workspace = run_dir / "workspace"
     baseline = prepare_workspace(scenario_dir, workspace)
     session_id = str(uuid.uuid4()) if args.provider == "claude" else None
-    version = tiny_command(
-        ("codex", "--version") if args.provider == "codex" else ("claude", "--version")
-    )
+    version = current_cli_version(args.provider)
     state = {
         "schema_version": 1,
         "provider": args.provider,
         "requested_model": args.model,
+        "expected_resolved_model": expected_model,
         "effort": args.effort,
         "cli_version": version,
         "scenario": args.scenario,
@@ -906,6 +996,12 @@ def run_turn(args: argparse.Namespace) -> int:
         raise RuntimeError(
             "a provider-started attempt failed; refusing to duplicate the paid call"
         )
+    current_version = current_cli_version(state["provider"])
+    if current_version != state.get("cli_version"):
+        raise RuntimeError(
+            "paid call denied: CLI version changed from "
+            f"{state.get('cli_version')!r} to {current_version!r}"
+        )
     valid, reason = quota_is_fresh(state, args.quota_max_age)
     if not valid:
         raise RuntimeError(f"paid call denied: {reason}")
@@ -978,6 +1074,11 @@ def run_turn(args: argparse.Namespace) -> int:
     if state["provider"] == "codex":
         agent.update(codex_rollout_context(state.get("session_id")))
         normalize_codex_turn_tokens([*state["turns"], {"agent": agent}])
+    execution_error = execution_evidence_error(state, agent)
+    if execution_error:
+        agent["execution_evidence_error"] = execution_error
+    else:
+        agent.pop("execution_evidence_error", None)
     same_session = bool(state.get("session_id")) and agent.get(
         "session_id"
     ) == state.get("session_id")
@@ -986,9 +1087,11 @@ def run_turn(args: argparse.Namespace) -> int:
         and not process["timed_out"]
         and agent["completed"]
         and same_session
+        and execution_error is None
     )
     turn = {
         "turn": turn_index + 1,
+        "cli_version": current_version,
         "process": process,
         "agent": agent,
         "same_session": same_session,
@@ -1402,6 +1505,22 @@ def finalize(args: argparse.Namespace) -> int:
     original_test_count = sum(name.startswith("test:") for name in base_tests)
     final_test_count = sum(name.startswith("test:") for name in final_tests)
     tokens = aggregate_tokens(state["turns"])
+    execution_errors = [
+        {"turn": turn["turn"], "error": error}
+        for turn in state["turns"]
+        if (error := execution_evidence_error(state, turn["agent"])) is not None
+    ]
+    execution_errors.extend(
+        {
+            "turn": turn["turn"],
+            "error": (
+                f"turn CLI version {turn.get('cli_version') or '<missing>'!r} "
+                f"did not match prepared version {state.get('cli_version')!r}"
+            ),
+        }
+        for turn in state["turns"]
+        if turn.get("cli_version") != state.get("cli_version")
+    )
     all_passed = (
         visible["exit_code"] == 0
         and not visible["timed_out"]
@@ -1415,10 +1534,12 @@ def finalize(args: argparse.Namespace) -> int:
         and base_is_ancestor
         and signatures_unchanged
         and tokens["complete"]
+        and not execution_errors
     )
     result = {
         "provider": state["provider"],
         "requested_model": state["requested_model"],
+        "expected_resolved_model": state.get("expected_resolved_model"),
         "effort": state["effort"],
         "cli_version": state["cli_version"],
         "resolved_models": sorted(
@@ -1489,6 +1610,10 @@ def finalize(args: argparse.Namespace) -> int:
         ),
         "patch": patch,
         "integrity": integrity,
+        "execution_evidence": {
+            "valid": not execution_errors,
+            "errors": execution_errors,
+        },
         "quota": {
             "baseline_percent": state["quota_baseline_percent"],
             "cap_delta_points": state["quota_cap_delta_points"],
@@ -1515,6 +1640,13 @@ def parser() -> argparse.ArgumentParser:
         "--provider", choices=("codex", "claude"), required=True
     )
     prepare_parser.add_argument("--model", required=True)
+    prepare_parser.add_argument(
+        "--expected-resolved-model",
+        help=(
+            "exact model identifier the CLI must report; defaults to --model "
+            "for Codex and is required for Claude aliases"
+        ),
+    )
     prepare_parser.add_argument(
         "--effort", choices=("low", "medium", "high"), default="high"
     )
@@ -1544,6 +1676,10 @@ def parser() -> argparse.ArgumentParser:
 
     auth_recover_parser = commands.add_parser("recover-auth")
     auth_recover_parser.add_argument("--run-dir", type=Path, required=True)
+    auth_recover_parser.add_argument(
+        "--expected-resolved-model",
+        help="exact model identifier required when upgrading a prepared legacy run",
+    )
     auth_recover_parser.set_defaults(handler=recover_auth)
 
     turn_parser = commands.add_parser("turn")
