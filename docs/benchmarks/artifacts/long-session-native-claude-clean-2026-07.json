@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "cell": "native-claude-opus-5-high-clean",
+  "source_artifact": "long-session-reservations-native-claude-20260728T040927Z-2201418",
+  "finalized_at": "2026-07-28T08:03:52.316732+00:00",
+  "valid_comparison_cell": true,
+  "quality_acceptance_passed": false,
+  "setup": {
+    "cli_version": "2.1.220 (Claude Code)",
+    "requested_model": "opus[1m]",
+    "resolved_model": "claude-opus-5[1m]",
+    "effort": "high",
+    "turns_completed": 6,
+    "same_session_all_model_turns": true,
+    "synthetic_base_tree": "7d17bf17bcd5f9467a305edf6a0a5a50dfa1582b",
+    "prompt_sha256": [
+      "29c633037dd2c8f1c64a60a861c1ca7557541ffa3c631a1971c84466e7224fe4",
+      "b551e2b12c9e76a0fcabfa17bc84515d0f37fb35415d700ef5fcc19bf70dbd42",
+      "68310f44dccf0032aa5a7955dd07410807a68949d6ecf9440082fb634dc0a262",
+      "d8fd10871e4b34383a1b8528e1804ae200d386f84ce264f47601eeff484a0447",
+      "a766696035f5517eddbc2502787553bba781e316b2706442be655a99f2456440",
+      "9c1d0bfa2de9752ce51d910c78de41e3b8befa7cdbc7a6a80d96a68798bd0c9f"
+    ]
+  },
+  "retained_pre_provider_attempts": [
+    {
+      "kind": "expired_authentication",
+      "wall_seconds": 1.417,
+      "event_count": 8,
+      "reported_tokens": 0
+    },
+    {
+      "kind": "local_session_id_collision",
+      "wall_seconds": 0.265,
+      "event_count": 0,
+      "reported_tokens": null
+    }
+  ],
+  "turns": [
+    {
+      "turn": 1,
+      "wall_seconds": 91.388,
+      "raw_tokens": 431848,
+      "cache_adjusted_tokens_025": 149551.0,
+      "cache_zero_credit_tokens": 55452,
+      "provider_calls": 14,
+      "tool_calls": 13
+    },
+    {
+      "turn": 2,
+      "wall_seconds": 288.91,
+      "raw_tokens": 826548,
+      "cache_adjusted_tokens_025": 251238.0,
+      "cache_zero_credit_tokens": 59468,
+      "provider_calls": 14,
+      "tool_calls": 13
+    },
+    {
+      "turn": 3,
+      "wall_seconds": 157.281,
+      "raw_tokens": 536784,
+      "cache_adjusted_tokens_025": 190566.75,
+      "cache_zero_credit_tokens": 75161,
+      "provider_calls": 7,
+      "tool_calls": 6
+    },
+    {
+      "turn": 4,
+      "wall_seconds": 222.095,
+      "raw_tokens": 1176163,
+      "cache_adjusted_tokens_025": 323834.5,
+      "cache_zero_credit_tokens": 39725,
+      "provider_calls": 12,
+      "tool_calls": 11
+    },
+    {
+      "turn": 5,
+      "wall_seconds": 211.233,
+      "raw_tokens": 1413346,
+      "cache_adjusted_tokens_025": 378242.5,
+      "cache_zero_credit_tokens": 33208,
+      "provider_calls": 12,
+      "tool_calls": 11
+    },
+    {
+      "turn": 6,
+      "wall_seconds": 46.811,
+      "raw_tokens": 256342,
+      "cache_adjusted_tokens_025": 68857.0,
+      "cache_zero_credit_tokens": 6362,
+      "provider_calls": 2,
+      "tool_calls": 1
+    }
+  ],
+  "totals": {
+    "model_turn_wall_seconds": 1017.718,
+    "attempted_wall_seconds": 1019.4,
+    "input_tokens": 4576533,
+    "cached_input_tokens": 4371655,
+    "uncached_input_tokens": 204878,
+    "output_tokens": 64498,
+    "raw_tokens": 4641031,
+    "cache_adjusted_tokens_025": 1362289.75,
+    "cache_zero_credit_tokens": 269376
+  },
+  "acceptance": {
+    "visible_tests": {
+      "passed": 23,
+      "attempted": 23
+    },
+    "original_tests_replay": {
+      "passed": 8,
+      "attempted": 8
+    },
+    "hidden_exit_code": 1,
+    "hidden_failure": "Conflict precedence: a reused request ID with a different unknown SKU raised NotFound before checking the existing request ID and raising Conflict.",
+    "public_signatures_unchanged": true,
+    "original_tests_not_weakened": true,
+    "patch_diff_check": true
+  },
+  "integrity": {
+    "events_audited": 2233,
+    "findings": [],
+    "valid": true,
+    "workspace_remotes": 0,
+    "execution_identity_valid": true
+  },
+  "patch": {
+    "bytes": 21012,
+    "sha256": "caa9a0b9353d3f54f24f94d89536332fe41217ccb7f1b2fe9f29eb5e8deea3a3"
+  },
+  "quota": {
+    "baseline_percent": 27.0,
+    "before_first_model_turn_percent": 28.0,
+    "final_percent": 29.0,
+    "cumulative_delta_points": 2.0,
+    "replacement_model_turn_delta_points": 1.0,
+    "cap_delta_points": 5.0,
+    "hard_stop_percent": 32.0,
+    "within_cap": true
+  },
+  "comparison_to_forge": {
+    "forge_quality_acceptance_passed": true,
+    "forge_faster_percent": 45.12,
+    "forge_raw_token_reduction_percent": 63.4,
+    "forge_cache_adjusted_reduction_percent": 43.97,
+    "forge_cache_zero_tokens_more_percent": 67.6
+  }
+}

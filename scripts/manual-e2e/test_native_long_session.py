@@ -41,6 +41,17 @@ class NativeLongSessionTests(unittest.TestCase):
         )
         self.assertIn("--session-id", claude_first)
         self.assertIn("--resume", claude_resumed)
+        self.assertEqual(
+            claude_first[claude_first.index("--model") + 1], "opus"
+        )
+        self.assertEqual(
+            claude_first[claude_first.index("--session-id") + 1],
+            "claude-session",
+        )
+        self.assertEqual(
+            claude_resumed[claude_resumed.index("--resume") + 1],
+            "claude-session",
+        )
         self.assertIn("--strict-mcp-config", claude_first)
         self.assertEqual(
             claude_first[claude_first.index("--disallowedTools") + 1],
@@ -274,23 +285,29 @@ class NativeLongSessionTests(unittest.TestCase):
         self.assertIn("post-turn", reason)
 
         state["quota_observations"][-1]["after_turn"] = 1
+        now = native.parse_observed_at(native.utc_now(), "now")
         state["turns"][0]["process"] = {
-            "ended_at": (
-                native.parse_observed_at(native.utc_now(), "now")
-                - native.dt.timedelta(seconds=1)
-            ).isoformat()
+            "started_at": (now - native.dt.timedelta(seconds=2)).isoformat(),
+            "ended_at": (now - native.dt.timedelta(seconds=1)).isoformat(),
         }
         self.assertTrue(native.quota_is_fresh(state, 900)[0])
-        state["turns"][0]["process"]["ended_at"] = (
-            native.parse_observed_at(native.utc_now(), "now")
-            + native.dt.timedelta(seconds=10)
+        state["turns"][0]["process"]["started_at"] = (
+            now + native.dt.timedelta(seconds=10)
         ).isoformat()
         valid, reason = native.quota_is_fresh(state, 900)
         self.assertFalse(valid)
         self.assertIn("predates", reason)
+        state["turns"][0]["process"]["started_at"] = (
+            now - native.dt.timedelta(seconds=2)
+        ).isoformat()
         state["turns"][0]["process"]["ended_at"] = (
-            native.parse_observed_at(native.utc_now(), "now")
-            - native.dt.timedelta(seconds=1)
+            now + native.dt.timedelta(seconds=10)
+        ).isoformat()
+        valid, reason = native.quota_is_fresh(state, 900)
+        self.assertFalse(valid)
+        self.assertIn("before", reason)
+        state["turns"][0]["process"]["ended_at"] = (
+            now - native.dt.timedelta(seconds=1)
         ).isoformat()
         state["quota_observations"][-1]["weekly_utilization_percent"] = 46
         valid, reason = native.quota_is_fresh(state, 900)
@@ -657,6 +674,41 @@ class NativeLongSessionTests(unittest.TestCase):
                 "a zero-event provider/transport failure must never be assumed free",
             )
 
+            (turn_dir / "stderr.log").write_text(
+                "Error: Session ID "
+                "ee906d54-43f8-405f-97a8-1736a863e2d2 is already in use.\n",
+                encoding="utf-8",
+            )
+            collision = {
+                **failure,
+                "turn": 1,
+                "process": {
+                    **failure["process"],
+                    "exit_code": 1,
+                    "wall_seconds": 0.265,
+                },
+            }
+            collision_state = {
+                "provider": "claude",
+                "session_id": "ee906d54-43f8-405f-97a8-1736a863e2d2",
+                "next_turn": 0,
+                "turns": [],
+                "preflight_failures": [],
+                "paid_failure": collision,
+            }
+            self.assertTrue(native.is_preflight_failure(collision))
+            self.assertTrue(native.recover_preflight_failures(collision_state))
+            self.assertNotIn("paid_failure", collision_state)
+            self.assertEqual(collision_state["preflight_failures"], [collision])
+            self.assertNotEqual(
+                collision_state["session_id"],
+                "ee906d54-43f8-405f-97a8-1736a863e2d2",
+            )
+            self.assertEqual(
+                collision_state["session_recoveries"][0]["source_turn_dir"],
+                str(turn_dir),
+            )
+
     def test_patch_capture_excludes_harness_noise_but_retains_source_changes(
         self,
     ) -> None:
@@ -670,6 +722,10 @@ class NativeLongSessionTests(unittest.TestCase):
             native.git(workspace, "config", "user.email", "test@local")
             native.git(workspace, "config", "user.name", "Test")
             (workspace / "source.py").write_text("old\n", encoding="utf-8")
+            (workspace / ".gitignore").write_text(
+                ".forge/\n.claude/\n__pycache__/\n*.pyc\n",
+                encoding="utf-8",
+            )
             native.git(workspace, "add", "-A")
             native.git(workspace, "commit", "-qm", "base")
             baseline = native.tiny_command(("git", "rev-parse", "HEAD"), cwd=workspace)
@@ -679,6 +735,7 @@ class NativeLongSessionTests(unittest.TestCase):
             checkpoint = workspace / ".forge" / "checkpoints"
             checkpoint.mkdir(parents=True)
             (checkpoint / "state.blob").write_text("generated\n", encoding="utf-8")
+            (workspace / ".claude" / ".cc-writes").mkdir(parents=True)
             cache = workspace / "pkg" / "__pycache__"
             cache.mkdir(parents=True)
             (cache / "module.pyc").write_bytes(b"generated")
@@ -690,9 +747,15 @@ class NativeLongSessionTests(unittest.TestCase):
             self.assertIn("source.py", patch)
             self.assertIn("new_test.py", patch)
             self.assertNotIn(".forge", patch)
+            self.assertNotIn(".claude", patch)
             self.assertNotIn("__pycache__", patch)
             self.assertTrue(
-                all(".forge" not in row and "__pycache__" not in row for row in result["status"])
+                all(
+                    ".forge" not in row
+                    and ".claude" not in row
+                    and "__pycache__" not in row
+                    for row in result["status"]
+                )
             )
             self.assertEqual(
                 (run_dir / "git-status.txt").read_text(encoding="utf-8").splitlines(),
@@ -704,6 +767,7 @@ class NativeLongSessionTests(unittest.TestCase):
     ) -> None:
         failure = {
             "success": False,
+            "turn": 1,
             "turn_dir": "/run/turns/01",
             "agent": {
                 "event_count": 8,
@@ -729,6 +793,7 @@ class NativeLongSessionTests(unittest.TestCase):
                 run_dir / native.STATE_FILE,
                 {
                     "provider": "claude",
+                    "session_id": "claude-auth-failed-session",
                     "next_turn": 0,
                     "paid_failure": failure,
                     "authentication_failures": [],
@@ -756,6 +821,15 @@ class NativeLongSessionTests(unittest.TestCase):
                 state["expected_resolved_model"], "claude-opus-5[1m]"
             )
             self.assertEqual(state["authentication_failures"], [failure])
+            self.assertNotEqual(
+                state["session_id"], "claude-auth-failed-session"
+            )
+            self.assertEqual(
+                state["session_recoveries"][0]["source_turn_dir"],
+                failure["turn_dir"],
+            )
+            self.assertEqual(native.retained_attempt_count(state, 1), 1)
+            self.assertEqual(native.retained_attempt_count(state, 2), 0)
 
     def test_logged_out_claude_is_denied_before_a_provider_process_starts(
         self,

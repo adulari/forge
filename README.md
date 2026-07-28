@@ -125,23 +125,24 @@ is spent only where it matters. Inspect any of these decisions live with `/mesh`
 
 The 2026-07-28 stress run used the same synthetic one-commit repository, six escalating prompts,
 continuous session history, hidden acceptance checks, and integrity audit for Forge full-mesh auto
-and native Codex CLI. A clean native Claude replacement is pending authentication:
+and native Codex CLI and Claude Code:
 
 | Long-session comparison | Forge mesh auto | Native Codex | Native Claude |
 |---|---:|---:|---:|
-| Quality acceptance | **Passed** | Passed | Clean rerun pending |
-| Wall time | **559.469s** | 1,333.317s | — |
-| Raw tokens | **1,698,715** | 5,129,177 | — |
-| Cache-adjusted tokens | **763,291** | 1,430,681 | — |
-| Integrity and public-API audit | **Passed** | Passed | — |
+| Quality acceptance | **Passed** | Passed | Failed hidden conflict precedence |
+| Attempted wall time | **559.469s** | 1,333.317s | 1,019.400s |
+| Raw tokens | **1,698,715** | 5,129,177 | 4,641,031 |
+| Cache-adjusted tokens | **763,291** | 1,430,681 | 1,362,289.75 |
+| Integrity and public-API audit | **Passed** | Passed | Passed |
 
 Forge matched Codex quality, ran **58.04% faster**, used **66.88% fewer raw tokens**, and used
-**46.65% fewer cache-adjusted tokens**. Honest review excluded the first Claude cell because its
-synthetic base contained one generated `.pyc`; the exact-tree replacement reached zero model tokens
-before expired OAuth stopped it. A follow-up audit strengthened hidden acceptance with 100
-deterministically alternating reserve/cancel operations and cancellation-write rollback; both
-retained valid workspaces passed the free replay. The report retains every artifact and fix and does
-not claim a clean Claude comparison. This is one workload, not a population estimate.
+**46.65% fewer cache-adjusted tokens**. Against clean native Claude, Forge passed the hidden
+contract Claude missed, ran **45.12% faster**, used **63.40% fewer raw tokens**, and used
+**43.97% fewer cache-adjusted tokens**. Honest review still excludes the older Claude cell whose
+base contained one generated `.pyc`; the exact-tree replacement above is the current result. The
+report retains every failure, quota refresh, artifact, and harness correction. This is one workload,
+not a population estimate, and native Codex/Claude remain more efficient only under the
+cache-zero-credit sensitivity.
 
 **[Read the matched long-session report and failed-attempt ledger →](docs/benchmarks/forge-long-session-stress-2026-07.md)**
 

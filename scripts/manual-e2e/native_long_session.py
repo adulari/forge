@@ -63,7 +63,9 @@ INTEGRITY_PATTERNS = {
 }
 PATCH_PATHS = (
     ".",
+    ":(exclude).forge",
     ":(exclude).forge/**",
+    ":(exclude).claude",
     ":(exclude).claude/**",
     ":(exclude)**/__pycache__/**",
     ":(exclude)**/*.pyc",
@@ -74,6 +76,9 @@ LOCAL_USAGE_ERROR = re.compile(
     r"invalid value|required arguments? (?:were|was) not provided).*$"
 )
 LOCAL_USAGE_BANNER = re.compile(r"(?im)^Usage:\s+(?:codex|claude)\b")
+CLAUDE_SESSION_IN_USE = re.compile(
+    r"(?im)^Error: Session ID [0-9a-f-]+ is already in use\.\s*$"
+)
 
 
 def utc_now() -> str:
@@ -701,17 +706,27 @@ def quota_is_fresh(
     turns = state.get("turns") or []
     if turns:
         try:
+            last_turn_started = parse_observed_at(
+                turns[-1]["process"].get("started_at"), "last turn started_at"
+            )
             last_turn_ended = parse_observed_at(
                 turns[-1]["process"].get("ended_at"), "last turn ended_at"
             )
         except (KeyError, TypeError, ValueError) as error:
             return False, f"invalid retained turn timestamp: {error}"
-        # Provider rate-limit headers are emitted immediately before CLI teardown; allow a few
-        # seconds for process cleanup while still rejecting any pre-turn or mid-turn sample.
-        if externally_observed + dt.timedelta(seconds=5) < last_turn_ended:
+        # Claude emits its authoritative subscription sample inside the final provider request,
+        # while Helm can only retrieve that sample after the CLI exits. Prove both halves:
+        # the external sample belongs to the completed arm, and this ledger write happened after
+        # process teardown. A pre-arm sample or pre-exit ledger write still fails closed.
+        if externally_observed + dt.timedelta(seconds=5) < last_turn_started:
             return (
                 False,
-                "external quota observation predates the completed provider turn",
+                "external quota observation predates the completed provider arm",
+            )
+        if recorded + dt.timedelta(seconds=1) < last_turn_ended:
+            return (
+                False,
+                "quota refresh was recorded before the completed provider turn ended",
             )
     weekly = float(latest["weekly_utilization_percent"])
     hard_stop = float(state["quota_baseline_percent"]) + float(
@@ -742,16 +757,42 @@ def is_preflight_failure(turn: dict[str, Any]) -> bool:
         stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         stderr = ""
-    return (
+    common = (
         not bool(turn.get("success"))
         and int((turn.get("agent") or {}).get("event_count") or 0) == 0
         and all(value is None for value in tokens.values())
         and (turn.get("agent") or {}).get("session_id") is None
-        and process.get("exit_code") == 2
         and not bool(process.get("timed_out"))
         and float(process.get("wall_seconds") or 0.0) <= 5.0
+    )
+    local_usage_failure = (
+        process.get("exit_code") == 2
         and bool(LOCAL_USAGE_ERROR.search(stderr))
         and bool(LOCAL_USAGE_BANNER.search(stderr))
+    )
+    reserved_claude_session = (
+        process.get("exit_code") == 1
+        and bool(CLAUDE_SESSION_IN_USE.fullmatch(stderr.strip()))
+    )
+    return common and (local_usage_failure or reserved_claude_session)
+
+
+def rotate_claude_session_id(
+    state: dict[str, Any], *, reason: str, source_turn_dir: str | None
+) -> None:
+    """Replace a never-started Claude session while preserving an audit record."""
+
+    previous = str(state.get("session_id") or "")
+    replacement = str(uuid.uuid4())
+    state["session_id"] = replacement
+    state.setdefault("session_recoveries", []).append(
+        {
+            "previous_session_id": previous,
+            "replacement_session_id": replacement,
+            "reason": reason,
+            "source_turn_dir": source_turn_dir,
+            "recorded_at": utc_now(),
+        }
     )
 
 
@@ -769,6 +810,29 @@ def recover_preflight_failures(state: dict[str, Any]) -> bool:
             changed = True
         else:
             retained.append(turn)
+    paid_failure = state.get("paid_failure")
+    if isinstance(paid_failure, dict) and is_preflight_failure(paid_failure):
+        if not any(
+            item.get("turn_dir") == paid_failure.get("turn_dir")
+            for item in preflight
+        ):
+            preflight.append(paid_failure)
+        if (
+            state.get("provider") == "claude"
+            and CLAUDE_SESSION_IN_USE.fullmatch(
+                (
+                    Path(str(paid_failure.get("turn_dir") or ""))
+                    / "stderr.log"
+                ).read_text(encoding="utf-8", errors="replace").strip()
+            )
+        ):
+            rotate_claude_session_id(
+                state,
+                reason="local session id reservation collision before provider execution",
+                source_turn_dir=paid_failure.get("turn_dir"),
+            )
+        state.pop("paid_failure", None)
+        changed = True
     if changed:
         state["turns"] = retained
         state["next_turn"] = len(retained)
@@ -860,6 +924,11 @@ def recover_auth(args: argparse.Namespace) -> int:
     failures = state.setdefault("authentication_failures", [])
     if not any(item.get("turn_dir") == failure.get("turn_dir") for item in failures):
         failures.append(failure)
+    rotate_claude_session_id(
+        state,
+        reason="zero-token authentication failure reserved the original local session id",
+        source_turn_dir=failure.get("turn_dir"),
+    )
     state.pop("paid_failure", None)
     dump_json(state_path, state)
     print(
@@ -873,6 +942,19 @@ def recover_auth(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def retained_attempt_count(state: dict[str, Any], turn_number: int) -> int:
+    """Count every preserved failed directory so a retry never collides with evidence."""
+
+    directories = {
+        str(attempt.get("turn_dir"))
+        for bucket in ("preflight_failures", "authentication_failures")
+        for attempt in state.get(bucket) or []
+        if int(attempt.get("turn") or 0) == turn_number
+        and attempt.get("turn_dir")
+    }
+    return len(directories)
 
 
 def prepare(args: argparse.Namespace) -> int:
@@ -1018,10 +1100,7 @@ def run_turn(args: argparse.Namespace) -> int:
             "run state is inconsistent; refusing to duplicate a provider call"
         )
 
-    prior_attempts = sum(
-        int(attempt.get("turn") or 0) == turn_index + 1
-        for attempt in state.get("preflight_failures") or []
-    )
+    prior_attempts = retained_attempt_count(state, turn_index + 1)
     directory_name = (
         f"{turn_index + 1:02d}"
         if prior_attempts == 0
@@ -1368,7 +1447,20 @@ def run_verifier(argv: Sequence[str], *, cwd: Path, path: Path) -> dict[str, Any
 
 
 def capture_patch(workspace: Path, run_dir: Path, baseline: str) -> dict[str, Any]:
-    git(workspace, "add", "-N", "--", *PATCH_PATHS)
+    untracked = git(
+        workspace,
+        "ls-files",
+        "-z",
+        "--others",
+        "--exclude-standard",
+        "--",
+        *PATCH_PATHS,
+    ).stdout.split(b"\0")
+    untracked_paths = [
+        path.decode("utf-8", "surrogateescape") for path in untracked if path
+    ]
+    if untracked_paths:
+        git(workspace, "add", "-N", "--", *untracked_paths)
     patch = git(workspace, "diff", "--binary", baseline, "--", *PATCH_PATHS)
     patch_path = run_dir / "changes.patch"
     patch_path.write_bytes(patch.stdout)

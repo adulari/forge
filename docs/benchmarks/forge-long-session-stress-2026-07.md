@@ -1,12 +1,11 @@
 # Forge matched long-session stress benchmark — 2026-07-28
 
-This is the current long-session result. It contains one fully matched comparison between regular
-full-mesh Forge auto and native Codex CLI on the same six-prompt workload. Honest review excluded
-the first native Claude cell because its synthetic base accidentally tracked one generated
-`tests/__pycache__/*.pyc` file. Every source and prompt blob matched, but the base trees were not
-byte-for-byte identical. A clean Claude replacement was prepared on the correct tree and failed
-before model execution because the local Claude OAuth session had expired. Both Claude artifacts
-are retained below; neither is used as a current matched headline cell.
+This is the current long-session result. It contains a fully matched comparison between regular
+full-mesh Forge auto, native Codex CLI, and native Claude Code on the same six-prompt workload.
+Honest review excluded the first native Claude cell because its synthetic base accidentally tracked
+one generated `tests/__pycache__/*.pyc` file. The clean Claude replacement used the exact accepted
+tree, completed all six Opus 5 turns after authentication was restored, and is the only Claude cell
+used in the headline.
 
 A follow-up skeptical review strengthened the hidden acceptance with 100 deterministically
 alternating reserve/cancel operations and injected cancellation-write rollback. Free replays passed
@@ -16,31 +15,35 @@ validation. Those fixes and replays are recorded below.
 
 ## Verdict
 
-On the fully matched Forge-versus-Codex workload, Forge met the target. The requested three-way
-Forge/Codex/Claude conclusion remains unconfirmed until Claude authentication is restored:
+On this fully matched workload, Forge met the target against both native harnesses:
 
 | Metric | Forge full mesh auto | Native Codex CLI | Native Claude Code |
 |---|---:|---:|---:|
-| Quality acceptance | **Passed** | **Passed** | Pending clean run |
-| Six turns completed | **6/6** | 6/6 | 0/6 clean replacement |
-| Total attempted wall time | **559.469s** | 1,333.317s | 1.417s pre-model failure |
-| Raw tokens | **1,698,715** | 5,129,177 | 0 replacement-attempt tokens |
-| Cache-adjusted tokens (25% cache cost) | **763,291** | 1,430,681 | 0 replacement-attempt tokens |
-| Cache-zero-credit tokens | 451,483 | **197,849** | 0 replacement-attempt tokens |
-| Integrity audit | **Passed** | Passed | Not applicable yet |
-| Public signatures unchanged | **Yes** | Yes | Not applicable yet |
-| Original test support preserved | **Yes** | Yes | Not applicable yet |
+| Quality acceptance | **Passed** | **Passed** | Failed hidden conflict precedence |
+| Six turns completed | **6/6** | 6/6 | 6/6 |
+| Total attempted wall time | **559.469s** | 1,333.317s | 1,019.400s |
+| Raw tokens | **1,698,715** | 5,129,177 | 4,641,031 |
+| Cache-adjusted tokens (25% cache cost) | **763,291** | 1,430,681 | 1,362,289.75 |
+| Cache-zero-credit tokens | 451,483 | **197,849** | 269,376 |
+| Integrity audit | **Passed** | Passed | Passed |
+| Public signatures unchanged | **Yes** | Yes | Yes |
+| Original test support preserved | **Yes** | Yes | Yes |
 
 Relative to native Codex, Forge was **58.04% faster**, used **66.88% fewer raw tokens**, and used
 **46.65% fewer cache-adjusted tokens**, with equal pass/fail quality. Native Codex used 56.18% fewer
 uncached-input-plus-output tokens under the cache-zero sensitivity, so Forge does not win every
-token-accounting model. Relative to native Claude, no clean matched claim is currently made.
+token-accounting model.
+
+Relative to native Claude, Forge passed the exact hidden contract that Claude missed, was
+**45.12% faster**, used **63.40% fewer raw tokens**, and used **43.97% fewer cache-adjusted
+tokens**. Native Claude used 40.34% fewer cache-zero-credit tokens than Forge, so the same
+cache-accounting caveat applies.
 
 These are results for one adversarial workload, not population estimates.
 
 ## Matched methodology
 
-The accepted Forge and Codex cells used:
+The accepted Forge and Codex cells and the valid failed-quality Claude cell used:
 
 - the same reservation-service fixture;
 - the same six prompts, in the same order;
@@ -52,9 +55,9 @@ The accepted Forge and Codex cells used:
 - complete accounting for failed, interrupted, and successful attempts.
 
 Native Codex used `codex-cli 0.145.0`, requested and resolved `gpt-5.6-sol`, and regular `high`
-effort. The excluded Claude cell used Claude Code `2.1.220`, requested `opus[1m]`, resolved
-`claude-opus-5[1m]`, and passed `--effort high`; Claude's JSON stream did not repeat a resolved
-effort identifier, so the requested flag is the retained effort evidence.
+effort. Native Claude used Claude Code `2.1.220`, requested `opus[1m]`, resolved only
+`claude-opus-5[1m]` on every turn, and passed `--effort high`; Claude's JSON stream does not repeat
+a resolved effort identifier, so the immutable argv is the retained effort evidence.
 
 Forge used `forge 2.11.0` in genuine regular auto mode:
 
@@ -65,8 +68,9 @@ Forge used `forge 2.11.0` in genuine regular auto mode:
 - no post-hoc patching of the benchmark workspace.
 
 The valid native Codex cell was not rerun. Only invalid Forge cells were rerun after a material
-code change. The clean Claude replacement uses the same source tree hash as Codex and Forge,
-`7d17bf17bcd5f9467a305edf6a0a5a50dfa1582b`, but stopped before the model ran.
+code change. The clean Claude replacement used the same source tree hash as Codex and Forge,
+`7d17bf17bcd5f9467a305edf6a0a5a50dfa1582b`, and all six prompt hashes matched. Its two
+pre-provider recovery attempts are included in attempted wall time but reported zero tokens.
 
 ## Final Forge route and per-turn accounting
 
@@ -106,6 +110,26 @@ snapshot exactly matches the session rollout's `token_count.info.total_token_usa
 boundary. The [machine-readable recalculation](artifacts/long-session-codex-token-recalculation-2026-07.json)
 pins the source hashes, original superseded totals, deltas, and corrected comparison.
 
+## Native Claude per-turn accounting
+
+| Turn | Wall time | Raw tokens | Cache-adjusted | Cache-zero |
+|---:|---:|---:|---:|---:|
+| 1 | 91.388s | 431,848 | 149,551 | 55,452 |
+| 2 | 288.910s | 826,548 | 251,238 | 59,468 |
+| 3 | 157.281s | 536,784 | 190,566.75 | 75,161 |
+| 4 | 222.095s | 1,176,163 | 323,834.5 | 39,725 |
+| 5 | 211.233s | 1,413,346 | 378,242.5 | 33,208 |
+| 6 | 46.811s | 256,342 | 68,857 | 6,362 |
+| **Model turns** | **1,017.718s** | **4,641,031** | **1,362,289.75** | **269,376** |
+| **Whole attempted arm** | **1,019.400s** |  |  |  |
+
+The additional 1.682 seconds are the retained 1.417-second expired-authentication attempt and
+0.265-second local session-ID collision. Both stopped before model execution and reported no
+tokens. Authentication recovery rotated the never-started session ID; every actual model turn then
+used one continuous replacement session. The
+[machine-readable Claude ledger](artifacts/long-session-native-claude-clean-2026-07.json) pins the
+exact setup, per-turn accounting, failed attempts, acceptance result, and quota delta.
+
 ## Quality and integrity acceptance
 
 | Check | Forge result |
@@ -126,11 +150,12 @@ pins the source hashes, original superseded totals, deltas, and corrected compar
 | Reachable base commits | 1 |
 | Patch `git diff --check` | Passed |
 
-The excluded native Claude cell's visible suite passed, but its hidden verifier failed because a
-reused request ID with a different unknown SKU raised `NotFound` before checking the existing
-request and raising the contractually required `Conflict`. The first Forge attempt made the same
-mistake. Native Codex and the final Forge cell passed this case. This remains useful diagnostic
-evidence, but it is not promoted to a matched Claude benchmark result.
+The clean native Claude cell passed 23/23 visible tests and replayed all 8 original tests, but its
+hidden verifier failed because a reused request ID with a different unknown SKU raised `NotFound`
+before checking the existing request and raising the contractually required `Conflict`. The first
+Forge attempt and superseded Claude cell made the same mistake. Native Codex and final Forge passed
+this exact case. The clean Claude cell remains a valid matched measurement with a failed quality
+outcome; it is not relabelled invalid merely because it lost.
 
 ## Complete validity and supersession ledger
 
@@ -140,7 +165,7 @@ No attempt was deleted or relabelled as successful:
 |---|---:|---:|---|---|
 | Native Codex Sol high | 1,333.317s | 5,129,177 / 1,430,681 | **Valid, passed** | Clean trace, full acceptance, cumulative usage corrected from retained events |
 | Native Claude Opus 5 high, original | 1,033.773s | 5,660,416 / 1,659,035.5 | **Invalid/superseded** | Source-equivalent, but base commit tracked one generated `.pyc`; hidden conflict-precedence failure retained as diagnostic evidence |
-| Native Claude Opus 5 high, clean replacement | 1.417s | 0 / 0 | **No benchmark cell** | Exact matched base; expired OAuth stopped before model execution |
+| Native Claude Opus 5 high, clean replacement | 1,019.400s | 4,641,031 / 1,362,289.75 | **Valid, failed quality** | Exact tree and setup; 6/6 turns, clean integrity, hidden conflict-precedence failure |
 | Forge attempt 1 | 1,074.668s | 2,852,727 / 1,887,927 | **Invalid/superseded** | Hidden conflict-precedence failure |
 | Forge attempt 2 | 758.737s | 1,634,531 / 616,163 | **Invalid/superseded** | Behavior passed, but added a public method |
 | Forge attempt 3 | 559.469s | 1,698,715 / 763,291 | **Valid, passed** | Every acceptance and integrity gate passed |
@@ -153,8 +178,8 @@ separately from the final steady-state performance comparison.
 
 ### 1. Verified findings
 
-- The accepted Codex and Forge base trees are byte-identical at
-  `7d17bf17bcd5f9467a305edf6a0a5a50dfa1582b`; their six prompt hashes also match.
+- The accepted Codex and Forge and clean Claude base trees are byte-identical at
+  `7d17bf17bcd5f9467a305edf6a0a5a50dfa1582b`; all six prompt hashes also match.
 - The accepted Forge patch passes the visible suite, every exact hidden invariant, original-test
   replay, complete public-signature comparison, trace audit, and `git diff --check`.
 - The strengthened hidden verifier was replayed against both retained accepted workspaces: Forge
@@ -163,8 +188,9 @@ separately from the final steady-state performance comparison.
 - The headline arithmetic was independently recomputed from retained summaries.
 - The corrected Codex token total telescopes to its final cumulative snapshot; every snapshot also
   equals the rollout's retained cumulative token count at the same turn boundary.
-- All failed/interrupted Forge time remains in the attempt ledger; the clean Claude authentication
-  failure is retained with its zero-token telemetry.
+- All failed/interrupted Forge time remains in the attempt ledger. The clean Claude cell retains
+  both its zero-token authentication failure and zero-event session-ID collision alongside every
+  successful turn.
 
 ### 2. Potential hallucinations
 
@@ -175,10 +201,10 @@ corrected token deltas are present in retained machine-readable artifacts.
 
 The former three-way headline said the original Claude cell had the same base repository. That was
 too strong: all source blobs matched, but one generated `.pyc` was tracked in Claude's base commit.
-The Claude figures were removed from the matched headline and the cell was marked superseded.
-The former Codex token headline also summed cumulative snapshots as if they were per-turn usage.
-Those totals and the resulting 89.30%/83.19% efficiency claims are superseded by the corrected
-66.88% raw and 46.65% cache-adjusted reductions.
+That cell remains superseded; only the exact-tree replacement is now promoted. The former Codex
+token headline also summed cumulative snapshots as if they were per-turn usage. Those totals and
+the resulting 89.30%/83.19% efficiency claims are superseded by the corrected 66.88% raw and
+46.65% cache-adjusted reductions.
 
 ### 4. Weak assumptions
 
@@ -202,36 +228,50 @@ Those totals and the resulting 89.30%/83.19% efficiency claims are superseded by
   New runs require one exact expected resolved model, regular `high`, and the prepared CLI version
   on every turn. Codex must also report resolved `high`; Claude's immutable `--effort high` argv
   remains the evidence because Claude Code 2.1.220 does not repeat effort in stream JSON.
+- Retry directory naming counted recovered parser failures but not recovered authentication
+  failures. Preserving the original zero-token `turns/01` artifact therefore caused the restored
+  run to stop locally when it tried to create `turns/01` again. Naming now counts both ledgers and
+  uses `turns/01-attempt-02`; the collision happened before any second provider process started.
+- Claude reserves a caller-supplied session ID locally even when authentication fails before model
+  execution. Recovery now rotates that never-started ID, retains the mapping, and treats only the
+  exact short zero-event `Session ID … is already in use` error as a recoverable local failure.
+- Claude's authoritative subscription samples may be emitted inside the final provider request
+  rather than after CLI exit. Quota gating now separately requires a sample from the completed arm
+  and a Helm retrieval/ledger write after process exit.
+- `git add -N .` can fail on an ignored empty `.claude` directory even when its contents are
+  excluded by pathspec. Patch capture now inventories only non-ignored untracked files and applies
+  intent-to-add to those exact paths.
 
 ### 5. Missing evidence
 
-A clean native Claude quality/time/token result is missing because local OAuth expired before model
-execution. No current claim compares Forge with native Claude on the exact tree.
+No required cell is missing. Statistical replication across more repositories and random seeds is
+still absent; this is one exact workload and one clean run per final harness.
 
 ### 6. Alternative explanations
 
-The excluded Claude semantic failure is one stochastic sample; the generated bytecode mismatch
-does not explain it because every source/test blob was identical, but the mismatch still prevents
-calling the arm exact. Likewise, Forge's first miss could reflect both the weaker initial route and
-model stochasticity; the minimum reruns establish improvement, not a universal causal effect size.
+The clean Claude semantic failure is one stochastic sample. Its independent superseded run made the
+same mistake, which strengthens the diagnostic signal but still does not establish a population
+failure rate. Likewise, Forge's first miss could reflect both the weaker initial route and model
+stochasticity; the minimum reruns establish improvement on this cell, not a universal causal effect
+size.
 
 ### 7. Confidence assessment
 
-Confidence is high for the narrow Forge-versus-Codex result and for the final Forge acceptance
-state. Confidence is intentionally withheld for Forge-versus-Claude until a clean authenticated
-replacement completes.
+Confidence is high for the narrow three-way result and final Forge acceptance state because the
+trees, prompts, traces, identities, evaluations, and quotas are matched and audited. Confidence in
+generalization beyond this workload remains limited.
 
 ### 8. Overall reliability score
 
-**Medium overall.** The accepted Forge/Codex comparison is well-supported, but the requested
-three-way conclusion is incomplete. Consumers should rely on the Forge/Codex numbers only.
+**High internal validity; limited external validity.** The requested three-way cell is complete and
+well-supported, but one workload cannot prove universal superiority.
 
 ### 9. Recommended corrections
 
-1. Restore native Claude authentication and resume only the prepared exact-tree replacement.
-2. Refresh Helm before and after every turn and stop at the existing 32% hard limit.
-3. Replace the pending Claude column only after all six turns, integrity checks, exact hidden
-   acceptance, patch capture, and final quota refresh pass.
+1. Repeat the same protocol on additional long-session workloads only when quota permits.
+2. Keep raw, 25%-adjusted, and cache-zero sensitivity separate rather than collapsing token
+   efficiency to one accounting model.
+3. Preserve failed-quality cells as valid measurements when setup and integrity are clean.
 
 The audit also made patch artifacts source-only by excluding `.forge`, `.claude`, and interpreter
 cache noise while retaining all committed and uncommitted source/test changes. Future manifests
@@ -403,8 +443,8 @@ Fix:
 - a logged-out status, malformed response, timeout, or missing CLI denies the call; and
 - a deterministic regression proves `run_capture` is never reached when authentication is absent.
 
-This cannot repair the user's expired credential, so the prepared exact-tree replacement remains
-retained and blocked from another attempt until authentication is genuinely restored.
+After the user restored authentication, the exact-tree replacement resumed without duplicating the
+zero-token attempt and completed all six model turns.
 
 ### 10. Cache-free sensitivity favors native Codex
 
@@ -448,8 +488,58 @@ Fix:
 Deterministic tests cover matching, wrong-model, wrong-effort, version drift, missing-evidence, and
 legacy-recovery paths. The retained Codex trace already proves `codex-cli 0.145.0`,
 `gpt-5.6-sol`, and `high` on all six turns, so this accounting-gate correction does not justify
-another provider call. The clean Claude replacement is still pending and will run under the new
-gate after authentication is restored.
+another provider call. The clean Claude trace then proved Claude Code `2.1.220`,
+`claude-opus-5[1m]`, and immutable `--effort high` on all six turns.
+
+### 12. Recovered authentication evidence collided with the retry directory
+
+After login was restored, `recover-auth` correctly retained the original 1.417-second zero-token
+failure. The next `turn` command nevertheless counted only `preflight_failures` when choosing its
+artifact directory, attempted to recreate the retained `turns/01`, and stopped at local
+`mkdir(exist_ok=False)` before `run_capture`.
+
+Fix:
+
+- retry naming now counts unique retained directories from both `preflight_failures` and
+  `authentication_failures`;
+- the preserved authentication failure therefore advances the retry to `01-attempt-02`; and
+- deterministic coverage proves the recovered turn contributes exactly one retained attempt
+  without affecting another turn.
+
+The run state remained at turn 0 with no new paid failure or provider process, so resuming the same
+prepared cell after this correction is not a duplicate call.
+
+### 13. Failed authentication reserved the local Claude session ID
+
+The next local attempt used the correctly named `01-attempt-02` directory but Claude Code rejected
+the original UUID with `Session ID … is already in use`. The expired-authentication process had
+reserved that UUID locally despite reporting zero model tokens.
+
+Fix:
+
+- zero-token authentication recovery now rotates the never-started UUID and records the old/new
+  mapping;
+- the already-recovered cell recognizes only the exact short, zero-event local collision as
+  recoverable and rotates once; and
+- all actual model turns must then report the replacement UUID.
+
+The collision stopped in 0.265 seconds before a provider event. It is preserved in attempted time.
+The six successful turns all used the one replacement session.
+
+### 14. Claude quota samples and ignored directories violated harness assumptions
+
+Two finalization assumptions failed locally:
+
+- Claude can emit its authoritative weekly sample inside the last provider request rather than
+  after CLI exit. The quota gate now proves the sample belongs to the completed arm and separately
+  proves the Helm retrieval was recorded after process exit. The final no-model `/usage` refresh
+  produced an explicitly post-turn Helm sample.
+- `git add -N .` failed on Claude Code's ignored empty `.claude/.cc-writes` directory. Patch capture
+  now asks Git for non-ignored untracked paths and applies intent-to-add only to those exact files;
+  tracked edits and all non-ignored new source/tests remain in the binary patch.
+
+Deterministic tests reproduce both cases. Neither correction changes model output or justifies a
+provider rerun.
 
 ## Quota ledger
 
@@ -468,11 +558,15 @@ arms:
 Helm was refreshed before and after each paid arm. Forge's direct Codex OAuth quota event at
 `2026-07-28T03:48:04Z` independently confirmed the post-arm 1% observation after the final model
 turn. Percentage telemetry is rounded, so token totals remain the more precise work measure.
+The user later authorized a fresh +10-point Codex allowance after reset, but the retained native
+Codex cell was already valid and no Codex-backed rerun was needed or launched.
 
-The clean Claude replacement was attempted at a retained 28% weekly utilization. It failed before
-model execution with zero reported tokens, Helm was refreshed afterward, and weekly utilization
-remained 28% against the 32% hard stop. The runner preserved the failure and will not silently retry
-it.
+The clean Claude replacement's first model turn started at a retained 28% weekly utilization and
+the final post-turn Helm observation was 29%. Against the fixed 27% baseline, the complete retained
+ledger ended at **+2 points**, below the 32% hard stop; the six-turn replacement itself moved the
+rounded reading by **+1 point**. Helm was refreshed after every turn. The initial 1.417-second
+authentication failure and 0.265-second session collision reported zero tokens and remain included
+in attempted wall time.
 
 ## Workload shape
 
@@ -503,7 +597,8 @@ After the honest-review corrections and report edits:
 - `cargo build --release --locked --bin forge` passed;
 - 196 mesh tests passed and 1 intentionally ignored test remained ignored;
 - all 39 manual-harness Python tests passed;
-- all strengthened hidden-verifier replays passed for the accepted Forge and Codex workspaces;
+- strengthened hidden verification passed for Forge and Codex and failed honestly for clean native
+  Claude at conflict precedence;
 - the 650-turn / 7,800-message routing endurance test passed;
 - three long-session core endurance tests passed; and
 - TUI replay, queued-reprompt, provider-bridge, integrity, and patch-capture regressions passed.
@@ -515,14 +610,14 @@ and the complete workspace suite was rerun successfully rather than hiding the f
 ## Honest limitations
 
 - One six-prompt task cannot prove superiority on every repository or stochastic run.
-- The original Claude sample is excluded from the matched headline because of its generated
-  bytecode base-tree mismatch; the clean replacement is pending authentication.
+- The original Claude sample remains excluded because of its generated-bytecode base-tree
+  mismatch; the clean replacement is the headline Claude cell and failed one hidden invariant.
 - The valid Forge cell routed only within GPT-5.6 because those were the strongest healthy measured
   candidates under the live catalog and quota state; a different account state can produce a
   different auto route.
 - Cache-adjusted tokens charge cached input at 25%; cache-zero-credit tokens are also shown because
   subscription accounting differs by provider. Forge wins raw and 25%-adjusted totals here, while
-  native Codex wins when cached input is treated as completely free.
+  both native harnesses use fewer tokens when cached input is treated as completely free.
 - Final-run wall time is the steady-state comparison. The full development/retest cost is disclosed
   separately and must not be mistaken for product latency.
 
