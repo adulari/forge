@@ -196,6 +196,12 @@ Those totals and the resulting 89.30%/83.19% efficiency claims are superseded by
 - The native runner assumed Codex `turn.completed.usage` was scoped to one invocation. Retained
   rollout events prove it is thread-cumulative in Codex CLI 0.145.0. It now stores the authoritative
   cumulative snapshots and aggregates only their monotonic deltas.
+- Native finalization recorded resolved model/effort identifiers but did not make them acceptance
+  gates, and it did not recheck the prepared CLI version before resumed turns. A transparent model
+  substitution or mid-run CLI upgrade could therefore retain a green, wrongly attributed result.
+  New runs require one exact expected resolved model, regular `high`, and the prepared CLI version
+  on every turn. Codex must also report resolved `high`; Claude's immutable `--effort high` argv
+  remains the evidence because Claude Code 2.1.220 does not repeat effort in stream JSON.
 
 ### 5. Missing evidence
 
@@ -422,6 +428,29 @@ Forge still exceeds the stated overall efficiency target on raw and cache-adjust
 controlled routing experiment may test quality-bounded model affinity, but it is not smuggled into
 this already-completed cell.
 
+### 11. Native execution identity was recorded but not acceptance-gated
+
+The native runner retained requested and resolved models, yet its final `all_acceptance_passed`
+boolean did not depend on them. It also recorded CLI version only during preparation. That was
+sufficient for manual inspection of these retained cells but not a defensible fail-closed harness:
+a CLI alias/provider substitution or mid-session CLI update could change the execution identity and
+still receive a green result attributed to the original setup.
+
+Fix:
+
+- every prepared run now stores one exact `expected_resolved_model`;
+- only regular `high` is accepted, and every turn must use the prepared CLI version;
+- Codex turns must report that model and resolved `high`;
+- Claude turns must report exactly that one model through `modelUsage`; and
+- recovery of a legacy zero-token Claude authentication failure requires the exact expectation
+  before the paid run can resume.
+
+Deterministic tests cover matching, wrong-model, wrong-effort, version drift, missing-evidence, and
+legacy-recovery paths. The retained Codex trace already proves `codex-cli 0.145.0`,
+`gpt-5.6-sol`, and `high` on all six turns, so this accounting-gate correction does not justify
+another provider call. The clean Claude replacement is still pending and will run under the new
+gate after authentication is restored.
+
 ## Quota ledger
 
 The original native cells and first Forge attempt ran before the Codex weekly window reset:
@@ -468,11 +497,12 @@ verification.
 
 After the honest-review corrections and report edits:
 
-- `cargo test --workspace --all-targets` passed;
+- `cargo test --workspace --all-targets` passed: 2,336 tests, with 28 intentional ignores;
 - `cargo clippy --workspace --all-targets -- -D warnings` passed;
 - `cargo fmt --all -- --check` passed;
-- all 197 mesh tests passed;
-- all 38 manual-harness Python tests passed;
+- `cargo build --release --locked --bin forge` passed;
+- 196 mesh tests passed and 1 intentionally ignored test remained ignored;
+- all 39 manual-harness Python tests passed;
 - all strengthened hidden-verifier replays passed for the accepted Forge and Codex workspaces;
 - the 650-turn / 7,800-message routing endurance test passed;
 - three long-session core endurance tests passed; and

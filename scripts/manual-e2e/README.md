@@ -66,7 +66,8 @@ or aggregate token reporting.
 
 ```bash
 python3 scripts/manual-e2e/native_long_session.py prepare \
-  --provider claude --model 'opus[1m]' --effort high \
+  --provider claude --model 'opus[1m]' \
+  --expected-resolved-model 'claude-opus-5[1m]' --effort high \
   --out-root /absolute/artifact/root --quota-baseline 27 --quota-cap 5
 
 python3 scripts/manual-e2e/native_long_session.py record-quota \
@@ -82,6 +83,11 @@ and record quota once more before `finalize`. A zero-token expired-OAuth failure
 automatically. After the operator restores Claude login, `recover-auth` unlocks only that narrowly
 proven failure and retains its time in the final attempt ledger. Zero-event transport failures do
 not qualify as free parser failures.
+
+Every paid turn also fails closed unless it uses the prepared CLI version and regular `high`, and
+Codex reports the configured exact model/effort or Claude reports the sole configured exact model.
+`recover-auth` requires that exact model when upgrading a prepared legacy run, while retaining the
+zero-token failure in the attempt ledger.
 
 ## Provider cache probe
 

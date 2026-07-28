@@ -142,6 +142,117 @@ class NativeLongSessionTests(unittest.TestCase):
             self.assertEqual(claude["resolved_models"], ["claude-opus-5-20260701"])
             self.assertEqual(claude["tokens"]["total_tokens"], 20)
 
+    def test_execution_evidence_requires_exact_model_and_regular_effort(
+        self,
+    ) -> None:
+        codex_state = {
+            "provider": "codex",
+            "expected_resolved_model": "gpt-5.6-sol",
+            "effort": "high",
+        }
+        self.assertIsNone(
+            native.execution_evidence_error(
+                codex_state,
+                {
+                    "resolved_model": "gpt-5.6-sol",
+                    "resolved_effort": "high",
+                },
+            )
+        )
+        self.assertIn(
+            "did not match",
+            native.execution_evidence_error(
+                codex_state,
+                {
+                    "resolved_model": "gpt-5.6-terra",
+                    "resolved_effort": "high",
+                },
+            )
+            or "",
+        )
+        self.assertIn(
+            "effort",
+            native.execution_evidence_error(
+                codex_state,
+                {
+                    "resolved_model": "gpt-5.6-sol",
+                    "resolved_effort": "xhigh",
+                },
+            )
+            or "",
+        )
+        self.assertIn(
+            "required regular",
+            native.execution_evidence_error(
+                {
+                    "provider": "codex",
+                    "expected_resolved_model": "gpt-5.6-sol",
+                    "effort": "medium",
+                },
+                {
+                    "resolved_model": "gpt-5.6-sol",
+                    "resolved_effort": "medium",
+                },
+            )
+            or "",
+        )
+
+        claude_state = {
+            "provider": "claude",
+            "expected_resolved_model": "claude-opus-5[1m]",
+            "effort": "high",
+        }
+        self.assertIsNone(
+            native.execution_evidence_error(
+                claude_state,
+                {"resolved_models": ["claude-opus-5[1m]"]},
+            )
+        )
+        self.assertIn(
+            "sole expected model",
+            native.execution_evidence_error(
+                claude_state,
+                {"resolved_models": ["claude-sonnet-5"]},
+            )
+            or "",
+        )
+        self.assertIn(
+            "not configured",
+            native.execution_evidence_error(
+                {"provider": "claude", "effort": "high"},
+                {"resolved_models": ["claude-opus-5[1m]"]},
+            )
+            or "",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            out_root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "expected-resolved-model"):
+                native.prepare(
+                    argparse.Namespace(
+                        provider="claude",
+                        model="opus[1m]",
+                        effort="high",
+                        scenario=native.DEFAULT_SCENARIO,
+                        out_root=out_root,
+                        quota_baseline=27.0,
+                        quota_cap=5.0,
+                    )
+                )
+            self.assertEqual(list(out_root.iterdir()), [])
+            with self.assertRaisesRegex(ValueError, "regular high"):
+                native.prepare(
+                    argparse.Namespace(
+                        provider="codex",
+                        model="gpt-5.6-sol",
+                        effort="medium",
+                        scenario=native.DEFAULT_SCENARIO,
+                        out_root=out_root,
+                        quota_baseline=36.0,
+                        quota_cap=10.0,
+                    )
+                )
+            self.assertEqual(list(out_root.iterdir()), [])
+
     def test_quota_gate_requires_fresh_post_turn_observation_and_fails_at_cap(
         self,
     ) -> None:
@@ -631,10 +742,19 @@ class NativeLongSessionTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(
-                    native.recover_auth(argparse.Namespace(run_dir=run_dir)), 0
+                    native.recover_auth(
+                        argparse.Namespace(
+                            run_dir=run_dir,
+                            expected_resolved_model="claude-opus-5[1m]",
+                        )
+                    ),
+                    0,
                 )
             state = native.load_json(run_dir / native.STATE_FILE)
             self.assertNotIn("paid_failure", state)
+            self.assertEqual(
+                state["expected_resolved_model"], "claude-opus-5[1m]"
+            )
             self.assertEqual(state["authentication_failures"], [failure])
 
     def test_logged_out_claude_is_denied_before_a_provider_process_starts(
@@ -646,18 +766,42 @@ class NativeLongSessionTests(unittest.TestCase):
                 run_dir / native.STATE_FILE,
                 {
                     "provider": "claude",
+                    "cli_version": "2.1.220 (Claude Code)",
                     "next_turn": 0,
                     "turns": [],
                     "preflight_failures": [],
                 },
             )
             with (
+                mock.patch.object(
+                    native,
+                    "current_cli_version",
+                    return_value="2.1.220 (Claude Code)",
+                ),
                 mock.patch.object(native, "quota_is_fresh", return_value=(True, "")),
                 mock.patch.object(
                     native, "claude_authenticated", return_value=False
                 ),
                 mock.patch.object(native, "run_capture") as capture,
                 self.assertRaisesRegex(RuntimeError, "Claude CLI is logged out"),
+            ):
+                native.run_turn(
+                    argparse.Namespace(
+                        run_dir=run_dir,
+                        timeout=10,
+                        quota_max_age=900,
+                    )
+                )
+            capture.assert_not_called()
+
+            with (
+                mock.patch.object(
+                    native,
+                    "current_cli_version",
+                    return_value="2.1.221 (Claude Code)",
+                ),
+                mock.patch.object(native, "run_capture") as capture,
+                self.assertRaisesRegex(RuntimeError, "CLI version changed"),
             ):
                 native.run_turn(
                     argparse.Namespace(
