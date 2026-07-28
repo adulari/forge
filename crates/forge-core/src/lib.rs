@@ -41,9 +41,11 @@ pub mod subagent;
 pub mod tokens;
 pub mod turn_contract;
 pub mod workflow;
+mod workspace_context;
 pub mod worktree;
 
 pub use llm_router::LlmRouter;
+pub use workspace_context::WorkspaceContext;
 
 pub const AUTO_COMPACT_THRESHOLD: f64 = 0.80;
 
@@ -868,37 +870,6 @@ fn sanitize_suggestion(content: &str, prev_prompt: &str) -> Option<String> {
 /// per-project). Matches the `forge memory` CLI so both see the same store.
 fn memory_scope_at(root: &std::path::Path) -> String {
     root.display().to_string()
-}
-
-/// Immutable filesystem identity for one session. A daemon may host sessions from
-/// different worktrees concurrently, so this must never be inferred from process cwd.
-#[derive(Debug, Clone)]
-pub struct WorkspaceContext {
-    root: std::path::PathBuf,
-}
-
-impl WorkspaceContext {
-    pub fn new(root: impl AsRef<std::path::Path>) -> Result<Self, CoreError> {
-        let requested = root.as_ref();
-        let root = requested
-            .canonicalize()
-            .map_err(|error| CoreError::Workspace(error.to_string()))?;
-        if !root.is_dir() {
-            return Err(CoreError::Workspace(format!(
-                "not a directory: {}",
-                root.display()
-            )));
-        }
-        Ok(Self { root })
-    }
-
-    pub fn root(&self) -> &std::path::Path {
-        &self.root
-    }
-
-    fn display(&self) -> String {
-        self.root.display().to_string()
-    }
 }
 
 /// Max same-model retries for a TRANSIENT provider failure (5xx / dropped stream / network blip)
