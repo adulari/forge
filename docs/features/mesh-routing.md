@@ -42,18 +42,18 @@ prompt + bounded prior-turn RoutingContext
   │    vision) and apply budget pressure
   │ 8. pick = first usable; rest = failover chain                 §8–9
   ▼
-RoutingDecision { tier, model, rationale, fallbacks, pinned }     crates/forge-mesh/src/lib.rs:99
+RoutingDecision { tier, model, rationale, fallbacks, pinned }     crates/forge-mesh/src/lib.rs:876
 ```
 
-The router is `HeuristicRouter` (`crates/forge-mesh/src/lib.rs:334`), behind the `Router` trait
-(`crates/forge-mesh/src/lib.rs:118`, async so the opt-in LLM classifier can do I/O). It is
-constructed per turn via `HeuristicRouter::new(config)` (`crates/forge-mesh/src/lib.rs:607`) and
-the builder methods `with_pin` (`lib.rs:622`), `with_catalog` (`lib.rs:629`),
-`with_context_windows` (`lib.rs:637`) and `with_repo_boosts` (`lib.rs:644`).
-`Router::route` (`lib.rs:1092`) classifies then delegates to `decide` (`lib.rs:915`), which is
+The router is `HeuristicRouter` (`crates/forge-mesh/src/lib.rs:1308`), behind the `Router` trait
+(`crates/forge-mesh/src/lib.rs:1208`, async so the opt-in LLM classifier can do I/O). It is
+constructed per turn via `HeuristicRouter::new(config)` (`crates/forge-mesh/src/lib.rs:1371`) and
+the builder methods `with_pin` (`lib.rs:1386`), `with_catalog` (`lib.rs:1393`),
+`with_context_windows` (`lib.rs:1401`) and `with_repo_boosts` (`lib.rs:1408`).
+`Router::route` (`lib.rs:2371`) classifies then delegates to `decide` (`lib.rs:2192`), which is
 the single selection path — pins, budget pressure, and chain building all live there.
-`route_hinted` (`lib.rs:1115`) lets a command/skill `tier:` frontmatter replace classification
-(the rest of the path is identical); `route_candidates` (`lib.rs:1146`) returns the top-n
+`route_hinted` (`lib.rs:2395`) lets a command/skill `tier:` frontmatter replace classification
+(the rest of the path is identical); `route_candidates` (`lib.rs:2471`) returns the top-n
 distinct-provider decisions for `/duel`.
 The main session path uses `route_contextual`: it supplies a bounded `RoutingContext` built from
 the transcript before the current user message is appended. Routers that do not need history retain
@@ -65,10 +65,11 @@ To see all of this live for a real prompt, run `forge mesh "<your task>"` (§11)
 
 ### 2.1 The weighted heuristic
 
-`score_prompt` (`crates/forge-mesh/src/lib.rs:488`) scores a prompt from local signals.
-Thresholds (`lib.rs:574-581`): **score ≤ 0 → Trivial, score ≥ 5 → Complex, else Standard.**
+`score_prompt` (`crates/forge-mesh/src/classification.rs:314`) scores a prompt from local
+signals. Thresholds (`classification.rs:411-418`): **score ≤ 0 → Trivial, score ≥ 5 →
+Complex, else Standard.**
 
-Hard override first: any `COMPLEX_HINTS` phrase (`lib.rs:185` — "think hard", "ultrathink",
+Hard override first: any `COMPLEX_HINTS` phrase (`classification.rs:14` — "think hard", "ultrathink",
 "step by step", "in depth", "comprehensive", "thorough", …) returns Complex immediately with
 `score = i32::MAX` (certain when the heuristic is used as the availability fallback).
 
@@ -76,30 +77,31 @@ Otherwise, points accumulate:
 
 | Signal | Points | Source |
 |---|---|---|
-| Very long prompt (> 120 words) | +3 | `lib.rs:506` |
-| Long prompt (> 40 words) | +1 | `lib.rs:509` |
-| Any `REASONING_TERMS` hit ("design", "debug", "why", "prove", "plan", "audit", …) | +5 | `lib.rs:215`, `lib.rs:515` |
-| Code present (``` fence or a `CODE_TOKENS` symbol, `lib.rs:321`) | +3 | `lib.rs:514` |
-| Any `ACTION_VERBS` hit ("implement", "migrate", "add a ", "write a ", …), word-boundary matched | +2 | `lib.rs:282`, `lib.rs:523` |
-| Multi-step scope (`is_multistep`, `lib.rs:596`: " then ", bullet lists, "1."+"2.", "after that") | +2 | `lib.rs:530` |
-| "test" / "benchmark" / "edge case" | +1 | `lib.rs:534` |
-| Any `ERROR_MARKERS` hit ("panic", "traceback", "error[", …) | +1 | `lib.rs:323`, `lib.rs:541` |
-| Each `ANALYSIS_TERMS` hit ("performance", "security", "review", …) | +3 each | `lib.rs:271`, `lib.rs:545` |
-| Self-hosting infra term while working on Forge's own source (`SELF_HOSTING_INFRA_TERMS`, gated on `ProjectContext::is_self_hosting`) | +5 | `lib.rs:258`, `lib.rs:550` |
+| Very long prompt (> 120 words) | +3 | `classification.rs:332` |
+| Long prompt (> 40 words) | +1 | `classification.rs:335` |
+| Any `REASONING_TERMS` hit ("design", "debug", "why", "prove", "plan", "audit", …) | +5 | `classification.rs:44`, `classification.rs:341` |
+| Code present (``` fence or a `CODE_TOKENS` symbol, `classification.rs:150`) | +3 | `classification.rs:340` |
+| Any `ACTION_VERBS` hit ("implement", "migrate", "add a ", "write a ", …), word-boundary matched | +2 | `classification.rs:111`, `classification.rs:349` |
+| Multi-step scope (`is_multistep`, `classification.rs:449`: " then ", bullet lists, "1."+"2.", "after that") | +2 | `classification.rs:356` |
+| "test" / "benchmark" / "edge case" | +1 | `classification.rs:361` |
+| Any `ERROR_MARKERS` hit ("panic", "traceback", "error[", …) | +1 | `classification.rs:152`, `classification.rs:368` |
+| Each `ANALYSIS_TERMS` hit ("performance", "security", "review", …) | +3 each | `classification.rs:100`, `classification.rs:372` |
+| Self-hosting infra term while working on Forge's own source (`SELF_HOSTING_INFRA_TERMS`, gated on `ProjectContext::is_self_hosting`) | +5 | `classification.rs:87`, `classification.rs:377` |
 | Short factual HTTP status-code explanation (for example, "explain what HTTP 429 means") | −8 | `is_simple_http_status_explanation` |
-| Any `TRIVIAL_HINTS` hit ("quick", "simple", "one-liner", …) | −5 | `lib.rs:203`, `lib.rs:556` |
-| Any `TRIVIAL_PATTERNS` hit ("typo", "rename", "add a comment", …), whole-word matched | −8 | `lib.rs:301`, `lib.rs:560` |
+| Any `TRIVIAL_HINTS` hit ("quick", "simple", "one-liner", …) | −5 | `classification.rs:32`, `classification.rs:392` |
+| Any `TRIVIAL_PATTERNS` hit ("typo", "rename", "add a comment", …), whole-word matched | −8 | `classification.rs:130`, `classification.rs:396` |
 
 Length is deliberately one capped signal, never the decider — a 24-char "design a lock-free
 queue" scores +5 from "design" and classifies Complex.
 
-Word-boundary matching: `contains_word_boundary` (`lib.rs:423`) stops "port " matching inside
-"report "; `contains_whole_word` (`lib.rs:448`) additionally checks the trailing boundary so
+Word-boundary matching: `contains_word_boundary` (`classification.rs:241`) stops "port " matching inside
+"report "; `contains_whole_word` (`classification.rs:266`) additionally checks the trailing boundary so
 "rename" doesn't fire inside "renames".
 
 ### 2.2 Contextual follow-ups
 
-`RoutingContext::from_messages` retains only routing-relevant, bounded history: the most recent
+`RoutingContext::from_messages` (`crates/forge-mesh/src/lib.rs:926`) retains only routing-relevant,
+bounded history: the most recent
 standalone user task (4,000 characters), up to three later user refinements (1,500 characters
 each), the last assistant status (1,500 characters), and a Forge compaction summary when present
 (4,000 characters). Tool messages and `UiOnly` chrome are excluded. The current classifier turn is
@@ -151,10 +153,11 @@ unambiguous. The compatibility mode is off by default.
 
 ### 2.4 RouteHints: code-heaviness and the per-prompt seed
 
-`RouteHints::from_prompt` derives standalone-turn hints; `RouteHints::from_context` substitutes the
+`RouteHints::from_prompt` (`crates/forge-mesh/src/classification.rs:190`) derives standalone-turn
+hints; `RouteHints::from_context` (`classification.rs:201`) substitutes the
 active task material for dependent follow-ups:
 
-- `code_heavy` — `is_code_heavy` (`lib.rs:474`): a ``` fence, a `CODE_TOKENS` symbol, or an
+- `code_heavy` — `is_code_heavy` (`classification.rs:299`): a ``` fence, a `CODE_TOKENS` symbol, or an
   `ACTION_VERBS` hit. Switches the benchmark quality term to the *coding* index and enables the
   coding-provider prior (§4.4).
 - `seed` — `stable_hash(prompt)` (`crates/forge-mesh/src/catalog.rs:578`, FNV-1a). Everything
