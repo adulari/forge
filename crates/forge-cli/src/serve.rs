@@ -435,35 +435,6 @@ struct CreateSessionReq {
     temper: Option<String>,
 }
 
-#[derive(Clone, serde::Serialize)]
-struct ProjectRow {
-    path: String,
-    name: String,
-    is_git_repo: bool,
-    last_activity: Option<i64>,
-}
-
-#[derive(serde::Serialize)]
-struct ProjectCatalog {
-    default_cwd: String,
-    recent: Vec<ProjectRow>,
-    roots: Vec<ProjectRow>,
-}
-
-#[derive(serde::Deserialize)]
-struct BrowseProjectsQuery {
-    path: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct BrowseProjectsResponse {
-    path: String,
-    parent: Option<String>,
-    entries: Vec<ProjectRow>,
-    roots: Vec<ProjectRow>,
-    truncated: bool,
-}
-
 pub(crate) async fn serve_cmd(
     local: bool,
     anywhere: bool,
@@ -894,9 +865,11 @@ impl Drop for AbortTask {
 
 mod serve_assets;
 mod serve_mcp;
+mod serve_projects;
 mod serve_workflows;
 use serve_assets::*;
 use serve_mcp::*;
+use serve_projects::*;
 use serve_workflows::*;
 
 /// `GET /api/sessions` — the fleet list, newest first.
@@ -921,220 +894,6 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
     }
     sort_session_rows(&mut rows);
     json_response(&rows)
-}
-
-fn expand_project_root(raw: &str) -> PathBuf {
-    if raw == "~" {
-        return std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(raw));
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(raw)
-}
-
-fn resolve_project_roots(default_cwd: &Path, configured: &[String]) -> Vec<PathBuf> {
-    let mut roots = Vec::with_capacity(configured.len() + 1);
-    for candidate in std::iter::once(default_cwd.to_path_buf())
-        .chain(configured.iter().map(|raw| expand_project_root(raw)))
-    {
-        match candidate.canonicalize() {
-            Ok(path) if path.is_dir() => {
-                if !roots.contains(&path) {
-                    roots.push(path);
-                }
-            }
-            Ok(_) => eprintln!(
-                "⚠ remote project root is not a directory: {}",
-                candidate.display()
-            ),
-            Err(error) => eprintln!(
-                "⚠ remote project root is unavailable ({}): {error}",
-                candidate.display()
-            ),
-        }
-    }
-    roots
-}
-
-fn project_name(path: &Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-fn project_row(path: &Path, last_activity: Option<i64>) -> ProjectRow {
-    ProjectRow {
-        path: path.display().to_string(),
-        name: project_name(path),
-        is_git_repo: path.join(".git").exists(),
-        last_activity,
-    }
-}
-
-fn path_is_browsable(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| path.starts_with(root))
-}
-
-fn browse_project_directory(
-    requested: PathBuf,
-    roots: Vec<PathBuf>,
-) -> std::result::Result<BrowseProjectsResponse, String> {
-    let path = requested
-        .canonicalize()
-        .map_err(|error| format!("project directory is unavailable: {error}"))?;
-    if !path.is_dir() {
-        return Err("project path is not a directory".to_string());
-    }
-    if !path_is_browsable(&path, &roots) {
-        return Err("project path is outside the configured browse roots".to_string());
-    }
-
-    let mut entries = std::fs::read_dir(&path)
-        .map_err(|error| format!("project directory cannot be read: {error}"))?
-        .filter_map(std::result::Result::ok)
-        .filter_map(|entry| {
-            let file_type = entry.file_type().ok()?;
-            if !file_type.is_dir() {
-                return None;
-            }
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with('.') {
-                return None;
-            }
-            let canonical = entry.path().canonicalize().ok()?;
-            path_is_browsable(&canonical, &roots).then(|| project_row(&canonical, None))
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|a, b| {
-        b.is_git_repo
-            .cmp(&a.is_git_repo)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    let truncated = entries.len() > 200;
-    entries.truncate(200);
-    let parent = path
-        .parent()
-        .filter(|parent| path_is_browsable(parent, &roots))
-        .map(|parent| parent.display().to_string());
-    let root_rows = roots.iter().map(|root| project_row(root, None)).collect();
-    Ok(BrowseProjectsResponse {
-        path: path.display().to_string(),
-        parent,
-        entries,
-        roots: root_rows,
-        truncated,
-    })
-}
-
-/// `GET /api/projects` — the zero-input default plus MRU project choices. Worktree sessions are
-/// intentionally excluded: their generated directories are implementation details, not durable
-/// projects a person should be encouraged to pick again.
-async fn project_catalog(State(state): State<Arc<DaemonState>>) -> Response {
-    let mut candidates: Vec<(String, i64)> = state
-        .registry
-        .all()
-        .await
-        .into_iter()
-        .filter(|handle| handle.worktree.is_none())
-        .map(|handle| {
-            (
-                handle.cwd.clone(),
-                handle
-                    .last_activity
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            )
-        })
-        .collect();
-
-    let store = state.store.clone();
-    let past = match tokio::task::spawn_blocking(move || store.list_sessions_for_resume()).await {
-        Ok(Ok(rows)) => rows,
-        Ok(Err(error)) => {
-            return err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("listing recent projects failed: {error}"),
-            )
-        }
-        Err(error) => {
-            return err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("listing recent projects task failed: {error}"),
-            )
-        }
-    };
-    candidates.extend(
-        past.into_iter()
-            .filter(|session| session.worktree_path.is_none())
-            .map(|session| (session.cwd, session.last_activity)),
-    );
-    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
-
-    let default_path = PathBuf::from(&state.default_cwd);
-    let mut seen = std::collections::HashSet::new();
-    seen.insert(default_path.clone());
-    let recent = candidates
-        .into_iter()
-        .filter_map(|(raw, last_activity)| {
-            let path = PathBuf::from(raw).canonicalize().ok()?;
-            if !path.is_dir() || !seen.insert(path.clone()) {
-                return None;
-            }
-            Some(project_row(&path, Some(last_activity)))
-        })
-        .take(8)
-        .collect();
-    let roots = state
-        .project_roots
-        .iter()
-        .map(|root| project_row(root, None))
-        .collect();
-
-    json_response(&ProjectCatalog {
-        default_cwd: state.default_cwd.clone(),
-        recent,
-        roots,
-    })
-}
-
-/// `GET /api/projects/browse?path=` — enumerate only canonical descendants of the daemon's
-/// configured roots. Canonicalizing before the containment check blocks both `..` traversal and
-/// symlink escapes.
-async fn browse_projects(
-    State(state): State<Arc<DaemonState>>,
-    Query(query): Query<BrowseProjectsQuery>,
-) -> Response {
-    let roots = state.project_roots.clone();
-    let requested = query
-        .path
-        .filter(|path| !path.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| roots.first().cloned());
-    let Some(requested) = requested else {
-        return err_response(
-            axum::http::StatusCode::NOT_FOUND,
-            "no project roots are available",
-        );
-    };
-
-    let result =
-        tokio::task::spawn_blocking(move || browse_project_directory(requested, roots)).await;
-
-    match result {
-        Ok(Ok(response)) => json_response(&response),
-        Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
-        Err(error) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("browsing project directory failed: {error}"),
-        ),
-    }
 }
 
 /// `POST /api/sessions` starts a session.
@@ -3161,6 +2920,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_browse_route_is_token_scoped_and_defaults_to_the_first_root() {
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("project")).unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: canonical_root.display().to_string(),
+            project_roots: vec![canonical_root.clone()],
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+        let unauthorized = router
+            .clone()
+            .oneshot(
+                axum::http::Request::get("/api/projects/browse")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), axum::http::StatusCode::NOT_FOUND);
+
+        let response = router
+            .oneshot(
+                axum::http::Request::get("/tok/api/projects/browse")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["path"], canonical_root.display().to_string());
+        assert_eq!(body["parent"], serde_json::Value::Null);
+        assert_eq!(body["entries"][0]["name"], "project");
+    }
+
+    #[tokio::test]
     async fn workflow_library_serves_the_runs_this_workspace_actually_had() {
         use tower::ServiceExt;
 
@@ -3260,93 +3068,6 @@ mod tests {
         // Repeated enable requests attach to the same one-shot supervisor.
         signal_anywhere_enable(&enabled);
         assert!(*receiver.borrow());
-    }
-
-    #[test]
-    fn project_roots_are_canonical_deduplicated_and_default_first() {
-        let temp = tempfile::tempdir().unwrap();
-        let default = temp.path().join("default");
-        let extra = temp.path().join("extra");
-        std::fs::create_dir_all(&default).unwrap();
-        std::fs::create_dir_all(&extra).unwrap();
-
-        let roots = resolve_project_roots(
-            &default,
-            &[
-                default.join(".").display().to_string(),
-                extra.display().to_string(),
-                extra.join("..").join("extra").display().to_string(),
-            ],
-        );
-
-        assert_eq!(
-            roots,
-            vec![
-                default.canonicalize().unwrap(),
-                extra.canonicalize().unwrap()
-            ]
-        );
-    }
-
-    #[test]
-    fn project_browser_stays_inside_roots_and_prioritizes_git_projects() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let ordinary = root.path().join("alpha");
-        let git = root.path().join("zeta-git");
-        std::fs::create_dir_all(&ordinary).unwrap();
-        std::fs::create_dir_all(git.join(".git")).unwrap();
-        std::fs::create_dir_all(root.path().join(".hidden")).unwrap();
-        let canonical_root = root.path().canonicalize().unwrap();
-
-        let result =
-            browse_project_directory(canonical_root.clone(), vec![canonical_root.clone()]).unwrap();
-        assert_eq!(result.path, canonical_root.display().to_string());
-        assert!(
-            result.parent.is_none(),
-            "the browse root cannot navigate upward"
-        );
-        assert_eq!(
-            result
-                .entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["zeta-git", "alpha"]
-        );
-        assert!(result.entries[0].is_git_repo);
-
-        let error = browse_project_directory(outside.path().to_path_buf(), vec![canonical_root])
-            .err()
-            .expect("outside path must be rejected");
-        assert!(
-            error.contains("outside the configured browse roots"),
-            "{error}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn project_browser_rejects_symlink_escapes() {
-        use std::os::unix::fs::symlink;
-
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let escape = root.path().join("escape");
-        symlink(outside.path(), &escape).unwrap();
-        let canonical_root = root.path().canonicalize().unwrap();
-
-        let listing =
-            browse_project_directory(canonical_root.clone(), vec![canonical_root.clone()]).unwrap();
-        assert!(listing.entries.iter().all(|entry| entry.name != "escape"));
-
-        let error = browse_project_directory(escape, vec![canonical_root])
-            .err()
-            .expect("symlink escape must be rejected");
-        assert!(
-            error.contains("outside the configured browse roots"),
-            "{error}"
-        );
     }
 
     #[test]
