@@ -13,6 +13,7 @@ mod assay_store;
 mod automation_store;
 mod checkpoint_store;
 mod duel_store;
+mod fork_store;
 mod handoff;
 mod handoff_types;
 mod lattice_store;
@@ -1655,86 +1656,6 @@ impl Store {
             res.push(r?);
         }
         Ok(res)
-    }
-
-    // --- forge fork / forge tree: counterfactual session branching ---
-    // (ForkNode is defined next to the other read-side row types below.)
-
-    /// Branch a session at a turn boundary: create a new top-level session (same cwd + mode)
-    /// carrying a copy of `src`'s *active* messages with `seq < at_seq`, linked back via
-    /// `forked_from`/`forked_at_seq`. The re-asked prompt itself is NOT copied — the fork's next
-    /// turn supplies it (possibly against a different model), which is the whole point.
-    pub fn fork_session(&self, src: &str, at_seq: i64) -> Result<String> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (cwd, mode): (String, String) = tx.query_row(
-            "SELECT cwd, permission_mode FROM session WHERE id = ?1",
-            [src],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let new_id = forge_types::new_id();
-        tx.execute(
-            "INSERT INTO session (id, cwd, permission_mode, total_cost_usd, forked_from, forked_at_seq) \
-             VALUES (?1, ?2, ?3, 0, ?4, ?5)",
-            (&new_id, &cwd, &mode, src, at_seq),
-        )?;
-        {
-            let mut read = tx.prepare(
-                "SELECT seq, role, content, model, tool_calls_json, tool_call_id, visibility \
-                 FROM message WHERE session_id = ?1 AND active = 1 AND seq < ?2 ORDER BY seq",
-            )?;
-            let mut write = tx.prepare(
-                "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id, visibility) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )?;
-            let rows = read.query_map((src, at_seq), |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                    r.get::<_, String>(6)?,
-                ))
-            })?;
-            for row in rows {
-                let (seq, role, content, model, tcj, tcid, vis) = row?;
-                write.execute((
-                    forge_types::new_id(),
-                    &new_id,
-                    seq,
-                    role,
-                    content,
-                    model,
-                    tcj,
-                    tcid,
-                    vis,
-                ))?;
-            }
-        }
-        tx.commit()?;
-        Ok(new_id)
-    }
-
-    /// `forge tree` shows conversations, not worker fan-out.
-    pub fn fork_nodes(&self) -> Result<Vec<ForkNode>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, title, forked_from, forked_at_seq, created_at FROM session \
-             WHERE parent_session_id IS NULL ORDER BY created_at, id",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(ForkNode {
-                id: r.get(0)?,
-                title: r.get(1)?,
-                forked_from: r.get(2)?,
-                forked_at_seq: r.get(3)?,
-                created_at: r.get(4)?,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(StoreError::from)
     }
 }
 
@@ -4350,6 +4271,35 @@ mod tests {
         assert_eq!(row.status, "done");
         assert_eq!(row.summary.as_deref(), Some("first"));
         assert_eq!(row.finished_at, Some(20));
+    }
+
+    #[test]
+    fn fork_journals_the_session_and_copied_prefix_atomically() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_sync_journal_enabled(true).unwrap();
+        let source = store.create_session("/repo", "default").unwrap();
+        store
+            .add_message(&source, 0, Role::User, "prompt", None)
+            .unwrap();
+        store
+            .add_message(&source, 1, Role::Assistant, "answer", Some("model"))
+            .unwrap();
+        let before = store.pending_sync_journal(100).unwrap().len();
+
+        let fork = store.fork_session(&source, 2).unwrap();
+
+        let new_entries = store.pending_sync_journal(100).unwrap();
+        let new_entries = &new_entries[before..];
+        assert!(new_entries
+            .iter()
+            .any(|entry| entry.record_kind == "session" && entry.stable_id == fork));
+        assert_eq!(
+            new_entries
+                .iter()
+                .filter(|entry| entry.record_kind == "message")
+                .count(),
+            2
+        );
     }
 
     #[test]
