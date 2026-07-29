@@ -432,6 +432,9 @@ pub(crate) fn copy_catalog_assets(
         if matches!(cmd.scope, forge_skills::Scope::Builtin) {
             continue;
         }
+        if matches!(cmd.scope, forge_skills::Scope::Builtin) {
+            continue;
+        }
         std::fs::copy(&cmd.path, &dest)
             .with_context(|| format!("copying {} to {}", cmd.path.display(), dest.display()))?;
         counts.copied_commands += 1;
