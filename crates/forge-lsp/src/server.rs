@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ pub struct LspServer {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
+    documents: HashMap<String, i32>,
     /// Bounded tail of the server's stderr. A server that dies during the handshake reports the
     /// real cause here (a missing rustup component, a bad config) while stdout only shows EOF.
     stderr: Arc<Mutex<String>>,
@@ -60,6 +62,7 @@ impl LspServer {
             stdin,
             stdout,
             next_id: 1,
+            documents: HashMap::new(),
             stderr,
             stderr_reader,
         })
@@ -115,6 +118,16 @@ impl LspServer {
             match tokio::time::timeout(remaining, read_msg(&mut self.stdout)).await {
                 Ok(Some(msg)) => {
                     if msg.get("id").and_then(|v| v.as_u64()) == Some(id) {
+                        if let Some(error) = msg.get("error") {
+                            let message = error
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown initialization error");
+                            return Err(std::io::Error::other(format!(
+                                "lsp: initialize rejected: {}",
+                                sanitize_log_text(message)
+                            )));
+                        }
                         break;
                     }
                 }
@@ -141,23 +154,40 @@ impl LspServer {
         Ok(())
     }
 
-    pub async fn did_open(&mut self, uri: &str, lang: &str, text: &str) -> std::io::Result<()> {
-        let notif = json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/didOpen",
-            "params": {
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": lang,
-                    "version": 1,
-                    "text": text
+    pub async fn sync_document(
+        &mut self,
+        uri: &str,
+        lang: &str,
+        text: &str,
+    ) -> std::io::Result<()> {
+        let version = self.documents.entry(uri.to_string()).or_insert(0);
+        *version += 1;
+        let notif = if *version == 1 {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": uri, "languageId": lang, "version": *version, "text": text
+                }}
+            })
+        } else {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": { "uri": uri, "version": *version },
+                    "contentChanges": [{ "text": text }]
                 }
-            }
-        });
+            })
+        };
         write_msg(&mut self.stdin, &notif).await
     }
 
-    pub async fn collect_diagnostics(&mut self, uri: &str, timeout: Duration) -> Vec<Diagnostic> {
+    pub async fn collect_diagnostics(
+        &mut self,
+        uri: &str,
+        timeout: Duration,
+    ) -> std::io::Result<Vec<Diagnostic>> {
         let mut diags = Vec::new();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -167,7 +197,13 @@ impl LspServer {
             }
             let msg = match tokio::time::timeout(remaining, read_msg(&mut self.stdout)).await {
                 Ok(Some(m)) => m,
-                _ => break,
+                Ok(None) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "lsp: server closed stdout while collecting diagnostics",
+                    ))
+                }
+                Err(_) => break,
             };
             if msg.get("method").and_then(|v| v.as_str()) == Some("textDocument/publishDiagnostics")
             {
@@ -182,7 +218,7 @@ impl LspServer {
                 }
             }
         }
-        diags
+        Ok(diags)
     }
 }
 
@@ -199,15 +235,34 @@ fn append_bounded(buf: &mut String, chunk: &str, cap: usize) {
     buf.drain(..cut);
 }
 
+fn sanitize_log_text(raw: &str) -> String {
+    let mut output = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if character.is_control() {
+            output.push(' ');
+        } else {
+            output.push(character);
+        }
+    }
+    output.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Collapse a captured stderr tail into one log-safe line, clipped to `max_chars` from the end
 /// (the tail carries the fatal message; earlier progress chatter is the part worth dropping).
 fn summarize_stderr(raw: &str, max_chars: usize) -> String {
-    let joined = raw
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" | ");
+    let joined = sanitize_log_text(raw);
     let count = joined.chars().count();
     if count <= max_chars {
         return joined;
@@ -381,6 +436,28 @@ mod tests {
         assert!(wide.len() <= 5);
     }
 
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn initialize_rejects_json_rpc_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script = tmp.path().join("reject-lsp.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nIFS= read -r header\nlen=${header#Content-Length: }\nIFS= read -r blank\ndd bs=1 count=$len of=/dev/null 2>/dev/null\nbody='{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"bad init\"}}'\nprintf 'Content-Length: %d\\r\\n\\r\\n%s' ${#body} \"$body\"\nsleep 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut server = LspServer::spawn(&script.to_string_lossy(), &[])
+            .await
+            .unwrap();
+        let error = server
+            .initialize("file:///tmp", Duration::from_secs(1))
+            .await
+            .expect_err("JSON-RPC initialize error must fail startup");
+        assert!(error.to_string().contains("bad init"));
+    }
+
     #[test]
     fn stderr_summary_is_one_clipped_line() {
         assert_eq!(summarize_stderr("", 100), "");
@@ -390,10 +467,14 @@ mod tests {
                 "error: 'rust-analyzer' is not installed\n  help: run rustup\n",
                 100
             ),
-            "error: 'rust-analyzer' is not installed | help: run rustup"
+            "error: 'rust-analyzer' is not installed help: run rustup"
         );
         // Clipping keeps the END of the tail — the fatal line, not the startup chatter.
         let long = summarize_stderr("aaaaaaaaaa\nfatal", 5);
         assert_eq!(long, "…fatal");
+        assert_eq!(
+            summarize_stderr("\u{1b}[31mERROR\u{1b}[0m\r\nnext\u{7}line", 100),
+            "ERROR next line"
+        );
     }
 }

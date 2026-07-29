@@ -166,17 +166,27 @@ impl LspRegistry {
             return vec![];
         };
 
-        if let Err(e) = server.did_open(&uri, lang, &text).await {
-            // The pipe is gone: keeping the dead process in the slot would fail every later call
-            // with the same error, so drop it and let the cooldown pace the next attempt.
+        if let Err(e) = server.sync_document(&uri, lang, &text).await {
+            slot.server = None;
             let backoff = slot.record_failure(Instant::now());
             warn!(
-                "lsp: did_open failed for {lang} ({cmd}): {e} — retrying in {}s",
+                "lsp: document sync failed for {lang} ({cmd}): {e} — retrying in {}s",
                 backoff.as_secs()
             );
             return vec![];
         }
-        server.collect_diagnostics(&uri, timeout).await
+        match server.collect_diagnostics(&uri, timeout).await {
+            Ok(diagnostics) => diagnostics,
+            Err(error) => {
+                slot.server = None;
+                let backoff = slot.record_failure(Instant::now());
+                warn!(
+                    "lsp: diagnostics failed for {lang} ({cmd}): {error} — retrying in {}s",
+                    backoff.as_secs()
+                );
+                vec![]
+            }
+        }
     }
 
     /// Forget every pending failure cooldown, as if it had elapsed.
