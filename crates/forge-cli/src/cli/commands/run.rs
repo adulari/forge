@@ -20,6 +20,11 @@ pub(crate) use session::*;
 mod one_shot;
 pub(crate) use one_shot::*;
 
+mod plain_chat;
+pub(crate) use plain_chat::*;
+mod natural_language;
+pub(crate) use natural_language::*;
+
 /// A finished `/duel` result: the comparable report plus the still-alive worktree guards for
 /// every candidate (the picker owns picking a winner — merging it back and dropping every guard).
 /// Named so the background task ([`spawn_duel`]) and the done-signal drain that consumes it don't
@@ -105,59 +110,6 @@ pub(crate) fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
         Some(tok) => app.palette.open_with(&tok.name),
         None => app.palette.close(),
     }
-}
-
-pub(crate) async fn nl_cmd(query: String, mode: Option<Mode>) -> Result<()> {
-    if query.trim().is_empty() {
-        anyhow::bail!(
-            "empty query — usage: forge nl \"what changed performance-wise since last week\""
-        );
-    }
-    maybe_first_run_setup(false)?;
-    // Gather shell context so the model can run the right commands.
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| ".".to_string());
-    let git_ctx = {
-        let branch = std::process::Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string());
-        let log = std::process::Command::new("git")
-            .args(["log", "--oneline", "-8"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string());
-        match (branch, log) {
-            (Some(b), Some(l)) if !l.is_empty() => {
-                format!("\n- Git branch: {b}\n- Recent commits:\n{l}")
-            }
-            (Some(b), _) => format!("\n- Git branch: {b}"),
-            _ => String::new(),
-        }
-    };
-    let platform = std::env::consts::OS;
-    let guidance = format!(
-        "You are a shell expert. The user asks a natural-language question about their system \
-or codebase. Determine which shell commands answer it, run them with the shell tool, then \
-synthesize a clear, direct answer. Do not explain what you are about to do — just run \
-commands and explain the output. Be concise.\n\
-\n\
-Environment:\n\
-- Working directory: {cwd}\n\
-- Platform: {platform}{git_ctx}"
-    );
-    let mut session = build_session(false, mode, false, None, None).await?;
-    session
-        .run_turn_with(&query, &[guidance], None)
-        .await
-        .context("nl query")?;
-    Ok(())
 }
 
 /// Unblock a turn parked in a permission/question prompt before quitting. `Presenter::confirm`/
@@ -249,98 +201,6 @@ pub(crate) async fn claude_quota_is_stale(
         .await
         .claude_quota_age_secs()
         .is_none_or(|a| a > max_age)
-}
-
-pub(crate) async fn chat(
-    mock: bool,
-    mode: Option<Mode>,
-    resume_mode: ResumeMode,
-    plain: bool,
-    fullscreen: bool,
-    pin: Option<String>,
-) -> Result<()> {
-    maybe_first_run_setup(mock)?;
-    maybe_autostart_local();
-    // Default to the interactive (animated) TUI on a real terminal.
-    if !plain && std::io::stdout().is_terminal() {
-        // Update check happens in background inside run_chat_tui (via the UiMsg channel) so it
-        // never delays TUI startup. The check has a 3s network timeout — blocking here would
-        // freeze the terminal for up to 3s once per day.
-        return run_chat_tui(mock, mode, resume_mode, fullscreen, pin).await;
-    }
-    // Plain path: blocking update check is fine (no TUI to corrupt).
-    update_check::maybe_notify(&forge_config::load().unwrap_or_default()).await;
-
-    // Plain line mode: read prompts from stdin.
-    // Picker is already ruled out by resolve_resume_mode for headless/plain.
-    let resume_id = match resume_mode {
-        ResumeMode::Id(id) => Some(id),
-        ResumeMode::Fresh | ResumeMode::Picker => None,
-    };
-    let mut session = build_session_with(
-        Box::new(HeadlessPresenter::default()),
-        mock,
-        mode,
-        resume_id,
-        pin,
-        false,
-    )
-    .await?;
-    if std::io::stdin().is_terminal() {
-        println!("forge chat — type a task and press enter; /quit to exit");
-    }
-    {
-        let sid = session.session_id().to_string();
-        let hooks = session.hooks().to_vec();
-        let workspace = session.workspace_root().to_path_buf();
-        forge_core::hooks::run_session_hooks_in(
-            &hooks,
-            forge_config::HookEvent::SessionStart,
-            &sid,
-            Some(&workspace),
-        )
-        .await;
-    }
-    while let Some(line) = session.read_line() {
-        match chat_action(&line) {
-            ChatAction::Quit => break,
-            ChatAction::Skip => continue,
-            ChatAction::Run(task) => {
-                let hooks = session.hooks().to_vec();
-                let hook_workspace = session.workspace_root().to_path_buf();
-                let task = match forge_core::hooks::run_prompt_hooks_in(
-                    &hooks,
-                    &task,
-                    Some(&hook_workspace),
-                )
-                .await
-                {
-                    Ok(t) => t,
-                    Err(reason) => {
-                        eprintln!("⎇ prompt blocked by hook: {reason}");
-                        continue;
-                    }
-                };
-                session
-                    .run_turn(&task)
-                    .await
-                    .context("running agent turn")?;
-            }
-        }
-    }
-    {
-        let sid = session.session_id().to_string();
-        let hooks = session.hooks().to_vec();
-        let workspace = session.workspace_root().to_path_buf();
-        forge_core::hooks::run_session_hooks_in(
-            &hooks,
-            forge_config::HookEvent::SessionEnd,
-            &sid,
-            Some(&workspace),
-        )
-        .await;
-    }
-    Ok(())
 }
 
 /// Sends the turn-complete signal (carrying the turn's generation) on drop — so `busy` is released
