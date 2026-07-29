@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS session (
     forked_from       TEXT,         -- counterfactual forks (forge fork): source session id
     forked_at_seq     INTEGER,      -- ...and the seq the copied prefix stops before (also migration_0006)
     worktree_path     TEXT,         -- forge serve: the isolated worktree this session runs in (also migration_0008)
-    archived          INTEGER NOT NULL DEFAULT 0  -- forge serve: archived sessions are hidden from lists (also migration_0008)
+    archived          INTEGER NOT NULL DEFAULT 0, -- forge serve: archived sessions are hidden from lists (also migration_0008)
+    agent_active      INTEGER NOT NULL DEFAULT 0,
+    live_event_writes INTEGER NOT NULL DEFAULT 0
 );
 
 -- Web-push subscriptions for the forge serve daemon (pre-added for actionable push
@@ -278,7 +280,8 @@ CREATE INDEX IF NOT EXISTS idx_memory_salience ON memory(salience DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_updated ON memory(updated_at DESC);
 
 -- Live-event ring buffer: MCP agent sessions write events here so the TUI can
--- observe them in real-time. Pruned to last 2000 rows per session.
+-- observe them in real-time. Retains the latest 2000 rows, with at most 255 rows of
+-- amortized-pruning drift per session.
 CREATE TABLE IF NOT EXISTS live_event (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id  TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,

@@ -17,6 +17,7 @@ mod fork_store;
 mod handoff;
 mod handoff_types;
 mod lattice_store;
+mod live_session_store;
 mod memory;
 mod migrations;
 mod model_health_store;
@@ -52,7 +53,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -123,8 +124,8 @@ const EMPTY_PRUNE_BATCH: usize = 200;
 /// (the old per-insert correlated-subquery DELETE was O(n) on a hot path).
 const LIVE_EVENT_PRUNE_EVERY: u64 = 256;
 
-/// Max live events kept per session (ring buffer). The actual count drifts up to this plus at most
-/// [`LIVE_EVENT_PRUNE_EVERY`] between prunes.
+/// Max live events kept per session (ring buffer). The durable per-session append counter lets
+/// pruning run once every [`LIVE_EVENT_PRUNE_EVERY`] writes, including across Store handles.
 const LIVE_EVENT_KEEP: i64 = 2000;
 
 /// Whether a rusqlite error is a transient busy/locked condition worth retrying (covers plain
@@ -359,10 +360,6 @@ impl Drop for ModelReservation {
 pub struct Store {
     pool: r2d2::Pool<SqliteManager>,
     reservation_store_id: String,
-    /// Append counter for `live_event`, so the ring-buffer prune runs once every
-    /// [`LIVE_EVENT_PRUNE_EVERY`] inserts instead of on every append (the old per-insert
-    /// correlated-subquery DELETE was O(n) on a hot path).
-    live_event_writes: std::sync::atomic::AtomicU64,
 }
 
 /// SQL fragment: derives a usage row's provider from its message model (aliased `m`).
@@ -1275,7 +1272,6 @@ impl Store {
         Ok(Self {
             pool,
             reservation_store_id,
-            live_event_writes: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -1583,80 +1579,6 @@ fn lattice_node_from_row(r: &rusqlite::Row) -> rusqlite::Result<LatticeNodeRow> 
         line_start: r.get(8)?,
         pagerank: r.get(9).unwrap_or(0.0),
     })
-}
-
-impl Store {
-    /// Write an event for an active MCP agent session. Keeps only the last 2000 events per
-    /// session (ring buffer) to bound disk usage on long runs.
-    pub fn append_live_event(&self, session_id: &str, payload_json: &str) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
-            "INSERT INTO live_event (session_id, payload_json) VALUES (?1, ?2)",
-            (session_id, payload_json),
-        )?;
-        // Prune to the ring-buffer cap only once every LIVE_EVENT_PRUNE_EVERY appends. The old code
-        // ran the correlated-subquery DELETE on EVERY insert (an O(n) scan per append on the hottest
-        // write path); amortizing it keeps the buffer bounded without the per-event cost.
-        let n = self
-            .live_event_writes
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n.is_multiple_of(LIVE_EVENT_PRUNE_EVERY) {
-            conn.execute(
-                "DELETE FROM live_event WHERE session_id = ?1 AND id <= (
-                    SELECT id FROM live_event WHERE session_id = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2
-                 )",
-                (session_id, LIVE_EVENT_KEEP),
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Fetch all events for `session_id` with `id > after_id`, in order.
-    pub fn live_events_after(&self, session_id: &str, after_id: i64) -> Result<Vec<(i64, String)>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT id, payload_json FROM live_event WHERE session_id = ?1 AND id > ?2 ORDER BY id",
-        )?;
-        let rows = stmt.query_map((session_id, after_id), |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut res = Vec::new();
-        for r in rows {
-            res.push(r?);
-        }
-        Ok(res)
-    }
-
-    /// Mark a session as having an active MCP agent.
-    pub fn set_session_agent_active(&self, session_id: &str, active: bool) -> Result<()> {
-        self.lock()?.execute(
-            "UPDATE session SET agent_active = ?1 WHERE id = ?2",
-            (active as i64, session_id),
-        )?;
-        Ok(())
-    }
-
-    /// Clear agent_active on all sessions. Called at MCP server startup to reset flags left
-    /// by processes that were SIGKILLed before their Drop guard could run.
-    pub fn clear_all_agent_active(&self) -> Result<()> {
-        self.lock()?
-            .execute("UPDATE session SET agent_active = 0", [])?;
-        Ok(())
-    }
-
-    /// Session IDs with agent_active = 1.
-    pub fn active_agent_session_ids(&self) -> Result<Vec<String>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id FROM session WHERE agent_active = 1 AND parent_session_id IS NULL",
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let mut res = Vec::new();
-        for r in rows {
-            res.push(r?);
-        }
-        Ok(res)
-    }
 }
 
 /// One registered `forge schedule` row: a task, its working directory, and the cron/interval spec
@@ -4610,6 +4532,83 @@ mod tests {
         store.set_session_agent_active(&sid, false).unwrap();
         let active = store.active_agent_session_ids().unwrap();
         assert!(active.is_empty());
+    }
+
+    #[test]
+    fn v20_database_gains_live_event_counter_and_prunes() {
+        let path = temp_db_path();
+        Store::open(&path).unwrap();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("ALTER TABLE session DROP COLUMN live_event_writes", [])
+                .unwrap();
+            conn.pragma_update(None, "user_version", 20i64).unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        let appends = LIVE_EVENT_PRUNE_EVERY as i64 * 9;
+        for n in 0..appends {
+            store.append_live_event(&sid, &n.to_string()).unwrap();
+        }
+        assert_eq!(
+            store.live_events_after(&sid, 0).unwrap().len(),
+            LIVE_EVENT_KEEP as usize
+        );
+        let conn = store.lock().unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT live_event_writes FROM session WHERE id = ?1",
+                [&sid],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            appends
+        );
+        drop(conn);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn live_event_retention_is_per_session_and_shared_across_store_handles() {
+        let path = temp_db_path();
+        let store_a = Store::open(&path).unwrap();
+        let store_b = Store::open(&path).unwrap();
+        let busy = store_a.create_session("/busy", "default").unwrap();
+        let quiet = store_a.create_session("/quiet", "default").unwrap();
+
+        // Interleaved writes through two independent Store pools must leave each session's
+        // pruning cadence independent. Both totals land on a pruning boundary, so each retains
+        // the documented ring-buffer cap rather than leaking rows indefinitely.
+        let appends = LIVE_EVENT_PRUNE_EVERY as i64 * 9;
+        for n in 0..appends {
+            store_a.append_live_event(&busy, &n.to_string()).unwrap();
+            store_b.append_live_event(&quiet, &n.to_string()).unwrap();
+        }
+        let busy_events = store_b.live_events_after(&busy, 0).unwrap();
+        let quiet_events = store_a.live_events_after(&quiet, 0).unwrap();
+        assert_eq!(busy_events.len(), LIVE_EVENT_KEEP as usize);
+        assert_eq!(quiet_events.len(), LIVE_EVENT_KEEP as usize);
+        assert_eq!(busy_events[0].1, (appends - LIVE_EVENT_KEEP).to_string());
+        assert_eq!(quiet_events[0].1, (appends - LIVE_EVENT_KEEP).to_string());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn resetting_one_agent_presence_preserves_other_live_agents() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store.create_session("/first", "default").unwrap();
+        let second = store.create_session("/second", "default").unwrap();
+        store.set_session_agent_active(&first, true).unwrap();
+        store.set_session_agent_active(&second, true).unwrap();
+
+        store.reset_session_agent_active(&second).unwrap();
+        assert_eq!(store.active_agent_session_ids().unwrap(), vec![first]);
     }
 
     // --- Concurrency + integrity hardening (v2.0) -------------------------------------------

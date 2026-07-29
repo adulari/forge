@@ -505,13 +505,32 @@ fn resume_mode_neither_flag_gives_fresh() {
 
 #[test]
 fn resume_mode_continue_returns_most_recent_id() {
+    use forge_types::Role;
     let store = make_store_with_sessions(0);
     let a = store.create_session("/a", "default").unwrap();
+    store.add_message(&a, 0, Role::User, "a", None).unwrap();
     let b = store.create_session("/b", "default").unwrap();
+    store.add_message(&b, 0, Role::User, "b", None).unwrap();
     let mode = resolve_resume_mode(true, None, &store, false).unwrap();
     assert_eq!(mode, ResumeMode::Id(b.clone()));
     // a is not the most recent
     assert_ne!(mode, ResumeMode::Id(a));
+}
+
+#[test]
+fn resume_mode_continue_skips_a_session_that_was_never_used() {
+    use forge_types::Role;
+    // A session row is created eagerly at process start, so an opened-then-quit `forge chat`
+    // leaves a blank row behind. `--continue` must reattach the last session the user actually
+    // talked to, matching what the picker and `forge sessions` list.
+    let store = make_store_with_sessions(0);
+    let used = store.create_session("/used", "default").unwrap();
+    store
+        .add_message(&used, 0, Role::User, "real work", None)
+        .unwrap();
+    let _blank = store.create_session("/blank", "default").unwrap();
+    let mode = resolve_resume_mode(true, None, &store, false).unwrap();
+    assert_eq!(mode, ResumeMode::Id(used));
 }
 
 #[test]
@@ -536,20 +555,6 @@ fn resume_mode_bare_resume_plain_gives_error() {
     // plain=true: headless, no TTY → should error
     let err = resolve_resume_mode(false, Some(None), &store, true).unwrap_err();
     assert!(err.to_string().contains("--resume <id>"));
-}
-
-#[test]
-fn resume_mode_bare_resume_tty_gives_picker() {
-    // We can't test actual TTY detection in a test, but we can test with plain=false
-    // when we know stdout is NOT a terminal in CI — so we can't assert Picker here.
-    // Instead, verify the plain=false + non-TTY path gives the same error as plain=true.
-    // This is covered by the headless guard path; Picker path is integration-only.
-    let store = make_store_with_sessions(1);
-    // In a non-TTY test environment, plain=false but no terminal → same error as plain=true.
-    // We test the logic branch that matters: is_terminal() is false in tests → error path.
-    let _ = resolve_resume_mode(false, Some(None), &store, false);
-    // Not asserting the result here because is_terminal() differs per environment;
-    // the plain=true path (covered above) is the deterministic guard we rely on.
 }
 
 // ---------------------------------------------------------------------------

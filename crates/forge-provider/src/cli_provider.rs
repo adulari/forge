@@ -2005,7 +2005,13 @@ fn classify_in_band_error(binary: &str, e: &str) -> ProviderError {
             message: msg,
             retry_after: None,
         }
-    } else if lower.contains("auth") || lower.contains("401") || lower.contains("403") {
+    } else if lower.contains("auth")
+        || lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("not logged in")
+        || lower.contains("login required")
+        || lower.contains("please log in")
+    {
         ProviderError::Auth(msg)
     } else if lower.contains("overload")
         || lower.contains("server_error")
@@ -4631,6 +4637,14 @@ mod tests {
         ));
         assert!(matches!(
             classify_in_band_error("claude", "401 unauthorized"),
+            ProviderError::Auth(_)
+        ));
+        assert!(matches!(
+            classify_in_band_error("claude", "Not logged in. Please run /login"),
+            ProviderError::Auth(_)
+        ));
+        assert!(matches!(
+            classify_in_band_error("claude", "login required before continuing"),
             ProviderError::Auth(_)
         ));
         assert!(matches!(
