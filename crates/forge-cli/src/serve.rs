@@ -379,26 +379,6 @@ impl From<ConfigScopeRequest> for forge_config::ConfigScope {
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateMcpServerRequest {
-    name: String,
-    transport: McpTransportRequest,
-    command: Option<String>,
-    #[serde(default)]
-    args: Vec<String>,
-    url: Option<String>,
-    token_env: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum McpTransportRequest {
-    Stdio,
-    Http,
-    Sse,
-}
-
 /// One row of `GET /api/sessions` — the fleet dashboard's data. `waiting` is the killer signal
 /// (a permission prompt or question is blocking the turn until a human decides); the list is
 /// served with waiting sessions FIRST so the dashboard surfaces them without client-side logic.
@@ -913,8 +893,10 @@ impl Drop for AbortTask {
 // ---------------------------------------------------------------------------
 
 mod serve_assets;
+mod serve_mcp;
 mod serve_workflows;
 use serve_assets::*;
+use serve_mcp::*;
 use serve_workflows::*;
 
 /// `GET /api/sessions` — the fleet list, newest first.
@@ -2878,202 +2860,6 @@ async fn plans_page(State(state): State<Arc<DaemonState>>) -> Response {
         }
     }
     json_response(&plans)
-}
-
-#[derive(serde::Serialize)]
-struct McpServerRow {
-    name: String,
-    transport: String,
-    enabled: bool,
-    auth_configured: bool,
-    secret_env_count: usize,
-    /// Whether `PATCH /api/mcp` can toggle this server — true only when it is declared in one of
-    /// the `mcp.toml` files the CLI writes. A server resolved from somewhere else (an imported
-    /// `.mcp.json`) is read-only, and the client needs to know that BEFORE offering a control,
-    /// rather than discovering it from a 404 after the user flips a switch.
-    editable: bool,
-}
-
-#[derive(serde::Serialize)]
-struct McpResponse {
-    servers: Vec<McpServerRow>,
-    allowed_servers: Vec<String>,
-    allowed_tools: Vec<String>,
-    call_timeout_secs: u64,
-    connect_timeout_secs: u64,
-}
-
-async fn create_mcp_server(Json(request): Json<CreateMcpServerRequest>) -> Response {
-    let result = tokio::task::spawn_blocking(move || {
-        let name = request.name.trim();
-        if name.is_empty()
-            || !name.chars().all(|character| {
-                character.is_ascii_alphanumeric() || character == '-' || character == '_'
-            })
-        {
-            return Err(
-                "server name must use only letters, numbers, hyphens, or underscores".to_string(),
-            );
-        }
-        let path = std::path::PathBuf::from(".forge/mcp.toml");
-        let mut config = forge_config::load_mcp_toml(&path);
-        if config.servers.iter().any(|server| server.name == name) {
-            return Err("a server with that name already exists".to_string());
-        }
-        let transport = match request.transport {
-            McpTransportRequest::Stdio => {
-                let command = request
-                    .command
-                    .filter(|command| !command.trim().is_empty())
-                    .ok_or_else(|| "stdio servers need a command".to_string())?;
-                forge_config::McpTransport::Stdio {
-                    command,
-                    args: request.args,
-                    env: std::collections::HashMap::new(),
-                }
-            }
-            McpTransportRequest::Http => forge_config::McpTransport::Http {
-                url: valid_mcp_url(request.url)?,
-                headers: std::collections::HashMap::new(),
-            },
-            McpTransportRequest::Sse => forge_config::McpTransport::Sse {
-                url: valid_mcp_url(request.url)?,
-                headers: std::collections::HashMap::new(),
-            },
-        };
-        let auth = request
-            .token_env
-            .filter(|name| !name.trim().is_empty())
-            .map(|token_env| forge_config::McpAuth {
-                token_env: Some(token_env),
-                token_keyring: None,
-                header: None,
-                oauth: None,
-            });
-        config.servers.push(forge_config::McpServerConfig {
-            name: name.to_string(),
-            transport,
-            auth,
-            secret_env: Vec::new(),
-            enabled: true,
-        });
-        forge_config::write_mcp_toml(&path, &config).map_err(|error| error.to_string())
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => mcp_page().await,
-        Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not save MCP server",
-        ),
-    }
-}
-
-/// Body of `PATCH /api/mcp` — currently only the enable/disable toggle the app's MCP screen needs.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UpdateMcpServerRequest {
-    name: String,
-    enabled: bool,
-}
-
-/// The two `mcp.toml` files the CLI writes, project scope first — the same order and paths
-/// `forge mcp add/remove --scope` uses (`crates/forge-cli/src/cli/commands/mcp.rs`).
-fn mcp_toml_scopes() -> Vec<std::path::PathBuf> {
-    let mut paths = vec![std::path::PathBuf::from(".forge/mcp.toml")];
-    if let Some(dir) = forge_config::config_dir() {
-        paths.push(dir.join("mcp.toml"));
-    }
-    paths
-}
-
-/// `PATCH /api/mcp` — flip a configured server's `enabled` flag, persisting through the same
-/// `mcp.toml` the CLI writes so `forge mcp list` and the daemon never disagree.
-///
-/// A server that resolves from somewhere else entirely (an imported `.mcp.json`, say) is NOT
-/// silently materialised into a new `mcp.toml` entry — that would fork the source of truth, so it
-/// is a 404 naming where the toggle would have to be made instead.
-async fn update_mcp_server(Json(request): Json<UpdateMcpServerRequest>) -> Response {
-    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        for path in mcp_toml_scopes() {
-            let mut config = forge_config::load_mcp_toml(&path);
-            let Some(server) = config
-                .servers
-                .iter_mut()
-                .find(|server| server.name == request.name)
-            else {
-                continue;
-            };
-            if server.enabled == request.enabled {
-                return Ok(());
-            }
-            server.enabled = request.enabled;
-            return forge_config::write_mcp_toml(&path, &config).map_err(|e| e.to_string());
-        }
-        Err(format!(
-            "no server '{}' in .forge/mcp.toml or the user mcp.toml — edit it where it is defined",
-            request.name
-        ))
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => mcp_page().await,
-        Ok(Err(message)) => err_response(axum::http::StatusCode::NOT_FOUND, &message),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not update MCP server",
-        ),
-    }
-}
-
-fn valid_mcp_url(url: Option<String>) -> Result<String, String> {
-    let url = url.ok_or_else(|| "HTTP and SSE servers need an http(s) URL".to_string())?;
-    if url.starts_with("http://") || url.starts_with("https://") {
-        Ok(url)
-    } else {
-        Err("HTTP and SSE servers need an http(s) URL".to_string())
-    }
-}
-
-async fn mcp_page() -> Response {
-    match tokio::task::spawn_blocking(|| {
-        let config = forge_config::load().unwrap_or_default();
-        // Read the toggleable scopes once, not once per server: `editable` is exactly the
-        // membership test `update_mcp_server` performs before it agrees to write.
-        let editable: std::collections::HashSet<String> = mcp_toml_scopes()
-            .iter()
-            .flat_map(|path| forge_config::load_mcp_toml(path).servers)
-            .map(|server| server.name)
-            .collect();
-        McpResponse {
-            servers: config
-                .mcp
-                .servers
-                .iter()
-                .map(|server| McpServerRow {
-                    name: server.name.clone(),
-                    transport: server.transport_label().to_string(),
-                    enabled: server.enabled,
-                    auth_configured: server.auth.is_some(),
-                    secret_env_count: server.secret_env.len(),
-                    editable: editable.contains(&server.name),
-                })
-                .collect(),
-            allowed_servers: config.mcp.allow.servers,
-            allowed_tools: config.mcp.allow.tools,
-            call_timeout_secs: config.mcp.call_timeout_secs,
-            connect_timeout_secs: config.mcp.connect_timeout_secs,
-        }
-    })
-    .await
-    {
-        Ok(response) => json_response(&response),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read MCP configuration",
-        ),
-    }
 }
 
 async fn usage_page(
