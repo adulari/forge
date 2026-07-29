@@ -89,8 +89,13 @@ impl SessionDriverHandle {
     /// Wait (bounded) for the driver task to finish after [`Self::shutdown`].
     pub async fn join(&self, timeout: std::time::Duration) {
         let task = self.task.lock().await.take();
-        if let Some(task) = task {
-            let _ = tokio::time::timeout(timeout, task).await;
+        if let Some(mut task) = task {
+            if tokio::time::timeout(timeout, &mut task).await.is_err() {
+                // Dropping a JoinHandle detaches rather than cancels. Abort explicitly so a stuck
+                // driver cannot retain its Session, App, replay ring, and any active turn forever.
+                task.abort();
+                let _ = task.await;
+            }
         }
     }
 }
@@ -242,6 +247,14 @@ struct DriverState {
     mesh_load_rx: Option<tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>>,
     usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>>,
     cwd: String,
+}
+
+impl Drop for DriverState {
+    fn drop(&mut self) {
+        if let Some(turn) = self.turn_handle.take() {
+            turn.abort();
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

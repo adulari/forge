@@ -20,5 +20,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+serial_test = "3"
 # In-memory secret_store for tests (resolver=2: does not leak into production builds).
 forge-config = { workspace = true, features = ["test-secrets"] }

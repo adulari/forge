@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex as StdMutex;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, warn};
 
 use forge_config::LspConfig;
@@ -28,11 +27,9 @@ const IDLE_SERVER_TTL: Duration = Duration::from_secs(300);
 /// own lock so a hung server only blocks callers waiting on that same pair.
 type ServerSlot = Arc<Mutex<ServerEntry>>;
 
-type GlobalSlot = (usize, Weak<Mutex<ServerEntry>>);
-
-fn global_slots() -> &'static StdMutex<Vec<GlobalSlot>> {
-    static SLOTS: OnceLock<StdMutex<Vec<GlobalSlot>>> = OnceLock::new();
-    SLOTS.get_or_init(|| StdMutex::new(Vec::new()))
+fn global_permits() -> &'static Arc<Semaphore> {
+    static PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    PERMITS.get_or_init(|| Arc::new(Semaphore::new(MAX_SERVER_SLOTS)))
 }
 
 /// The live server for one `(language, repo-root)` pair plus its failure backoff.
@@ -48,6 +45,8 @@ struct ServerEntry {
     retry_at: Option<Instant>,
     last_used: Instant,
     idle_generation: u64,
+    idle_timer: Option<tokio::task::AbortHandle>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl Default for ServerEntry {
@@ -58,6 +57,8 @@ impl Default for ServerEntry {
             retry_at: None,
             last_used: Instant::now(),
             idle_generation: 0,
+            idle_timer: None,
+            permit: None,
         }
     }
 }
@@ -71,6 +72,7 @@ impl ServerEntry {
     /// Drop any live server, extend the cooldown, and return how long the next attempt waits.
     fn record_failure(&mut self, now: Instant) -> Duration {
         self.server = None;
+        self.permit = None;
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let backoff = failure_backoff(self.consecutive_failures);
         self.retry_at = Some(now + backoff);
@@ -166,7 +168,7 @@ impl LspRegistry {
             servers.retain(|_, entry| {
                 entry
                     .try_lock()
-                    .map(|slot| !slot.is_idle(now))
+                    .map(|slot| !slot.is_idle(now) || slot.cooling_down(now))
                     .unwrap_or(true)
             });
             if !servers.contains_key(&key) && servers.len() >= MAX_SERVER_SLOTS {
@@ -196,14 +198,18 @@ impl LspRegistry {
 
         let mut slot = entry.lock().await;
         let idle_generation = slot.touch();
-        schedule_idle_shutdown(entry.clone(), idle_generation);
+        arm_idle_timer(&mut slot, entry.clone(), idle_generation, IDLE_SERVER_TTL);
         if slot.server.is_none() {
-            global_touch(&entry);
             let now = Instant::now();
             if slot.cooling_down(now) {
                 debug!("lsp: {lang} ({cmd}) is in failure cooldown — skipping diagnostics");
                 return vec![];
             }
+            let Some(permit) = global_permits().clone().try_acquire_owned().ok() else {
+                debug!("lsp: global analyzer cap is full; deferring diagnostics");
+                return vec![];
+            };
+            slot.permit = Some(permit);
             match LspServer::spawn(&cmd, &args).await {
                 Ok(mut srv) => match srv.initialize(&root_uri, timeout).await {
                     Ok(()) => {
@@ -211,9 +217,8 @@ impl LspRegistry {
                         slot.server = Some(srv);
                     }
                     Err(e) => {
-                        // The handshake error is usually just EOF; the server's own stderr is what
-                        // names the actual cause, so it travels with the warning.
                         let cause = srv.stderr_summary().await;
+                        slot.permit = None;
                         let backoff = slot.record_failure(now);
                         warn!(
                             "lsp: initialize failed for {lang} ({cmd}): {e}{} — retrying in {}s",
@@ -224,6 +229,7 @@ impl LspRegistry {
                     }
                 },
                 Err(e) => {
+                    slot.permit = None;
                     let backoff = slot.record_failure(now);
                     warn!(
                         "lsp: spawn failed for {lang} ({cmd}): {e} — retrying in {}s",
@@ -294,57 +300,15 @@ impl LspRegistry {
     }
 }
 
-fn global_touch(entry: &ServerSlot) {
-    let pointer = Arc::as_ptr(entry) as usize;
-    let mut slots = global_slots()
-        .lock()
-        .expect("LSP global slot lock poisoned");
-    slots.retain(|(_, slot)| slot.strong_count() > 0);
-    if !slots.iter().any(|(known, _)| *known == pointer) {
-        slots.push((pointer, Arc::downgrade(entry)));
+/// Process-wide capacity permits are held for the lifetime of each live analyzer.
+fn arm_idle_timer(slot: &mut ServerEntry, entry: ServerSlot, generation: u64, delay: Duration) {
+    if let Some(previous) = slot.idle_timer.take() {
+        previous.abort();
     }
-    let live = slots
-        .iter()
-        .filter_map(|(known, slot)| {
-            let entry = slot.upgrade()?;
-            let slot = entry.try_lock().ok()?;
-            slot.server.as_ref().map(|_| (*known, slot.last_used))
-        })
-        .collect::<Vec<_>>();
-    if live.len() < MAX_SERVER_SLOTS {
-        return;
-    }
-    let Some((victim, _)) = live
-        .into_iter()
-        .filter(|(known, _)| *known != pointer)
-        .min_by_key(|(_, last_used)| *last_used)
-    else {
-        return;
-    };
-    if let Some((_, weak)) = slots.iter().find(|(known, _)| *known == victim) {
-        if let Some(entry) = weak.upgrade() {
-            if let Ok(mut slot) = entry.try_lock() {
-                debug!(
-                    "lsp: evicting least-recently-used server globally to enforce process limit"
-                );
-                slot.server = None;
-            }
-        }
-    }
-}
-
-/// Arm a one-shot reaper for a use of a server slot. A newer use changes the generation, making
-/// older timers harmless. A weak reference means an LRU eviction drops the slot and its
-/// `kill_on_drop` child immediately instead of letting this timer retain it for five minutes.
-fn schedule_idle_shutdown(entry: ServerSlot, generation: u64) {
-    schedule_idle_shutdown_after(entry, generation, IDLE_SERVER_TTL);
-}
-
-fn schedule_idle_shutdown_after(entry: ServerSlot, generation: u64, delay: Duration) {
-    let entry = Arc::downgrade(&entry);
-    tokio::spawn(async move {
+    let weak = Arc::downgrade(&entry);
+    let task = tokio::spawn(async move {
         tokio::time::sleep(delay).await;
-        let Some(entry) = entry.upgrade() else {
+        let Some(entry) = weak.upgrade() else {
             return;
         };
         let mut slot = entry.lock().await;
@@ -354,8 +318,11 @@ fn schedule_idle_shutdown_after(entry: ServerSlot, generation: u64, delay: Durat
                 delay.as_secs()
             );
             slot.server = None;
+            slot.permit = None;
+            slot.idle_timer = None;
         }
     });
+    slot.idle_timer = Some(task.abort_handle());
 }
 
 /// Render a captured stderr tail as a trailing clause, or nothing when the server was silent.
@@ -657,6 +624,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[tokio::test]
     async fn diagnostics_for_returns_empty_when_no_lang() {
         let cfg = LspConfig {
@@ -680,6 +648,17 @@ mod tests {
         assert_eq!(failure_backoff(3), BACKOFF_BASE * 4);
         assert_eq!(failure_backoff(99), BACKOFF_MAX);
         assert_eq!(failure_backoff(u32::MAX), BACKOFF_MAX);
+    }
+
+    #[test]
+    fn a_failure_releases_its_global_permit() {
+        let mut entry = ServerEntry {
+            permit: Some(global_permits().clone().try_acquire_owned().unwrap()),
+            ..Default::default()
+        };
+        entry.server = None;
+        entry.record_failure(Instant::now());
+        assert!(entry.permit.is_none());
     }
 
     #[test]
@@ -767,6 +746,7 @@ mod tests {
     /// A server that cannot start (the reported `rust-analyzer` component was missing) must not be
     /// respawned once per diagnostic request, and must recover on its own once it is repaired.
     #[cfg(unix)]
+    #[serial_test::serial]
     #[tokio::test]
     async fn a_failing_server_backs_off_then_recovers_after_the_cooldown() {
         let tmp = TempDir::new().unwrap();
@@ -830,6 +810,7 @@ mod tests {
 
     /// An idle server is reaped by its own timer; no later diagnostics call is needed to trigger it.
     #[cfg(unix)]
+    #[serial_test::serial]
     #[tokio::test]
     async fn idle_server_is_terminated_without_a_follow_up_request() {
         let tmp = TempDir::new().unwrap();
@@ -859,8 +840,16 @@ mod tests {
         let pid = started_pids(&attempts)[0];
         let key = ("rust".to_string(), tmp.path().canonicalize().unwrap());
         let entry = reg.servers.lock().await.get(&key).unwrap().clone();
-        let generation = entry.lock().await.idle_generation;
-        schedule_idle_shutdown_after(entry, generation, Duration::from_millis(25));
+        {
+            let mut slot = entry.lock().await;
+            let generation = slot.idle_generation;
+            arm_idle_timer(
+                &mut slot,
+                entry.clone(),
+                generation,
+                Duration::from_millis(25),
+            );
+        }
         wait_for_process_exit(pid).await;
         assert!(
             !process_is_alive(pid),
@@ -870,6 +859,7 @@ mod tests {
 
     /// The cap is process-wide, not one four-process allowance per session registry.
     #[cfg(unix)]
+    #[serial_test::serial]
     #[tokio::test]
     async fn live_servers_are_bounded_across_registries() {
         let tmp = TempDir::new().unwrap();
@@ -901,19 +891,19 @@ mod tests {
             let _ = reg.diagnostics_for(&file, Duration::from_millis(200)).await;
             registries.push(reg);
         }
-        wait_for_starts(&attempts, MAX_SERVER_SLOTS + 1).await;
+        wait_for_starts(&attempts, MAX_SERVER_SLOTS).await;
         let pids = started_pids(&attempts);
-        assert_eq!(pids.len(), MAX_SERVER_SLOTS + 1);
-        wait_for_process_exit(pids[0]).await;
+        assert_eq!(pids.len(), MAX_SERVER_SLOTS);
         assert!(
-            !process_is_alive(pids[0]),
-            "global LSP cap must evict across registries"
+            pids.iter().all(|pid| process_is_alive(*pid)),
+            "the global permit cap must refuse new analyzers rather than exceed the limit"
         );
     }
 
     /// A daemon may work across many project roots, but must retain only a fixed number of
     /// heavyweight analyzer processes. Evicted roots are lazy: touching one again can restart it.
     #[cfg(unix)]
+    #[serial_test::serial]
     #[tokio::test]
     async fn live_servers_are_bounded_across_project_roots() {
         let tmp = TempDir::new().unwrap();
@@ -957,6 +947,7 @@ mod tests {
 
     /// The cause a bare "server closed stdout" hides must survive to the failure path.
     #[cfg(unix)]
+    #[serial_test::serial]
     #[tokio::test]
     async fn a_dying_server_reports_its_stderr() {
         let tmp = TempDir::new().unwrap();
@@ -985,6 +976,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[tokio::test]
     async fn diagnostics_for_returns_empty_when_binary_not_found() {
         let mut servers = std::collections::HashMap::new();
