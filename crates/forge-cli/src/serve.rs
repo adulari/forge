@@ -93,6 +93,12 @@ pub(crate) fn daemon_token_at(path: &std::path::Path, rotate: bool) -> Result<St
         if let Ok(existing) = std::fs::read_to_string(path) {
             let t = existing.trim();
             if (16..=64).contains(&t.len()) && t.chars().all(|c| c.is_ascii_hexdigit()) {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                        .with_context(|| format!("securing {}", path.display()))?;
+                }
                 return Ok(t.to_string());
             }
         }
@@ -3922,6 +3928,18 @@ export async function run() {}
         // Second call returns the SAME token (stable origin is the whole point).
         let t2 = daemon_token_at(&path, false).unwrap();
         assert_eq!(t1, t2, "token is stable across restarts");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(daemon_token_at(&path, false).unwrap(), t1);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "existing token is repaired to owner-only"
+            );
+        }
         // Rotation mints a fresh one and persists it.
         let t3 = daemon_token_at(&path, true).unwrap();
         assert_ne!(t1, t3, "rotate mints a new token");
