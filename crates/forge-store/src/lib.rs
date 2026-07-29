@@ -9,6 +9,8 @@ use forge_types::{Role, TaskTier, ToolCall, Usage, Visibility};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
+mod assay_store;
+mod checkpoint_store;
 mod duel_store;
 mod handoff;
 mod handoff_types;
@@ -2140,103 +2142,6 @@ impl Store {
         })
     }
 
-    // --- Assay runs + findings (docs/features/analysis-mode.md) ---
-
-    /// Persist an assay run; returns its id. Add findings with [`add_finding`](Self::add_finding).
-    pub fn create_assay_run(&self, scope: &str, cost_usd: f64) -> Result<String> {
-        let id = forge_types::new_id();
-        self.lock()?.execute(
-            "INSERT INTO assay_run (id, scope, cost_usd) VALUES (?1, ?2, ?3)",
-            (&id, scope, cost_usd),
-        )?;
-        Ok(id)
-    }
-
-    /// Persist one finding under a run.
-    pub fn add_finding(&self, run_id: &str, f: &forge_types::Finding) -> Result<()> {
-        self.lock()?.execute(
-            "INSERT INTO finding (id, run_id, category, severity, confidence, file, line, title,
-             rationale, suggested_fix, effort, lens, verified)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            rusqlite::params![
-                f.id,
-                run_id,
-                f.category.as_str(),
-                f.severity.as_str(),
-                f.confidence.as_str(),
-                f.file,
-                f.line,
-                f.title,
-                f.rationale,
-                f.suggested_fix,
-                f.effort.as_str(),
-                f.lens,
-                f.verified as i64,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Findings of a run, ranked (severity, confidence) at read time.
-    pub fn load_findings(&self, run_id: &str) -> Result<Vec<forge_types::Finding>> {
-        use forge_types::{Confidence, Effort, FindingCategory, Severity};
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            // Actually rank by (severity, confidence) as the doc promises — the query had no ORDER BY,
-            // so SQLite returned insertion order and the UI showed the least-important finding first.
-            "SELECT id, category, severity, confidence, file, line, title, rationale,
-                    suggested_fix, effort, lens, verified
-             FROM finding WHERE run_id = ?1
-             ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
-                      CASE confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END",
-        )?;
-        let rows = stmt.query_map([run_id], |row| {
-            let category: String = row.get(1)?;
-            let severity: String = row.get(2)?;
-            let confidence: String = row.get(3)?;
-            let effort: String = row.get(9)?;
-            Ok(forge_types::Finding {
-                id: row.get(0)?,
-                category: FindingCategory::parse(&category).unwrap_or(FindingCategory::Correctness),
-                severity: Severity::parse(&severity).unwrap_or(Severity::Low),
-                confidence: Confidence::parse(&confidence).unwrap_or(Confidence::Low),
-                file: row.get(4)?,
-                line: row.get(5)?,
-                title: row.get(6)?,
-                rationale: row.get(7)?,
-                suggested_fix: row.get(8)?,
-                effort: Effort::parse(&effort).unwrap_or(Effort::Small),
-                lens: row.get(10)?,
-                verified: row.get::<_, i64>(11)? != 0,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
-    }
-
-    /// The most recent assay run for `scope`, excluding `exclude_id` (the just-created run).
-    /// Returns `None` when this is the first run for this scope.
-    pub fn latest_run_for_scope(&self, scope: &str, exclude_id: &str) -> Result<Option<String>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id FROM assay_run WHERE scope = ?1 AND id != ?2
-             ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query([scope, exclude_id])?;
-        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
-    }
-
-    /// Past assay runs, newest first: `(id, scope, cost_usd, created_at)`.
-    pub fn list_assay_runs(&self) -> Result<Vec<(String, String, f64, i64)>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, scope, cost_usd, created_at FROM assay_run ORDER BY created_at DESC, rowid DESC",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
-    }
-
     /// The next `seq` to assign for a session: `MAX(seq) + 1` over ALL rows (active or soft-deleted),
     /// or 0 for a fresh session. Must be used instead of an in-memory message COUNT when resuming a
     /// session that may have been COMPACTED — `load_messages` returns only the active tail (+ a
@@ -2248,71 +2153,6 @@ impl Store {
             [session_id],
             |row| row.get(0),
         )?)
-    }
-
-    // --- Conversation checkpoints / undo (RFC session-management-and-commands, PR2) ---
-
-    /// Soft-delete every message of a session with `seq >= from_seq` (an `/undo` / checkpoint
-    /// rewind). The rows stay in the table (`active = 0`) for audit/redo; [`load_messages`]
-    /// excludes them. Returns the number of messages deactivated.
-    pub fn deactivate_messages_from(&self, session_id: &str, from_seq: i64) -> Result<usize> {
-        Ok(self.lock()?.execute(
-            "UPDATE message SET active = 0 WHERE session_id = ?1 AND seq >= ?2 AND active = 1",
-            (session_id, from_seq),
-        )?)
-    }
-
-    /// Save a checkpoint (rewind point) at `seq`. `label` NULL = an auto per-turn checkpoint.
-    pub fn add_checkpoint(
-        &self,
-        session_id: &str,
-        label: Option<&str>,
-        seq: i64,
-    ) -> Result<String> {
-        let id = forge_types::new_id();
-        with_busy_retry(|| {
-            let mut conn = self.lock()?;
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            tx.execute(
-                "INSERT INTO checkpoint (id, session_id, label, seq) VALUES (?1, ?2, ?3, ?4)",
-                (&id, session_id, label, seq),
-            )?;
-            let payload = sync_json(serde_json::json!({
-                "id": id,
-                "session_id": session_id,
-                "label": label,
-                "seq": seq,
-            }))?;
-            append_sync_revision(
-                &tx,
-                "checkpoint",
-                &id,
-                SyncJournalOperation::Upsert,
-                &payload,
-            )?;
-            tx.commit()?;
-            Ok(())
-        })?;
-        Ok(id)
-    }
-
-    /// A session's named checkpoints, newest first.
-    pub fn list_checkpoints(&self, session_id: &str) -> Result<Vec<CheckpointRow>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, label, seq, created_at FROM checkpoint
-             WHERE session_id = ?1 ORDER BY seq DESC, created_at DESC",
-        )?;
-        let rows = stmt.query_map([session_id], |row| {
-            Ok(CheckpointRow {
-                id: row.get(0)?,
-                label: row.get(1)?,
-                seq: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
     }
 }
 
@@ -4223,6 +4063,83 @@ mod tests {
     }
 
     // --- Assay runs + findings ---
+
+    fn assay_finding(
+        severity: forge_types::Severity,
+        confidence: forge_types::Confidence,
+        title: &str,
+    ) -> forge_types::Finding {
+        forge_types::Finding {
+            id: forge_types::new_id(),
+            category: forge_types::FindingCategory::Correctness,
+            severity,
+            confidence,
+            file: "core/lib.rs".into(),
+            line: None,
+            title: title.into(),
+            rationale: "reason".into(),
+            suggested_fix: "fix".into(),
+            effort: forge_types::Effort::Small,
+            lens: "correctness".into(),
+            verified: true,
+        }
+    }
+
+    #[test]
+    fn assay_findings_are_ranked_by_severity_then_confidence() {
+        use forge_types::{Confidence, Severity};
+        let store = Store::open_in_memory().unwrap();
+        let run = store.create_assay_run("repo", 0.0).unwrap();
+        for finding in [
+            assay_finding(Severity::Low, Confidence::High, "low"),
+            assay_finding(Severity::High, Confidence::Low, "high-low-confidence"),
+            assay_finding(Severity::High, Confidence::High, "high-high-confidence"),
+            assay_finding(Severity::Critical, Confidence::Low, "critical"),
+        ] {
+            store.add_finding(&run, &finding).unwrap();
+        }
+
+        let titles: Vec<_> = store
+            .load_findings(&run)
+            .unwrap()
+            .into_iter()
+            .map(|finding| finding.title)
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "critical",
+                "high-high-confidence",
+                "high-low-confidence",
+                "low"
+            ]
+        );
+    }
+
+    #[test]
+    fn assay_history_is_scope_specific_and_excludes_the_current_run() {
+        let store = Store::open_in_memory().unwrap();
+        let first_repo = store.create_assay_run("repo", 0.1).unwrap();
+        let path_run = store.create_assay_run("path src", 0.2).unwrap();
+        let current_repo = store.create_assay_run("repo", 0.3).unwrap();
+
+        assert_eq!(
+            store
+                .latest_run_for_scope("repo", &current_repo)
+                .unwrap()
+                .as_deref(),
+            Some(first_repo.as_str())
+        );
+        assert_eq!(
+            store.latest_run_for_scope("path src", &path_run).unwrap(),
+            None
+        );
+        let runs = store.list_assay_runs().unwrap();
+        assert_eq!(
+            runs.first().map(|row| row.0.as_str()),
+            Some(current_repo.as_str())
+        );
+    }
 
     #[test]
     fn assay_run_and_findings_round_trip() {
