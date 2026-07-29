@@ -208,7 +208,7 @@ pub(crate) async fn build_session_with_self_mcp(
         // A prefixed id whose provider isn't a recognized one is clearly invalid — hard stop, even
         // when discovery is off/timed-out and there's no catalog to check against (it would
         // otherwise pass straight through to a raw resolver error every turn).
-        if !prefix.is_empty() && !is_known_provider_prefix(prefix) {
+        if !prefix.is_empty() && !forge_config::is_known_provider(prefix) {
             anyhow::bail!(
                 "unknown model '{id}': '{prefix}' is not a known provider. \
                  Run `forge models` to see usable ids, or `forge auth` to add a provider."
