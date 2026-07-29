@@ -933,6 +933,7 @@ of a live turn's image attachments.
 
 ```
 $ forge mesh "design and prove correct a lock-free concurrent queue in Rust"
+classifier: heuristic
 classified: complex  ·  code-heavy: no  ·  reasons: reasoning/algorithmic term
 
 quota:
