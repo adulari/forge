@@ -680,19 +680,61 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Active display windows, applying the same alias/freshness policy as `quota_at`.
     pub fn subscription_windows(&self) -> Result<Vec<SubscriptionWindow>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare("SELECT provider, window_kind, status, resets_at, fraction FROM subscription_usage WHERE resets_at IS NULL OR resets_at > ?1")?;
-        let rows = stmt.query_map([chrono::Utc::now().timestamp()], |r| {
-            Ok(SubscriptionWindow {
-                provider: r.get(0)?,
-                window_kind: r.get(1)?,
-                status: r.get(2)?,
-                resets_at: r.get(3)?,
-                fraction: r.get(4)?,
-            })
+        let mut stmt = conn.prepare(
+            "SELECT provider, window_kind, status, resets_at, fraction, updated_at
+             FROM subscription_usage",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                SubscriptionWindow {
+                    provider: row.get(0)?,
+                    window_kind: row.get(1)?,
+                    status: row.get(2)?,
+                    resets_at: row.get(3)?,
+                    fraction: row.get(4)?,
+                },
+                row.get::<_, i64>(5)?,
+            ))
         })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let mut latest =
+            std::collections::HashMap::<(String, String), (SubscriptionWindow, i64)>::new();
+        for row in rows {
+            let (mut window, updated_at) = row?;
+            if matches!(window.provider.as_str(), "codex-cli" | "codex-oauth") {
+                window.provider = "codex-oauth".to_string();
+            }
+            let key = (window.provider.clone(), window.window_kind.clone());
+            if latest
+                .get(&key)
+                .is_none_or(|(_, existing)| updated_at >= *existing)
+            {
+                latest.insert(key, (window, updated_at));
+            }
+        }
+        let now = chrono::Utc::now().timestamp();
+        let mut windows = latest
+            .into_values()
+            .filter_map(|(window, updated_at)| {
+                if window.resets_at.is_some_and(|resets_at| resets_at <= now) {
+                    return None;
+                }
+                if matches!(window.provider.as_str(), "codex-oauth")
+                    && now.saturating_sub(updated_at) > 300
+                {
+                    return None;
+                }
+                Some(window)
+            })
+            .collect::<Vec<_>>();
+        windows.sort_by(|left, right| {
+            left.provider
+                .cmp(&right.provider)
+                .then_with(|| left.window_kind.cmp(&right.window_kind))
+        });
+        Ok(windows)
     }
 
     /// This is the authoritative budget figure (FR-5): it aggregates `usage.cost_usd` across
