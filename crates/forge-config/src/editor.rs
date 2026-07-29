@@ -500,9 +500,9 @@ pub fn set_config_value(scope: ConfigScope, path: &str, raw: &str) -> Result<(),
     Ok(())
 }
 
-/// Reset a setting to its default by removing it from the given scope's `config.toml` (and, when
-/// resetting user scope, also from the project file if present, so the default actually takes
-/// effect). No-op if absent. The remaining file is validated.
+/// Reset a setting in the selected scope by removing it from that scope's `config.toml`. A value
+/// in a higher-precedence scope can therefore remain effective; this is a scoped reset, not a
+/// command to erase the setting from every layer. No-op if absent. The remaining file is validated.
 pub fn reset_config_value(scope: ConfigScope, path: &str) -> Result<(), ConfigError> {
     let file = scope_path(scope)?;
     let Some(text) = std::fs::read_to_string(&file).ok() else {
