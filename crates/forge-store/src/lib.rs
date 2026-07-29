@@ -28,8 +28,10 @@ use migrations::{
     migration_0001, migration_0020, ANYWHERE_PRERELEASE_MAX_VERSION,
     ANYWHERE_PRERELEASE_MIN_VERSION, MIGRATIONS,
 };
+mod provenance_store;
 mod quota_store;
 mod schema;
+mod session_catalog_store;
 mod session_usage_store;
 mod spending_store;
 mod sync_files_store;
@@ -37,6 +39,7 @@ mod sync_history_store;
 mod sync_journal;
 mod sync_store;
 mod task_store;
+mod transcript_read_store;
 mod usage_store;
 
 pub use handoff_types::{
@@ -1301,688 +1304,6 @@ impl Store {
         self.pool.get().map_err(|e| StoreError::Pool(e.to_string()))
     }
 
-    /// Number of messages in a session.
-    pub fn message_count(&self, session_id: &str) -> Result<i64> {
-        Ok(self.lock()?.query_row(
-            // `active = 1` only — soft-deleted (undone/compacted) rows must not inflate the count
-            // shown in the session picker / `forge sessions`, which `load_messages` also excludes.
-            "SELECT COUNT(*) FROM message WHERE session_id = ?1 AND active = 1",
-            [session_id],
-            |row| row.get(0),
-        )?)
-    }
-
-    /// The id of the most-recent top-level session (excludes subagent children), or `None` if
-    /// there are no sessions yet.
-    pub fn most_recent_session_id(&self) -> Result<Option<String>> {
-        let conn = self.lock()?;
-        // Order by LAST ACTIVITY (newest message), not creation time, so `--continue` reattaches
-        // the session the user actually used most recently — not whichever was created last.
-        let result = conn
-            .query_row(
-                "SELECT s.id FROM session s WHERE s.parent_session_id IS NULL \
-                 ORDER BY COALESCE( \
-                   (SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id), \
-                   s.created_at) DESC, s.rowid DESC LIMIT 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        Ok(result)
-    }
-
-    /// Past sessions, **most-recently-used first** (by newest message, falling back to creation
-    /// time), so the picker lists the sessions you're likely to resume at the top. Excludes
-    /// subagent child sessions (`parent_session_id IS NOT NULL`) so the picker and the
-    /// `forge sessions` command only surface top-level sessions. Also excludes sessions that
-    /// never received a real (role='user') message — checked regardless of `active`, so a
-    /// session whose sole user message was later soft-deleted by `/undo` or a checkpoint restore
-    /// still counts as used — a session row is created eagerly at process start (before
-    /// [`Store::prune_empty`] has a chance to sweep it, and for a session still in its first
-    /// few minutes of life), so without this filter a process that opens a session and
-    /// exits/crashes before any prompt is sent — including one stuck in a spawn loop, the
-    /// original trigger for this — fills the picker with blank, useless entries.
-    pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT s.id, s.cwd, s.permission_mode, s.created_at, s.total_cost_usd,
-                    (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id AND m.active = 1),
-                    (SELECT content FROM message m WHERE m.session_id = s.id
-                       AND m.role = 'user' AND m.active = 1 ORDER BY m.seq LIMIT 1),
-                    COALESCE((SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id),
-                             s.created_at) AS last_activity,
-                    s.title, s.worktree_path
-             FROM session s WHERE s.parent_session_id IS NULL \
-             AND s.archived = 0 \
-             AND EXISTS ( \
-               SELECT 1 FROM message m \
-               WHERE m.session_id = s.id AND m.role = 'user' \
-             ) \
-             ORDER BY last_activity DESC, s.rowid DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(SessionSummary {
-                id: row.get(0)?,
-                cwd: row.get(1)?,
-                permission_mode: row.get(2)?,
-                created_at: row.get(3)?,
-                total_cost_usd: row.get(4)?,
-                message_count: row.get(5)?,
-                preview: row.get(6)?,
-                last_activity: row.get(7)?,
-                title: row.get(8)?,
-                worktree_path: row.get(9)?,
-                archived: false, // filtered to archived = 0 above
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
-    }
-
-    /// Like [`Store::list_sessions`] but INCLUDES archived sessions (flagged via
-    /// [`SessionSummary::archived`]) instead of hiding them. Used by `forge serve`'s
-    /// past-sessions browser (`GET /api/sessions/past`) so a session the user explicitly
-    /// archived is still browsable and resumable — just visibly marked — rather than only
-    /// surfacing sessions orphaned by a daemon restart. Same MRU ordering, same exclusion of
-    /// subagent children and sessions that never received a real user message.
-    pub fn list_sessions_for_resume(&self) -> Result<Vec<SessionSummary>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT s.id, s.cwd, s.permission_mode, s.created_at, s.total_cost_usd,
-                    (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id AND m.active = 1),
-                    (SELECT content FROM message m WHERE m.session_id = s.id
-                       AND m.role = 'user' AND m.active = 1 ORDER BY m.seq LIMIT 1),
-                    COALESCE((SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id),
-                             s.created_at) AS last_activity,
-                    s.title, s.worktree_path, s.archived
-             FROM session s WHERE s.parent_session_id IS NULL \
-             AND EXISTS ( \
-               SELECT 1 FROM message m \
-               WHERE m.session_id = s.id AND m.role = 'user' \
-             ) \
-             ORDER BY last_activity DESC, s.rowid DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(SessionSummary {
-                id: row.get(0)?,
-                cwd: row.get(1)?,
-                permission_mode: row.get(2)?,
-                created_at: row.get(3)?,
-                total_cost_usd: row.get(4)?,
-                message_count: row.get(5)?,
-                preview: row.get(6)?,
-                last_activity: row.get(7)?,
-                title: row.get(8)?,
-                worktree_path: row.get(9)?,
-                archived: row.get::<_, i64>(10)? != 0,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
-    }
-
-    /// Archive a session (`forge serve`): hidden from [`Store::list_sessions`] and the daemon's
-    /// session list, but its full history stays intact (nothing is deleted).
-    pub fn archive_session(&self, session_id: &str) -> Result<()> {
-        self.lock()?.execute(
-            "UPDATE session SET archived = 1 WHERE id = ?1",
-            [session_id],
-        )?;
-        Ok(())
-    }
-
-    /// Whether a session is archived. `Ok(false)` for unknown ids (nothing to un-hide).
-    pub fn session_archived(&self, session_id: &str) -> Result<bool> {
-        let n: i64 = self.lock()?.query_row(
-            "SELECT COUNT(*) FROM session WHERE id = ?1 AND archived = 1",
-            [session_id],
-            |row| row.get(0),
-        )?;
-        Ok(n > 0)
-    }
-
-    /// Un-archive a session: reverses [`Store::archive_session`]. `forge serve` calls this when
-    /// resuming a session from the past-sessions browser — resurrecting an archived session is
-    /// an explicit choice to bring it back, so it should reappear in [`Store::list_sessions`]
-    /// and the fleet list once it stops running again, rather than immediately re-hiding itself.
-    pub fn unarchive_session(&self, session_id: &str) -> Result<()> {
-        let conn = self.lock()?;
-        let blocked: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM anywhere_handoff_session_state WHERE session_id=?1)",
-            [session_id],
-            |row| row.get(0),
-        )?;
-        if blocked {
-            return Err(StoreError::InvalidValue(
-                "session is frozen by an Anywhere handoff".into(),
-            ));
-        }
-        conn.execute(
-            "UPDATE session SET archived = 0 WHERE id = ?1",
-            [session_id],
-        )?;
-        Ok(())
-    }
-
-    /// Record the isolated worktree a daemon session runs in (`forge serve` with `worktree:true`).
-    pub fn set_session_worktree(&self, session_id: &str, path: &str) -> Result<()> {
-        self.lock()?.execute(
-            "UPDATE session SET worktree_path = ?2 WHERE id = ?1",
-            (session_id, path),
-        )?;
-        Ok(())
-    }
-
-    /// The isolated worktree recorded for a session, if any.
-    pub fn session_worktree(&self, session_id: &str) -> Result<Option<String>> {
-        Ok(self
-            .lock()?
-            .query_row(
-                "SELECT worktree_path FROM session WHERE id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten())
-    }
-
-    /// A session's stored title, if any.
-    pub fn session_title(&self, session_id: &str) -> Result<Option<String>> {
-        Ok(self
-            .lock()?
-            .query_row(
-                "SELECT title FROM session WHERE id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten())
-    }
-
-    /// Full session ids whose id starts with `prefix` (git-style abbreviation). `prefix` is
-    /// matched literally: any `%`/`_`/`\` it contains is escaped so it can't act as a SQL LIKE
-    /// wildcard and broaden the match beyond a literal prefix.
-    pub fn matching_session_ids(&self, prefix: &str) -> Result<Vec<String>> {
-        let conn = self.lock()?;
-        let escaped = escape_like_pattern(prefix);
-        let mut stmt =
-            conn.prepare("SELECT id FROM session WHERE id LIKE ?1 || '%' ESCAPE '\\'")?;
-        let rows = stmt.query_map([escaped], |row| row.get::<_, String>(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
-    }
-
-    /// Whether a session with this id exists.
-    pub fn session_exists(&self, session_id: &str) -> Result<bool> {
-        let n: i64 = self.lock()?.query_row(
-            "SELECT COUNT(*) FROM session WHERE id = ?1",
-            [session_id],
-            |row| row.get(0),
-        )?;
-        Ok(n > 0)
-    }
-
-    /// All *active* messages of a session, in turn order (by seq). Soft-deleted rows (those a
-    /// `/undo` rewound past) are excluded — they remain in the table for audit/redo. If a
-    /// compaction summary exists (written by [`compact_session_store`](Self::compact_session_store)),
-    /// a synthetic System message is prepended so a resumed session sees the compacted view.
-    pub fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
-        let conn = self.lock()?;
-        // Read compaction summary before the message prepare (both are &self borrows; ordering
-        // keeps the non-mut borrow from query_row from conflicting with the stmt lifetime).
-        let summary: Option<String> = conn
-            .query_row(
-                "SELECT summary FROM session_compaction WHERE session_id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility
-             FROM message WHERE session_id = ?1 AND active = 1 ORDER BY seq",
-        )?;
-        let rows = stmt.query_map([session_id], |row| {
-            let role: String = row.get(0)?;
-            let tool_calls_json: Option<String> = row.get(3)?;
-            let tool_calls = tool_calls_json
-                .and_then(|j| serde_json::from_str(&j).ok())
-                .unwrap_or_default();
-            let visibility: String = row.get(5)?;
-            Ok(StoredMessage {
-                role: Role::parse(&role).unwrap_or(Role::User),
-                content: row.get(1)?,
-                model: row.get(2)?,
-                tool_calls,
-                tool_call_id: row.get(4)?,
-                visibility: Visibility::parse(&visibility),
-            })
-        })?;
-        let mut msgs = rows
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)?;
-        if let Some(s) = summary {
-            msgs.insert(
-                0,
-                StoredMessage {
-                    role: Role::System,
-                    content: format!(
-                        "[Earlier conversation summarized to save context]\n{}",
-                        s.trim()
-                    ),
-                    model: None,
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                    visibility: Visibility::Llm,
-                },
-            );
-        }
-        Ok(msgs)
-    }
-
-    /// ALL messages of a session in turn order, INCLUDING soft-deleted rows (compacted-away or
-    /// `/undo`-rewound) and WITHOUT prepending the summary marker — the genuine, untouched
-    /// conversation. The model only ever sees the compacted view ([`load_messages`](Self::load_messages)),
-    /// but this lets the USER still read the FULL original history in scrollback after a resume.
-    pub fn load_all_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility
-             FROM message WHERE session_id = ?1 ORDER BY seq",
-        )?;
-        let rows = stmt.query_map([session_id], |row| {
-            let role: String = row.get(0)?;
-            let tool_calls_json: Option<String> = row.get(3)?;
-            let tool_calls = tool_calls_json
-                .and_then(|j| serde_json::from_str(&j).ok())
-                .unwrap_or_default();
-            let visibility: String = row.get(5)?;
-            Ok(StoredMessage {
-                role: Role::parse(&role).unwrap_or(Role::User),
-                content: row.get(1)?,
-                model: row.get(2)?,
-                tool_calls,
-                tool_call_id: row.get(4)?,
-                visibility: Visibility::parse(&visibility),
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
-    }
-
-    /// One page of a session's user-facing transcript, NEWEST first — the remote-control
-    /// scrollback pagination seam (docs/features/remote-control.md). Returns user + assistant
-    /// turns plus `visibility='ui'` notes (they are part of the visible conversation); tool
-    /// results, tool-call carrier rows (empty content), and system prompts are harness plumbing
-    /// and excluded. Soft-deleted (`active=0`) rows are INCLUDED, like
-    /// [`load_all_messages`](Self::load_all_messages) — this is the user's history, not the
-    /// model's context. `before_seq` restricts to rows with `seq < before_seq` (pass `None` for
-    /// the newest page); `limit` caps the page size.
-    pub fn load_history_page(
-        &self,
-        session_id: &str,
-        before_seq: Option<i64>,
-        limit: usize,
-    ) -> Result<Vec<HistoryRow>> {
-        self.load_history_page_with(session_id, before_seq, limit, false)
-    }
-
-    /// [`load_history_page`](Self::load_history_page) with the tool rows opted in.
-    ///
-    /// `include_tools = false` is byte-for-byte the historical page (the filter below collapses to
-    /// the original predicate), so every existing caller and the legacy PWA see no change.
-    ///
-    /// `include_tools = true` additionally returns the persisted `role='tool'` rows — the tool
-    /// RESULT rows written by `Session::invoke_tool` — with [`HistoryRow::tool_name`] resolved.
-    /// Note what that is and isn't: the tool row itself stores only the result text and its
-    /// `tool_call_id`; the NAME lives in the assistant carrier's `tool_calls_json`, so it is
-    /// recovered from the nearest preceding row that has one and left `None` when that carrier is
-    /// gone or does not contain the id. `llm_only` tool rows stay excluded — like their
-    /// user/assistant siblings they are provider-continuity plumbing, not conversation.
-    ///
-    /// It also SURFACES the tool CALLS, which are persisted but were previously unreachable: a
-    /// carrier row's `content` is empty, so the `content != ''` filter dropped it and the
-    /// `[{id, name, args}]` it carries went with it. With tools opted in, each carrier is expanded
-    /// into one row per declared call ([`ToolPhase::Call`], content = a capped args summary), at
-    /// the CARRIER's `seq`/`created_at` — so every call sorts before the result row that answers
-    /// it (results always carry a later seq), and a call whose result never arrived (an
-    /// interrupted turn) still shows up instead of vanishing. A carrier that also wrote prose
-    /// keeps its own assistant row, ordered before its calls. Nothing here is reconstructed: the
-    /// carrier row and its JSON are real persisted data.
-    pub fn load_history_page_with(
-        &self,
-        session_id: &str,
-        before_seq: Option<i64>,
-        limit: usize,
-        include_tools: bool,
-    ) -> Result<Vec<HistoryRow>> {
-        let conn = self.lock()?;
-        // The carrier lookup sits behind `CASE WHEN ?4 = 1 AND m.role = 'tool'` rather than in the
-        // projection unconditionally: SQLite short-circuits the CASE, so the default page runs the
-        // same work it always did and pays nothing for a subquery it never needs. Same for the
-        // row's OWN `tool_calls_json` (the carrier expansion below) and for the widened content
-        // filter, which collapses back to `m.content != ''` when tools aren't asked for.
-        let mut stmt = conn.prepare(
-            "SELECT m.seq, m.role, m.content, m.model, m.created_at, m.visibility,
-                    m.tool_call_id,
-                    CASE WHEN ?4 = 1 AND m.role = 'tool' THEN (
-                        SELECT c.tool_calls_json FROM message c
-                         WHERE c.session_id = m.session_id
-                           AND c.seq < m.seq
-                           AND c.tool_calls_json IS NOT NULL
-                         ORDER BY c.seq DESC LIMIT 1
-                    ) END,
-                    CASE WHEN ?4 = 1 THEN m.tool_calls_json END
-             FROM message m
-             WHERE m.session_id = ?1
-               AND (?2 IS NULL OR m.seq < ?2)
-               AND (((m.role IN ('user', 'assistant') AND m.visibility != 'llm_only') OR m.visibility = 'ui')
-                    OR (?4 = 1 AND m.role = 'tool' AND m.visibility != 'llm_only'))
-               AND (m.content != ''
-                    OR (?4 = 1 AND m.role = 'assistant' AND m.visibility != 'llm_only'
-                        AND m.tool_calls_json IS NOT NULL))
-             ORDER BY m.seq DESC LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![
-                session_id,
-                before_seq,
-                limit as i64,
-                i64::from(include_tools)
-            ],
-            |row| {
-                let role: String = row.get(1)?;
-                let visibility: String = row.get(5)?;
-                let tool_call_id: Option<String> = row.get(6)?;
-                let carrier_json: Option<String> = row.get(7)?;
-                let own_calls_json: Option<String> = row.get(8)?;
-                let role = Role::parse(&role).unwrap_or(Role::User);
-                Ok((
-                    HistoryRow {
-                        seq: row.get(0)?,
-                        role,
-                        content: row.get(2)?,
-                        model: row.get(3)?,
-                        created_at: row.get(4)?,
-                        visibility: Visibility::parse(&visibility),
-                        tool_name: carrier_json.as_deref().and_then(|carrier| {
-                            tool_name_from_carrier(carrier, tool_call_id.as_deref())
-                        }),
-                        tool_phase: (role == Role::Tool).then_some(ToolPhase::Result),
-                    },
-                    own_calls_json,
-                ))
-            },
-        )?;
-        // `limit` bounds the DB rows read, not the rows returned: one carrier expands into as many
-        // call rows as it declares. Pagination is unaffected — every returned row carries a REAL
-        // `seq`, so `before_seq` from the oldest of them opens the next window with no gap and no
-        // repeat.
-        let mut out = Vec::new();
-        for row in rows {
-            let (row, own_calls_json) = row?;
-            // Newest-first order, so a carrier's calls are pushed in reverse declaration order and
-            // its own prose last: reversed by the client, that reads prose → call 1 → call 2.
-            if let Some(json) = own_calls_json.as_deref() {
-                for call in parse_tool_calls(json).into_iter().rev() {
-                    out.push(HistoryRow {
-                        seq: row.seq,
-                        // A call is tool activity, like the result it precedes — the carrier's
-                        // `assistant` role belongs to its prose row, not to the calls.
-                        role: Role::Tool,
-                        content: tool_call_args_summary(&call.args),
-                        // Only a provider round-trip has a model; the persisted result rows this
-                        // sits next to carry none either.
-                        model: None,
-                        created_at: row.created_at,
-                        visibility: row.visibility,
-                        tool_name: Some(call.name),
-                        tool_phase: Some(ToolPhase::Call),
-                    });
-                }
-            }
-            if !row.content.is_empty() {
-                out.push(row);
-            }
-        }
-        Ok(out)
-    }
-
-    /// When the session's FIRST user-facing row was written — the zero point a transcript replay
-    /// measures its offsets from (raw `created_at` epochs give a scrubber nothing to anchor on).
-    /// Same row filter as [`load_history_page`](Self::load_history_page), so the epoch is the
-    /// first row a client can actually page to. `None` for a session with no visible rows yet.
-    pub fn history_epoch(&self, session_id: &str) -> Result<Option<i64>> {
-        self.history_epoch_with(session_id, false)
-    }
-
-    /// [`history_epoch`](Self::history_epoch) over the row set
-    /// [`load_history_page_with`](Self::load_history_page_with) returns for the same `include_tools`.
-    ///
-    /// The two MUST be asked the same question: a session whose first row is a tool result has one
-    /// epoch with tools included and a later one without, and mixing them would slide every
-    /// `elapsed_ms` on the wire — the scrubber's zero point would jump the moment a client toggled
-    /// tool rows on.
-    pub fn history_epoch_with(&self, session_id: &str, include_tools: bool) -> Result<Option<i64>> {
-        let conn = self.lock()?;
-        // Must mirror `load_history_page_with`'s filter exactly, INCLUDING the carrier rows it
-        // expands into call rows: a carrier can be the oldest row of an include_tools page (a turn
-        // that opened with a tool call), and measuring against a later row would slide every
-        // `elapsed_ms` on the wire.
-        let epoch = conn.query_row(
-            "SELECT MIN(created_at)
-             FROM message
-             WHERE session_id = ?1
-               AND (((role IN ('user', 'assistant') AND visibility != 'llm_only') OR visibility = 'ui')
-                    OR (?2 = 1 AND role = 'tool' AND visibility != 'llm_only'))
-               AND (content != ''
-                    OR (?2 = 1 AND role = 'assistant' AND visibility != 'llm_only'
-                        AND tool_calls_json IS NOT NULL))",
-            rusqlite::params![session_id, i64::from(include_tools)],
-            |row| row.get::<_, Option<i64>>(0),
-        )?;
-        Ok(epoch)
-    }
-
-    /// Whether this session has a stored compaction summary (was compacted at least once) — the
-    /// signal for offering "compact first vs continue uncompacted" when resuming it.
-    pub fn session_has_compaction(&self, session_id: &str) -> Result<bool> {
-        let n: i64 = self.lock()?.query_row(
-            "SELECT COUNT(*) FROM session_compaction WHERE session_id = ?1",
-            [session_id],
-            |row| row.get(0),
-        )?;
-        Ok(n > 0)
-    }
-
-    /// Persist the compacted view of a session: soft-delete the oldest active messages (keeping
-    /// the last `keep_count`) and upsert `summary` into `session_compaction`. On the next resume,
-    /// [`load_messages`](Self::load_messages) prepends a System message with the summary so the
-    /// session rehydrates the compacted state instead of the full transcript.
-    pub fn compact_session_store(
-        &self,
-        session_id: &str,
-        summary: &str,
-        keep_count: usize,
-    ) -> Result<()> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if keep_count == 0 {
-            tx.execute(
-                "UPDATE message SET active = 0, compacted = 1 WHERE session_id = ?1 AND active = 1",
-                [session_id],
-            )?;
-        } else {
-            // Soft-delete every active message whose seq is below the (keep_count)-th newest.
-            // LIMIT 1 OFFSET (keep_count-1) on DESC order gives the oldest row to KEEP.
-            tx.execute(
-                "UPDATE message SET active = 0, compacted = 1
-                 WHERE session_id = ?1 AND active = 1
-                 AND seq < (
-                     SELECT seq FROM message
-                     WHERE session_id = ?1 AND active = 1
-                     ORDER BY seq DESC
-                     LIMIT 1 OFFSET ?2
-                 )",
-                (session_id, keep_count as i64 - 1),
-            )?;
-        }
-        tx.execute(
-            "INSERT INTO session_compaction (session_id, summary) VALUES (?1, ?2)
-             ON CONFLICT(session_id) DO UPDATE SET
-               summary = excluded.summary,
-               created_at = strftime('%s','now')",
-            (session_id, summary),
-        )?;
-        let payload = sync_json(serde_json::json!({
-            "session_id": session_id,
-            "summary": summary,
-            "keep_count": keep_count,
-        }))?;
-        append_sync_revision(
-            &tx,
-            "compaction",
-            session_id,
-            SyncJournalOperation::Upsert,
-            &payload,
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Undo a compaction: reactivate the messages THIS compaction soft-deleted (`compacted = 1`)
-    /// and drop the stored summary row. Rows `/undo` soft-deleted (`active = 0`, `compacted = 0`)
-    /// stay removed — resurrecting them was a bug. Returns `false` (no-op) if the session was never
-    /// compacted (no `session_compaction` row).
-    pub fn uncompact_session_store(&self, session_id: &str) -> Result<bool> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let had_compaction: bool = tx.query_row(
-            "SELECT COUNT(*) FROM session_compaction WHERE session_id = ?1",
-            [session_id],
-            |row| row.get::<_, i64>(0),
-        )? > 0;
-        if !had_compaction {
-            tx.commit()?;
-            return Ok(false);
-        }
-        tx.execute(
-            "UPDATE message SET active = 1, compacted = 0 WHERE session_id = ?1 AND compacted = 1",
-            [session_id],
-        )?;
-        tx.execute(
-            "DELETE FROM session_compaction WHERE session_id = ?1",
-            [session_id],
-        )?;
-        append_sync_revision(
-            &tx,
-            "compaction",
-            session_id,
-            SyncJournalOperation::Tombstone,
-            &[],
-        )?;
-        tx.commit()?;
-        Ok(true)
-    }
-
-    /// Every active message of a session in turn order, each joined to its usage row so a
-    /// replay can show the model, token counts, cost, and wall-clock time of each turn
-    /// (docs/features/session-replay.md). Unlike [`load_messages`](Self::load_messages) this
-    /// is for auditing a finished session, not rebuilding live state.
-    pub fn load_replay(&self, session_id: &str) -> Result<Vec<ReplayEntry>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT m.seq, m.role, m.content, m.model, m.created_at, m.tool_calls_json,
-                    u.input_tokens, u.output_tokens, u.cost_usd
-             FROM message m LEFT JOIN usage u ON u.message_id = m.id
-             WHERE m.session_id = ?1 AND m.active = 1 ORDER BY m.seq",
-        )?;
-        let rows = stmt.query_map([session_id], |row| {
-            let role: String = row.get(1)?;
-            let tool_calls_json: Option<String> = row.get(5)?;
-            let tool_calls = tool_calls_json
-                .and_then(|j| serde_json::from_str(&j).ok())
-                .unwrap_or_default();
-            Ok(ReplayEntry {
-                seq: row.get(0)?,
-                role: Role::parse(&role).unwrap_or(Role::User),
-                content: row.get(2)?,
-                model: row.get(3)?,
-                created_at: row.get(4)?,
-                tool_calls,
-                input_tokens: row.get(6)?,
-                output_tokens: row.get(7)?,
-                cost_usd: row.get(8)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
-    }
-
-    /// Every recorded `write_file`/`edit_file` call whose `path` matches (as a suffix) the given
-    /// `filename_suffix`, oldest first — the raw material `forge blame` (docs/features/forge-blame.md)
-    /// attributes source lines from. Joined to the owning session (for `cwd`, to resolve a relative
-    /// `path` the same way the tool did) and to the assistant message that made the call (for
-    /// `model`); `routing_decision.chosen_model` fills in when the message's own `model` is NULL
-    /// (older rows, or a message that predates routing being recorded for it).
-    pub fn file_edits(&self, filename_suffix: &str) -> Result<Vec<FileEditRow>> {
-        let conn = self.lock()?;
-        let pattern = escape_like_pattern(filename_suffix);
-        let mut stmt = conn.prepare(
-            "SELECT tc.tool_name, tc.args_json, tc.path, m.session_id, s.cwd,
-                    COALESCE(m.model, r.chosen_model), m.seq, tc.created_at
-             FROM tool_call tc
-             JOIN message m ON m.id = tc.message_id
-             JOIN session s ON s.id = m.session_id
-             LEFT JOIN routing_decision r ON r.message_id = m.id
-             WHERE tc.path IS NOT NULL
-               AND tc.tool_name IN ('write_file', 'edit_file')
-               AND tc.status = 'ok'
-               AND tc.path LIKE '%' || ?1 ESCAPE '\\'
-             ORDER BY tc.created_at ASC",
-        )?;
-        let rows = stmt.query_map([pattern], |row| {
-            Ok(FileEditRow {
-                tool_name: row.get(0)?,
-                args_json: row.get(1)?,
-                path: row.get(2)?,
-                session_id: row.get(3)?,
-                session_cwd: row.get(4)?,
-                model: row.get(5)?,
-                seq: row.get(6)?,
-                created_at: row.get(7)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
-    }
-
-    /// The provenance context of one turn: the nearest user prompt at or before `seq`, and the
-    /// content of the assistant message AT `seq` (the one that made the edit `forge blame` is
-    /// explaining). Either half is `None` if no matching row exists — e.g. `seq` is a virtual
-    /// subagent turn with no direct user prompt in this session.
-    pub fn turn_context(&self, session_id: &str, seq: i64) -> Result<TurnContext> {
-        let conn = self.lock()?;
-        let user_prompt = conn
-            .query_row(
-                "SELECT content FROM message WHERE session_id = ?1 AND role = 'user' AND seq <= ?2 \
-                 ORDER BY seq DESC LIMIT 1",
-                (session_id, seq),
-                |r| r.get(0),
-            )
-            .optional()?;
-        let assistant_content = conn
-            .query_row(
-                "SELECT content FROM message WHERE session_id = ?1 AND role = 'assistant' AND seq = ?2",
-                (session_id, seq),
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(TurnContext {
-            user_prompt,
-            assistant_content,
-        })
-    }
-
     /// The next `seq` to assign for a session: `MAX(seq) + 1` over ALL rows (active or soft-deleted),
     /// or 0 for a fresh session. Must be used instead of an in-memory message COUNT when resuming a
     /// session that may have been COMPACTED — `load_messages` returns only the active tail (+ a
@@ -2833,6 +2154,34 @@ mod tests {
             .unwrap();
         let page = store.load_history_page(&sid, None, 10).unwrap();
         assert_eq!(page.len(), 5, "other session's rows excluded");
+    }
+
+    #[test]
+    fn history_tool_result_finds_its_matching_interleaved_carrier() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        store.add_message(&sid, 0, Role::User, "q", None).unwrap();
+        for (seq, id, name) in [(1, "call-a", "read_file"), (2, "call-b", "shell")] {
+            let calls = [ToolCall {
+                id: id.into(),
+                name: name.into(),
+                args: serde_json::json!({}),
+            }];
+            store
+                .add_message_full(&sid, seq, Role::Assistant, "", None, &calls, None)
+                .unwrap();
+        }
+        store
+            .add_message_full(&sid, 3, Role::Tool, "a", None, &[], Some("call-a"))
+            .unwrap();
+
+        let result = store
+            .load_history_page_with(&sid, None, 10, true)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.tool_phase == Some(ToolPhase::Result))
+            .unwrap();
+        assert_eq!(result.tool_name.as_deref(), Some("read_file"));
     }
 
     #[test]
@@ -4714,11 +4063,31 @@ mod tests {
     }
 
     #[test]
+    fn most_recent_session_id_skips_blank_and_archived_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let used = store.create_session("/used", "default").unwrap();
+        store
+            .add_message(&used, 0, Role::User, "used", None)
+            .unwrap();
+        let blank = store.create_session("/blank", "default").unwrap();
+        assert_ne!(blank, used);
+        let archived = store.create_session("/archived", "default").unwrap();
+        store
+            .add_message(&archived, 0, Role::User, "archived", None)
+            .unwrap();
+        store.archive_session(&archived).unwrap();
+
+        assert_eq!(store.most_recent_session_id().unwrap(), Some(used));
+    }
+
+    #[test]
     fn most_recent_session_id_returns_newest_top_level() {
         let store = Store::open_in_memory().unwrap();
         let a = store.create_session("/a", "default").unwrap();
+        store.add_message(&a, 0, Role::User, "a", None).unwrap();
         let b = store.create_session("/b", "default").unwrap();
-        // b was created last → should be most recent
+        store.add_message(&b, 0, Role::User, "b", None).unwrap();
+        // b was used last → should be most recent
         assert_eq!(store.most_recent_session_id().unwrap(), Some(b));
         // a is still there but not most recent
         assert_ne!(store.most_recent_session_id().unwrap(), Some(a));
@@ -4728,6 +4097,9 @@ mod tests {
     fn most_recent_session_id_skips_child_sessions() {
         let store = Store::open_in_memory().unwrap();
         let parent = store.create_session("/parent", "default").unwrap();
+        store
+            .add_message(&parent, 0, Role::User, "parent", None)
+            .unwrap();
         // Create a child session after the parent — it must not appear as most-recent
         let _child = store
             .create_child_session("/child", "default", &parent)
