@@ -233,14 +233,14 @@ fn remove_state() {
 /// The daemon's session registry: id → running driver handle. Mirrors `mcp_serve`'s
 /// LocalSessionManager pattern (one task per session, addressed by id).
 pub(crate) struct SessionRegistry {
-    sessions: tokio::sync::Mutex<std::collections::HashMap<String, Arc<SessionDriverHandle>>>,
+    sessions: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<SessionDriverHandle>>>>,
     fleet_tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl SessionRegistry {
     pub(crate) fn new() -> Self {
         Self {
-            sessions: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fleet_tx: tokio::sync::watch::channel(0).0,
         }
     }
@@ -277,6 +277,32 @@ impl SessionRegistry {
                 let next = fleet_tx.borrow().wrapping_add(1);
                 fleet_tx.send_replace(next);
                 next_allowed = tokio::time::Instant::now() + FLEET_INVALIDATION_MIN_INTERVAL;
+            }
+        });
+        let sessions = self.sessions.clone();
+        let fleet_tx = self.fleet_tx.clone();
+        let retained = handle.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if retained.is_finished() {
+                    let removed = {
+                        let mut sessions = sessions.lock().await;
+                        if sessions
+                            .get(&retained.session_id)
+                            .is_some_and(|current| Arc::ptr_eq(current, &retained))
+                        {
+                            sessions.remove(&retained.session_id)
+                        } else {
+                            None
+                        }
+                    };
+                    if removed.is_some() {
+                        let next = fleet_tx.borrow().wrapping_add(1);
+                        fleet_tx.send_replace(next);
+                    }
+                    break;
+                }
             }
         });
         self.sessions
@@ -583,11 +609,13 @@ pub(crate) async fn serve_cmd(
         r = server => r,
         _ = tokio::signal::ctrl_c() => {
             println!("\n⚒ shutting down — stopping sessions…");
-            for handle in registry.all().await {
+            let handles = registry.all().await;
+            for handle in &handles {
                 handle.shutdown();
             }
-            // Bounded: a wedged driver must not hold the daemon's exit hostage.
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            for handle in handles {
+                handle.join(ARCHIVE_JOIN_TIMEOUT).await;
+            }
             remove_state();
             Ok(())
         }

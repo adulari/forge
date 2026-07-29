@@ -86,6 +86,14 @@ impl SessionDriverHandle {
         let _ = self.shutdown_tx.send(true);
     }
 
+    pub fn is_finished(&self) -> bool {
+        self.task
+            .lock()
+            .expect("driver task lock poisoned")
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+    }
+
     /// Wait (bounded) for the driver task to finish after [`Self::shutdown`].
     pub async fn join(&self, timeout: std::time::Duration) {
         let task = self.task.lock().expect("driver task lock poisoned").take();

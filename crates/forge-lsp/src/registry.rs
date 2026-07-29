@@ -253,7 +253,7 @@ impl LspRegistry {
             );
             return vec![];
         }
-        match server.collect_diagnostics(&uri, timeout).await {
+        let diagnostics = match server.collect_diagnostics(&uri, timeout).await {
             Ok(diagnostics) => diagnostics,
             Err(error) => {
                 slot.server = None;
@@ -262,9 +262,12 @@ impl LspRegistry {
                     "lsp: diagnostics failed for {lang} ({cmd}): {error} — retrying in {}s",
                     backoff.as_secs()
                 );
-                vec![]
+                return vec![];
             }
-        }
+        };
+        let idle_generation = slot.touch();
+        arm_idle_timer(&mut slot, entry.clone(), idle_generation, IDLE_SERVER_TTL);
+        diagnostics
     }
 
     /// Forget every pending failure cooldown, as if it had elapsed.

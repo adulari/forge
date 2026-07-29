@@ -28,6 +28,14 @@ pub struct LspServer {
     stderr_reader: Option<tokio::task::JoinHandle<()>>,
 }
 
+impl Drop for LspServer {
+    fn drop(&mut self) {
+        if let Some(reader) = self.stderr_reader.take() {
+            reader.abort();
+        }
+    }
+}
+
 impl LspServer {
     pub async fn spawn(cmd: &str, args: &[String]) -> std::io::Result<Self> {
         let mut child = tokio::process::Command::new(cmd)
@@ -72,8 +80,14 @@ impl LspServer {
     /// Called on the failure path only: it waits briefly for the reader task to drain a stderr pipe
     /// the dying process has already closed, so the cause isn't lost to a race with its exit.
     pub async fn stderr_summary(&mut self) -> String {
-        if let Some(handle) = self.stderr_reader.take() {
-            let _ = tokio::time::timeout(STDERR_DRAIN_GRACE, handle).await;
+        if let Some(mut handle) = self.stderr_reader.take() {
+            if tokio::time::timeout(STDERR_DRAIN_GRACE, &mut handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+                let _ = handle.await;
+            }
         }
         let raw = self
             .stderr
