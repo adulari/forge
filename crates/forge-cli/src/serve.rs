@@ -824,6 +824,7 @@ mod serve_assets;
 mod serve_changelog;
 mod serve_config;
 mod serve_mcp;
+mod serve_models;
 mod serve_projects;
 mod serve_usage;
 mod serve_workflows;
@@ -831,6 +832,7 @@ use serve_assets::*;
 use serve_changelog::*;
 use serve_config::*;
 use serve_mcp::*;
+use serve_models::*;
 use serve_projects::*;
 use serve_usage::*;
 use serve_workflows::*;
@@ -2249,116 +2251,6 @@ async fn skills_page() -> Response {
         Err(_) => err_response(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "could not read skills catalog",
-        ),
-    }
-}
-
-#[derive(serde::Serialize)]
-struct ModelsResponse {
-    catalog: &'static str,
-    providers: Vec<ModelProvider>,
-}
-
-#[derive(serde::Serialize)]
-struct ModelProvider {
-    provider: String,
-    models: Vec<ModelRow>,
-}
-
-#[derive(serde::Serialize)]
-struct ModelRow {
-    id: String,
-    name: String,
-    frontier: bool,
-    free: bool,
-    paid: bool,
-    subscription: bool,
-    estimated_cost_usd: f64,
-    health: Option<ModelHealth>,
-    tier: &'static str,
-    benchmark_intelligence: Option<f64>,
-    benchmark_coding: Option<f64>,
-    context_window: Option<u32>,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct ModelHealth {
-    until_epoch: i64,
-    reason: String,
-}
-
-async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
-    let store = state.store.clone();
-    match tokio::task::spawn_blocking(move || {
-        let Some(catalog) = crate::cli::commands::models::load_cached_catalog() else {
-            return ModelsResponse {
-                catalog: "unavailable",
-                providers: Vec::new(),
-            };
-        };
-        let config = forge_config::load().unwrap_or_default();
-        let pricing = forge_mesh::pricing::Pricing::from_config(&config);
-        let benches: std::collections::HashMap<_, _> = store
-            .current_benched_report()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(model, until_epoch, reason)| {
-                (
-                    model,
-                    ModelHealth {
-                        until_epoch,
-                        reason,
-                    },
-                )
-            })
-            .collect();
-        let context_windows = store.all_model_contexts().unwrap_or_default();
-        ModelsResponse {
-            catalog: "available",
-            providers: catalog
-                .by_provider(&pricing)
-                .into_iter()
-                .map(|provider| ModelProvider {
-                    provider: provider.provider,
-                    models: provider
-                        .models
-                        .into_iter()
-                        .map(|model| ModelRow {
-                            health: benches.get(&model.id).cloned(),
-                            id: model.id.clone(),
-                            name: model.name,
-                            frontier: model.frontier,
-                            free: model.free,
-                            paid: model.paid,
-                            subscription: model.subscription,
-                            estimated_cost_usd: model.cost,
-                            tier: if model.frontier {
-                                "complex"
-                            } else if model.subscription || model.paid {
-                                "standard"
-                            } else {
-                                "trivial"
-                            },
-                            benchmark_intelligence: catalog
-                                .benchmark_for(&model.id)
-                                .map(|score| score.0),
-                            benchmark_coding: catalog.benchmark_for(&model.id).map(|score| score.1),
-                            context_window: context_windows
-                                .get(&model.id)
-                                .copied()
-                                .or_else(|| forge_mesh::pricing::context_limit(&model.id)),
-                        })
-                        .collect(),
-                })
-                .collect(),
-        }
-    })
-    .await
-    {
-        Ok(response) => json_response(&response),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read model catalog",
         ),
     }
 }
