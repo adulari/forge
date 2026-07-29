@@ -34,8 +34,9 @@ clears the cooldown, so diagnostics resume on their own once the toolchain is re
 `rustup component add rust-analyzer`) — no Forge restart required.
 
 A daemon can visit many project roots across many concurrent sessions, so the process-wide live
-registry retains at most four `(language, repo-root)` analyzer processes total. Each analyzer has an
-independent five-minute idle timer that terminates it even when the session receives no further
+registry retains at most four `(language, repo-root)` slots and permits one live analyzer process
+tree at a time. Each analyzer has a configurable idle timer (120 seconds by default) that
+terminates it even when the session receives no further
 edits; a later edit lazily starts it again. This bounds retained analyzer memory across idle
 sessions without making an eviction permanent: the existing 30-second to 10-minute failure backoff
 still applies after a server exits unexpectedly or is OOM-killed, and a later successful handshake
@@ -45,6 +46,8 @@ restores diagnostics.
 [lsp]
 enabled = true
 timeout_ms = 3000
+memory_limit_mb = 2048
+idle_timeout_secs = 120
 [lsp.servers.rust]
 command = "rust-analyzer"
 [lsp.servers.typescript]

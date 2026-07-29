@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
+use tracing::warn;
 
 use crate::rpc::{read_msg, write_msg};
 use crate::types::{Diagnostic, DiagnosticSeverity};
@@ -15,6 +17,8 @@ const STDERR_TAIL_BYTES: usize = 2048;
 const STDERR_DRAIN_GRACE: Duration = Duration::from_millis(250);
 /// Upper bound on the single-line cause attached to a failure message.
 const STDERR_SUMMARY_CHARS: usize = 300;
+/// Poll slowly enough to stay negligible while still stopping sustained allocation bursts.
+const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct LspServer {
     _child: Child,
@@ -26,6 +30,7 @@ pub struct LspServer {
     /// real cause here (a missing rustup component, a bad config) while stdout only shows EOF.
     stderr: Arc<Mutex<String>>,
     stderr_reader: Option<tokio::task::JoinHandle<()>>,
+    memory_guard: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for LspServer {
@@ -33,13 +38,31 @@ impl Drop for LspServer {
         if let Some(reader) = self.stderr_reader.take() {
             reader.abort();
         }
+        if let Some(guard) = self.memory_guard.take() {
+            guard.abort();
+        }
     }
 }
 
 impl LspServer {
     pub async fn spawn(cmd: &str, args: &[String]) -> std::io::Result<Self> {
-        let mut child = tokio::process::Command::new(cmd)
-            .args(args)
+        Self::spawn_with_memory_limit(cmd, args, None, false).await
+    }
+
+    pub(crate) async fn spawn_with_memory_limit(
+        cmd: &str,
+        args: &[String],
+        memory_limit_bytes: Option<u64>,
+        rust_resource_profile: bool,
+    ) -> std::io::Result<Self> {
+        let mut command = tokio::process::Command::new(cmd);
+        command.args(args);
+        if rust_resource_profile {
+            command
+                .env("CARGO_BUILD_JOBS", "1")
+                .env("RAYON_NUM_THREADS", "1");
+        }
+        let mut child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -48,6 +71,10 @@ impl LspServer {
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
         let stderr = Arc::new(Mutex::new(String::new()));
+        let memory_guard = child.id().and_then(|pid| {
+            memory_limit_bytes
+                .map(|limit| tokio::spawn(monitor_process_tree_memory(pid, limit, stderr.clone())))
+        });
         let stderr_reader = child.stderr.take().map(|mut pipe| {
             let sink = stderr.clone();
             tokio::spawn(async move {
@@ -73,6 +100,7 @@ impl LspServer {
             documents: HashMap::new(),
             stderr,
             stderr_reader,
+            memory_guard,
         })
     }
 
@@ -104,21 +132,17 @@ impl LspServer {
     }
 
     pub async fn initialize(&mut self, root_uri: &str, timeout: Duration) -> std::io::Result<()> {
+        self.initialize_with_options(root_uri, timeout, None).await
+    }
+
+    pub(crate) async fn initialize_with_options(
+        &mut self,
+        root_uri: &str,
+        timeout: Duration,
+        initialization_options: Option<Value>,
+    ) -> std::io::Result<()> {
         let id = self.new_id();
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "initialize",
-            "params": {
-                "processId": std::process::id(),
-                "rootUri": root_uri,
-                "capabilities": {
-                    "textDocument": {
-                        "publishDiagnostics": {}
-                    }
-                }
-            }
-        });
+        let req = initialize_request(id, root_uri, initialization_options);
         write_msg(&mut self.stdin, &req).await?;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -173,9 +197,10 @@ impl LspServer {
         uri: &str,
         lang: &str,
         text: &str,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<i32> {
         let version = self.documents.entry(uri.to_string()).or_insert(0);
         *version += 1;
+        let current_version = *version;
         let notif = if *version == 1 {
             json!({
                 "jsonrpc": "2.0",
@@ -194,12 +219,14 @@ impl LspServer {
                 }
             })
         };
-        write_msg(&mut self.stdin, &notif).await
+        write_msg(&mut self.stdin, &notif).await?;
+        Ok(current_version)
     }
 
     pub async fn collect_diagnostics(
         &mut self,
         uri: &str,
+        minimum_version: i32,
         timeout: Duration,
     ) -> std::io::Result<Vec<Diagnostic>> {
         let mut diags = Vec::new();
@@ -224,6 +251,9 @@ impl LspServer {
                 if let Some(params) = msg.get("params") {
                     let msg_uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
                     if msg_uri == uri {
+                        if !diagnostic_version_is_current(params, minimum_version) {
+                            continue;
+                        }
                         if let Some(arr) = params.get("diagnostics").and_then(|v| v.as_array()) {
                             diags = arr.iter().filter_map(parse_diagnostic).collect();
                         }
@@ -234,6 +264,116 @@ impl LspServer {
         }
         Ok(diags)
     }
+}
+
+fn initialize_request(id: u64, root_uri: &str, initialization_options: Option<Value>) -> Value {
+    let mut params = json!({
+        "processId": std::process::id(),
+        "rootUri": root_uri,
+        "capabilities": {
+            "textDocument": {
+                "publishDiagnostics": {}
+            }
+        }
+    });
+    if let Some(options) = initialization_options {
+        params
+            .as_object_mut()
+            .expect("initialize params are an object")
+            .insert("initializationOptions".to_string(), options);
+    }
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "initialize",
+        "params": params
+    })
+}
+
+async fn monitor_process_tree_memory(root_pid: u32, limit_bytes: u64, stderr: Arc<Mutex<String>>) {
+    let root = Pid::from_u32(root_pid);
+    let mut system = System::new();
+
+    loop {
+        let sample = tokio::task::spawn_blocking(move || {
+            system.refresh_processes(ProcessesToUpdate::All, true);
+            let root_exists = system.process(root).is_some();
+            let relationships = system
+                .processes()
+                .iter()
+                .map(|(pid, process)| (*pid, process.parent()))
+                .collect::<Vec<_>>();
+            let members = process_tree_pids(root, &relationships);
+            let resident_bytes = members.iter().fold(0u64, |total, pid| {
+                total.saturating_add(
+                    system
+                        .process(*pid)
+                        .map(sysinfo::Process::memory)
+                        .unwrap_or(0),
+                )
+            });
+            (system, root_exists, members, resident_bytes)
+        })
+        .await;
+
+        let Ok((next_system, root_exists, members, resident_bytes)) = sample else {
+            return;
+        };
+        system = next_system;
+        if !root_exists {
+            return;
+        }
+
+        if resident_bytes > limit_bytes {
+            let resident_mib = resident_bytes / (1024 * 1024);
+            let limit_mib = limit_bytes / (1024 * 1024);
+            let message = format!(
+                "forge lsp memory guard stopped process tree {root_pid}: \
+                 {resident_mib} MiB exceeded {limit_mib} MiB"
+            );
+            warn!("{message}");
+            if let Ok(mut sink) = stderr.lock() {
+                append_bounded(&mut sink, &message, STDERR_TAIL_BYTES);
+            }
+            let _ = tokio::task::spawn_blocking(move || {
+                // Kill children before the server so cargo/rustc helpers cannot be orphaned.
+                for pid in members.iter().filter(|pid| **pid != root) {
+                    if let Some(process) = system.process(*pid) {
+                        process.kill();
+                    }
+                }
+                if let Some(process) = system.process(root) {
+                    process.kill();
+                }
+            })
+            .await;
+            return;
+        }
+
+        tokio::time::sleep(RESOURCE_SAMPLE_INTERVAL).await;
+    }
+}
+
+fn process_tree_pids(root: Pid, relationships: &[(Pid, Option<Pid>)]) -> HashSet<Pid> {
+    let mut members = HashSet::from([root]);
+    loop {
+        let before = members.len();
+        for (pid, parent) in relationships {
+            if parent.is_some_and(|parent| members.contains(&parent)) {
+                members.insert(*pid);
+            }
+        }
+        if members.len() == before {
+            return members;
+        }
+    }
+}
+
+fn diagnostic_version_is_current(params: &Value, minimum_version: i32) -> bool {
+    params
+        .get("version")
+        .and_then(Value::as_i64)
+        .is_none_or(|version| version >= i64::from(minimum_version))
 }
 
 /// Append `chunk`, keeping at most the last `cap` bytes (trimmed forward to a char boundary).
@@ -320,6 +460,49 @@ fn parse_diagnostic(v: &Value) -> Option<Diagnostic> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn initialize_request_carries_resource_safe_options() {
+        let request = initialize_request(
+            7,
+            "file:///workspace",
+            Some(json!({"numThreads": 1, "checkOnSave": false})),
+        );
+
+        assert_eq!(request["id"], 7);
+        assert_eq!(request["params"]["rootUri"], "file:///workspace");
+        assert_eq!(
+            request["params"]["initializationOptions"],
+            json!({"numThreads": 1, "checkOnSave": false})
+        );
+    }
+
+    #[test]
+    fn process_tree_membership_excludes_unrelated_processes() {
+        let root = Pid::from_u32(10);
+        let relationships = [
+            (root, Some(Pid::from_u32(1))),
+            (Pid::from_u32(11), Some(root)),
+            (Pid::from_u32(12), Some(Pid::from_u32(11))),
+            (Pid::from_u32(20), Some(Pid::from_u32(1))),
+        ];
+
+        let members = process_tree_pids(root, &relationships);
+
+        assert_eq!(members.len(), 3);
+        assert!(members.contains(&root));
+        assert!(members.contains(&Pid::from_u32(11)));
+        assert!(members.contains(&Pid::from_u32(12)));
+        assert!(!members.contains(&Pid::from_u32(20)));
+    }
+
+    #[test]
+    fn stale_published_diagnostics_are_rejected_by_version() {
+        assert!(!diagnostic_version_is_current(&json!({"version": 2}), 3));
+        assert!(diagnostic_version_is_current(&json!({"version": 3}), 3));
+        assert!(diagnostic_version_is_current(&json!({"version": 4}), 3));
+        assert!(diagnostic_version_is_current(&json!({}), 3));
+    }
 
     fn full_diag() -> Value {
         json!({
@@ -470,6 +653,36 @@ mod tests {
             .await
             .expect_err("JSON-RPC initialize error must fail startup");
         assert!(error.to_string().contains("bad init"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn memory_guard_stops_an_over_budget_process_tree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script = tmp.path().join("memory-hog-lsp.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut server =
+            LspServer::spawn_with_memory_limit(&script.to_string_lossy(), &[], Some(1), false)
+                .await
+                .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while server._child.try_wait().unwrap().is_none() && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            server._child.try_wait().unwrap().is_some(),
+            "the guard must terminate an over-budget server"
+        );
+        let cause = server.stderr_summary().await;
+        assert!(
+            cause.contains("forge lsp memory guard stopped process tree"),
+            "stderr summary was: {cause:?}"
+        );
     }
 
     #[test]
