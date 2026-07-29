@@ -1195,7 +1195,7 @@ pub(crate) enum QueueCmd {
         /// Run the assay gate on each result diff; tasks with findings at or above this
         /// severity are marked `gated` (their branch is still kept). Values: low|medium|high.
         #[arg(long, value_name = "SEVERITY")]
-        gate: Option<String>,
+        gate: Option<FailOnSeverity>,
         /// Drain at most this many tasks.
         #[arg(long)]
         max: Option<usize>,

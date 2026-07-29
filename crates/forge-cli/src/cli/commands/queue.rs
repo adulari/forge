@@ -45,13 +45,16 @@ fn add_queue_cmd(
         }
     }
     let cwd = canonical_cwd()?;
+    let queue_root = git_repo_root(&cwd)
+        .map(|root| root.display().to_string())
+        .unwrap_or_else(|_| cwd.clone());
     let store = open_store()?;
     let id = forge_types::new_id();
     store
         .add_queue_task(
             &id,
             task.trim(),
-            &cwd,
+            &queue_root,
             mode.as_deref(),
             model.as_deref(),
             budget,
@@ -123,16 +126,23 @@ fn resolve_queue_id(store: &Store, prefix: &str) -> Result<String> {
 // layer (per-provider caps), not here.
 // ---------------------------------------------------------------------------
 
-fn run_queue_cmd(gate: Option<String>, max: Option<usize>, mock: bool, shadow: bool) -> Result<()> {
+fn run_queue_cmd(
+    gate: Option<FailOnSeverity>,
+    max: Option<usize>,
+    mock: bool,
+    shadow: bool,
+) -> Result<()> {
     let cwd = canonical_cwd()?;
     let repo_root = git_repo_root(&cwd)
         .context("`forge queue run` needs a git repository (results are left as branches)")?;
     let store = open_store()?;
     let pending: Vec<_> = store
-        .list_queue_tasks(Some(&cwd))
+        .list_queue_tasks(None)
         .context("listing queue")?
         .into_iter()
-        .filter(|t| t.status == "pending")
+        .filter(|task| {
+            task.status == "pending" && git_repo_root(&task.cwd).is_ok_and(|root| root == repo_root)
+        })
         .take(max.unwrap_or(usize::MAX))
         .collect();
     if pending.is_empty() {
@@ -148,7 +158,13 @@ fn run_queue_cmd(gate: Option<String>, max: Option<usize>, mock: bool, shadow: b
             continue; // a concurrent drain got there first
         }
         println!("▶ {}  {}", &t.id[..8], truncate(&t.task, 70));
-        let outcome = run_one_task(&t, &repo_root, &forge_exe, gate.as_deref(), mock);
+        let gate = gate.map(|severity| match severity {
+            FailOnSeverity::Low => "low",
+            FailOnSeverity::Medium => "medium",
+            FailOnSeverity::High => "high",
+            FailOnSeverity::Critical => "critical",
+        });
+        let outcome = run_one_task(&t, &repo_root, &forge_exe, gate, mock);
         let (status, session_id, branch, summary, cost, gate_note, model) = match outcome {
             Ok(o) => (
                 o.status,
@@ -317,15 +333,20 @@ fn run_one_task(
 
     // Gate BEFORE committing: assay's diff scope reads the uncommitted working tree.
     let mut gate_note = None;
-    if let Some(sev) = gate {
-        if !over_budget {
+    if exit.success() && !over_budget {
+        if let Some(sev) = gate {
             let gate_out = std::process::Command::new(forge_exe)
                 .args(["assay", "run", "--scope", "diff", "--fail-on", sev])
                 .current_dir(guard.path())
                 .output()
                 .context("running the assay gate")?;
-            if gate_out.status.code() == Some(2) {
-                gate_note = Some(format!("assay found ≥{sev} severity findings"));
+            if !gate_out.status.success() {
+                let detail = if gate_out.status.code() == Some(2) {
+                    format!("assay found ≥{sev} severity findings")
+                } else {
+                    format!("assay gate failed to complete ({})", gate_out.status)
+                };
+                gate_note = Some(detail);
             }
         }
     }
@@ -355,10 +376,10 @@ fn run_one_task(
 
     let status = if over_budget {
         "over-budget"
+    } else if !exit.success() {
+        "failed"
     } else if gate_note.is_some() {
         "gated"
-    } else if !exit.success() && branch.is_none() {
-        "failed"
     } else if branch.is_some() {
         "done"
     } else {
