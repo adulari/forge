@@ -25,7 +25,7 @@ Subscription quota state is not ordinary usage accounting. It is a routing input
 - bridge-fraction projection used by UI and routing;
 - privacy-preserving Mesh outcome recording and bounded calibration.
 
-The parent store retains schema/open lifecycle, model health/failover state, sessions, messages, spending, and other persistence domains.
+Model health/failover and duel learning now have separate routing-persistence modules. The parent store retains schema/open lifecycle, sessions, messages, spending, and other persistence domains.
 
 ## Interface as test surface
 
