@@ -8,23 +8,10 @@ use std::io::{IsTerminal, Write};
 use forge_types::SideEffect;
 pub use forge_types::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, ReplayItem, NO_ANSWER};
 
-/// Resolve a typed answer line against the options: a number `1..=N` picks that option's label;
-/// otherwise, if `allow_other`, the trimmed line is a free-text answer. `None` = invalid input
-/// (not a valid number and free text not allowed) → the caller should re-prompt.
-pub fn resolve_answer(line: &str, options: &[QChoice], allow_other: bool) -> Option<String> {
-    let t = line.trim();
-    if let Ok(n) = t.parse::<usize>() {
-        if n >= 1 && n <= options.len() {
-            return Some(options[n - 1].label.clone());
-        }
-    }
-    if allow_other && !t.is_empty() {
-        return Some(t.to_string());
-    }
-    None
-}
-
+pub mod answer;
+pub use answer::resolve_answer;
 pub mod app;
+mod app_remote;
 mod commands;
 pub mod config_editor;
 mod driver;
@@ -42,11 +29,13 @@ mod voice;
 mod workflow_view;
 pub use app::{
     banner_lines, handle_key, input_cursor_up, insert_voice_transcript, lattice_view_lines,
-    picker_kind_wire, print_banner_direct, render_mesh_overlay, render_usage_overlay,
-    render_voice_overlay, ActivityKind, ActivityStatus, App, DiffFileSnapshot, DiffHunkSnapshot,
-    DiffSnapshot, InputOutcome, KeyKind, MeshCandRow, MeshOverlay, MeshQuotaRow,
-    OverlayRowSnapshot, OverlaySnapshot, RemoteSnapshot, TranscriptKind, TranscriptRow,
-    TranscriptView, UsageOverlay, VoiceOverlay, VoicePhase,
+    print_banner_direct, render_mesh_overlay, render_usage_overlay, render_voice_overlay,
+    ActivityKind, ActivityStatus, App, InputOutcome, KeyKind, MeshCandRow, MeshOverlay,
+    MeshQuotaRow, TranscriptRow, TranscriptView, UsageOverlay, VoiceOverlay, VoicePhase,
+};
+pub use app_remote::{
+    picker_kind_wire, DiffFileSnapshot, DiffHunkSnapshot, DiffSnapshot, OverlayRowSnapshot,
+    OverlaySnapshot, RemoteSnapshot, TranscriptKind,
 };
 pub use commands::{
     arg_values, at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken,
