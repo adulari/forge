@@ -1,5 +1,5 @@
 //! Embedded base schema (idempotent `CREATE TABLE IF NOT EXISTS`). Versioned, ordered schema
-//! changes live in `MIGRATIONS` (lib.rs), gated by `PRAGMA user_version`. Anything that depends on a
+//! changes live in `migrations.rs`, gated by `PRAGMA user_version`. Anything that depends on a
 //! migrated column (e.g. indexes on `message.active`) must be created in a migration, NOT here —
 //! `CREATE TABLE IF NOT EXISTS` won't add columns to an existing table, so a column-dependent index
 //! in this batch would fail to open a pre-migration DB.
