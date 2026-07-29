@@ -38,6 +38,7 @@ pub mod duel;
 pub mod hooks;
 pub mod llm_router;
 mod model_loop;
+mod model_request;
 mod model_response;
 mod model_stream;
 mod model_tools;
