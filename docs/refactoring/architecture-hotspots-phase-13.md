@@ -1,6 +1,6 @@
 # Architecture hotspot completion phase
 
-This phase completes the canonical 5,000-line hotspot objective without adding baseline exceptions.
+This intermediate phase completes the canonical 5,000-line hotspot objective without adding baseline exceptions; it does not complete the repository-wide distribution campaign.
 
 ## Extracted ownership
 
@@ -13,7 +13,7 @@ This phase completes the canonical 5,000-line hotspot objective without adding b
 
 The final draft measurement reports zero implementation files above 5,000 lines. File distribution improves from 66.2% to 67.0% at or below 500 lines and from 82.8% to 85.0% at or below 800 lines.
 
-The proposed 90%/95% distribution figures are not accepted as a phase-completion gate. Reaching them from the measured tree requires at least 54 additional net owners at or below 500 lines and 24 additional net owners at or below 800 lines. Creating those files mechanically would be shallow inflation, while deep extraction spans unrelated Store, Config, Serve, Provider, Anywhere, and command domains and cannot be truthfully represented as completion of these four hotspot seams. The enforced canonical policy remains the architecture guard: no new owner above 800, no distribution regression, and ratcheted existing hotspots. Repository-wide deepening should continue as independently reviewed domain phases.
+The 90%/95% distribution figures remain the Forge-wide campaign gate, although they are not a gate for this independently reviewed intermediate phase. Reaching them from the measured tree requires at least 54 additional net owners at or below 500 lines and 24 additional net owners at or below 800 lines. Creating those files mechanically would be shallow inflation, while deep extraction spans unrelated Store, Config, Serve, Provider, Anywhere, and command domains and cannot be truthfully represented as completion of these four hotspot seams. The enforced canonical policy remains the architecture guard: no new owner above 800, no distribution regression, and ratcheted existing hotspots. Repository-wide deepening should continue as independently reviewed domain phases.
 
 ## Verification
 
