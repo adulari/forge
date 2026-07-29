@@ -19,12 +19,14 @@ mod lattice_store;
 mod memory;
 mod migrations;
 mod model_health_store;
+mod notification_store;
 use migrations::{
     add_column_if_missing, migrate_subscription_usage, run_migrations, seed_singleton_rows,
 };
 #[cfg(test)]
 use migrations::{
-    migration_0001, ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION, MIGRATIONS,
+    migration_0001, migration_0020, ANYWHERE_PRERELEASE_MAX_VERSION,
+    ANYWHERE_PRERELEASE_MIN_VERSION, MIGRATIONS,
 };
 mod quota_store;
 mod schema;
@@ -46,7 +48,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1482,168 +1484,6 @@ impl Store {
             )
             .optional()?
             .flatten())
-    }
-
-    /// Store (or refresh) a Web Push subscription, deduplicating by `endpoint` — a browser
-    /// re-subscribing after a permission round-trip must update its keys in place, never pile
-    /// up duplicate rows that would each receive (and each decrypt-fail or double-notify) every
-    /// push. Atomic: a single `INSERT … ON CONFLICT(endpoint) DO UPDATE` against the UNIQUE index
-    /// `idx_push_subscription_endpoint` (migration #13), so concurrent callers can't race a
-    /// duplicate in between a SELECT and an INSERT. Returns the row id (existing or new).
-    pub fn upsert_push_subscription(
-        &self,
-        endpoint: &str,
-        p256dh: &str,
-        auth: &str,
-    ) -> Result<String> {
-        let conn = self.lock()?;
-        let id = forge_types::new_id();
-        let row_id = conn.query_row(
-            "INSERT INTO push_subscription (id, endpoint, p256dh, auth) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth
-             RETURNING id",
-            (&id, endpoint, p256dh, auth),
-            |row| row.get::<_, String>(0),
-        )?;
-        Ok(row_id)
-    }
-
-    /// Remove a Web Push subscription by its endpoint (unsubscribe, or a push service answering
-    /// 404/410). `Ok(true)` when a row was actually deleted.
-    pub fn delete_push_subscription(&self, endpoint: &str) -> Result<bool> {
-        let n = self.lock()?.execute(
-            "DELETE FROM push_subscription WHERE endpoint = ?1",
-            [endpoint],
-        )?;
-        Ok(n > 0)
-    }
-
-    /// Every stored Web Push subscription, oldest first (delivery order is stable and boring).
-    pub fn list_push_subscriptions(&self) -> Result<Vec<PushSubscription>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, endpoint, p256dh, auth FROM push_subscription ORDER BY created_at, id",
-        )?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(PushSubscription {
-                    id: row.get(0)?,
-                    endpoint: row.get(1)?,
-                    p256dh: row.get(2)?,
-                    auth: row.get(3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    }
-
-    /// Store (or refresh) an APNs subscription, deduplicating by `device_token` — Apple may
-    /// reissue the same device a new token, but a re-registration with an unchanged token must
-    /// update the row in place, never pile up duplicates. Returns the row id (existing or new).
-    pub fn upsert_apns_subscription(
-        &self,
-        device_token: &str,
-        environment: &str,
-    ) -> Result<String> {
-        let conn = self.lock()?;
-        if let Some(id) = conn
-            .query_row(
-                "SELECT id FROM apns_subscription WHERE device_token = ?1",
-                [device_token],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            conn.execute(
-                "UPDATE apns_subscription SET environment = ?2 WHERE id = ?1",
-                (&id, environment),
-            )?;
-            return Ok(id);
-        }
-        let id = forge_types::new_id();
-        conn.execute(
-            "INSERT INTO apns_subscription (id, device_token, environment) VALUES (?1, ?2, ?3)",
-            (&id, device_token, environment),
-        )?;
-        Ok(id)
-    }
-
-    /// Remove an APNs subscription by its device token (unsubscribe, or APNs answering
-    /// `BadDeviceToken`/`Unregistered`). `Ok(true)` when a row was actually deleted.
-    pub fn delete_apns_subscription(&self, device_token: &str) -> Result<bool> {
-        let n = self.lock()?.execute(
-            "DELETE FROM apns_subscription WHERE device_token = ?1",
-            [device_token],
-        )?;
-        Ok(n > 0)
-    }
-
-    /// Every stored APNs subscription, oldest first.
-    pub fn list_apns_subscriptions(&self) -> Result<Vec<ApnsSubscription>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, device_token, environment FROM apns_subscription ORDER BY created_at, id",
-        )?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(ApnsSubscription {
-                    id: row.get(0)?,
-                    device_token: row.get(1)?,
-                    environment: row.get(2)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    }
-
-    /// Store (or refresh) a session's Live Activity remote-update push token. Keyed by
-    /// `session_id` (the table's primary key), so a re-registration for the same session
-    /// replaces the existing token/environment in place rather than adding a row.
-    pub fn upsert_live_activity_token(
-        &self,
-        session_id: &str,
-        push_token: &str,
-        environment: &str,
-    ) -> Result<()> {
-        self.lock()?.execute(
-            "INSERT INTO live_activity_token (session_id, push_token, environment)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(session_id) DO UPDATE SET
-                push_token = excluded.push_token,
-                environment = excluded.environment,
-                updated_at = strftime('%s','now')",
-            (session_id, push_token, environment),
-        )?;
-        Ok(())
-    }
-
-    /// Remove a session's Live Activity push token (the activity ended). `Ok(true)` when a row
-    /// was actually deleted.
-    pub fn delete_live_activity_token(&self, session_id: &str) -> Result<bool> {
-        let n = self.lock()?.execute(
-            "DELETE FROM live_activity_token WHERE session_id = ?1",
-            [session_id],
-        )?;
-        Ok(n > 0)
-    }
-
-    /// A session's stored Live Activity push token, if any.
-    pub fn get_live_activity_token(&self, session_id: &str) -> Result<Option<LiveActivityToken>> {
-        self.lock()?
-            .query_row(
-                "SELECT session_id, push_token, environment FROM live_activity_token
-                 WHERE session_id = ?1",
-                [session_id],
-                |row| {
-                    Ok(LiveActivityToken {
-                        session_id: row.get(0)?,
-                        push_token: row.get(1)?,
-                        environment: row.get(2)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(StoreError::from)
     }
 
     /// A session's stored title, if any.
@@ -6152,6 +5992,62 @@ mod tests {
             [],
         );
         assert!(dup.is_err(), "duplicate endpoint rejected by UNIQUE index");
+    }
+
+    #[test]
+    fn migration_0020_dedupes_legacy_rows_and_rebuilds_the_identity_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE apns_subscription (
+                id TEXT PRIMARY KEY,
+                device_token TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO apns_subscription (id, device_token, environment)
+             VALUES ('first', 'dup', 'sandbox'), ('second', 'dup', 'production');
+             CREATE INDEX idx_apns_subscription_device_token
+                 ON apns_subscription(environment);",
+        )
+        .unwrap();
+
+        migration_0020(&conn).unwrap();
+        migration_0020(&conn).unwrap();
+
+        let rows: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, environment FROM apns_subscription ORDER BY rowid")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(rows, [("first".to_string(), "sandbox".to_string())]);
+        let duplicate = conn.execute(
+            "INSERT INTO apns_subscription (id, device_token, environment)
+             VALUES ('third', 'dup', 'production')",
+            [],
+        );
+        assert!(duplicate.is_err());
+    }
+
+    #[test]
+    fn apns_device_token_has_a_unique_index() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.lock().unwrap();
+        conn.execute(
+            "INSERT INTO apns_subscription (id, device_token, environment)
+             VALUES ('a1', 'dup-token', 'sandbox')",
+            [],
+        )
+        .unwrap();
+        let duplicate = conn.execute(
+            "INSERT INTO apns_subscription (id, device_token, environment)
+             VALUES ('a2', 'dup-token', 'production')",
+            [],
+        );
+        assert!(duplicate.is_err());
     }
 
     #[test]

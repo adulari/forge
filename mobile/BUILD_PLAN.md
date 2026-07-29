@@ -223,11 +223,12 @@ invalidates the stored URL → app shows "pairing invalid, re-scan" on persisten
 
 **Current resolution of the original gaps:**
 1. **Native push shipped:** iOS registers its APNs device token with the user's daemon. The daemon
-   uses a direct operator key when configured or the open-source hosted relay by default. The
-   relay receives the opaque device/Live Activity token and notification title/body/status; those
-   snippets can contain sensitive session text. It does not deliberately receive the daemon token,
-   full transcript, source files, or API credentials. Users can self-host, bring their own APNs
-   key, or set `FORGE_APNS_DISABLE_RELAY=1`.
+   uses a direct operator key when configured or the open-source hosted relay by default. Current
+   daemons send the stock public relay only an opaque device/Live Activity token plus a static
+   generic alert; no session title, body, status, daemon token, transcript, source file, or API
+   credential is included. Older daemons and explicitly configured private relays may use richer
+   payloads, so operators should treat those endpoints according to their own deployment policy.
+   Users can self-host, bring their own APNs key, or set `FORGE_APNS_DISABLE_RELAY=1`.
 2. **Self-signed LAN TLS:** default `--lan` mode's self-signed cert is rejected by RN fetch/WS.
    Use `--local` only for a client on the daemon machine. For another device, use `--anywhere` or
    put the daemon behind a trusted HTTPS reverse proxy. A tunnel provider terminates TLS and can

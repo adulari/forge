@@ -430,6 +430,42 @@ fn migration_0019(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #20: APNs registration identity is the device token. The original application-side
+/// SELECT-then-INSERT could race across pooled connections and create duplicate deliveries. Keep
+/// the earliest row, then enforce the identity at the database boundary for atomic upserts.
+pub(super) fn migration_0020(conn: &Connection) -> rusqlite::Result<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='apns_subscription'",
+        [],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(());
+    }
+    let valid_index: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_index_list('apns_subscription') AS indexes
+         WHERE indexes.name = 'idx_apns_subscription_device_token'
+           AND indexes.[unique] = 1
+           AND (SELECT COUNT(*) FROM pragma_index_info(indexes.name)) = 1
+           AND (SELECT name FROM pragma_index_info(indexes.name) LIMIT 1) = 'device_token'",
+        [],
+        |row| row.get(0),
+    )?;
+    if valid_index > 0 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         DROP INDEX IF EXISTS idx_apns_subscription_device_token;
+         DELETE FROM apns_subscription WHERE rowid NOT IN (
+             SELECT MIN(rowid) FROM apns_subscription GROUP BY device_token
+         );
+         CREATE UNIQUE INDEX idx_apns_subscription_device_token
+             ON apns_subscription(device_token);
+         COMMIT;",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -452,6 +488,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0017,
     migration_0018,
     migration_0019,
+    migration_0020,
 ];
 
 /// Create the singleton rows the Anywhere sync state machine expects, if they are missing.
