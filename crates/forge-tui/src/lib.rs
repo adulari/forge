@@ -32,6 +32,7 @@ mod help;
 pub mod init_wizard;
 mod keybind_configurator;
 pub mod keybinds;
+mod overlays;
 mod render;
 pub mod select;
 mod surface;
