@@ -12,11 +12,11 @@ use forge_types::TaskTier;
 
 pub(crate) use cli::args::anywhere::ShareExpiry;
 pub(crate) use cli::args::mcp::McpTransportArg;
+pub(crate) use cli::args::plugins::PluginMarketplaceCmd;
 pub(crate) use cli::args::{
     AnywhereCmd, AssayCmd, AssayFormat, BenchCmd, Cli, Command, ExportScope, FailOnSeverity,
-    GitCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat, PluginCmd,
-    PluginMarketplaceCmd, ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd,
-    SkillCmd, VoiceOp,
+    GitCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat, PluginCmd, ProviderCmd,
+    QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd, VoiceOp,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::blame::blame_cmd;

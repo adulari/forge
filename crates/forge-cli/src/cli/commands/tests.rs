@@ -807,6 +807,66 @@ fn skill_import_load_alias_and_scope_values() {
 }
 
 #[test]
+fn plugin_grammar_preserves_marketplace_and_optional_arguments() {
+    let cli = Cli::try_parse_from([
+        "forge",
+        "plugin",
+        "install",
+        "package",
+        "--marketplace",
+        "community",
+    ])
+    .expect("plugin install grammar");
+    assert!(matches!(
+        cli.command,
+        Command::Plugin {
+            cmd: PluginCmd::Install { ref plugin, marketplace: Some(ref marketplace) }
+        } if plugin == "package" && marketplace == "community"
+    ));
+    let cli = Cli::try_parse_from([
+        "forge",
+        "plugin",
+        "marketplace",
+        "add",
+        "community",
+        "owner/repo",
+        "--ref",
+        "main",
+    ])
+    .expect("marketplace grammar");
+    assert!(matches!(
+        cli.command,
+        Command::Plugin {
+            cmd: PluginCmd::Marketplace { cmd: PluginMarketplaceCmd::Add { ref name, ref source, ref ref_ } }
+        } if name == "community" && source == "owner/repo" && ref_.as_deref() == Some("main")
+    ));
+    let cli = Cli::try_parse_from(["forge", "plugin", "list", "--available"])
+        .expect("plugin list available grammar");
+    assert!(matches!(
+        cli.command,
+        Command::Plugin {
+            cmd: PluginCmd::List { available: true }
+        }
+    ));
+    let cli = Cli::try_parse_from(["forge", "plugin", "update"])
+        .expect("plugin update without a package");
+    assert!(matches!(
+        cli.command,
+        Command::Plugin {
+            cmd: PluginCmd::Update { plugin: None }
+        }
+    ));
+    let cli = Cli::try_parse_from(["forge", "plugin", "marketplace", "remove", "community"])
+        .expect("marketplace removal grammar");
+    assert!(matches!(
+        cli.command,
+        Command::Plugin {
+            cmd: PluginCmd::Marketplace { cmd: PluginMarketplaceCmd::Remove { ref name } }
+        } if name == "community"
+    ));
+}
+
+#[test]
 fn plugin_add_alias_and_plugins_top_alias() {
     // `plugin add` is an alias for `plugin install`.
     let cli = Cli::try_parse_from(["forge", "plugin", "add", "owner/repo"]).unwrap();

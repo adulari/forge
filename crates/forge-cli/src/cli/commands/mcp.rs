@@ -780,7 +780,6 @@ pub(crate) fn mcp_get(name: String) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// `forge plugin <install|list|remove|update|marketplace>` — real plugin/skill-pack management
-/// backed by the marketplace registry + install lockfile (see `commands::marketplace`).
 pub(crate) async fn plugin_cmd(cmd: PluginCmd) -> Result<()> {
     use crate::cli::commands::marketplace;
     match cmd {

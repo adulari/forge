@@ -688,9 +688,9 @@ pub(crate) enum Command {
     },
     /// Manage Forge plugins (skill packs). Alias: `plugins`.
     ///
-    /// Forge uses skills as its plugin model — `forge plugin install owner/repo` fetches all
-    /// `.md` skill files from a GitHub repository and installs them locally. The `list`
-    /// subcommand shows currently installed skill packs.
+    /// Forge uses skills as its plugin model. `forge plugin install` accepts GitHub repositories,
+    /// Git URLs, and packages from registered marketplaces; `list` shows installed packs and
+    /// configured marketplaces.
     #[command(alias = "plugins")]
     Plugin {
         #[command(subcommand)]
@@ -1217,59 +1217,9 @@ pub(crate) enum QueueCmd {
 pub(crate) mod mcp;
 pub(crate) use mcp::{McpCmd, ServeTransportArg};
 
-#[derive(Subcommand, Debug)]
-pub(crate) enum PluginMarketplaceCmd {
-    /// Register a marketplace: a name → source mapping. SOURCE is a GitHub `owner/repo` (whose
-    /// top-level directories are packages), a full git URL, or an `owner/repo` index repo.
-    ///
-    /// Examples:
-    ///   forge plugin marketplace add community anthropics/forge-marketplace
-    ///   forge plugin marketplace add internal https://git.corp/ai/skills.git --ref main
-    Add {
-        /// Marketplace name used in `forge plugin install <pkg>@<name>`.
-        name: String,
-        /// Source: `owner/repo`, a full git URL, or an index repo.
-        source: String,
-        /// Pin the marketplace to a branch/tag.
-        #[arg(long, name = "ref")]
-        ref_: Option<String>,
-    },
-    /// List configured marketplace sources.
-    List,
-    /// Remove a marketplace source.
-    Remove { name: String },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum PluginCmd {
-    /// Install a skill pack. PLUGIN is `owner/repo[@ref]`, a full git URL, `pkg@marketplace`, or a
-    /// bare `pkg` resolved against `--marketplace`. Records a lockfile entry for `forge plugin
-    /// update`. Honors `GITHUB_TOKEN` for private repos. Alias: `add`.
-    ///
-    /// This is the canonical, marketplace-aware pack installer. The simpler `forge skill install`
-    /// is a plain GitHub/URL fetcher that lands packs in the same skills directory.
-    #[command(alias = "add")]
-    Install {
-        plugin: String,
-        /// Resolve PLUGIN as a package within this registered marketplace.
-        #[arg(long)]
-        marketplace: Option<String>,
-    },
-    /// List installed skill packs (from the lockfile) and registered marketplaces.
-    List {
-        #[arg(long)]
-        available: bool,
-    },
-    /// Remove an installed skill pack.
-    Remove { plugin: String },
-    /// Re-fetch installed packs and update them. With PLUGIN, update only that pack.
-    Update { plugin: Option<String> },
-    /// Manage plugin marketplaces.
-    Marketplace {
-        #[command(subcommand)]
-        cmd: PluginMarketplaceCmd,
-    },
-}
+#[path = "args/plugins.rs"]
+pub(crate) mod plugins;
+pub(crate) use plugins::PluginCmd;
 
 /// Output format for `forge run`. `text` is the human line renderer; `stream-json` emits NDJSON
 /// events mirroring Claude Code's `--output-format stream-json` so tools can embed Forge.
