@@ -289,10 +289,10 @@ pub(crate) fn skills_import(src: &std::path::Path, scope: Scope) -> Result<()> {
         )
     };
 
-    let mut counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+    let mut counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst)?;
     let agent_src = src.join("agents");
     if agent_src.is_dir() {
-        count_copy_md_files(&agent_src, &agent_dst, &mut counts);
+        count_copy_md_files(&agent_src, &agent_dst, &mut counts)?;
     }
 
     let scope_label = if scope.is_project() {
@@ -358,14 +358,14 @@ pub(crate) fn skills_export(dest: &std::path::Path, scope: ExportScope) -> Resul
 
     // Commands + skills go through the same catalog-copy helper `forge import` uses (inverse direction).
     let cat = forge_skills::Catalog::load(&sources);
-    let counts = copy_catalog_assets(&cat, &dest.join("commands"), &dest.join("skills"));
+    let counts = copy_catalog_assets(&cat, &dest.join("commands"), &dest.join("skills"))?;
 
     // Agents are plain `.md` files (not catalog entries) — copy them directly.
     let mut agents = ImportCounts::default();
     let agent_dst = dest.join("agents");
     for d in &agent_dirs {
         if d.exists() {
-            count_copy_md_files(d, &agent_dst, &mut agents);
+            count_copy_md_files(d, &agent_dst, &mut agents)?;
         }
     }
 

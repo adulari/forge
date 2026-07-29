@@ -490,7 +490,7 @@ pub fn cc_tool_alias(forge_tool: &str) -> &str {
         "edit_file" | "apply_patch" => "Edit",
         "write_file" | "create_file" => "Write",
         "read_file" => "Read",
-        "list_files" | "ls" => "LS",
+        "list_dir" | "list_files" | "ls" => "LS",
         "search" | "grep" | "ripgrep" => "Grep",
         "glob" => "Glob",
         "web_fetch" => "WebFetch",
@@ -502,19 +502,27 @@ pub fn cc_tool_alias(forge_tool: &str) -> &str {
 /// Map a Claude-Code tool name (`Bash`, `Edit`, `Read`, …) to Forge's tool name, for translating a
 /// CC `settings.json` permission entry (`Bash(npm run *)`) into a Forge `[[permissions.rules]]`
 /// block. Unknown names (e.g. an MCP tool) pass through unchanged.
-pub fn forge_tool_from_cc(cc_tool: &str) -> &str {
+pub fn forge_tools_from_cc(cc_tool: &str) -> Vec<&'static str> {
     match cc_tool {
-        "Bash" => "shell",
-        "Edit" | "MultiEdit" => "edit_file",
-        "Write" => "write_file",
-        "Read" => "read_file",
-        "LS" => "list_files",
-        "Grep" => "search",
-        "Glob" => "glob",
-        "WebFetch" => "web_fetch",
-        "WebSearch" => "web_search",
-        other => other,
+        "Bash" => vec!["shell"],
+        "Edit" | "MultiEdit" => vec!["edit_file", "apply_patch"],
+        "Write" => vec!["write_file", "create_file"],
+        "Read" => vec!["read_file"],
+        "LS" => vec!["list_dir"],
+        "Grep" => vec!["search"],
+        "Glob" => vec!["glob"],
+        "WebFetch" => vec!["web_fetch"],
+        "WebSearch" => vec!["web_search"],
+        _ => vec![],
     }
+}
+
+/// Map a Claude-Code tool name to Forge's primary tool name for compatibility callers.
+pub fn forge_tool_from_cc(cc_tool: &str) -> &str {
+    forge_tools_from_cc(cc_tool)
+        .into_iter()
+        .next()
+        .unwrap_or(cc_tool)
 }
 
 impl HookConfig {
@@ -2319,6 +2327,39 @@ pub fn command_sources() -> forge_skills::Sources {
     forge_skills::Sources { commands, skills }
 }
 
+fn merge_mcp_servers(destination: &mut Vec<McpServerConfig>, incoming: Vec<McpServerConfig>) {
+    for server in incoming {
+        if let Some(existing) = destination.iter_mut().find(|item| item.name == server.name) {
+            *existing = server;
+        } else {
+            destination.push(server);
+        }
+    }
+}
+
+fn merge_mcp_toml(config: &mut McpConfig, path: &std::path::Path) {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let has_allow = toml::from_str::<toml::Value>(&text)
+            .ok()
+            .and_then(|value| {
+                value
+                    .as_table()
+                    .and_then(|table| table.get("allow"))
+                    .cloned()
+            })
+            .is_some();
+        match toml::from_str::<McpConfig>(&text) {
+            Ok(mcp) => {
+                merge_mcp_servers(&mut config.servers, mcp.servers);
+                if has_allow {
+                    config.allow = mcp.allow;
+                }
+            }
+            Err(e) => tracing::warn!("ignoring malformed {}: {e}", path.display()),
+        }
+    }
+}
+
 /// Load configuration with full layered precedence (lowest -> highest):
 /// built-in defaults -> user config -> project `./.forge/config.toml` -> `FORGE_*` env.
 pub fn load() -> Result<Config, ConfigError> {
@@ -2336,12 +2377,10 @@ pub fn load() -> Result<Config, ConfigError> {
     // present it sets the whole `[mcp]` section (overriding any `[mcp]` in config.toml). Keeping
     // it a separate file matches Claude-Code's `.mcp.json` convention and keeps server lists out
     // of the main config.
-    if let Ok(text) = std::fs::read_to_string("./.forge/mcp.toml") {
-        match toml::from_str::<McpConfig>(&text) {
-            Ok(mcp) => config.mcp = mcp,
-            Err(e) => tracing::warn!("ignoring malformed .forge/mcp.toml: {e}"),
-        }
+    if let Some(dir) = config_dir() {
+        merge_mcp_toml(&mut config.mcp, &dir.join("mcp.toml"));
     }
+    merge_mcp_toml(&mut config.mcp, std::path::Path::new("./.forge/mcp.toml"));
 
     // Claude-Code-compatible hooks: a `settings.json` (user config dir + project `.forge/`) can
     // declare hooks in CC's event-nested shape. They're appended (CC-compat mode) so existing CC
@@ -2961,6 +3000,20 @@ pub fn inject_provider_keys() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_aliases_cover_every_imported_permission_tool() {
+        for (claude, expected) in [
+            ("Edit", vec!["edit_file", "apply_patch"]),
+            ("Write", vec!["write_file", "create_file"]),
+            ("LS", vec!["list_dir"]),
+        ] {
+            assert_eq!(forge_tools_from_cc(claude), expected);
+            for tool in forge_tools_from_cc(claude) {
+                assert_eq!(cc_tool_alias(tool), claude);
+            }
+        }
+    }
 
     static TEST_CWD_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 

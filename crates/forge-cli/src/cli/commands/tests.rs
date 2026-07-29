@@ -238,6 +238,12 @@ fn expand_at_files_survives_multibyte_whitespace() {
 }
 
 #[test]
+fn cursor_description_escapes_json_compatible_yaml_scalars() {
+    let converted = convert_mdc_to_command_md("---\ndescription: say \"hi\"\n---\nbody\n", "rule");
+    assert!(converted.contains("description: \"say \\\"hi\\\"\""));
+}
+
+#[test]
 fn copy_catalog_assets_imports_then_skips_existing() {
     // A Codex-style prompt: plain markdown, no frontmatter (name = file stem, description =
     // first body line). The lenient command reader must accept it and we must copy it.
@@ -261,13 +267,13 @@ fn copy_catalog_assets_imports_then_skips_existing() {
     };
     let cat = forge_skills::Catalog::load(&sources);
 
-    let first = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+    let first = copy_catalog_assets(&cat, &cmd_dst, &skill_dst).unwrap();
     assert_eq!(first.copied_commands, 1, "the prompt was imported");
     assert_eq!(first.copied_skills, 0);
     assert!(cmd_dst.join("refactor.md").exists());
 
     // Re-running keeps the existing file instead of overwriting it.
-    let second = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+    let second = copy_catalog_assets(&cat, &cmd_dst, &skill_dst).unwrap();
     assert_eq!(second.copied_commands, 0);
     assert_eq!(second.skipped_commands, 1, "already present → skipped");
 
@@ -300,7 +306,7 @@ fn copy_catalog_assets_copies_skill_dir_with_resources() {
     };
     let cat = forge_skills::Catalog::load(&sources);
 
-    let counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+    let counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst).unwrap();
     assert_eq!(counts.copied_skills, 1, "the skill directory was copied");
     assert!(skill_dst.join("refactor/SKILL.md").exists());
     assert!(
@@ -325,7 +331,7 @@ fn export_copies_agent_md_files_then_skips_existing() {
     std::fs::write(src.join("README.txt"), "not an agent").unwrap();
 
     let mut first = ImportCounts::default();
-    count_copy_md_files(&src, &dst, &mut first);
+    count_copy_md_files(&src, &dst, &mut first).unwrap();
     assert_eq!(first.copied_agents, 2, "both .md agents copied");
     assert!(dst.join("reviewer.md").exists());
     assert!(dst.join("planner.md").exists());
@@ -336,7 +342,7 @@ fn export_copies_agent_md_files_then_skips_existing() {
 
     // Re-running keeps existing agents instead of overwriting them.
     let mut second = ImportCounts::default();
-    count_copy_md_files(&src, &dst, &mut second);
+    count_copy_md_files(&src, &dst, &mut second).unwrap();
     assert_eq!(second.copied_agents, 0);
     assert_eq!(second.skipped_agents, 2, "already present → skipped");
 
@@ -366,7 +372,7 @@ fn copy_catalog_assets_preserves_command_namespace() {
         skills: vec![],
     };
     let cat = forge_skills::Catalog::load(&sources);
-    let counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+    let counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst).unwrap();
 
     assert_eq!(
         counts.copied_commands, 3,
