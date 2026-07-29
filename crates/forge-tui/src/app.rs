@@ -3330,11 +3330,7 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
 }
 
 mod render;
-pub(crate) use render::{
-    compact_band_height, cost_cell, fmt_dur, human, input_spans, input_text_rows, mesh_pace_suffix,
-    model_short, needs_phase_header, prompt_height, render_transcript_area, split_panel_budget,
-    statusline_hint,
-};
+pub(crate) use render::{human, mesh_pace_suffix, model_short, needs_phase_header};
 pub use render::{
     input_box_height, input_cursor_up, render_live, render_mesh_overlay, render_usage_overlay,
     render_voice_overlay,
@@ -3342,6 +3338,12 @@ pub use render::{
 
 #[cfg(test)]
 mod tests {
+    use super::render::input::{input_spans, input_text_rows};
+    use super::render::live::split_panel_budget;
+    use super::render::status_line::statusline_hint;
+    use super::render::{
+        compact_band_height, cost_cell, fmt_dur, prompt_height, render_transcript_area,
+    };
     use super::*;
     use crate::app_remote::REMOTE_DIFF_MAX_FILES;
     use crate::voice::VOICE_WAVEFORM_BARS;

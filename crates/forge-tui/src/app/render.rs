@@ -2,20 +2,19 @@
 
 use super::*;
 
-mod input;
-mod live;
+pub(crate) mod input;
+pub(crate) mod live;
 mod overlays;
-mod status_line;
+pub(crate) mod status_line;
 mod status_widgets;
 mod transcript;
 mod voice;
+pub(crate) use input::render_input;
 pub use input::{input_box_height, input_cursor_up};
-pub(crate) use input::{input_spans, input_text_rows, render_input};
 pub use live::render_live;
-pub(crate) use live::split_panel_budget;
 pub(crate) use overlays::{cost_cell, mesh_pace_suffix};
 pub use overlays::{render_mesh_overlay, render_usage_overlay};
-pub(crate) use status_line::{render_statusline, statusline_hint};
+pub(crate) use status_line::render_statusline;
 pub(crate) use status_widgets::{
     compact_band_height, context_gauge_spans, effort_status, fmt_dur, format_tok, human,
     render_compact_band, render_effort_slider, rl_age_note, statusline_height,
