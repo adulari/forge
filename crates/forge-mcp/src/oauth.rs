@@ -93,6 +93,37 @@ impl RegisteredClient {
     }
 }
 
+pub async fn register_device_client(
+    client: &reqwest::Client,
+    registration_endpoint: &str,
+    scopes: &[String],
+    client_name: &str,
+) -> Result<RegisteredClient, String> {
+    let body = serde_json::json!({
+        "client_name": client_name,
+        "grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
+        "token_endpoint_auth_method": "none",
+        "scope": scopes.join(" "),
+    });
+    let response = client
+        .post(registration_endpoint)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("POST {registration_endpoint}: {error}"))?;
+    let status = response.status();
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("registration response JSON: {error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "dynamic client registration failed ({status}): {value}"
+        ));
+    }
+    RegisteredClient::from_json(&value)
+}
+
 /// RFC 7591 §3.1 Dynamic Client Registration: POST client metadata to the authorization server's
 /// `registration_endpoint` (discovered via RFC 8414 metadata) and get back a real `client_id`
 /// (+ optional `client_secret`). Hosted OAuth MCP servers (GitHub, Linear, Notion) reject the old

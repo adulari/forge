@@ -13,6 +13,13 @@ fn paste_redirect_uri(port: Option<u16>) -> Result<String> {
     Ok(format!("http://127.0.0.1:{port}/callback"))
 }
 
+fn registered_client_matches_issuer(
+    client: &forge_mcp::oauth::RegisteredClient,
+    issuer: &str,
+) -> bool {
+    client.issuer.as_deref() == Some(issuer)
+}
+
 #[cfg(test)]
 fn registered_client_matches_redirect(
     client: &forge_mcp::oauth::RegisteredClient,
@@ -96,25 +103,57 @@ pub(crate) async fn mcp_login(
                  device_authorization_endpoint"
                 )
             })?;
-        let registered = forge_mcp::oauth::load_registered_client(server);
+        let scopes = if oauth_cfg.scopes.is_empty() {
+            vec!["mcp".to_string(), "offline_access".to_string()]
+        } else {
+            oauth_cfg.scopes.clone()
+        };
+        let registered = if oauth_cfg.client_id.is_none() {
+            match forge_mcp::oauth::load_registered_client(server).filter(|client| {
+                registered_client_matches_issuer(client, &issuer) && client.redirect_uri.is_none()
+            }) {
+                Some(client) => Some(client),
+                None => match as_meta.registration_endpoint.as_deref() {
+                    Some(endpoint) => {
+                        let mut client = forge_mcp::oauth::register_device_client(
+                            &http, endpoint, &scopes, "Forge",
+                        )
+                        .await
+                        .map_err(|error| anyhow::anyhow!("dynamic client registration: {error}"))?;
+                        client.issuer = Some(issuer.clone());
+                        forge_mcp::oauth::store_registered_client(server, &client).map_err(
+                            |error| anyhow::anyhow!("persisting registered client: {error}"),
+                        )?;
+                        Some(client)
+                    }
+                    None => None,
+                },
+            }
+        } else {
+            None
+        };
         let client_id = oauth_cfg
             .client_id
             .clone()
             .or_else(|| registered.as_ref().map(|client| client.client_id.clone()))
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "device login needs an OAuth client_id in .forge/mcp.toml or a prior \
-                     browser login that registered one"
-                )
+                anyhow::anyhow!("device login needs an OAuth client_id or registration_endpoint")
             })?;
+        let client_secret = registered
+            .as_ref()
+            .and_then(|client| client.client_secret.as_deref());
         let scope = if oauth_cfg.scopes.is_empty() {
             "mcp offline_access".to_string()
         } else {
             oauth_cfg.scopes.join(" ")
         };
-        let device =
-            crate::cli::commands::oauth_flow::request_device_code(device_url, &client_id, &scope)
-                .await?;
+        let device = crate::cli::commands::oauth_flow::request_device_code(
+            device_url,
+            &client_id,
+            &scope,
+            client_secret,
+        )
+        .await?;
         println!(
             "Open {} and enter the displayed user code.",
             device.verification_uri
@@ -127,6 +166,7 @@ pub(crate) async fn mcp_login(
             &as_meta.token_endpoint,
             &client_id,
             &device,
+            client_secret,
         )
         .await?;
         let now = std::time::SystemTime::now()
@@ -308,7 +348,9 @@ pub(crate) async fn mcp_login(
 
 #[cfg(test)]
 mod tests {
-    use super::{paste_redirect_uri, registered_client_matches_redirect};
+    use super::{
+        paste_redirect_uri, registered_client_matches_issuer, registered_client_matches_redirect,
+    };
 
     #[test]
     fn registered_clients_are_reused_only_for_their_registered_redirect() {
@@ -318,6 +360,15 @@ mod tests {
             redirect_uri: Some("http://127.0.0.1:8787/callback".into()),
             issuer: Some("https://issuer.test".into()),
         };
+        assert!(client.redirect_uri.is_some());
+        assert!(registered_client_matches_issuer(
+            &client,
+            "https://issuer.test"
+        ));
+        assert!(!registered_client_matches_issuer(
+            &client,
+            "https://other-issuer.test"
+        ));
         assert!(registered_client_matches_redirect(
             &client,
             "http://127.0.0.1:8787/callback"

@@ -164,10 +164,15 @@ pub async fn request_device_code(
     device_url: &str,
     client_id: &str,
     scope: &str,
+    client_secret: Option<&str>,
 ) -> Result<DeviceCodeInfo> {
+    let mut form = vec![("client_id", client_id), ("scope", scope)];
+    if let Some(secret) = client_secret {
+        form.push(("client_secret", secret));
+    }
     let response = reqwest::Client::new()
         .post(device_url)
-        .form(&[("client_id", client_id), ("scope", scope)])
+        .form(&form)
         .send()
         .await
         .with_context(|| format!("requesting device code from {device_url}"))?;
@@ -195,6 +200,7 @@ pub async fn poll_device_token(
     token_url: &str,
     client_id: &str,
     device: &DeviceCodeInfo,
+    client_secret: Option<&str>,
 ) -> Result<DeviceTokens> {
     let client = reqwest::Client::new();
     let mut interval = Duration::from_secs(device.interval);
@@ -204,13 +210,17 @@ pub async fn poll_device_token(
             bail!("device code expired before authorization");
         }
         tokio::time::sleep(interval).await;
+        let mut form = vec![
+            ("client_id", client_id),
+            ("device_code", device.device_code.as_str()),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ];
+        if let Some(secret) = client_secret {
+            form.push(("client_secret", secret));
+        }
         let response = client
             .post(token_url)
-            .form(&[
-                ("client_id", client_id),
-                ("device_code", device.device_code.as_str()),
-                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ])
+            .form(&form)
             .send()
             .await
             .with_context(|| format!("polling token endpoint {token_url}"))?;
