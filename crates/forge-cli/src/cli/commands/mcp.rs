@@ -790,7 +790,7 @@ pub(crate) async fn plugin_cmd(cmd: PluginCmd) -> Result<()> {
         PluginCmd::Update { plugin } => {
             return marketplace::update_installed(plugin.as_deref()).await
         }
-        PluginCmd::List { .. } => return marketplace::list_installed_and_marketplaces(),
+        PluginCmd::List { available } => return marketplace::list_plugins(available),
         PluginCmd::Marketplace { cmd } => {
             return match cmd {
                 PluginMarketplaceCmd::Add { name, source, ref_ } => {
@@ -803,7 +803,7 @@ pub(crate) async fn plugin_cmd(cmd: PluginCmd) -> Result<()> {
         PluginCmd::Remove { plugin } => {
             // Remove the on-disk skill (dir or file) AND its lockfile entry, so a later `update`
             // doesn't resurrect it.
-            let _ = marketplace::remove_installed_entry(&plugin);
+            marketplace::remove_installed_entry(&plugin)?;
             if let Some(dir) = forge_config::config_dir() {
                 let skill_dir = dir.join("skills").join(&plugin);
                 let skill_file = dir.join("skills").join(format!("{plugin}.md"));

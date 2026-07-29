@@ -120,6 +120,16 @@ pub(crate) fn load_installed_at(path: &Path) -> InstalledSkills {
         .unwrap_or_default()
 }
 
+fn load_installed_for_removal_at(path: &Path) -> Result<InstalledSkills> {
+    match std::fs::read_to_string(path) {
+        Ok(body) => toml::from_str(&body).with_context(|| format!("parsing {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(InstalledSkills::default())
+        }
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
 fn save_installed_at(path: &Path, lock: &InstalledSkills) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -137,7 +147,7 @@ pub(crate) fn record_installed_at(path: &Path, name: &str, entry: InstalledEntry
 
 /// Drop a pack from the lockfile (used by `forge plugin remove`). Returns whether it existed.
 pub(crate) fn remove_installed_at(path: &Path, name: &str) -> Result<bool> {
-    let mut lock = load_installed_at(path);
+    let mut lock = load_installed_for_removal_at(path)?;
     let existed = lock.skills.remove(name).is_some();
     if existed {
         save_installed_at(path, &lock)?;
@@ -598,12 +608,28 @@ pub(crate) fn list_installed_and_marketplaces() -> Result<()> {
     Ok(())
 }
 
+/// List installed packs and reject the unsupported remote catalog query explicitly.
+pub(crate) fn list_plugins(available: bool) -> Result<()> {
+    if available {
+        anyhow::bail!(
+            "`forge plugin list --available` is not implemented; use `forge plugin marketplace list` to inspect configured sources"
+        );
+    }
+    list_installed_and_marketplaces()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("forge-mkt-{}-{}", name, forge_types::new_id()))
+    }
+
+    #[test]
+    fn available_listing_returns_actionable_error() {
+        let error = list_plugins(true).expect_err("remote listing is not implemented");
+        assert!(error.to_string().contains("plugin marketplace list"));
     }
 
     #[test]
@@ -653,6 +679,17 @@ mod tests {
         assert_eq!(got, &entry);
         assert_eq!(got.git_ref.as_deref(), Some("v1.2.0"));
         assert_eq!(got.subdir.as_deref(), Some("pirate-pack"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn removal_rejects_a_malformed_lockfile() {
+        let path = tmp("malformed-lock").join("installed-skills.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "this is not valid = [toml").unwrap();
+
+        let error = remove_installed_at(&path, "pirate-pack").expect_err("malformed lock fails");
+        assert!(error.to_string().contains("parsing"));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

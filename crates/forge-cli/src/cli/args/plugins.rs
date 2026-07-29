@@ -41,7 +41,8 @@ pub(crate) enum PluginCmd {
         marketplace: Option<String>,
     },
     List {
-        /// Include remotely available packages from configured marketplaces.
+        /// Request remotely available packages from configured marketplaces. This is currently
+        /// unavailable; use `forge plugin marketplace list` to inspect configured sources.
         #[arg(long)]
         available: bool,
     },
