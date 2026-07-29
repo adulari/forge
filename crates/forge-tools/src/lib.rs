@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use workspace::WorkspaceTool;
 
 use async_trait::async_trait;
+pub use discovery_tools::{GlobTool, ListDirTool, SearchTool};
 use forge_types::{FileDiff, SideEffect};
 use serde_json::Value;
 
@@ -16,14 +17,15 @@ tokio::task_local! {
 }
 
 mod core_tools;
+mod discovery_tools;
 mod lattice_tool;
 mod sandbox;
 mod shell;
 mod web;
 mod workspace;
 pub use core_tools::{
-    AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, GlobTool, ListDirTool,
-    MultiEditTool, NotebookEditTool, ReadFileTool, SearchTool, WriteFileTool,
+    AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, MultiEditTool, NotebookEditTool,
+    ReadFileTool, WriteFileTool,
 };
 pub use lattice_tool::LatticeTool;
 pub use sandbox::{ApplyResult, SandboxPolicy};
