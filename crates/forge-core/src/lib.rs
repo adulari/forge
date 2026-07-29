@@ -9989,13 +9989,11 @@ mod tests {
 
     #[tokio::test]
     async fn pinned_model_recovers_from_a_transient_outage_via_backoff() {
-        // The originating incident (pinned-outage-resilience §1): a pinned model stalls/drops
-        // (`Unavailable`) past the hot same-model retries and used to hard-fail the turn
-        // (`FailoverPolicy::FailTurn`). It must now back off and retry the SAME model instead —
-        // real time cost: 2 hot retries (500ms+1s) + one outage-backoff attempt (~4-6s jittered).
+        // Generic `Unavailable` bypasses the Codex-specific hot retry and takes one bounded
+        // outage backoff before recovering on the same pinned model.
         let provider = Arc::new(UnavailableThenOkProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            fail_first: 3, // 2 absorbed by hot retry, 1 by the outage backoff, then recovers.
+            fail_first: 1, // One outage backoff, then recovers.
         });
         let router = Arc::new(PinnedRouter {
             model: "pin::model".into(),
@@ -11605,11 +11603,12 @@ mod tests {
             bad: std::collections::HashSet::new(),
             err: unavailable,
         });
-        let router = Arc::new(PinnedRouter {
+        let router = Arc::new(FixedRouter {
             model: "pin::model".into(),
             fallbacks: vec!["fallback::model".into()],
         });
         let (store, mut session) = fixed_session(provider, router);
+        session.pin_model(Some("pin::model".into()));
         let _reservation = store.try_reserve_model("pin::model").unwrap();
 
         assert_eq!(session.run_turn("hi").await.unwrap(), "pin::model");

@@ -28,7 +28,7 @@ impl Session {
         // path passes None, so `chain` is immediately exhausted and failover never fires.
         let fallbacks: Vec<String> = decision.map(|d| d.fallbacks.clone()).unwrap_or_default();
         let mut chain = fallbacks.into_iter();
-        let explicit_pin = decision.is_some_and(|d| d.pinned);
+        let explicit_pin = self.pinned_model.is_some() || decision.is_some_and(|d| d.pinned);
         let mut last_resort_used = false;
         // Bounds the overflow self-heal (shrink + retry the SAME model) so a transcript that can't
         // be shrunk enough eventually falls through to normal failover instead of looping.
