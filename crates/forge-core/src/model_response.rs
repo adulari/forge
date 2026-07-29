@@ -45,14 +45,10 @@ impl Session {
                 None,
             )?
         };
-        // A successful Codex OAuth response carries a backend-authoritative plan header.
-        // Persist its short-lived observation even for a model-pinned turn (which has no
-        // auto-routing decision) so the next process's mesh inspector sees the same account.
-        if active_model.starts_with("codex-oauth::") {
-            if let Some(plan) = forge_provider::fresh_live_codex_plan() {
-                let _ = self.store.record_subscription_plan("codex-oauth", &plan);
-            }
-        }
+        let live_codex_plan = active_model
+            .starts_with("codex-oauth::")
+            .then(forge_provider::fresh_live_codex_plan)
+            .flatten();
         // Step-0 routing record and quota-hint persistence are only meaningful for the primary
         // turn (when we have a decision). The autofix re-run skips both.
         if let Some(d) = decision {
@@ -63,7 +59,15 @@ impl Session {
             // Quota-aware routing (L3): if a CLI bridge reported its subscription window this
             // turn, persist it so the next route() can demote/skip a near-limit subscription.
             for hint in &resp.quotas {
-                let _ = self.store.record_quota(hint);
+                if active_model.starts_with("codex-oauth::") {
+                    let _ = self
+                        .store
+                        .record_live_codex_account(hint, live_codex_plan.as_deref());
+                } else if hint.provider == "codex-cli" || hint.provider == "codex-oauth" {
+                    let _ = self.store.record_codex_quota(hint);
+                } else {
+                    let _ = self.store.record_quota(hint);
+                }
                 // Push to the TUI so the /usage overlay updates in real-time.
                 if let Some(f) = hint.fraction_used {
                     self.presenter

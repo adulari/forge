@@ -138,8 +138,8 @@ fn seed_codex_rollout_quota(store: &Store, stats: &crate::bridge_stats::BridgeSt
             .codex_plan_observed_at
             .unwrap_or_else(|| chrono::Utc::now().timestamp());
         if chrono::Utc::now().timestamp().saturating_sub(observed_at) <= CODEX_QUOTA_MAX_AGE_SECS {
-            let _ = store.record_subscription_plan("codex-cli", plan);
-            let _ = store.record_subscription_plan("codex-oauth", plan);
+            let _ = store.record_subscription_plan_at("codex-cli", plan, observed_at);
+            let _ = store.record_subscription_plan_at("codex-oauth", plan, observed_at);
             observed = true;
         }
     }
@@ -1378,6 +1378,32 @@ pub(crate) async fn probe_models(
 #[cfg(test)]
 mod bridge_harness_tests {
     use super::*;
+
+    #[test]
+    fn rollout_seed_preserves_source_timestamps_for_quota_and_plan() {
+        let store = Store::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let stats = crate::bridge_stats::BridgeStats {
+            codex_5h_pct: Some(35.0),
+            codex_5h_observed_at: Some(now - 30),
+            codex_plan: Some("pro".to_string()),
+            codex_plan_observed_at: Some(now - 20),
+            ..Default::default()
+        };
+
+        assert!(seed_codex_rollout_quota(&store, &stats));
+        assert_eq!(store.subscription_age_secs("codex-cli"), Some(30));
+        assert_eq!(
+            store
+                .fresh_subscription_plan_at("codex-oauth", now)
+                .as_deref(),
+            Some("pro")
+        );
+        assert_eq!(
+            store.fresh_subscription_plan_at("codex-oauth", now + CODEX_QUOTA_MAX_AGE_SECS + 1),
+            None
+        );
+    }
 
     #[test]
     fn default_classifier_uses_one_fixed_capable_model() {
