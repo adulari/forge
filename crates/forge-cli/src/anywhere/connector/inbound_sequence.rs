@@ -1,7 +1,30 @@
-//! Replay-safe acceptance of inbound relay envelope sequences.
+//! Host-target admission and replay-safe acceptance for inbound relay envelopes.
 
-use super::{LocalState, StateStore};
+use super::{Identity, LocalState, StateStore};
 use anyhow::{bail, Result};
+use forge_anywhere_protocol::{Envelope, RecipientKind};
+
+/// Validate envelope routing without requiring the host's current key epoch.
+/// Durable queued commands may legitimately target an older retained account-data-key epoch.
+pub(super) fn validate_inbound_routing(envelope: &Envelope, identity: &Identity) -> Result<()> {
+    let metadata = &envelope.metadata;
+    if metadata.account_id != identity.account_id {
+        bail!("relay envelope account does not match this host");
+    }
+    if metadata.recipient_kind != RecipientKind::Host || metadata.recipient_id != identity.host_id {
+        bail!("relay envelope is not addressed to this host");
+    }
+    Ok(())
+}
+
+/// Validate that an envelope is addressed to this host and its active key epoch.
+pub(super) fn validate_inbound_metadata(envelope: &Envelope, identity: &Identity) -> Result<()> {
+    validate_inbound_routing(envelope, identity)?;
+    if envelope.metadata.key_epoch != identity.key_epoch {
+        bail!("relay envelope uses an unavailable account key epoch");
+    }
+    Ok(())
+}
 
 pub(super) fn accept_inbound_envelopes(
     store: &StateStore,

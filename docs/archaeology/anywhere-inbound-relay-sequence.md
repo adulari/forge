@@ -2,7 +2,7 @@
 
 ## Boundary
 
-`connector/inbound_sequence.rs` owns durable replay acceptance after the parent connector has authenticated and decrypted a relay envelope (and, when present, its referenced blob). The parent remains responsible for cryptographic validation and local dispatch.
+`connector/inbound_sequence.rs` owns durable replay acceptance and routing admission after the parent connector has authenticated and decrypted a relay envelope (and, when present, its referenced blob). Durable queued commands use the same routing admission but may legitimately use a retained older account-data-key epoch. The parent remains responsible for cryptographic validation and local dispatch.
 
 ## Invariants
 

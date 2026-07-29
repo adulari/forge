@@ -165,7 +165,9 @@ struct Identity {
 }
 
 mod inbound_sequence;
-use inbound_sequence::accept_inbound_envelopes;
+use inbound_sequence::{
+    accept_inbound_envelopes, validate_inbound_metadata, validate_inbound_routing,
+};
 
 mod streams;
 use streams::{
@@ -743,25 +745,6 @@ where
             }
         }
         _ => bail!("relay envelope kind is not valid on a host connection"),
-    }
-    Ok(())
-}
-
-fn validate_inbound_metadata(envelope: &Envelope, identity: &Identity) -> Result<()> {
-    validate_inbound_routing(envelope, identity)?;
-    if envelope.metadata.key_epoch != identity.key_epoch {
-        bail!("relay envelope uses an unavailable account key epoch");
-    }
-    Ok(())
-}
-
-fn validate_inbound_routing(envelope: &Envelope, identity: &Identity) -> Result<()> {
-    let metadata = &envelope.metadata;
-    if metadata.account_id != identity.account_id {
-        bail!("relay envelope account does not match this host");
-    }
-    if metadata.recipient_kind != RecipientKind::Host || metadata.recipient_id != identity.host_id {
-        bail!("relay envelope is not addressed to this host");
     }
     Ok(())
 }
