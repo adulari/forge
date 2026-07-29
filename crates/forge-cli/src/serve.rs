@@ -1168,9 +1168,56 @@ async fn create_session(
         None => None,
     };
 
-    let cwd = req
-        .cwd
-        .filter(|c| !c.trim().is_empty())
+    let resume_metadata = if let Some(session_id) = req.resume.as_deref() {
+        if req.worktree {
+            return err_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                "resume cannot create a new worktree; it restores the session's recorded workspace",
+            );
+        }
+        let cwd = match state.store.session_cwd(session_id) {
+            Ok(Some(cwd)) => cwd,
+            Ok(None) => {
+                return err_response(axum::http::StatusCode::NOT_FOUND, "session not found")
+            }
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("loading resumed session workspace failed: {error}"),
+                )
+            }
+        };
+        let title = match state.store.session_title(session_id) {
+            Ok(title) => title.unwrap_or_default(),
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("loading resumed session title failed: {error}"),
+                )
+            }
+        };
+        let worktree = match state.store.session_worktree(session_id) {
+            Ok(worktree) => worktree,
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("loading resumed session worktree failed: {error}"),
+                )
+            }
+        };
+        Some((cwd, title, worktree))
+    } else {
+        None
+    };
+    let cwd = resume_metadata
+        .as_ref()
+        .map(|(cwd, _, _)| cwd.clone())
+        .or_else(|| {
+            req.cwd
+                .as_deref()
+                .filter(|cwd| !cwd.trim().is_empty())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| state.default_cwd.clone());
     let cwd_path = std::path::Path::new(&cwd);
     if !cwd_path.is_dir() {
@@ -1198,7 +1245,9 @@ async fn create_session(
 
     // Keep the guard alive through driver startup so an early error removes its new worktree.
     // Once live, the worktree intentionally outlives the handle for manual review or merge.
-    let mut worktree: Option<String> = None;
+    let mut worktree = resume_metadata
+        .as_ref()
+        .and_then(|(_, _, worktree)| worktree.clone());
     let worktree_guard = if req.worktree {
         if !forge_core::worktree::is_git_repo(cwd_path) {
             return err_response(
@@ -1263,7 +1312,10 @@ async fn create_session(
     let spec = DriverSpec {
         cwd: session_cwd,
         worktree: worktree.clone(),
-        title: req.title.unwrap_or_default(),
+        title: req
+            .title
+            .or_else(|| resume_metadata.map(|(_, title, _)| title))
+            .unwrap_or_default(),
         mock: state.mock,
         model: req.model,
         resume: req.resume,
@@ -4751,10 +4803,12 @@ export async function run() {}
             std::env::temp_dir().join(format!("forge-serve-past-arch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let stored_dir = dir.join("durable-workspace");
+        std::fs::create_dir_all(&stored_dir).unwrap();
         std::env::set_var("FORGE_DB", dir.join("past-arch.db"));
 
         let mk = |title: &str| DriverSpec {
-            cwd: dir.display().to_string(),
+            cwd: stored_dir.display().to_string(),
             worktree: None,
             title: title.to_string(),
             mock: true,
@@ -4794,6 +4848,9 @@ export async function run() {}
             h.join(std::time::Duration::from_secs(5)).await;
         }
         let store = crate::open_store().unwrap();
+        store
+            .set_session_worktree(&archived_id, &stored_dir.display().to_string())
+            .unwrap();
         store.archive_session(&archived_id).unwrap();
         assert!(store.session_archived(&archived_id).unwrap());
 
@@ -4850,6 +4907,22 @@ export async function run() {}
         assert_eq!(resp.status(), axum::http::StatusCode::OK, "resume succeeds");
         let body = json_body(resp).await;
         assert_eq!(body["id"], archived_id, "resumed the same session");
+        assert_eq!(body["title"], "was-archived");
+        assert_eq!(
+            body["cwd"],
+            stored_dir.display().to_string(),
+            "resume-only restores the durable workspace rather than daemon default"
+        );
+        let resumed = registry
+            .get(&archived_id)
+            .await
+            .expect("resumed driver registered");
+        assert_eq!(resumed.title, "was-archived");
+        assert_eq!(resumed.cwd, stored_dir.display().to_string());
+        assert_eq!(
+            resumed.worktree.as_deref(),
+            Some(stored_dir.to_str().unwrap())
+        );
 
         let store = crate::open_store().unwrap();
         assert!(
