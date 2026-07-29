@@ -14,7 +14,7 @@ pub(super) async fn request_provider_response(
     checkpoint_ctx: &forge_provider::CheckpointContext,
     verify_attempts: usize,
     in_plan_mode: bool,
-    mut proposed_plan: &mut Option<forge_types::PlanProposal>,
+    proposed_plan: &mut Option<forge_types::PlanProposal>,
     tools_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     inspect_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     bridge_build_fight: &std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -49,12 +49,12 @@ pub(super) async fn request_provider_response(
         // long conversation can't overflow it — which otherwise fails the turn as
         // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
         // smaller-window model still fits. The immutable borrow ends before the block below.
-        let sent = session.transcript_with_preamble(&active_model);
+        let sent = session.transcript_with_preamble(active_model);
         // Auto-routed completions reserve a model before dispatch so independent sessions
         // can distribute across the fallback chain. Explicit pins deliberately bypass this
         // scheduler: their existing pin outage/failover policy remains authoritative.
         let reservation = (!explicit_pin)
-            .then(|| session.store.try_reserve_model(&active_model))
+            .then(|| session.store.try_reserve_model(active_model))
             .flatten();
         let reserved = reservation.is_some();
         // Pre-dispatch key backstop: a model can reach here with NO provider key via a path
@@ -72,13 +72,13 @@ pub(super) async fn request_provider_response(
             Err(forge_provider::ProviderError::Unavailable(format!(
                 "model '{active_model}' is serving another session"
             )))
-        } else if forge_config::is_model_disabled(&active_model, &session.config.mesh.disabled)
-            || !forge_config::has_api_key(forge_config::provider_of(&active_model))
+        } else if forge_config::is_model_disabled(active_model, &session.config.mesh.disabled)
+            || !forge_config::has_api_key(forge_config::provider_of(active_model))
         {
             Err(forge_provider::ProviderError::Auth(format!(
                 "model '{}' is disabled or has no API key configured for provider '{}'",
                 active_model,
-                forge_config::provider_of(&active_model)
+                forge_config::provider_of(active_model)
             )))
         } else {
             session.presenter.emit(PresenterEvent::ProviderRequest {
@@ -94,12 +94,12 @@ pub(super) async fn request_provider_response(
             let act = std::sync::Arc::clone(&activity);
             let active_tools = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             let active = std::sync::Arc::clone(&active_tools);
-            let tools = std::sync::Arc::clone(&tools_ran);
-            let inspects = std::sync::Arc::clone(&inspect_ran);
-            let build_fight = std::sync::Arc::clone(&bridge_build_fight);
-            let verification = std::sync::Arc::clone(&verification_ledger);
-            let pending_observations = std::sync::Arc::clone(&bridge_observations);
-            let tools_unavailable = std::sync::Arc::clone(&mcp_tools_unavailable);
+            let tools = std::sync::Arc::clone(tools_ran);
+            let inspects = std::sync::Arc::clone(inspect_ran);
+            let build_fight = std::sync::Arc::clone(bridge_build_fight);
+            let verification = std::sync::Arc::clone(verification_ledger);
+            let pending_observations = std::sync::Arc::clone(bridge_observations);
+            let tools_unavailable = std::sync::Arc::clone(mcp_tools_unavailable);
             let suppress_assistant_text = verify_attempts > 0;
             let mut sink = |ev: StreamEvent| {
                 handle_stream_event(
@@ -107,7 +107,7 @@ pub(super) async fn request_provider_response(
                     presenter.as_mut(),
                     suppress_assistant_text,
                     in_plan_mode,
-                    &mut proposed_plan,
+                    proposed_plan,
                     &act,
                     &active,
                     &tools,
@@ -129,7 +129,7 @@ pub(super) async fn request_provider_response(
                 response_format: None,
             };
             let fut =
-                provider.complete_with(&active_model, &sent, specs, &completion_opts, &mut sink);
+                provider.complete_with(active_model, &sent, specs, &completion_opts, &mut sink);
             stream_with_idle_timeout(fut, &activity, Some(&active_tools), stream_idle).await
         };
         if let Err(error) = &result {
@@ -233,7 +233,7 @@ pub(super) async fn request_provider_response(
             // tokenizer — each retry multiplies the cap down. Bounded by `compact_retries`.
             Err(e) if *compact_retries < 3 && e.is_context_overflow() => {
                 *compact_retries += 1;
-                let shrunk = (session.effective_context_window(&active_model) as u64 * 55 / 100)
+                let shrunk = (session.effective_context_window(active_model) as u64 * 55 / 100)
                     .max(1) as u32;
                 session.overflow_window_cap = Some((active_model.clone(), shrunk));
                 session.presenter.emit(PresenterEvent::Warning(format!(
@@ -243,7 +243,7 @@ pub(super) async fn request_provider_response(
                 // itself fits. The window cap above is the guarantee that the retry shrinks
                 // regardless of whether compaction runs.
                 let _ = session.compact(true).await;
-                session.emit_context_gauge(&active_model);
+                session.emit_context_gauge(active_model);
                 continue;
             }
             Err(e) if failover_enabled && (e.is_retryable() || e.is_context_overflow()) => {
@@ -253,14 +253,14 @@ pub(super) async fn request_provider_response(
                 // on the next mesh decision.
                 let auth_error = e.is_auth();
                 if auth_error {
-                    session.record_model_failure(&active_model, &e, default_cooldown);
+                    session.record_model_failure(active_model, &e, default_cooldown);
                 }
                 // A transient failure other than an explicit provider outage (for example
                 // a dropped stream) gets a short same-model retry. An `Unavailable`
                 // response is already a shared health signal: bench it and immediately
                 // advance the fallback chain instead of delaying every concurrent turn.
                 if *transient_retries < MAX_TRANSIENT_RETRIES
-                    && should_retry_same_model_transient(&active_model, &e)
+                    && should_retry_same_model_transient(active_model, &e)
                     && !e.is_permanent()
                     && !e.is_rate_limited()
                     && !e.is_context_overflow()
@@ -450,7 +450,7 @@ pub(super) async fn request_provider_response(
                 // Auth failures exclude the whole provider; permanent capability failures
                 // exclude only this model; transient failures take a short bench.
                 if !auth_error {
-                    session.record_model_failure(&active_model, &e, default_cooldown);
+                    session.record_model_failure(active_model, &e, default_cooldown);
                 }
                 // Drive the single animated "finding a model" indicator instead of emitting
                 // one scrollback warning per hop (the failover spam). It clears itself when
@@ -466,7 +466,7 @@ pub(super) async fn request_provider_response(
                 // other failure keeps rank order intact. (Without this, dropping the old
                 // provider-interleave would re-expose the 429-storm the interleave guarded.)
                 let skip_provider = if e.is_rate_limited() || e.is_permanent() {
-                    Some(forge_config::provider_of(&active_model).to_string())
+                    Some(forge_config::provider_of(active_model).to_string())
                 } else {
                     None
                 };
@@ -527,7 +527,7 @@ pub(super) async fn request_provider_response(
                     // working when every model is briefly rate-limited but none is
                     // permanently incapable. Guarded by `last_resort_used` so a model that
                     // fails again can't loop.
-                    None => match session.last_resort_model(&active_model, *last_resort_used) {
+                    None => match session.last_resort_model(active_model, *last_resort_used) {
                         Some(m) => {
                             *last_resort_used = true;
                             session.presenter.emit(PresenterEvent::Routing {

@@ -27,7 +27,7 @@ impl Session {
         // A,B,A,B,A,B alternation surfaces the same signature THRESHOLD× and trips the guard,
         // while leaving room for legitimate progress (distinct calls don't accumulate).
         const DOOM_OSC_WINDOW: usize = 6;
-        let sig = tool_batch_signature(&calls);
+        let sig = tool_batch_signature(calls);
         if *last_tool_sig == Some(sig) {
             *repeat_count += 1;
         } else {
