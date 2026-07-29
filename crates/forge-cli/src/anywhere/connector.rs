@@ -164,6 +164,9 @@ struct Identity {
     signing_key: SigningKey,
 }
 
+mod inbound_sequence;
+use inbound_sequence::accept_inbound_envelopes;
+
 mod streams;
 use streams::{
     open_stream, stale_stream_close, LocalSocketCommand, LocalSocketEvent, StreamHandle,
@@ -891,44 +894,6 @@ fn verify_blob_object(
         plaintext,
         sequence,
     })
-}
-
-fn accept_inbound_envelopes(
-    store: &StateStore,
-    sender_device_id: [u8; 16],
-    key_epoch: u32,
-    blob_sequence: Option<u64>,
-    control_sequence: u64,
-) -> Result<()> {
-    store.update(|state| {
-        let first_sequence = blob_sequence.unwrap_or(control_sequence);
-        if blob_sequence.is_some_and(|sequence| sequence >= control_sequence) {
-            bail!("relay blob sequence must precede its referencing envelope");
-        }
-        accept_inbound_sequence(state, sender_device_id, key_epoch, first_sequence)?;
-        let namespace = format!("{}:{key_epoch}", hex::encode(sender_device_id));
-        state.accepted_sequences.insert(namespace, control_sequence);
-        Ok(())
-    })?;
-    Ok(())
-}
-
-fn accept_inbound_sequence(
-    state: &mut LocalState,
-    sender_device_id: [u8; 16],
-    key_epoch: u32,
-    sequence: u64,
-) -> Result<()> {
-    let namespace = format!("{}:{key_epoch}", hex::encode(sender_device_id));
-    if state
-        .accepted_sequences
-        .get(&namespace)
-        .is_some_and(|last| sequence <= *last)
-    {
-        bail!("replayed or out-of-order relay sequence");
-    }
-    state.accepted_sequences.insert(namespace, sequence);
-    Ok(())
 }
 
 async fn upload_blob(

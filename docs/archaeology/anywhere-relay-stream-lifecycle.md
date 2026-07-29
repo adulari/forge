@@ -14,4 +14,4 @@
 
 ## Characterization
 
-`a_frame_for_a_forgotten_stream_closes_that_stream_instead_of_the_connector` protects the stale-stream recovery contract. Connector integration tests cover route validation and encrypted relay dispatch around this boundary.
+`forgotten_stream_data_is_closed_but_a_close_is_not_echoed` protects the stale-stream recovery contract. Connector integration tests cover route validation and encrypted relay dispatch around this boundary.

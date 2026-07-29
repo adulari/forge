@@ -583,12 +583,10 @@ impl CodexOauthProvider {
             .expect("turn websocket was connected")
             .complete(call.body, on_event, classify_codex_status)
             .await;
-        if result.as_ref().is_err_and(|error| {
-            error
-                .to_string()
-                .to_ascii_lowercase()
-                .contains("previous_response_not_found")
-        }) {
+        if result
+            .as_ref()
+            .is_err_and(codex_websocket::is_stale_previous_response_error)
+        {
             // The backend can evict an incremental response id while the turn is still alive.
             // Reconnect on the same turn-state route and resend the full logical request once.
             let socket = codex_websocket::CodexTurnWebsocket::connect(

@@ -47,6 +47,15 @@ pub fn is_websocket_model(model: &str) -> bool {
     CODEX_WEBSOCKET_MODELS.contains(&bare)
 }
 
+/// True when the backend explicitly rejects a stale `previous_response_id`. This is deliberately
+/// narrower than generic request failures because callers may retry exactly once without the chain.
+pub(crate) fn is_stale_previous_response_error(error: &ProviderError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("previous_response_not_found")
+        || (message.contains("previous response with id") && message.contains("not found"))
+        || message.contains("invalid previous_response_id")
+}
+
 /// `https://…/responses` → `wss://…/responses` (scheme only, same host/path). `http://` (test
 /// mock servers) maps to `ws://` so this stays testable without a real TLS endpoint.
 pub fn to_ws_url(url: &str) -> Result<String, ProviderError> {
@@ -1188,6 +1197,28 @@ mod tests {
     fn rate_limits_frame_empty_without_rate_limits_object() {
         let frame = serde_json::json!({"type": "codex.rate_limits"});
         assert!(parse_rate_limits_frame(&frame).is_empty());
+    }
+
+    #[test]
+    fn stale_previous_response_error_matches_only_explicit_chain_rejections() {
+        assert!(is_stale_previous_response_error(&ProviderError::Request(
+            "Previous response with id resp_123 not found".into()
+        )));
+        assert!(is_stale_previous_response_error(&ProviderError::Request(
+            "invalid previous_response_id".into()
+        )));
+        assert!(!is_stale_previous_response_error(&ProviderError::Request(
+            "previous response payload invalid".into()
+        )));
+        assert!(!is_stale_previous_response_error(&ProviderError::Request(
+            "previous response metadata not found".into()
+        )));
+        assert!(!is_stale_previous_response_error(&ProviderError::Request(
+            "response body not found".into()
+        )));
+        assert!(!is_stale_previous_response_error(
+            &ProviderError::Unavailable("previous response timed out".into())
+        ));
     }
 
     #[test]
