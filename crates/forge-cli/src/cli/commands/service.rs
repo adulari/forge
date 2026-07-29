@@ -284,7 +284,9 @@ fn run_capture(cmd: &str, args: &[&str]) -> Result<(bool, String, String)> {
 fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> String {
     format!(
         "[Unit]\nDescription=Forge serve — headless multi-session daemon\n\n\
-         [Service]\nExecStart={forge_exe} serve {} --port {port}\nRestart=on-failure\n\n\
+         [Service]\nExecStart={forge_exe} serve {} --port {port}\nRestart=on-failure\n\
+         # An agent-owned compiler or language server may be the kernel's OOM victim. Keep the\n\
+         # daemon and its recoverable session metadata alive in that case.\nOOMPolicy=continue\n\n\
          [Install]\nWantedBy=default.target\n",
         exposure.flag()
     )
@@ -573,6 +575,11 @@ mod tests {
         let unit = render_systemd_service("/usr/local/bin/forge", Exposure::Lan, 7420);
         assert!(unit.contains("ExecStart=/usr/local/bin/forge serve --lan --port 7420"));
         assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("OOMPolicy=continue"));
+        assert!(
+            !unit.contains("OOMPolicy=stop"),
+            "an OOM-selected agent child must not stop the daemon"
+        );
         assert!(unit.contains("WantedBy=default.target"));
     }
 

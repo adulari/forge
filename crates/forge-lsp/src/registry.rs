@@ -16,6 +16,12 @@ const BACKOFF_BASE: Duration = Duration::from_secs(30);
 /// Ceiling for the doubling cooldown, so a permanently broken toolchain settles at one retry
 /// every ten minutes instead of one process per edited file.
 const BACKOFF_MAX: Duration = Duration::from_secs(600);
+/// A daemon can visit many worktrees over its lifetime; never retain one heavyweight analyzer for
+/// every root it has touched.
+const MAX_SERVER_SLOTS: usize = 4;
+/// An analyzer that has not served diagnostics recently is disposable and will be restarted on
+/// demand. This bounds idle memory without disabling automatic recovery.
+const IDLE_SERVER_TTL: Duration = Duration::from_secs(300);
 
 /// A lazily-initialized language-server slot for one `(language, repo-root)` pair, behind its
 /// own lock so a hung server only blocks callers waiting on that same pair.
@@ -28,11 +34,24 @@ type ServerSlot = Arc<Mutex<ServerEntry>>;
 /// and one identical warning per edited file. Recording the failure lets Forge skip the attempt
 /// until the cooldown expires, and a later success (once the toolchain is repaired) clears it, so
 /// diagnostics come back on their own without restarting Forge.
-#[derive(Default)]
 struct ServerEntry {
     server: Option<LspServer>,
     consecutive_failures: u32,
     retry_at: Option<Instant>,
+    last_used: Instant,
+    idle_generation: u64,
+}
+
+impl Default for ServerEntry {
+    fn default() -> Self {
+        Self {
+            server: None,
+            consecutive_failures: 0,
+            retry_at: None,
+            last_used: Instant::now(),
+            idle_generation: 0,
+        }
+    }
 }
 
 impl ServerEntry {
@@ -53,6 +72,16 @@ impl ServerEntry {
     fn clear_failure(&mut self) {
         self.consecutive_failures = 0;
         self.retry_at = None;
+    }
+
+    fn touch(&mut self) -> u64 {
+        self.last_used = Instant::now();
+        self.idle_generation = self.idle_generation.wrapping_add(1);
+        self.idle_generation
+    }
+
+    fn is_idle(&self, now: Instant) -> bool {
+        now.duration_since(self.last_used) >= IDLE_SERVER_TTL
     }
 }
 
@@ -119,6 +148,34 @@ impl LspRegistry {
         // spawn/initialize/diagnostics work for that one (language, repo-root) pair.
         let entry = {
             let mut servers = self.servers.lock().await;
+            let now = Instant::now();
+            // Do not wait behind a diagnostic request while holding the registry lock. Busy slots
+            // stay alive; idle ones are dropped (and kill_on_drop reaps their child).
+            servers.retain(|_, entry| {
+                entry
+                    .try_lock()
+                    .map(|slot| !slot.is_idle(now))
+                    .unwrap_or(true)
+            });
+            if !servers.contains_key(&key) && servers.len() >= MAX_SERVER_SLOTS {
+                let evict = servers
+                    .iter()
+                    .filter_map(|(key, entry)| {
+                        entry
+                            .try_lock()
+                            .ok()
+                            .map(|slot| (key.clone(), slot.last_used))
+                    })
+                    .min_by_key(|(_, last_used)| *last_used)
+                    .map(|(key, _)| key);
+                if let Some(evict) = evict {
+                    debug!("lsp: evicting least-recently-used server slot to enforce root limit");
+                    servers.remove(&evict);
+                } else {
+                    // All analyzers are busy. Diagnostics are best-effort; never overcommit.
+                    return vec![];
+                }
+            }
             servers
                 .entry(key)
                 .or_insert_with(|| Arc::new(Mutex::new(ServerEntry::default())))
@@ -126,6 +183,8 @@ impl LspRegistry {
         };
 
         let mut slot = entry.lock().await;
+        let idle_generation = slot.touch();
+        schedule_idle_shutdown(entry.clone(), idle_generation);
         if slot.server.is_none() {
             let now = Instant::now();
             if slot.cooling_down(now) {
@@ -197,6 +256,11 @@ impl LspRegistry {
         }
     }
 
+    #[cfg(test)]
+    async fn server_slot_count(&self) -> usize {
+        self.servers.lock().await.len()
+    }
+
     fn server_for_lang(&self, lang: &str) -> Option<(String, Vec<String>)> {
         if let Some(entry) = self.config.servers.get(lang) {
             return Some((entry.command.clone(), entry.args.clone()));
@@ -215,6 +279,27 @@ impl LspRegistry {
             _ => None,
         }
     }
+}
+
+/// Arm a one-shot reaper for a use of a server slot. A newer use changes the generation, making
+/// older timers harmless. A weak reference means an LRU eviction drops the slot and its
+/// `kill_on_drop` child immediately instead of letting this timer retain it for five minutes.
+fn schedule_idle_shutdown(entry: ServerSlot, generation: u64) {
+    let entry = Arc::downgrade(&entry);
+    tokio::spawn(async move {
+        tokio::time::sleep(IDLE_SERVER_TTL).await;
+        let Some(entry) = entry.upgrade() else {
+            return;
+        };
+        let mut slot = entry.lock().await;
+        if slot.idle_generation == generation && slot.is_idle(Instant::now()) {
+            debug!(
+                "lsp: stopping idle language server after {}s",
+                IDLE_SERVER_TTL.as_secs()
+            );
+            slot.server = None;
+        }
+    });
 }
 
 /// Render a captured stderr tail as a trailing clause, or nothing when the server was silent.
@@ -563,7 +648,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let body = format!(
             "#!/bin/sh\n\
-             echo start >> {attempts}\n\
+             echo $$ >> {attempts}\n\
              if [ ! -f {fixed} ]; then\n\
              echo \"error: 'rust-analyzer' is not installed for the toolchain\" 1>&2\n\
              exit 1\n\
@@ -572,7 +657,7 @@ mod tests {
              diag='{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{{\"uri\":\"{uri}\",\"diagnostics\":[{{\"message\":\"boom\",\"severity\":1,\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":1}}}}}}]}}}}'\n\
              printf 'Content-Length: %d\\r\\n\\r\\n%s' ${{#init}} \"$init\"\n\
              printf 'Content-Length: %d\\r\\n\\r\\n%s' ${{#diag}} \"$diag\"\n\
-             sleep 5\n",
+             exec sleep 5\n",
             attempts = attempts.display(),
             fixed = fixed.display(),
             uri = uri,
@@ -586,6 +671,33 @@ mod tests {
         fs::read_to_string(attempts)
             .map(|t| t.lines().count())
             .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    fn started_pids(attempts: &Path) -> Vec<u32> {
+        fs::read_to_string(attempts)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|pid| pid.parse().ok())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_process_exit(pid: u32) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while process_is_alive(pid) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[cfg(unix)]
@@ -657,6 +769,50 @@ mod tests {
             starts_recorded(&attempts),
             2,
             "a live server must be reused"
+        );
+    }
+
+    /// A daemon may work across many project roots, but must retain only a fixed number of
+    /// heavyweight analyzer processes. Evicted roots are lazy: touching one again can restart it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_servers_are_bounded_across_project_roots() {
+        let tmp = TempDir::new().unwrap();
+        let attempts = tmp.path().join("attempts");
+        let fixed = tmp.path().join("fixed");
+        fs::write(&fixed, "").unwrap();
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &fixed, "file:///unused.rs");
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "rust".to_string(),
+            forge_config::LspServerEntry {
+                command: script.to_string_lossy().into_owned(),
+                args: vec![],
+            },
+        );
+        let reg = LspRegistry::from_config(&LspConfig {
+            enabled: true,
+            timeout_ms: 200,
+            servers,
+        });
+
+        for root_number in 0..=MAX_SERVER_SLOTS {
+            let root = tmp.path().join(format!("root-{root_number}"));
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+            let file = root.join("main.rs");
+            fs::write(&file, "fn main() {}").unwrap();
+            let _ = reg.diagnostics_for(&file, Duration::from_millis(200)).await;
+        }
+
+        assert_eq!(reg.server_slot_count().await, MAX_SERVER_SLOTS);
+        let pids = started_pids(&attempts);
+        assert_eq!(pids.len(), MAX_SERVER_SLOTS + 1);
+        wait_for_process_exit(pids[0]).await;
+        assert!(
+            !process_is_alive(pids[0]),
+            "the evicted server process must be killed, not retained by an idle timer"
         );
     }
 

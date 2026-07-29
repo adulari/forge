@@ -622,7 +622,10 @@ the unit exists/is running and independently TCP-probes the port.
 Surviving a reboot **before** you log in (Linux) needs `loginctl enable-linger $USER` — `install`
 prints this as a note but never runs it itself (it can require auth). Every backend call
 surfaces the failing command's stderr with an actionable hint (e.g. "is a systemd user manager
-available?") rather than a bare exit code.
+available?") rather than a bare exit code. On Linux the generated unit sets `OOMPolicy=continue`:
+if the kernel OOM-kills an agent-owned compiler or language-server child, systemd keeps the daemon
+and its live-session metadata running. Forge's LSP failure backoff then retries diagnostics after
+the normal cooldown rather than treating that child eviction as a daemon failure.
 
 ## 4. Surfaces touched
 
