@@ -1,17 +1,29 @@
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::BufReader;
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use crate::rpc::{read_msg, write_msg};
 use crate::types::{Diagnostic, DiagnosticSeverity};
+
+/// How much of the server's stderr is retained (the tail — the last thing it said before dying).
+const STDERR_TAIL_BYTES: usize = 2048;
+/// How long the reader task is given to finish draining stderr once a handshake has failed.
+const STDERR_DRAIN_GRACE: Duration = Duration::from_millis(250);
+/// Upper bound on the single-line cause attached to a failure message.
+const STDERR_SUMMARY_CHARS: usize = 300;
 
 pub struct LspServer {
     _child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
+    /// Bounded tail of the server's stderr. A server that dies during the handshake reports the
+    /// real cause here (a missing rustup component, a bad config) while stdout only shows EOF.
+    stderr: Arc<Mutex<String>>,
+    stderr_reader: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LspServer {
@@ -20,17 +32,52 @@ impl LspServer {
             .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let stderr_reader = child.stderr.take().map(|mut pipe| {
+            let sink = stderr.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                loop {
+                    match pipe.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
+                            if let Ok(mut sink) = sink.lock() {
+                                append_bounded(&mut sink, &chunk, STDERR_TAIL_BYTES);
+                            }
+                        }
+                    }
+                }
+            })
+        });
         Ok(Self {
             _child: child,
             stdin,
             stdout,
             next_id: 1,
+            stderr,
+            stderr_reader,
         })
+    }
+
+    /// A short, single-line tail of what the server printed on stderr, or `""` if it said nothing.
+    /// Called on the failure path only: it waits briefly for the reader task to drain a stderr pipe
+    /// the dying process has already closed, so the cause isn't lost to a race with its exit.
+    pub async fn stderr_summary(&mut self) -> String {
+        if let Some(handle) = self.stderr_reader.take() {
+            let _ = tokio::time::timeout(STDERR_DRAIN_GRACE, handle).await;
+        }
+        let raw = self
+            .stderr
+            .lock()
+            .map(|tail| tail.clone())
+            .unwrap_or_default();
+        summarize_stderr(&raw, STDERR_SUMMARY_CHARS)
     }
 
     fn new_id(&mut self) -> u64 {
@@ -137,6 +184,40 @@ impl LspServer {
         }
         diags
     }
+}
+
+/// Append `chunk`, keeping at most the last `cap` bytes (trimmed forward to a char boundary).
+fn append_bounded(buf: &mut String, chunk: &str, cap: usize) {
+    buf.push_str(chunk);
+    if buf.len() <= cap {
+        return;
+    }
+    let mut cut = buf.len() - cap;
+    while cut < buf.len() && !buf.is_char_boundary(cut) {
+        cut += 1;
+    }
+    buf.drain(..cut);
+}
+
+/// Collapse a captured stderr tail into one log-safe line, clipped to `max_chars` from the end
+/// (the tail carries the fatal message; earlier progress chatter is the part worth dropping).
+fn summarize_stderr(raw: &str, max_chars: usize) -> String {
+    let joined = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let count = joined.chars().count();
+    if count <= max_chars {
+        return joined;
+    }
+    let start = joined
+        .char_indices()
+        .nth(count - max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    format!("…{}", &joined[start..])
 }
 
 fn parse_diagnostic(v: &Value) -> Option<Diagnostic> {
@@ -284,5 +365,35 @@ mod tests {
         let mut v = full_diag();
         v["range"]["start"]["line"] = json!("oops");
         assert!(parse_diagnostic(&v).is_none());
+    }
+
+    #[test]
+    fn stderr_tail_keeps_the_last_bytes_on_a_char_boundary() {
+        let mut buf = String::new();
+        append_bounded(&mut buf, "first\n", 8);
+        assert_eq!(buf, "first\n");
+        append_bounded(&mut buf, "second\n", 8);
+        assert_eq!(buf, "\nsecond\n", "only the last {} bytes are kept", 8);
+        // A multi-byte character straddling the cut is dropped whole, never split.
+        let mut wide = String::new();
+        append_bounded(&mut wide, "ééééé", 5);
+        assert!(wide.chars().all(|c| c == 'é'), "tail was: {wide:?}");
+        assert!(wide.len() <= 5);
+    }
+
+    #[test]
+    fn stderr_summary_is_one_clipped_line() {
+        assert_eq!(summarize_stderr("", 100), "");
+        assert_eq!(summarize_stderr("   \n\n  \n", 100), "");
+        assert_eq!(
+            summarize_stderr(
+                "error: 'rust-analyzer' is not installed\n  help: run rustup\n",
+                100
+            ),
+            "error: 'rust-analyzer' is not installed | help: run rustup"
+        );
+        // Clipping keeps the END of the tail — the fatal line, not the startup chatter.
+        let long = summarize_stderr("aaaaaaaaaa\nfatal", 5);
+        assert_eq!(long, "…fatal");
     }
 }

@@ -1,19 +1,68 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use forge_config::LspConfig;
 
 use crate::server::LspServer;
 use crate::types::Diagnostic;
 
+/// First cooldown after a language server fails to start or hand shake.
+const BACKOFF_BASE: Duration = Duration::from_secs(30);
+/// Ceiling for the doubling cooldown, so a permanently broken toolchain settles at one retry
+/// every ten minutes instead of one process per edited file.
+const BACKOFF_MAX: Duration = Duration::from_secs(600);
+
 /// A lazily-initialized language-server slot for one `(language, repo-root)` pair, behind its
 /// own lock so a hung server only blocks callers waiting on that same pair.
-type ServerSlot = Arc<Mutex<Option<LspServer>>>;
+type ServerSlot = Arc<Mutex<ServerEntry>>;
+
+/// The live server for one `(language, repo-root)` pair plus its failure backoff.
+///
+/// Without the backoff, a server that cannot start (a missing rustup component, a broken config)
+/// is respawned on every single diagnostic request: one doomed process, one truncated handshake,
+/// and one identical warning per edited file. Recording the failure lets Forge skip the attempt
+/// until the cooldown expires, and a later success (once the toolchain is repaired) clears it, so
+/// diagnostics come back on their own without restarting Forge.
+#[derive(Default)]
+struct ServerEntry {
+    server: Option<LspServer>,
+    consecutive_failures: u32,
+    retry_at: Option<Instant>,
+}
+
+impl ServerEntry {
+    /// Whether a start attempt is still suppressed by the current cooldown.
+    fn cooling_down(&self, now: Instant) -> bool {
+        self.retry_at.is_some_and(|retry_at| now < retry_at)
+    }
+
+    /// Drop any live server, extend the cooldown, and return how long the next attempt waits.
+    fn record_failure(&mut self, now: Instant) -> Duration {
+        self.server = None;
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let backoff = failure_backoff(self.consecutive_failures);
+        self.retry_at = Some(now + backoff);
+        backoff
+    }
+
+    fn clear_failure(&mut self) {
+        self.consecutive_failures = 0;
+        self.retry_at = None;
+    }
+}
+
+/// Exponential cooldown for the nth consecutive failure, capped at [`BACKOFF_MAX`].
+fn failure_backoff(consecutive_failures: u32) -> Duration {
+    let doublings = consecutive_failures.saturating_sub(1).min(16);
+    BACKOFF_BASE
+        .saturating_mul(1u32 << doublings)
+        .min(BACKOFF_MAX)
+}
 
 /// Owns the live language-server processes and routes a file to the right one.
 ///
@@ -72,36 +121,70 @@ impl LspRegistry {
             let mut servers = self.servers.lock().await;
             servers
                 .entry(key)
-                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .or_insert_with(|| Arc::new(Mutex::new(ServerEntry::default())))
                 .clone()
         };
 
         let mut slot = entry.lock().await;
-        if slot.is_none() {
+        if slot.server.is_none() {
+            let now = Instant::now();
+            if slot.cooling_down(now) {
+                debug!("lsp: {lang} ({cmd}) is in failure cooldown — skipping diagnostics");
+                return vec![];
+            }
             match LspServer::spawn(&cmd, &args).await {
-                Ok(mut srv) => {
-                    if let Err(e) = srv.initialize(&root_uri, timeout).await {
-                        warn!("lsp: initialize failed for {lang}: {e}");
+                Ok(mut srv) => match srv.initialize(&root_uri, timeout).await {
+                    Ok(()) => {
+                        slot.clear_failure();
+                        slot.server = Some(srv);
+                    }
+                    Err(e) => {
+                        // The handshake error is usually just EOF; the server's own stderr is what
+                        // names the actual cause, so it travels with the warning.
+                        let cause = srv.stderr_summary().await;
+                        let backoff = slot.record_failure(now);
+                        warn!(
+                            "lsp: initialize failed for {lang} ({cmd}): {e}{} — retrying in {}s",
+                            stderr_clause(&cause),
+                            backoff.as_secs()
+                        );
                         return vec![];
                     }
-                    *slot = Some(srv);
-                }
+                },
                 Err(e) => {
-                    warn!("lsp: spawn failed for {lang} ({cmd}): {e}");
+                    let backoff = slot.record_failure(now);
+                    warn!(
+                        "lsp: spawn failed for {lang} ({cmd}): {e} — retrying in {}s",
+                        backoff.as_secs()
+                    );
                     return vec![];
                 }
             }
         }
-        let Some(server) = slot.as_mut() else {
+        let Some(server) = slot.server.as_mut() else {
             warn!("lsp: server unavailable for {lang} after spawn");
             return vec![];
         };
 
         if let Err(e) = server.did_open(&uri, lang, &text).await {
-            warn!("lsp: did_open failed: {e}");
+            // The pipe is gone: keeping the dead process in the slot would fail every later call
+            // with the same error, so drop it and let the cooldown pace the next attempt.
+            let backoff = slot.record_failure(Instant::now());
+            warn!(
+                "lsp: did_open failed for {lang} ({cmd}): {e} — retrying in {}s",
+                backoff.as_secs()
+            );
             return vec![];
         }
         server.collect_diagnostics(&uri, timeout).await
+    }
+
+    /// Forget every pending failure cooldown, as if it had elapsed.
+    #[cfg(test)]
+    async fn expire_cooldowns(&self) {
+        for entry in self.servers.lock().await.values() {
+            entry.lock().await.retry_at = None;
+        }
     }
 
     fn server_for_lang(&self, lang: &str) -> Option<(String, Vec<String>)> {
@@ -121,6 +204,15 @@ impl LspRegistry {
             "go" => Some(("gopls".to_string(), vec![])),
             _ => None,
         }
+    }
+}
+
+/// Render a captured stderr tail as a trailing clause, or nothing when the server was silent.
+fn stderr_clause(cause: &str) -> String {
+    if cause.is_empty() {
+        String::new()
+    } else {
+        format!(" — server stderr: {cause}")
     }
 }
 
@@ -427,6 +519,149 @@ mod tests {
         fs::write(&f, "hello").unwrap();
         let diags = reg.diagnostics_for(&f, Duration::from_millis(100)).await;
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn backoff_doubles_and_is_capped() {
+        assert_eq!(failure_backoff(0), BACKOFF_BASE);
+        assert_eq!(failure_backoff(1), BACKOFF_BASE);
+        assert_eq!(failure_backoff(2), BACKOFF_BASE * 2);
+        assert_eq!(failure_backoff(3), BACKOFF_BASE * 4);
+        assert_eq!(failure_backoff(99), BACKOFF_MAX);
+        assert_eq!(failure_backoff(u32::MAX), BACKOFF_MAX);
+    }
+
+    #[test]
+    fn a_success_clears_the_cooldown() {
+        let now = Instant::now();
+        let mut entry = ServerEntry::default();
+        assert!(!entry.cooling_down(now));
+        let first = entry.record_failure(now);
+        assert_eq!(first, BACKOFF_BASE);
+        assert!(entry.cooling_down(now));
+        assert!(!entry.cooling_down(now + first));
+        assert_eq!(entry.record_failure(now), BACKOFF_BASE * 2);
+        entry.clear_failure();
+        assert!(!entry.cooling_down(now));
+        assert_eq!(entry.record_failure(now), BACKOFF_BASE);
+    }
+
+    /// Write an executable fake language server that records every start, fails the handshake
+    /// until `fixed` exists, and afterwards answers `initialize` and publishes one diagnostic.
+    #[cfg(unix)]
+    fn write_fake_server(script: &Path, attempts: &Path, fixed: &Path, uri: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let body = format!(
+            "#!/bin/sh\n\
+             echo start >> {attempts}\n\
+             if [ ! -f {fixed} ]; then\n\
+             echo \"error: 'rust-analyzer' is not installed for the toolchain\" 1>&2\n\
+             exit 1\n\
+             fi\n\
+             init='{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"capabilities\":{{}}}}}}'\n\
+             diag='{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{{\"uri\":\"{uri}\",\"diagnostics\":[{{\"message\":\"boom\",\"severity\":1,\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":1}}}}}}]}}}}'\n\
+             printf 'Content-Length: %d\\r\\n\\r\\n%s' ${{#init}} \"$init\"\n\
+             printf 'Content-Length: %d\\r\\n\\r\\n%s' ${{#diag}} \"$diag\"\n\
+             sleep 5\n",
+            attempts = attempts.display(),
+            fixed = fixed.display(),
+            uri = uri,
+        );
+        fs::write(script, body).unwrap();
+        fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn starts_recorded(attempts: &Path) -> usize {
+        fs::read_to_string(attempts)
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// A server that cannot start (the reported `rust-analyzer` component was missing) must not be
+    /// respawned once per diagnostic request, and must recover on its own once it is repaired.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failing_server_backs_off_then_recovers_after_the_cooldown() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("Cargo.toml"), "[package]").unwrap();
+        let file = tmp.path().join("main.rs");
+        fs::write(&file, "fn main() {}").unwrap();
+        let attempts = tmp.path().join("attempts");
+        let fixed = tmp.path().join("fixed");
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &fixed, &path_to_uri(&file));
+
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "rust".to_string(),
+            forge_config::LspServerEntry {
+                command: script.to_string_lossy().into_owned(),
+                args: vec![],
+            },
+        );
+        let reg = LspRegistry::from_config(&LspConfig {
+            enabled: true,
+            timeout_ms: 500,
+            servers,
+        });
+        let timeout = Duration::from_millis(500);
+
+        assert!(reg.diagnostics_for(&file, timeout).await.is_empty());
+        assert_eq!(starts_recorded(&attempts), 1);
+
+        // Still inside the cooldown: no second process, no second warning.
+        assert!(reg.diagnostics_for(&file, timeout).await.is_empty());
+        assert_eq!(
+            starts_recorded(&attempts),
+            1,
+            "cooldown must suppress the respawn"
+        );
+
+        // The toolchain is repaired and the cooldown elapses: diagnostics come back by themselves.
+        fs::write(&fixed, "").unwrap();
+        reg.expire_cooldowns().await;
+        let diags = reg.diagnostics_for(&file, timeout).await;
+        assert_eq!(
+            starts_recorded(&attempts),
+            2,
+            "the cooldown must expire, not latch"
+        );
+        assert_eq!(diags.len(), 1, "diagnostics were: {diags:?}");
+        assert_eq!(diags[0].message, "boom");
+
+        // The healthy server is reused rather than restarted (the fake publishes only once, so
+        // the second request's result is empty — what matters is that no third process started).
+        let _ = reg.diagnostics_for(&file, timeout).await;
+        assert_eq!(
+            starts_recorded(&attempts),
+            2,
+            "a live server must be reused"
+        );
+    }
+
+    /// The cause a bare "server closed stdout" hides must survive to the failure path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dying_server_reports_its_stderr() {
+        let tmp = TempDir::new().unwrap();
+        let attempts = tmp.path().join("attempts");
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &tmp.path().join("never"), "file:///x");
+
+        let mut srv = LspServer::spawn(&script.to_string_lossy(), &[])
+            .await
+            .unwrap();
+        let err = srv
+            .initialize("file:///tmp", Duration::from_millis(500))
+            .await
+            .expect_err("the fake server exits before answering");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        let cause = srv.stderr_summary().await;
+        assert!(
+            cause.contains("'rust-analyzer' is not installed"),
+            "stderr summary was: {cause:?}"
+        );
     }
 
     #[tokio::test]
