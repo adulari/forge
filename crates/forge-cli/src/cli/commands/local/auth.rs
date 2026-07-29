@@ -482,7 +482,7 @@ pub(crate) async fn auth_codex_oauth(
     if matches!(flow, crate::cli::commands::oauth_flow::LoginFlow::Paste) {
         println!(
             "Headless paste flow: authorize on any device, then paste the complete redirect URL \
-             (including the state parameter) here. A bare code is also accepted."
+             (including the state parameter) here."
         );
     } else if no_browser {
         println!(

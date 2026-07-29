@@ -51,8 +51,8 @@ pub fn read_pasted_redirect_from_stdin() -> Result<String> {
     Ok(input)
 }
 
-/// Extract an authorization code from a pasted redirect URL, query, or bare code.
-/// URLs carrying a `code` must also carry the expected CSRF state.
+/// Extract an authorization code from a pasted redirect URL or query.
+/// Paste flows require the callback's CSRF state; a bare code is intentionally rejected.
 pub fn parse_pasted_redirect(input: &str, expected_state: &str) -> Result<String> {
     let input = input.trim();
     if input.is_empty() {
@@ -66,7 +66,7 @@ pub fn parse_pasted_redirect(input: &str, expected_state: &str) -> Result<String
             }
             bail!("pasted callback is missing the 'code' parameter")
         }
-        return Ok(input.to_string());
+        bail!("paste the complete OAuth callback URL including its state parameter; bare authorization codes are not accepted")
     }
     let query = input
         .split_once('?')
@@ -290,9 +290,6 @@ mod tests {
                 .contains("denied")
         );
         assert!(parse_pasted_redirect("state=ok", "ok").is_err());
-        assert_eq!(
-            parse_pasted_redirect("bare-code", "unused").unwrap(),
-            "bare-code"
-        );
+        assert!(parse_pasted_redirect("bare-code", "unused").is_err());
     }
 }

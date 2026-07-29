@@ -232,10 +232,7 @@ pub(crate) async fn mcp_login(
     }
     let (code, returned_state) =
         if matches!(flow, crate::cli::commands::oauth_flow::LoginFlow::Paste) {
-            println!(
-                "Paste the complete redirect URL (including the state parameter) here; a bare \
-             authorization code is also accepted."
-            );
+            println!("Paste the complete redirect URL (including the state parameter) here.");
             let input = if let Some(value) = paste {
                 if value.is_empty() {
                     tokio::task::spawn_blocking(
