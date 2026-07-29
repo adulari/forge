@@ -991,6 +991,15 @@ pub struct LspConfig {
     /// How long to wait for a server's `publishDiagnostics` before giving up.
     #[serde(default = "default_lsp_timeout_ms")]
     pub timeout_ms: u64,
+    /// Maximum resident memory for one analyzer process tree, in MiB. `0` disables the guard.
+    ///
+    /// Forge runs at most one analyzer process tree at a time, so this is also the process-wide
+    /// aggregate LSP memory ceiling.
+    #[serde(default = "default_lsp_memory_limit_mb")]
+    pub memory_limit_mb: u64,
+    /// Stop an analyzer after this many idle seconds. A later edit starts it again on demand.
+    #[serde(default = "default_lsp_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
     /// Per-language server command, keyed by language id (`rust`, `typescript`, `python`, …).
     /// Empty = use the built-in defaults for languages whose server binary is found on PATH.
     #[serde(default)]
@@ -1010,6 +1019,8 @@ impl Default for LspConfig {
         Self {
             enabled: false,
             timeout_ms: default_lsp_timeout_ms(),
+            memory_limit_mb: default_lsp_memory_limit_mb(),
+            idle_timeout_secs: default_lsp_idle_timeout_secs(),
             servers: std::collections::HashMap::new(),
         }
     }
@@ -1017,6 +1028,14 @@ impl Default for LspConfig {
 
 fn default_lsp_timeout_ms() -> u64 {
     3000
+}
+
+fn default_lsp_memory_limit_mb() -> u64 {
+    2048
+}
+
+fn default_lsp_idle_timeout_secs() -> u64 {
+    120
 }
 
 /// Auto-lint / auto-test self-healing. After a turn makes edits, run the configured lint and/or

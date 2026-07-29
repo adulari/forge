@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use serde_json::{json, Value};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, warn};
 
@@ -19,9 +20,13 @@ const BACKOFF_MAX: Duration = Duration::from_secs(600);
 /// A daemon can visit many worktrees over its lifetime; never retain one heavyweight analyzer for
 /// every root it has touched.
 const MAX_SERVER_SLOTS: usize = 4;
-/// An analyzer that has not served diagnostics recently is disposable and will be restarted on
-/// demand. This bounds idle memory without disabling automatic recovery.
-const IDLE_SERVER_TTL: Duration = Duration::from_secs(300);
+/// Only one heavyweight analyzer process tree may run in Forge at once. Combined with the
+/// per-process-tree resident-memory guard, this makes the configured per-server limit an aggregate
+/// process-wide LSP ceiling as well.
+const MAX_LIVE_SERVERS: usize = 1;
+/// A lightweight rust-analyzer still needs a short cold-start window to load project metadata.
+/// Hot diagnostic requests continue to use the operator-configured timeout.
+const COLD_START_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// A lazily-initialized language-server slot for one `(language, repo-root)` pair, behind its
 /// own lock so a hung server only blocks callers waiting on that same pair.
@@ -29,7 +34,7 @@ type ServerSlot = Arc<Mutex<ServerEntry>>;
 
 fn global_permits() -> &'static Arc<Semaphore> {
     static PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    PERMITS.get_or_init(|| Arc::new(Semaphore::new(MAX_SERVER_SLOTS)))
+    PERMITS.get_or_init(|| Arc::new(Semaphore::new(MAX_LIVE_SERVERS)))
 }
 
 /// The live server for one `(language, repo-root)` pair plus its failure backoff.
@@ -93,10 +98,6 @@ impl ServerEntry {
     fn is_idle_for(&self, now: Instant, ttl: Duration) -> bool {
         now.duration_since(self.last_used) >= ttl
     }
-
-    fn is_idle(&self, now: Instant) -> bool {
-        self.is_idle_for(now, IDLE_SERVER_TTL)
-    }
 }
 
 /// Exponential cooldown for the nth consecutive failure, capped at [`BACKOFF_MAX`].
@@ -129,6 +130,17 @@ impl LspRegistry {
         }
     }
 
+    fn idle_ttl(&self) -> Duration {
+        Duration::from_secs(self.config.idle_timeout_secs.max(1))
+    }
+
+    fn memory_limit_bytes(&self) -> Option<u64> {
+        self.config
+            .memory_limit_mb
+            .checked_mul(1024 * 1024)
+            .filter(|limit| *limit > 0)
+    }
+
     /// Diagnostics for one file, or an empty vec if the language is unconfigured, the server binary
     /// isn't on PATH, or it doesn't answer within `timeout`. Never errors — best-effort by design.
     pub async fn diagnostics_for(&self, abs_path: &Path, timeout: Duration) -> Vec<Diagnostic> {
@@ -156,6 +168,8 @@ impl LspRegistry {
         let uri = path_to_uri(abs_path);
         let root_uri = path_to_uri(&root);
         let key = (lang.to_string(), root.clone());
+        let idle_ttl = self.idle_ttl();
+        let rust_resource_profile = uses_rust_analyzer_profile(lang, &cmd);
 
         // Only the map lookup/insert happens under the registry-wide lock; the entry's own
         // lock (acquired below, after this guard is dropped) is what serializes the actual
@@ -168,7 +182,7 @@ impl LspRegistry {
             servers.retain(|_, entry| {
                 entry
                     .try_lock()
-                    .map(|slot| !slot.is_idle(now) || slot.cooling_down(now))
+                    .map(|slot| !slot.is_idle_for(now, idle_ttl) || slot.cooling_down(now))
                     .unwrap_or(true)
             });
             if !servers.contains_key(&key) && servers.len() >= MAX_SERVER_SLOTS {
@@ -198,7 +212,8 @@ impl LspRegistry {
 
         let mut slot = entry.lock().await;
         let idle_generation = slot.touch();
-        arm_idle_timer(&mut slot, entry.clone(), idle_generation, IDLE_SERVER_TTL);
+        arm_idle_timer(&mut slot, entry.clone(), idle_generation, idle_ttl);
+        let mut cold_start = false;
         if slot.server.is_none() {
             let now = Instant::now();
             if slot.cooling_down(now) {
@@ -210,11 +225,26 @@ impl LspRegistry {
                 return vec![];
             };
             slot.permit = Some(permit);
-            match LspServer::spawn(&cmd, &args).await {
-                Ok(mut srv) => match srv.initialize(&root_uri, timeout).await {
+            match LspServer::spawn_with_memory_limit(
+                &cmd,
+                &args,
+                self.memory_limit_bytes(),
+                rust_resource_profile,
+            )
+            .await
+            {
+                Ok(mut srv) => match srv
+                    .initialize_with_options(
+                        &root_uri,
+                        timeout,
+                        initialization_options_for(rust_resource_profile),
+                    )
+                    .await
+                {
                     Ok(()) => {
                         slot.clear_failure();
                         slot.server = Some(srv);
+                        cold_start = true;
                     }
                     Err(e) => {
                         let cause = srv.stderr_summary().await;
@@ -244,19 +274,35 @@ impl LspRegistry {
             return vec![];
         };
 
-        if let Err(e) = server.sync_document(&uri, lang, &text).await {
-            slot.server = None;
-            let backoff = slot.record_failure(Instant::now());
-            warn!(
-                "lsp: document sync failed for {lang} ({cmd}): {e} — retrying in {}s",
-                backoff.as_secs()
-            );
-            return vec![];
-        }
-        let diagnostics = match server.collect_diagnostics(&uri, timeout).await {
-            Ok(diagnostics) => diagnostics,
-            Err(error) => {
+        let document_version = match server.sync_document(&uri, lang, &text).await {
+            Ok(version) => version,
+            Err(e) => {
                 slot.server = None;
+                let backoff = slot.record_failure(Instant::now());
+                warn!(
+                    "lsp: document sync failed for {lang} ({cmd}): {e} — retrying in {}s",
+                    backoff.as_secs()
+                );
+                return vec![];
+            }
+        };
+        let diagnostic_timeout = if cold_start && rust_resource_profile {
+            timeout.max(COLD_START_DIAGNOSTIC_TIMEOUT)
+        } else {
+            timeout
+        };
+        let diagnostics = match server
+            .collect_diagnostics(&uri, document_version, diagnostic_timeout)
+            .await
+        {
+            Ok(diagnostics) => diagnostics,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                debug!("lsp: diagnostics timed out for {lang} ({cmd}); keeping the server warm");
+                let idle_generation = slot.touch();
+                arm_idle_timer(&mut slot, entry.clone(), idle_generation, idle_ttl);
+                return vec![];
+            }
+            Err(error) => {
                 let backoff = slot.record_failure(Instant::now());
                 warn!(
                     "lsp: diagnostics failed for {lang} ({cmd}): {error} — retrying in {}s",
@@ -266,7 +312,7 @@ impl LspRegistry {
             }
         };
         let idle_generation = slot.touch();
-        arm_idle_timer(&mut slot, entry.clone(), idle_generation, IDLE_SERVER_TTL);
+        arm_idle_timer(&mut slot, entry.clone(), idle_generation, idle_ttl);
         diagnostics
     }
 
@@ -301,6 +347,52 @@ impl LspRegistry {
             _ => None,
         }
     }
+}
+
+fn uses_rust_analyzer_profile(lang: &str, command: &str) -> bool {
+    lang == "rust"
+        && Path::new(command)
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().contains("rust-analyzer"))
+}
+
+fn initialization_options_for(rust_resource_profile: bool) -> Option<Value> {
+    rust_resource_profile.then(|| {
+        json!({
+            // Forge requests diagnostics after edits; an additional full-workspace `cargo check`
+            // duplicates the autofix/test pipeline and caused sustained CPU saturation.
+            "checkOnSave": false,
+            // Let rust-analyzer analyze opened files on demand instead of eagerly warming every
+            // crate in a large workspace.
+            "cachePriming": {
+                "enable": false,
+                "numThreads": 1
+            },
+            // Build-script discovery can launch dozens of cargo/rustc children during initialize.
+            // Forge keeps syntax/type diagnostics available but leaves full macro/build validation
+            // to its explicit check/test pipeline.
+            "cargo": {
+                "buildScripts": {
+                    "enable": false
+                }
+            },
+            "procMacro": {
+                "enable": false
+            },
+            // With proc-macro expansion intentionally disabled, these notices are expected noise;
+            // cargo check/Clippy remains the authoritative macro diagnostic path.
+            "diagnostics": {
+                "disabled": ["macro-error"]
+            },
+            // Forge opens files for diagnostics, not IDE-wide navigation. A smaller syntax-tree
+            // cache prevents memory from ratcheting upward across long multi-file sessions.
+            "lru": {
+                "capacity": 32
+            },
+            // Keep semantic diagnostics usable while bounding its internal worker pool.
+            "numThreads": 1
+        })
+    })
 }
 
 /// Process-wide capacity permits are held for the lifetime of each live analyzer.
@@ -427,6 +519,33 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn rust_analyzer_uses_the_resource_safe_profile() {
+        let defaults = LspConfig::default();
+        assert_eq!(defaults.memory_limit_mb, 2048);
+        assert_eq!(defaults.idle_timeout_secs, 120);
+
+        assert!(uses_rust_analyzer_profile("rust", "rust-analyzer"));
+        assert!(uses_rust_analyzer_profile(
+            "rust",
+            "/usr/local/bin/rust-analyzer-wrapper"
+        ));
+        assert!(!uses_rust_analyzer_profile("rust", "custom-rust-lsp"));
+        assert!(!uses_rust_analyzer_profile("python", "rust-analyzer"));
+
+        let options = initialization_options_for(true).unwrap();
+
+        assert_eq!(options["checkOnSave"], false);
+        assert_eq!(options["cachePriming"]["enable"], false);
+        assert_eq!(options["cachePriming"]["numThreads"], 1);
+        assert_eq!(options["cargo"]["buildScripts"]["enable"], false);
+        assert_eq!(options["procMacro"]["enable"], false);
+        assert_eq!(options["diagnostics"]["disabled"], json!(["macro-error"]));
+        assert_eq!(options["lru"]["capacity"], 32);
+        assert_eq!(options["numThreads"], 1);
+        assert!(initialization_options_for(false).is_none());
+    }
+
+    #[test]
     fn lang_from_ext_table() {
         assert_eq!(lang_from_ext(Path::new("foo.rs")), Some("rust"));
         assert_eq!(lang_from_ext(Path::new("foo.ts")), Some("typescript"));
@@ -457,6 +576,7 @@ mod tests {
             enabled: true,
             timeout_ms: 100,
             servers: std::collections::HashMap::new(),
+            ..LspConfig::default()
         }
     }
 
@@ -507,6 +627,7 @@ mod tests {
             enabled: true,
             timeout_ms: 100,
             servers,
+            ..LspConfig::default()
         };
         let reg = LspRegistry::from_config(&cfg);
         assert_eq!(
@@ -529,6 +650,7 @@ mod tests {
             enabled: true,
             timeout_ms: 100,
             servers,
+            ..LspConfig::default()
         };
         let reg = LspRegistry::from_config(&cfg);
         assert_eq!(
@@ -634,6 +756,7 @@ mod tests {
             enabled: true,
             timeout_ms: 100,
             servers: std::collections::HashMap::new(),
+            ..LspConfig::default()
         };
         let reg = LspRegistry::from_config(&cfg);
         let tmp = TempDir::new().unwrap();
@@ -654,6 +777,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn a_failure_releases_its_global_permit() {
         let mut entry = ServerEntry {
             permit: Some(global_permits().clone().try_acquire_owned().unwrap()),
@@ -773,6 +897,7 @@ mod tests {
             enabled: true,
             timeout_ms: 500,
             servers,
+            ..LspConfig::default()
         });
         let timeout = Duration::from_millis(500);
 
@@ -837,6 +962,7 @@ mod tests {
             enabled: true,
             timeout_ms: 500,
             servers,
+            ..LspConfig::default()
         });
         let _ = reg.diagnostics_for(&file, Duration::from_millis(500)).await;
         wait_for_starts(&attempts, 1).await;
@@ -860,7 +986,53 @@ mod tests {
         );
     }
 
-    /// The cap is process-wide, not one four-process allowance per session registry.
+    #[cfg(unix)]
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn diagnostic_timeout_keeps_a_healthy_server_warm() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("Cargo.toml"), "[package]").unwrap();
+        let file = tmp.path().join("main.rs");
+        fs::write(&file, "fn main() {}").unwrap();
+        let attempts = tmp.path().join("attempts");
+        let fixed = tmp.path().join("fixed");
+        fs::write(&fixed, "").unwrap();
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &fixed, &path_to_uri(&file));
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "rust".to_string(),
+            forge_config::LspServerEntry {
+                command: script.to_string_lossy().into_owned(),
+                args: vec![],
+            },
+        );
+        let reg = LspRegistry::from_config(&LspConfig {
+            enabled: true,
+            timeout_ms: 20,
+            servers,
+            ..LspConfig::default()
+        });
+
+        let first = reg.diagnostics_for(&file, Duration::from_millis(20)).await;
+        assert_eq!(first.len(), 1);
+        let diagnostics = reg.diagnostics_for(&file, Duration::from_millis(20)).await;
+
+        assert!(diagnostics.is_empty());
+        let key = ("rust".to_string(), tmp.path().canonicalize().unwrap());
+        let entry = reg.servers.lock().await.get(&key).unwrap().clone();
+        let slot = entry.lock().await;
+        assert!(
+            slot.server.is_some(),
+            "a timeout must not kill a live server"
+        );
+        assert!(
+            slot.retry_at.is_none(),
+            "a timeout must not trigger backoff"
+        );
+    }
+
+    /// The live-process cap is process-wide, not one allowance per session registry.
     #[cfg(unix)]
     #[serial_test::serial]
     #[tokio::test]
@@ -890,13 +1062,14 @@ mod tests {
                 enabled: true,
                 timeout_ms: 200,
                 servers,
+                ..LspConfig::default()
             }));
             let _ = reg.diagnostics_for(&file, Duration::from_millis(200)).await;
             registries.push(reg);
         }
-        wait_for_starts(&attempts, MAX_SERVER_SLOTS).await;
+        wait_for_starts(&attempts, MAX_LIVE_SERVERS).await;
         let pids = started_pids(&attempts);
-        assert_eq!(pids.len(), MAX_SERVER_SLOTS);
+        assert_eq!(pids.len(), MAX_LIVE_SERVERS);
         assert!(
             pids.iter().all(|pid| process_is_alive(*pid)),
             "the global permit cap must refuse new analyzers rather than exceed the limit"
@@ -927,6 +1100,7 @@ mod tests {
             enabled: true,
             timeout_ms: 200,
             servers,
+            ..LspConfig::default()
         });
 
         for root_number in 0..=MAX_SERVER_SLOTS {
@@ -940,7 +1114,7 @@ mod tests {
 
         assert_eq!(reg.server_slot_count().await, MAX_SERVER_SLOTS);
         let pids = started_pids(&attempts);
-        assert_eq!(pids.len(), MAX_SERVER_SLOTS + 1);
+        assert_eq!(pids.len(), MAX_LIVE_SERVERS + 1);
         wait_for_process_exit(pids[0]).await;
         assert!(
             !process_is_alive(pids[0]),
@@ -994,6 +1168,7 @@ mod tests {
             enabled: true,
             timeout_ms: 100,
             servers,
+            ..LspConfig::default()
         };
         let reg = LspRegistry::from_config(&cfg);
         let tmp = TempDir::new().unwrap();

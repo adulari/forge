@@ -156,3 +156,18 @@ The following are explicit follow-ups, not hidden completion claims:
 
 This closeout intentionally leaves those gaps visible so a future campaign can start from measured
 facts rather than from a false “100% complete” label.
+
+## Post-closeout LSP resource follow-up (2026-07-29)
+
+The LSP safety gap above was addressed by
+[ADR-0013](../architecture/decisions/0013-resource-bounded-lsp-processes.md). Forge now combines a
+single process-wide live-analyzer permit, a configurable 2 GiB process-tree RSS guard, 120-second
+idle reaping, and a lightweight Rust Analyzer profile. A real-workspace probe reduced the measured
+cold-start peak from 3.7 GiB/37 processes/approximately 14 cores to 1675.7 MiB/four processes/
+approximately one core while still reporting an intentional Rust type error in 9.03 seconds. The
+final RSS remained at the measured peak through the 60.79-second run and the 2 GiB guard did not
+fire.
+
+The operational workaround `[lsp] enabled = false` is therefore no longer required for this
+workstation once a build containing ADR-0013 is installed. The historical measurements and
+workaround remain above to preserve an accurate record of the original campaign state.
