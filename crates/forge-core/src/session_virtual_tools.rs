@@ -354,10 +354,10 @@ impl Session {
 }
 
 /// The on-demand memory-write virtual tool name.
-pub(crate) const REMEMBER_TOOL: &str = "remember";
+pub const REMEMBER_TOOL: &str = "remember";
 
 /// The `ToolSpec` advertised to the model for [`REMEMBER_TOOL`].
-pub(crate) fn remember_spec() -> ToolSpec {
+pub fn remember_spec() -> ToolSpec {
     ToolSpec {
         name: REMEMBER_TOOL.to_string(),
         description: "Persist a durable fact to memory so it's available in future sessions. \
