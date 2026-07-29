@@ -58,7 +58,14 @@ pub fn parse_pasted_redirect(input: &str, expected_state: &str) -> Result<String
     if input.is_empty() {
         bail!("no redirect URL or authorization code provided")
     }
+    let is_callback = input.contains('?') || input.contains('&') || input.contains('=');
     if !input.contains("code=") {
+        if is_callback {
+            if input.contains("error=") {
+                bail!("OAuth authorization was denied or failed; pasted callback has no code")
+            }
+            bail!("pasted callback is missing the 'code' parameter")
+        }
         return Ok(input.to_string());
     }
     let query = input
@@ -276,6 +283,13 @@ mod tests {
         );
         assert!(parse_pasted_redirect("https://localhost/cb?code=a&state=no", "ok").is_err());
         assert!(parse_pasted_redirect("https://localhost/cb?code=a", "ok").is_err());
+        assert!(
+            parse_pasted_redirect("https://localhost/cb?error=access_denied&state=ok", "ok")
+                .unwrap_err()
+                .to_string()
+                .contains("denied")
+        );
+        assert!(parse_pasted_redirect("state=ok", "ok").is_err());
         assert_eq!(
             parse_pasted_redirect("bare-code", "unused").unwrap(),
             "bare-code"

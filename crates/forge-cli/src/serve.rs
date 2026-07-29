@@ -1153,13 +1153,12 @@ async fn browse_projects(
     }
 }
 
-/// `POST /api/sessions` — create (optionally in a fresh isolated worktree) and start driving.
+/// `POST /api/sessions` starts a session.
 async fn create_session(
     State(state): State<Arc<DaemonState>>,
     axum::Json(req): axum::Json<CreateSessionReq>,
 ) -> Response {
-    // Validate `temper` first and fail fast — before any worktree/driver side effect — so an
-    // unrecognized value never silently falls back to the default temper.
+    // Validate temper before creating a worktree or driver.
     let temper = match req.temper.as_deref() {
         Some(raw) => match parse_temper(raw) {
             Ok(mode) => Some(mode),
@@ -1167,7 +1166,6 @@ async fn create_session(
         },
         None => None,
     };
-
     let resume_metadata = if let Some(session_id) = req.resume.as_deref() {
         if req.worktree {
             return err_response(
