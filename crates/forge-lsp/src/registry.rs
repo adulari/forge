@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -26,6 +27,13 @@ const IDLE_SERVER_TTL: Duration = Duration::from_secs(300);
 /// A lazily-initialized language-server slot for one `(language, repo-root)` pair, behind its
 /// own lock so a hung server only blocks callers waiting on that same pair.
 type ServerSlot = Arc<Mutex<ServerEntry>>;
+
+type GlobalSlot = (usize, Weak<Mutex<ServerEntry>>);
+
+fn global_slots() -> &'static StdMutex<Vec<GlobalSlot>> {
+    static SLOTS: OnceLock<StdMutex<Vec<GlobalSlot>>> = OnceLock::new();
+    SLOTS.get_or_init(|| StdMutex::new(Vec::new()))
+}
 
 /// The live server for one `(language, repo-root)` pair plus its failure backoff.
 ///
@@ -80,8 +88,12 @@ impl ServerEntry {
         self.idle_generation
     }
 
+    fn is_idle_for(&self, now: Instant, ttl: Duration) -> bool {
+        now.duration_since(self.last_used) >= ttl
+    }
+
     fn is_idle(&self, now: Instant) -> bool {
-        now.duration_since(self.last_used) >= IDLE_SERVER_TTL
+        self.is_idle_for(now, IDLE_SERVER_TTL)
     }
 }
 
@@ -186,6 +198,7 @@ impl LspRegistry {
         let idle_generation = slot.touch();
         schedule_idle_shutdown(entry.clone(), idle_generation);
         if slot.server.is_none() {
+            global_touch(&entry);
             let now = Instant::now();
             if slot.cooling_down(now) {
                 debug!("lsp: {lang} ({cmd}) is in failure cooldown — skipping diagnostics");
@@ -281,21 +294,64 @@ impl LspRegistry {
     }
 }
 
+fn global_touch(entry: &ServerSlot) {
+    let pointer = Arc::as_ptr(entry) as usize;
+    let mut slots = global_slots()
+        .lock()
+        .expect("LSP global slot lock poisoned");
+    slots.retain(|(_, slot)| slot.strong_count() > 0);
+    if !slots.iter().any(|(known, _)| *known == pointer) {
+        slots.push((pointer, Arc::downgrade(entry)));
+    }
+    let live = slots
+        .iter()
+        .filter_map(|(known, slot)| {
+            let entry = slot.upgrade()?;
+            let slot = entry.try_lock().ok()?;
+            slot.server.as_ref().map(|_| (*known, slot.last_used))
+        })
+        .collect::<Vec<_>>();
+    if live.len() < MAX_SERVER_SLOTS {
+        return;
+    }
+    let Some((victim, _)) = live
+        .into_iter()
+        .filter(|(known, _)| *known != pointer)
+        .min_by_key(|(_, last_used)| *last_used)
+    else {
+        return;
+    };
+    if let Some((_, weak)) = slots.iter().find(|(known, _)| *known == victim) {
+        if let Some(entry) = weak.upgrade() {
+            if let Ok(mut slot) = entry.try_lock() {
+                debug!(
+                    "lsp: evicting least-recently-used server globally to enforce process limit"
+                );
+                slot.server = None;
+            }
+        }
+    }
+}
+
 /// Arm a one-shot reaper for a use of a server slot. A newer use changes the generation, making
 /// older timers harmless. A weak reference means an LRU eviction drops the slot and its
 /// `kill_on_drop` child immediately instead of letting this timer retain it for five minutes.
 fn schedule_idle_shutdown(entry: ServerSlot, generation: u64) {
+    schedule_idle_shutdown_after(entry, generation, IDLE_SERVER_TTL);
+}
+
+fn schedule_idle_shutdown_after(entry: ServerSlot, generation: u64, delay: Duration) {
     let entry = Arc::downgrade(&entry);
     tokio::spawn(async move {
-        tokio::time::sleep(IDLE_SERVER_TTL).await;
+        tokio::time::sleep(delay).await;
         let Some(entry) = entry.upgrade() else {
             return;
         };
         let mut slot = entry.lock().await;
-        if slot.idle_generation == generation && slot.is_idle(Instant::now()) {
+        if slot.idle_generation == generation && slot.is_idle_for(Instant::now(), delay) {
             debug!(
                 "lsp: stopping idle language server after {}s",
-                IDLE_SERVER_TTL.as_secs()
+                delay.as_secs()
             );
             slot.server = None;
         }
@@ -769,6 +825,89 @@ mod tests {
             starts_recorded(&attempts),
             2,
             "a live server must be reused"
+        );
+    }
+
+    /// An idle server is reaped by its own timer; no later diagnostics call is needed to trigger it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_server_is_terminated_without_a_follow_up_request() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("Cargo.toml"), "[package]").unwrap();
+        let file = tmp.path().join("main.rs");
+        fs::write(&file, "fn main() {}").unwrap();
+        let attempts = tmp.path().join("attempts");
+        let fixed = tmp.path().join("fixed");
+        fs::write(&fixed, "").unwrap();
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &fixed, &path_to_uri(&file));
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "rust".to_string(),
+            forge_config::LspServerEntry {
+                command: script.to_string_lossy().into_owned(),
+                args: vec![],
+            },
+        );
+        let reg = LspRegistry::from_config(&LspConfig {
+            enabled: true,
+            timeout_ms: 500,
+            servers,
+        });
+        let _ = reg.diagnostics_for(&file, Duration::from_millis(500)).await;
+        wait_for_starts(&attempts, 1).await;
+        let pid = started_pids(&attempts)[0];
+        let key = ("rust".to_string(), tmp.path().canonicalize().unwrap());
+        let entry = reg.servers.lock().await.get(&key).unwrap().clone();
+        let generation = entry.lock().await.idle_generation;
+        schedule_idle_shutdown_after(entry, generation, Duration::from_millis(25));
+        wait_for_process_exit(pid).await;
+        assert!(
+            !process_is_alive(pid),
+            "idle analyzer must be terminated by its timer"
+        );
+    }
+
+    /// The cap is process-wide, not one four-process allowance per session registry.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_servers_are_bounded_across_registries() {
+        let tmp = TempDir::new().unwrap();
+        let attempts = tmp.path().join("attempts");
+        let fixed = tmp.path().join("fixed");
+        fs::write(&fixed, "").unwrap();
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &fixed, "file:///unused.rs");
+        let mut registries = Vec::new();
+        for index in 0..=MAX_SERVER_SLOTS {
+            let root = tmp.path().join(format!("registry-root-{index}"));
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+            let file = root.join("main.rs");
+            fs::write(&file, "fn main() {}").unwrap();
+            let mut servers = std::collections::HashMap::new();
+            servers.insert(
+                "rust".to_string(),
+                forge_config::LspServerEntry {
+                    command: script.to_string_lossy().into_owned(),
+                    args: vec![],
+                },
+            );
+            let reg = Arc::new(LspRegistry::from_config(&LspConfig {
+                enabled: true,
+                timeout_ms: 200,
+                servers,
+            }));
+            let _ = reg.diagnostics_for(&file, Duration::from_millis(200)).await;
+            registries.push(reg);
+        }
+        wait_for_starts(&attempts, MAX_SERVER_SLOTS + 1).await;
+        let pids = started_pids(&attempts);
+        assert_eq!(pids.len(), MAX_SERVER_SLOTS + 1);
+        wait_for_process_exit(pids[0]).await;
+        assert!(
+            !process_is_alive(pids[0]),
+            "global LSP cap must evict across registries"
         );
     }
 

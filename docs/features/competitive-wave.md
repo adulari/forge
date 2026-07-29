@@ -33,11 +33,13 @@ toolchain costs one doomed process per cooldown rather than one per edited file.
 clears the cooldown, so diagnostics resume on their own once the toolchain is repaired (e.g.
 `rustup component add rust-analyzer`) — no Forge restart required.
 
-A daemon can visit many project roots over time, so live diagnostics retain at most four
-`(language, repo-root)` servers per Forge session. A server idle for five minutes is dropped and
-spawned lazily if that root is edited again. This bounds idle analyzer memory without making an
-eviction permanent: the existing 30-second to 10-minute failure backoff still applies after a
-server exits unexpectedly or is OOM-killed, and a later successful handshake restores diagnostics.
+A daemon can visit many project roots across many concurrent sessions, so the process-wide live
+registry retains at most four `(language, repo-root)` analyzer processes total. Each analyzer has an
+independent five-minute idle timer that terminates it even when the session receives no further
+edits; a later edit lazily starts it again. This bounds retained analyzer memory across idle
+sessions without making an eviction permanent: the existing 30-second to 10-minute failure backoff
+still applies after a server exits unexpectedly or is OOM-killed, and a later successful handshake
+restores diagnostics.
 
 ```toml
 [lsp]
