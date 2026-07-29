@@ -76,7 +76,7 @@ pub(crate) struct SessionDriverHandle {
     /// per connection). The push debounce: any client connected ⇒ no push.
     pub ws_clients: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
-    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl SessionDriverHandle {
@@ -88,7 +88,7 @@ impl SessionDriverHandle {
 
     /// Wait (bounded) for the driver task to finish after [`Self::shutdown`].
     pub async fn join(&self, timeout: std::time::Duration) {
-        let task = self.task.lock().await.take();
+        let task = self.task.lock().expect("driver task lock poisoned").take();
         if let Some(mut task) = task {
             if tokio::time::timeout(timeout, &mut task).await.is_err() {
                 // Dropping a JoinHandle detaches rather than cancels. Abort explicitly so a stuck
@@ -96,6 +96,19 @@ impl SessionDriverHandle {
                 task.abort();
                 let _ = task.await;
             }
+        }
+    }
+}
+
+impl Drop for SessionDriverHandle {
+    fn drop(&mut self) {
+        if let Some(task) = self
+            .task
+            .get_mut()
+            .expect("driver task lock poisoned")
+            .take()
+        {
+            task.abort();
         }
     }
 }
@@ -200,7 +213,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         last_activity,
         ws_clients,
         shutdown_tx,
-        task: tokio::sync::Mutex::new(Some(task)),
+        task: std::sync::Mutex::new(Some(task)),
     })
 }
 
@@ -813,6 +826,79 @@ mod tests {
             usage_load_rx: None,
             cwd: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_last_handle_aborts_its_driver_task() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            struct NotifyDrop(Option<tokio::sync::oneshot::Sender<()>>);
+            impl Drop for NotifyDrop {
+                fn drop(&mut self) {
+                    let _ = self.0.take().expect("drop once").send(());
+                }
+            }
+            let _notify = NotifyDrop(Some(done_tx));
+            std::future::pending::<()>().await;
+        });
+        started_rx
+            .await
+            .expect("driver must start before it is dropped");
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let (_, snapshot_rx) = tokio::sync::watch::channel(std::sync::Arc::new(
+            remote::SnapshotFrame::new(remote::Snapshot::default()),
+        ));
+        let (input_tx, _) = tokio::sync::mpsc::channel(1);
+        drop(SessionDriverHandle {
+            session_id: "test".into(),
+            title: String::new(),
+            cwd: String::new(),
+            worktree: None,
+            created_at: 0,
+            snapshot_rx,
+            events: std::sync::Arc::new(std::sync::Mutex::new(remote::EventLog::new(1))),
+            input_tx,
+            last_activity: std::sync::Arc::new(AtomicI64::new(0)),
+            ws_clients: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_tx,
+            task: std::sync::Mutex::new(Some(task)),
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
+            .await
+            .expect("dropped handle must abort retained driver")
+            .expect("driver drop notifier");
+    }
+
+    #[tokio::test]
+    async fn timed_out_join_aborts_the_retained_driver_task() {
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(std::sync::Arc::new(
+            remote::SnapshotFrame::new(remote::Snapshot::default()),
+        ));
+        drop(snapshot_tx);
+        let (input_tx, _) = tokio::sync::mpsc::channel(1);
+        let handle = SessionDriverHandle {
+            session_id: "test".into(),
+            title: String::new(),
+            cwd: String::new(),
+            worktree: None,
+            created_at: 0,
+            snapshot_rx,
+            events: std::sync::Arc::new(std::sync::Mutex::new(remote::EventLog::new(1))),
+            input_tx,
+            last_activity: std::sync::Arc::new(AtomicI64::new(0)),
+            ws_clients: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_tx,
+            task: std::sync::Mutex::new(Some(tokio::spawn(std::future::pending()))),
+        };
+        handle.join(std::time::Duration::from_millis(1)).await;
+        assert!(handle
+            .task
+            .lock()
+            .expect("driver task lock poisoned")
+            .is_none());
     }
 
     #[tokio::test]
