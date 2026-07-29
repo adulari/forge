@@ -22,10 +22,10 @@
 //!    and look it up in OR's index. This covers NVIDIA NIM's full model catalog even though OR
 //!    lists those models under `meta-llama/` rather than `nvidia/`.
 
+#[cfg(test)]
+use forge_mesh::pricing;
 use std::collections::HashMap;
 use std::time::Duration;
-
-use forge_mesh::pricing;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -216,77 +216,10 @@ pub async fn fetch_and_persist(models: &[String]) {
     persist_authoritative_contexts(models, &store);
 }
 
-// ── CLI bridge derivation ─────────────────────────────────────────────────────────────────────────
-
-/// Persist narrowly scoped authoritative context windows after every discovery source. Most model
-/// windows remain API-derived; this covers compatible endpoints that expose only model IDs.
-fn persist_authoritative_contexts(models: &[String], store: &forge_store::Store) {
-    for model in models {
-        if let Some(window) = pricing::authoritative_context_limit(model) {
-            let _ = store.set_model_context(model, window);
-        }
-    }
-}
-
-/// Family word a bridge's bare tier aliases must share with a canonical candidate. claude-cli
-/// aliases (`opus`, `fable`) and codex-cli's don't always spell their family, so without this
-/// `opus` could match any model containing that word. agy-cli aliases are full model names
-/// (`gemini-3.5-flash`, `claude-sonnet-4.6`) that already carry their family.
-fn bridge_family_token(prefix: &str) -> Option<&'static str> {
-    match prefix {
-        "claude-cli" => Some("claude"),
-        "codex-cli" => Some("gpt"),
-        _ => None,
-    }
-}
-
-/// The context window for one bridge alias, derived from fetched data: the alias's token set must
-/// be a subset of a canonical model's tokens — the same vocabulary the benchmark mapper uses
-/// (`fable` ⊆ `anthropic::claude-fable-5`) — and among all canonical matches the LARGEST window
-/// wins, because a versionless alias (`opus`, `sonnet`) means the latest/best model of that tier,
-/// exactly like its benchmark mapping. `None` when nothing fetched matches.
-fn bridge_window(prefix: &str, alias: &str, ctx_registry: &HashMap<String, u32>) -> Option<u32> {
-    let want = forge_mesh::bench::tokens(alias);
-    if want.is_empty() {
-        return None;
-    }
-    let family = bridge_family_token(prefix);
-    ctx_registry
-        .iter()
-        .filter(|(id, _)| {
-            let model = id.split_once("::").map(|(_, m)| m).unwrap_or(id);
-            let cand = forge_mesh::bench::tokens(model);
-            family.is_none_or(|f| cand.iter().any(|t| t == f))
-                && want.iter().all(|t| cand.contains(t))
-        })
-        .map(|(_, &w)| w)
-        .max()
-}
-
-fn derive_cli_bridge_windows(
-    models: &[String],
-    ctx_registry: &HashMap<String, u32>,
-    store: &forge_store::Store,
-) {
-    for id in models {
-        let Some((prefix, alias)) = id.split_once("::") else {
-            continue;
-        };
-        if alias.is_empty() || !forge_mesh::catalog::is_subscription(id) {
-            continue;
-        }
-        // Dynamic first. The hardcoded per-bridge table (forge_mesh::pricing::context_limit) is
-        // the LAST-RESORT fallback, for a bridge model absent from every fetched source (e.g. a
-        // codex GPT release before OpenRouter lists it). The result is written to the store
-        // either way so a stale row from an earlier run can't linger and win over the fallback
-        // at read time (the store outranks context_limit in effective_context_window).
-        let window =
-            bridge_window(prefix, alias, ctx_registry).or_else(|| pricing::context_limit(id));
-        if let Some(w) = window {
-            let _ = store.set_model_context(id, w);
-        }
-    }
-}
+mod bridges;
+#[cfg(test)]
+use bridges::bridge_window;
+use bridges::{derive_cli_bridge_windows, persist_authoritative_contexts};
 
 // ── parsers ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -574,11 +507,11 @@ mod tests {
 
     #[test]
     fn bridge_window_family_guard_blocks_cross_family_word_matches() {
-        // "opus" appears in acme/magnum-opus-72b (32k) — the claude family guard must keep the
-        // claude-cli alias off it (already covered by the 1M assertions above), and a registry
-        // with ONLY the impostor must yield no match at all rather than a wrong window.
-        let impostor = HashMap::from([("openrouter::acme/magnum-opus-72b".to_string(), 32_000)]);
-        assert_eq!(bridge_window("claude-cli", "opus", &impostor), None);
+        let impostors = HashMap::from([
+            ("openrouter::acme/magnum-opus-72b".to_string(), 32_000),
+            ("openrouter::acme/claude-opus-4".to_string(), 2_000_000),
+        ]);
+        assert_eq!(bridge_window("claude-cli", "opus", &impostors), None);
     }
 
     #[test]
@@ -590,7 +523,8 @@ mod tests {
             "claude-cli::haiku".to_string(),
             "codex-cli::gpt-5.5".to_string(),
             "codex-cli::gpt-9.9".to_string(), // absent from fetched data → fallback
-            "claude-cli::".to_string(),       // bare id → never windowed
+            "codex-oauth::gpt-5.6-sol".to_string(),
+            "claude-cli::".to_string(), // bare id → never windowed
             "anthropic::claude-fable-5".to_string(), // non-bridge → untouched here
         ];
         // A stale pre-fix row must be overwritten by the dynamic value.
@@ -616,6 +550,11 @@ mod tests {
             pricing::context_limit("codex-cli::gpt-9.9")
         );
         assert_eq!(store.model_context("claude-cli::").unwrap(), None);
+        assert_eq!(
+            store.model_context("codex-oauth::gpt-5.6-sol").unwrap(),
+            None,
+            "non-CLI subscription models are not bridge-derived"
+        );
     }
 
     #[test]
