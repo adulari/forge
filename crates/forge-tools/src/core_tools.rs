@@ -1787,6 +1787,20 @@ mod tests {
         assert_eq!(out, format!("{file}:2: find ME here"), "got:\n{out}");
         assert!(!out.contains("b.txt"), "only the named file is searched");
 
+        let out = SearchTool
+            .run(&json!({ "query": "find ME", "path": file, "file_pattern": "*.rs" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            out, "No matches found.",
+            "the explicit file must satisfy file_pattern"
+        );
+        let out = SearchTool
+            .run(&json!({ "query": "find ME", "path": file, "file_pattern": "*.txt" }))
+            .await
+            .unwrap();
+        assert_eq!(out, format!("{file}:2: find ME here"));
+
         // Same regex + context semantics as the directory walk.
         let out = SearchTool
             .run(&json!({ "query": r"find \w+", "path": file, "regex": true, "context": 1 }))

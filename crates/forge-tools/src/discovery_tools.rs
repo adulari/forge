@@ -163,10 +163,17 @@ impl Tool for SearchTool {
         tokio::task::spawn_blocking(move || -> Result<String, ToolError> {
             let mut matches: Vec<String> = Vec::new();
             if root_is_file {
-                // A file path searches that single file — same matching semantics + output
-                // format, the path column is the file as given. `file_pattern` is ignored:
-                // the caller already named the exact file. A read failure is a real error
-                // here (unlike the walk, where unreadable files are skipped silently).
+                // A file path searches that single file with the same matching semantics and
+                // output format as a recursive search. The optional filter still applies.
+                if let Some(ref fg) = file_glob {
+                    let path = std::path::Path::new(&root);
+                    let name = path.file_name().map(std::path::Path::new).unwrap_or(path);
+                    if !fg.is_match(path) && !fg.is_match(name) {
+                        return Ok("No matches found.".to_string());
+                    }
+                }
+                // A read failure is a real error here (unlike the walk, where unreadable files
+                // are skipped silently).
                 let content = std::fs::read_to_string(&root)
                     .map_err(|e| ToolError::Failed(format!("can't read {root}: {e}")))?;
                 append_search_matches(&root, &content, re.as_ref(), &query, context, &mut matches);
