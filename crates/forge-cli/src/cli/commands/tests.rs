@@ -86,6 +86,61 @@ fn provider_azure_requires_exactly_one_endpoint_source() {
 }
 
 #[test]
+fn mcp_add_preserves_transport_and_stdio_command_tail() {
+    let cli = Cli::try_parse_from([
+        "forge",
+        "mcp",
+        "add",
+        "server",
+        "--transport",
+        "stdio",
+        "-e",
+        "KEY=value",
+        "--",
+        "node",
+        "server.js",
+        "--watch",
+    ])
+    .expect("stdio MCP config");
+    assert!(matches!(
+        cli.command,
+        Command::Mcp {
+            cmd: Some(McpCmd::Add {
+                transport: McpTransportArg::Stdio,
+                env,
+                command,
+                ..
+            })
+        } if env == ["KEY=value"] && command == ["node", "server.js", "--watch"]
+    ));
+
+    let cli = Cli::try_parse_from([
+        "forge",
+        "mcp",
+        "add",
+        "remote",
+        "--transport",
+        "http",
+        "--url",
+        "https://mcp.example",
+        "--header",
+        "X-Test=yes",
+    ])
+    .expect("HTTP MCP config");
+    assert!(matches!(
+        cli.command,
+        Command::Mcp {
+            cmd: Some(McpCmd::Add {
+                transport: McpTransportArg::Http,
+                url: Some(ref url),
+                header,
+                ..
+            })
+        } if url == "https://mcp.example" && header == ["X-Test=yes"]
+    ));
+}
+
+#[test]
 fn extract_code_blocks_pulls_fenced_blocks_with_lang() {
     let md =
         "Here you go:\n\n```rust\nfn main() {}\n```\n\nand shell:\n\n```bash\nls -la\n```\ndone";
