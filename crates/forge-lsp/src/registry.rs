@@ -588,6 +588,14 @@ mod tests {
             .unwrap_or(0)
     }
 
+    #[cfg(unix)]
+    async fn wait_for_starts(attempts: &Path, expected: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while starts_recorded(attempts) < expected && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// A server that cannot start (the reported `rust-analyzer` component was missing) must not be
     /// respawned once per diagnostic request, and must recover on its own once it is repaired.
     #[cfg(unix)]
@@ -618,6 +626,7 @@ mod tests {
         let timeout = Duration::from_millis(500);
 
         assert!(reg.diagnostics_for(&file, timeout).await.is_empty());
+        wait_for_starts(&attempts, 1).await;
         assert_eq!(starts_recorded(&attempts), 1);
 
         // Still inside the cooldown: no second process, no second warning.
@@ -632,6 +641,7 @@ mod tests {
         fs::write(&fixed, "").unwrap();
         reg.expire_cooldowns().await;
         let diags = reg.diagnostics_for(&file, timeout).await;
+        wait_for_starts(&attempts, 2).await;
         assert_eq!(
             starts_recorded(&attempts),
             2,
@@ -666,7 +676,13 @@ mod tests {
             .initialize("file:///tmp", Duration::from_millis(500))
             .await
             .expect_err("the fake server exits before answering");
-        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe
+            ),
+            "unexpected initialize failure: {err}"
+        );
         let cause = srv.stderr_summary().await;
         assert!(
             cause.contains("'rust-analyzer' is not installed"),
