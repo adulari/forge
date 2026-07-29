@@ -198,10 +198,14 @@ pub(crate) enum ProviderCmd {
     Azure {
         /// Azure resource name → `https://<resource>.openai.azure.com`. Use `--endpoint` for a full
         /// custom URL (sovereign clouds, proxies). Exactly one of `--resource` / `--endpoint`.
-        #[arg(long, conflicts_with = "endpoint")]
+        #[arg(
+            long,
+            conflicts_with = "endpoint",
+            required_unless_present = "endpoint"
+        )]
         resource: Option<String>,
         /// Full resource endpoint base (e.g. `https://my-resource.openai.azure.com`).
-        #[arg(long)]
+        #[arg(long, required_unless_present = "resource")]
         endpoint: Option<String>,
         /// Azure REST `api-version` (default: a recent GA version).
         #[arg(long)]

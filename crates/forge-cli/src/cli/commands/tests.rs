@@ -62,6 +62,30 @@ fn anywhere_exposes_approval_and_explicit_recovery_fallback() {
 }
 
 #[test]
+fn provider_azure_requires_exactly_one_endpoint_source() {
+    assert!(Cli::try_parse_from(["forge", "provider", "azure"]).is_err());
+    assert!(Cli::try_parse_from([
+        "forge",
+        "provider",
+        "azure",
+        "--resource",
+        "example",
+        "--endpoint",
+        "https://example.test"
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from(["forge", "provider", "azure", "--resource", "example"]).is_ok());
+    assert!(Cli::try_parse_from([
+        "forge",
+        "provider",
+        "azure",
+        "--endpoint",
+        "https://example.test"
+    ])
+    .is_ok());
+}
+
+#[test]
 fn extract_code_blocks_pulls_fenced_blocks_with_lang() {
     let md =
         "Here you go:\n\n```rust\nfn main() {}\n```\n\nand shell:\n\n```bash\nls -la\n```\ndone";
