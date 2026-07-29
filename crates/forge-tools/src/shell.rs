@@ -34,6 +34,8 @@ use tokio::process::{Child, Command};
 
 use crate::sandbox::{self, SandboxPolicy};
 use crate::{str_arg, Tool, ToolError};
+mod output;
+use output::{render_streams, stream_text, truncate_for_model};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const MAX_TIMEOUT_SECS: u64 = 600;
@@ -552,32 +554,6 @@ fn pty_kill_child(pid: Option<u32>) {
     }
 }
 
-/// Render combined streams, ANSI-stripped, with binary output summarized rather than dumped.
-fn render_streams(out: &[u8], err: &[u8]) -> String {
-    let mut parts = Vec::new();
-    if let Some(s) = stream_text(out) {
-        if !s.trim().is_empty() {
-            parts.push(s);
-        }
-    }
-    if let Some(s) = stream_text(err) {
-        if !s.trim().is_empty() {
-            parts.push(format!("[stderr]\n{s}"));
-        }
-    }
-    parts.join("\n")
-}
-
-fn stream_text(bytes: &[u8]) -> Option<String> {
-    if bytes.is_empty() {
-        return None;
-    }
-    if bytes.contains(&0) {
-        return Some(format!("<binary output: {} bytes, not shown>", bytes.len()));
-    }
-    Some(strip_ansi(&String::from_utf8_lossy(bytes)))
-}
-
 /// Read an async stream up to [`CAPTURE_CAP`] bytes; returns the bytes and whether it capped.
 async fn read_capped<R: AsyncRead + Unpin>(mut r: R) -> (Vec<u8>, bool) {
     let mut buf = Vec::new();
@@ -800,83 +776,6 @@ async fn terminate(child: &mut Child, pgid: Option<i32>) {
     }
 }
 
-/// Strip ANSI/CSI escape sequences (token noise) from model-facing text.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // CSI: ESC [ ... <final byte 0x40..0x7e>
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for n in chars.by_ref() {
-                    if ('\x40'..='\x7e').contains(&n) {
-                        break;
-                    }
-                }
-            } else if chars.peek() == Some(&']') {
-                // OSC: ESC ] ... terminated by BEL (0x07) or ST (ESC \). Color-enabled programs in
-                // PTY mode emit these constantly (window titles `ESC]0;…BEL`, hyperlinks `ESC]8;;…`).
-                // Consume the whole sequence so its payload doesn't leak into model-facing output.
-                chars.next();
-                while let Some(n) = chars.next() {
-                    if n == '\x07' {
-                        break;
-                    }
-                    if n == '\x1b' {
-                        chars.next(); // ST = ESC \ — drop the trailing backslash too
-                        break;
-                    }
-                }
-            } else if let Some(next) = chars.next() {
-                // other escape: drop the next char defensively (ESC c, ESC =). For the 3-byte
-                // charset-designation form `ESC <intermediate 0x20-0x2f> <final>` (e.g. `ESC ( B`,
-                // emitted by ncurses/box-drawing tools) drop the final byte too, or it leaks.
-                if ('\x20'..='\x2f').contains(&next) {
-                    chars.next();
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Keep head + tail within `budget` bytes, with a middle marker. Char-boundary safe.
-fn truncate_for_model(s: &str, budget: usize) -> (String, bool) {
-    if s.len() <= budget {
-        return (s.to_string(), false);
-    }
-    let head_len = floor_boundary(s, budget / 2);
-    let tail_len = floor_boundary_back(s, budget - head_len);
-    let dropped = s.len() - head_len - tail_len;
-    let head = &s[..head_len];
-    let tail = &s[s.len() - tail_len..];
-    (
-        format!("{head}\n… {dropped} bytes truncated …\n{tail}"),
-        true,
-    )
-}
-
-fn floor_boundary(s: &str, mut i: usize) -> usize {
-    if i >= s.len() {
-        return s.len();
-    }
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-fn floor_boundary_back(s: &str, len: usize) -> usize {
-    let mut start = s.len().saturating_sub(len);
-    while start < s.len() && !s.is_char_boundary(start) {
-        start += 1;
-    }
-    s.len() - start
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,51 +842,6 @@ mod tests {
         );
         assert!(!sentinel.join("marker").exists());
         let _ = std::fs::remove_dir_all(base);
-    }
-
-    #[test]
-    fn strip_ansi_removes_color_codes() {
-        let colored = "\x1b[31mred\x1b[0m plain";
-        assert_eq!(strip_ansi(colored), "red plain");
-    }
-
-    #[test]
-    fn strip_ansi_consumes_whole_osc_sequence() {
-        // OSC (ESC ] … BEL/ST) used to leak its payload — only `]` was dropped.
-        assert_eq!(strip_ansi("\x1b]0;my title\x07hello"), "hello"); // BEL-terminated
-        assert_eq!(strip_ansi("\x1b]8;;http://x\x1b\\link"), "link"); // ST-terminated hyperlink
-    }
-
-    #[test]
-    fn strip_ansi_drops_three_byte_charset_sequences() {
-        // `ESC ( B` / `ESC ) 0` (charset designation, emitted by ncurses/box-drawing tools) are
-        // 3 bytes — the final byte used to leak. 2-byte escapes (ESC c, ESC =) must still work.
-        assert_eq!(strip_ansi("\x1b(Btext"), "text");
-        assert_eq!(strip_ansi("\x1b)0text"), "text");
-        assert_eq!(strip_ansi("\x1b=text"), "text");
-        assert_eq!(strip_ansi("\x1bctext"), "text");
-    }
-
-    #[test]
-    fn truncate_keeps_head_and_tail_with_marker() {
-        let s = "a".repeat(20_000);
-        let (t, truncated) = truncate_for_model(&s, 8 * 1024);
-        assert!(truncated);
-        assert!(t.contains("truncated"));
-        assert!(t.len() < s.len());
-    }
-
-    #[test]
-    fn small_output_not_truncated() {
-        let (t, truncated) = truncate_for_model("hello", 8 * 1024);
-        assert!(!truncated);
-        assert_eq!(t, "hello");
-    }
-
-    #[test]
-    fn binary_output_is_summarized() {
-        let s = stream_text(&[0u8, 1, 2, 3]).unwrap();
-        assert!(s.contains("binary output"));
     }
 
     // Execution tests are POSIX-only (the tool shells out to `sh`).
