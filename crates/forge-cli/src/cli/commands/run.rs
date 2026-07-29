@@ -8,51 +8,22 @@ use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
 
 use crate::*;
 
-/// Build the `shell` tool's Landlock sandbox and/or scoped `CARGO_TARGET_DIR` carve-out from
-/// `[shell]` config (`sandbox` / `scoped_cargo_target`, ADR-0008 + PR #521). Returns `None` when
-/// both knobs are off, in which case the caller should keep the plain `ShellTool::default()`
-/// already registered by `ToolRegistry::with_core_tools()`. Shared by `forge run` (this file) and
-/// the `mcp-serve` CLI-bridge path (`crate::mcp_serve::run`) so the two entry points can't drift —
-/// a bridged claude/codex agent gets the same compile-check carve-out as a direct `forge run`
-/// session.
-pub(crate) fn sandboxed_shell_tool_in(
-    config: &forge_config::Config,
-    workspace: &std::path::Path,
-) -> Option<forge_tools::ShellTool> {
-    if !(config.shell.sandbox || config.shell.scoped_cargo_target) {
-        return None;
-    }
-    let writable = config
-        .shell
-        .sandbox_writable
-        .iter()
-        .map(std::path::PathBuf::from)
-        .collect();
-    let cargo_target_base = config.shell.scoped_cargo_target.then(|| {
-        config
-            .shell
-            .scoped_cargo_target_dir
-            .clone()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("forge-cargo-target"))
-    });
-    Some(forge_tools::ShellTool::with_policy_in_workspace(
-        forge_tools::SandboxPolicy {
-            enabled: config.shell.sandbox,
-            writable,
-            cargo_target_base,
-        },
-        workspace,
-    ))
-}
+mod autonomous;
+pub(crate) use autonomous::*;
 
-#[allow(dead_code)]
-pub(crate) fn sandboxed_shell_tool(
-    config: &forge_config::Config,
-) -> Option<forge_tools::ShellTool> {
-    let workspace = std::env::current_dir().ok()?;
-    sandboxed_shell_tool_in(config, &workspace)
-}
+mod setup;
+pub(crate) use setup::*;
+
+mod session;
+pub(crate) use session::*;
+
+mod one_shot;
+pub(crate) use one_shot::*;
+
+mod plain_chat;
+pub(crate) use plain_chat::*;
+mod natural_language;
+pub(crate) use natural_language::*;
 
 /// A finished `/duel` result: the comparable report plus the still-alive worktree guards for
 /// every candidate (the picker owns picking a winner — merging it back and dropping every guard).
@@ -74,741 +45,81 @@ pub(crate) use dispatch::*;
 mod driver;
 pub(crate) use driver::*;
 
-/// Keep the command palette in sync with the `/command` token at the cursor (input end): open +
-/// filter when one is present anywhere on the line, close when not (`//` escape yields no token).
-/// Ingest an external bridge-stat snapshot into the session's shared quota store. Raw CLI cache
-/// files are input-only; every display and router reads the normalized store after this step.
+/// Ingest an external bridge-stat snapshot into the session's shared quota store.
 pub(crate) fn seed_subscription_stats(session: &Session, bstats: &bridge_stats::BridgeStats) {
-    session.seed_subscription_quota_at(
-        "codex-cli",
-        "five_hour",
-        bstats.codex_5h_pct,
-        bstats.codex_5h_observed_at,
-    );
-    session.seed_subscription_quota_at(
-        "codex-cli",
-        "weekly",
-        bstats.codex_weekly_pct,
-        bstats.codex_weekly_observed_at,
-    );
-    session.seed_subscription_quota_at(
-        "claude-cli",
-        "five_hour",
-        bstats.claude_5h_pct,
-        bstats.claude_5h_observed_at,
-    );
-    session.seed_subscription_quota_at(
-        "claude-cli",
-        "weekly",
-        bstats.claude_weekly_pct,
-        bstats.claude_weekly_observed_at,
-    );
+    for (provider, window, fraction, observed_at) in [
+        (
+            "codex-cli",
+            "five_hour",
+            bstats.codex_5h_pct,
+            bstats.codex_5h_observed_at,
+        ),
+        (
+            "codex-cli",
+            "weekly",
+            bstats.codex_weekly_pct,
+            bstats.codex_weekly_observed_at,
+        ),
+        (
+            "claude-cli",
+            "five_hour",
+            bstats.claude_5h_pct,
+            bstats.claude_5h_observed_at,
+        ),
+        (
+            "claude-cli",
+            "weekly",
+            bstats.claude_weekly_pct,
+            bstats.claude_weekly_observed_at,
+        ),
+    ] {
+        session.seed_subscription_quota_at(provider, window, fraction, observed_at);
+    }
 }
 
-/// Populate subscription utilisation from the shared quota store. This is intentionally the same
-/// normalized snapshot that `/mesh`, `forge mesh`, and the router consult; raw bridge caches must
-/// never directly override the `/usage` percentages.
+/// Populate the usage overlay from the shared, normalized quota store.
 pub(crate) fn fill_subscription_pcts(
     overlay: &mut forge_tui::UsageOverlay,
-    fracs: &std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
+    fractions: &std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
     claude_store_age_secs: Option<i64>,
 ) {
-    let store = |p: &str, w: &str| fracs.get(p).and_then(|m| m.get(w)).copied();
-    overlay.claude_5h_pct = store("claude-cli", "five_hour").map(|f| f * 100.0);
-    overlay.claude_weekly_pct = store("claude-cli", "weekly").map(|f| f * 100.0);
-    overlay.codex_5h_pct = store("codex-cli", "five_hour").map(|f| f * 100.0);
-    overlay.codex_weekly_pct = store("codex-cli", "weekly").map(|f| f * 100.0);
-    // Only annotate a genuinely stale STORE observation. A raw cache-file age is not a display
-    // authority: it can be days old while a live Claude header probe has already refreshed the
-    // exact same shared store row.
+    let stored = |provider: &str, window: &str| {
+        fractions
+            .get(provider)
+            .and_then(|windows| windows.get(window))
+            .copied()
+    };
+    overlay.claude_5h_pct = stored("claude-cli", "five_hour").map(|fraction| fraction * 100.0);
+    overlay.claude_weekly_pct = stored("claude-cli", "weekly").map(|fraction| fraction * 100.0);
+    overlay.codex_5h_pct = stored("codex-cli", "five_hour").map(|fraction| fraction * 100.0);
+    overlay.codex_weekly_pct = stored("codex-cli", "weekly").map(|fraction| fraction * 100.0);
     overlay.claude_rl_age_secs = claude_store_age_secs.filter(|&age| age > 300);
 }
 
+/// Synchronize the command palette with the slash token containing the cursor.
 pub(crate) fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
-    let cur = app.input_cursor.min(app.input.len());
-    // Cursor-anchored: drive the palette only from a `/command` token the cursor sits *within*.
-    // `slash_token_at` otherwise falls back to the last token on the line, which kept the palette
-    // open after a trailing space (so it never closed once you started typing args). Requiring the
-    // cursor to be inside the token closes it the moment the cursor moves past the command name.
-    let tok = forge_tui::slash_token_at(&app.input, cur).filter(|t| cur >= t.start && cur <= t.end);
-    match tok {
-        Some(tok) if app.palette.open => {
-            app.palette.query = tok.name;
+    let cursor = app.input_cursor.min(app.input.len());
+    let token = forge_tui::slash_token_at(&app.input, cursor)
+        .filter(|token| cursor >= token.start && cursor <= token.end);
+    match token {
+        Some(token) if app.palette.open => {
+            app.palette.query = token.name;
             app.palette.clamp();
         }
-        Some(tok) => app.palette.open_with(&tok.name),
+        Some(token) => app.palette.open_with(&token.name),
         None => app.palette.close(),
     }
 }
 
-fn should_refresh_codex_quota(mock: bool, pin: Option<&str>) -> bool {
-    if mock {
-        return false;
-    }
-    match pin.map(forge_config::provider_of) {
-        // Unpinned/bare ids may route through Codex, so preserve the routing-pressure refresh.
-        None | Some("") => true,
-        // Any fully-qualified pin bypasses mesh selection. A Codex response carries fresh quota
-        // headers itself, so a separate pre-turn Luna probe cannot affect the decision and only
-        // adds subscription burn plus startup latency.
-        Some(_) => false,
-    }
-}
-
-pub(crate) async fn build_session_with(
-    presenter: Box<dyn Presenter>,
-    mock: bool,
-    mode: Option<Mode>,
-    resume: Option<String>,
-    pin: Option<String>,
-    suppress_mcp_announce: bool,
-) -> Result<Session> {
-    build_session_with_self_mcp(
-        presenter,
-        mock,
-        mode,
-        resume,
-        pin,
-        suppress_mcp_announce,
-        true,
-        None,
-    )
-    .await
-}
-
-/// Build a session, optionally suppressing the self-MCP injection (see the `disable_self_mcp`
-/// doc below). `build_session_with` is the normal entrypoint (self-MCP allowed); `forge mcp
-/// agent` calls this directly with `disable_self_mcp = false` to break the recursion.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn build_session_with_self_mcp(
-    presenter: Box<dyn Presenter>,
-    mock: bool,
-    mode: Option<Mode>,
-    resume: Option<String>,
-    pin: Option<String>,
-    suppress_mcp_announce: bool,
-    allow_self_mcp: bool,
-    session_cwd: Option<&str>,
-) -> Result<Session> {
-    if let Some(session_id) = resume.as_deref() {
-        if crate::open_store()?
-            .session_handoff_blocked(session_id)
-            .context("checking Anywhere handoff state")?
-        {
-            anyhow::bail!(
-                "session {session_id} is frozen by an Anywhere handoff and cannot be resumed"
-            );
-        }
-    }
-    // Make any keyring-stored provider keys visible to the provider client.
-    forge_config::inject_provider_keys();
-    // …and the search-API key visible to the web_search tool.
-    forge_config::inject_search_keys();
-
-    let mut config = forge_config::load().context("loading configuration")?;
-    if let Some(m) = mode {
-        config.permission_mode = m.into();
-    }
-    // Capture the MCP config before `config` is moved into the Session; connect after the session
-    // is built so its presenter can show the connection status.
-    let mut mcp_config = config.mcp.clone();
-    // Self-MCP: inject a sub-Forge MCP agent server so forge_chat / forge_assay are available
-    // as native tools. Skipped if already declared (prevents duplicate "forge" prefix), and
-    // skipped entirely when `allow_self_mcp` is false — `forge mcp agent` builds its OWN session
-    // through this same function, and without this guard each spawned agent injected another
-    // "forge" MCP server pointing at `mcp agent`, which something then eagerly connected
-    // (spawned) immediately: a real, observed runaway self-fork chain (one child every
-    // ~200-300ms, no depth limit, OOM'd the machine in minutes). `forge mcp agent` IS the
-    // self-MCP tool surface already — it must never try to spawn another copy of itself.
-    if !allow_self_mcp {
-        // Not enough to just skip the dynamic injection below: `forge import claude` (or a
-        // user's own `.forge/mcp.toml`) can ALSO persist an explicit "forge" server entry
-        // (copied verbatim from a `.mcp.json` like the one this binary documents in its own
-        // `--help`). `forge mcp agent` loads the exact same `mcp_config` as every other
-        // session, so a persisted entry bypasses the injection guard entirely and still gets
-        // eagerly connected (= spawned) by `connect_active()` — this is what actually kept
-        // reproducing the fork bomb after the injection-only fix shipped. Strip any stdio
-        // server that resolves to THIS SAME BINARY invoked with `mcp agent`, regardless of
-        // what it's named in the config (covers a renamed entry too, not just literally
-        // "forge").
-        let self_exe_name = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
-        mcp_config.servers.retain(|s| {
-            let forge_config::McpTransport::Stdio { command, args, .. } = &s.transport else {
-                return true;
-            };
-            let is_self_binary = self_exe_name.as_deref().is_some_and(|n| {
-                std::path::Path::new(command)
-                    .file_name()
-                    .map(|f| f.to_string_lossy() == n)
-                    .unwrap_or(false)
-            });
-            let is_mcp_agent_invocation =
-                args.iter().any(|a| a == "mcp") && args.iter().any(|a| a == "agent");
-            !(is_self_binary && is_mcp_agent_invocation)
-        });
-    } else if config.self_mcp && !mcp_config.servers.iter().any(|s| s.name == "forge") {
-        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("forge"));
-        mcp_config.servers.insert(
-            0,
-            forge_config::McpServerConfig {
-                name: "forge".to_string(),
-                transport: forge_config::McpTransport::Stdio {
-                    command: exe.to_string_lossy().into_owned(),
-                    args: vec!["mcp".to_string(), "agent".to_string()],
-                    env: std::collections::HashMap::new(),
-                },
-                auth: None,
-                secret_env: vec![],
-                enabled: true,
-            },
-        );
-    }
-    let config_has_mcp = mcp_config.active_servers().next().is_some();
-    let lattice_enabled = config.lattice.enabled;
-    let config_lattice_watch = config.lattice.watch;
-    let config_default_effort = config.mesh.default_effort.clone();
-
-    // Normalize before any provider-specific startup work so a pinned session only initializes
-    // the provider it can actually use.
-    let pin = pin.map(|p| forge_provider::normalize_model_id(&p).into_owned());
-
-    let store = Arc::new(open_store()?);
-    // Never construct a session router from an expired Codex pressure reading. The helper uses a
-    // fresh CLI rollout when available, otherwise performs one bounded minimal OAuth probe; it
-    // updates the shared codex-oauth/codex-cli quota bucket before this session's first route.
-    // A pinned non-Codex model never routes to Codex, so probing its keyring/quota is irrelevant
-    // startup work and can block the requested provider behind an unavailable Secret Service.
-    if should_refresh_codex_quota(mock, pin.as_deref()) {
-        crate::cli::commands::models::refresh_codex_quota(&store).await;
-    }
-    let store_for_lattice = Arc::clone(&store);
-    // Startup hint: if models are benched from a prior run/probe, tell the user how to recheck
-    // (docs/features/mesh-routing.md — we never auto-probe, so a stale bench is the user's to clear).
-    let mut presenter = presenter;
-    if let Ok(report) = store.current_benched_report() {
-        if !report.is_empty() {
-            presenter.emit(forge_tui::PresenterEvent::Warning(format!(
-                "{} model(s) benched (rate-limited/unavailable) — `forge models --probe` to recheck",
-                report.len()
-            )));
-        }
-    }
-
-    // Auto-discovery: build a live model catalog so the mesh routes to the best usable model
-    // (docs/features/mesh-routing.md). Skipped for the offline mock and when disabled.
-    //
-    // Cache-first: if a catalog from the last 24 h exists on disk, use it instantly and kick off
-    // a background refresh so the NEXT startup is also fast. On first run (or stale cache) we
-    // do the full network discovery (bounded at 15 s) and save it for next time.
-    let catalog = if !mock && config.mesh.auto_discover {
-        if let Some(cached) = load_cached_catalog() {
-            // Fast path — instant startup. Refresh in background for the next run.
-            let cfg = config.clone();
-            tokio::spawn(async move {
-                let fresh = discover_catalog(&cfg).await;
-                save_catalog(&fresh);
-            });
-            Some(cached)
-        } else {
-            // First run or stale cache — block on discovery, then persist the result.
-            const DISCOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
-            match tokio::time::timeout(DISCOVERY_BUDGET, discover_catalog(&config)).await {
-                Ok(cat) => {
-                    save_catalog(&cat);
-                    Some(cat)
-                }
-                Err(_) => {
-                    presenter.emit(forge_tui::PresenterEvent::Warning(format!(
-                        "model auto-discovery exceeded {}s — using built-in defaults for now; run \
-                         `forge models` to refresh once your network/providers respond",
-                        DISCOVERY_BUDGET.as_secs()
-                    )));
-                    None
-                }
-            }
-        }
-    } else {
-        None
-    };
-
-    // Validate the pinned model so unknown ids fail fast with a clear message rather than a
-    // confusing provider "Resolver error" at the first API call.
-    if let Some(id) = pin.as_deref() {
-        let prefix = forge_config::provider_of(id);
-        // A prefixed id whose provider isn't a recognized one is clearly invalid — hard stop, even
-        // when discovery is off/timed-out and there's no catalog to check against (it would
-        // otherwise pass straight through to a raw resolver error every turn).
-        if !prefix.is_empty() && !is_known_provider_prefix(prefix) {
-            anyhow::bail!(
-                "unknown model '{id}': '{prefix}' is not a known provider. \
-                 Run `forge models` to see usable ids, or `forge auth` to add a provider."
-            );
-        }
-        // With a catalog, also flag a known-provider id that isn't in it (likely a typo). This
-        // stays a soft warning: a brand-new model may simply not be discovered yet.
-        if let Some(cat) = catalog.as_ref() {
-            if !cat.models().contains(&id.to_string()) {
-                let suggestions: Vec<&str> = cat
-                    .models()
-                    .iter()
-                    .filter(|m| m.starts_with(prefix))
-                    .map(String::as_str)
-                    .take(5)
-                    .collect();
-                let hint = if suggestions.is_empty() {
-                    format!("no '{prefix}' models in catalog — run `forge models` to see what's available")
-                } else {
-                    format!("try: {}", suggestions.join(", "))
-                };
-                presenter.emit(forge_tui::PresenterEvent::Warning(format!(
-                    "unknown model '{id}' — {hint}"
-                )));
-            }
-        }
-    }
-
-    let catalog = catalog
-        .map(|catalog| crate::cli::commands::models::apply_outcome_calibration(catalog, &store));
-    let ctx_windows = crate::open_store()
-        .ok()
-        .and_then(|s| s.all_model_contexts().ok())
-        .unwrap_or_default();
-    let workspace_root = match session_cwd {
-        Some(cwd) => std::path::PathBuf::from(cwd)
-            .canonicalize()
-            .with_context(|| format!("resolving session workspace {cwd}"))?,
-        None if resume.is_some() => {
-            let prefix = resume.as_deref().expect("resume checked above");
-            let full = resolve_session(&store, prefix)?;
-            let cwd = store
-                .session_cwd(&full)?
-                .ok_or_else(|| anyhow::anyhow!("resumed session has no workspace"))?;
-            std::path::PathBuf::from(cwd)
-                .canonicalize()
-                .context("resumed session workspace is unavailable")?
-        }
-        None => std::env::current_dir()?,
-    };
-    let workspace_cwd = workspace_root.display().to_string();
-    let repo_key = workspace_cwd.clone();
-    let repo_boosts = crate::open_store()
-        .ok()
-        .and_then(|s| s.duel_boosts(&repo_key).ok())
-        .unwrap_or_default();
-    let (provider, router) = build_provider_and_router(
-        &config,
-        mock,
-        pin,
-        catalog.clone(),
-        ctx_windows,
-        repo_boosts,
-    );
-
-    // Build the code-intelligence index up front so it can be shared between the model-facing
-    // `lattice` tool and the turn's auto-injection (code-intelligence.md). Cheap to construct; it
-    // reads whatever `forge lattice update` last persisted.
-    let lattice = (!mock && lattice_enabled).then(|| {
-        let root = workspace_root.clone();
-        Arc::new(forge_index::Lattice::new(store_for_lattice, &root))
-    });
-    let mut tools = ToolRegistry::with_core_tools_in(&workspace_root);
-    // Opt-in OS sandbox and/or scoped build-target dir: replace the default shell tool with one
-    // that confines filesystem writes to the workspace via Landlock (Linux; no-op elsewhere) and/or
-    // relocates cargo's CARGO_TARGET_DIR outside the (possibly read-only) workspace so a
-    // bypass-mode agent can compile-check its own edits under confinement. Shared with the
-    // `mcp-serve` bridge path via `sandboxed_shell_tool` so the two can't drift.
-    if let Some(shell_tool) = sandboxed_shell_tool_in(&config, &workspace_root) {
-        tools.register(Box::new(shell_tool));
-    }
-    if let Some(lat) = &lattice {
-        tools.register(Box::new(forge_tools::LatticeTool::new(Arc::clone(lat))));
-        // Auto-index (and auto-embed when enabled) in the background so the graph is fresh without
-        // a manual `forge lattice update` — "automatic under the hood". Incremental + non-blocking;
-        // the watcher keeps it fresh thereafter. Errors are swallowed (best-effort, additive).
-        let lat_bg = Arc::clone(lat);
-        let embeddings = config.lattice.embeddings.clone();
-        tokio::spawn(async move {
-            // `Lattice::update()` is fully synchronous and CPU-bound (walks the repo, tree-sitter
-            // parses every file, writes SQLite). Running it inside a plain async task occupies a
-            // tokio *worker* thread for its whole duration — on a low-core machine (runtime sized
-            // to `num_cpus`) that starves the executor and the first turn's `route_hinted` never
-            // gets scheduled, so `forge run` hangs right after `● session`. Offload to the blocking
-            // pool so worker threads stay free. (`spawn_blocking` JoinError on panic → treat as
-            // "not updated" rather than propagating.)
-            let lat_update = Arc::clone(&lat_bg);
-            let updated = tokio::task::spawn_blocking(move || lat_update.update().is_ok())
-                .await
-                .unwrap_or(false);
-            if updated {
-                if let Some((embedder, _)) = forge_provider::select_embedder(&embeddings) {
-                    let _ = lat_bg.embed_pending(embedder.as_ref(), 64).await;
-                }
-            }
-        });
-    }
-
-    let lsp_config = config.lsp.clone();
-    let mut session = match resume {
-        Some(ref prefix) => {
-            let full = resolve_session(&store, prefix)?;
-            Session::resume(store, provider, router, tools, presenter, config, &full)
-                .with_context(|| format!("resuming session {full}"))?
-        }
-        None => Session::start(
-            store,
-            provider,
-            router,
-            tools,
-            presenter,
-            config,
-            &workspace_cwd,
-        )
-        .context("starting session")?,
-    };
-    session.set_catalog(catalog);
-    // Seed the effort pin from config if set (`mesh.default_effort`).
-    if let Some(ref s) = config_default_effort {
-        if let Some(e) = forge_types::EffortLevel::parse(s) {
-            session.set_effort(Some(e));
-        }
-    }
-    // Share the index with the session so turns auto-inject relevant code and agent edits reindex
-    // in-turn (code-intelligence.md). Empty index → nothing injected (additive guarantee).
-    // Also start the background watcher so external editor edits reindex automatically.
-    if let Some(lat) = &lattice {
-        if config_lattice_watch {
-            let cwd = workspace_root.clone();
-            // Scope the recursive watch to the nearest PROJECT ROOT, and refuse to watch all of
-            // $HOME (pathological: pulls in .cargo / cloned .git trees / caches → thousands of
-            // inotify watches + a slow initial walk). `None` ⇒ no sensible root → skip the watcher.
-            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-            match forge_index::resolve_watch_root(&cwd, home.as_deref()) {
-                None => session.notify_error(
-                    "watch & reindex skipped: launched in the home directory with no project root \
-                     — open a project folder (one with a .git) to enable auto-reindex",
-                ),
-                Some(root) => {
-                    // Build the watcher on a detached thread and DELIVER it to the session through a
-                    // channel, so NOTHING about watcher setup gates TUI startup — not a recursive
-                    // inotify registration (which blocks uninterruptibly on WSL2's 9p DrvFs and used
-                    // to hang `forge chat`), nor the polling backend's synchronous initial tree scan
-                    // (slow over a remote/9p link). On a non-native fs spawn_watcher transparently
-                    // uses polling so auto-reindex still works there. The session holds the receiver,
-                    // so the watcher is owned per-session and dropped when the session ends (no leak
-                    // across repeated build_session calls — bench/replay); the thread exits after the
-                    // send. A setup error is non-fatal and intentionally silent (no caveat).
-                    let lat2 = Arc::clone(lat);
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    std::thread::spawn(move || {
-                        if let Ok(watcher) = forge_index::spawn_watcher(
-                            lat2,
-                            &root,
-                            std::time::Duration::from_millis(400),
-                        ) {
-                            let _ = tx.send(watcher);
-                        }
-                    });
-                    session.set_lattice_watcher(Some(rx));
-                }
-            }
-        }
-    }
-    session.set_lattice(lattice);
-
-    // Attach the command/skill catalog so the model can discover + load Forge's own skills via
-    // the `use_skill` tool (instead of hunting ~/.claude). Cheap, sync, pure.
-    let skill_catalog = forge_skills::Catalog::load(&forge_config::command_sources());
-    session.set_skills(Some(std::sync::Arc::new(skill_catalog)));
-
-    // Connect external MCP servers (mcp-client.md). Skipped for the offline mock. Per-server
-    // failures are isolated inside connect_all (each lands `failed` with a reason); we surface the
-    // whole listing once on a fresh session (resume suppresses it — the transcript separator
-    // already orients the user, and the MCP panel is always reachable via `/mcp`).
-    if !mock && config_has_mcp {
-        // Connect MCP servers in the BACKGROUND so a slow/unreachable server can't delay TUI startup
-        // by up to connect_timeout (20s default per server) — the same non-blocking pattern
-        // `mcp-serve` uses. `connecting()` marks every active server `Reconnecting` and advertises
-        // the MCP meta-tools immediately (so `is_empty()` is false and the tool surface is ready),
-        // then a detached task connects them; each flips to connected/failed in the `/mcp` panel as
-        // it resolves, and the first `mcp_call` lazily waits on its own server. No startup op should
-        // gate the UI (cf. the 9p watcher hang).
-        let manager = std::sync::Arc::new(forge_mcp::McpManager::connecting(&mcp_config));
-        let bg = std::sync::Arc::clone(&manager);
-        tokio::spawn(async move { bg.connect_active().await });
-        session.set_mcp(Some(manager));
-        if resume.is_none() && !suppress_mcp_announce {
-            session.announce_mcp();
-        }
-    }
-    if lsp_config.enabled {
-        session.set_lsp(Some(std::sync::Arc::new(
-            forge_lsp::LspRegistry::from_config(&lsp_config),
-        )));
-    }
-    Ok(session)
-}
-
-/// Build a session with the default surface (TUI on a tty, else plain).
-pub(crate) async fn build_session(
-    mock: bool,
-    mode: Option<Mode>,
-    tui: bool,
-    resume: Option<String>,
-    pin: Option<String>,
-) -> Result<Session> {
-    let presenter: Box<dyn Presenter> = if tui && std::io::stdout().is_terminal() {
-        Box::new(TuiPresenter::new().context("initializing TUI")?)
-    } else {
-        if tui {
-            eprintln!("forge: --tui needs an interactive terminal; falling back to plain output");
-        }
-        Box::new(HeadlessPresenter::default())
-    };
-    build_session_with(presenter, mock, mode, resume, pin, false).await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run(
-    prompt: String,
-    mock: bool,
-    mode: Option<Mode>,
-    tui: bool,
-    resume: Option<String>,
-    pin: Option<String>,
-    system: Vec<String>,
-    output_format: OutputFormat,
-) -> Result<()> {
-    if prompt.trim().is_empty() {
-        anyhow::bail!("empty prompt — usage: forge run \"<your task>\"");
-    }
-    // A first-time user's `forge run "hi"` would otherwise dead-end with no provider; offer the
-    // guided wizard (no-ops on non-tty / once configured), same as `chat()`.
-    maybe_first_run_setup(mock)?;
-
-    // One-shot slash support: `forge run "/rust <task>"` expands a catalog command/skill exactly
-    // like the interactive dispatcher — without this the literal `/rust` reaches the model as
-    // prose and it guesses at the intent. Unknown tokens (absolute paths, TUI-only builtins)
-    // pass through verbatim; `//…` escapes a literal leading slash, mirroring chat.
-    let (prompt, command_guidance, tier) = expand_one_shot_slash(&prompt)?;
-    let mut guidance = system;
-    guidance.extend(command_guidance);
-
-    // stream-json: emit NDJSON events on stdout via the StreamJsonPresenter (no TUI, no heartbeat —
-    // stdout stays a clean machine-readable event stream). Ctrl-C still returns partial output.
-    if output_format == OutputFormat::StreamJson {
-        let presenter: Box<dyn Presenter> = Box::new(forge_tui::StreamJsonPresenter::new());
-        let mut session = build_session_with(presenter, mock, mode, resume, pin, true).await?;
-        let turn = session.run_turn_with(&prompt, &guidance, tier);
-        tokio::pin!(turn);
-        let result = tokio::select! {
-            r = &mut turn => r.map(|_| ()).context("running agent turn"),
-            _ = tokio::signal::ctrl_c() => Ok(()),
-        };
-        result?;
-        return Ok(());
-    }
-
-    let mut session = build_session(mock, mode, tui, resume, pin).await?;
-
-    // TUI mode handles its own Ctrl-C (crossterm) + spinner; keep it unchanged.
-    if tui {
-        session
-            .run_turn_with(&prompt, &guidance, tier)
-            .await
-            .context("running agent turn")?;
-        // Hold the final frame until the user quits (Esc / Ctrl-C).
-        let _ = session.read_line();
-        return Ok(());
-    }
-
-    // Headless heartbeat: a long model call streams nothing until the first token, so tick
-    // "working… Ns" to stderr to show the turn is alive. Skipped for `--mock` (instant).
-    let heartbeat = (!mock).then(|| {
-        tokio::spawn(async {
-            let start = std::time::Instant::now();
-            let mut iv = tokio::time::interval(std::time::Duration::from_secs(2));
-            iv.tick().await; // immediate first tick — skip it
-            loop {
-                iv.tick().await;
-                eprint!("\r\x1b[2m⧖ working… {}s\x1b[0m", start.elapsed().as_secs());
-                let _ = std::io::Write::flush(&mut std::io::stderr());
-            }
-        })
-    });
-
-    // Race the turn against Ctrl-C so a hard kill doesn't discard partial output: on interrupt we
-    // drop the turn future (it stops at its next await) and return what already streamed.
-    let result = {
-        let turn = session.run_turn_with(&prompt, &guidance, tier);
-        tokio::pin!(turn);
-        tokio::select! {
-            r = &mut turn => r.map(|_| ()).context("running agent turn"),
-            _ = tokio::signal::ctrl_c() => {
-                eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — stopping turn (partial output kept)\x1b[0m");
-                Ok(())
-            }
-        }
-    };
-    if let Some(h) = heartbeat {
-        h.abort();
-        eprint!("\r\x1b[K"); // clear the heartbeat line
-        let _ = std::io::Write::flush(&mut std::io::stderr());
-    }
-    result?;
-    Ok(())
-}
-
-/// Resolve a one-shot `/command` or skill prompt against the file catalog (the same
-/// `Catalog::resolve` the interactive dispatcher uses) so `forge run "/rust <task>"` behaves like
-/// typing it in the TUI. Returns `(prompt, guidance, tier)`:
-/// - `//foo` escapes to a literal `/foo` prompt (mirrors chat).
-/// - A command expands to its prompt (+ guidance/tier); a skill with a task runs the task under
-///   the skill's methodology.
-/// - A bare skill or missing args is a usage error — one-shot has no "next turn" to prime.
-/// - Project-scope definitions require `[commands] trust_project = true`: the interactive
-///   run-again-to-confirm gate has no headless equivalent, so default-deny with a pointer.
-/// - Anything unresolved (absolute paths, unknown tokens, TUI-only builtins) passes through
-///   verbatim.
-fn expand_one_shot_slash(
-    raw: &str,
-) -> Result<(String, Vec<String>, Option<forge_types::TaskTier>)> {
-    let t = raw.trim();
-    if let Some(rest) = t.strip_prefix("//") {
-        return Ok((format!("/{rest}"), Vec::new(), None));
-    }
-    if !t.starts_with('/') {
-        return Ok((t.to_string(), Vec::new(), None));
-    }
-    let catalog = forge_skills::Catalog::load(&forge_config::command_sources());
-    let trust_project = forge_config::load()
-        .map(|c| c.commands.trust_project)
-        .unwrap_or(false);
-    use forge_skills::Resolved;
-    match catalog.resolve(t) {
-        Resolved::Command {
-            cmd,
-            prompt,
-            guidance,
-        } => {
-            if cmd.scope == forge_skills::Scope::Project && !trust_project {
-                anyhow::bail!(
-                    "/{} is a project-scope command — set `[commands] trust_project = true` in \
-                     your config, or run it interactively via `forge chat`",
-                    cmd.name
-                );
-            }
-            eprintln!("⚒ command · /{} ({})", cmd.name, cmd.scope.label());
-            Ok((prompt, guidance, cmd.tier))
-        }
-        Resolved::Skill { meta, prompt } => {
-            if meta.scope == forge_skills::Scope::Project && !trust_project {
-                anyhow::bail!(
-                    "/{} is a project-scope skill — set `[commands] trust_project = true` in \
-                     your config, or run it interactively via `forge chat`",
-                    meta.name
-                );
-            }
-            if prompt.trim().is_empty() {
-                anyhow::bail!(
-                    "skill /{name} needs a task in one-shot mode — usage: forge run \
-                     \"/{name} <task>\"",
-                    name = meta.name
-                );
-            }
-            let skill = forge_skills::Skill::load(&meta);
-            for w in &skill.warnings {
-                eprintln!("⚠ {w}");
-            }
-            eprintln!("⚒ skill · {} ({})", meta.name, meta.scope.label());
-            Ok((prompt, vec![skill.guidance()], meta.tier))
-        }
-        Resolved::MissingArgs { name, missing } => {
-            let need = missing
-                .iter()
-                .map(|m| format!("<{m}>"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            anyhow::bail!("/{name} requires {need}")
-        }
-        Resolved::Unknown(_) => Ok((t.to_string(), Vec::new(), None)),
-        // Unreachable here (the early returns above cover non-slash + `//` escapes), but the
-        // catalog's own contract for it is "pass straight to run_turn" — honor that.
-        Resolved::Plain(p) => Ok((p, Vec::new(), None)),
-    }
-}
-
-pub(crate) async fn nl_cmd(query: String, mode: Option<Mode>) -> Result<()> {
-    if query.trim().is_empty() {
-        anyhow::bail!(
-            "empty query — usage: forge nl \"what changed performance-wise since last week\""
-        );
-    }
-    maybe_first_run_setup(false)?;
-    // Gather shell context so the model can run the right commands.
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| ".".to_string());
-    let git_ctx = {
-        let branch = std::process::Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string());
-        let log = std::process::Command::new("git")
-            .args(["log", "--oneline", "-8"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string());
-        match (branch, log) {
-            (Some(b), Some(l)) if !l.is_empty() => {
-                format!("\n- Git branch: {b}\n- Recent commits:\n{l}")
-            }
-            (Some(b), _) => format!("\n- Git branch: {b}"),
-            _ => String::new(),
-        }
-    };
-    let platform = std::env::consts::OS;
-    let guidance = format!(
-        "You are a shell expert. The user asks a natural-language question about their system \
-or codebase. Determine which shell commands answer it, run them with the shell tool, then \
-synthesize a clear, direct answer. Do not explain what you are about to do — just run \
-commands and explain the output. Be concise.\n\
-\n\
-Environment:\n\
-- Working directory: {cwd}\n\
-- Platform: {platform}{git_ctx}"
-    );
-    let mut session = build_session(false, mode, false, None, None).await?;
-    session
-        .run_turn_with(&query, &[guidance], None)
-        .await
-        .context("nl query")?;
-    Ok(())
-}
-
-/// Unblock a turn parked in a permission/question prompt before quitting. `Presenter::confirm`/
-/// `ask` run INSIDE the turn task via `block_in_place` (a real blocking `recv()`, not an
-/// `.await`), so `turn_handle.abort()` alone cannot preempt it — only dropping/answering its reply
-/// channel does. Without this, quitting while such a prompt is pending deadlocks: the code right
-/// after the main loop does `session.lock().await`, which blocks forever waiting for the turn task
-/// to release the mutex, while that task blocks forever waiting for this reply channel — a
-/// permanent hang the user can't even Ctrl-C out of (raw mode consumes it as a keystroke). Mirrors
-/// the Esc/Ctrl-C interrupt cleanup; omits `loop_state`/`queued_prompts` since quitting doesn't
-/// need to preserve resumable state the way interrupting-and-continuing does.
-fn abort_turn_before_quit(
+/// Abort a turn and release any UI prompts that would otherwise hold its task mutex.
+pub(crate) fn abort_turn_before_quit(
     turn_handle: &mut Option<tokio::task::JoinHandle<()>>,
     pending: &mut Option<(String, std::sync::mpsc::Sender<forge_tui::ConfirmOutcome>)>,
     pending_question: &mut Option<std::sync::mpsc::Sender<String>>,
     app: &mut forge_tui::App,
 ) {
-    if let Some(h) = turn_handle.take() {
-        h.abort();
+    if let Some(handle) = turn_handle.take() {
+        handle.abort();
     }
     *pending = None;
     *pending_question = None;
@@ -816,20 +127,100 @@ fn abort_turn_before_quit(
     app.clear_question();
 }
 
-/// Whether `prefix` is a provider Forge recognizes. Delegating to config keeps explicit pin
-/// validation aligned with discovery and dispatch as new keyless bridges are added.
-fn is_known_provider_prefix(prefix: &str) -> bool {
-    forge_config::is_known_provider(prefix)
-}
-
-/// The OS shell used to run a `StatuslineWidget::Custom` command — same choice as hooks (see
-/// `forge_core::hooks::hook_shell`), duplicated locally since it's three lines and pulling in a
-/// dependency for it would be overkill.
-fn shell_widget_shell() -> (&'static str, &'static str) {
+/// The OS shell used to run a custom statusline command.
+pub(crate) fn shell_widget_shell() -> (&'static str, &'static str) {
     #[cfg(windows)]
     return ("cmd", "/C");
     #[cfg(not(windows))]
     ("sh", "-c")
+}
+
+/// Emit styled lines to native scrollback when available, otherwise to the app transcript.
+pub(crate) fn emit_scrollback(
+    tui: Option<&mut forge_tui::Tui>,
+    app: &mut forge_tui::App,
+    lines: Vec<forge_tui::ScrollbackLine<'static>>,
+) {
+    match tui {
+        Some(tui) if !tui.is_fullscreen() => tui.insert_lines(lines),
+        _ => app.push_scrollback(lines),
+    }
+}
+
+/// Emit plain text to native scrollback when available, otherwise to the app transcript.
+pub(crate) fn emit_text(tui: Option<&mut forge_tui::Tui>, app: &mut forge_tui::App, text: &str) {
+    match tui {
+        Some(tui) if !tui.is_fullscreen() => tui.print_text(text),
+        _ => app.push_scrollback_text(text),
+    }
+}
+
+/// Every editable setting as `/config` editor rows.
+pub(crate) fn config_editor_rows() -> Vec<forge_tui::SettingRow> {
+    let mut rows: Vec<forge_tui::SettingRow> = forge_config::known_key_providers()
+        .map(|provider| forge_tui::SettingRow {
+            path: format!("key.{provider}"),
+            group: "Providers & Keys".to_string(),
+            label: format!("{} API key", provider_label(provider)),
+            help: Some(format!(
+                "API key for {provider}, stored in the OS keyring. Enter to set; empty to remove."
+            )),
+            kind: forge_tui::RowKind::Secret,
+            value: if forge_config::has_api_key(provider) {
+                "● set"
+            } else {
+                "○ not set"
+            }
+            .to_string(),
+            default: String::new(),
+            modified: forge_config::has_api_key(provider),
+            source: "keyring".to_string(),
+        })
+        .collect();
+    rows.extend(
+        forge_config::config_descriptors()
+            .into_iter()
+            .map(|descriptor| {
+                let kind = match descriptor.kind {
+                    forge_config::SettingKind::Bool => forge_tui::RowKind::Bool,
+                    forge_config::SettingKind::Int => forge_tui::RowKind::Int,
+                    forge_config::SettingKind::Float => forge_tui::RowKind::Float,
+                    forge_config::SettingKind::List
+                    | forge_config::SettingKind::Json
+                    | forge_config::SettingKind::Text => forge_tui::RowKind::Text,
+                    forge_config::SettingKind::Enum(options) => {
+                        forge_tui::RowKind::Enum(options.into_iter().map(str::to_string).collect())
+                    }
+                };
+                forge_tui::SettingRow {
+                    path: descriptor.path,
+                    group: descriptor.group,
+                    label: descriptor.label,
+                    help: descriptor.help,
+                    kind,
+                    value: descriptor.value.display(),
+                    default: descriptor.default.display(),
+                    modified: descriptor.modified,
+                    source: descriptor.source.to_string(),
+                }
+            }),
+    );
+    rows.extend(
+        forge_config::complex_sections()
+            .iter()
+            .map(|&section| forge_tui::SettingRow {
+                path: section.to_string(),
+                group: "Advanced (edit in $EDITOR)".to_string(),
+                label: section.to_string(),
+                help: Some(forge_config::complex_section_help(section).to_string()),
+                kind: forge_tui::RowKind::ReadOnly,
+                value: String::new(),
+                default: String::new(),
+                modified: false,
+                source: "config.toml".to_string(),
+            }),
+    );
+    rows
 }
 
 /// On a fresh machine (no keys, no bridge, no config) offer the `forge init` wizard before the
@@ -849,16 +240,14 @@ pub(crate) fn maybe_first_run_setup(mock: bool) -> Result<()> {
     if yes.is_empty() || yes.eq_ignore_ascii_case("y") || yes.eq_ignore_ascii_case("yes") {
         setup()?;
     } else {
-        // Mark onboarded so we don't ask again; the user can re-run `forge setup` anytime.
         let _ = forge_config::write_subscriptions(&std::collections::HashMap::new());
         println!("Skipped. Run `forge setup` anytime, or `forge auth <provider>` to add a key.");
     }
     Ok(())
 }
 
-/// Probe Claude's CURRENT rate limits (both windows, via the `claude --debug` headers) and record
-/// them into the session store. Best-effort; the caller gates it on staleness. This is the live
-/// claude-usage source — it replaces the helm-wiped statusline cache.
+/// Probe Claude's current rate limits and record them into the session store. Best-effort; the
+/// caller gates it on staleness.
 pub(crate) async fn refresh_claude_quota(session: &std::sync::Arc<tokio::sync::Mutex<Session>>) {
     let limits = tokio::task::spawn_blocking(bridge_stats::probe_claude_limits)
         .await
@@ -871,7 +260,7 @@ pub(crate) async fn refresh_claude_quota(session: &std::sync::Arc<tokio::sync::M
     }
 }
 
-/// Whether the stored claude quota is older than `max_age` seconds (or absent) — gates the probe.
+/// Whether the stored Claude quota is older than `max_age` seconds (or absent).
 pub(crate) async fn claude_quota_is_stale(
     session: &std::sync::Arc<tokio::sync::Mutex<Session>>,
     max_age: i64,
@@ -880,202 +269,16 @@ pub(crate) async fn claude_quota_is_stale(
         .lock()
         .await
         .claude_quota_age_secs()
-        .is_none_or(|a| a > max_age)
+        .is_none_or(|age| age > max_age)
 }
 
-pub(crate) async fn chat(
-    mock: bool,
-    mode: Option<Mode>,
-    resume_mode: ResumeMode,
-    plain: bool,
-    fullscreen: bool,
-    pin: Option<String>,
-) -> Result<()> {
-    maybe_first_run_setup(mock)?;
-    maybe_autostart_local();
-    // Default to the interactive (animated) TUI on a real terminal.
-    if !plain && std::io::stdout().is_terminal() {
-        // Update check happens in background inside run_chat_tui (via the UiMsg channel) so it
-        // never delays TUI startup. The check has a 3s network timeout — blocking here would
-        // freeze the terminal for up to 3s once per day.
-        return run_chat_tui(mock, mode, resume_mode, fullscreen, pin).await;
-    }
-    // Plain path: blocking update check is fine (no TUI to corrupt).
-    update_check::maybe_notify(&forge_config::load().unwrap_or_default()).await;
-
-    // Plain line mode: read prompts from stdin.
-    // Picker is already ruled out by resolve_resume_mode for headless/plain.
-    let resume_id = match resume_mode {
-        ResumeMode::Id(id) => Some(id),
-        ResumeMode::Fresh | ResumeMode::Picker => None,
-    };
-    let mut session = build_session_with(
-        Box::new(HeadlessPresenter::default()),
-        mock,
-        mode,
-        resume_id,
-        pin,
-        false,
-    )
-    .await?;
-    if std::io::stdin().is_terminal() {
-        println!("forge chat — type a task and press enter; /quit to exit");
-    }
-    {
-        let sid = session.session_id().to_string();
-        let hooks = session.hooks().to_vec();
-        let workspace = session.workspace_root().to_path_buf();
-        forge_core::hooks::run_session_hooks_in(
-            &hooks,
-            forge_config::HookEvent::SessionStart,
-            &sid,
-            Some(&workspace),
-        )
-        .await;
-    }
-    while let Some(line) = session.read_line() {
-        match chat_action(&line) {
-            ChatAction::Quit => break,
-            ChatAction::Skip => continue,
-            ChatAction::Run(task) => {
-                let hooks = session.hooks().to_vec();
-                let hook_workspace = session.workspace_root().to_path_buf();
-                let task = match forge_core::hooks::run_prompt_hooks_in(
-                    &hooks,
-                    &task,
-                    Some(&hook_workspace),
-                )
-                .await
-                {
-                    Ok(t) => t,
-                    Err(reason) => {
-                        eprintln!("⎇ prompt blocked by hook: {reason}");
-                        continue;
-                    }
-                };
-                session
-                    .run_turn(&task)
-                    .await
-                    .context("running agent turn")?;
-            }
-        }
-    }
-    {
-        let sid = session.session_id().to_string();
-        let hooks = session.hooks().to_vec();
-        let workspace = session.workspace_root().to_path_buf();
-        forge_core::hooks::run_session_hooks_in(
-            &hooks,
-            forge_config::HookEvent::SessionEnd,
-            &sid,
-            Some(&workspace),
-        )
-        .await;
-    }
-    Ok(())
-}
-
-/// Sends the turn-complete signal (carrying the turn's generation) on drop — so `busy` is released
-/// even if the turn task panics or is aborted. The loop only acts on a signal whose generation
-/// matches the current turn, so an interrupted turn's late signal can't end a *later* turn.
+/// Sends the turn-complete signal on drop so an aborted turn releases `busy`.
 pub(crate) struct DoneGuard(pub(crate) std::sync::mpsc::Sender<u64>, pub(crate) u64);
 
 impl Drop for DoneGuard {
     fn drop(&mut self) {
         let _ = self.0.send(self.1);
     }
-}
-
-/// Animated TUI chat loop: renders at ~16fps, runs each turn on a task so a spinner
-/// ticks (and streamed tokens flow) while the model works.
-/// Emit pre-styled out-of-band lines to the conversation, respecting the viewport mode: inline →
-/// the terminal's native scrollback; full-screen → the app's transcript log (since there's no
-/// native scrollback in alternate-screen mode).
-pub(crate) fn emit_scrollback(
-    tui: Option<&mut forge_tui::Tui>,
-    app: &mut forge_tui::App,
-    lines: Vec<forge_tui::ScrollbackLine<'static>>,
-) {
-    match tui {
-        Some(tui) if !tui.is_fullscreen() => tui.insert_lines(lines),
-        // Full-screen (no native scrollback) and headless (`forge serve` — no terminal at all)
-        // both land in the app's transcript log, which the remote snapshot mirrors.
-        _ => app.push_scrollback(lines),
-    }
-}
-
-/// Like [`emit_scrollback`] but for plain (unstyled) multi-line text.
-pub(crate) fn emit_text(tui: Option<&mut forge_tui::Tui>, app: &mut forge_tui::App, text: &str) {
-    match tui {
-        Some(tui) if !tui.is_fullscreen() => tui.print_text(text),
-        _ => app.push_scrollback_text(text),
-    }
-}
-
-/// Every editable setting as `/config` editor rows, grouped: "Providers & Keys" (API keys, keyring)
-/// first, then the discovered scalar settings (friendly labels, control kind, default, source).
-pub(crate) fn config_editor_rows() -> Vec<forge_tui::SettingRow> {
-    let mut rows: Vec<forge_tui::SettingRow> = forge_config::known_key_providers()
-        .map(|p| forge_tui::SettingRow {
-            path: format!("key.{p}"),
-            group: "Providers & Keys".to_string(),
-            label: format!("{} API key", provider_label(p)),
-            help: Some(format!(
-                "API key for {p}, stored in the OS keyring. Enter to set; empty to remove."
-            )),
-            kind: forge_tui::RowKind::Secret,
-            value: if forge_config::has_api_key(p) {
-                "● set".to_string()
-            } else {
-                "○ not set".to_string()
-            },
-            default: String::new(),
-            modified: forge_config::has_api_key(p),
-            source: "keyring".to_string(),
-        })
-        .collect();
-    rows.extend(forge_config::config_descriptors().into_iter().map(|d| {
-        let kind = match d.kind {
-            forge_config::SettingKind::Bool => forge_tui::RowKind::Bool,
-            forge_config::SettingKind::Int => forge_tui::RowKind::Int,
-            forge_config::SettingKind::Float => forge_tui::RowKind::Float,
-            forge_config::SettingKind::List => forge_tui::RowKind::Text,
-            forge_config::SettingKind::Json => forge_tui::RowKind::Text,
-            forge_config::SettingKind::Text => forge_tui::RowKind::Text,
-            forge_config::SettingKind::Enum(opts) => {
-                forge_tui::RowKind::Enum(opts.into_iter().map(str::to_string).collect())
-            }
-        };
-        forge_tui::SettingRow {
-            path: d.path,
-            group: d.group,
-            label: d.label,
-            help: d.help,
-            kind,
-            value: d.value.display(),
-            default: d.default.display(),
-            modified: d.modified,
-            source: d.source.to_string(),
-        }
-    }));
-    // Complex sections (hooks/mcp/permissions) can't be flattened to scalars, so list them
-    // read-only with an "edit in $EDITOR" jump — otherwise they're invisible in `/config`.
-    rows.extend(
-        forge_config::complex_sections()
-            .iter()
-            .map(|&section| forge_tui::SettingRow {
-                path: section.to_string(),
-                group: "Advanced (edit in $EDITOR)".to_string(),
-                label: section.to_string(),
-                help: Some(forge_config::complex_section_help(section).to_string()),
-                kind: forge_tui::RowKind::ReadOnly,
-                value: String::new(),
-                default: String::new(),
-                modified: false,
-                source: "config.toml".to_string(),
-            }),
-    );
-    rows
 }
 
 pub(crate) async fn run_chat_tui(
@@ -4928,1210 +4131,12 @@ pub(crate) async fn run_chat_tui(
 pub(crate) const VOICE_PTT_HOLD_MS: u128 = 400;
 
 /// See [`VOICE_PTT_HOLD_MS`].
-pub(crate) fn voice_is_hold(held_ms: u128) -> bool {
-    held_ms >= VOICE_PTT_HOLD_MS
-}
-
-/// Wire a freshly-dispatched `/voice` into the loop-local recorder/download state. `App::voice`
-/// (the rendering-facing state) is already set by `dispatch_command` — this only handles the real
-/// system resources, which must live loop-local so `App` stays `Clone + Default`. Shared by every
-/// place `/voice` can be triggered from: the palette, a typed `/voice` line, remote input, and the
-/// Ctrl+V shortcut. Resets every voice-related loop-local first, so no state from a previous voice
-/// session can bleed through.
-#[allow(clippy::too_many_arguments)]
-fn apply_voice_start(
-    start: VoiceStart,
-    tui: &mut forge_tui::Tui,
-    app: &mut forge_tui::App,
-    voice_handle: &mut Option<forge_voice::RecordingHandle>,
-    voice_model_path: &mut Option<std::path::PathBuf>,
-    voice_download_progress_rx: &mut Option<tokio::sync::watch::Receiver<(u64, Option<u64>)>>,
-    voice_download_done_rx: &mut Option<
-        tokio::sync::oneshot::Receiver<std::result::Result<forge_voice::RecordingHandle, String>>,
-    >,
-    voice_started_at: &mut Option<std::time::Instant>,
-    voice_error_until: &mut Option<std::time::Instant>,
-    voice_ptt_active: &mut bool,
-) {
-    *voice_handle = None;
-    *voice_model_path = None;
-    *voice_download_progress_rx = None;
-    *voice_download_done_rx = None;
-    *voice_started_at = None;
-    *voice_error_until = None;
-    if *voice_ptt_active {
-        tui.pop_voice_ptt();
-        *voice_ptt_active = false;
-    }
-    match start {
-        VoiceStart::Recording { handle, model_path } => {
-            *voice_ptt_active = tui.push_voice_ptt();
-            if let Some(v) = app.voice.as_mut() {
-                v.phase = forge_tui::VoicePhase::Recording {
-                    ptt_active: *voice_ptt_active,
-                };
-            }
-            *voice_handle = Some(handle);
-            *voice_model_path = Some(model_path);
-            *voice_started_at = Some(std::time::Instant::now());
-        }
-        VoiceStart::Downloading {
-            model_path,
-            progress_rx,
-            done_rx,
-        } => {
-            *voice_model_path = Some(model_path);
-            *voice_download_progress_rx = Some(progress_rx);
-            *voice_download_done_rx = Some(done_rx);
-        }
-        VoiceStart::Error => {
-            // `app.voice` is already the error card (set by `dispatch_command`).
-            *voice_error_until =
-                Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
-        }
-    }
-}
-
-/// Stop the recording and kick off transcription in the background — shared by the Enter key
-/// (toggle mode) and a held-then-released push-to-talk chord. Moves the overlay into
-/// `VoicePhase::Transcribing`; the tick loop polls the returned receiver for the result.
-fn start_voice_transcribe(
-    app: &mut forge_tui::App,
-    handle: forge_voice::RecordingHandle,
-    model_path: std::path::PathBuf,
-) -> tokio::sync::oneshot::Receiver<forge_voice::Result<String>> {
-    if let Some(v) = app.voice.as_mut() {
-        v.phase = forge_tui::VoicePhase::Transcribing;
-    }
-    let config = forge_config::load().unwrap_or_default();
-    let language = (config.voice.language != "auto").then_some(config.voice.language);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    tokio::task::spawn_blocking(move || {
-        let result = (|| -> forge_voice::Result<String> {
-            let samples = handle.stop()?;
-            let transcriber = forge_voice::Transcriber::load(&model_path)?;
-            transcriber.transcribe(&samples, language.as_deref())
-        })();
-        let _ = tx.send(result);
-    });
-    rx
-}
-
-/// `/loop` runtime state: the generation of the in-flight loop turn and how many iterations have
-/// run, so completion can be detected and capped.
-pub(crate) struct LoopState {
-    gen: u64,
-    iter: usize,
-}
-
-/// Iteration cap so a loop that never signals completion can't run forever.
-pub(crate) const LOOP_MAX_ITERS: usize = 25;
-
-/// Context-fill fraction above which a turn-end auto-compact fires (context-compaction.md).
-pub(crate) const AUTO_COMPACT_THRESHOLD: f64 = 0.80;
-
-/// The token the model is told to emit when the looped task is fully complete.
-pub(crate) const LOOP_DONE_SENTINEL: &str = "LOOP_COMPLETE";
-
-/// Guidance injected on every loop turn: make progress, and signal completion explicitly.
-pub(crate) const LOOP_GUIDANCE: &str = "You are running in an autonomous loop. Make concrete progress on the \
-task each turn. When — and ONLY when — the task is fully complete, end your final message with \
-the token LOOP_COMPLETE on its own line. While work remains, keep going and do NOT emit that token.";
-
-/// Decide whether a loop should stop after a turn. Returns `Some(reason)` to stop (shown to the
-/// user), or `None` to run another iteration. Pure so it's unit-testable.
-pub(crate) fn loop_stop_reason(last_assistant: Option<&str>, iter: usize) -> Option<&'static str> {
-    if last_assistant.is_some_and(|t| t.contains(LOOP_DONE_SENTINEL)) {
-        Some("◆ loop complete")
-    } else if iter >= LOOP_MAX_ITERS {
-        Some("◆ loop stopped — hit the iteration cap")
-    } else {
-        None
-    }
-}
-
-/// `/goal` runtime state: the generation of the in-flight goal turn, how many iterations have
-/// run, and how many tasks were done as of the last turn — so stalls (no task progress) can be
-/// detected alongside completion and the iteration cap.
-pub(crate) struct GoalState {
-    gen: u64,
-    iter: usize,
-    prev_done: usize,
-    no_progress: usize,
-    goal: String,
-}
-
-/// Absolute iteration ceiling so a goal that never signals completion can't run forever.
-pub(crate) const GOAL_MAX_ITERS: usize = 200;
-
-/// Consecutive turns with no task-list progress before a goal is declared wedged and stopped.
-pub(crate) const GOAL_NO_PROGRESS_MAX: usize = 6;
-
-/// Guidance injected on every goal turn: work the tracked plan, never stop for approval, and
-/// signal completion explicitly.
-pub(crate) const GOAL_GUIDANCE: &str = "You are in autonomous goal mode. Keep working through the \
-tracked task plan (update_tasks) one item at a time until the entire goal is met. Never stop to \
-ask for approval — you have standing authorization. When (and only when) every task is Done and \
-the goal is fully satisfied, reply with one concise final response that states the goal is complete \
-and briefly summarizes what was done. Do not emit control sentinels or repeated completion messages.";
-
-/// The prompt each re-drive turn is given once the goal is running autonomously.
-pub(crate) const GOAL_CONTINUE_PROMPT: &str = "Continue the goal. Commit/push/PR any finished \
-work, then take the single highest-value not-done task and complete it end to end. Keep the \
-update_tasks plan current.";
-
-/// Legacy completion marker accepted only as an exact standalone reply. New goal guidance asks
-/// for a normal final response and completion is otherwise inferred from the tracked task plan.
-pub(crate) fn is_goal_complete_marker(text: Option<&str>) -> bool {
-    text.is_some_and(|text| text.trim() == "GOAL COMPLETE")
-}
-
-pub(crate) const GOAL_COMPLETE_REASON: &str = "🎯 goal complete";
-
-pub(crate) fn is_goal_complete_reason(reason: &str) -> bool {
-    reason == GOAL_COMPLETE_REASON || reason == "🎯 goal complete — all tasks done"
-}
-
-/// Remove the oldest prompt submitted while a turn was active, refresh the visible queue, and
-/// retain it in prompt history exactly like an idle submission. Shared by ordinary FIFO drain and
-/// `/loop`/`/goal` steering so a user correction always owns the very next iteration.
-pub(crate) fn dequeue_prompt(
-    queue: &mut Vec<String>,
-    app: &mut forge_tui::App,
-    prompt_history: &mut Vec<String>,
-) -> Option<String> {
-    let next = queue.first().cloned()?;
-    queue.remove(0);
-    app.set_queued(queue);
-    let history_entry = next.trim();
-    if prompt_history.last().map(String::as_str) != Some(history_entry) {
-        prompt_history.push(history_entry.to_string());
-    }
-    Some(next)
-}
-
-/// Close every presenter surface owned by an aborted turn. Local and remote interrupts must share
-/// this path: the task that would emit `WorkflowFinished` no longer exists, so leaving its workflow
-/// active would poison the queued replacement turn.
-pub(crate) fn finish_interrupted_presenter(app: &mut forge_tui::App) {
-    app.workflow.on_interrupt();
-    app.apply(forge_tui::PresenterEvent::AssistantDone);
-}
-
-/// A model-skip retries the same logical autonomous turn under a fresh generation. Keep `/loop`
-/// or `/goal` attached to that replacement so its completion advances the mode normally; queued
-/// user corrections remain untouched and drain after the retried turn.
-pub(crate) fn rebind_autonomous_generation(
-    loop_state: &mut Option<LoopState>,
-    goal_state: &mut Option<GoalState>,
-    generation: u64,
-) {
-    if let Some(state) = loop_state {
-        state.gen = generation;
-    }
-    if let Some(state) = goal_state {
-        state.gen = generation;
-    }
-}
-
-/// Decide whether a goal should stop after a turn. Returns `Some(reason)` to stop (shown to the
-/// user), or `None` to run another iteration. Pure so it's unit-testable.
-pub(crate) fn goal_stop_reason(
-    said_complete: bool,
-    done: usize,
-    total: usize,
-    iter: usize,
-    no_progress: usize,
-) -> Option<&'static str> {
-    if said_complete {
-        Some(GOAL_COMPLETE_REASON)
-    } else if total > 0 && done == total {
-        Some("🎯 goal complete — all tasks done")
-    } else if iter >= GOAL_MAX_ITERS {
-        Some("🎯 goal stopped — iteration ceiling")
-    } else if no_progress >= GOAL_NO_PROGRESS_MAX {
-        Some("🎯 goal stalled — no task progress, stopping")
-    } else {
-        None
-    }
-}
-
-/// Echo a prompt + spawn the turn task (shared by normal submit and the `//` literal escape).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_turn(
-    prompt: &str,
-    session: &Arc<tokio::sync::Mutex<Session>>,
-    done_tx: &std::sync::mpsc::Sender<u64>,
-    gen: u64,
-    app: &mut forge_tui::App,
-    busy: &mut bool,
-    busy_since: &mut std::time::Instant,
-) -> tokio::task::JoinHandle<()> {
-    app.on_turn_start();
-    app.submit_user(prompt);
-    app.done = false;
-    app.tick = 0;
-    *busy = true;
-    *busy_since = std::time::Instant::now();
-    let s = session.clone();
-    let dt = done_tx.clone();
-    let prompt = prompt.to_string();
-    tokio::spawn(async move {
-        // DoneGuard fires on the way out — normal return, panic unwind, OR abort (interrupt) —
-        // so the UI can never stay stuck "working". It carries this turn's generation.
-        let _done = DoneGuard(dt, gen);
-        let mut sess = s.lock().await;
-        if let Err(e) = sess.run_turn(&prompt).await {
-            sess.notify_error(&format!("turn failed: {e}"));
-        }
-    })
-}
-
-/// Like [`spawn_turn`] but runs an expanded command/skill: prepends `guidance` and biases routing
-/// with the `tier` hint. The displayed user line is the original `/command` (echoed by the
-/// dispatcher), so the model receives the expanded `prompt` while the transcript shows the turn.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_turn_with(
-    prompt: String,
-    guidance: Vec<String>,
-    tier: Option<forge_types::TaskTier>,
-    session: &Arc<tokio::sync::Mutex<Session>>,
-    done_tx: &std::sync::mpsc::Sender<u64>,
-    gen: u64,
-    app: &mut forge_tui::App,
-    busy: &mut bool,
-    busy_since: &mut std::time::Instant,
-) -> tokio::task::JoinHandle<()> {
-    app.on_turn_start();
-    app.submit_user(&prompt);
-    app.done = false;
-    app.tick = 0;
-    *busy = true;
-    *busy_since = std::time::Instant::now();
-    let s = session.clone();
-    let dt = done_tx.clone();
-    tokio::spawn(async move {
-        let _done = DoneGuard(dt, gen);
-        let mut sess = s.lock().await;
-        if let Err(e) = sess.run_turn_with(&prompt, &guidance, tier).await {
-            sess.notify_error(&format!("turn failed: {e}"));
-        }
-    })
-}
-
-/// Spawn `/compact` as a background task (it makes a cheap model call): the spinner ticks while the
-/// older transcript is summarized, exactly like a turn.
-pub(crate) fn spawn_compact(
-    session: &Arc<tokio::sync::Mutex<Session>>,
-    done_tx: &std::sync::mpsc::Sender<u64>,
-    gen: u64,
-    app: &mut forge_tui::App,
-    busy: &mut bool,
-    busy_since: &mut std::time::Instant,
-) -> tokio::task::JoinHandle<()> {
-    app.done = false;
-    app.tick = 0;
-    *busy = true;
-    *busy_since = std::time::Instant::now();
-    let s = session.clone();
-    let dt = done_tx.clone();
-    tokio::spawn(async move {
-        let _done = DoneGuard(dt, gen);
-        let mut sess = s.lock().await;
-        if let Err(e) = sess.compact(false).await {
-            sess.notify_error(&format!("compact failed: {e}"));
-        }
-    })
-}
-
-/// Keys inside the workflow view's Enter-zoom transcript: mirrors the activity viewer's scrolling
-/// (↑↓/PgUp/PgDn/Home/End, j/k/g/G) plus ←→/Tab to switch agents. An upward scroll first snaps
-/// the stored offset from the "tail" sentinel down to the real max (recorded by the render path),
-/// so scrolling back out of follow mode moves on the first keypress instead of unwinding a
-/// `usize::MAX / 2` sentinel one line at a time.
-pub(crate) fn workflow_zoom_key(app: &mut forge_tui::App, key: forge_tui::KeyKind) {
-    use forge_tui::KeyKind;
-    let max = app
-        .workflow
-        .zoom_geom
-        .get()
-        .map(|(wrapped_len, body_h)| wrapped_len.saturating_sub(body_h as usize));
-    let clamp = |scroll: usize| max.map_or(scroll, |m| scroll.min(m));
-    match key {
-        KeyKind::Esc | KeyKind::Char('q') => app.workflow.zoom = None,
-        KeyKind::Up | KeyKind::Char('k') => {
-            if let Some(z) = app.workflow.zoom.as_mut() {
-                z.follow = false;
-                z.scroll = clamp(z.scroll).saturating_sub(1);
-            }
-        }
-        KeyKind::Down | KeyKind::Char('j') | KeyKind::Char(' ') => {
-            if let Some(z) = app.workflow.zoom.as_mut() {
-                z.scroll = clamp(z.scroll).saturating_add(1);
-            }
-            app.workflow.zoom_refollow_at_tail();
-        }
-        KeyKind::PageUp => {
-            if let Some(z) = app.workflow.zoom.as_mut() {
-                z.follow = false;
-                z.scroll = clamp(z.scroll).saturating_sub(10);
-            }
-        }
-        KeyKind::PageDown => {
-            if let Some(z) = app.workflow.zoom.as_mut() {
-                z.scroll = clamp(z.scroll).saturating_add(10);
-            }
-            app.workflow.zoom_refollow_at_tail();
-        }
-        KeyKind::Home | KeyKind::Char('g') => {
-            if let Some(z) = app.workflow.zoom.as_mut() {
-                z.follow = false;
-                z.scroll = 0;
-            }
-        }
-        KeyKind::End | KeyKind::Char('G') => {
-            if let Some(z) = app.workflow.zoom.as_mut() {
-                z.follow = true;
-                z.scroll = usize::MAX / 2;
-            }
-        }
-        KeyKind::Left => {
-            app.workflow.move_selection(-1);
-            app.workflow.zoom = Some(Default::default());
-        }
-        KeyKind::Right | KeyKind::Tab => {
-            app.workflow.move_selection(1);
-            app.workflow.zoom = Some(Default::default());
-        }
-        _ => {}
-    }
-}
-
-/// Spawn `/workflow run <name>` as a background task (docs/rfcs/forge-workflow.md): runs a saved
-/// script directly, no authoring turn, same busy/spinner/interrupt semantics as a normal turn.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_saved_workflow(
-    session: &Arc<tokio::sync::Mutex<Session>>,
-    done_tx: &std::sync::mpsc::Sender<u64>,
-    gen: u64,
-    app: &mut forge_tui::App,
-    busy: &mut bool,
-    busy_since: &mut std::time::Instant,
-    name: String,
-    args: serde_json::Value,
-) -> tokio::task::JoinHandle<()> {
-    app.done = false;
-    app.tick = 0;
-    *busy = true;
-    *busy_since = std::time::Instant::now();
-    let s = session.clone();
-    let dt = done_tx.clone();
-    tokio::spawn(async move {
-        let _done = DoneGuard(dt, gen);
-        let mut sess = s.lock().await;
-        if let Err(e) = sess.run_saved_workflow(&name, args).await {
-            sess.notify_error(&format!("workflow '{name}' failed: {e}"));
-        }
-    })
-}
-
-/// Spawn `/duel <task>` as a background task (docs/features/duel.md): same busy/spinner/interrupt
-/// semantics as a normal turn. Unlike `run_saved_workflow`, the result isn't just a presenter
-/// event trail — the finished report + still-alive worktree guards must reach the render loop so
-/// it can open a picker over the candidates, so they're written into `pending_duel` for the
-/// done-signal drain to pick up.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_duel(
-    session: &Arc<tokio::sync::Mutex<Session>>,
-    done_tx: &std::sync::mpsc::Sender<u64>,
-    gen: u64,
-    app: &mut forge_tui::App,
-    busy: &mut bool,
-    busy_since: &mut std::time::Instant,
-    task: String,
-    pending_duel: Arc<std::sync::Mutex<PendingDuel>>,
-) -> tokio::task::JoinHandle<()> {
-    app.done = false;
-    app.tick = 0;
-    *busy = true;
-    *busy_since = std::time::Instant::now();
-    let s = session.clone();
-    let dt = done_tx.clone();
-    tokio::spawn(async move {
-        let _done = DoneGuard(dt, gen);
-        let mut sess = s.lock().await;
-        match sess.run_duel(&task).await {
-            Ok(result) => *pending_duel.lock().unwrap() = Some(result),
-            Err(e) => sess.notify_error(&format!("duel failed: {e}")),
-        }
-    })
-}
-
-/// Who/where a snapshot frame describes — the per-session identity fields of
-/// [`remote::Snapshot`] that the driving loop (TUI render loop or a headless `forge serve`
-/// session driver) knows and `App` doesn't.
-pub(crate) struct SnapshotIdentity<'a> {
-    pub session_id: &'a str,
-    /// Session display title (v6). Empty when unnamed.
-    pub title: &'a str,
-    pub cwd: &'a str,
-    /// The isolated worktree the session runs in (v6), if any.
-    pub worktree: Option<&'a str>,
-    /// Canonical project initialization state for this session's working directory.
-    pub project_initialized: bool,
-    /// Guidance shown when the project has not been initialized for Forge.
-    pub project_init_hint: Option<String>,
-    /// "loopback" | "LAN" | "public (provider)" — see [`remote::exposure_label`].
-    pub exposure: String,
-}
-
-/// Build one wire [`remote::Snapshot`] frame from the App's remote projection. The ONE snapshot
-/// producer shared by `run_chat_tui`'s broadcast block and the headless `forge serve` session
-/// driver, so both paths serialize the identical shape. `revision` should carry the LAST
-/// broadcast revision — the caller compares for change and bumps it just before an actual send.
-pub(crate) fn build_snapshot_frame(
-    app: &forge_tui::App,
-    ident: SnapshotIdentity<'_>,
-    copy_text: Option<String>,
-    prompt_seq: u64,
-    notes: Vec<String>,
-    revision: u64,
-) -> remote::Snapshot {
-    let mut view = app.remote_snapshot();
-    // Build the plan card first, while `view` is still whole: each step's status is read off the
-    // live task list (see `plan_step_status`), which the literal below also consumes.
-    let plan = view.plan.take().map(|p| remote::SnapPlan {
-        title: p.title,
-        steps: p
-            .steps
-            .into_iter()
-            .map(|s| remote::SnapPlanStep {
-                status: plan_step_status(&view.tasks, &s.title),
-                title: s.title,
-                detail: s.detail,
-            })
-            .collect(),
-        notes: p.notes,
-    });
-    remote::Snapshot {
-        protocol: remote::PROTOCOL_VERSION,
-        session_id: ident.session_id.to_string(),
-        title: ident.title.to_string(),
-        cwd: ident.cwd.to_string(),
-        worktree: ident.worktree.map(str::to_string),
-        project_initialized: ident.project_initialized,
-        project_init_hint: ident.project_init_hint,
-        exposure: ident.exposure,
-        busy: view.busy,
-        done: view.done,
-        temper: view.temper,
-        effort: view
-            .effort
-            .map(forge_types::EffortLevel::as_str)
-            .unwrap_or("medium")
-            .to_string(),
-        tier: view.tier,
-        model: view.model,
-        cost_usd: view.cost_usd,
-        context_tokens: view.context_tokens,
-        context_limit: view.context_limit,
-        streaming: view.streaming,
-        transcript: view.transcript,
-        transcript_rows: view
-            .transcript_rows
-            .into_iter()
-            .map(|r| remote::SnapTranscriptRow {
-                kind: r.kind.as_str().to_string(),
-                text: r.text,
-                tool: r.tool,
-                meta: r.meta,
-            })
-            .collect(),
-        tasks: view
-            .tasks
-            .iter()
-            .map(|t| remote::SnapTask {
-                title: t.title.clone(),
-                status: match t.status {
-                    forge_types::TodoStatus::Pending => "pending",
-                    forge_types::TodoStatus::InProgress => "in_progress",
-                    forge_types::TodoStatus::Done => "done",
-                }
-                .to_string(),
-                // Whoever the model named in `update_tasks` — `None` for work it kept itself.
-                assignee: t.assignee.clone(),
-            })
-            .collect(),
-        subagents: view
-            .subagents
-            .iter()
-            .map(|s| remote::SnapSubagent {
-                id: s.id.clone(),
-                agent: s.agent.clone(),
-                task: s.task.clone(),
-                model: s.model.clone(),
-                phase: s.phase.clone(),
-                last: s.last.clone(),
-                done: s.done,
-                ok: s.ok,
-                cost: s.cost,
-                // Reserved: children run headless (an `Ask` resolves as Deny inside a subagent),
-                // so no child is ever parked on its own prompt — every prompt is session-level
-                // and rides in `permission_prompt` below.
-                permission_prompt: None,
-            })
-            .collect(),
-        queued: view.queued,
-        permission_prompt: view.permission_prompt,
-        question: view.question,
-        question_options: view
-            .question_options
-            .iter()
-            .map(|o| remote::SnapOption {
-                label: o.label.clone(),
-                description: o.description.clone(),
-            })
-            .collect(),
-        question_allow_other: view.question_allow_other,
-        // The generic overlay projection: whatever modal surface owns the keyboard
-        // (palette / any picker / config / usage / mesh / workflow).
-        overlay: app.remote_overlay().map(map_overlay_snapshot),
-        diff: view.diff.map(map_diff_snapshot),
-        plan,
-        workflow: view.workflow.map(|w| remote::SnapWorkflow {
-            active: w.active,
-            name: w.name,
-            phases: w.phases,
-            logs: w.logs,
-            finished_ok: w.finished_ok,
-            summary: w.summary,
-        }),
-        suggested_prompt: view.suggested_prompt,
-        copy_text,
-        prompt_seq,
-        notes,
-        revision,
-        resync: false,
-        closed: false,
-    }
-}
-
-/// Map one persisted transcript row into the wire type. Shared by the TUI's `/remote` provider
-/// and the daemon's `/api/history` route so both serve the identical shape, including the v9
-/// replay fields: `kind` in the same vocabulary as the live transcript, and `elapsed_ms`, the
-/// offset from `epoch` (the session's first visible row).
-///
-/// `kind == "tool"` only ever appears on a page the caller asked for with `include_tools` —
-/// otherwise `Store::load_history_page` selects only user/assistant turns plus `ui` notes and no
-/// tool row reaches here at all. `epoch` MUST come from `Store::history_epoch_with` for the same
-/// flag, or the offsets would be measured against rows the page doesn't contain.
-pub(crate) fn map_history_row(
-    row: forge_store::HistoryRow,
-    epoch: Option<i64>,
-) -> remote::HistoryRow {
-    let visibility = row.visibility.as_str().to_string();
-    let role = row.role.as_str().to_string();
-    // `ui` rows are Forge talking to the user (notices, command feedback), not a turn of the
-    // conversation — they carry role='assistant' in the store but read as system lines.
-    let kind = if visibility == "ui" {
-        "system"
-    } else {
-        match role.as_str() {
-            "user" => "user",
-            "assistant" => "assistant",
-            "tool" => "tool",
-            _ => "system",
-        }
-    };
-    remote::HistoryRow {
-        seq: row.seq,
-        role,
-        content: row.content,
-        model: row.model,
-        created_at: row.created_at,
-        visibility,
-        kind: kind.to_string(),
-        // Milliseconds on the wire (what a scrubber wants) but SECOND resolution in fact:
-        // `message.created_at` is stored as unix seconds, so this is exact to the second, not
-        // finer. Clamped at 0 because a row can share the epoch's second.
-        elapsed_ms: epoch.map(|e| (row.created_at - e).max(0) * 1_000),
-        // Only the store can say which tool a result row came from; it stays `None` rather than
-        // being inferred from the result prose when the carrier is unrecoverable.
-        tool: row.tool_name,
-        // Call-vs-result only means anything on a tool row: a `ui` note written with role='tool'
-        // reads as a system line here, and tagging it would say something false about it.
-        tool_phase: (kind == "tool")
-            .then(|| row.tool_phase.map(|phase| phase.as_str().to_string()))
-            .flatten(),
-    }
-}
-
-/// A plan step's execution state (v9), correlated with the live task list rather than invented:
-/// a `PlanStep` has no state of its own, but approving a plan seeds one task per step with that
-/// step's trimmed title (`Session::activate_plan_tasks`), and the model then drives those through
-/// `update_tasks`. So a step is exactly as far along as the task carrying its title — and
-/// "queued" whenever no such task exists (an unapproved proposal, or a list the model has since
-/// rewritten past recognition), never a guess at progress.
-fn plan_step_status(tasks: &[forge_types::TodoItem], step_title: &str) -> String {
-    let step_title = step_title.trim();
-    tasks
-        .iter()
-        .find(|t| t.title.trim() == step_title)
-        .map(|t| match t.status {
-            forge_types::TodoStatus::InProgress => "in_progress",
-            forge_types::TodoStatus::Done => "done",
-            forge_types::TodoStatus::Pending => "queued",
-        })
-        .unwrap_or("queued")
-        .to_string()
-}
-
-/// Map the TUI-side diff projection into the remote wire type (same split as the overlay).
-pub(crate) fn map_diff_snapshot(d: forge_tui::DiffSnapshot) -> remote::SnapDiff {
-    remote::SnapDiff {
-        pending: d.pending,
-        files: d
-            .files
-            .into_iter()
-            .map(|f| remote::SnapDiffFile {
-                path: f.path,
-                kind: f.kind,
-                binary: f.binary,
-                adds: f.adds,
-                dels: f.dels,
-                hunks: f
-                    .hunks
-                    .into_iter()
-                    .map(|h| remote::SnapDiffHunk {
-                        header: h.header,
-                        lines: h.lines,
-                    })
-                    .collect(),
-                skipped_lines: f.skipped_lines,
-            })
-            .collect(),
-        skipped_files: d.skipped_files,
-    }
-}
-
-/// Map the TUI-side overlay projection into the remote wire type (kept apart so `forge-tui`
-/// never depends on the server module — same split as `RemoteSnapshot` → `Snapshot`).
-pub(crate) fn map_overlay_snapshot(o: forge_tui::OverlaySnapshot) -> remote::SnapOverlay {
-    remote::SnapOverlay {
-        kind: o.kind,
-        title: o.title,
-        rows: o
-            .rows
-            .into_iter()
-            .map(|r| remote::SnapRow {
-                id: r.id,
-                label: r.label,
-                detail: r.detail,
-                selected: r.selected,
-                group: r.group,
-            })
-            .collect(),
-        selected: o.selected,
-        filter: o.filter,
-        free_text: o.free_text,
-        body: o.body,
-    }
-}
-
-/// The next input event for the key loop: remote-injected keys first (so a remote overlay
-/// commit — cursor move + synthesized Enter — is never interleaved by local typing), then the
-/// terminal's own events. Remote keys become plain [`forge_tui::InputEvent::Key`]s here, so from
-/// this point on they are indistinguishable from local keystrokes — the ONE code path both take.
-fn next_input_event(
-    remote_keys: &mut std::collections::VecDeque<forge_tui::KeyKind>,
-    tui: &mut forge_tui::Tui,
-) -> Result<Option<forge_tui::InputEvent>> {
-    if let Some(k) = remote_keys.pop_front() {
-        return Ok(Some(forge_tui::InputEvent::Key(k)));
-    }
-    tui.poll_event().context("reading input")
-}
-
-/// True when any modal surface owns the keyboard — the same set `remote_overlay()` projects.
-pub(crate) fn any_remote_modal_open(app: &forge_tui::App) -> bool {
-    app.workflow.open
-        || app.config_editor.open
-        || app.command_center.open
-        || app.palette.open
-        || app.usage_overlay.open
-        || app.mesh_overlay.open
-        || app.at_picker.open
-        || app.picker.open
-}
-
-/// A remote overlay verb, decoded from [`remote::RemoteInput`] by the drain.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RemoteOverlayOp {
-    /// Move the cursor onto the row with this id, then commit it (synthesized Enter).
-    Select(String),
-    /// Move the cursor by this many rows (negative = up), as repeated ↑/↓ keys.
-    Nav(i32),
-    /// Replace the overlay's filter/query text (or the value being edited, for free-text).
-    Filter(String),
-    /// Close the overlay (Esc) — a no-op when nothing modal is open.
-    Cancel,
-}
-
-/// Apply a remote overlay verb to the TOP-MOST open overlay (same precedence as
-/// `App::remote_overlay`) and return the keystrokes to inject through the normal key path.
-/// Select = set the cursor to the row with that id, then Enter — so a remotely committed picker
-/// produces the identical `DispatchOutcome` handling a local Enter does. All mutations here are
-/// cursor/filter state only; every side effect still happens in the shared key path.
-pub(crate) fn apply_overlay_input(
-    app: &mut forge_tui::App,
-    op: RemoteOverlayOp,
-) -> Vec<forge_tui::KeyKind> {
-    use forge_tui::KeyKind as K;
-    match op {
-        RemoteOverlayOp::Cancel => {
-            if any_remote_modal_open(app) {
-                vec![K::Esc]
-            } else {
-                Vec::new()
-            }
-        }
-        RemoteOverlayOp::Nav(delta) => {
-            if !any_remote_modal_open(app) || delta == 0 {
-                return Vec::new();
-            }
-            let key = if delta < 0 { K::Up } else { K::Down };
-            // Bounded: a hostile frame can't queue an unbounded key storm.
-            vec![key; delta.unsigned_abs().min(100) as usize]
-        }
-        RemoteOverlayOp::Filter(text) => {
-            if app.workflow.open || app.usage_overlay.open || app.mesh_overlay.open {
-                // Informational overlays have no filter.
-            } else if app.config_editor.open {
-                if app.config_editor.editing.is_some() {
-                    app.config_editor.editing = Some(text);
-                } else {
-                    app.config_editor.filter = text;
-                    app.config_editor.selected = 0;
-                }
-            } else if app.command_center.open {
-                app.command_center.query = text;
-                app.command_center.selected = 0;
-                app.command_center.clamp(&app.palette.extra);
-            } else if app.palette.open {
-                // Mirror local typing: the palette query IS the input line's slash token.
-                app.input = format!("/{text}");
-                app.input_cursor = app.input.len();
-                app.palette.query = text;
-                app.palette.selected = 0;
-                app.palette.clamp();
-            } else if app.at_picker.open {
-                app.at_picker.query = text;
-                app.at_picker.selected = 0;
-            } else if app.picker.open {
-                app.picker.query = text;
-                app.picker.selected = 0;
-                app.picker.clamp();
-            }
-            Vec::new()
-        }
-        RemoteOverlayOp::Select(id) => {
-            if app.workflow.open {
-                if let Some(idx) = app.workflow.rows.iter().position(|r| r.id == id) {
-                    app.workflow.selected = idx;
-                }
-                Vec::new() // Enter would zoom a transcript only the host can see
-            } else if app.config_editor.open {
-                if app.config_editor.editing.is_some() {
-                    return Vec::new(); // committing the edit is the free-text box's job
-                }
-                let matches = app.config_editor.matches();
-                if let Some(pos) = matches
-                    .iter()
-                    .position(|&i| app.config_editor.rows[i].path == id)
-                {
-                    app.config_editor.selected = pos;
-                    return vec![K::Enter];
-                }
-                Vec::new()
-            } else if app.command_center.open {
-                let entries = app.command_center.matches(&app.palette.extra);
-                if let Some(idx) = entries.iter().position(|entry| entry.name == id) {
-                    app.command_center.selected = idx;
-                    return vec![K::Enter];
-                }
-                Vec::new()
-            } else if app.palette.open {
-                let names: Vec<String> =
-                    app.palette.matches().into_iter().map(|e| e.name).collect();
-                if let Some(idx) = names.iter().position(|n| *n == id) {
-                    app.palette.selected = idx;
-                    // A leading `/command` input line is what makes the palette's Enter
-                    // dispatch (vs. accept-in-place) — materialize the pick exactly as typed.
-                    app.input = format!("/{id}");
-                    app.input_cursor = app.input.len();
-                    return vec![K::Enter];
-                }
-                Vec::new()
-            } else if app.usage_overlay.open {
-                Vec::new() // informational — rows aren't selectable
-            } else if app.mesh_overlay.open {
-                if let Some(idx) = app
-                    .mesh_overlay
-                    .candidates
-                    .iter()
-                    .position(|c| c.model == id)
-                {
-                    app.mesh_overlay.cursor = idx;
-                }
-                Vec::new() // browsing highlight only, same as local ↑/↓
-            } else if app.at_picker.open {
-                if let Some(idx) = app.at_picker.matches().iter().position(|p| **p == id) {
-                    app.at_picker.selected = idx;
-                    return vec![K::Enter];
-                }
-                Vec::new()
-            } else if app.picker.open {
-                if let Some(idx) = app.picker.matches().iter().position(|r| r.id == id) {
-                    app.picker.selected = idx;
-                    return vec![K::Enter];
-                }
-                Vec::new()
-            } else {
-                Vec::new()
-            }
-        }
-    }
-}
-
-/// Append a remote-facing notice (`Snapshot::notes`), keeping the ring bounded. These are state,
-/// not events — `watch` coalescing can drop intermediate snapshots, so a note must survive until
-/// the page has had a chance to render it.
-pub(crate) fn push_remote_note(notes: &mut Vec<String>, msg: &str) {
-    const MAX_REMOTE_NOTES: usize = 8;
-    notes.push(msg.to_string());
-    while notes.len() > MAX_REMOTE_NOTES {
-        notes.remove(0);
-    }
-}
-
-/// Prefix a remote prompt with the pending uploaded-text-file mentions (drained), so
-/// `expand_at_files` inlines their contents exactly like a locally typed `@path`.
-pub(crate) fn prepend_attach_mentions(mentions: &mut Vec<String>, text: String) -> String {
-    if mentions.is_empty() {
-        return text;
-    }
-    let m = mentions
-        .drain(..)
-        .map(|p| format!("@{p}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("{m}\n{text}")
-}
-
-/// Handle a [`remote::RemoteInput::Attach`] (the delivery leg of `POST /api/upload`): an image
-/// becomes vision input on the session's next turn; a text file a pending `@path` mention.
-///
-/// The path is confined to the session's `.forge/uploads/` scratch area (canonicalized — no
-/// symlink or `..` escape): `Attach` exists only to deliver uploads, so a WS client injecting
-/// an arbitrary host path (`~/.ssh/id_rsa`) is refused with a note instead of read.
-/// Confine an upload path to `<cwd>/.forge/uploads/` (canonicalized — no symlink/`..` escape).
-/// Shared by [`handle_remote_attach`] (the ambient `Attach` input) and
-/// [`resolve_prompt_attachments`] (the explicit, message-correlated attachment list on a
-/// `Prompt`) — both exist only to deliver `POST /api/upload` results, so an arbitrary host path
-/// (e.g. a WS client probing for secret files) must be refused either way.
-fn remote_attach_confined(path: &str, cwd: &str) -> bool {
-    let root = std::path::Path::new(cwd).join(".forge").join("uploads");
-    std::fs::canonicalize(path)
-        .ok()
-        .zip(std::fs::canonicalize(&root).ok())
-        .map(|(p, r)| p.starts_with(&r))
-        .unwrap_or(false)
-}
-
-pub(crate) async fn handle_remote_attach(
-    session: &Arc<tokio::sync::Mutex<Session>>,
-    app: &mut forge_tui::App,
-    mentions: &mut Vec<String>,
-    cwd: &str,
-    path: String,
-    image: bool,
-) {
-    if !remote_attach_confined(&path, cwd) {
-        app.note("⚠ attach ignored — not a file from this session's upload area");
-        return;
-    }
-    if image {
-        match crate::image_input::load_image_file(&path) {
-            Ok((att, label)) => {
-                session.lock().await.attach_images(vec![att]);
-                // Also record a `@path` mention, exactly like the non-image branch below: the
-                // vision attachment only rides THIS turn's provider call (`attach_images` is
-                // transient), so without a durable mention the image reference never reaches
-                // persisted history — it renders fine live, then silently vanishes after any
-                // history reload (new device, app restart). The mention gives the mobile client
-                // something resolvable to detect and re-render on reload via `GET /api/upload`.
-                mentions.push(path);
-                app.note(&format!(
-                    "🖼 image attached ({label}) — rides the next prompt"
-                ));
-            }
-            Err(e) => app.note(&format!("⚠ image attach failed: {e}")),
-        }
-    } else {
-        let name = std::path::Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.clone());
-        mentions.push(path);
-        app.note(&format!(
-            "📎 attached {name} — included with the next prompt"
-        ));
-    }
-}
-
-/// Resolve a [`remote::RemoteInput::Prompt`]'s explicit, message-correlated `attachments` list
-/// (mobile-upload-race fix): when non-empty it is AUTHORITATIVE for this turn, so any stale
-/// `pending_images` left over from an unrelated `Attach` (e.g. an image already uploading for a
-/// different, adjacent message) is discarded first — it must never leak into this turn — then
-/// each listed attachment is resolved fresh with the same confinement check
-/// [`handle_remote_attach`] uses. Images ride straight onto the session; non-image files come
-/// back as plain paths (the caller prepends them onto the prompt text as `@path` mentions via
-/// [`prepend_attach_mentions`] itself, at the point where the old ambient mentions were applied —
-/// this function never touches `text`, so a `//`-escape or `/command` dispatched off the SAME
-/// prompt still parses cleanly).
-///
-/// An empty list (older client, or a plain message with genuinely no attachments) is a no-op that
-/// returns an empty `Vec` without touching any session state — callers fall back to exactly the
-/// pre-existing ambient `Attach`-then-`Prompt` behavior.
-pub(crate) async fn resolve_prompt_attachments(
-    session: &Arc<tokio::sync::Mutex<Session>>,
-    app: &mut forge_tui::App,
-    remote_notes: &mut Vec<String>,
-    cwd: &str,
-    attachments: Vec<remote::PromptAttachment>,
-) -> Vec<String> {
-    if attachments.is_empty() {
-        return Vec::new();
-    }
-    // Drop, don't use: whatever's ambiently pending belongs to no turn now that an explicit,
-    // authoritative list has arrived for THIS one.
-    let _ = session.lock().await.take_pending_images();
-
-    let mut mentions = Vec::new();
-    for att in attachments {
-        if !remote_attach_confined(&att.path, cwd) {
-            tracing::warn!(
-                path = %att.path,
-                cwd = %cwd,
-                "prompt attachment rejected: outside session's upload area"
-            );
-            push_remote_note(
-                remote_notes,
-                "⚠ attach ignored — not a file from this session's upload area",
-            );
-            continue;
-        }
-        if att.image {
-            match crate::image_input::load_image_file(&att.path) {
-                Ok((img, label)) => {
-                    tracing::info!(path = %att.path, %label, "prompt image attachment resolved");
-                    session.lock().await.attach_images(vec![img]);
-                    app.note(&format!("🖼 image attached ({label}) — rides this prompt"));
-                }
-                Err(e) => {
-                    tracing::warn!(path = %att.path, error = %e, "prompt image attachment failed to load");
-                    app.note(&format!("⚠ image attach failed: {e}"));
-                }
-            }
-        } else {
-            mentions.push(att.path);
-        }
-    }
-    mentions
-}
-
-/// Start or stop remote control in response to `/remote`. On: bind the server (LAN-reachable by
-/// default, loopback with `--local`, or piped through a public tunnel with `--anywhere`), print
-/// the connect URL + a scan-to-connect QR code into scrollback, and light the statusline
-/// indicator. Off: drop the handle (stops the server + tunnel, frees the port) and clear the
-/// indicator. Idempotent: `/remote` toggles, so running it again turns it off.
-///
-/// `host_override` (`[remote] host`) replaces the auto-discovered LAN IP in the connect
-/// URL/QR/cert; only meaningful for the LAN exposure.
-pub(crate) async fn toggle_remote(
-    remote: &mut Option<remote::RemoteControl>,
-    app: &mut forge_tui::App,
-    _tui: &mut forge_tui::Tui,
-    exposure: remote::Exposure,
-    remote_cfg: &forge_config::RemoteConfig,
-    history: remote::HistoryProvider,
-    workspace: &std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>,
-) -> Result<()> {
-    if let Some(rc) = remote.take() {
-        // Turning it off: the handle's Drop aborts the server task + tunnel and sends a `closed`
-        // snapshot so any connected browser stops reconnecting.
-        app.remote_active = false;
-        app.note("◉ remote control off — browser disconnected");
-        drop(rc);
-        return Ok(());
-    }
-    let anywhere = exposure == remote::Exposure::Anywhere;
-    if anywhere {
-        app.note("◉ remote control — opening a public tunnel (this can take a few seconds)…");
-    }
-    let workspace = workspace.clone();
-    let started = match exposure {
-        remote::Exposure::Anywhere => {
-            remote::start_anywhere(Some(history), remote_cfg, Some(&workspace)).await
-        }
-        other => remote::start(
-            other,
-            remote_cfg.host.as_deref(),
-            Some(history),
-            Some(&workspace),
-        ),
-    };
-    match started {
-        Ok(rc) => {
-            app.remote_active = true;
-            let where_ = match exposure {
-                remote::Exposure::Lan => "LAN".to_string(),
-                remote::Exposure::Local => "loopback".to_string(),
-                remote::Exposure::Anywhere => {
-                    format!("public tunnel via {}", rc.tunnel.unwrap_or("tunnel"))
-                }
-            };
-            app.note(&format!(
-                "◉ remote control on — listening on {} ({where_})",
-                rc.url.addr,
-            ));
-            if anywhere {
-                // A public URL is reachable from the whole internet; the path token is the only
-                // gate. Make that explicit so the user knows what they've opened.
-                app.note(
-                    "  ⚠ anyone with the link can drive this session — the token is the only gate",
-                );
-            }
-            app.note(&format!("  connect: {}", rc.url.url));
-            if let Some(qr) = remote::qr_lines(&rc.url.url) {
-                app.print_lines(qr);
-            }
-            *remote = Some(rc);
-        }
-        Err(e) => {
-            app.note(&format!("⚠ could not start remote control: {e}"));
-        }
-    }
-    Ok(())
-}
-
-/// First use of a *project*-scope command/skill is confirmed by re-running it (its name is
-/// "armed" on the first attempt and runs on the second) — unless project scope is trusted. User-
-/// scope and builtins are never gated. Returns true when the invocation may proceed.
-pub(crate) fn project_trust_ok(
-    name: &str,
-    scope: forge_skills::Scope,
-    trust_project: bool,
-    armed: &mut std::collections::HashSet<String>,
-    app: &mut forge_tui::App,
-) -> bool {
-    if scope != forge_skills::Scope::Project || trust_project || armed.contains(name) {
-        return true;
-    }
-    armed.insert(name.to_string());
-    app.note(&format!(
-        "⚠ /{name} is a project command — it can steer the model. Run it again to confirm."
-    ));
-    false
-}
-
-/// Populate + open the session picker from the store (newest first). `query` pre-fills the filter.
-/// A clean, single-line title for a session row, derived from its first user prompt: newlines and
-/// runs of whitespace collapse to single spaces, leading `/command` noise is kept, and the result
-/// is trimmed to a readable length. Falls back to a placeholder when the session has no prompt.
-pub(crate) fn session_title(preview: Option<&str>) -> String {
-    let raw = preview.unwrap_or("").trim();
-    if raw.is_empty() {
-        return "(no prompt yet)".to_string();
-    }
-    let collapsed: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    let max = 64;
-    if collapsed.chars().count() > max {
-        format!("{}…", collapsed.chars().take(max - 1).collect::<String>())
-    } else {
-        collapsed
-    }
-}
-
-/// Surface what an undo/restore did to the user's files.
-pub(crate) fn note_restore(app: &mut forge_tui::App, report: &forge_core::snapshot::RestoreReport) {
-    if !report.restored.is_empty() {
-        app.note(&format!("↺ restored {} file(s)", report.restored.len()));
-    }
-    for w in &report.warnings {
-        app.note(&format!(
-            "⚠ {w} changed since Forge wrote it — overwrote your edit"
-        ));
-    }
-    for f in &report.failed {
-        app.note(&format!("✗ failed to restore {f}"));
-    }
-}
-
-/// A short relative age like "3m ago" / "2h ago" / "5d ago" from an epoch-second timestamp.
-pub(crate) fn fmt_age(created_at: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let secs = (now - created_at).max(0);
-    if secs < 60 {
-        format!("{secs}s ago")
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86_400)
-    }
-}
-
-fn find_starting_event_id(store: &forge_store::Store, session_id: &str) -> i64 {
-    if let Ok(events) = store.live_events_after(session_id, 0) {
-        for (id, json) in events.iter().rev() {
-            if let Ok(ev) = serde_json::from_str::<crate::live_observer::LiveEvent>(json) {
-                if matches!(ev, crate::live_observer::LiveEvent::AssistantDone) {
-                    return *id;
-                }
-            }
-        }
-    }
-    0
-}
+mod support;
+pub(crate) use support::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn codex_quota_refresh_only_runs_when_the_session_can_use_codex() {
-        assert!(should_refresh_codex_quota(false, None));
-        assert!(should_refresh_codex_quota(false, Some("bare-model")));
-        assert!(!should_refresh_codex_quota(
-            false,
-            Some("codex-cli::gpt-5.4-mini")
-        ));
-        assert!(!should_refresh_codex_quota(
-            false,
-            Some("codex-oauth::gpt-5.6-luna")
-        ));
-        assert!(!should_refresh_codex_quota(
-            false,
-            Some("claude-cli::sonnet")
-        ));
-        assert!(!should_refresh_codex_quota(false, Some("openai::gpt-5.4")));
-        assert!(!should_refresh_codex_quota(true, None));
-    }
 
     #[test]
     fn plan_step_status_follows_the_task_the_step_seeded() {
@@ -6749,19 +4754,6 @@ mod tests {
             .any(|n| n.contains("not a file from this session's upload area")));
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn known_provider_prefixes_accept_real_providers_and_keyless_bridges() {
-        assert!(is_known_provider_prefix("groq"));
-        assert!(is_known_provider_prefix("anthropic"));
-        assert!(is_known_provider_prefix("ollama"));
-        assert!(is_known_provider_prefix("claude-cli"));
-        assert!(is_known_provider_prefix("codex-cli"));
-        assert!(is_known_provider_prefix("agy-cli"));
-        // Clearly-invalid prefixes are rejected so `--model` hard-stops without a catalog.
-        assert!(!is_known_provider_prefix("nonsense"));
-        assert!(!is_known_provider_prefix("gpt-5"));
     }
 
     #[test]

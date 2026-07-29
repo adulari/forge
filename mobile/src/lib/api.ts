@@ -138,7 +138,7 @@ export interface UsageResponse {
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
   quota: UsageQuota[];
 }
-export interface UsageTotals { inputTokens: number; outputTokens: number; costUsd: number }
+export interface UsageTotals { inputTokens: number; cachedInputTokens: number; outputTokens: number; costUsd: number }
 export interface UsageProvider extends UsageTotals { provider: string; kind: "bridge" | "oauth" | "api" }
 export interface UsageQuota {
   provider: string;

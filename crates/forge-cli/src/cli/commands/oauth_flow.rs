@@ -51,15 +51,22 @@ pub fn read_pasted_redirect_from_stdin() -> Result<String> {
     Ok(input)
 }
 
-/// Extract an authorization code from a pasted redirect URL, query, or bare code.
-/// URLs carrying a `code` must also carry the expected CSRF state.
+/// Extract an authorization code from a pasted redirect URL or query.
+/// Paste flows require the callback's CSRF state; a bare code is intentionally rejected.
 pub fn parse_pasted_redirect(input: &str, expected_state: &str) -> Result<String> {
     let input = input.trim();
     if input.is_empty() {
         bail!("no redirect URL or authorization code provided")
     }
+    let is_callback = input.contains('?') || input.contains('&') || input.contains('=');
     if !input.contains("code=") {
-        return Ok(input.to_string());
+        if is_callback {
+            if input.contains("error=") {
+                bail!("OAuth authorization was denied or failed; pasted callback has no code")
+            }
+            bail!("pasted callback is missing the 'code' parameter")
+        }
+        bail!("paste the complete OAuth callback URL including its state parameter; bare authorization codes are not accepted")
     }
     let query = input
         .split_once('?')
@@ -157,10 +164,15 @@ pub async fn request_device_code(
     device_url: &str,
     client_id: &str,
     scope: &str,
+    client_secret: Option<&str>,
 ) -> Result<DeviceCodeInfo> {
+    let mut form = vec![("client_id", client_id), ("scope", scope)];
+    if let Some(secret) = client_secret {
+        form.push(("client_secret", secret));
+    }
     let response = reqwest::Client::new()
         .post(device_url)
-        .form(&[("client_id", client_id), ("scope", scope)])
+        .form(&form)
         .send()
         .await
         .with_context(|| format!("requesting device code from {device_url}"))?;
@@ -188,6 +200,7 @@ pub async fn poll_device_token(
     token_url: &str,
     client_id: &str,
     device: &DeviceCodeInfo,
+    client_secret: Option<&str>,
 ) -> Result<DeviceTokens> {
     let client = reqwest::Client::new();
     let mut interval = Duration::from_secs(device.interval);
@@ -197,13 +210,17 @@ pub async fn poll_device_token(
             bail!("device code expired before authorization");
         }
         tokio::time::sleep(interval).await;
+        let mut form = vec![
+            ("client_id", client_id),
+            ("device_code", device.device_code.as_str()),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ];
+        if let Some(secret) = client_secret {
+            form.push(("client_secret", secret));
+        }
         let response = client
             .post(token_url)
-            .form(&[
-                ("client_id", client_id),
-                ("device_code", device.device_code.as_str()),
-                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ])
+            .form(&form)
             .send()
             .await
             .with_context(|| format!("polling token endpoint {token_url}"))?;
@@ -276,9 +293,13 @@ mod tests {
         );
         assert!(parse_pasted_redirect("https://localhost/cb?code=a&state=no", "ok").is_err());
         assert!(parse_pasted_redirect("https://localhost/cb?code=a", "ok").is_err());
-        assert_eq!(
-            parse_pasted_redirect("bare-code", "unused").unwrap(),
-            "bare-code"
+        assert!(
+            parse_pasted_redirect("https://localhost/cb?error=access_denied&state=ok", "ok")
+                .unwrap_err()
+                .to_string()
+                .contains("denied")
         );
+        assert!(parse_pasted_redirect("state=ok", "ok").is_err());
+        assert!(parse_pasted_redirect("bare-code", "unused").is_err());
     }
 }

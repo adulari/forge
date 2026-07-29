@@ -198,10 +198,14 @@ pub(crate) enum ProviderCmd {
     Azure {
         /// Azure resource name → `https://<resource>.openai.azure.com`. Use `--endpoint` for a full
         /// custom URL (sovereign clouds, proxies). Exactly one of `--resource` / `--endpoint`.
-        #[arg(long, conflicts_with = "endpoint")]
+        #[arg(
+            long,
+            conflicts_with = "endpoint",
+            required_unless_present = "endpoint"
+        )]
         resource: Option<String>,
         /// Full resource endpoint base (e.g. `https://my-resource.openai.azure.com`).
-        #[arg(long)]
+        #[arg(long, required_unless_present = "resource")]
         endpoint: Option<String>,
         /// Azure REST `api-version` (default: a recent GA version).
         #[arg(long)]
@@ -277,99 +281,9 @@ pub(crate) enum AssayCmd {
     },
 }
 
-/// Managed Forge Anywhere account and host operations.
-#[derive(Subcommand)]
-pub(crate) enum AnywhereCmd {
-    /// Guided, resumable setup: sign in, recover or enroll, activate this host, and verify it.
-    Setup {
-        /// Stable name shown in the host fleet (defaults to the system hostname).
-        #[arg(long, value_name = "NAME")]
-        name: Option<String>,
-        /// Recover with an offline Recovery Kit instead of approval from an enrolled device.
-        #[arg(long)]
-        recovery: bool,
-    },
-    /// Sign in with GitHub's device flow and enroll this controller device.
-    Login {
-        /// Recover with an offline Recovery Kit instead of approval from an enrolled device.
-        #[arg(long)]
-        recovery: bool,
-    },
-    /// Approve a short-lived enrollment challenge from a new device.
-    Approve {
-        /// Challenge printed by `forge anywhere setup` on the new device.
-        challenge: String,
-    },
-    /// Register this machine as a managed host and enable its connector.
-    Enable {
-        /// Stable name shown in the host fleet.
-        #[arg(long, value_name = "NAME")]
-        name: Option<String>,
-    },
-    /// Show local enrollment plus live entitlement, connection, and quota state.
-    Status,
-    /// Diagnose setup, enrollment, connector, and service readiness without printing secrets.
-    Doctor,
-    /// Move a paused session and its workspace capsule to another host.
-    Handoff {
-        /// Session id or unique prefix.
-        session: String,
-        /// Destination host id or unique name.
-        #[arg(long, value_name = "HOST")]
-        to: String,
-    },
-    /// Create an end-to-end encrypted replay link.
-    Share {
-        /// Session id or unique prefix.
-        session: String,
-        /// Link lifetime, capped at 30 days.
-        #[arg(long, value_enum, default_value_t = ShareExpiry::Hours24)]
-        expires: ShareExpiry,
-    },
-    /// Queue an encrypted create-session job for a host, even when its live relay is offline.
-    Job {
-        /// Destination host id, unique id prefix, or unique name.
-        #[arg(long, value_name = "HOST")]
-        to: String,
-        /// Working directory on the destination host (encrypted end to end).
-        #[arg(long, value_name = "PATH")]
-        cwd: Option<String>,
-        /// Optional session title (encrypted end to end).
-        #[arg(long)]
-        title: Option<String>,
-        /// Optional model pin (encrypted end to end).
-        #[arg(long)]
-        model: Option<String>,
-        /// Initial permission mode.
-        #[arg(long, value_name = "MODE")]
-        temper: Option<String>,
-        /// Create the session in an isolated git worktree.
-        #[arg(long)]
-        worktree: bool,
-    },
-    /// Retry exact queued job ciphertext and poll categorical host acknowledgements.
-    Jobs,
-    /// List enrolled devices, or atomically revoke one and rotate the data-key epoch.
-    Devices {
-        /// Device id to revoke. Omit to list devices.
-        #[arg(long, value_name = "DEVICE")]
-        revoke: Option<String>,
-    },
-    /// Revoke this host and stop its managed connector. Local Forge is unchanged.
-    Disable,
-    /// Revoke local account tokens while preserving local Forge and encrypted history.
-    Logout,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum ShareExpiry {
-    #[value(name = "24h")]
-    Hours24,
-    #[value(name = "7d")]
-    Days7,
-    #[value(name = "30d")]
-    Days30,
-}
+#[path = "args/anywhere.rs"]
+pub(crate) mod anywhere;
+pub(crate) use anywhere::AnywhereCmd;
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
@@ -774,9 +688,9 @@ pub(crate) enum Command {
     },
     /// Manage Forge plugins (skill packs). Alias: `plugins`.
     ///
-    /// Forge uses skills as its plugin model — `forge plugin install owner/repo` fetches all
-    /// `.md` skill files from a GitHub repository and installs them locally. The `list`
-    /// subcommand shows currently installed skill packs.
+    /// Forge uses skills as its plugin model. `forge plugin install` accepts GitHub repositories,
+    /// Git URLs, and packages from registered marketplaces; `list` shows installed packs and
+    /// configured marketplaces.
     #[command(alias = "plugins")]
     Plugin {
         #[command(subcommand)]
@@ -1281,7 +1195,7 @@ pub(crate) enum QueueCmd {
         /// Run the assay gate on each result diff; tasks with findings at or above this
         /// severity are marked `gated` (their branch is still kept). Values: low|medium|high.
         #[arg(long, value_name = "SEVERITY")]
-        gate: Option<String>,
+        gate: Option<FailOnSeverity>,
         /// Drain at most this many tasks.
         #[arg(long)]
         max: Option<usize>,
@@ -1299,162 +1213,13 @@ pub(crate) enum QueueCmd {
     Report,
 }
 
-#[derive(Subcommand)]
-pub(crate) enum McpCmd {
-    /// Add an MCP server to the config (compatible with `claude mcp add` / `codex mcp add`).
-    ///
-    /// Examples:
-    ///   forge mcp add myserver -- npx -y @scope/mcp-server
-    ///   forge mcp add myserver --transport http --url https://api.example.com/mcp
-    ///   forge mcp add myserver -e API_KEY=secret -- node server.js
-    Add {
-        /// Unique name for the server.
-        name: String,
-        /// Transport protocol.
-        #[arg(long, default_value = "stdio")]
-        transport: McpTransportArg,
-        /// Config scope: `local`/`project` → `.forge/mcp.toml`; `user` → `~/.config/forge/mcp.toml`.
-        #[arg(long, short = 's', default_value = "local")]
-        scope: Scope,
-        /// Environment variables to pass to the stdio process (KEY=VALUE).
-        #[arg(long, short = 'e', value_name = "KEY=VALUE")]
-        env: Vec<String>,
-        /// HTTP headers to add to requests (KEY=VALUE).
-        #[arg(long, value_name = "KEY=VALUE")]
-        header: Vec<String>,
-        /// HTTP/SSE server URL (required for `--transport http` or `--transport sse`).
-        #[arg(long)]
-        url: Option<String>,
-        /// Environment variable holding the bearer token for auth.
-        #[arg(long, value_name = "ENV_VAR")]
-        bearer_token_env_var: Option<String>,
-        /// Command and arguments for stdio servers (everything after `--`).
-        #[arg(last = true, value_name = "COMMAND")]
-        command: Vec<String>,
-    },
-    /// Remove an MCP server from the config.
-    Remove {
-        /// Server name to remove.
-        name: String,
-        /// Config scope to remove from.
-        #[arg(long, short = 's', default_value = "local")]
-        scope: Scope,
-    },
-    /// Show the config entry for one MCP server.
-    Get {
-        /// Server name to look up.
-        name: String,
-    },
-    /// Expose a persistent Forge session as an MCP server on stdio, so another agent
-    /// (Claude Code, another Forge) can drive it via `forge_chat` / `forge_status` /
-    /// `forge_set_mode`. Add to `.mcp.json`: `{"forge": {"type":"stdio","command":"forge","args":["mcp","agent"]}}`.
-    Agent {
-        /// Resume an existing session by ID prefix instead of starting a fresh one.
-        #[arg(long)]
-        session: Option<String>,
-        /// Change the working directory before starting (the session's tool calls operate here).
-        #[arg(long)]
-        cwd: Option<std::path::PathBuf>,
-    },
-    /// Show the full discovered tool list for one connected server.
-    Tools {
-        /// Server name (as declared in `.forge/mcp.toml`).
-        server: String,
-    },
-    /// Import a Claude-Code-style `.mcp.json` into `.forge/mcp.toml` (secrets are NOT copied).
-    Import {
-        /// Path to the `.mcp.json` (default: `./.mcp.json`).
-        path: Option<String>,
-    },
-    /// Obtain OAuth tokens for an OAuth-protected HTTP MCP server.
-    Login {
-        /// Server name (as declared in `.forge/mcp.toml`).
-        server: String,
-        /// Force RFC 8628 device authorization when advertised.
-        #[arg(long)]
-        device: bool,
-        /// Use pasted redirect (or read it from stdin when no value is given).
-        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "REDIRECT")]
-        paste: Option<String>,
-    },
-    /// Remove stored OAuth tokens for a server (`forge mcp logout <server>`). Bare removes every
-    /// account; `--account <id>` removes just one.
-    Logout {
-        /// Server name (as declared in `.forge/mcp.toml`).
-        server: String,
-        /// Remove just this account instead of every account stored for the server.
-        #[arg(long)]
-        account: Option<String>,
-    },
-}
+#[path = "args/mcp.rs"]
+pub(crate) mod mcp;
+pub(crate) use mcp::{McpCmd, ServeTransportArg};
 
-#[derive(Clone, ValueEnum, Debug)]
-pub(crate) enum McpTransportArg {
-    Stdio,
-    Sse,
-    Http,
-}
-
-/// Transport for `forge mcp-serve` (Forge serving its own tools as an MCP **server**).
-#[derive(Clone, ValueEnum, Debug)]
-pub(crate) enum ServeTransportArg {
-    Stdio,
-    Http,
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum PluginMarketplaceCmd {
-    /// Register a marketplace: a name → source mapping. SOURCE is a GitHub `owner/repo` (whose
-    /// top-level directories are packages), a full git URL, or an `owner/repo` index repo.
-    ///
-    /// Examples:
-    ///   forge plugin marketplace add community anthropics/forge-marketplace
-    ///   forge plugin marketplace add internal https://git.corp/ai/skills.git --ref main
-    Add {
-        /// Marketplace name used in `forge plugin install <pkg>@<name>`.
-        name: String,
-        /// Source: `owner/repo`, a full git URL, or an index repo.
-        source: String,
-        /// Pin the marketplace to a branch/tag.
-        #[arg(long, name = "ref")]
-        ref_: Option<String>,
-    },
-    /// List configured marketplace sources.
-    List,
-    /// Remove a marketplace source.
-    Remove { name: String },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum PluginCmd {
-    /// Install a skill pack. PLUGIN is `owner/repo[@ref]`, a full git URL, `pkg@marketplace`, or a
-    /// bare `pkg` resolved against `--marketplace`. Records a lockfile entry for `forge plugin
-    /// update`. Honors `GITHUB_TOKEN` for private repos. Alias: `add`.
-    ///
-    /// This is the canonical, marketplace-aware pack installer. The simpler `forge skill install`
-    /// is a plain GitHub/URL fetcher that lands packs in the same skills directory.
-    #[command(alias = "add")]
-    Install {
-        plugin: String,
-        /// Resolve PLUGIN as a package within this registered marketplace.
-        #[arg(long)]
-        marketplace: Option<String>,
-    },
-    /// List installed skill packs (from the lockfile) and registered marketplaces.
-    List {
-        #[arg(long)]
-        available: bool,
-    },
-    /// Remove an installed skill pack.
-    Remove { plugin: String },
-    /// Re-fetch installed packs and update them. With PLUGIN, update only that pack.
-    Update { plugin: Option<String> },
-    /// Manage plugin marketplaces.
-    Marketplace {
-        #[command(subcommand)]
-        cmd: PluginMarketplaceCmd,
-    },
-}
+#[path = "args/plugins.rs"]
+pub(crate) mod plugins;
+pub(crate) use plugins::PluginCmd;
 
 /// Output format for `forge run`. `text` is the human line renderer; `stream-json` emits NDJSON
 /// events mirroring Claude Code's `--output-format stream-json` so tools can embed Forge.

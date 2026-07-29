@@ -5,8 +5,8 @@
 
 use forge_types::{ProjectContext, TaskTier};
 
-use crate::catalog;
-use crate::{normalized_turn, RoutingContext};
+use crate::context::normalized_turn;
+use crate::{catalog, RoutingContext};
 
 // --- Classification signals (weighted scoring; see `classify`). Capability over length. ---
 

@@ -58,7 +58,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Json, Path as AxumPath, Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -93,6 +93,12 @@ pub(crate) fn daemon_token_at(path: &std::path::Path, rotate: bool) -> Result<St
         if let Ok(existing) = std::fs::read_to_string(path) {
             let t = existing.trim();
             if (16..=64).contains(&t.len()) && t.chars().all(|c| c.is_ascii_hexdigit()) {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                        .with_context(|| format!("securing {}", path.display()))?;
+                }
                 return Ok(t.to_string());
             }
         }
@@ -227,14 +233,14 @@ fn remove_state() {
 /// The daemon's session registry: id → running driver handle. Mirrors `mcp_serve`'s
 /// LocalSessionManager pattern (one task per session, addressed by id).
 pub(crate) struct SessionRegistry {
-    sessions: tokio::sync::Mutex<std::collections::HashMap<String, Arc<SessionDriverHandle>>>,
+    sessions: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<SessionDriverHandle>>>>,
     fleet_tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl SessionRegistry {
     pub(crate) fn new() -> Self {
         Self {
-            sessions: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fleet_tx: tokio::sync::watch::channel(0).0,
         }
     }
@@ -271,6 +277,32 @@ impl SessionRegistry {
                 let next = fleet_tx.borrow().wrapping_add(1);
                 fleet_tx.send_replace(next);
                 next_allowed = tokio::time::Instant::now() + FLEET_INVALIDATION_MIN_INTERVAL;
+            }
+        });
+        let sessions = self.sessions.clone();
+        let fleet_tx = self.fleet_tx.clone();
+        let retained = handle.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if retained.is_finished() {
+                    let removed = {
+                        let mut sessions = sessions.lock().await;
+                        if sessions
+                            .get(&retained.session_id)
+                            .is_some_and(|current| Arc::ptr_eq(current, &retained))
+                        {
+                            sessions.remove(&retained.session_id)
+                        } else {
+                            None
+                        }
+                    };
+                    if removed.is_some() {
+                        let next = fleet_tx.borrow().wrapping_add(1);
+                        fleet_tx.send_replace(next);
+                    }
+                    break;
+                }
             }
         });
         self.sessions
@@ -330,69 +362,6 @@ pub(crate) struct DaemonState {
     anywhere_enable: tokio::sync::watch::Sender<bool>,
 }
 
-#[derive(serde::Serialize)]
-struct ConfigResponse {
-    fields: Vec<ConfigField>,
-}
-
-#[derive(serde::Serialize)]
-struct ConfigField {
-    key: String,
-    group: String,
-    field_type: String,
-    label: String,
-    help: Option<String>,
-    options: Vec<String>,
-    value: String,
-    default: String,
-    modified: bool,
-    source: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UpdateConfigRequest {
-    key: String,
-    value: Option<String>,
-    scope: ConfigScopeRequest,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ConfigScopeRequest {
-    User,
-    Project,
-}
-
-impl From<ConfigScopeRequest> for forge_config::ConfigScope {
-    fn from(value: ConfigScopeRequest) -> Self {
-        match value {
-            ConfigScopeRequest::User => Self::User,
-            ConfigScopeRequest::Project => Self::Project,
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateMcpServerRequest {
-    name: String,
-    transport: McpTransportRequest,
-    command: Option<String>,
-    #[serde(default)]
-    args: Vec<String>,
-    url: Option<String>,
-    token_env: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum McpTransportRequest {
-    Stdio,
-    Http,
-    Sse,
-}
-
 /// One row of `GET /api/sessions` — the fleet dashboard's data. `waiting` is the killer signal
 /// (a permission prompt or question is blocking the turn until a human decides); the list is
 /// served with waiting sessions FIRST so the dashboard surfaces them without client-side logic.
@@ -447,35 +416,6 @@ struct CreateSessionReq {
     /// [`forge_types::PermissionMode::from_label`]. An unrecognized value is a `400`, never a
     /// silent fallback to the default temper.
     temper: Option<String>,
-}
-
-#[derive(Clone, serde::Serialize)]
-struct ProjectRow {
-    path: String,
-    name: String,
-    is_git_repo: bool,
-    last_activity: Option<i64>,
-}
-
-#[derive(serde::Serialize)]
-struct ProjectCatalog {
-    default_cwd: String,
-    recent: Vec<ProjectRow>,
-    roots: Vec<ProjectRow>,
-}
-
-#[derive(serde::Deserialize)]
-struct BrowseProjectsQuery {
-    path: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct BrowseProjectsResponse {
-    path: String,
-    parent: Option<String>,
-    entries: Vec<ProjectRow>,
-    roots: Vec<ProjectRow>,
-    truncated: bool,
 }
 
 pub(crate) async fn serve_cmd(
@@ -669,11 +609,13 @@ pub(crate) async fn serve_cmd(
         r = server => r,
         _ = tokio::signal::ctrl_c() => {
             println!("\n⚒ shutting down — stopping sessions…");
-            for handle in registry.all().await {
+            let handles = registry.all().await;
+            for handle in &handles {
                 handle.shutdown();
             }
-            // Bounded: a wedged driver must not hold the daemon's exit hostage.
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            for handle in handles {
+                handle.join(ARCHIVE_JOIN_TIMEOUT).await;
+            }
             remove_state();
             Ok(())
         }
@@ -906,64 +848,22 @@ impl Drop for AbortTask {
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn page(State(state): State<Arc<DaemonState>>) -> Response {
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (axum::http::header::X_FRAME_OPTIONS, "DENY"),
-            (
-                axum::http::header::CONTENT_SECURITY_POLICY,
-                remote::PAGE_CSP,
-            ),
-            (axum::http::header::REFERRER_POLICY, "no-referrer"),
-        ],
-        remote::CONTROL_PAGE.replace("__BASE__", &state.base),
-    )
-        .into_response()
-}
-
-async fn app_js(State(state): State<Arc<DaemonState>>) -> Response {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/javascript")],
-        remote::APP_JS.replace("__BASE__", &state.base),
-    )
-        .into_response()
-}
-
-async fn styles_css() -> Response {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/css")],
-        remote::STYLES_CSS,
-    )
-        .into_response()
-}
-
-async fn manifest(State(state): State<Arc<DaemonState>>) -> Response {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/manifest+json",
-        )],
-        remote::manifest_json(&state.base),
-    )
-        .into_response()
-}
-
-async fn service_worker() -> Response {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/javascript")],
-        remote::SERVICE_WORKER,
-    )
-        .into_response()
-}
-
-async fn icon() -> Response {
-    (
-        [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
-        remote::ICON_SVG,
-    )
-        .into_response()
-}
+mod serve_assets;
+mod serve_changelog;
+mod serve_config;
+mod serve_mcp;
+mod serve_models;
+mod serve_projects;
+mod serve_usage;
+mod serve_workflows;
+use serve_assets::*;
+use serve_changelog::*;
+use serve_config::*;
+use serve_mcp::*;
+use serve_models::*;
+use serve_projects::*;
+use serve_usage::*;
+use serve_workflows::*;
 
 /// `GET /api/sessions` — the fleet list, newest first.
 async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
@@ -989,227 +889,12 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
     json_response(&rows)
 }
 
-fn expand_project_root(raw: &str) -> PathBuf {
-    if raw == "~" {
-        return std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(raw));
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(raw)
-}
-
-fn resolve_project_roots(default_cwd: &Path, configured: &[String]) -> Vec<PathBuf> {
-    let mut roots = Vec::with_capacity(configured.len() + 1);
-    for candidate in std::iter::once(default_cwd.to_path_buf())
-        .chain(configured.iter().map(|raw| expand_project_root(raw)))
-    {
-        match candidate.canonicalize() {
-            Ok(path) if path.is_dir() => {
-                if !roots.contains(&path) {
-                    roots.push(path);
-                }
-            }
-            Ok(_) => eprintln!(
-                "⚠ remote project root is not a directory: {}",
-                candidate.display()
-            ),
-            Err(error) => eprintln!(
-                "⚠ remote project root is unavailable ({}): {error}",
-                candidate.display()
-            ),
-        }
-    }
-    roots
-}
-
-fn project_name(path: &Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-fn project_row(path: &Path, last_activity: Option<i64>) -> ProjectRow {
-    ProjectRow {
-        path: path.display().to_string(),
-        name: project_name(path),
-        is_git_repo: path.join(".git").exists(),
-        last_activity,
-    }
-}
-
-fn path_is_browsable(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| path.starts_with(root))
-}
-
-fn browse_project_directory(
-    requested: PathBuf,
-    roots: Vec<PathBuf>,
-) -> std::result::Result<BrowseProjectsResponse, String> {
-    let path = requested
-        .canonicalize()
-        .map_err(|error| format!("project directory is unavailable: {error}"))?;
-    if !path.is_dir() {
-        return Err("project path is not a directory".to_string());
-    }
-    if !path_is_browsable(&path, &roots) {
-        return Err("project path is outside the configured browse roots".to_string());
-    }
-
-    let mut entries = std::fs::read_dir(&path)
-        .map_err(|error| format!("project directory cannot be read: {error}"))?
-        .filter_map(std::result::Result::ok)
-        .filter_map(|entry| {
-            let file_type = entry.file_type().ok()?;
-            if !file_type.is_dir() {
-                return None;
-            }
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with('.') {
-                return None;
-            }
-            let canonical = entry.path().canonicalize().ok()?;
-            path_is_browsable(&canonical, &roots).then(|| project_row(&canonical, None))
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|a, b| {
-        b.is_git_repo
-            .cmp(&a.is_git_repo)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    let truncated = entries.len() > 200;
-    entries.truncate(200);
-    let parent = path
-        .parent()
-        .filter(|parent| path_is_browsable(parent, &roots))
-        .map(|parent| parent.display().to_string());
-    let root_rows = roots.iter().map(|root| project_row(root, None)).collect();
-    Ok(BrowseProjectsResponse {
-        path: path.display().to_string(),
-        parent,
-        entries,
-        roots: root_rows,
-        truncated,
-    })
-}
-
-/// `GET /api/projects` — the zero-input default plus MRU project choices. Worktree sessions are
-/// intentionally excluded: their generated directories are implementation details, not durable
-/// projects a person should be encouraged to pick again.
-async fn project_catalog(State(state): State<Arc<DaemonState>>) -> Response {
-    let mut candidates: Vec<(String, i64)> = state
-        .registry
-        .all()
-        .await
-        .into_iter()
-        .filter(|handle| handle.worktree.is_none())
-        .map(|handle| {
-            (
-                handle.cwd.clone(),
-                handle
-                    .last_activity
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            )
-        })
-        .collect();
-
-    let store = state.store.clone();
-    let past = match tokio::task::spawn_blocking(move || store.list_sessions_for_resume()).await {
-        Ok(Ok(rows)) => rows,
-        Ok(Err(error)) => {
-            return err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("listing recent projects failed: {error}"),
-            )
-        }
-        Err(error) => {
-            return err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("listing recent projects task failed: {error}"),
-            )
-        }
-    };
-    candidates.extend(
-        past.into_iter()
-            .filter(|session| session.worktree_path.is_none())
-            .map(|session| (session.cwd, session.last_activity)),
-    );
-    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
-
-    let default_path = PathBuf::from(&state.default_cwd);
-    let mut seen = std::collections::HashSet::new();
-    seen.insert(default_path.clone());
-    let recent = candidates
-        .into_iter()
-        .filter_map(|(raw, last_activity)| {
-            let path = PathBuf::from(raw).canonicalize().ok()?;
-            if !path.is_dir() || !seen.insert(path.clone()) {
-                return None;
-            }
-            Some(project_row(&path, Some(last_activity)))
-        })
-        .take(8)
-        .collect();
-    let roots = state
-        .project_roots
-        .iter()
-        .map(|root| project_row(root, None))
-        .collect();
-
-    json_response(&ProjectCatalog {
-        default_cwd: state.default_cwd.clone(),
-        recent,
-        roots,
-    })
-}
-
-/// `GET /api/projects/browse?path=` — enumerate only canonical descendants of the daemon's
-/// configured roots. Canonicalizing before the containment check blocks both `..` traversal and
-/// symlink escapes.
-async fn browse_projects(
-    State(state): State<Arc<DaemonState>>,
-    Query(query): Query<BrowseProjectsQuery>,
-) -> Response {
-    let roots = state.project_roots.clone();
-    let requested = query
-        .path
-        .filter(|path| !path.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| roots.first().cloned());
-    let Some(requested) = requested else {
-        return err_response(
-            axum::http::StatusCode::NOT_FOUND,
-            "no project roots are available",
-        );
-    };
-
-    let result =
-        tokio::task::spawn_blocking(move || browse_project_directory(requested, roots)).await;
-
-    match result {
-        Ok(Ok(response)) => json_response(&response),
-        Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
-        Err(error) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("browsing project directory failed: {error}"),
-        ),
-    }
-}
-
-/// `POST /api/sessions` — create (optionally in a fresh isolated worktree) and start driving.
+/// `POST /api/sessions` starts a session.
 async fn create_session(
     State(state): State<Arc<DaemonState>>,
     axum::Json(req): axum::Json<CreateSessionReq>,
 ) -> Response {
-    // Validate `temper` first and fail fast — before any worktree/driver side effect — so an
-    // unrecognized value never silently falls back to the default temper.
+    // Validate temper before creating a worktree or driver.
     let temper = match req.temper.as_deref() {
         Some(raw) => match parse_temper(raw) {
             Ok(mode) => Some(mode),
@@ -1217,10 +902,56 @@ async fn create_session(
         },
         None => None,
     };
-
-    let cwd = req
-        .cwd
-        .filter(|c| !c.trim().is_empty())
+    let resume_metadata = if let Some(session_id) = req.resume.as_deref() {
+        if req.worktree {
+            return err_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                "resume cannot create a new worktree; it restores the session's recorded workspace",
+            );
+        }
+        let cwd = match state.store.session_cwd(session_id) {
+            Ok(Some(cwd)) => cwd,
+            Ok(None) => {
+                return err_response(axum::http::StatusCode::NOT_FOUND, "session not found")
+            }
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("loading resumed session workspace failed: {error}"),
+                )
+            }
+        };
+        let title = match state.store.session_title(session_id) {
+            Ok(title) => title.unwrap_or_default(),
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("loading resumed session title failed: {error}"),
+                )
+            }
+        };
+        let worktree = match state.store.session_worktree(session_id) {
+            Ok(worktree) => worktree,
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("loading resumed session worktree failed: {error}"),
+                )
+            }
+        };
+        Some((cwd, title, worktree))
+    } else {
+        None
+    };
+    let cwd = resume_metadata
+        .as_ref()
+        .map(|(cwd, _, _)| cwd.clone())
+        .or_else(|| {
+            req.cwd
+                .as_deref()
+                .filter(|cwd| !cwd.trim().is_empty())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| state.default_cwd.clone());
     let cwd_path = std::path::Path::new(&cwd);
     if !cwd_path.is_dir() {
@@ -1248,7 +979,9 @@ async fn create_session(
 
     // Keep the guard alive through driver startup so an early error removes its new worktree.
     // Once live, the worktree intentionally outlives the handle for manual review or merge.
-    let mut worktree: Option<String> = None;
+    let mut worktree = resume_metadata
+        .as_ref()
+        .and_then(|(_, _, worktree)| worktree.clone());
     let worktree_guard = if req.worktree {
         if !forge_core::worktree::is_git_repo(cwd_path) {
             return err_response(
@@ -1313,7 +1046,10 @@ async fn create_session(
     let spec = DriverSpec {
         cwd: session_cwd,
         worktree: worktree.clone(),
-        title: req.title.unwrap_or_default(),
+        title: req
+            .title
+            .or_else(|| resume_metadata.map(|(_, title, _)| title))
+            .unwrap_or_default(),
         mock: state.mock,
         model: req.model,
         resume: req.resume,
@@ -2509,97 +2245,6 @@ fn guess_content_type(path: &str) -> &'static str {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct UsageParams {
-    session: Option<String>,
-}
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UsageTotals {
-    input_tokens: u64,
-    cached_input_tokens: u64,
-    output_tokens: u64,
-    cost_usd: f64,
-}
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UsageProvider {
-    provider: String,
-    kind: String,
-    input_tokens: u64,
-    cached_input_tokens: u64,
-    output_tokens: u64,
-    cost_usd: f64,
-}
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UsageQuota {
-    provider: String,
-    kind: String,
-    window_kind: String,
-    status: String,
-    resets_at: Option<i64>,
-    fraction: Option<f64>,
-}
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UsageWindow {
-    since_epoch: i64,
-    combined: UsageTotals,
-    providers: Vec<UsageProvider>,
-}
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionUsage {
-    session_id: String,
-    combined: UsageTotals,
-    providers: Vec<UsageProvider>,
-}
-#[derive(serde::Serialize)]
-struct UsageResponse {
-    week: UsageWindow,
-    session: Option<SessionUsage>,
-    quota: Vec<UsageQuota>,
-}
-
-fn provider_kind(provider: &str) -> &'static str {
-    if provider.ends_with("-cli") {
-        "bridge"
-    } else if provider.ends_with("-oauth") || provider == "gemini" {
-        "oauth"
-    } else {
-        "api"
-    }
-}
-fn usage_providers(rows: Vec<forge_store::ProviderUsage>) -> (UsageTotals, Vec<UsageProvider>) {
-    let total = rows.iter().fold(
-        UsageTotals {
-            input_tokens: 0,
-            cached_input_tokens: 0,
-            output_tokens: 0,
-            cost_usd: 0.0,
-        },
-        |mut t, r| {
-            t.input_tokens += r.input_tokens;
-            t.cached_input_tokens += r.cached_input_tokens;
-            t.output_tokens += r.output_tokens;
-            t.cost_usd += r.cost_usd;
-            t
-        },
-    );
-    let providers = rows
-        .into_iter()
-        .map(|r| UsageProvider {
-            kind: provider_kind(&r.provider).into(),
-            provider: r.provider,
-            input_tokens: r.input_tokens,
-            cached_input_tokens: r.cached_input_tokens,
-            output_tokens: r.output_tokens,
-            cost_usd: r.cost_usd,
-        })
-        .collect();
-    (total, providers)
-}
 #[derive(serde::Serialize)]
 struct SkillRow {
     name: String,
@@ -2635,490 +2280,6 @@ async fn skills_page() -> Response {
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "could not read skills catalog",
         ),
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct WorkflowsParams {
-    #[serde(default)]
-    session: String,
-}
-
-#[derive(serde::Serialize)]
-struct WorkflowRow {
-    name: String,
-    description: String,
-    when_to_use: Option<String>,
-    phases: Vec<String>,
-    /// Typed parameters the script reads off its injected `args` global, declared in `meta.args`.
-    /// Empty for every workflow that doesn't declare them (most don't) — never inferred.
-    args: Vec<WorkflowArg>,
-    /// Recorded past runs, newest first, capped at [`WORKFLOW_RUNS_PER_ROW`]. Read from the
-    /// `workflow_run` table `Session::run_saved_workflow` writes — only real runs of THIS
-    /// workspace's script appear, never reconstructed or guessed rows. Empty for a workflow the
-    /// model has only ever run inline (the `run_workflow` tool authors an anonymous script, which
-    /// belongs to no entry in this library) or that has never run on this machine.
-    runs: Vec<WorkflowRun>,
-}
-
-/// How many past runs each workflow row carries. The library screen shows a short history strip,
-/// not an audit log — the full history stays queryable in the store.
-const WORKFLOW_RUNS_PER_ROW: usize = 10;
-
-/// One declared workflow parameter. `arg_type` (not `type`, a Rust keyword) carries the author's
-/// free-form type word — `string`, `number`, `boolean`, `path`, … — verbatim.
-#[derive(serde::Serialize)]
-struct WorkflowArg {
-    name: String,
-    arg_type: Option<String>,
-    required: bool,
-    description: Option<String>,
-    default: Option<String>,
-}
-
-/// One recorded run of a saved workflow. `ok` is the coarse verdict older clients render;
-/// `status` is the honest one — an `interrupted` run (Esc, or a killed process) neither succeeded
-/// nor failed, so `ok` is null there rather than a fabricated `false`. `finished_at` is null while
-/// a run is live AND on a crash-interrupted run, whose end moment was never observed; `status`, not
-/// `finished_at`, is what says whether a run is still going.
-#[derive(serde::Serialize)]
-struct WorkflowRun {
-    started_at: i64,
-    finished_at: Option<i64>,
-    ok: Option<bool>,
-    summary: Option<String>,
-    /// `"running"` | `"ok"` | `"failed"` | `"interrupted"`.
-    status: String,
-    /// The session the run happened in, so the app can open its transcript.
-    session_id: String,
-    /// Phases the script announced and agents it started — the run's own counts, 0 when it
-    /// reported none (a single-phase script is a real 0, not a missing value).
-    phases: i64,
-    agents: i64,
-    /// Summed over the agents that reported a cost; 0 when none did.
-    cost_usd: f64,
-}
-
-impl From<forge_store::WorkflowRun> for WorkflowRun {
-    fn from(run: forge_store::WorkflowRun) -> Self {
-        Self {
-            started_at: run.started_at,
-            finished_at: run.finished_at,
-            ok: match run.status.as_str() {
-                "ok" => Some(true),
-                "failed" => Some(false),
-                // `running` and `interrupted` have no outcome to report.
-                _ => None,
-            },
-            summary: run.summary,
-            status: run.status,
-            session_id: run.session_id,
-            phases: run.phases,
-            agents: run.agents,
-            cost_usd: run.cost_usd,
-        }
-    }
-}
-
-/// Split a `meta` literal's `args: [ {...}, {...} ]` array into its top-level object literals.
-/// Brace-balanced and quote-aware for the same reason [`meta_literal`] is: a `{`/`}` inside a
-/// description string must not end an object.
-fn meta_arg_objects(meta: &str) -> Vec<&str> {
-    let Some(idx) = meta.find("args:") else {
-        return Vec::new();
-    };
-    let tail = &meta[idx + "args:".len()..];
-    let Some(open_bracket) = tail.find('[') else {
-        return Vec::new();
-    };
-    let body = &tail[open_bracket + 1..];
-    let mut objects = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    let mut in_str: Option<char> = None;
-    let mut prev_backslash = false;
-    for (i, c) in body.char_indices() {
-        if let Some(quote) = in_str {
-            if prev_backslash {
-                prev_backslash = false;
-            } else if c == '\\' {
-                prev_backslash = true;
-            } else if c == quote {
-                in_str = None;
-            }
-            continue;
-        }
-        match c {
-            '\'' | '"' | '`' => in_str = Some(c),
-            '{' => {
-                if depth == 0 {
-                    start = i;
-                }
-                depth += 1;
-            }
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    objects.push(&body[start..=i]);
-                }
-            }
-            ']' if depth == 0 => break,
-            _ => {}
-        }
-    }
-    objects
-}
-
-/// Parse `meta.args` into typed rows. An entry with no `name` is skipped rather than given a
-/// placeholder — a nameless argument tells the UI nothing true.
-fn meta_args(meta: &str) -> Vec<WorkflowArg> {
-    meta_arg_objects(meta)
-        .into_iter()
-        .filter_map(|object| {
-            let name = meta_string_field(object, "name")?;
-            Some(WorkflowArg {
-                name,
-                arg_type: meta_string_field(object, "type"),
-                required: object.contains("required: true")
-                    || object.contains("required:true")
-                    || object.contains("required: !0"),
-                description: meta_string_field(object, "description"),
-                default: meta_string_field(object, "default"),
-            })
-        })
-        .collect()
-}
-
-/// Pull a string field (`description: '…'` / `"…"`) out of a workflow script's `meta` literal.
-/// The meta block is a pure literal by contract (forge-core's authoring guidance), so a
-/// lightweight scan is faithful enough for a library listing — no JS engine needed.
-fn meta_string_field(meta: &str, field: &str) -> Option<String> {
-    let idx = meta.find(&format!("{field}:"))?;
-    let rest = &meta[idx + field.len() + 1..];
-    let rest = rest.trim_start();
-    let quote = rest.chars().next()?;
-    if quote != '\'' && quote != '"' && quote != '`' {
-        return None;
-    }
-    let body = &rest[1..];
-    let mut out = String::new();
-    let mut chars = body.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(escaped) = chars.next() {
-                out.push(escaped);
-            }
-        } else if c == quote {
-            return Some(out);
-        } else {
-            out.push(c);
-        }
-    }
-    None
-}
-
-/// Extract the `export const meta = {…}` literal (balanced braces, quote-aware).
-fn meta_literal(script: &str) -> Option<&str> {
-    let start = script.find("export const meta")?;
-    let open = script[start..].find('{')? + start;
-    let mut depth = 0usize;
-    let mut in_str: Option<char> = None;
-    let mut prev_backslash = false;
-    for (i, c) in script[open..].char_indices() {
-        if let Some(q) = in_str {
-            if prev_backslash {
-                prev_backslash = false;
-            } else if c == '\\' {
-                prev_backslash = true;
-            } else if c == q {
-                in_str = None;
-            }
-            continue;
-        }
-        match c {
-            '\'' | '"' | '`' => in_str = Some(c),
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&script[open..=open + i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Phase titles from the meta literal's `phases: [{ title: '…' }, …]` array, in order.
-fn meta_phase_titles(meta: &str) -> Vec<String> {
-    let Some(idx) = meta.find("phases:") else {
-        return Vec::new();
-    };
-    let Some(tail) = meta.get(idx..) else {
-        return Vec::new();
-    };
-    let Some(end) = tail.find(']') else {
-        return Vec::new();
-    };
-    let mut titles = Vec::new();
-    let mut rest = &tail[..end];
-    while let Some(t) = meta_string_field(rest, "title") {
-        let consumed = rest.find("title:").unwrap_or(0) + "title:".len() + t.len() + 2;
-        titles.push(t);
-        rest = rest.get(consumed..).unwrap_or("");
-    }
-    titles
-}
-
-/// `GET /api/workflows?session=<id>` — the saved-workflow library for the session's project
-/// (`.forge/workflows/*.js`), with `meta` description/whenToUse/phases parsed out for the
-/// app's library screen. Falls back to the daemon's default cwd when no session is given.
-async fn workflows_page(
-    State(state): State<Arc<DaemonState>>,
-    Query(params): Query<WorkflowsParams>,
-) -> Response {
-    let cwd = if params.session.is_empty() {
-        state.default_cwd.clone()
-    } else {
-        match state.registry.get(&params.session).await {
-            Some(handle) => handle.cwd.clone(),
-            None => state.default_cwd.clone(),
-        }
-    };
-    let store = state.store.clone();
-    let rows = tokio::task::spawn_blocking(move || {
-        let dir = std::path::Path::new(&cwd).join(".forge").join("workflows");
-        // Runs are keyed by the workspace root `Session::run_saved_workflow` recorded, which is
-        // canonicalized (`WorkspaceContext::new`) — canonicalize this side too so a session opened
-        // through a symlink or a trailing slash still finds its own history. A path that can't be
-        // canonicalized (a session whose cwd is gone) falls back to the raw string: at worst the
-        // strip is empty, never another project's runs.
-        let run_key = std::fs::canonicalize(&cwd)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| cwd.clone());
-        let mut rows: Vec<WorkflowRow> = Vec::new();
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return rows;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("js") {
-                continue;
-            }
-            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let script = std::fs::read_to_string(&path).unwrap_or_default();
-            let meta = meta_literal(&script).unwrap_or("");
-            rows.push(WorkflowRow {
-                name: name.to_string(),
-                description: meta_string_field(meta, "description").unwrap_or_default(),
-                when_to_use: meta_string_field(meta, "whenToUse"),
-                phases: meta_phase_titles(meta),
-                args: meta_args(meta),
-                // A store read that fails leaves the strip empty rather than failing the whole
-                // library — the scripts are still worth listing.
-                runs: store
-                    .list_workflow_runs(name, &run_key, WORKFLOW_RUNS_PER_ROW)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(WorkflowRun::from)
-                    .collect(),
-            });
-        }
-        rows.sort_by(|a, b| a.name.cmp(&b.name));
-        rows
-    })
-    .await;
-    match rows {
-        Ok(rows) => json_response(&rows),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read workflows",
-        ),
-    }
-}
-
-#[derive(serde::Serialize)]
-struct ModelsResponse {
-    catalog: &'static str,
-    providers: Vec<ModelProvider>,
-}
-
-#[derive(serde::Serialize)]
-struct ModelProvider {
-    provider: String,
-    models: Vec<ModelRow>,
-}
-
-#[derive(serde::Serialize)]
-struct ModelRow {
-    id: String,
-    name: String,
-    frontier: bool,
-    free: bool,
-    paid: bool,
-    subscription: bool,
-    estimated_cost_usd: f64,
-    health: Option<ModelHealth>,
-    tier: &'static str,
-    benchmark_intelligence: Option<f64>,
-    benchmark_coding: Option<f64>,
-    context_window: Option<u32>,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct ModelHealth {
-    until_epoch: i64,
-    reason: String,
-}
-
-async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
-    let store = state.store.clone();
-    match tokio::task::spawn_blocking(move || {
-        let Some(catalog) = crate::cli::commands::models::load_cached_catalog() else {
-            return ModelsResponse {
-                catalog: "unavailable",
-                providers: Vec::new(),
-            };
-        };
-        let config = forge_config::load().unwrap_or_default();
-        let pricing = forge_mesh::pricing::Pricing::from_config(&config);
-        let benches: std::collections::HashMap<_, _> = store
-            .current_benched_report()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(model, until_epoch, reason)| {
-                (
-                    model,
-                    ModelHealth {
-                        until_epoch,
-                        reason,
-                    },
-                )
-            })
-            .collect();
-        let context_windows = store.all_model_contexts().unwrap_or_default();
-        ModelsResponse {
-            catalog: "available",
-            providers: catalog
-                .by_provider(&pricing)
-                .into_iter()
-                .map(|provider| ModelProvider {
-                    provider: provider.provider,
-                    models: provider
-                        .models
-                        .into_iter()
-                        .map(|model| ModelRow {
-                            health: benches.get(&model.id).cloned(),
-                            id: model.id.clone(),
-                            name: model.name,
-                            frontier: model.frontier,
-                            free: model.free,
-                            paid: model.paid,
-                            subscription: model.subscription,
-                            estimated_cost_usd: model.cost,
-                            tier: if model.frontier {
-                                "complex"
-                            } else if model.subscription || model.paid {
-                                "standard"
-                            } else {
-                                "trivial"
-                            },
-                            benchmark_intelligence: catalog
-                                .benchmark_for(&model.id)
-                                .map(|score| score.0),
-                            benchmark_coding: catalog.benchmark_for(&model.id).map(|score| score.1),
-                            context_window: context_windows
-                                .get(&model.id)
-                                .copied()
-                                .or_else(|| forge_mesh::pricing::context_limit(&model.id)),
-                        })
-                        .collect(),
-                })
-                .collect(),
-        }
-    })
-    .await
-    {
-        Ok(response) => json_response(&response),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read model catalog",
-        ),
-    }
-}
-
-async fn config_page() -> Response {
-    match tokio::task::spawn_blocking(config_response).await {
-        Ok(response) => json_response(&response),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read configuration",
-        ),
-    }
-}
-
-async fn update_config(Json(request): Json<UpdateConfigRequest>) -> Response {
-    let result = tokio::task::spawn_blocking(move || {
-        let descriptors = forge_config::config_descriptors();
-        if !descriptors
-            .iter()
-            .any(|descriptor| descriptor.path == request.key)
-        {
-            return Err("unknown configuration field".to_string());
-        }
-        let scope = request.scope.into();
-        match request.value {
-            Some(value) => forge_config::set_config_value(scope, &request.key, &value),
-            None => forge_config::reset_config_value(scope, &request.key),
-        }
-        .map_err(|error| error.to_string())?;
-        Ok(config_response())
-    })
-    .await;
-
-    match result {
-        Ok(Ok(response)) => json_response(&response),
-        Ok(Err(error)) => err_response(axum::http::StatusCode::BAD_REQUEST, &error),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not update configuration",
-        ),
-    }
-}
-
-fn config_response() -> ConfigResponse {
-    ConfigResponse {
-        fields: forge_config::config_descriptors()
-            .into_iter()
-            .map(|descriptor| {
-                let (field_type, options) = match descriptor.kind {
-                    forge_config::SettingKind::Bool => ("bool", Vec::new()),
-                    forge_config::SettingKind::Int => ("int", Vec::new()),
-                    forge_config::SettingKind::Float => ("float", Vec::new()),
-                    forge_config::SettingKind::List => ("list", Vec::new()),
-                    forge_config::SettingKind::Json => ("json", Vec::new()),
-                    forge_config::SettingKind::Enum(options) => {
-                        ("enum", options.into_iter().map(str::to_string).collect())
-                    }
-                    forge_config::SettingKind::Text => ("text", Vec::new()),
-                };
-                ConfigField {
-                    key: descriptor.path,
-                    group: descriptor.group,
-                    field_type: field_type.to_string(),
-                    label: descriptor.label,
-                    help: descriptor.help,
-                    options,
-                    value: descriptor.value.display(),
-                    default: descriptor.default.display(),
-                    modified: descriptor.modified,
-                    source: descriptor.source.to_string(),
-                }
-            })
-            .collect(),
     }
 }
 
@@ -3180,255 +2341,6 @@ async fn plans_page(State(state): State<Arc<DaemonState>>) -> Response {
     json_response(&plans)
 }
 
-#[derive(serde::Serialize)]
-struct McpServerRow {
-    name: String,
-    transport: String,
-    enabled: bool,
-    auth_configured: bool,
-    secret_env_count: usize,
-    /// Whether `PATCH /api/mcp` can toggle this server — true only when it is declared in one of
-    /// the `mcp.toml` files the CLI writes. A server resolved from somewhere else (an imported
-    /// `.mcp.json`) is read-only, and the client needs to know that BEFORE offering a control,
-    /// rather than discovering it from a 404 after the user flips a switch.
-    editable: bool,
-}
-
-#[derive(serde::Serialize)]
-struct McpResponse {
-    servers: Vec<McpServerRow>,
-    allowed_servers: Vec<String>,
-    allowed_tools: Vec<String>,
-    call_timeout_secs: u64,
-    connect_timeout_secs: u64,
-}
-
-async fn create_mcp_server(Json(request): Json<CreateMcpServerRequest>) -> Response {
-    let result = tokio::task::spawn_blocking(move || {
-        let name = request.name.trim();
-        if name.is_empty()
-            || !name.chars().all(|character| {
-                character.is_ascii_alphanumeric() || character == '-' || character == '_'
-            })
-        {
-            return Err(
-                "server name must use only letters, numbers, hyphens, or underscores".to_string(),
-            );
-        }
-        let path = std::path::PathBuf::from(".forge/mcp.toml");
-        let mut config = forge_config::load_mcp_toml(&path);
-        if config.servers.iter().any(|server| server.name == name) {
-            return Err("a server with that name already exists".to_string());
-        }
-        let transport = match request.transport {
-            McpTransportRequest::Stdio => {
-                let command = request
-                    .command
-                    .filter(|command| !command.trim().is_empty())
-                    .ok_or_else(|| "stdio servers need a command".to_string())?;
-                forge_config::McpTransport::Stdio {
-                    command,
-                    args: request.args,
-                    env: std::collections::HashMap::new(),
-                }
-            }
-            McpTransportRequest::Http => forge_config::McpTransport::Http {
-                url: valid_mcp_url(request.url)?,
-                headers: std::collections::HashMap::new(),
-            },
-            McpTransportRequest::Sse => forge_config::McpTransport::Sse {
-                url: valid_mcp_url(request.url)?,
-                headers: std::collections::HashMap::new(),
-            },
-        };
-        let auth = request
-            .token_env
-            .filter(|name| !name.trim().is_empty())
-            .map(|token_env| forge_config::McpAuth {
-                token_env: Some(token_env),
-                token_keyring: None,
-                header: None,
-                oauth: None,
-            });
-        config.servers.push(forge_config::McpServerConfig {
-            name: name.to_string(),
-            transport,
-            auth,
-            secret_env: Vec::new(),
-            enabled: true,
-        });
-        forge_config::write_mcp_toml(&path, &config).map_err(|error| error.to_string())
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => mcp_page().await,
-        Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not save MCP server",
-        ),
-    }
-}
-
-/// Body of `PATCH /api/mcp` — currently only the enable/disable toggle the app's MCP screen needs.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UpdateMcpServerRequest {
-    name: String,
-    enabled: bool,
-}
-
-/// The two `mcp.toml` files the CLI writes, project scope first — the same order and paths
-/// `forge mcp add/remove --scope` uses (`crates/forge-cli/src/cli/commands/mcp.rs`).
-fn mcp_toml_scopes() -> Vec<std::path::PathBuf> {
-    let mut paths = vec![std::path::PathBuf::from(".forge/mcp.toml")];
-    if let Some(dir) = forge_config::config_dir() {
-        paths.push(dir.join("mcp.toml"));
-    }
-    paths
-}
-
-/// `PATCH /api/mcp` — flip a configured server's `enabled` flag, persisting through the same
-/// `mcp.toml` the CLI writes so `forge mcp list` and the daemon never disagree.
-///
-/// A server that resolves from somewhere else entirely (an imported `.mcp.json`, say) is NOT
-/// silently materialised into a new `mcp.toml` entry — that would fork the source of truth, so it
-/// is a 404 naming where the toggle would have to be made instead.
-async fn update_mcp_server(Json(request): Json<UpdateMcpServerRequest>) -> Response {
-    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        for path in mcp_toml_scopes() {
-            let mut config = forge_config::load_mcp_toml(&path);
-            let Some(server) = config
-                .servers
-                .iter_mut()
-                .find(|server| server.name == request.name)
-            else {
-                continue;
-            };
-            if server.enabled == request.enabled {
-                return Ok(());
-            }
-            server.enabled = request.enabled;
-            return forge_config::write_mcp_toml(&path, &config).map_err(|e| e.to_string());
-        }
-        Err(format!(
-            "no server '{}' in .forge/mcp.toml or the user mcp.toml — edit it where it is defined",
-            request.name
-        ))
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => mcp_page().await,
-        Ok(Err(message)) => err_response(axum::http::StatusCode::NOT_FOUND, &message),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not update MCP server",
-        ),
-    }
-}
-
-fn valid_mcp_url(url: Option<String>) -> Result<String, String> {
-    let url = url.ok_or_else(|| "HTTP and SSE servers need an http(s) URL".to_string())?;
-    if url.starts_with("http://") || url.starts_with("https://") {
-        Ok(url)
-    } else {
-        Err("HTTP and SSE servers need an http(s) URL".to_string())
-    }
-}
-
-async fn mcp_page() -> Response {
-    match tokio::task::spawn_blocking(|| {
-        let config = forge_config::load().unwrap_or_default();
-        // Read the toggleable scopes once, not once per server: `editable` is exactly the
-        // membership test `update_mcp_server` performs before it agrees to write.
-        let editable: std::collections::HashSet<String> = mcp_toml_scopes()
-            .iter()
-            .flat_map(|path| forge_config::load_mcp_toml(path).servers)
-            .map(|server| server.name)
-            .collect();
-        McpResponse {
-            servers: config
-                .mcp
-                .servers
-                .iter()
-                .map(|server| McpServerRow {
-                    name: server.name.clone(),
-                    transport: server.transport_label().to_string(),
-                    enabled: server.enabled,
-                    auth_configured: server.auth.is_some(),
-                    secret_env_count: server.secret_env.len(),
-                    editable: editable.contains(&server.name),
-                })
-                .collect(),
-            allowed_servers: config.mcp.allow.servers,
-            allowed_tools: config.mcp.allow.tools,
-            call_timeout_secs: config.mcp.call_timeout_secs,
-            connect_timeout_secs: config.mcp.connect_timeout_secs,
-        }
-    })
-    .await
-    {
-        Ok(response) => json_response(&response),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read MCP configuration",
-        ),
-    }
-}
-
-async fn usage_page(
-    State(state): State<Arc<DaemonState>>,
-    Query(params): Query<UsageParams>,
-) -> Response {
-    let store = state.store.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let now = chrono::Utc::now().timestamp();
-        let week_rows = store
-            .usage_by_provider_since(now - 604800)
-            .unwrap_or_default();
-        let (combined, providers) = usage_providers(week_rows);
-        let session = params.session.filter(|s| !s.is_empty()).map(|id| {
-            let (combined, providers) =
-                usage_providers(store.usage_by_provider_for_session(&id).unwrap_or_default());
-            SessionUsage {
-                session_id: id,
-                combined,
-                providers,
-            }
-        });
-        let quota = store
-            .subscription_windows()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|q| UsageQuota {
-                kind: provider_kind(&q.provider).into(),
-                provider: q.provider,
-                window_kind: q.window_kind,
-                status: q.status,
-                resets_at: q.resets_at,
-                fraction: q.fraction,
-            })
-            .collect();
-        UsageResponse {
-            week: UsageWindow {
-                since_epoch: now - 604800,
-                combined,
-                providers,
-            },
-            session,
-            quota,
-        }
-    })
-    .await;
-    match result {
-        Ok(body) => json_response(&body),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "usage unavailable",
-        ),
-    }
-}
-
 #[derive(serde::Deserialize)]
 struct HistoryParams {
     #[serde(default)]
@@ -3482,111 +2394,6 @@ async fn history_page(
 // ---------------------------------------------------------------------------
 // What's New (`GET /api/changelog`)
 // ---------------------------------------------------------------------------
-
-/// The repository's Keep-a-Changelog file, compiled in.
-///
-/// Embedded rather than read from disk because the daemon's cwd is a USER project, not the Forge
-/// checkout — there is no path at runtime that reliably holds the changelog for the binary that is
-/// actually running, and "what's new" is only true if it matches that binary. Same reach-out-to-the
-/// -repo-root pattern as `include_str!("../../../protocol/remote-v9.json")` in `remote.rs`. Only
-/// the top [`CHANGELOG_DEFAULT_RELEASES`] sections are ever parsed, so the ~200 KB is static
-/// rodata, never a per-request cost.
-const CHANGELOG_MD: &str = include_str!("../../../CHANGELOG.md");
-
-const CHANGELOG_DEFAULT_RELEASES: usize = 10;
-const CHANGELOG_MAX_RELEASES: usize = 50;
-
-#[derive(serde::Deserialize)]
-struct ChangelogParams {
-    limit: Option<usize>,
-}
-
-/// One bullet, tagged with the `### Added` / `### Changed` / `### Fixed` heading it sat under.
-#[derive(serde::Serialize, PartialEq, Debug)]
-struct ChangelogEntry {
-    section: String,
-    text: String,
-}
-
-#[derive(serde::Serialize, PartialEq, Debug)]
-struct ChangelogRelease {
-    version: String,
-    /// `null` for `[Unreleased]`, which carries no date.
-    date: Option<String>,
-    entries: Vec<ChangelogEntry>,
-}
-
-/// Parse the top `limit` `## [version] - date` sections. Continuation lines of a wrapped bullet are
-/// folded back into that bullet; `[Unreleased]` is emitted only when it actually has entries.
-fn parse_changelog(markdown: &str, limit: usize) -> Vec<ChangelogRelease> {
-    let mut releases: Vec<ChangelogRelease> = Vec::new();
-    let mut current: Option<ChangelogRelease> = None;
-    let mut section = String::new();
-    for line in markdown.lines() {
-        if let Some(heading) = line.strip_prefix("## ") {
-            if let Some(release) = current.take() {
-                if !release.entries.is_empty() {
-                    releases.push(release);
-                }
-            }
-            if releases.len() >= limit {
-                return releases;
-            }
-            let (version, date) = match heading.split_once(" - ") {
-                Some((version, date)) => (version, Some(date.trim().to_string())),
-                None => (heading, None),
-            };
-            let version = version.trim().trim_matches(['[', ']']).to_string();
-            // The running binary does not contain unreleased work, so `[Unreleased]` must never
-            // reach its own "What's New". This used to fall out of the empty-entries check below,
-            // which only held because that section happened to always be empty — the moment
-            // anything landed under it, it became the feed's newest "release", dateless.
-            // Leaving `current` unset also discards its bullets: entries only attach to a live
-            // release.
-            current = (!version.eq_ignore_ascii_case("Unreleased")).then_some(ChangelogRelease {
-                version,
-                date,
-                entries: Vec::new(),
-            });
-            section.clear();
-            continue;
-        }
-        if let Some(heading) = line.strip_prefix("### ") {
-            section = heading.trim().to_string();
-            continue;
-        }
-        let Some(release) = current.as_mut() else {
-            continue;
-        };
-        if let Some(item) = line.strip_prefix("- ") {
-            release.entries.push(ChangelogEntry {
-                section: section.clone(),
-                text: item.trim().to_string(),
-            });
-        } else if line.starts_with("  ") && !line.trim().is_empty() {
-            // A wrapped bullet: Forge's changelog hard-wraps long entries at ~100 columns.
-            if let Some(last) = release.entries.last_mut() {
-                last.text.push(' ');
-                last.text.push_str(line.trim());
-            }
-        }
-    }
-    if let Some(release) = current.take() {
-        if !release.entries.is_empty() && releases.len() < limit {
-            releases.push(release);
-        }
-    }
-    releases
-}
-
-/// `GET /api/changelog?limit=<n>` — the "What's New" feed for the running binary.
-async fn changelog_page(Query(params): Query<ChangelogParams>) -> Response {
-    let limit = params
-        .limit
-        .unwrap_or(CHANGELOG_DEFAULT_RELEASES)
-        .clamp(1, CHANGELOG_MAX_RELEASES);
-    json_response(&parse_changelog(CHANGELOG_MD, limit))
-}
 
 pub(crate) fn json_response<T: serde::Serialize>(value: &T) -> Response {
     (
@@ -3675,6 +2482,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_browse_route_is_token_scoped_and_defaults_to_the_first_root() {
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("project")).unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: canonical_root.display().to_string(),
+            project_roots: vec![canonical_root.clone()],
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+        let unauthorized = router
+            .clone()
+            .oneshot(
+                axum::http::Request::get("/api/projects/browse")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), axum::http::StatusCode::NOT_FOUND);
+
+        let response = router
+            .oneshot(
+                axum::http::Request::get("/tok/api/projects/browse")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["path"], canonical_root.display().to_string());
+        assert_eq!(body["parent"], serde_json::Value::Null);
+        assert_eq!(body["entries"][0]["name"], "project");
+    }
+
+    #[tokio::test]
     async fn workflow_library_serves_the_runs_this_workspace_actually_had() {
         use tower::ServiceExt;
 
@@ -3759,31 +2615,6 @@ mod tests {
     }
 
     #[test]
-    fn an_interrupted_run_reports_no_verdict_to_the_client() {
-        // `ok` is the coarse boolean older clients render; an interrupted run neither succeeded
-        // nor failed, so it stays null there and only `status` carries the truth.
-        let row = |status: &str| {
-            WorkflowRun::from(forge_store::WorkflowRun {
-                id: "r".into(),
-                name: "audit".into(),
-                session_id: "s".into(),
-                cwd: "/repo".into(),
-                started_at: 1_770_000_000,
-                finished_at: None,
-                status: status.into(),
-                summary: None,
-                phases: 0,
-                agents: 0,
-                cost_usd: 0.0,
-            })
-        };
-        assert_eq!(row("ok").ok, Some(true));
-        assert_eq!(row("failed").ok, Some(false));
-        assert_eq!(row("interrupted").ok, None);
-        assert_eq!(row("running").ok, None);
-    }
-
-    #[test]
     fn generic_attention_push_fires_only_on_waiting_transition() {
         assert!(attention_became_required(false, true));
         assert!(!attention_became_required(true, true));
@@ -3799,141 +2630,6 @@ mod tests {
         // Repeated enable requests attach to the same one-shot supervisor.
         signal_anywhere_enable(&enabled);
         assert!(*receiver.borrow());
-    }
-
-    #[test]
-    fn project_roots_are_canonical_deduplicated_and_default_first() {
-        let temp = tempfile::tempdir().unwrap();
-        let default = temp.path().join("default");
-        let extra = temp.path().join("extra");
-        std::fs::create_dir_all(&default).unwrap();
-        std::fs::create_dir_all(&extra).unwrap();
-
-        let roots = resolve_project_roots(
-            &default,
-            &[
-                default.join(".").display().to_string(),
-                extra.display().to_string(),
-                extra.join("..").join("extra").display().to_string(),
-            ],
-        );
-
-        assert_eq!(
-            roots,
-            vec![
-                default.canonicalize().unwrap(),
-                extra.canonicalize().unwrap()
-            ]
-        );
-    }
-
-    #[test]
-    fn workflow_meta_parsers_extract_library_fields() {
-        // A realistic authored workflow: `export const meta = {…}` with a brace and a
-        // matching quote inside a string value (must not break literal balancing or field
-        // extraction), plus an escaped apostrophe in whenToUse.
-        let script = r#"
-export const meta = {
-  name: 'code-review',
-  description: 'Review a diff { and } braces',
-  whenToUse: 'When you\'re unsure it is right',
-  phases: [
-    { title: 'Scan', prompt: 'p1' },
-    { title: 'Verify', prompt: 'p2' },
-    { title: 'Report', prompt: 'p3' },
-  ],
-};
-
-export async function run() {}
-"#;
-        let meta = meta_literal(script).expect("meta literal");
-        assert!(meta.starts_with('{') && meta.ends_with('}'));
-        assert!(meta.contains("phases:"));
-        assert!(!meta.contains("export async function"));
-
-        assert_eq!(
-            meta_string_field(meta, "description").as_deref(),
-            Some("Review a diff { and } braces")
-        );
-        assert_eq!(
-            meta_string_field(meta, "whenToUse").as_deref(),
-            Some("When you're unsure it is right")
-        );
-        assert_eq!(
-            meta_phase_titles(meta),
-            vec![
-                "Scan".to_string(),
-                "Verify".to_string(),
-                "Report".to_string()
-            ]
-        );
-
-        assert!(meta_literal("no meta here").is_none());
-        assert_eq!(
-            meta_phase_titles("{ description: 'x' }"),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn project_browser_stays_inside_roots_and_prioritizes_git_projects() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let ordinary = root.path().join("alpha");
-        let git = root.path().join("zeta-git");
-        std::fs::create_dir_all(&ordinary).unwrap();
-        std::fs::create_dir_all(git.join(".git")).unwrap();
-        std::fs::create_dir_all(root.path().join(".hidden")).unwrap();
-        let canonical_root = root.path().canonicalize().unwrap();
-
-        let result =
-            browse_project_directory(canonical_root.clone(), vec![canonical_root.clone()]).unwrap();
-        assert_eq!(result.path, canonical_root.display().to_string());
-        assert!(
-            result.parent.is_none(),
-            "the browse root cannot navigate upward"
-        );
-        assert_eq!(
-            result
-                .entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["zeta-git", "alpha"]
-        );
-        assert!(result.entries[0].is_git_repo);
-
-        let error = browse_project_directory(outside.path().to_path_buf(), vec![canonical_root])
-            .err()
-            .expect("outside path must be rejected");
-        assert!(
-            error.contains("outside the configured browse roots"),
-            "{error}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn project_browser_rejects_symlink_escapes() {
-        use std::os::unix::fs::symlink;
-
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let escape = root.path().join("escape");
-        symlink(outside.path(), &escape).unwrap();
-        let canonical_root = root.path().canonicalize().unwrap();
-
-        let listing =
-            browse_project_directory(canonical_root.clone(), vec![canonical_root.clone()]).unwrap();
-        assert!(listing.entries.iter().all(|entry| entry.name != "escape"));
-
-        let error = browse_project_directory(escape, vec![canonical_root])
-            .err()
-            .expect("symlink escape must be rejected");
-        assert!(
-            error.contains("outside the configured browse roots"),
-            "{error}"
-        );
     }
 
     #[test]
@@ -3978,6 +2674,18 @@ export async function run() {}
         // Second call returns the SAME token (stable origin is the whole point).
         let t2 = daemon_token_at(&path, false).unwrap();
         assert_eq!(t1, t2, "token is stable across restarts");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(daemon_token_at(&path, false).unwrap(), t1);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "existing token is repaired to owner-only"
+            );
+        }
         // Rotation mints a fresh one and persists it.
         let t3 = daemon_token_at(&path, true).unwrap();
         assert_ne!(t1, t3, "rotate mints a new token");
@@ -4789,10 +3497,12 @@ export async function run() {}
             std::env::temp_dir().join(format!("forge-serve-past-arch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let stored_dir = dir.join("durable-workspace");
+        std::fs::create_dir_all(&stored_dir).unwrap();
         std::env::set_var("FORGE_DB", dir.join("past-arch.db"));
 
         let mk = |title: &str| DriverSpec {
-            cwd: dir.display().to_string(),
+            cwd: stored_dir.display().to_string(),
             worktree: None,
             title: title.to_string(),
             mock: true,
@@ -4832,6 +3542,9 @@ export async function run() {}
             h.join(std::time::Duration::from_secs(5)).await;
         }
         let store = crate::open_store().unwrap();
+        store
+            .set_session_worktree(&archived_id, &stored_dir.display().to_string())
+            .unwrap();
         store.archive_session(&archived_id).unwrap();
         assert!(store.session_archived(&archived_id).unwrap());
 
@@ -4888,6 +3601,22 @@ export async function run() {}
         assert_eq!(resp.status(), axum::http::StatusCode::OK, "resume succeeds");
         let body = json_body(resp).await;
         assert_eq!(body["id"], archived_id, "resumed the same session");
+        assert_eq!(body["title"], "was-archived");
+        assert_eq!(
+            body["cwd"],
+            stored_dir.display().to_string(),
+            "resume-only restores the durable workspace rather than daemon default"
+        );
+        let resumed = registry
+            .get(&archived_id)
+            .await
+            .expect("resumed driver registered");
+        assert_eq!(resumed.title, "was-archived");
+        assert_eq!(resumed.cwd, stored_dir.display().to_string());
+        assert_eq!(
+            resumed.worktree.as_deref(),
+            Some(stored_dir.to_str().unwrap())
+        );
 
         let store = crate::open_store().unwrap();
         assert!(
@@ -5883,104 +4612,6 @@ export async function run() {}
         handle.shutdown();
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn changelog_parses_the_top_releases_with_their_sections() {
-        let releases = parse_changelog(CHANGELOG_MD, 3);
-        assert_eq!(releases.len(), 3, "the top N releases, no more");
-        assert!(
-            releases.iter().all(|r| !r.entries.is_empty()),
-            "sections with no entries are never emitted"
-        );
-        assert!(
-            !releases
-                .iter()
-                .any(|r| r.version.eq_ignore_ascii_case("Unreleased")),
-            "the running binary never advertises unreleased work"
-        );
-        let first = &releases[0];
-        assert!(
-            first
-                .version
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit()),
-            "version brackets are stripped: {}",
-            first.version
-        );
-        assert!(first.date.is_some(), "a released version carries its date");
-        assert!(first.entries.iter().all(|e| matches!(
-            e.section.as_str(),
-            "Added" | "Changed" | "Fixed" | "Removed"
-        )));
-    }
-
-    // The assertion above goes vacuous whenever `[Unreleased]` happens to be empty, which is most
-    // of the time — a released CHANGELOG_MD cannot prove this. Pin the behaviour on a fixture that
-    // always has unreleased entries.
-    #[test]
-    fn a_populated_unreleased_section_never_reaches_the_whats_new_feed() {
-        let markdown = "\
-## [Unreleased]
-
-### Fixed
-
-- Something that has not shipped yet.
-
-## [9.9.9] - 2026-01-01
-
-### Added
-
-- Something that has.
-";
-        let releases = parse_changelog(markdown, 3);
-        assert_eq!(releases.len(), 1, "only the shipped release is advertised");
-        assert_eq!(releases[0].version, "9.9.9");
-        assert_eq!(
-            releases[0].entries.len(),
-            1,
-            "unreleased bullets are dropped"
-        );
-        assert_eq!(releases[0].entries[0].text, "Something that has.");
-    }
-
-    #[test]
-    fn changelog_folds_wrapped_bullets_and_skips_empty_unreleased() {
-        let markdown = "# Changelog\n\n## [Unreleased]\n\n## [1.2.0] - 2026-01-02\n\n### Added\n\n- a thing\n  that wrapped\n- another\n\n### Fixed\n\n- a fix\n";
-        let releases = parse_changelog(markdown, 10);
-        assert_eq!(releases.len(), 1, "empty `[Unreleased]` is dropped");
-        assert_eq!(releases[0].version, "1.2.0");
-        assert_eq!(releases[0].date.as_deref(), Some("2026-01-02"));
-        assert_eq!(
-            releases[0].entries,
-            vec![
-                ChangelogEntry {
-                    section: "Added".into(),
-                    text: "a thing that wrapped".into()
-                },
-                ChangelogEntry {
-                    section: "Added".into(),
-                    text: "another".into()
-                },
-                ChangelogEntry {
-                    section: "Fixed".into(),
-                    text: "a fix".into()
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn workflow_meta_args_parse_typed_declarations_only() {
-        let meta = "{ name: 'x', args: [{ name: 'target', type: 'path', required: true, description: 'what to scan' }, { type: 'string' }] }";
-        let args = meta_args(meta);
-        assert_eq!(args.len(), 1, "a nameless arg is skipped, never placeheld");
-        assert_eq!(args[0].name, "target");
-        assert_eq!(args[0].arg_type.as_deref(), Some("path"));
-        assert!(args[0].required);
-        assert_eq!(args[0].description.as_deref(), Some("what to scan"));
-        assert!(meta_args("{ name: 'x' }").is_empty());
     }
 
     /// The git review dock over the REAL router and a REAL repository: status buckets a staged

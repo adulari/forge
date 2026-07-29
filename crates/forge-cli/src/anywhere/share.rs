@@ -15,7 +15,7 @@ use sha2::{Digest as _, Sha256};
 use super::{
     decode_base64_array, decode_hex_array, ensure_access_token, now_ms, LocalState, StateStore,
 };
-use crate::ShareExpiry;
+use crate::cli::args::anywhere::ShareExpiry;
 
 const TRANSFER_ATTEMPTS: usize = 2;
 

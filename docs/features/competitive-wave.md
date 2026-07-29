@@ -23,6 +23,24 @@ channel the shell-error interceptor uses — so the model sees the type errors /
 its next step and self-corrects. Built-in server defaults for rust / typescript / javascript /
 python / go; degrades silently when the binary isn't on `PATH`.
 
+A server that fails to start or hand shake is reported with cause and then paced. The server's
+stderr is captured (bounded tail) and attached to the warning, so the common
+`rust-analyzer` case reads `server closed stdout during initialize — server stderr: error:
+'rust-analyzer' is not installed for the toolchain` instead of a bare EOF. The failing
+`(language, repo-root)` pair then enters a doubling cooldown (30s → 10min cap), so a broken
+toolchain costs one doomed process per cooldown rather than one per edited file. A dead pipe on
+`didOpen` drops the server from the slot for the same treatment. The first successful handshake
+clears the cooldown, so diagnostics resume on their own once the toolchain is repaired (e.g.
+`rustup component add rust-analyzer`) — no Forge restart required.
+
+A daemon can visit many project roots across many concurrent sessions, so the process-wide live
+registry retains at most four `(language, repo-root)` analyzer processes total. Each analyzer has an
+independent five-minute idle timer that terminates it even when the session receives no further
+edits; a later edit lazily starts it again. This bounds retained analyzer memory across idle
+sessions without making an eviction permanent: the existing 30-second to 10-minute failure backoff
+still applies after a server exits unexpectedly or is OOM-killed, and a later successful handshake
+restores diagnostics.
+
 ```toml
 [lsp]
 enabled = true

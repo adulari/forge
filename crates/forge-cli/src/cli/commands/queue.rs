@@ -45,13 +45,16 @@ fn add_queue_cmd(
         }
     }
     let cwd = canonical_cwd()?;
+    let queue_root = git_repo_root(&cwd)
+        .map(|root| root.display().to_string())
+        .unwrap_or_else(|_| cwd.clone());
     let store = open_store()?;
     let id = forge_types::new_id();
     store
         .add_queue_task(
             &id,
             task.trim(),
-            &cwd,
+            &queue_root,
             mode.as_deref(),
             model.as_deref(),
             budget,
@@ -123,16 +126,23 @@ fn resolve_queue_id(store: &Store, prefix: &str) -> Result<String> {
 // layer (per-provider caps), not here.
 // ---------------------------------------------------------------------------
 
-fn run_queue_cmd(gate: Option<String>, max: Option<usize>, mock: bool, shadow: bool) -> Result<()> {
+fn run_queue_cmd(
+    gate: Option<FailOnSeverity>,
+    max: Option<usize>,
+    mock: bool,
+    shadow: bool,
+) -> Result<()> {
     let cwd = canonical_cwd()?;
     let repo_root = git_repo_root(&cwd)
         .context("`forge queue run` needs a git repository (results are left as branches)")?;
     let store = open_store()?;
     let pending: Vec<_> = store
-        .list_queue_tasks(Some(&cwd))
+        .list_queue_tasks(None)
         .context("listing queue")?
         .into_iter()
-        .filter(|t| t.status == "pending")
+        .filter(|task| {
+            task.status == "pending" && git_repo_root(&task.cwd).is_ok_and(|root| root == repo_root)
+        })
         .take(max.unwrap_or(usize::MAX))
         .collect();
     if pending.is_empty() {
@@ -148,7 +158,13 @@ fn run_queue_cmd(gate: Option<String>, max: Option<usize>, mock: bool, shadow: b
             continue; // a concurrent drain got there first
         }
         println!("▶ {}  {}", &t.id[..8], truncate(&t.task, 70));
-        let outcome = run_one_task(&t, &repo_root, &forge_exe, gate.as_deref(), mock);
+        let gate = gate.map(|severity| match severity {
+            FailOnSeverity::Low => "low",
+            FailOnSeverity::Medium => "medium",
+            FailOnSeverity::High => "high",
+            FailOnSeverity::Critical => "critical",
+        });
+        let outcome = run_one_task(&t, &repo_root, &forge_exe, gate, mock);
         let (status, session_id, branch, summary, cost, gate_note, model) = match outcome {
             Ok(o) => (
                 o.status,
@@ -317,15 +333,20 @@ fn run_one_task(
 
     // Gate BEFORE committing: assay's diff scope reads the uncommitted working tree.
     let mut gate_note = None;
-    if let Some(sev) = gate {
-        if !over_budget {
+    if exit.success() && !over_budget {
+        if let Some(sev) = gate {
             let gate_out = std::process::Command::new(forge_exe)
                 .args(["assay", "run", "--scope", "diff", "--fail-on", sev])
                 .current_dir(guard.path())
                 .output()
                 .context("running the assay gate")?;
-            if gate_out.status.code() == Some(2) {
-                gate_note = Some(format!("assay found ≥{sev} severity findings"));
+            if !gate_out.status.success() {
+                let detail = if gate_out.status.code() == Some(2) {
+                    format!("assay found ≥{sev} severity findings")
+                } else {
+                    format!("assay gate failed to complete ({})", gate_out.status)
+                };
+                gate_note = Some(detail);
             }
         }
     }
@@ -355,10 +376,10 @@ fn run_one_task(
 
     let status = if over_budget {
         "over-budget"
+    } else if !exit.success() {
+        "failed"
     } else if gate_note.is_some() {
         "gated"
-    } else if !exit.success() && branch.is_none() {
-        "failed"
     } else if branch.is_some() {
         "done"
     } else {
@@ -488,149 +509,10 @@ pub(crate) fn scoreboard_cmd() -> Result<()> {
 // --output-format stream-json`: init → session_id, usage → cumulative cost, result → final text.
 // ---------------------------------------------------------------------------
 
-/// Folded view of one child run's NDJSON stream.
-#[derive(Default)]
-struct StreamRun {
-    session_id: Option<String>,
-    cost_usd: Option<f64>,
-    result: Option<String>,
-    /// The routed model — last `routing` event wins, so mid-run failover reports the model
-    /// that actually finished the work.
-    model: Option<String>,
-}
-
-impl StreamRun {
-    fn fold_line(&mut self, line: &str) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            return;
-        };
-        match (
-            v.get("type").and_then(|t| t.as_str()),
-            v.get("subtype").and_then(|t| t.as_str()),
-        ) {
-            (Some("system"), Some("init")) => {
-                self.session_id = v
-                    .get("session_id")
-                    .and_then(|s| s.as_str())
-                    .map(str::to_string);
-            }
-            (Some("system"), Some("routing")) => {
-                self.model = v.get("model").and_then(|m| m.as_str()).map(str::to_string);
-            }
-            (Some("system"), Some("usage")) => {
-                self.cost_usd = v.get("total_cost_usd").and_then(|c| c.as_f64());
-            }
-            (Some("result"), _) => {
-                self.result = v.get("result").and_then(|r| r.as_str()).map(str::to_string);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Lowercase, alnum-preserving, dash-separated slug for the result branch name (≤24 chars).
-fn slugify(task: &str) -> String {
-    let mut slug = String::new();
-    let mut last_dash = true;
-    for c in task.chars() {
-        if slug.len() >= 24 {
-            break;
-        }
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            slug.push('-');
-            last_dash = true;
-        }
-    }
-    let slug = slug.trim_end_matches('-').to_string();
-    if slug.is_empty() {
-        "task".into()
-    } else {
-        slug
-    }
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    match s.char_indices().nth(max) {
-        Some((i, _)) => &s[..i],
-        None => s,
-    }
-}
-
-fn status_glyph(status: &str) -> &'static str {
-    match status {
-        "done" => "✓",
-        "empty" => "○",
-        "gated" => "⚠",
-        "over-budget" => "$",
-        "failed" => "✗",
-        "running" => "▶",
-        _ => "·",
-    }
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn canonical_cwd() -> Result<String> {
-    let cwd = std::env::current_dir().context("resolving the current directory")?;
-    Ok(cwd
-        .canonicalize()
-        .unwrap_or(cwd)
-        .to_string_lossy()
-        .into_owned())
-}
-
-fn git_repo_root(cwd: &str) -> Result<std::path::PathBuf> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .output()
-        .context("running git")?;
-    if !out.status.success() {
-        anyhow::bail!("not a git repository");
-    }
-    Ok(std::path::PathBuf::from(
-        String::from_utf8_lossy(&out.stdout).trim(),
-    ))
-}
-
-/// Fire-and-forget desktop notification so an overnight drain announces itself in the morning.
-/// Best-effort on every platform; failures (no DE, no notifier binary) are silently ignored.
-fn notify_desktop(title: &str, body: &str) {
-    if cfg!(target_os = "linux") {
-        let _ = std::process::Command::new("notify-send")
-            .args([title, body])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    } else if cfg!(target_os = "macos") {
-        let script = format!(
-            "display notification \"{}\" with title \"{}\"",
-            body.replace('"', "'"),
-            title.replace('"', "'")
-        );
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    } else if cfg!(target_os = "windows") {
-        // msg.exe is present on all supported Windows editions; a toast would need a helper
-        // module or PowerShell body — this stays dependency-free and disappears on its own.
-        let _ = std::process::Command::new("msg")
-            .args(["*", "/TIME:30", &format!("{title}: {body}")])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-}
+mod support;
+use support::{
+    canonical_cwd, git_repo_root, notify_desktop, now, slugify, status_glyph, truncate, StreamRun,
+};
 
 #[cfg(test)]
 mod tests {

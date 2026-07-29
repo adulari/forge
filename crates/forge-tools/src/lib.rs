@@ -5,7 +5,10 @@
 
 use std::collections::HashMap;
 
+use workspace::WorkspaceTool;
+
 use async_trait::async_trait;
+pub use discovery_tools::{GlobTool, ListDirTool, SearchTool};
 use forge_types::{FileDiff, SideEffect};
 use serde_json::Value;
 
@@ -14,13 +17,15 @@ tokio::task_local! {
 }
 
 mod core_tools;
+mod discovery_tools;
 mod lattice_tool;
 mod sandbox;
 mod shell;
 mod web;
+mod workspace;
 pub use core_tools::{
-    AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, GlobTool, ListDirTool,
-    MultiEditTool, NotebookEditTool, ReadFileTool, SearchTool, WriteFileTool,
+    AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, MultiEditTool, NotebookEditTool,
+    ReadFileTool, WriteFileTool,
 };
 pub use lattice_tool::LatticeTool;
 pub use sandbox::{ApplyResult, SandboxPolicy};
@@ -65,122 +70,6 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     workspace: Option<std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>>,
-}
-
-struct WorkspaceTool {
-    inner: Box<dyn Tool>,
-    workspace: std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>,
-}
-
-#[async_trait]
-impl Tool for WorkspaceTool {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn description(&self) -> &str {
-        self.inner.description()
-    }
-
-    fn side_effect(&self) -> SideEffect {
-        self.inner.side_effect()
-    }
-
-    fn schema(&self) -> Value {
-        self.inner.schema()
-    }
-
-    async fn preview(&self, args: &Value) -> Option<FileDiff> {
-        let workspace = self.workspace.read().ok()?.clone();
-        let args = root_workspace_args(self.inner.name(), args, &workspace);
-        validate_workspace_args(&args, &workspace).ok()?;
-        SESSION_WORKSPACE
-            .scope(workspace, self.inner.preview(&args))
-            .await
-    }
-
-    async fn run(&self, args: &Value) -> Result<String, ToolError> {
-        let workspace = self
-            .workspace
-            .read()
-            .map_err(|_| ToolError::Failed("session workspace binding poisoned".to_string()))?
-            .clone();
-        let args = root_workspace_args(self.inner.name(), args, &workspace);
-        validate_workspace_args(&args, &workspace)?;
-        SESSION_WORKSPACE
-            .scope(workspace, self.inner.run(&args))
-            .await
-    }
-}
-
-fn validate_workspace_args(args: &Value, workspace: &std::path::Path) -> Result<(), ToolError> {
-    for key in ["path", "cwd"] {
-        if let Some(path) = args.get(key).and_then(Value::as_str) {
-            let target = crate::core_tools::normalize_target(std::path::Path::new(path));
-            if !target.starts_with(workspace) {
-                return Err(ToolError::Failed(format!(
-                    "{key} resolves outside the workspace"
-                )));
-            }
-        }
-    }
-    if let Some(paths) = args.get("paths").and_then(Value::as_array) {
-        for path in paths.iter().filter_map(Value::as_str) {
-            let target = crate::core_tools::normalize_target(std::path::Path::new(path));
-            if !target.starts_with(workspace) {
-                return Err(ToolError::Failed(
-                    "path resolves outside the workspace".to_string(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn root_workspace_args(tool_name: &str, args: &Value, workspace: &std::path::Path) -> Value {
-    let Some(mut object) = args.as_object().cloned() else {
-        return args.clone();
-    };
-    match tool_name {
-        "shell" if !object.contains_key("cwd") => {
-            object.insert(
-                "cwd".to_string(),
-                Value::String(workspace.display().to_string()),
-            );
-        }
-        "apply_patch" if !object.contains_key("cwd") => {
-            object.insert(
-                "cwd".to_string(),
-                Value::String(workspace.display().to_string()),
-            );
-        }
-        "list_dir" | "search" | "glob" if !object.contains_key("path") => {
-            object.insert(
-                "path".to_string(),
-                Value::String(workspace.display().to_string()),
-            );
-        }
-        _ => {}
-    }
-    for key in ["path", "cwd"] {
-        if let Some(Value::String(value)) = object.get_mut(key) {
-            let candidate = std::path::Path::new(value);
-            if candidate.is_relative() {
-                *value = workspace.join(candidate).display().to_string();
-            }
-        }
-    }
-    if let Some(Value::Array(paths)) = object.get_mut("paths") {
-        for path in paths {
-            if let Value::String(path) = path {
-                let candidate = std::path::Path::new(path);
-                if candidate.is_relative() {
-                    *path = workspace.join(candidate).display().to_string();
-                }
-            }
-        }
-    }
-    Value::Object(object)
 }
 
 impl ToolRegistry {
@@ -287,6 +176,7 @@ pub(crate) fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::root_workspace_args;
 
     #[test]
     fn scoped_default_injection_is_tool_specific() {

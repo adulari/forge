@@ -45,7 +45,7 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
         ),
         ImportSource::Cursor { .. } | ImportSource::Aider { .. } => unreachable!(),
     };
-    if !home.exists() {
+    if !(home.exists() || label == "claude" && project) {
         println!("nothing to import: {} does not exist", home.display());
         return Ok(());
     }
@@ -81,13 +81,13 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
             .unwrap_or_default(),
     };
     let cat = forge_skills::Catalog::load(&sources);
-    let mut counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+    let mut counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst)?;
 
     // Agents: CC and Forge use the same .md front-matter format — direct file copy.
     if let Some(asub) = agents_sub {
         let agent_src = home.join(asub);
         if agent_src.is_dir() {
-            count_copy_md_files(&agent_src, &agent_dst, &mut counts);
+            count_copy_md_files(&agent_src, &agent_dst, &mut counts)?;
         }
     }
 
@@ -99,8 +99,10 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
         let src = std::path::PathBuf::from("./CLAUDE.md");
         let dst = std::path::PathBuf::from("./.forge/AGENTS.md");
         if src.is_file() && !dst.exists() {
-            std::fs::create_dir_all("./.forge").ok();
-            imported_memory = std::fs::copy(&src, &dst).is_ok();
+            std::fs::create_dir_all("./.forge").context("creating .forge")?;
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
+            imported_memory = true;
         }
     }
 
@@ -130,230 +132,25 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
     // fold in the MCP servers, instead of silently dropping them. Best-effort; each piece reports
     // what transferred vs. what was skipped.
     if label == "claude" {
-        import_claude_settings(&home, project);
+        import_claude_settings(&home, project)?;
     }
-    import_tool_mcp_servers(label, project);
+    import_tool_mcp_servers(label, project)?;
     Ok(())
 }
 
-/// Translate a Claude-Code `settings.json` (user `~/.claude/settings.json` + project `.claude/`)
-/// into Forge: permission allow/ask/deny rules → `[[permissions.rules]]`, and hooks → a
-/// CC-compatible `settings.json` Forge loads natively (item: CC-compatible hooks). Prints a summary.
-fn import_claude_settings(claude_home: &std::path::Path, project: bool) {
-    // Gather every CC settings file that exists, in increasing precedence.
-    let mut sources = vec![claude_home.join("settings.json")];
-    sources.push(std::path::PathBuf::from("./.claude/settings.json"));
-    sources.push(std::path::PathBuf::from("./.claude/settings.local.json"));
-
-    let mut values = Vec::new();
-    for p in &sources {
-        if let Ok(text) = std::fs::read_to_string(p) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                values.push(v);
-            }
-        }
-    }
-    if values.is_empty() {
-        return;
-    }
-
-    // Target files: project scope writes `./.forge/...`; user scope writes the user config dir.
-    let (settings_dst, config_dst) = if project {
-        (
-            std::path::PathBuf::from("./.forge/settings.json"),
-            std::path::PathBuf::from("./.forge/config.toml"),
-        )
-    } else {
-        match forge_config::config_dir() {
-            Some(dir) => (dir.join("settings.json"), dir.join("config.toml")),
-            None => return,
-        }
-    };
-
-    // Hooks are NOT imported by default (see `count_cc_hooks` doc comment for why) — only
-    // permission rules transfer automatically.
-    let hooks_n = count_cc_hooks(&values);
-    let perms_n = transfer_permissions(&values, &config_dst);
-
-    if hooks_n > 0 {
-        println!(
-            "• found {hooks_n} hook(s) in settings.json — NOT imported. Claude Code hooks \
-             commonly assume they're running inside Claude Code itself (e.g. injecting text \
-             into an LLM's system prompt, or talking to Claude-Code-only tooling) and can \
-             misbehave or print confusing raw output when Forge runs them as its own session \
-             hooks. Review them and add any that genuinely apply to {} manually \
-             (docs/features/hooks.md).",
-            settings_dst.display()
-        );
-    }
-    if perms_n > 0 {
-        println!(
-            "✓ imported {perms_n} permission rule(s) from settings.json → {}",
-            config_dst.display()
-        );
-    }
-    if hooks_n == 0 && perms_n == 0 {
-        println!("• no hooks or permission rules found in settings.json to import");
-    }
-}
-
-/// Count the hook command entries present across the CC settings sources — for the import
-/// summary only, nothing is written. Hooks are deliberately NOT auto-imported (unlike commands/
-/// skills/agents/permissions): a CC hook script is written against Claude Code's specific
-/// behavior — many exist purely to inject text into an LLM's SYSTEM PROMPT (mode trackers,
-/// project-context primers) or to talk to Claude-Code-only tooling, and assume nobody but an
-/// LLM ever sees their raw stdout. Forge has its own session lifecycle and currently renders a
-/// CC-compatible hook's stdout directly as a visible chat note — so blindly importing someone's
-/// personal Claude Code hook set silently turned every new Forge session into a wall of garbled,
-/// context-injection-style text (found via a real user report; the hooks were never meant to be
-/// shown to a human). Permissions stay auto-imported below — `allow`/`deny`/`ask` tool rules are
-/// data, not arbitrary code, so they carry no equivalent execution-context mismatch risk.
-fn count_cc_hooks(values: &[serde_json::Value]) -> usize {
-    use serde_json::Value;
-    let mut merged: serde_json::Map<String, Value> = serde_json::Map::new();
-    for v in values {
-        let Some(hooks) = v.get("hooks").and_then(|h| h.as_object()) else {
-            continue;
-        };
-        for (event, groups) in hooks {
-            let Some(groups) = groups.as_array() else {
-                continue;
-            };
-            let entry = merged
-                .entry(event.clone())
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if let Some(arr) = entry.as_array_mut() {
-                arr.extend(groups.iter().cloned());
-            }
-        }
-    }
-    if merged.is_empty() {
-        return 0;
-    }
-    forge_config::cc_hooks_from_settings(&Value::Object(merged)).len()
-}
-
-/// Translate CC `permissions.{allow,ask,deny}` entries into Forge `[[permissions.rules]]` blocks,
-/// appended to the target `config.toml`. Returns the number of rules written.
-fn transfer_permissions(values: &[serde_json::Value], config_dst: &std::path::Path) -> usize {
-    let mut blocks = String::new();
-    let mut count = 0usize;
-    for v in values {
-        let Some(perms) = v.get("permissions").and_then(|p| p.as_object()) else {
-            continue;
-        };
-        for (kind, decision) in [("deny", "deny"), ("ask", "ask"), ("allow", "allow")] {
-            let Some(arr) = perms.get(kind).and_then(|a| a.as_array()) else {
-                continue;
-            };
-            for item in arr {
-                let Some(s) = item.as_str() else { continue };
-                let (cc_tool, pattern) = parse_cc_permission(s);
-                let tool = forge_config::forge_tool_from_cc(&cc_tool);
-                let pat = pattern.unwrap_or_else(|| "*".to_string());
-                blocks.push_str(&format!(
-                    "\n[[permissions.rules]]\ntool = {}\n{decision} = {}\nreason = \"imported from Claude Code settings.json\"\n",
-                    toml_str(tool),
-                    toml_str(&pat),
-                ));
-                count += 1;
-            }
-        }
-    }
-    if count == 0 {
-        return 0;
-    }
-    if let Some(parent) = config_dst.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    // Append (create if absent) so existing config.toml settings are preserved.
-    use std::io::Write;
-    let header = if config_dst.exists() {
-        String::new()
-    } else {
-        "# Forge config (imported permission rules from Claude Code)\n".to_string()
-    };
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(config_dst)
-    {
-        Ok(mut f) => match write!(f, "{header}{blocks}") {
-            Ok(()) => count,
-            Err(_) => 0,
-        },
-        Err(_) => 0,
-    }
-}
-
-/// Parse a CC permission string `Tool(pattern)` → `(tool, Some(pattern))`; a bare `Tool` →
-/// `(tool, None)`.
-fn parse_cc_permission(s: &str) -> (String, Option<String>) {
-    let s = s.trim();
-    if let Some(open) = s.find('(') {
-        if s.ends_with(')') {
-            let tool = s[..open].trim().to_string();
-            let pat = s[open + 1..s.len() - 1].trim().to_string();
-            return (tool, (!pat.is_empty()).then_some(pat));
-        }
-    }
-    (s.to_string(), None)
-}
-
-/// Quote a string as a TOML basic string (escaping `\` and `"`).
-fn toml_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-/// Fold the tool's MCP servers into `.forge/mcp.toml` (item: fold `forge mcp import` into
-/// `forge import`). Non-interactive: imports every server discovered for this tool, storing secrets
-/// in the OS keyring. `label` is `claude` or `codex`; other labels have no MCP sources here.
-fn import_tool_mcp_servers(label: &str, _project: bool) {
-    let prefix = match label {
-        "claude" => "claude",
-        "codex" => "codex",
-        _ => return,
-    };
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let sources = forge_config::discover_import_sources(&cwd);
-    let mut servers = Vec::new();
-    let mut secrets = std::collections::HashMap::new();
-    let mut seen = std::collections::HashSet::new();
-    for s in &sources {
-        if !s.label.starts_with(prefix) {
-            continue;
-        }
-        for srv in &s.servers {
-            if seen.insert(srv.name.clone()) {
-                for key in srv.keyring_keys() {
-                    if let Some(val) = s.secrets.get(&key) {
-                        secrets.insert(key, val.clone());
-                    }
-                }
-                servers.push(srv.clone());
-            }
-        }
-    }
-    if servers.is_empty() {
-        return;
-    }
-    let out = std::path::Path::new(".forge/mcp.toml");
-    if let Err(e) = crate::cli::commands::mcp::finish_import(out, servers, secrets) {
-        eprintln!("• MCP import skipped: {e}");
-    }
-}
+mod claude;
+use claude::{import_claude_settings, import_tool_mcp_servers};
 
 /// Copy `*.md` files from `src` into `dst`, skipping any that already exist. Updates `counts`.
 pub(crate) fn count_copy_md_files(
     src: &std::path::Path,
     dst: &std::path::Path,
     counts: &mut ImportCounts,
-) {
-    std::fs::create_dir_all(dst).ok();
-    let Ok(entries) = std::fs::read_dir(src) else {
-        return;
-    };
-    for entry in entries.flatten() {
+) -> Result<()> {
+    std::fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
+    let entries = std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading entry in {}", src.display()))?;
         let from = entry.path();
         if from.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
@@ -364,10 +161,13 @@ pub(crate) fn count_copy_md_files(
         let to = dst.join(fname);
         if to.exists() {
             counts.skipped_agents += 1;
-        } else if std::fs::copy(&from, &to).is_ok() {
+        } else {
+            std::fs::copy(&from, &to)
+                .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
             counts.copied_agents += 1;
         }
     }
+    Ok(())
 }
 
 /// Copy a loaded catalog's command files + skill directories into the target scope, keeping any
@@ -376,9 +176,9 @@ pub(crate) fn copy_catalog_assets(
     cat: &forge_skills::Catalog,
     cmd_dst: &std::path::Path,
     skill_dst: &std::path::Path,
-) -> ImportCounts {
+) -> Result<ImportCounts> {
     let mut counts = ImportCounts::default();
-    std::fs::create_dir_all(cmd_dst).ok();
+    std::fs::create_dir_all(cmd_dst).with_context(|| format!("creating {}", cmd_dst.display()))?;
     for cmd in cat.all_commands() {
         // Preserve the command's NAMESPACE (its source subdirectory). A subdir command `git/commit.md`
         // loads as the namespaced name `git:commit`; copying it by bare file name flattened it to
@@ -395,25 +195,36 @@ pub(crate) fn copy_catalog_assets(
             continue;
         }
         if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).ok();
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
         }
-        if std::fs::copy(&cmd.path, &dest).is_ok() {
-            counts.copied_commands += 1;
+        if matches!(cmd.scope, forge_skills::Scope::Builtin) {
+            continue;
         }
+        if matches!(cmd.scope, forge_skills::Scope::Builtin) {
+            continue;
+        }
+        std::fs::copy(&cmd.path, &dest)
+            .with_context(|| format!("copying {} to {}", cmd.path.display(), dest.display()))?;
+        counts.copied_commands += 1;
     }
 
-    std::fs::create_dir_all(skill_dst).ok();
+    std::fs::create_dir_all(skill_dst)
+        .with_context(|| format!("creating {}", skill_dst.display()))?;
     for skill in cat.all_skills() {
+        if matches!(skill.scope, forge_skills::Scope::Builtin) {
+            continue;
+        }
         let dest = skill_dst.join(&skill.name);
         if dest.exists() {
             counts.skipped_skills += 1;
             continue;
         }
-        if copy_dir(&skill.dir, &dest).is_ok() {
-            counts.copied_skills += 1;
-        }
+        copy_dir(&skill.dir, &dest)
+            .with_context(|| format!("copying {} to {}", skill.dir.display(), dest.display()))?;
+        counts.copied_skills += 1;
     }
-    counts
+    Ok(counts)
 }
 
 /// Import Cursor AI rules (`~/.cursor/rules/*.mdc`) as Forge commands.
@@ -434,15 +245,14 @@ pub(crate) fn import_cursor(project: bool) -> Result<()> {
             .context("no config directory on this platform")?
             .join("commands")
     };
-    std::fs::create_dir_all(&cmd_dst).ok();
+    std::fs::create_dir_all(&cmd_dst).with_context(|| format!("creating {}", cmd_dst.display()))?;
 
     let mut copied = 0usize;
     let mut skipped = 0usize;
-    let Ok(entries) = std::fs::read_dir(&rules_dir) else {
-        println!("nothing to import: cannot read {}", rules_dir.display());
-        return Ok(());
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(&rules_dir)
+        .with_context(|| format!("reading {}", rules_dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading entry in {}", rules_dir.display()))?;
         let from = entry.path();
         if from.extension().and_then(|e| e.to_str()) != Some("mdc") {
             continue;
@@ -456,13 +266,11 @@ pub(crate) fn import_cursor(project: bool) -> Result<()> {
             skipped += 1;
             continue;
         }
-        let Ok(raw) = std::fs::read_to_string(&from) else {
-            continue;
-        };
+        let raw = std::fs::read_to_string(&from)
+            .with_context(|| format!("reading {}", from.display()))?;
         let converted = convert_mdc_to_command_md(&raw, stem);
-        if std::fs::write(&dest, converted).is_ok() {
-            copied += 1;
-        }
+        std::fs::write(&dest, converted).with_context(|| format!("writing {}", dest.display()))?;
+        copied += 1;
     }
     let scope = if project {
         "./.forge"
@@ -483,8 +291,16 @@ pub(crate) fn convert_mdc_to_command_md(raw: &str, fallback_name: &str) -> Strin
                 .lines()
                 .find_map(|l| {
                     let l = l.trim();
-                    l.strip_prefix("description:")
-                        .map(|v| v.trim().trim_matches('"').trim_matches('\'').to_string())
+                    l.strip_prefix("description:").map(|v| {
+                        let value = v.trim();
+                        serde_json::from_str::<String>(value).unwrap_or_else(|_| {
+                            if value.starts_with('\'') && value.ends_with('\'') {
+                                value[1..value.len() - 1].replace("''", "'")
+                            } else {
+                                value.to_string()
+                            }
+                        })
+                    })
                 })
                 .filter(|d| !d.is_empty())
                 .unwrap_or_else(|| format!("Cursor rule: {fallback_name}"));
@@ -496,7 +312,9 @@ pub(crate) fn convert_mdc_to_command_md(raw: &str, fallback_name: &str) -> Strin
     } else {
         (format!("Cursor rule: {fallback_name}"), raw.to_string())
     };
-    format!("---\ndescription: \"{description}\"\n---\n{body}")
+    let description =
+        serde_json::to_string(&description).unwrap_or_else(|_| "\"Cursor rule\"".to_string());
+    format!("---\ndescription: {description}\n---\n{body}")
 }
 
 /// Import Aider convention files as Forge commands. Looks for `CONVENTIONS.md`,
@@ -509,7 +327,7 @@ pub(crate) fn import_aider(project: bool) -> Result<()> {
             .context("no config directory on this platform")?
             .join("commands")
     };
-    std::fs::create_dir_all(&cmd_dst).ok();
+    std::fs::create_dir_all(&cmd_dst).with_context(|| format!("creating {}", cmd_dst.display()))?;
 
     let search_dirs: Vec<std::path::PathBuf> =
         [forge_config::home_dir(), std::env::current_dir().ok()]
@@ -532,9 +350,8 @@ pub(crate) fn import_aider(project: bool) -> Result<()> {
                 skipped += 1;
                 continue;
             }
-            let Ok(raw) = std::fs::read_to_string(&from) else {
-                continue;
-            };
+            let raw = std::fs::read_to_string(&from)
+                .with_context(|| format!("reading {}", from.display()))?;
             // Wrap the file as a CC-compatible command if it lacks front-matter.
             let content = if raw.starts_with("---") {
                 raw
@@ -545,9 +362,9 @@ pub(crate) fn import_aider(project: bool) -> Result<()> {
                     .unwrap_or("aider-conventions");
                 format!("---\ndescription: \"Aider conventions ({stem})\"\n---\n{raw}")
             };
-            if std::fs::write(&dest, content).is_ok() {
-                copied += 1;
-            }
+            std::fs::write(&dest, content)
+                .with_context(|| format!("writing {}", dest.display()))?;
+            copied += 1;
         }
     }
 
@@ -609,7 +426,7 @@ pub(crate) fn normalize_md_dir(dir: &std::path::Path) -> usize {
 
 #[cfg(test)]
 mod settings_import_tests {
-    use super::*;
+    use super::claude::{count_cc_hooks, parse_cc_permission, transfer_permissions};
 
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("forge-imp-{name}-{}", forge_types::new_id()))
@@ -640,7 +457,7 @@ mod settings_import_tests {
         let dir = tmp("perms");
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = dir.join("config.toml");
-        let n = transfer_permissions(&[v], &cfg);
+        let n = transfer_permissions(&[v], &cfg).unwrap();
         assert_eq!(n, 3, "two allows + one deny");
 
         // The written TOML parses, and its [[permissions.rules]] carry the translated tool names +
@@ -699,6 +516,29 @@ mod settings_import_tests {
             2,
             "hooks from every CC settings source are counted"
         );
+    }
+
+    #[test]
+    fn transfer_permissions_expands_write_equivalent_aliases() {
+        let value =
+            serde_json::json!({ "permissions": { "deny": ["Edit(*)", "Write(*)", "LS(*)"] } });
+        let dir = tmp("aliases");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        assert_eq!(transfer_permissions(&[value], &config).unwrap(), 5);
+        let text = std::fs::read_to_string(&config).unwrap();
+        for tool in [
+            "edit_file",
+            "apply_patch",
+            "write_file",
+            "create_file",
+            "list_dir",
+        ] {
+            assert!(
+                text.contains(&format!("tool = \"{tool}\"")),
+                "missing {tool}"
+            );
+        }
     }
 
     #[test]

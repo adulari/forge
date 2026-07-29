@@ -1,19 +1,111 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
-use tokio::sync::Mutex;
-use tracing::warn;
+use tokio::sync::{Mutex, Semaphore};
+use tracing::{debug, warn};
 
 use forge_config::LspConfig;
 
 use crate::server::LspServer;
 use crate::types::Diagnostic;
 
+/// First cooldown after a language server fails to start or hand shake.
+const BACKOFF_BASE: Duration = Duration::from_secs(30);
+/// Ceiling for the doubling cooldown, so a permanently broken toolchain settles at one retry
+/// every ten minutes instead of one process per edited file.
+const BACKOFF_MAX: Duration = Duration::from_secs(600);
+/// A daemon can visit many worktrees over its lifetime; never retain one heavyweight analyzer for
+/// every root it has touched.
+const MAX_SERVER_SLOTS: usize = 4;
+/// An analyzer that has not served diagnostics recently is disposable and will be restarted on
+/// demand. This bounds idle memory without disabling automatic recovery.
+const IDLE_SERVER_TTL: Duration = Duration::from_secs(300);
+
 /// A lazily-initialized language-server slot for one `(language, repo-root)` pair, behind its
 /// own lock so a hung server only blocks callers waiting on that same pair.
-type ServerSlot = Arc<Mutex<Option<LspServer>>>;
+type ServerSlot = Arc<Mutex<ServerEntry>>;
+
+fn global_permits() -> &'static Arc<Semaphore> {
+    static PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    PERMITS.get_or_init(|| Arc::new(Semaphore::new(MAX_SERVER_SLOTS)))
+}
+
+/// The live server for one `(language, repo-root)` pair plus its failure backoff.
+///
+/// Without the backoff, a server that cannot start (a missing rustup component, a broken config)
+/// is respawned on every single diagnostic request: one doomed process, one truncated handshake,
+/// and one identical warning per edited file. Recording the failure lets Forge skip the attempt
+/// until the cooldown expires, and a later success (once the toolchain is repaired) clears it, so
+/// diagnostics come back on their own without restarting Forge.
+struct ServerEntry {
+    server: Option<LspServer>,
+    consecutive_failures: u32,
+    retry_at: Option<Instant>,
+    last_used: Instant,
+    idle_generation: u64,
+    idle_timer: Option<tokio::task::AbortHandle>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl Default for ServerEntry {
+    fn default() -> Self {
+        Self {
+            server: None,
+            consecutive_failures: 0,
+            retry_at: None,
+            last_used: Instant::now(),
+            idle_generation: 0,
+            idle_timer: None,
+            permit: None,
+        }
+    }
+}
+
+impl ServerEntry {
+    /// Whether a start attempt is still suppressed by the current cooldown.
+    fn cooling_down(&self, now: Instant) -> bool {
+        self.retry_at.is_some_and(|retry_at| now < retry_at)
+    }
+
+    /// Drop any live server, extend the cooldown, and return how long the next attempt waits.
+    fn record_failure(&mut self, now: Instant) -> Duration {
+        self.server = None;
+        self.permit = None;
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let backoff = failure_backoff(self.consecutive_failures);
+        self.retry_at = Some(now + backoff);
+        backoff
+    }
+
+    fn clear_failure(&mut self) {
+        self.consecutive_failures = 0;
+        self.retry_at = None;
+    }
+
+    fn touch(&mut self) -> u64 {
+        self.last_used = Instant::now();
+        self.idle_generation = self.idle_generation.wrapping_add(1);
+        self.idle_generation
+    }
+
+    fn is_idle_for(&self, now: Instant, ttl: Duration) -> bool {
+        now.duration_since(self.last_used) >= ttl
+    }
+
+    fn is_idle(&self, now: Instant) -> bool {
+        self.is_idle_for(now, IDLE_SERVER_TTL)
+    }
+}
+
+/// Exponential cooldown for the nth consecutive failure, capped at [`BACKOFF_MAX`].
+fn failure_backoff(consecutive_failures: u32) -> Duration {
+    let doublings = consecutive_failures.saturating_sub(1).min(16);
+    BACKOFF_BASE
+        .saturating_mul(1u32 << doublings)
+        .min(BACKOFF_MAX)
+}
 
 /// Owns the live language-server processes and routes a file to the right one.
 ///
@@ -70,38 +162,125 @@ impl LspRegistry {
         // spawn/initialize/diagnostics work for that one (language, repo-root) pair.
         let entry = {
             let mut servers = self.servers.lock().await;
+            let now = Instant::now();
+            // Do not wait behind a diagnostic request while holding the registry lock. Busy slots
+            // stay alive; idle ones are dropped (and kill_on_drop reaps their child).
+            servers.retain(|_, entry| {
+                entry
+                    .try_lock()
+                    .map(|slot| !slot.is_idle(now) || slot.cooling_down(now))
+                    .unwrap_or(true)
+            });
+            if !servers.contains_key(&key) && servers.len() >= MAX_SERVER_SLOTS {
+                let evict = servers
+                    .iter()
+                    .filter_map(|(key, entry)| {
+                        entry
+                            .try_lock()
+                            .ok()
+                            .map(|slot| (key.clone(), slot.last_used))
+                    })
+                    .min_by_key(|(_, last_used)| *last_used)
+                    .map(|(key, _)| key);
+                if let Some(evict) = evict {
+                    debug!("lsp: evicting least-recently-used server slot to enforce root limit");
+                    servers.remove(&evict);
+                } else {
+                    // All analyzers are busy. Diagnostics are best-effort; never overcommit.
+                    return vec![];
+                }
+            }
             servers
                 .entry(key)
-                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .or_insert_with(|| Arc::new(Mutex::new(ServerEntry::default())))
                 .clone()
         };
 
         let mut slot = entry.lock().await;
-        if slot.is_none() {
+        let idle_generation = slot.touch();
+        arm_idle_timer(&mut slot, entry.clone(), idle_generation, IDLE_SERVER_TTL);
+        if slot.server.is_none() {
+            let now = Instant::now();
+            if slot.cooling_down(now) {
+                debug!("lsp: {lang} ({cmd}) is in failure cooldown — skipping diagnostics");
+                return vec![];
+            }
+            let Some(permit) = global_permits().clone().try_acquire_owned().ok() else {
+                debug!("lsp: global analyzer cap is full; deferring diagnostics");
+                return vec![];
+            };
+            slot.permit = Some(permit);
             match LspServer::spawn(&cmd, &args).await {
-                Ok(mut srv) => {
-                    if let Err(e) = srv.initialize(&root_uri, timeout).await {
-                        warn!("lsp: initialize failed for {lang}: {e}");
+                Ok(mut srv) => match srv.initialize(&root_uri, timeout).await {
+                    Ok(()) => {
+                        slot.clear_failure();
+                        slot.server = Some(srv);
+                    }
+                    Err(e) => {
+                        let cause = srv.stderr_summary().await;
+                        slot.permit = None;
+                        let backoff = slot.record_failure(now);
+                        warn!(
+                            "lsp: initialize failed for {lang} ({cmd}): {e}{} — retrying in {}s",
+                            stderr_clause(&cause),
+                            backoff.as_secs()
+                        );
                         return vec![];
                     }
-                    *slot = Some(srv);
-                }
+                },
                 Err(e) => {
-                    warn!("lsp: spawn failed for {lang} ({cmd}): {e}");
+                    slot.permit = None;
+                    let backoff = slot.record_failure(now);
+                    warn!(
+                        "lsp: spawn failed for {lang} ({cmd}): {e} — retrying in {}s",
+                        backoff.as_secs()
+                    );
                     return vec![];
                 }
             }
         }
-        let Some(server) = slot.as_mut() else {
+        let Some(server) = slot.server.as_mut() else {
             warn!("lsp: server unavailable for {lang} after spawn");
             return vec![];
         };
 
-        if let Err(e) = server.did_open(&uri, lang, &text).await {
-            warn!("lsp: did_open failed: {e}");
+        if let Err(e) = server.sync_document(&uri, lang, &text).await {
+            slot.server = None;
+            let backoff = slot.record_failure(Instant::now());
+            warn!(
+                "lsp: document sync failed for {lang} ({cmd}): {e} — retrying in {}s",
+                backoff.as_secs()
+            );
             return vec![];
         }
-        server.collect_diagnostics(&uri, timeout).await
+        let diagnostics = match server.collect_diagnostics(&uri, timeout).await {
+            Ok(diagnostics) => diagnostics,
+            Err(error) => {
+                slot.server = None;
+                let backoff = slot.record_failure(Instant::now());
+                warn!(
+                    "lsp: diagnostics failed for {lang} ({cmd}): {error} — retrying in {}s",
+                    backoff.as_secs()
+                );
+                return vec![];
+            }
+        };
+        let idle_generation = slot.touch();
+        arm_idle_timer(&mut slot, entry.clone(), idle_generation, IDLE_SERVER_TTL);
+        diagnostics
+    }
+
+    /// Forget every pending failure cooldown, as if it had elapsed.
+    #[cfg(test)]
+    async fn expire_cooldowns(&self) {
+        for entry in self.servers.lock().await.values() {
+            entry.lock().await.retry_at = None;
+        }
+    }
+
+    #[cfg(test)]
+    async fn server_slot_count(&self) -> usize {
+        self.servers.lock().await.len()
     }
 
     fn server_for_lang(&self, lang: &str) -> Option<(String, Vec<String>)> {
@@ -121,6 +300,40 @@ impl LspRegistry {
             "go" => Some(("gopls".to_string(), vec![])),
             _ => None,
         }
+    }
+}
+
+/// Process-wide capacity permits are held for the lifetime of each live analyzer.
+fn arm_idle_timer(slot: &mut ServerEntry, entry: ServerSlot, generation: u64, delay: Duration) {
+    if let Some(previous) = slot.idle_timer.take() {
+        previous.abort();
+    }
+    let weak = Arc::downgrade(&entry);
+    let task = tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let Some(entry) = weak.upgrade() else {
+            return;
+        };
+        let mut slot = entry.lock().await;
+        if slot.idle_generation == generation && slot.is_idle_for(Instant::now(), delay) {
+            debug!(
+                "lsp: stopping idle language server after {}s",
+                delay.as_secs()
+            );
+            slot.server = None;
+            slot.permit = None;
+            slot.idle_timer = None;
+        }
+    });
+    slot.idle_timer = Some(task.abort_handle());
+}
+
+/// Render a captured stderr tail as a trailing clause, or nothing when the server was silent.
+fn stderr_clause(cause: &str) -> String {
+    if cause.is_empty() {
+        String::new()
+    } else {
+        format!(" — server stderr: {cause}")
     }
 }
 
@@ -414,6 +627,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[tokio::test]
     async fn diagnostics_for_returns_empty_when_no_lang() {
         let cfg = LspConfig {
@@ -429,6 +643,343 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    #[test]
+    fn backoff_doubles_and_is_capped() {
+        assert_eq!(failure_backoff(0), BACKOFF_BASE);
+        assert_eq!(failure_backoff(1), BACKOFF_BASE);
+        assert_eq!(failure_backoff(2), BACKOFF_BASE * 2);
+        assert_eq!(failure_backoff(3), BACKOFF_BASE * 4);
+        assert_eq!(failure_backoff(99), BACKOFF_MAX);
+        assert_eq!(failure_backoff(u32::MAX), BACKOFF_MAX);
+    }
+
+    #[test]
+    fn a_failure_releases_its_global_permit() {
+        let mut entry = ServerEntry {
+            permit: Some(global_permits().clone().try_acquire_owned().unwrap()),
+            ..Default::default()
+        };
+        entry.server = None;
+        entry.record_failure(Instant::now());
+        assert!(entry.permit.is_none());
+    }
+
+    #[test]
+    fn a_success_clears_the_cooldown() {
+        let now = Instant::now();
+        let mut entry = ServerEntry::default();
+        assert!(!entry.cooling_down(now));
+        let first = entry.record_failure(now);
+        assert_eq!(first, BACKOFF_BASE);
+        assert!(entry.cooling_down(now));
+        assert!(!entry.cooling_down(now + first));
+        assert_eq!(entry.record_failure(now), BACKOFF_BASE * 2);
+        entry.clear_failure();
+        assert!(!entry.cooling_down(now));
+        assert_eq!(entry.record_failure(now), BACKOFF_BASE);
+    }
+
+    /// Write an executable fake language server that records every start, fails the handshake
+    /// until `fixed` exists, and afterwards answers `initialize` and publishes one diagnostic.
+    #[cfg(unix)]
+    fn write_fake_server(script: &Path, attempts: &Path, fixed: &Path, uri: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let body = format!(
+            "#!/bin/sh\n\
+             echo $$ >> {attempts}\n\
+             if [ ! -f {fixed} ]; then\n\
+             echo \"error: 'rust-analyzer' is not installed for the toolchain\" 1>&2\n\
+             exit 1\n\
+             fi\n\
+             init='{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"capabilities\":{{}}}}}}'\n\
+             diag='{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{{\"uri\":\"{uri}\",\"diagnostics\":[{{\"message\":\"boom\",\"severity\":1,\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":1}}}}}}]}}}}'\n\
+             printf 'Content-Length: %d\\r\\n\\r\\n%s' ${{#init}} \"$init\"\n\
+             printf 'Content-Length: %d\\r\\n\\r\\n%s' ${{#diag}} \"$diag\"\n\
+             exec sleep 5\n",
+            attempts = attempts.display(),
+            fixed = fixed.display(),
+            uri = uri,
+        );
+        fs::write(script, body).unwrap();
+        fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn starts_recorded(attempts: &Path) -> usize {
+        fs::read_to_string(attempts)
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    fn started_pids(attempts: &Path) -> Vec<u32> {
+        fs::read_to_string(attempts)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|pid| pid.parse().ok())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_process_exit(pid: u32) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while process_is_alive(pid) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_starts(attempts: &Path, expected: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while starts_recorded(attempts) < expected && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// A server that cannot start (the reported `rust-analyzer` component was missing) must not be
+    /// respawned once per diagnostic request, and must recover on its own once it is repaired.
+    #[cfg(unix)]
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn a_failing_server_backs_off_then_recovers_after_the_cooldown() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("Cargo.toml"), "[package]").unwrap();
+        let file = tmp.path().join("main.rs");
+        fs::write(&file, "fn main() {}").unwrap();
+        let attempts = tmp.path().join("attempts");
+        let fixed = tmp.path().join("fixed");
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &fixed, &path_to_uri(&file));
+
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "rust".to_string(),
+            forge_config::LspServerEntry {
+                command: script.to_string_lossy().into_owned(),
+                args: vec![],
+            },
+        );
+        let reg = LspRegistry::from_config(&LspConfig {
+            enabled: true,
+            timeout_ms: 500,
+            servers,
+        });
+        let timeout = Duration::from_millis(500);
+
+        assert!(reg.diagnostics_for(&file, timeout).await.is_empty());
+        wait_for_starts(&attempts, 1).await;
+        assert_eq!(starts_recorded(&attempts), 1);
+
+        // Still inside the cooldown: no second process, no second warning.
+        assert!(reg.diagnostics_for(&file, timeout).await.is_empty());
+        assert_eq!(
+            starts_recorded(&attempts),
+            1,
+            "cooldown must suppress the respawn"
+        );
+
+        // The toolchain is repaired and the cooldown elapses: diagnostics come back by themselves.
+        fs::write(&fixed, "").unwrap();
+        reg.expire_cooldowns().await;
+        let diags = reg.diagnostics_for(&file, timeout).await;
+        wait_for_starts(&attempts, 2).await;
+        assert_eq!(
+            starts_recorded(&attempts),
+            2,
+            "the cooldown must expire, not latch"
+        );
+        assert_eq!(diags.len(), 1, "diagnostics were: {diags:?}");
+        assert_eq!(diags[0].message, "boom");
+
+        // The healthy server is reused rather than restarted (the fake publishes only once, so
+        // the second request's result is empty — what matters is that no third process started).
+        let _ = reg.diagnostics_for(&file, timeout).await;
+        assert_eq!(
+            starts_recorded(&attempts),
+            2,
+            "a live server must be reused"
+        );
+    }
+
+    /// An idle server is reaped by its own timer; no later diagnostics call is needed to trigger it.
+    #[cfg(unix)]
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn idle_server_is_terminated_without_a_follow_up_request() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("Cargo.toml"), "[package]").unwrap();
+        let file = tmp.path().join("main.rs");
+        fs::write(&file, "fn main() {}").unwrap();
+        let attempts = tmp.path().join("attempts");
+        let fixed = tmp.path().join("fixed");
+        fs::write(&fixed, "").unwrap();
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &fixed, &path_to_uri(&file));
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "rust".to_string(),
+            forge_config::LspServerEntry {
+                command: script.to_string_lossy().into_owned(),
+                args: vec![],
+            },
+        );
+        let reg = LspRegistry::from_config(&LspConfig {
+            enabled: true,
+            timeout_ms: 500,
+            servers,
+        });
+        let _ = reg.diagnostics_for(&file, Duration::from_millis(500)).await;
+        wait_for_starts(&attempts, 1).await;
+        let pid = started_pids(&attempts)[0];
+        let key = ("rust".to_string(), tmp.path().canonicalize().unwrap());
+        let entry = reg.servers.lock().await.get(&key).unwrap().clone();
+        {
+            let mut slot = entry.lock().await;
+            let generation = slot.idle_generation;
+            arm_idle_timer(
+                &mut slot,
+                entry.clone(),
+                generation,
+                Duration::from_millis(25),
+            );
+        }
+        wait_for_process_exit(pid).await;
+        assert!(
+            !process_is_alive(pid),
+            "idle analyzer must be terminated by its timer"
+        );
+    }
+
+    /// The cap is process-wide, not one four-process allowance per session registry.
+    #[cfg(unix)]
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn live_servers_are_bounded_across_registries() {
+        let tmp = TempDir::new().unwrap();
+        let attempts = tmp.path().join("attempts");
+        let fixed = tmp.path().join("fixed");
+        fs::write(&fixed, "").unwrap();
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &fixed, "file:///unused.rs");
+        let mut registries = Vec::new();
+        for index in 0..=MAX_SERVER_SLOTS {
+            let root = tmp.path().join(format!("registry-root-{index}"));
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+            let file = root.join("main.rs");
+            fs::write(&file, "fn main() {}").unwrap();
+            let mut servers = std::collections::HashMap::new();
+            servers.insert(
+                "rust".to_string(),
+                forge_config::LspServerEntry {
+                    command: script.to_string_lossy().into_owned(),
+                    args: vec![],
+                },
+            );
+            let reg = Arc::new(LspRegistry::from_config(&LspConfig {
+                enabled: true,
+                timeout_ms: 200,
+                servers,
+            }));
+            let _ = reg.diagnostics_for(&file, Duration::from_millis(200)).await;
+            registries.push(reg);
+        }
+        wait_for_starts(&attempts, MAX_SERVER_SLOTS).await;
+        let pids = started_pids(&attempts);
+        assert_eq!(pids.len(), MAX_SERVER_SLOTS);
+        assert!(
+            pids.iter().all(|pid| process_is_alive(*pid)),
+            "the global permit cap must refuse new analyzers rather than exceed the limit"
+        );
+    }
+
+    /// A daemon may work across many project roots, but must retain only a fixed number of
+    /// heavyweight analyzer processes. Evicted roots are lazy: touching one again can restart it.
+    #[cfg(unix)]
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn live_servers_are_bounded_across_project_roots() {
+        let tmp = TempDir::new().unwrap();
+        let attempts = tmp.path().join("attempts");
+        let fixed = tmp.path().join("fixed");
+        fs::write(&fixed, "").unwrap();
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &fixed, "file:///unused.rs");
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "rust".to_string(),
+            forge_config::LspServerEntry {
+                command: script.to_string_lossy().into_owned(),
+                args: vec![],
+            },
+        );
+        let reg = LspRegistry::from_config(&LspConfig {
+            enabled: true,
+            timeout_ms: 200,
+            servers,
+        });
+
+        for root_number in 0..=MAX_SERVER_SLOTS {
+            let root = tmp.path().join(format!("root-{root_number}"));
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+            let file = root.join("main.rs");
+            fs::write(&file, "fn main() {}").unwrap();
+            let _ = reg.diagnostics_for(&file, Duration::from_millis(200)).await;
+        }
+
+        assert_eq!(reg.server_slot_count().await, MAX_SERVER_SLOTS);
+        let pids = started_pids(&attempts);
+        assert_eq!(pids.len(), MAX_SERVER_SLOTS + 1);
+        wait_for_process_exit(pids[0]).await;
+        assert!(
+            !process_is_alive(pids[0]),
+            "the evicted server process must be killed, not retained by an idle timer"
+        );
+    }
+
+    /// The cause a bare "server closed stdout" hides must survive to the failure path.
+    #[cfg(unix)]
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn a_dying_server_reports_its_stderr() {
+        let tmp = TempDir::new().unwrap();
+        let attempts = tmp.path().join("attempts");
+        let script = tmp.path().join("fake-lsp.sh");
+        write_fake_server(&script, &attempts, &tmp.path().join("never"), "file:///x");
+
+        let mut srv = LspServer::spawn(&script.to_string_lossy(), &[])
+            .await
+            .unwrap();
+        let err = srv
+            .initialize("file:///tmp", Duration::from_millis(500))
+            .await
+            .expect_err("the fake server exits before answering");
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe
+            ),
+            "unexpected initialize failure: {err}"
+        );
+        let cause = srv.stderr_summary().await;
+        assert!(
+            cause.contains("'rust-analyzer' is not installed"),
+            "stderr summary was: {cause:?}"
+        );
+    }
+
+    #[serial_test::serial]
     #[tokio::test]
     async fn diagnostics_for_returns_empty_when_binary_not_found() {
         let mut servers = std::collections::HashMap::new();

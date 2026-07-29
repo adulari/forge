@@ -1,171 +1,15 @@
-//! Skills marketplace/registry, install, and update (docs/features/skills-system.md).
-//!
-//! Three persisted files under the user config dir:
-//! - `marketplaces.toml` — a name → source registry (`forge plugin marketplace add/list/remove`).
-//! - `installed-skills.toml` — a lockfile of installed packs (source, marketplace, pinned ref, the
-//!   files written), so `forge plugin update` / `forge skill update` know what to refresh + from where.
-//!
-//! Fetching is git-backed (`git clone --depth 1 [--branch <ref>]`), which uniformly covers public
-//! GitHub repos, private repos (via `GITHUB_TOKEN`), generic git URLs, subdirectory packages, and
-//! `@ref`/tag pinning. The pure registry + lockfile helpers are path-injected so they're unit-tested
-//! without touching the network.
+//! Git-backed skill package installation and update.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 
-// ---------------------------------------------------------------------------
-// marketplaces.toml — the name → source registry
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct Marketplaces {
-    #[serde(default)]
-    pub(crate) marketplaces: BTreeMap<String, MarketplaceEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MarketplaceEntry {
-    /// A GitHub `owner/repo` (top-level dirs = packages), or a full git URL.
-    pub(crate) source: String,
-    /// Optional pinned branch/tag for the whole marketplace.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
-    pub(crate) git_ref: Option<String>,
-}
-
-pub(crate) fn load_marketplaces_at(path: &Path) -> Marketplaces {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| toml::from_str(&t).ok())
-        .unwrap_or_default()
-}
-
-fn save_marketplaces_at(path: &Path, m: &Marketplaces) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let body = toml::to_string_pretty(m).context("serializing marketplaces.toml")?;
-    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))
-}
-
-/// Add (or overwrite) a marketplace entry. Pure over the given path. Returns whether it replaced one.
-pub(crate) fn add_marketplace_at(
-    path: &Path,
-    name: &str,
-    source: &str,
-    git_ref: Option<String>,
-) -> Result<bool> {
-    if name.trim().is_empty() {
-        anyhow::bail!("marketplace name cannot be empty");
-    }
-    let mut m = load_marketplaces_at(path);
-    let replaced = m
-        .marketplaces
-        .insert(
-            name.to_string(),
-            MarketplaceEntry {
-                source: source.to_string(),
-                git_ref,
-            },
-        )
-        .is_some();
-    save_marketplaces_at(path, &m)?;
-    Ok(replaced)
-}
-
-/// Remove a marketplace entry. Returns whether one existed.
-pub(crate) fn remove_marketplace_at(path: &Path, name: &str) -> Result<bool> {
-    let mut m = load_marketplaces_at(path);
-    let existed = m.marketplaces.remove(name).is_some();
-    if existed {
-        save_marketplaces_at(path, &m)?;
-    }
-    Ok(existed)
-}
-
-// ---------------------------------------------------------------------------
-// installed-skills.toml — the install lockfile
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct InstalledSkills {
-    #[serde(default)]
-    pub(crate) skills: BTreeMap<String, InstalledEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct InstalledEntry {
-    /// The repo/URL the pack was fetched from (the clone target).
-    pub(crate) source: String,
-    /// The marketplace it was resolved through, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) marketplace: Option<String>,
-    /// The subdirectory within `source` holding this package (marketplace installs), if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) subdir: Option<String>,
-    /// The pinned branch/tag/ref, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
-    pub(crate) git_ref: Option<String>,
-    /// The skill file/dir names written into the skills dir (for update/removal).
-    #[serde(default)]
-    pub(crate) files: Vec<String>,
-}
-
-pub(crate) fn load_installed_at(path: &Path) -> InstalledSkills {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| toml::from_str(&t).ok())
-        .unwrap_or_default()
-}
-
-fn save_installed_at(path: &Path, lock: &InstalledSkills) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let body = toml::to_string_pretty(lock).context("serializing installed-skills.toml")?;
-    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))
-}
-
-/// Record (or replace) an installed pack in the lockfile. Pure over the given path.
-pub(crate) fn record_installed_at(path: &Path, name: &str, entry: InstalledEntry) -> Result<()> {
-    let mut lock = load_installed_at(path);
-    lock.skills.insert(name.to_string(), entry);
-    save_installed_at(path, &lock)
-}
-
-/// Drop a pack from the lockfile (used by `forge plugin remove`). Returns whether it existed.
-pub(crate) fn remove_installed_at(path: &Path, name: &str) -> Result<bool> {
-    let mut lock = load_installed_at(path);
-    let existed = lock.skills.remove(name).is_some();
-    if existed {
-        save_installed_at(path, &lock)?;
-    }
-    Ok(existed)
-}
-
-/// Drop a pack from the default lockfile.
-pub(crate) fn remove_installed_entry(name: &str) -> Result<bool> {
-    remove_installed_at(&installed_path()?, name)
-}
-
-// ---------------------------------------------------------------------------
-// Default config paths
-// ---------------------------------------------------------------------------
-
-fn config_dir() -> Result<PathBuf> {
-    forge_config::config_dir().context("no user config directory on this platform")
-}
-fn marketplaces_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("marketplaces.toml"))
-}
-fn installed_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("installed-skills.toml"))
-}
-fn skills_dir() -> Result<PathBuf> {
-    Ok(config_dir()?.join("skills"))
-}
+mod registry;
+pub(crate) use registry::{
+    add_marketplace_at, installed_path, load_installed_at, load_marketplaces_at, marketplaces_path,
+    record_installed_at, remove_installed_entry, remove_marketplace_at, skills_dir, InstalledEntry,
+    Marketplaces,
+};
 
 /// A private-repo / authenticated token, if the user exported one.
 fn github_token() -> Option<String> {
@@ -194,7 +38,7 @@ pub(crate) fn marketplace_add(name: &str, source: &str, git_ref: Option<String>)
 
 pub(crate) fn marketplace_list() -> Result<()> {
     let path = marketplaces_path()?;
-    let m = load_marketplaces_at(&path);
+    let m = load_marketplaces_at(&path)?;
     if m.marketplaces.is_empty() {
         println!("no marketplaces configured — add one with `forge plugin marketplace add <name> <source>`");
         return Ok(());
@@ -442,7 +286,7 @@ fn normalize_in_place(dir: &Path) {
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn install_plugin(pkg: &str, marketplace_flag: Option<String>) -> Result<()> {
-    let registry = load_marketplaces_at(&marketplaces_path()?);
+    let registry = load_marketplaces_at(&marketplaces_path()?)?;
     let resolved = resolve(pkg, marketplace_flag.as_deref(), &registry)?;
     let token = github_token();
     let skills_dir = skills_dir()?;
@@ -502,7 +346,7 @@ pub(crate) async fn install_plugin(pkg: &str, marketplace_flag: Option<String>) 
 
 pub(crate) async fn update_installed(name: Option<&str>) -> Result<()> {
     let lock_path = installed_path()?;
-    let lock = load_installed_at(&lock_path);
+    let lock = load_installed_at(&lock_path)?;
     if lock.skills.is_empty() {
         println!("no installed skill packs to update (install one with `forge plugin install`).");
         return Ok(());
@@ -565,7 +409,7 @@ pub(crate) async fn update_installed(name: Option<&str>) -> Result<()> {
 
 /// List installed packs (lockfile) + registered marketplaces.
 pub(crate) fn list_installed_and_marketplaces() -> Result<()> {
-    let lock = load_installed_at(&installed_path()?);
+    let lock = load_installed_at(&installed_path()?)?;
     if lock.skills.is_empty() {
         println!("no skill packs installed (install one with `forge plugin install <pkg>`).");
     } else {
@@ -588,7 +432,7 @@ pub(crate) fn list_installed_and_marketplaces() -> Result<()> {
             );
         }
     }
-    let m = load_marketplaces_at(&marketplaces_path()?);
+    let m = load_marketplaces_at(&marketplaces_path()?)?;
     if !m.marketplaces.is_empty() {
         println!("\nmarketplaces ({}):", m.marketplaces.len());
         for (name, entry) in &m.marketplaces {
@@ -598,12 +442,29 @@ pub(crate) fn list_installed_and_marketplaces() -> Result<()> {
     Ok(())
 }
 
+/// List installed packs and reject the unsupported remote catalog query explicitly.
+pub(crate) fn list_plugins(available: bool) -> Result<()> {
+    if available {
+        anyhow::bail!(
+            "`forge plugin list --available` is not implemented; use `forge plugin marketplace list` to inspect configured sources"
+        );
+    }
+    list_installed_and_marketplaces()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::registry::{remove_installed_at, MarketplaceEntry};
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("forge-mkt-{}-{}", name, forge_types::new_id()))
+    }
+
+    #[test]
+    fn available_listing_returns_actionable_error() {
+        let error = list_plugins(true).expect_err("remote listing is not implemented");
+        assert!(error.to_string().contains("plugin marketplace list"));
     }
 
     #[test]
@@ -618,20 +479,20 @@ mod tests {
             Some("main".into())
         )
         .unwrap());
-        let m = load_marketplaces_at(&path);
+        let m = load_marketplaces_at(&path).unwrap();
         assert_eq!(m.marketplaces.len(), 2);
         assert_eq!(m.marketplaces["community"].source, "anthropics/skills");
         assert_eq!(m.marketplaces["internal"].git_ref.as_deref(), Some("main"));
         // overwrite returns true.
         assert!(add_marketplace_at(&path, "community", "other/repo", None).unwrap());
         assert_eq!(
-            load_marketplaces_at(&path).marketplaces["community"].source,
+            load_marketplaces_at(&path).unwrap().marketplaces["community"].source,
             "other/repo"
         );
         // remove.
         assert!(remove_marketplace_at(&path, "community").unwrap());
         assert!(!remove_marketplace_at(&path, "community").unwrap());
-        assert_eq!(load_marketplaces_at(&path).marketplaces.len(), 1);
+        assert_eq!(load_marketplaces_at(&path).unwrap().marketplaces.len(), 1);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
@@ -647,12 +508,51 @@ mod tests {
         };
         record_installed_at(&path, "pirate-pack", entry.clone()).unwrap();
         // update's detection step: the named pack is found with its recorded source + pin.
-        let lock = load_installed_at(&path);
+        let lock = load_installed_at(&path).unwrap();
         assert_eq!(lock.skills.len(), 1);
         let got = lock.skills.get("pirate-pack").expect("pack recorded");
         assert_eq!(got, &entry);
         assert_eq!(got.git_ref.as_deref(), Some("v1.2.0"));
         assert_eq!(got.subdir.as_deref(), Some("pirate-pack"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn malformed_persisted_state_rejects_mutation() {
+        let registry_path = tmp("malformed-registry").join("marketplaces.toml");
+        std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
+        std::fs::write(&registry_path, "not = [toml").unwrap();
+        let registry_before = std::fs::read_to_string(&registry_path).unwrap();
+        assert!(add_marketplace_at(&registry_path, "community", "owner/repo", None).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&registry_path).unwrap(),
+            registry_before
+        );
+
+        let lock_path = tmp("malformed-installed").join("installed-skills.toml");
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        std::fs::write(&lock_path, "not = [toml").unwrap();
+        let entry = InstalledEntry {
+            source: "owner/repo".into(),
+            marketplace: None,
+            subdir: None,
+            git_ref: None,
+            files: vec!["skill.md".into()],
+        };
+        assert!(record_installed_at(&lock_path, "pack", entry).is_err());
+
+        std::fs::remove_dir_all(registry_path.parent().unwrap()).ok();
+        std::fs::remove_dir_all(lock_path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn removal_rejects_a_malformed_lockfile() {
+        let path = tmp("malformed-lock").join("installed-skills.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "this is not valid = [toml").unwrap();
+
+        let error = remove_installed_at(&path, "pirate-pack").expect_err("malformed lock fails");
+        assert!(error.to_string().contains("parsing"));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

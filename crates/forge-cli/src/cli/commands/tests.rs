@@ -62,6 +62,85 @@ fn anywhere_exposes_approval_and_explicit_recovery_fallback() {
 }
 
 #[test]
+fn provider_azure_requires_exactly_one_endpoint_source() {
+    assert!(Cli::try_parse_from(["forge", "provider", "azure"]).is_err());
+    assert!(Cli::try_parse_from([
+        "forge",
+        "provider",
+        "azure",
+        "--resource",
+        "example",
+        "--endpoint",
+        "https://example.test"
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from(["forge", "provider", "azure", "--resource", "example"]).is_ok());
+    assert!(Cli::try_parse_from([
+        "forge",
+        "provider",
+        "azure",
+        "--endpoint",
+        "https://example.test"
+    ])
+    .is_ok());
+}
+
+#[test]
+fn mcp_add_preserves_transport_and_stdio_command_tail() {
+    let cli = Cli::try_parse_from([
+        "forge",
+        "mcp",
+        "add",
+        "server",
+        "--transport",
+        "stdio",
+        "-e",
+        "KEY=value",
+        "--",
+        "node",
+        "server.js",
+        "--watch",
+    ])
+    .expect("stdio MCP config");
+    assert!(matches!(
+        cli.command,
+        Command::Mcp {
+            cmd: Some(McpCmd::Add {
+                transport: McpTransportArg::Stdio,
+                env,
+                command,
+                ..
+            })
+        } if env == ["KEY=value"] && command == ["node", "server.js", "--watch"]
+    ));
+
+    let cli = Cli::try_parse_from([
+        "forge",
+        "mcp",
+        "add",
+        "remote",
+        "--transport",
+        "http",
+        "--url",
+        "https://mcp.example",
+        "--header",
+        "X-Test=yes",
+    ])
+    .expect("HTTP MCP config");
+    assert!(matches!(
+        cli.command,
+        Command::Mcp {
+            cmd: Some(McpCmd::Add {
+                transport: McpTransportArg::Http,
+                url: Some(ref url),
+                header,
+                ..
+            })
+        } if url == "https://mcp.example" && header == ["X-Test=yes"]
+    ));
+}
+
+#[test]
 fn extract_code_blocks_pulls_fenced_blocks_with_lang() {
     let md =
         "Here you go:\n\n```rust\nfn main() {}\n```\n\nand shell:\n\n```bash\nls -la\n```\ndone";
@@ -159,6 +238,12 @@ fn expand_at_files_survives_multibyte_whitespace() {
 }
 
 #[test]
+fn cursor_description_escapes_json_compatible_yaml_scalars() {
+    let converted = convert_mdc_to_command_md("---\ndescription: say \"hi\"\n---\nbody\n", "rule");
+    assert!(converted.contains("description: \"say \\\"hi\\\"\""));
+}
+
+#[test]
 fn copy_catalog_assets_imports_then_skips_existing() {
     // A Codex-style prompt: plain markdown, no frontmatter (name = file stem, description =
     // first body line). The lenient command reader must accept it and we must copy it.
@@ -182,13 +267,13 @@ fn copy_catalog_assets_imports_then_skips_existing() {
     };
     let cat = forge_skills::Catalog::load(&sources);
 
-    let first = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+    let first = copy_catalog_assets(&cat, &cmd_dst, &skill_dst).unwrap();
     assert_eq!(first.copied_commands, 1, "the prompt was imported");
     assert_eq!(first.copied_skills, 0);
     assert!(cmd_dst.join("refactor.md").exists());
 
     // Re-running keeps the existing file instead of overwriting it.
-    let second = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+    let second = copy_catalog_assets(&cat, &cmd_dst, &skill_dst).unwrap();
     assert_eq!(second.copied_commands, 0);
     assert_eq!(second.skipped_commands, 1, "already present → skipped");
 
@@ -221,7 +306,7 @@ fn copy_catalog_assets_copies_skill_dir_with_resources() {
     };
     let cat = forge_skills::Catalog::load(&sources);
 
-    let counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+    let counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst).unwrap();
     assert_eq!(counts.copied_skills, 1, "the skill directory was copied");
     assert!(skill_dst.join("refactor/SKILL.md").exists());
     assert!(
@@ -246,7 +331,7 @@ fn export_copies_agent_md_files_then_skips_existing() {
     std::fs::write(src.join("README.txt"), "not an agent").unwrap();
 
     let mut first = ImportCounts::default();
-    count_copy_md_files(&src, &dst, &mut first);
+    count_copy_md_files(&src, &dst, &mut first).unwrap();
     assert_eq!(first.copied_agents, 2, "both .md agents copied");
     assert!(dst.join("reviewer.md").exists());
     assert!(dst.join("planner.md").exists());
@@ -257,7 +342,7 @@ fn export_copies_agent_md_files_then_skips_existing() {
 
     // Re-running keeps existing agents instead of overwriting them.
     let mut second = ImportCounts::default();
-    count_copy_md_files(&src, &dst, &mut second);
+    count_copy_md_files(&src, &dst, &mut second).unwrap();
     assert_eq!(second.copied_agents, 0);
     assert_eq!(second.skipped_agents, 2, "already present → skipped");
 
@@ -287,7 +372,7 @@ fn copy_catalog_assets_preserves_command_namespace() {
         skills: vec![],
     };
     let cat = forge_skills::Catalog::load(&sources);
-    let counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+    let counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst).unwrap();
 
     assert_eq!(
         counts.copied_commands, 3,
@@ -505,13 +590,32 @@ fn resume_mode_neither_flag_gives_fresh() {
 
 #[test]
 fn resume_mode_continue_returns_most_recent_id() {
+    use forge_types::Role;
     let store = make_store_with_sessions(0);
     let a = store.create_session("/a", "default").unwrap();
+    store.add_message(&a, 0, Role::User, "a", None).unwrap();
     let b = store.create_session("/b", "default").unwrap();
+    store.add_message(&b, 0, Role::User, "b", None).unwrap();
     let mode = resolve_resume_mode(true, None, &store, false).unwrap();
     assert_eq!(mode, ResumeMode::Id(b.clone()));
     // a is not the most recent
     assert_ne!(mode, ResumeMode::Id(a));
+}
+
+#[test]
+fn resume_mode_continue_skips_a_session_that_was_never_used() {
+    use forge_types::Role;
+    // A session row is created eagerly at process start, so an opened-then-quit `forge chat`
+    // leaves a blank row behind. `--continue` must reattach the last session the user actually
+    // talked to, matching what the picker and `forge sessions` list.
+    let store = make_store_with_sessions(0);
+    let used = store.create_session("/used", "default").unwrap();
+    store
+        .add_message(&used, 0, Role::User, "real work", None)
+        .unwrap();
+    let _blank = store.create_session("/blank", "default").unwrap();
+    let mode = resolve_resume_mode(true, None, &store, false).unwrap();
+    assert_eq!(mode, ResumeMode::Id(used));
 }
 
 #[test]
@@ -536,20 +640,6 @@ fn resume_mode_bare_resume_plain_gives_error() {
     // plain=true: headless, no TTY → should error
     let err = resolve_resume_mode(false, Some(None), &store, true).unwrap_err();
     assert!(err.to_string().contains("--resume <id>"));
-}
-
-#[test]
-fn resume_mode_bare_resume_tty_gives_picker() {
-    // We can't test actual TTY detection in a test, but we can test with plain=false
-    // when we know stdout is NOT a terminal in CI — so we can't assert Picker here.
-    // Instead, verify the plain=false + non-TTY path gives the same error as plain=true.
-    // This is covered by the headless guard path; Picker path is integration-only.
-    let store = make_store_with_sessions(1);
-    // In a non-TTY test environment, plain=false but no terminal → same error as plain=true.
-    // We test the logic branch that matters: is_terminal() is false in tests → error path.
-    let _ = resolve_resume_mode(false, Some(None), &store, false);
-    // Not asserting the result here because is_terminal() differs per environment;
-    // the plain=true path (covered above) is the deterministic guard we rely on.
 }
 
 // ---------------------------------------------------------------------------
@@ -719,6 +809,66 @@ fn skill_import_load_alias_and_scope_values() {
                 ..
             }
         }
+    ));
+}
+
+#[test]
+fn plugin_grammar_preserves_marketplace_and_optional_arguments() {
+    let cli = Cli::try_parse_from([
+        "forge",
+        "plugin",
+        "install",
+        "package",
+        "--marketplace",
+        "community",
+    ])
+    .expect("plugin install grammar");
+    assert!(matches!(
+        cli.command,
+        Command::Plugin {
+            cmd: PluginCmd::Install { ref plugin, marketplace: Some(ref marketplace) }
+        } if plugin == "package" && marketplace == "community"
+    ));
+    let cli = Cli::try_parse_from([
+        "forge",
+        "plugin",
+        "marketplace",
+        "add",
+        "community",
+        "owner/repo",
+        "--ref",
+        "main",
+    ])
+    .expect("marketplace grammar");
+    assert!(matches!(
+        cli.command,
+        Command::Plugin {
+            cmd: PluginCmd::Marketplace { cmd: PluginMarketplaceCmd::Add { ref name, ref source, ref ref_ } }
+        } if name == "community" && source == "owner/repo" && ref_.as_deref() == Some("main")
+    ));
+    let cli = Cli::try_parse_from(["forge", "plugin", "list", "--available"])
+        .expect("plugin list available grammar");
+    assert!(matches!(
+        cli.command,
+        Command::Plugin {
+            cmd: PluginCmd::List { available: true }
+        }
+    ));
+    let cli = Cli::try_parse_from(["forge", "plugin", "update"])
+        .expect("plugin update without a package");
+    assert!(matches!(
+        cli.command,
+        Command::Plugin {
+            cmd: PluginCmd::Update { plugin: None }
+        }
+    ));
+    let cli = Cli::try_parse_from(["forge", "plugin", "marketplace", "remove", "community"])
+        .expect("marketplace removal grammar");
+    assert!(matches!(
+        cli.command,
+        Command::Plugin {
+            cmd: PluginCmd::Marketplace { cmd: PluginMarketplaceCmd::Remove { ref name } }
+        } if name == "community"
     ));
 }
 

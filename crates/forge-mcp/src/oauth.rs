@@ -55,6 +55,8 @@ pub async fn fetch_auth_server_metadata(
 pub struct RegisteredClient {
     pub client_id: String,
     pub client_secret: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub issuer: Option<String>,
 }
 
 impl RegisteredClient {
@@ -68,9 +70,16 @@ impl RegisteredClient {
             .get("client_secret")
             .and_then(|x| x.as_str())
             .map(str::to_string);
+        let redirect_uri = v
+            .get("redirect_uri")
+            .and_then(|x| x.as_str())
+            .map(str::to_string);
+        let issuer = v.get("issuer").and_then(|x| x.as_str()).map(str::to_string);
         Ok(Self {
             client_id,
             client_secret,
+            redirect_uri,
+            issuer,
         })
     }
 
@@ -78,8 +87,41 @@ impl RegisteredClient {
         serde_json::json!({
             "client_id": self.client_id,
             "client_secret": self.client_secret,
+            "redirect_uri": self.redirect_uri,
+            "issuer": self.issuer,
         })
     }
+}
+
+pub async fn register_device_client(
+    client: &reqwest::Client,
+    registration_endpoint: &str,
+    scopes: &[String],
+    client_name: &str,
+) -> Result<RegisteredClient, String> {
+    let body = serde_json::json!({
+        "client_name": client_name,
+        "grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
+        "token_endpoint_auth_method": "none",
+        "scope": scopes.join(" "),
+    });
+    let response = client
+        .post(registration_endpoint)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("POST {registration_endpoint}: {error}"))?;
+    let status = response.status();
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("registration response JSON: {error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "dynamic client registration failed ({status}): {value}"
+        ));
+    }
+    RegisteredClient::from_json(&value)
 }
 
 /// RFC 7591 §3.1 Dynamic Client Registration: POST client metadata to the authorization server's
@@ -135,13 +177,43 @@ pub fn registered_client_key(server: &str) -> String {
     format!("mcp-oauth-client:{server}")
 }
 
+fn registered_client_id_key(server: &str, client_id: &str) -> String {
+    format!("{}:id:{client_id}", registered_client_key(server))
+}
+
+fn registered_client_key_for(server: &str, issuer: &str, redirect_uri: &str) -> String {
+    let encode = |value: &str| {
+        value
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    format!(
+        "{}:{}:{}",
+        registered_client_key(server),
+        encode(issuer),
+        encode(redirect_uri)
+    )
+}
+
 /// Persist a registered client (id + optional secret) so subsequent connects/logins reuse it
 /// instead of re-registering. Stored in the same secret store as tokens (keyring, encrypted-file
 /// fallback) — never in config or logs.
 pub fn store_registered_client(server: &str, c: &RegisteredClient) -> Result<(), String> {
     let json = c.to_json().to_string();
+    let key = match (&c.issuer, &c.redirect_uri) {
+        (Some(issuer), Some(redirect_uri)) => {
+            registered_client_key_for(server, issuer, redirect_uri)
+        }
+        _ => registered_client_key(server),
+    };
+    forge_config::store_secret(&key, &json)
+        .map_err(|e| format!("storing registered client: {e}"))?;
+    forge_config::store_secret(&registered_client_id_key(server, &c.client_id), &json)
+        .map_err(|e| format!("indexing registered client: {e}"))?;
     forge_config::store_secret(&registered_client_key(server), &json)
-        .map_err(|e| format!("storing registered client: {e}"))
+        .map_err(|e| format!("indexing latest registered client: {e}"))
 }
 
 /// Load a server's previously-registered client, or `None` if it has never registered.
@@ -149,6 +221,29 @@ pub fn load_registered_client(server: &str) -> Option<RegisteredClient> {
     let json = forge_config::load_secret(&registered_client_key(server))?;
     let val: serde_json::Value = serde_json::from_str(&json).ok()?;
     RegisteredClient::from_json(&val).ok()
+}
+
+pub fn load_registered_client_for(
+    server: &str,
+    issuer: &str,
+    redirect_uri: &str,
+) -> Option<RegisteredClient> {
+    let key = registered_client_key_for(server, issuer, redirect_uri);
+    let json = forge_config::load_secret(&key)
+        .or_else(|| forge_config::load_secret(&registered_client_key(server)))?;
+    let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+    let client = RegisteredClient::from_json(&value).ok()?;
+    (client.issuer.as_deref() == Some(issuer)
+        && client.redirect_uri.as_deref() == Some(redirect_uri))
+    .then_some(client)
+}
+
+pub fn load_registered_client_for_id(server: &str, client_id: &str) -> Option<RegisteredClient> {
+    let json = forge_config::load_secret(&registered_client_id_key(server, client_id))
+        .or_else(|| forge_config::load_secret(&registered_client_key(server)))?;
+    let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+    let client = RegisteredClient::from_json(&value).ok()?;
+    (client.client_id == client_id).then_some(client)
 }
 
 /// Exchange an authorization code for tokens (RFC 6749 §4.1.3 + PKCE verifier). `client_secret` is
@@ -242,7 +337,8 @@ pub async fn resolve_oauth_token_async(server_name: &str) -> Result<String, Stri
         .map_err(|e| format!("http client for '{server_name}': {e}"))?;
     // Pass the DCR-issued client secret (if this server registered a confidential client) so the
     // refresh authenticates; public PKCE clients have no secret and pass `None`.
-    let client_secret = load_registered_client(server_name).and_then(|c| c.client_secret);
+    let client_secret = load_registered_client_for_id(server_name, &tokens.client_id)
+        .and_then(|client| client.client_secret);
     let new_tokens = refresh_token(&client, &tokens, client_secret.as_deref())
         .await
         .map_err(|e| format!("token refresh for '{server_name}' failed: {e}"))?;
