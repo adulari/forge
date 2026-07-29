@@ -72,13 +72,39 @@ pub(crate) fn store_upload(
         return Err("only images and UTF-8 text files can ride a prompt".to_string());
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("upload dir: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("securing upload dir: {e}"))?;
+    }
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let path = dir.join(format!("{ts}-{}", sanitize_upload_name(name)));
-    std::fs::write(&path, bytes).map_err(|e| format!("writing upload: {e}"))?;
-    Ok((path, image))
+    let safe_name = sanitize_upload_name(name);
+    for _ in 0..16 {
+        let nonce = rand::random::<u64>();
+        let path = dir.join(format!("{ts}-{nonce:016x}-{safe_name}"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                file.write_all(bytes)
+                    .map_err(|e| format!("writing upload: {e}"))?;
+                return Ok((path, image));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("writing upload: {error}")),
+        }
+    }
+    Err("could not allocate a unique upload path".to_string())
 }
 
 /// `POST /<token>/api/upload` — multipart file/image upload for the in-chat single-session

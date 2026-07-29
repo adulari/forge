@@ -2680,6 +2680,25 @@ mod tests {
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"hello");
 
+        // A second same-name upload cannot overwrite the first, even within the same millisecond.
+        let (second, _) =
+            store_upload(&dir, "notes file.txt", Some("text/plain"), b"second").unwrap();
+        assert_ne!(path, second);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
         // Images are detected by content type OR extension — bytes go through unvalidated
         // (the vision provider is the judge of image bytes, not us).
         let (_, image) = store_upload(&dir, "shot.png", None, &[0x89, 0x50, 0x4e]).unwrap();
