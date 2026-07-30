@@ -31,8 +31,8 @@ To add a surface:
 4. Add a shortcut or native desktop menu item only when the action is globally useful.
 5. Test identity, tab retention, placement independence, and close fallback in the pure reducer.
 
-Files/search/editor, browser preview, review annotations, and multi-terminal work should extend
-this model rather than adding route-local visibility booleans or another fixed dock.
+Files/search/editor, browser preview, and review annotations extend this model. Multi-terminal
+work should do the same rather than adding route-local visibility booleans or another fixed dock.
 
 ## Workspace files
 
@@ -94,3 +94,27 @@ Working-tree, staged, turn, and fork diffs use the same review model:
   as readable line-addressed context only after the next prompt is successfully sent or queued.
 - The compact Review tab remains marked while annotations are pending. Turn and working-tree views
   both feed the same composer, so mobile and expanded desktop/web have one feedback contract.
+
+## Desktop browser preview
+
+The Browser preview surface is a session-pinned, retained right-lane tab in the Tauri desktop
+app:
+
+- Its address field accepts an HTTP(S) URL, hostname, localhost address, or bare development
+  port. Bare ports resolve to loopback; public hostnames default to HTTPS. Native validation
+  independently rejects every non-HTTP scheme.
+- Back, forward, reload, external-browser opening, 50–200% zoom, fit/390/768 CSS-pixel viewport
+  modes, and multiple retained preview tabs use the same workbench model as Files and Git.
+- Arbitrary preview pages run in an isolated native child webview. The child label is outside the
+  trusted main-window capability, normal navigation is restricted to HTTP(S), and Forge exposes no
+  general page-to-app IPC or arbitrary-JavaScript command.
+- Element picking injects only the bounded picker runtime. A pick attempts a custom navigation
+  which native code intercepts and cancels; the main app receives the page URL/title, stable CSS
+  selector, semantic attributes, visible text, and CSS-pixel bounds.
+- Picked elements become removable, session-scoped composer chips. They are formatted into exact
+  browser context and cleared only after the prompt successfully sends or queues, matching review
+  annotation delivery semantics.
+- Web/iOS/Android clients explain that embedded preview is desktop-only and never attempt a
+  fragile cross-origin iframe. Remote-host port tunnelling, screenshots/recording, console/network
+  capture, and agent-driven browser automation remain later explicit capabilities rather than
+  being implied by this first isolated preview slice.

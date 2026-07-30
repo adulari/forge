@@ -85,4 +85,25 @@ describe("workbench surface model", () => {
     expect(state.bottom.tabs[0]?.title).toBe("API server");
     expect(activeWorkbenchSurface(state, "bottom")).toEqual(second);
   });
+
+  it("pins browser preview tabs to a session and resource in the right lane", () => {
+    const first = createWorkbenchSurface({
+      kind: "preview",
+      sessionId: "session-a",
+      resourceId: "tab-one",
+    });
+    const second = createWorkbenchSurface({
+      kind: "preview",
+      sessionId: "session-a",
+      resourceId: "tab-two",
+    });
+
+    let state = reduce(INITIAL_WORKBENCH_STATE, { type: "open", surface: first });
+    state = reduce(state, { type: "open", surface: second });
+
+    expect(first.placement).toBe("right");
+    expect(first.id).not.toBe(second.id);
+    expect(state.right.tabs).toEqual([first, second]);
+    expect(activeWorkbenchSurface(state, "right")).toEqual(second);
+  });
 });

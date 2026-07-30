@@ -17,7 +17,7 @@
 //            call TelemetrySheet's "Model" row already makes.
 //   effort → the existing EffortPicker, mounted headless (`showTrigger={false}`), which commits
 //            `/effort <level>` (or bare `/effort` to reset) over the same prompt path.
-import { ArrowUp, ChevronDown, Clock, FileCode2, FileText, Image as ImageIcon, MessageSquare, Mic, RotateCcw, Sparkles, Square } from "lucide-react-native";
+import { ArrowUp, ChevronDown, Clock, FileCode2, FileText, Image as ImageIcon, MessageSquare, Mic, MousePointer2, RotateCcw, Sparkles, Square } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ColorValue, Image, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
@@ -35,6 +35,13 @@ import {
   reviewRangeLabel,
   useReviewComments,
 } from "../../lib/reviewComments";
+import {
+  clearVisualAnnotations,
+  formatVisualAnnotationsPrompt,
+  removeVisualAnnotation,
+  useVisualAnnotations,
+  visualAnnotationLabel,
+} from "../../lib/visualAnnotations";
 import { isMacOS } from "../../lib/platform";
 import { useUpload, useWorkspaceSearch } from "../../lib/queries";
 import { useSessionCtx } from "../../lib/sessionContext";
@@ -139,6 +146,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     send,
   } = useSessionCtx();
   const reviewComments = useReviewComments(sessionId);
+  const visualAnnotations = useVisualAnnotations(sessionId);
   const toast = useToast();
   const [recording, setRecording] = useState(false);
   const [goalVisible, setGoalVisible] = useState(false);
@@ -211,7 +219,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   }, [commandFocusSignal]);
 
   const canSend =
-    (text.trim().length > 0 || reviewComments.length > 0) &&
+    (text.trim().length > 0 || reviewComments.length > 0 || visualAnnotations.length > 0) &&
     !attachments.some((a) => a.state === "uploading");
   const action = busy ? "stop" : online ? "send" : "queue";
   const reduced = useReducedMotion();
@@ -347,7 +355,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
 
   const commit = (value: string) => {
     const trimmed = value.trim();
-    if (!trimmed && reviewComments.length === 0) return;
+    if (!trimmed && reviewComments.length === 0 && visualAnnotations.length === 0) return;
     // An attachment still in flight (or failed) must never be silently dropped from the send —
     // block it with a toast instead so the user notices and can wait/remove/retry.
     if (attachments.some((a) => a.state === "uploading")) {
@@ -364,7 +372,10 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     const sent: SentAttachment[] = attachments
       .filter((a) => a.state === "done")
       .map((a) => ({ id: a.id, name: a.name, image: a.image, uri: a.uri, path: a.path }));
-    const prompt = formatReviewCommentsPrompt(trimmed, reviewComments);
+    const prompt = formatVisualAnnotationsPrompt(
+      formatReviewCommentsPrompt(trimmed, reviewComments),
+      visualAnnotations,
+    );
     if (!onSend(prompt, sent)) return;
     setLastPrompt(prompt);
     // Whatever suggestion is live right now belongs to the turn that's ending, not the one this
@@ -375,6 +386,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     void clearDraft(sessionId);
     setAttachments([]);
     clearReviewComments(sessionId);
+    clearVisualAnnotations(sessionId);
     if (Platform.OS === "web") setHeight(MIN_HEIGHT);
   };
   // `commit` closes over `onSend` (and whatever connection state it reads), so it's a new
@@ -576,6 +588,28 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
         },
       ]}
     >
+      {!recording && visualAnnotations.length > 0 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.commandScroll}
+          contentContainerStyle={styles.chipsRow}
+          keyboardShouldPersistTaps="handled"
+          accessibilityLabel="Pending browser preview annotations"
+        >
+          {visualAnnotations.map((annotation) => (
+            <Chip
+              key={annotation.id}
+              icon={<MousePointer2 size={14} strokeWidth={1.75} color={tokens.accent} />}
+              label={visualAnnotationLabel(annotation)}
+              selected
+              onPress={() => removeVisualAnnotation(sessionId, annotation.id)}
+              testID={`visual-annotation-${annotation.id}`}
+            />
+          ))}
+        </ScrollView>
+      ) : null}
+
       {!recording && reviewComments.length > 0 ? (
         <ScrollView
           horizontal

@@ -343,9 +343,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
               if (activeRightSurface?.kind === "files") workbench.hidePlacement("right");
               else workbench.openSurface({ kind: "files" });
             }}
+            onTogglePreview={() => workbench.toggleSurface({ kind: "preview", sessionId })}
             onToggleGitReview={() => workbench.toggleSurface({ kind: "git" })}
             onToggleTerminal={() => workbench.toggleSurface({ kind: "terminal" })}
             filesActive={activeRightSurface?.kind === "files"}
+            previewActive={activeRightSurface?.kind === "preview"}
             gitReviewActive={activeRightSurface?.kind === "git"}
             terminalActive={activeBottomSurface?.kind === "terminal"}
 

@@ -14,6 +14,7 @@ use tauri::{RunEvent, WindowEvent};
 
 mod about;
 mod menu;
+mod preview;
 mod serve_discovery;
 mod tray;
 
@@ -37,6 +38,15 @@ pub fn run() {
             serve_discovery::forge_anywhere_host_enrolled,
             serve_discovery::install_forge_anywhere_host,
             serve_discovery::activate_forge_anywhere_host,
+            preview::preview_open,
+            preview::preview_set_bounds,
+            preview::preview_navigate,
+            preview::preview_history,
+            preview::preview_reload,
+            preview::preview_set_zoom,
+            preview::preview_set_picker,
+            preview::preview_hide,
+            preview::preview_close,
             tray::set_tray_summary,
             about::set_about_info,
             about::open_about_window,

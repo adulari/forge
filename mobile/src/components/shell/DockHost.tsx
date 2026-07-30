@@ -25,6 +25,7 @@ import {
   type WorkbenchSurfaceKind,
 } from "../workbench/model";
 import { GitReviewDock } from "../git/GitReviewDock";
+import { BrowserPreviewDock } from "../preview/BrowserPreviewDock";
 import { WorkspaceDock } from "../workspace/WorkspaceDock";
 import { useSessionRow } from "./activeSession";
 import { TerminalDock } from "./TerminalDock";
@@ -53,6 +54,10 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
     render: ({ sessionId, surface }) => (
       <WorkspaceDock sessionId={sessionId} resourceId={surface?.resourceId ?? null} />
     ),
+  },
+  preview: {
+    render: ({ sessionId, surface }) =>
+      sessionId && surface ? <BrowserPreviewDock sessionId={sessionId} surface={surface} /> : null,
   },
   terminal: {
     render: ({ sessionId }) => <TerminalDock sessionId={sessionId} />,

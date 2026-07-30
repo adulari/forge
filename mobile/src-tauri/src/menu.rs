@@ -52,6 +52,7 @@ pub const VIEW_TERMINAL: &str = "view:terminal";
 pub const VIEW_USAGE: &str = "view:usage";
 pub const VIEW_NOTES: &str = "view:notes";
 pub const VIEW_GIT_REVIEW: &str = "view:git-review";
+pub const VIEW_BROWSER_PREVIEW: &str = "view:browser-preview";
 pub const VIEW_APPEARANCE_LIGHT: &str = "view:appearance:light";
 pub const VIEW_APPEARANCE_DARK: &str = "view:appearance:dark";
 pub const VIEW_APPEARANCE_SYSTEM: &str = "view:appearance:system";
@@ -193,6 +194,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .item(&item(VIEW_USAGE, "Usage Panel", Some("CmdOrCtrl+U"))?)
         .item(&item(VIEW_NOTES, "Notes", None)?)
         .item(&item(VIEW_GIT_REVIEW, "Git Review", Some("CmdOrCtrl+G"))?)
+        .item(&item(VIEW_BROWSER_PREVIEW, "Browser Preview", None)?)
         .separator()
         .item(&appearance)
         .build()?;

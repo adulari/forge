@@ -151,12 +151,18 @@ function RootNavigator() {
   const openGitReview = () => {
     if (isExpanded) workbench.toggleSurface({ kind: "git" });
   };
+  const toggleBrowserPreview = () => {
+    if (isExpanded && activeSessionId) {
+      workbench.toggleSurface({ kind: "preview", sessionId: activeSessionId });
+    }
+  };
   useHotkey("d", toggleSplit, { meta: true });
   useDesktopMenuAction("view:split-pane", toggleSplit);
   useHotkey("j", toggleTerminal, { meta: true });
   useDesktopMenuAction("view:terminal", toggleTerminal);
   useHotkey("g", openGitReview, { meta: true });
   useDesktopMenuAction("view:git-review", openGitReview);
+  useDesktopMenuAction("view:browser-preview", toggleBrowserPreview);
 
   useEffect(() => {
     if (!isLoading) {

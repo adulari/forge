@@ -63,6 +63,7 @@ export type DesktopMenuId =
   | "view:usage"
   | "view:notes"
   | "view:git-review"
+  | "view:browser-preview"
   | "view:appearance:light"
   | "view:appearance:dark"
   | "view:appearance:system"
@@ -211,6 +212,7 @@ function runDefault(id: string): void {
     case "view:terminal":
     case "view:notes":
     case "view:git-review":
+    case "view:browser-preview":
       unwired(id, "the split-pane/dock builder (components/shell/DockHost.tsx)");
       return;
     default:

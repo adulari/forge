@@ -13,6 +13,7 @@ import {
   GitCompareArrows,
   Map,
   Microscope,
+  MonitorPlay,
   MoreHorizontal,
   Network,
   Plus,
@@ -63,9 +64,11 @@ export interface SessionHeaderProps {
   /** Expanded workbench controls. Compact layouts use their native navigation instead. */
   onToggleGitReview?: () => void;
   onToggleFiles?: () => void;
+  onTogglePreview?: () => void;
   onToggleTerminal?: () => void;
   gitReviewActive?: boolean;
   filesActive?: boolean;
+  previewActive?: boolean;
   terminalActive?: boolean;
   /** Forge Anywhere — these three rows only render when their handler is provided, so
    * non-Anywhere sessions (no relay pairing) see this menu completely unchanged. */
@@ -111,6 +114,20 @@ export function SessionHeader(props: SessionHeaderProps) {
             onPress={props.onToggleFiles}
             accessibilityLabel={`${props.filesActive ? "Hide" : "Show"} workspace files`}
             style={props.filesActive ? { backgroundColor: tokens.selection } : undefined}
+          />
+        ) : null}
+        {isExpanded && props.onTogglePreview ? (
+          <IconButton
+            icon={
+              <MonitorPlay
+                size={19}
+                strokeWidth={1.75}
+                color={props.previewActive ? tokens.accent : tokens.ink2}
+              />
+            }
+            onPress={props.onTogglePreview}
+            accessibilityLabel={`${props.previewActive ? "Hide" : "Show"} browser preview`}
+            style={props.previewActive ? { backgroundColor: tokens.selection } : undefined}
           />
         ) : null}
         {isExpanded && props.onToggleGitReview ? (
