@@ -84,6 +84,14 @@ jobs:
           name: forge-assets
           path: dist-assets/**
           if-no-files-found: error
+      - name: Bound persistent build cache
+        if: always()
+        run: |
+          if [[ -f scripts/ci/trim-runner-cache.sh ]]; then
+            bash scripts/ci/trim-runner-cache.sh
+          else
+            echo "::notice::cache bound unavailable on this older release tag"
+          fi
 
   # Raw per-platform binary only — no packaging here. Packaging (bundling README/LICENSE/
   # completions/man page into the final archive) now happens once in `release`, after both this
@@ -238,10 +246,35 @@ jobs:
           name: forge-raw-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ matrix.bin }}
           if-no-files-found: error
+      - name: Bound persistent workspace cache
+        if: always() && matrix.self_hosted
+        run: |
+          if [[ -f scripts/ci/trim-runner-cache.sh ]]; then
+            bash scripts/ci/trim-runner-cache.sh
+          else
+            echo "::notice::cache bound unavailable on this older release tag"
+          fi
+
+  release-cache-cleanup:
+    name: bound persistent release cache
+    needs: build
+    if: always()
+    runs-on: [forge-release-sandbox]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          # Cleanup policy is operational, not release content. Using protected main keeps repair
+          # runs for older tags working even when that tag predates this script.
+          ref: main
+      - name: Bound persistent Docker volumes
+        env:
+          FORGE_TRIM_RELEASE_DOCKER_VOLUMES: "1"
+        run: bash scripts/ci/trim-runner-cache.sh
 
   release:
     name: package + publish release
-    needs: [assets, build]
+    needs: [assets, build, release-cache-cleanup]
     runs-on: [release, linux, x64]
     timeout-minutes: 30
     environment: release

@@ -163,6 +163,10 @@ async fn upload_batch() -> Result<()> {
     if conflicts > 0 {
         eprintln!("⚠ Forge Anywhere staged {conflicts} conflict(s) without changing local data");
     }
+    // Acknowledged outbox revisions and already-materialized downloads otherwise retain duplicate
+    // payloads forever. Keep this bounded so a long-lived daemon amortizes old cleanup without a
+    // latency or write-lock spike; conflicts and each local record's newest revision are retained.
+    store.prune_terminal_sync_rows(1_000)?;
     Ok(())
 }
 

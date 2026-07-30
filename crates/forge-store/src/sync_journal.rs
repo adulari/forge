@@ -293,4 +293,61 @@ impl Store {
         transaction.commit()?;
         Ok(true)
     }
+
+    /// Remove bounded encrypted-sync staging data that no longer owns recovery state.
+    ///
+    /// Local rows are eligible only after the service acknowledged them, and the newest
+    /// revision for every `(record_kind, stable_id)` is retained so revision clocks and
+    /// idempotent retries remain anchored. Remote rows are eligible only after materialization
+    /// ended in `applied` or `superseded`; unresolved conflicts remain available to the UI.
+    /// The durable download cursor and materialized/domain rows are independent of this staging
+    /// data, so deleting a terminal remote row cannot replay or roll back a change.
+    pub fn prune_terminal_sync_rows(&self, max_rows: usize) -> Result<SyncPruneSummary> {
+        if max_rows == 0 {
+            return Ok(SyncPruneSummary::default());
+        }
+        let limit = i64::try_from(max_rows).map_err(|_| {
+            StoreError::InvalidValue("sync prune limit exceeds SQLite range".into())
+        })?;
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let local_revisions = transaction.execute(
+            "WITH doomed AS (
+                 SELECT older.id
+                 FROM sync_journal older
+                 WHERE older.uploaded_at IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1
+                       FROM sync_journal newer
+                       WHERE newer.record_kind = older.record_kind
+                         AND newer.stable_id = older.stable_id
+                         AND newer.revision > older.revision
+                   )
+                 ORDER BY older.id
+                 LIMIT ?1
+             )
+             DELETE FROM sync_journal WHERE id IN (SELECT id FROM doomed)",
+            [limit],
+        )?;
+
+        let remote_records = transaction.execute(
+            "WITH doomed AS (
+                 SELECT remote.cursor
+                 FROM anywhere_sync_remote remote
+                 JOIN anywhere_sync_apply apply ON apply.cursor = remote.cursor
+                 WHERE apply.state IN ('applied', 'superseded')
+                 ORDER BY remote.cursor
+                 LIMIT ?1
+             )
+             DELETE FROM anywhere_sync_remote WHERE cursor IN (SELECT cursor FROM doomed)",
+            [limit],
+        )?;
+
+        transaction.commit()?;
+        Ok(SyncPruneSummary {
+            local_revisions,
+            remote_records,
+        })
+    }
 }

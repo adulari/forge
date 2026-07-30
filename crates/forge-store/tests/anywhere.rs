@@ -230,6 +230,103 @@ fn remote_record_and_cursor_are_staged_atomically() {
 }
 
 #[test]
+fn terminal_sync_pruning_keeps_latest_revision_and_unresolved_conflicts() {
+    let store = Store::open_in_memory().expect("open store");
+    let first = br#"{"id":"mutable","version":1}"#;
+    let second = br#"{"id":"mutable","version":2}"#;
+    assert!(store
+        .append_sync_journal(
+            "session",
+            "mutable",
+            SyncJournalOperation::Upsert,
+            1,
+            1,
+            first,
+        )
+        .expect("append first revision"));
+    assert!(store
+        .append_sync_journal(
+            "session",
+            "mutable",
+            SyncJournalOperation::Upsert,
+            2,
+            2,
+            second,
+        )
+        .expect("append second revision"));
+    let pending = store.pending_sync_journal(10).expect("pending revisions");
+    let ids = pending.iter().map(|entry| entry.id).collect::<Vec<_>>();
+    assert_eq!(
+        store
+            .mark_sync_journal_uploaded(&ids, 123)
+            .expect("acknowledge revisions"),
+        2
+    );
+
+    let applied = remote_memory(1, [0x70; 16], "remote-applied", 1, 1, "remote value");
+    store
+        .stage_remote_sync_record(&applied)
+        .expect("stage applied record");
+    assert_eq!(
+        store
+            .apply_staged_memory_records([0x80; 16], 10)
+            .expect("apply remote record")
+            .applied,
+        1
+    );
+
+    let mut conflict = remote_memory(2, [0x70; 16], "remote-conflict", 1, 1, "invalid value");
+    conflict.content_hash = [0xff; 32];
+    store
+        .stage_remote_sync_record(&conflict)
+        .expect("stage conflicting record");
+    assert_eq!(
+        store
+            .apply_staged_memory_records([0x80; 16], 10)
+            .expect("record conflict")
+            .conflicts,
+        1
+    );
+
+    assert_eq!(
+        store
+            .prune_terminal_sync_rows(10)
+            .expect("prune terminal rows"),
+        forge_store::SyncPruneSummary {
+            local_revisions: 1,
+            remote_records: 1,
+        }
+    );
+    assert_eq!(
+        store
+            .sync_apply_conflicts(10)
+            .expect("retained conflicts")
+            .len(),
+        1
+    );
+    assert!(!store
+        .append_sync_journal(
+            "session",
+            "mutable",
+            SyncJournalOperation::Upsert,
+            2,
+            2,
+            second,
+        )
+        .expect("latest revision remains idempotent"));
+    assert!(store
+        .append_sync_journal(
+            "session",
+            "mutable",
+            SyncJournalOperation::Upsert,
+            3,
+            3,
+            br#"{"id":"mutable","version":3}"#,
+        )
+        .expect("next revision remains appendable"));
+}
+
+#[test]
 fn staged_memory_uses_deterministic_lww_and_applies_tombstones() {
     let store = Store::open_in_memory().expect("open store");
     store

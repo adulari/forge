@@ -53,6 +53,10 @@ jobs:
         run: bash scripts/ci/test-eas-ota-safety.sh
       - name: Test runner resource budgets
         run: bash scripts/ci/test-runner-resource-budget.sh
+      - name: Test persistent runner cache bounds
+        run: bash scripts/ci/test-trim-runner-cache.sh
+      - name: Test crates.io publication order
+        run: bash scripts/ci/test-crates-release-order.sh
       # Static contract between the release workflows and the published one-line installers: the
       # CLI half stays a draft, app-desktop.yml publishes it, the manifest covers every filename
       # an installer asks for, and Latest moves only after the public bytes verify (#837).
@@ -103,6 +107,9 @@ jobs:
       # (cost us a failed v0.4.42 release). Catch the drift on every affected Rust PR.
       - run: cargo clippy --locked --all-targets --all-features
       - run: cargo clippy --locked --manifest-path vendor/genai-0.6.5/Cargo.toml --all-targets -- -D warnings
+      - name: Bound persistent build cache
+        if: always()
+        run: bash scripts/ci/trim-runner-cache.sh
 
   test:
     name: test (archlinux)
@@ -118,6 +125,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       - run: cargo test --locked --all --all-features
       - run: cargo test --locked --manifest-path vendor/genai-0.6.5/Cargo.toml
+      - name: Bound persistent build cache
+        if: always()
+        run: bash scripts/ci/trim-runner-cache.sh
 
   # Release-profile + `--locked` smoke on one platform. The release workflow builds with
   # `--release --locked`, and breakages there (LTO-only failures, a Cargo.lock that drifted from
@@ -137,6 +147,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/release-upgrade-e2e.sh "" target/release/forge
+      - name: Bound persistent build cache
+        if: always()
+        run: bash scripts/ci/trim-runner-cache.sh
 
   CI:
     needs: [changes, anywhere-policy, fmt, clippy, test, release-build]

@@ -45,8 +45,10 @@ Architecture decisions live in `docs/architecture/` (ADRs under `decisions/`); d
 3. **Conventional Commits.** `feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `test:`, `perf:`,
    `ci:` — see [Conventional Commits](https://www.conventionalcommits.org/).
 4. **Keep it green.** Run the local checks below before pushing. CI must pass to merge.
-5. **Open a PR** into `main`, filling out the PR template. One approving review + green CI are
-   required. PRs are squash-merged to keep `main` linear.
+5. **Open a PR** into `main`, filling out the PR template. The protected branch requires the
+   aggregate `CI`, `mobile checks`, and `security checks` contexts against the current `main`.
+   Reviews are encouraged but are not a merge gate in this maintainer-operated repository. PRs are
+   squash-merged to keep `main` linear.
 
 ## Branching & release model
 

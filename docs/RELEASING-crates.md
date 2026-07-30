@@ -39,21 +39,22 @@ Publish the fixed-version dependency fork first when it has not yet been indexed
 
 Then publish the versioned Forge graph:
 
-1. `forge-agent-types`
-2. `forge-agent-workflow`
-3. `forge-agent-voice`
-4. `forge-agent-skills`
-5. `forge-agent-store`
-6. `forge-agent-config`
-7. `forge-agent-lsp`
-8. `forge-agent-mcp`
-9. `forge-agent-mesh`
-10. `forge-agent-index`
-11. `forge-agent-tui`
-12. `forge-agent-provider`
-13. `forge-agent-tools`
-14. `forge-agent-core`
-15. `forge-agent` (the binary crate, published last)
+1. `forge-agent-anywhere-protocol`
+2. `forge-agent-types`
+3. `forge-agent-workflow`
+4. `forge-agent-voice`
+5. `forge-agent-skills`
+6. `forge-agent-store`
+7. `forge-agent-config`
+8. `forge-agent-lsp`
+9. `forge-agent-mcp`
+10. `forge-agent-mesh`
+11. `forge-agent-index`
+12. `forge-agent-tui`
+13. `forge-agent-provider`
+14. `forge-agent-tools`
+15. `forge-agent-core`
+16. `forge-agent` (the binary crate, published last)
 
 (`forge-relay` and `xtasks` are `publish = false` and are never released.)
 
@@ -81,9 +82,10 @@ next:
 cargo info --registry crates-io forge-agent-genai@0.6.5-forge.1 >/dev/null 2>&1 || \
   cargo publish --locked --manifest-path vendor/genai-0.6.5/Cargo.toml
 
-for crate in forge-agent-types forge-agent-workflow forge-agent-voice forge-agent-skills forge-agent-store \
-             forge-agent-config forge-agent-lsp forge-agent-mcp forge-agent-mesh forge-agent-index \
-             forge-agent-tui forge-agent-provider forge-agent-tools forge-agent-core forge-agent; do
+for crate in forge-agent-anywhere-protocol forge-agent-types forge-agent-workflow forge-agent-voice \
+             forge-agent-skills forge-agent-store forge-agent-config forge-agent-lsp forge-agent-mcp \
+             forge-agent-mesh forge-agent-index forge-agent-tui forge-agent-provider forge-agent-tools \
+             forge-agent-core forge-agent; do
   cargo publish -p "$crate" --locked
   # give the index a moment so the next crate can resolve this one
   sleep 20
@@ -95,7 +97,8 @@ be re-published at the same version (bump the patch and retry the whole set if n
 
 ## After publishing
 
-- `cargo install forge-agent` should now work on a clean machine (installs the `forge` binary).
+- `cargo install forge-agent --version X.Y.Z` should now work from a clean Cargo home and install
+  a `forge` binary that reports exactly `forge X.Y.Z`.
 - The already-created tag + GitHub release (handled by `.github/workflows/release.yml`) provide the
   prebuilt binaries plus repository-backed Homebrew and Scoop manifests. AUR publication remains a
   separate push to the AUR Git repository after the maintainer key is configured.

@@ -585,6 +585,15 @@ pub struct RemoteSyncApplySummary {
     pub deferred: usize,
 }
 
+/// Rows removed by one bounded encrypted-sync maintenance pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SyncPruneSummary {
+    /// Acknowledged local revisions older than the retained newest revision.
+    pub local_revisions: usize,
+    /// Remote staging rows whose apply outcome was already terminal and non-conflicting.
+    pub remote_records: usize,
+}
+
 /// One safely materialized account record used by local settings/command/extension consumers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortableSyncRecord {
