@@ -2106,6 +2106,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-agent-genai"
+version = "0.6.5-forge.1"
+dependencies = [
+ "base64",
+ "bytes",
+ "derive_more",
+ "eventsource-stream",
+ "futures",
+ "mime_guess",
+ "paste",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "strum",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+ "value-ext",
+]
+
+[[package]]
 name = "forge-agent-index"
 version = "2.12.0"
 dependencies = [
@@ -2194,10 +2218,10 @@ dependencies = [
  "anyhow",
  "async-trait",
  "forge-agent-config",
+ "forge-agent-genai",
  "forge-agent-index",
  "forge-agent-types",
  "futures",
- "genai",
  "httpmock",
  "libc",
  "reqwest",
@@ -2479,30 +2503,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "genai"
-version = "0.6.5"
-dependencies = [
- "base64",
- "bytes",
- "derive_more",
- "eventsource-stream",
- "futures",
- "mime_guess",
- "paste",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "serde_with",
- "strum",
- "tokio",
- "tokio-stream",
- "tracing",
- "uuid",
- "value-ext",
 ]
 
 [[package]]
