@@ -75,6 +75,7 @@ mod serve;
 mod serve_git;
 mod serve_schedules;
 mod serve_terminal;
+mod serve_workspace;
 mod telemetry;
 mod update;
 mod update_check;

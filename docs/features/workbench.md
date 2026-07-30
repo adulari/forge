@@ -33,3 +33,24 @@ To add a surface:
 
 Files/search/editor, browser preview, review annotations, and multi-terminal work should extend
 this model rather than adding route-local visibility booleans or another fixed dock.
+
+## Workspace files
+
+The Files surface is session-scoped: the daemon derives its root from the session's worktree or
+cwd, never from a client-provided absolute path.
+
+- The browser lazily lists directories and offers ranked filename search or bounded text search.
+- Selecting a file opens it as a retained workbench tab. Text files up to 1 MiB can be edited.
+- Saves include the hash returned when the file was opened. A concurrent agent/editor change
+  returns `409 Conflict`; Forge asks the user to reload instead of overwriting it.
+- Canonical path checks reject absolute paths, `..`, `.git`, and symlinks escaping the session
+  root. Search respects repository ignore rules, skips generated dependency/build directories,
+  and stops at 20,000 files or 64 MiB of searchable text.
+- Composer `@path` completion uses the same session-scoped search. Paths containing whitespace are
+  inserted as `@{path with spaces}` and expanded relative to the correct session workspace.
+- These filesystem endpoints are Direct-only today. Forge Anywhere intentionally does not bridge
+  project files; the surface explains how to reconnect directly instead of retrying a disallowed
+  route.
+- Compact iOS/Android layouts expose Files as a session tab and keep file navigation/editor state
+  local to that route. Expanded desktop/web layouts open the same browser and editor as retained
+  workbench tabs.

@@ -31,6 +31,8 @@
 //! - `GET  /api/changelog?limit=<n>`  parsed "What's New" releases from the compiled-in CHANGELOG
 //! - `GET|POST /api/git/*`            the git review dock ([`crate::serve_git`]): status, per-file
 //!   diff, stage/unstage, commit — always inside the addressed session's own repository
+//! - `GET|PUT /api/workspace/*`       session-scoped file tree, search, text reads, and
+//!   conflict-safe edits ([`crate::serve_workspace`])
 //! - `GET|POST /api/schedules[/{id}/pause|resume|delete]`  the real `forge schedule` registry
 //!   ([`crate::serve_schedules`]) — store rows plus the same OS timers the CLI installs
 //! - `WS   /ws/terminal?session=<id>` a PTY-backed shell in the session's directory
@@ -687,6 +689,21 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(
             &format!("{base}/api/git/commit"),
             post(crate::serve_git::git_commit),
+        )
+        // Workspace inspector/editor (serve_workspace.rs). Roots come only from the live session;
+        // relative paths are canonicalized and confined before any filesystem operation.
+        .route(
+            &format!("{base}/api/workspace/entries"),
+            get(crate::serve_workspace::workspace_entries),
+        )
+        .route(
+            &format!("{base}/api/workspace/file"),
+            get(crate::serve_workspace::workspace_file)
+                .put(crate::serve_workspace::workspace_write),
+        )
+        .route(
+            &format!("{base}/api/workspace/search"),
+            get(crate::serve_workspace::workspace_search),
         )
         // Schedule registry (serve_schedules.rs) — the same rows + OS timers `forge schedule` owns.
         .route(
@@ -4700,6 +4717,12 @@ mod tests {
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap()
         };
+        let put = |path: &str, body: serde_json::Value| {
+            axum::http::Request::put(path)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap()
+        };
 
         // Unknown session → 404, exactly like every other session-scoped route.
         let (status, _) = json(
@@ -4858,6 +4881,97 @@ mod tests {
         // than inventing a base.
         let (status, _) = json(router.clone(), get(format!("/tok/api/sessions/{sid}/diff"))).await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        // Workspace browsing/search/editing resolves from this same session root. Repository
+        // metadata is hidden, traversal is rejected, and a stale hash cannot overwrite a file.
+        let (status, body) = json(
+            router.clone(),
+            get(format!("/tok/api/workspace/entries?session={sid}&path=")),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let workspace_paths = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["path"].as_str())
+            .collect::<Vec<_>>();
+        assert!(workspace_paths.contains(&"tracked.txt"));
+        assert!(!workspace_paths.contains(&".git"));
+
+        let (status, opened) = json(
+            router.clone(),
+            get(format!(
+                "/tok/api/workspace/file?session={sid}&path=tracked.txt"
+            )),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let opened_hash = opened["hash"].as_str().unwrap().to_string();
+        assert_eq!(opened["content"], "one\nTWO\nthree\n");
+
+        let (status, body) = json(
+            router.clone(),
+            get(format!(
+                "/tok/api/workspace/search?session={sid}&q=tracked&mode=files"
+            )),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|result| result["path"] == "tracked.txt"));
+
+        let (status, _) = json(
+            router.clone(),
+            get(format!(
+                "/tok/api/workspace/file?session={sid}&path=../../etc/passwd"
+            )),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        let (status, body) = json(
+            router.clone(),
+            put(
+                "/tok/api/workspace/file",
+                serde_json::json!({
+                    "session": sid,
+                    "path": "tracked.txt",
+                    "content": "stale write\n",
+                    "expected_hash": "not-the-opened-hash"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert!(body["error"].as_str().unwrap().contains("changed"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tracked.txt")).unwrap(),
+            "one\nTWO\nthree\n"
+        );
+
+        let (status, body) = json(
+            router.clone(),
+            put(
+                "/tok/api/workspace/file",
+                serde_json::json!({
+                    "session": sid,
+                    "path": "tracked.txt",
+                    "content": "saved from workspace\n",
+                    "expected_hash": opened_hash
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["content"], "saved from workspace\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tracked.txt")).unwrap(),
+            "saved from workspace\n"
+        );
 
         // The changelog route is session-independent and returns parsed releases.
         let (status, body) = json(router.clone(), get("/tok/api/changelog?limit=2".into())).await;

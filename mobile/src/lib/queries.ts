@@ -50,6 +50,16 @@ import {
   type SessionDiffResponse,
   getSessionDiff,
 
+  type WorkspaceEntriesResponse,
+  getWorkspaceEntries,
+  type WorkspaceFileResponse,
+  getWorkspaceFile,
+  type WorkspaceSearchMode,
+  type WorkspaceSearchResponse,
+  searchWorkspace,
+  type WorkspaceWriteRequest,
+  writeWorkspaceFile,
+
   type ScheduleRow,
   type CreateScheduleRequest,
   getSchedules,
@@ -134,6 +144,16 @@ function keys(baseUrl: string | null) {
     gitDiff: (sessionId: string, path: string, staged: boolean) =>
       ["git", "diff", baseUrl, sessionId, path, staged] as const,
     sessionDiff: (sessionId: string) => ["sessions", "diff", baseUrl, sessionId] as const,
+    workspaceEntries: (sessionId: string, path: string) =>
+      ["workspace", "entries", baseUrl, sessionId, path] as const,
+    workspaceFile: (sessionId: string, path: string) =>
+      ["workspace", "file", baseUrl, sessionId, path] as const,
+    workspaceSearch: (
+      sessionId: string,
+      query: string,
+      mode: WorkspaceSearchMode,
+      limit: number,
+    ) => ["workspace", "search", baseUrl, sessionId, mode, query, limit] as const,
     schedules: ["schedules", baseUrl] as const,
     changelog: (limit?: number) => ["changelog", baseUrl, limit ?? null] as const,
   };
@@ -346,6 +366,68 @@ export function useSessionDiff(sessionId: string | null, enabled = true) {
     queryKey: keys(baseUrl).sessionDiff(sessionId ?? ""),
     queryFn: () => getSessionDiff(baseUrl as string, sessionId as string),
     enabled: enabled && baseUrl != null && sessionId != null,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workspace inspector/editor
+// ---------------------------------------------------------------------------
+
+export function useWorkspaceEntries(sessionId: string | null, path = "") {
+  const { baseUrl } = useAuth();
+  return useQuery<WorkspaceEntriesResponse>({
+    queryKey: keys(baseUrl).workspaceEntries(sessionId ?? "", path),
+    queryFn: () => getWorkspaceEntries(baseUrl as string, sessionId as string, path),
+    enabled: baseUrl != null && sessionId != null,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useWorkspaceFile(sessionId: string | null, path: string | null) {
+  const { baseUrl } = useAuth();
+  return useQuery<WorkspaceFileResponse>({
+    queryKey: keys(baseUrl).workspaceFile(sessionId ?? "", path ?? ""),
+    queryFn: () => getWorkspaceFile(baseUrl as string, sessionId as string, path as string),
+    enabled: baseUrl != null && sessionId != null && path != null && path !== "",
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useWorkspaceSearch(
+  sessionId: string | null,
+  query: string,
+  mode: WorkspaceSearchMode = "files",
+  limit = 50,
+) {
+  const { baseUrl } = useAuth();
+  const normalized = query.trim();
+  return useQuery<WorkspaceSearchResponse>({
+    queryKey: keys(baseUrl).workspaceSearch(sessionId ?? "", normalized, mode, limit),
+    queryFn: () =>
+      searchWorkspace(baseUrl as string, {
+        session: sessionId as string,
+        q: normalized,
+        mode,
+        limit,
+      }),
+    enabled: baseUrl != null && sessionId != null && normalized.length > 0,
+    staleTime: 15_000,
+  });
+}
+
+export function useWriteWorkspaceFile() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation<WorkspaceFileResponse, Error, WorkspaceWriteRequest>({
+    mutationFn: (body) => writeWorkspaceFile(baseUrl as string, body),
+    onSuccess: (data, body) => {
+      queryClient.setQueryData(keys(baseUrl).workspaceFile(body.session, body.path), data);
+      queryClient.invalidateQueries({
+        queryKey: keys(baseUrl).workspaceEntries(body.session, ""),
+      });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).gitStatus(body.session) });
+      queryClient.invalidateQueries({ queryKey: ["git", "diff", baseUrl, body.session] });
+    },
   });
 }
 

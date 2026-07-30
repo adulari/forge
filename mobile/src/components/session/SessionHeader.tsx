@@ -6,6 +6,7 @@ import {
   Bookmark,
   Bot,
   Brain,
+  Files,
   GitFork,
   GitPullRequest,
   History,
@@ -61,8 +62,10 @@ export interface SessionHeaderProps {
   onLattice: () => void;
   /** Expanded workbench controls. Compact layouts use their native navigation instead. */
   onToggleGitReview?: () => void;
+  onToggleFiles?: () => void;
   onToggleTerminal?: () => void;
   gitReviewActive?: boolean;
+  filesActive?: boolean;
   terminalActive?: boolean;
   /** Forge Anywhere — these three rows only render when their handler is provided, so
    * non-Anywhere sessions (no relay pairing) see this menu completely unchanged. */
@@ -96,6 +99,20 @@ export function SessionHeader(props: SessionHeaderProps) {
         <StatusDot state={props.state} />
         <Text style={[typeScale.headingBold, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
         {isPublic ? <Text style={[typeScale.meta, { color: tokens.danger }]}>public</Text> : null}
+        {isExpanded && props.onToggleFiles ? (
+          <IconButton
+            icon={
+              <Files
+                size={19}
+                strokeWidth={1.75}
+                color={props.filesActive ? tokens.accent : tokens.ink2}
+              />
+            }
+            onPress={props.onToggleFiles}
+            accessibilityLabel={`${props.filesActive ? "Hide" : "Show"} workspace files`}
+            style={props.filesActive ? { backgroundColor: tokens.selection } : undefined}
+          />
+        ) : null}
         {isExpanded && props.onToggleGitReview ? (
           <IconButton
             icon={

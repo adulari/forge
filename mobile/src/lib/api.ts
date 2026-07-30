@@ -117,6 +117,17 @@ export interface GitCommitResponse { ok: boolean; sha: string; summary: string; 
  * included. 400 for a session with no worktree. */
 export interface SessionDiffResponse { base: string; branch: string; worktree: string; files: GitDiffFile[]; }
 
+// --- Workspace inspector/editor (crates/forge-cli/src/serve_workspace.rs) ---
+
+export type WorkspaceEntryKind = "directory" | "file" | "symlink";
+export interface WorkspaceEntry { name: string; path: string; kind: WorkspaceEntryKind; size: number; modified_ms: number | null; }
+export interface WorkspaceEntriesResponse { root: string; path: string; entries: WorkspaceEntry[]; truncated: number; }
+export interface WorkspaceFileResponse { root: string; path: string; name: string; content: string; size: number; modified_ms: number | null; hash: string; extension: string | null; }
+export type WorkspaceSearchMode = "files" | "content";
+export interface WorkspaceSearchResult { path: string; kind: "file" | "match"; line: number | null; column: number | null; preview: string | null; }
+export interface WorkspaceSearchResponse { query: string; mode: WorkspaceSearchMode; results: WorkspaceSearchResult[]; scanned_files: number; truncated: boolean; }
+export interface WorkspaceWriteRequest { session: string; path: string; content: string; expected_hash: string; }
+
 // --- Schedules (crates/forge-cli/src/serve_schedules.rs) ---
 
 /** `cron` is the stored spec verbatim (`every:1800` / `daily:09:00` / `cron:<expr>`);
@@ -582,6 +593,51 @@ export function commitStaged(baseUrl: string, body: GitCommitRequest): Promise<G
 
 export function getSessionDiff(baseUrl: string, id: string): Promise<SessionDiffResponse> {
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/diff`);
+}
+
+// ---------------------------------------------------------------------------
+// Workspace inspector/editor
+// ---------------------------------------------------------------------------
+
+export function getWorkspaceEntries(
+  baseUrl: string,
+  session: string,
+  path = "",
+): Promise<WorkspaceEntriesResponse> {
+  return request(baseUrl, `/api/workspace/entries${qs({ session, path })}`);
+}
+
+export function getWorkspaceFile(
+  baseUrl: string,
+  session: string,
+  path: string,
+): Promise<WorkspaceFileResponse> {
+  return request(baseUrl, `/api/workspace/file${qs({ session, path })}`);
+}
+
+export function searchWorkspace(
+  baseUrl: string,
+  params: { session: string; q: string; mode?: WorkspaceSearchMode; limit?: number },
+): Promise<WorkspaceSearchResponse> {
+  return request(
+    baseUrl,
+    `/api/workspace/search${qs({
+      session: params.session,
+      q: params.q,
+      mode: params.mode ?? "files",
+      limit: params.limit ?? 50,
+    })}`,
+  );
+}
+
+export function writeWorkspaceFile(
+  baseUrl: string,
+  body: WorkspaceWriteRequest,
+): Promise<WorkspaceFileResponse> {
+  return request(baseUrl, "/api/workspace/file", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
 }
 
 // ---------------------------------------------------------------------------

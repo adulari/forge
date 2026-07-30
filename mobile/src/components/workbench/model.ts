@@ -1,7 +1,7 @@
 export const WORKBENCH_PLACEMENTS = ["right", "bottom"] as const;
 
 export type WorkbenchPlacement = (typeof WORKBENCH_PLACEMENTS)[number];
-export type WorkbenchSurfaceKind = "usage" | "git" | "terminal";
+export type WorkbenchSurfaceKind = "usage" | "git" | "files" | "terminal";
 
 export interface WorkbenchSurfaceDefinition {
   kind: WorkbenchSurfaceKind;
@@ -27,6 +27,13 @@ export const WORKBENCH_SURFACE_DEFINITIONS: Record<
     title: "Git review",
     placement: "right",
     defaultSize: 420,
+    sessionScoped: true,
+  },
+  files: {
+    kind: "files",
+    title: "Files",
+    placement: "right",
+    defaultSize: 560,
     sessionScoped: true,
   },
   terminal: {

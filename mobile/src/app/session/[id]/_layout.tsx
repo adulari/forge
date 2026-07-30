@@ -67,7 +67,7 @@ import { radii, space, type StatusDotState } from "../../../theme/tokens";
 import { type as typeScale } from "../../../theme/typography";
 import { useBreakpoint } from "../../../theme/useBreakpoint";
 
-type SegmentValue = "chat" | "tasks" | "agents" | "review" | "replay";
+type SegmentValue = "chat" | "tasks" | "agents" | "review" | "files" | "replay";
 
 // Path suffix appended to `/session/{id}` for each segment ("" = the index/Chat route).
 const SEGMENT_SUFFIX: Record<SegmentValue, string> = {
@@ -75,12 +75,13 @@ const SEGMENT_SUFFIX: Record<SegmentValue, string> = {
   tasks: "tasks",
   agents: "agents",
   review: "review",
+  files: "files",
   replay: "replay",
 };
 
 function segmentFromPathname(pathname: string): SegmentValue {
   const last = pathname.split("/").filter(Boolean).pop();
-  if (last === "tasks" || last === "agents" || last === "review" || last === "replay") return last;
+  if (last === "tasks" || last === "agents" || last === "review" || last === "files" || last === "replay") return last;
   return "chat";
 }
 
@@ -207,6 +208,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
       { value: "tasks", label: "Tasks", badge: taskCount || undefined },
       { value: "agents", label: "Agents", badge: agentCount || undefined },
       { value: "review", label: "Review", dot: reviewPending },
+      { value: "files", label: "Files" },
       { value: "replay", label: "Replay" },
     ];
   }, [snapshot?.tasks.length, snapshot?.subagents.length, snapshot?.plan, snapshot?.diff]);
@@ -328,8 +330,13 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
             onLattice={() => setLatticeVisible(true)}
+            onToggleFiles={() => {
+              if (activeRightSurface?.kind === "files") workbench.hidePlacement("right");
+              else workbench.openSurface({ kind: "files" });
+            }}
             onToggleGitReview={() => workbench.toggleSurface({ kind: "git" })}
             onToggleTerminal={() => workbench.toggleSurface({ kind: "terminal" })}
+            filesActive={activeRightSurface?.kind === "files"}
             gitReviewActive={activeRightSurface?.kind === "git"}
             terminalActive={activeBottomSurface?.kind === "terminal"}
 

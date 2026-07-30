@@ -25,6 +25,7 @@ import {
   type WorkbenchSurfaceKind,
 } from "../workbench/model";
 import { GitReviewDock } from "../git/GitReviewDock";
+import { WorkspaceDock } from "../workspace/WorkspaceDock";
 import { useSessionRow } from "./activeSession";
 import { TerminalDock } from "./TerminalDock";
 import { UsageDock } from "./UsageDock";
@@ -33,6 +34,7 @@ export type DockKind = WorkbenchSurfaceKind;
 
 export interface DockContext {
   sessionId: string | null;
+  surface: WorkbenchSurface | null;
 }
 
 interface DockDefinition {
@@ -46,6 +48,11 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
   git: {
     // The dock follows the active routed session unless a future resource tab pins one.
     render: ({ sessionId }) => (sessionId ? <GitReviewDock sessionId={sessionId} /> : null),
+  },
+  files: {
+    render: ({ sessionId, surface }) => (
+      <WorkspaceDock sessionId={sessionId} resourceId={surface?.resourceId ?? null} />
+    ),
   },
   terminal: {
     render: ({ sessionId }) => <TerminalDock sessionId={sessionId} />,
@@ -194,7 +201,9 @@ export function DockHost({
           accessibilityLabel={`Resize ${surfaceDefinition.title.toLowerCase()} dock`}
         />
         {header(true)}
-        <View style={styles.body}>{definition.render({ sessionId: effectiveSessionId })}</View>
+        <View style={styles.body}>
+          {definition.render({ sessionId: effectiveSessionId, surface })}
+        </View>
       </View>
     );
   }
@@ -211,7 +220,9 @@ export function DockHost({
       ]}
     >
       {header(false)}
-      <View style={styles.body}>{definition.render({ sessionId: effectiveSessionId })}</View>
+      <View style={styles.body}>
+        {definition.render({ sessionId: effectiveSessionId, surface })}
+      </View>
     </View>
   );
 }
