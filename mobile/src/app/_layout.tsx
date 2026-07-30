@@ -28,11 +28,13 @@ import { Screen } from "../components/ds/Screen";
 import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
 import { useActiveSessionId } from "../components/shell/activeSession";
-import { DockHost, type DockKind } from "../components/shell/DockHost";
+import { DockHost } from "../components/shell/DockHost";
 import { IconRail } from "../components/shell/IconRail";
 import { QuickComposer } from "../components/shell/QuickComposer";
 import { Sidebar } from "../components/shell/Sidebar";
 import { SplitPanes, useSplitPanes } from "../components/shell/SplitPanes";
+import { WorkbenchProvider, useWorkbench } from "../components/workbench/WorkbenchProvider";
+import { activeWorkbenchSurface } from "../components/workbench/model";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
 import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
@@ -108,12 +110,11 @@ function RootNavigator() {
   // hotkeys unconditionally is harmless — the chrome they toggle only ever renders
   // below, gated on `isPaired && isExpanded`.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  // The right-edge dock is one slot: usage (⌘U) and git review (⌘G) take turns in it, null =
-  // closed. The terminal is a bottom dock (⌘J) and stacks with whichever right dock is open.
-  const [rightDock, setRightDock] = useState<DockKind | null>(null);
-  const [terminalOpen, setTerminalOpen] = useState(false);
   const [quickComposerOpen, setQuickComposerOpen] = useState(false);
-  const dockOpen = rightDock != null;
+  const workbench = useWorkbench();
+  const rightSurface = activeWorkbenchSurface(workbench.state, "right");
+  const bottomSurface = activeWorkbenchSurface(workbench.state, "bottom");
+  const dockOpen = rightSurface != null;
 
   const activeSessionId = useActiveSessionId();
   // Desktop-only: on compact/medium the split reports inactive and nothing extra renders.
@@ -132,9 +133,9 @@ function RootNavigator() {
       return next;
     });
   };
-  const toggleRightDock = (kind: DockKind) => setRightDock((current) => (current === kind ? null : kind));
+  const toggleUsageDock = () => workbench.toggleSurface({ kind: "usage" });
   useSidebarCollapseHotkey(toggleSidebarCollapsed);
-  useUsageDockHotkey(() => toggleRightDock("usage"));
+  useUsageDockHotkey(toggleUsageDock);
   useQuickComposerHotkey(() => setQuickComposerOpen(true));
 
   // ⌘D split · ⌘J terminal · ⌘G git review. Each claims the matching Tauri menu item as well
@@ -145,10 +146,10 @@ function RootNavigator() {
     if (isExpanded) split.toggle();
   };
   const toggleTerminal = () => {
-    if (isExpanded) setTerminalOpen((open) => !open);
+    if (isExpanded) workbench.toggleSurface({ kind: "terminal" });
   };
   const openGitReview = () => {
-    if (isExpanded) toggleRightDock("git");
+    if (isExpanded) workbench.toggleSurface({ kind: "git" });
   };
   useHotkey("d", toggleSplit, { meta: true });
   useDesktopMenuAction("view:split-pane", toggleSplit);
@@ -200,9 +201,9 @@ function RootNavigator() {
   );
 
   const rail = railless ? null : sidebarCollapsed ? (
-    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={() => toggleRightDock("usage")} />
+    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} />
   ) : (
-    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={() => toggleRightDock("usage")} />
+    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} />
   );
 
   // The split wraps the live route stack rather than replacing it (see SplitPanes.tsx), and the
@@ -222,10 +223,13 @@ function RootNavigator() {
         appStack
       )}
       <DockHost
-        open={terminalOpen && !railless}
+        open={bottomSurface != null && !railless}
         dock="terminal"
+        surface={bottomSurface}
+        tabs={workbench.state.bottom.tabs}
         sessionId={activeSessionId}
-        onClose={() => setTerminalOpen(false)}
+        onActivateSurface={(id) => workbench.activateSurface("bottom", id)}
+        onClose={() => workbench.hidePlacement("bottom")}
       />
     </View>
   );
@@ -234,14 +238,21 @@ function RootNavigator() {
     <>
       {isPaired && isExpanded ? (
         <>
-          {isWeb && !isTauri ? <WebTopBar onToggleDock={() => toggleRightDock("usage")} dockOpen={dockOpen} /> : null}
+          {isWeb && !isTauri ? (
+            <WebTopBar
+              onToggleDock={toggleUsageDock}
+              dockOpen={rightSurface?.kind === "usage"}
+            />
+          ) : null}
           <View style={styles.shellRow}>
             <MasterDetail master={rail} detail={detail} railWidth={sidebarCollapsed ? ICON_RAIL_WIDTH : SIDEBAR_WIDTH} />
             <DockHost
               open={dockOpen && !railless}
-              dock={rightDock ?? "usage"}
+              surface={rightSurface}
+              tabs={workbench.state.right.tabs}
               sessionId={activeSessionId}
-              onClose={() => setRightDock(null)}
+              onActivateSurface={(id) => workbench.activateSurface("right", id)}
+              onClose={() => workbench.hidePlacement("right")}
             />
           </View>
           <QuickComposer visible={quickComposerOpen} onClose={() => setQuickComposerOpen(false)} />
@@ -312,11 +323,13 @@ export default function RootLayout() {
                         `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
                     <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
                       <PaletteHost>
-                        <AppLock>
-                          <RootNavigator />
-                        </AppLock>
-                        {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
-                        <DesktopWindowChrome />
+                        <WorkbenchProvider>
+                          <AppLock>
+                            <RootNavigator />
+                          </AppLock>
+                          {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
+                          <DesktopWindowChrome />
+                        </WorkbenchProvider>
                       </PaletteHost>
                     </View>
                   </ToastHost>

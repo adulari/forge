@@ -27,6 +27,8 @@ import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
+import { useWorkbench } from "../../../components/workbench/WorkbenchProvider";
+import { activeWorkbenchSurface } from "../../../components/workbench/model";
 import { GoalBanner } from "../../../components/session/GoalBanner";
 import { StatusDot } from "../../../components/ds/StatusDot";
 import { DuelSheet } from "../../../components/session/DuelSheet";
@@ -87,6 +89,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const toast = useToast();
   const pathname = usePathname();
   const { isCompact, isExpanded } = useBreakpoint();
+  const workbench = useWorkbench();
+  const activeRightSurface = activeWorkbenchSurface(workbench.state, "right");
+  const activeBottomSurface = activeWorkbenchSurface(workbench.state, "bottom");
   const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
   const [duelVisible, setDuelVisible] = useState(false);
   const [planVisible, setPlanVisible] = useState(false);
@@ -323,6 +328,10 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
             onLattice={() => setLatticeVisible(true)}
+            onToggleGitReview={() => workbench.toggleSurface({ kind: "git" })}
+            onToggleTerminal={() => workbench.toggleSurface({ kind: "terminal" })}
+            gitReviewActive={activeRightSurface?.kind === "git"}
+            terminalActive={activeBottomSurface?.kind === "terminal"}
 
             onHandoff={signedIn ? () => setHandoffVisible(true) : undefined}
             onShareReplay={signedIn ? () => setShareVisible(true) : undefined}

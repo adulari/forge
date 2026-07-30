@@ -9,6 +9,7 @@ import {
   GitFork,
   GitPullRequest,
   History,
+  GitCompareArrows,
   Map,
   Microscope,
   MoreHorizontal,
@@ -17,6 +18,7 @@ import {
   Search,
   Send,
   Share2,
+  SquareTerminal,
   Swords,
   Workflow,
 } from "lucide-react-native";
@@ -57,6 +59,11 @@ export interface SessionHeaderProps {
   onPullRequest: () => void;
   onMemory: () => void;
   onLattice: () => void;
+  /** Expanded workbench controls. Compact layouts use their native navigation instead. */
+  onToggleGitReview?: () => void;
+  onToggleTerminal?: () => void;
+  gitReviewActive?: boolean;
+  terminalActive?: boolean;
   /** Forge Anywhere — these three rows only render when their handler is provided, so
    * non-Anywhere sessions (no relay pairing) see this menu completely unchanged. */
   onHandoff?: () => void;
@@ -89,6 +96,36 @@ export function SessionHeader(props: SessionHeaderProps) {
         <StatusDot state={props.state} />
         <Text style={[typeScale.headingBold, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
         {isPublic ? <Text style={[typeScale.meta, { color: tokens.danger }]}>public</Text> : null}
+        {isExpanded && props.onToggleGitReview ? (
+          <IconButton
+            icon={
+              <GitCompareArrows
+                size={19}
+                strokeWidth={1.75}
+                color={props.gitReviewActive ? tokens.accent : tokens.ink2}
+              />
+            }
+            onPress={props.onToggleGitReview}
+            accessibilityLabel={`${props.gitReviewActive ? "Hide" : "Show"} git review`}
+            accessibilityHint="Command G"
+            style={props.gitReviewActive ? { backgroundColor: tokens.selection } : undefined}
+          />
+        ) : null}
+        {isExpanded && props.onToggleTerminal ? (
+          <IconButton
+            icon={
+              <SquareTerminal
+                size={19}
+                strokeWidth={1.75}
+                color={props.terminalActive ? tokens.accent : tokens.ink2}
+              />
+            }
+            onPress={props.onToggleTerminal}
+            accessibilityLabel={`${props.terminalActive ? "Hide" : "Show"} terminal`}
+            accessibilityHint="Command J"
+            style={props.terminalActive ? { backgroundColor: tokens.selection } : undefined}
+          />
+        ) : null}
         <IconButton icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onPalette} accessibilityLabel="Open command palette" />
         <IconButton icon={<MoreHorizontal size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={() => setActionsVisible(true)} accessibilityLabel="Session actions" style={styles.trailingBleed} />
       </View>
