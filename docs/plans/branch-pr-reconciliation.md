@@ -65,7 +65,7 @@ Extend this list whenever inspection proves an owner is actively using another w
 4. **Reconcile #769.** Rebase the rmcp compatibility repair onto post-P0 main if required, validate that it contains only intended dependency work, obtain independent review, wait for green current-head checks, then enable squash automerge. Keep disabled otherwise.
 5. **Serialize dependency PRs.** For #759/#739/#738/#737 and any replacement, merge at most one root `Cargo.lock` changer at a time. After each squash merge: refresh main, rebase the next candidate, regenerate/verify lockfile, rerun fmt/clippy/tests/release/audit/deny, and repeat review for changed heads. Apply the same rule to mobile/package-lock changes.
 6. **Process independent work.** Review/repair #735 and each handoff/OAuth/mesh follow-up from clean current-main worktrees. Run applicable Rust, security, mobile/native, E2E, and EAS checks; require independent review before squash automerge.
-7. **Final proof and cleanup.** Re-inventory PRs, refs, worktrees, unique commits, and dirty files. For every cleanup candidate record `git status --short`, `git diff`, `git diff --cached`, head SHA, path, PR, and `git log origin/main..REF`; delete/archive only proven inactive merged/superseded items. Never touch the allowlist or unique unfinished work. Final state should contain `main` and genuinely active work only.
+7. **Final proof and cleanup.** Re-inventory PRs, refs, worktrees, unique commits, dirty files, and generated build/dependency trees. For every cleanup candidate record `git status --short`, `git diff`, `git diff --cached`, head SHA, path, PR, and `git log origin/main..REF`; delete/archive only proven inactive merged/superseded items. Before retaining a dirty or active worktree, inventory its ignored `target` and `node_modules` directories, prove that no live build uses them, and remove those regenerable trees without touching source or untracked work. Record before/after disk space and any permission-blocked path. Never touch the allowlist or unique unfinished work. Final state should contain `main` and genuinely active work only, without abandoned per-worktree build caches.
 
 ## Safe command set
 
@@ -106,6 +106,7 @@ Do not run cleanup commands against the root `pr/oauth`, any allowlisted path, o
 - Every repaired PR has independent review, current required checks, and a recorded merge SHA.
 - Every Cargo.lock/package-lock conflict was serialized and revalidated after predecessor merges.
 - Every unique committed and uncommitted change has a landed, active, or explicit preserved disposition.
+- Every retained worktree is free of inactive `target`/`node_modules` trees, with live builds and permission-blocked residue explicitly recorded.
 - Root `pr/oauth` WIP is unchanged.
 - No inactive branch/session was removed without proof; only `main` and genuinely active work remain.
 - This document contains concise evidence and actions, not raw logs or generated metadata.

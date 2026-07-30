@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-07-30
+
 ### Added
 
 - **Forge has a logo.** Every icon the product shipped was the stock Expo placeholder — the blue "A"
@@ -24,6 +26,56 @@ All notable changes to Forge are documented here. The format follows
   `scripts/gen-splash-light-variant.py` is superseded and removed.
 - The web root now serves a real `favicon.ico`. Browsers request `/favicon.ico` unprompted and there
   was nothing there.
+
+- **Reproducible, history-safe benchmark cells for Codex, Claude, and full-mesh routing.** The
+  harnesses now recreate exact source trees, gate model/effort/CLI identity, include child-session
+  usage, preserve superseded attempts, and publish official-evaluator plus quota/integrity evidence.
+  The matched July samples retain the important caveat: they are evidence for those tasks, models,
+  hosts, and dates, not population-wide performance estimates.
+
+### Changed
+
+- **Single coding tasks stay direct and recursive delegation is opt-in.** Completeness, named-API,
+  and migration guidance is stronger without paying for redundant orchestration or repeated audits;
+  failed environment setup is bounded and child-session cost is included in benchmark accounting.
+- **Claude's persistent bridge is stricter and more resilient.** Authoritative model discovery,
+  bounded tool aliases, MCP readiness, partial-message deduplication, safe no-replay behavior, and a
+  bounded extra idle window for known long-running tools make subscription-backed Claude sessions
+  less prone to stalls, duplicate activity, or silent capability drift.
+- **Long mesh sessions retain quality with less repeated context.** Complex task-defining turns get
+  a usable quality anchor, continuations keep controlled diversification, verified session/model/
+  account boundaries can reuse provider prefixes and Codex response chains, completed tool logs are
+  pruned, and task-list bookkeeping no longer consumes an independent model round trip.
+- **Runtime ownership is split behind narrower internal boundaries.** Core, Mesh, Store, CLI, TUI,
+  Tools, Config, Provider, Anywhere, and Serve now use cohesive private modules, with no
+  implementation owner above 5,000 lines. This is an architecture improvement, not a claim that the
+  longer-term file-size distribution or numerical coverage targets have been reached.
+- Auto-merge reconciliation now observes completed workflows instead of depending on events GitHub
+  can drop, while still requiring the protected aggregate `CI` gate for code-bearing changes.
+
+### Fixed
+
+- **Rust Analyzer can no longer create an unbounded workstation burst.** Forge permits one live
+  analyzer tree process-wide, uses a one-worker/one-Cargo-job lightweight profile, enforces a
+  configurable aggregate RSS guard (2 GiB by default), reaps idle servers after 120 seconds, keeps
+  healthy timed-out servers warm, and rejects diagnostics for stale document versions. A real
+  workspace probe reduced the observed peak from 3.7 GiB/37 processes/about 14 cores to
+  1675.7 MiB/four processes/about one core while still finding an injected Rust type error.
+- Long-running sessions now handle queued steering, interruption cleanup, stale completion markers,
+  context fitting, cancellation rollback, stream snapshots, and provider reconnect/recovery without
+  advancing the wrong turn, repeating activity, or retaining detached work.
+- OAuth pasted callbacks preserve CSRF-state validation; explicit model pins survive reservation
+  pressure; context windows no longer borrow unrelated provider metadata; and usage-store failures
+  no longer become plausible zero values.
+- Serve now aborts timed-out or dropped drivers, prunes unexpectedly completed drivers, performs
+  bounded shutdown joins, preserves malformed MCP catalogs during mutation, rejects project-path
+  ambiguity and symlink escapes, serializes configuration writes, and includes stored pricing in
+  model projections.
+- Queue repository validation, gate exits and failed-task branches, Assay semantics, MCP dynamic
+  registration/device-flow separation, Claude import policy and error propagation, Codex alias
+  freshness, Gemini classification, and TypeScript protocol parity were corrected.
+- Tauri desktop icons are generated as RGBA PNGs, so `tauri::generate_context!` accepts the shared
+  brand assets instead of failing release builds on RGB-only icons.
 
 ## [2.11.0] - 2026-07-27
 
@@ -3169,7 +3221,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.11.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.12.0...HEAD
+[2.12.0]: https://github.com/Adulari/forge/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/Adulari/forge/compare/v2.10.2...v2.11.0
 [2.10.2]: https://github.com/Adulari/forge/compare/v2.10.1...v2.10.2
 [2.10.1]: https://github.com/Adulari/forge/compare/v2.9.1...v2.10.1

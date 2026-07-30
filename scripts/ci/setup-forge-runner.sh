@@ -134,7 +134,7 @@ Description=Prune stale forge CI runner build artifacts
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env bash -c 'find "$RUNNER_HOME"/actions-runner-*/_work -maxdepth 4 -type d -name target -mtime +14 -exec rm -rf {} + ; find "$RUNNER_HOME"/actions-runner-*/_work/_temp -mindepth 1 -mtime +7 -delete 2>/dev/null || true'
+ExecStart=/usr/bin/env bash -c 'find "$RUNNER_HOME"/actions-runner-*/_work -xdev -type d \( -name target -o -name node_modules \) -prune -mtime +14 -exec rm -rf -- {} + ; find "$RUNNER_HOME"/actions-runner-*/_work/_temp -xdev -mindepth 1 -mtime +7 -delete 2>/dev/null || true'
 EOF
 
 cat > /etc/systemd/system/forge-runner-cleanup.timer <<EOF
@@ -155,7 +155,7 @@ systemctl enable --now forge-runner-cleanup.timer
 echo
 echo "=================================================================="
 echo "Runner instances: $NUM_RUNNERS, each CPUQuota=${CPUQUOTA}% MemoryMax=${MEM_MAX}G Nice=10 (best-effort IO)"
-echo "Cleanup timer:    forge-runner-cleanup.timer (weekly, prunes _work targets >14d / _temp >7d)"
+echo "Cleanup timer:    forge-runner-cleanup.timer (weekly, prunes nested _work target/node_modules >14d / _temp >7d)"
 echo
 echo "Verify with:"
 for svc in "${SVC_NAMES[@]}"; do
