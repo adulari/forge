@@ -72,6 +72,14 @@ jobs:
           cache-dependency-path: mobile/package-lock.json
       - run: npm ci
       - run: npm run check
+      - name: Bound persistent dependency cache
+        if: always()
+        run: |
+          if [[ -f scripts/ci/trim-runner-cache.sh ]]; then
+            bash scripts/ci/trim-runner-cache.sh
+          else
+            echo "::notice::cache bound unavailable on this older release tag"
+          fi
 
   build:
     name: build (${{ matrix.os }})
@@ -312,6 +320,14 @@ jobs:
           name: forge-desktop-${{ matrix.name }}
           path: mobile/release-assets/**
           if-no-files-found: error
+      - name: Bound persistent build cache
+        if: always() && matrix.name == 'linux-x86_64'
+        run: |
+          if [[ -f scripts/ci/trim-runner-cache.sh ]]; then
+            bash scripts/ci/trim-runner-cache.sh
+          else
+            echo "::notice::cache bound unavailable on this older release tag"
+          fi
 
   updater:
     name: validate and publish desktop release

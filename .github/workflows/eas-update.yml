@@ -129,3 +129,7 @@ jobs:
           # self-hosted runner exhausts RAM during bundling and freezes it (job lost
           # at ~600s, empty logs). Read by mobile/metro.config.js.
           METRO_MAX_WORKERS: "2"
+      - name: Bound persistent dependency cache
+        if: always()
+        working-directory: .
+        run: bash scripts/ci/trim-runner-cache.sh

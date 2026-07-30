@@ -119,3 +119,6 @@ jobs:
             doctor-${{ matrix.label }}.txt
             turn-${{ matrix.label }}.txt
           if-no-files-found: ignore
+      - name: Bound persistent build cache
+        if: always() && matrix.label == 'archlinux'
+        run: bash scripts/ci/trim-runner-cache.sh

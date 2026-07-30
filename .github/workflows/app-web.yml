@@ -88,6 +88,15 @@ jobs:
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
         with:
           path: mobile/dist
+      - name: Bound persistent dependency cache
+        if: always()
+        working-directory: .
+        run: |
+          if [[ -f scripts/ci/trim-runner-cache.sh ]]; then
+            bash scripts/ci/trim-runner-cache.sh
+          else
+            echo "::notice::cache bound unavailable on this older release tag"
+          fi
 
   publish:
     name: attach web release asset

@@ -153,6 +153,15 @@ jobs:
       - name: Remove Google Play credentials
         if: always()
         run: '[ -z "${GOOGLE_PLAY_CREDENTIAL:-}" ] || rm -f "$GOOGLE_PLAY_CREDENTIAL"'
+      - name: Bound persistent dependency cache
+        if: always()
+        working-directory: .
+        run: |
+          if [[ -f scripts/ci/trim-runner-cache.sh ]]; then
+            bash scripts/ci/trim-runner-cache.sh
+          else
+            echo "::notice::cache bound unavailable on this older release tag"
+          fi
 
   publish:
     name: publish tagged Android artifact
