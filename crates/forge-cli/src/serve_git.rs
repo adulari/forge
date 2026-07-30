@@ -2,10 +2,13 @@
 //!
 //! Routes (all token-scoped under `{base}`, registered in [`crate::serve::daemon_router`]):
 //! - `GET  /api/git/status?session=<id>`                    staged / unstaged / untracked rows
+//! - `GET  /api/git/branches?session=<id>&q=<query>`        local / remote refs + worktree owners
 //! - `GET  /api/git/diff?session=<id>&path=<p>&staged=<b>`  one file's unified-diff hunks
 //! - `POST /api/git/stage`   `{session, paths[]}`
 //! - `POST /api/git/unstage` `{session, paths[]}`
 //! - `POST /api/git/commit`  `{session, message}` → the new commit sha
+//! - `POST /api/git/switch`  `{session, branch}` → switch a clean shared workspace
+//! - `POST /api/git/branches` `{session, name}` → create + switch a clean shared workspace
 //! - `GET  /api/sessions/{id}/diff`                         a forked session's worktree vs its base
 //!
 //! Every route resolves its repository from the SESSION (its worktree if it has one, else its
@@ -33,6 +36,12 @@ const MAX_STATUS_ROWS: usize = 2_000;
 
 /// Largest untracked file rendered as an all-additions hunk (bigger ones report size only).
 const MAX_UNTRACKED_BYTES: u64 = 512 * 1024;
+
+/// Ref rows returned after server-side filtering. This is deliberately lower than the status-row
+/// cap: the branch picker virtualises locally, while a pathological ref namespace must not turn a
+/// phone request into a multi-megabyte response.
+const DEFAULT_BRANCH_ROWS: usize = 200;
+const MAX_BRANCH_ROWS: usize = 500;
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -62,6 +71,32 @@ pub(crate) struct GitStatusResponse {
     unstaged: Vec<GitFileRow>,
     untracked: Vec<GitFileRow>,
     /// Rows dropped by [`MAX_STATUS_ROWS`], summed across the three buckets.
+    truncated: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct GitBranchRow {
+    /// Local names are `feature/x`; remote names retain their remote prefix (`origin/feature/x`).
+    name: String,
+    oid: String,
+    upstream: Option<String>,
+    remote: bool,
+    current: bool,
+    default: bool,
+    /// Absolute checkout path when this local branch is owned by a worktree.
+    worktree: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct GitBranchesResponse {
+    root: String,
+    current: Option<String>,
+    default_branch: Option<String>,
+    managed_worktree: bool,
+    /// Authoritative reason create/switch is unavailable. `None` means the daemon will accept a
+    /// branch action if repository state has not changed before the POST arrives.
+    actions_blocked_reason: Option<String>,
+    branches: Vec<GitBranchRow>,
     truncated: usize,
 }
 
@@ -119,6 +154,16 @@ pub(crate) struct GitSessionQuery {
 }
 
 #[derive(serde::Deserialize)]
+pub(crate) struct GitBranchesQuery {
+    #[serde(default)]
+    session: String,
+    #[serde(default)]
+    q: String,
+    #[serde(default = "default_branch_rows")]
+    limit: usize,
+}
+
+#[derive(serde::Deserialize)]
 pub(crate) struct GitDiffQuery {
     #[serde(default)]
     session: String,
@@ -142,9 +187,33 @@ pub(crate) struct GitCommitRequest {
     message: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GitSwitchRequest {
+    session: String,
+    branch: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GitCreateBranchRequest {
+    session: String,
+    name: String,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct GitBranchActionResponse {
+    ok: bool,
+    branch: String,
+}
+
 // ---------------------------------------------------------------------------
 // Session → repository resolution
 // ---------------------------------------------------------------------------
+
+fn default_branch_rows() -> usize {
+    DEFAULT_BRANCH_ROWS
+}
 
 /// The directory a session's git commands run in: its worktree when it has one (that is where the
 /// agent is actually editing), otherwise its cwd. `None` = no such session.
@@ -222,6 +291,434 @@ fn git_raw(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(out.stdout)
+}
+
+// ---------------------------------------------------------------------------
+// Branches / worktrees
+// ---------------------------------------------------------------------------
+
+struct SessionGitContext {
+    dir: String,
+    managed_worktree: bool,
+    busy: bool,
+}
+
+async fn session_git_context(state: &DaemonState, session: &str) -> Option<SessionGitContext> {
+    let handle = state.registry.get(session).await?;
+    let managed_worktree = handle.worktree.is_some();
+    let dir = handle
+        .worktree
+        .clone()
+        .unwrap_or_else(|| handle.cwd.clone());
+    let self_busy = handle.snapshot_rx.borrow().snapshot.busy;
+    // A shared checkout is process-global repository state: switching it underneath a different
+    // busy session is just as unsafe as switching underneath the addressed one. Worktree-backed
+    // sessions are isolated and do not participate in this check.
+    let busy = if managed_worktree {
+        self_busy
+    } else {
+        let busy_shared_dirs = state
+            .registry
+            .all()
+            .await
+            .into_iter()
+            .filter(|peer| peer.worktree.is_none() && peer.snapshot_rx.borrow().snapshot.busy)
+            .map(|peer| peer.cwd.clone())
+            .collect::<Vec<_>>();
+        let target_dir = dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let Ok(target_root) = repo_root_of(&target_dir) else {
+                return self_busy;
+            };
+            busy_shared_dirs
+                .iter()
+                .filter_map(|peer_dir| repo_root_of(peer_dir).ok())
+                .any(|peer_root| peer_root == target_root)
+        })
+        .await
+        .unwrap_or(self_busy)
+    };
+    Some(SessionGitContext {
+        dir,
+        managed_worktree,
+        busy,
+    })
+}
+
+fn is_forge_managed_worktree(path: &str) -> bool {
+    let components: Vec<_> = Path::new(path).components().collect();
+    components
+        .windows(2)
+        .any(|window| window[0].as_os_str() == ".forge" && window[1].as_os_str() == "worktrees")
+}
+
+fn parse_worktree_branches(raw: &str) -> std::collections::HashMap<String, String> {
+    let mut branches = std::collections::HashMap::new();
+    let mut path: Option<String> = None;
+    for line in raw.lines().chain(std::iter::once("")) {
+        if let Some(value) = line.strip_prefix("worktree ") {
+            path = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+            if let Some(worktree) = path.as_ref() {
+                branches.insert(value.to_string(), worktree.clone());
+            }
+        } else if line.is_empty() {
+            path = None;
+        }
+    }
+    branches
+}
+
+fn worktree_state(
+    root: &Path,
+) -> Result<(std::collections::HashMap<String, String>, bool), String> {
+    let raw =
+        String::from_utf8_lossy(&git_raw(root, &["worktree", "list", "--porcelain"])?).into_owned();
+    let branches = parse_worktree_branches(&raw);
+    let has_managed = branches
+        .values()
+        .any(|path| is_forge_managed_worktree(path));
+    Ok((branches, has_managed))
+}
+
+fn default_branch(root: &Path) -> Option<String> {
+    git_stdout(
+        root,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .ok()
+    .and_then(|name| name.strip_prefix("origin/").map(str::to_string))
+}
+
+fn parse_branch_rows(
+    raw: &str,
+    current: Option<&str>,
+    default: Option<&str>,
+    worktrees: &std::collections::HashMap<String, String>,
+) -> Vec<GitBranchRow> {
+    let mut rows = Vec::new();
+    for record in raw.lines() {
+        let mut fields = record.split('\0');
+        let Some(full_name) = fields.next() else {
+            continue;
+        };
+        let oid = fields.next().unwrap_or_default().to_string();
+        let upstream = fields
+            .next()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        let (name, remote) = if let Some(name) = full_name.strip_prefix("refs/heads/") {
+            (name.to_string(), false)
+        } else if let Some(name) = full_name.strip_prefix("refs/remotes/") {
+            // `origin/HEAD` is a symbolic convenience ref, not a checkout target.
+            if name.ends_with("/HEAD") {
+                continue;
+            }
+            (name.to_string(), true)
+        } else {
+            continue;
+        };
+        let local_default = default.is_some_and(|candidate| !remote && candidate == name);
+        let remote_default = default.is_some_and(|candidate| {
+            remote
+                && name
+                    .strip_prefix("origin/")
+                    .is_some_and(|tail| tail == candidate)
+        });
+        rows.push(GitBranchRow {
+            current: !remote && current.is_some_and(|candidate| candidate == name),
+            default: local_default || remote_default,
+            worktree: (!remote).then(|| worktrees.get(&name).cloned()).flatten(),
+            name,
+            oid,
+            upstream,
+            remote,
+        });
+    }
+    rows.sort_by(|a, b| {
+        (
+            !a.current,
+            a.remote,
+            !a.default,
+            a.worktree.is_none(),
+            a.name.to_lowercase(),
+        )
+            .cmp(&(
+                !b.current,
+                b.remote,
+                !b.default,
+                b.worktree.is_none(),
+                b.name.to_lowercase(),
+            ))
+    });
+    rows
+}
+
+fn branch_action_blocker(
+    root: &Path,
+    managed_worktree: bool,
+    busy: bool,
+    has_managed_worktrees: bool,
+) -> Result<Option<String>, String> {
+    if managed_worktree {
+        return Ok(Some(
+            "This isolated Forge worktree keeps its generated branch until you merge or discard the session."
+                .to_string(),
+        ));
+    }
+    if busy {
+        return Ok(Some(
+            "Wait for active turns using this shared repository to finish before changing branches."
+                .to_string(),
+        ));
+    }
+    if has_managed_worktrees {
+        return Ok(Some(
+            "Merge or discard Forge worktree sessions before changing the shared workspace branch."
+                .to_string(),
+        ));
+    }
+    if !git_raw(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?
+    .is_empty()
+    {
+        return Ok(Some(
+            "Commit, stash, or discard working tree changes before changing branches.".to_string(),
+        ));
+    }
+    Ok(None)
+}
+
+fn branches_impl(
+    context: SessionGitContext,
+    query: String,
+    limit: usize,
+) -> Result<GitBranchesResponse, String> {
+    let root = repo_root_of(&context.dir)?;
+    let current = git_stdout(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+    let default = default_branch(&root);
+    let (worktrees, has_managed_worktrees) = worktree_state(&root)?;
+    let raw = String::from_utf8_lossy(&git_raw(
+        &root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname:short)%00%(upstream:short)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )?)
+    .into_owned();
+    let query = query.trim().to_lowercase();
+    let mut rows = parse_branch_rows(&raw, current.as_deref(), default.as_deref(), &worktrees);
+    if !query.is_empty() {
+        rows.retain(|row| row.name.to_lowercase().contains(&query));
+    }
+    let limit = limit.clamp(1, MAX_BRANCH_ROWS);
+    let truncated = rows.len().saturating_sub(limit);
+    rows.truncate(limit);
+    let actions_blocked_reason = branch_action_blocker(
+        &root,
+        context.managed_worktree,
+        context.busy,
+        has_managed_worktrees,
+    )?;
+    Ok(GitBranchesResponse {
+        root: root.to_string_lossy().into_owned(),
+        current,
+        default_branch: default,
+        managed_worktree: context.managed_worktree,
+        actions_blocked_reason,
+        branches: rows,
+        truncated,
+    })
+}
+
+/// `GET /api/git/branches?session=<id>&q=<query>&limit=<n>`.
+pub(crate) async fn git_branches(
+    State(state): State<Arc<DaemonState>>,
+    Query(params): Query<GitBranchesQuery>,
+) -> Response {
+    let Some(context) = session_git_context(&state, &params.session).await else {
+        return no_such_session();
+    };
+    match tokio::task::spawn_blocking(move || branches_impl(context, params.q, params.limit)).await
+    {
+        Ok(Ok(response)) => json_response(&response),
+        Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "git branch listing failed",
+        ),
+    }
+}
+
+fn valid_branch_name(root: &Path, raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("a branch name is required".to_string());
+    }
+    git_raw(root, &["check-ref-format", "--branch", name])
+        .map_err(|_| format!("invalid branch name: {name}"))?;
+    Ok(name.to_string())
+}
+
+fn ref_exists(root: &Path, full_ref: &str) -> bool {
+    std::process::Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "show-ref",
+            "--verify",
+            "--quiet",
+            full_ref,
+        ])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+type BranchActionResult = Result<GitBranchActionResponse, (axum::http::StatusCode, String)>;
+
+fn branch_action_ready(
+    context: &SessionGitContext,
+) -> Result<PathBuf, (axum::http::StatusCode, String)> {
+    let root = repo_root_of(&context.dir)
+        .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+    let (_, has_managed_worktrees) =
+        worktree_state(&root).map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+    if let Some(reason) = branch_action_blocker(
+        &root,
+        context.managed_worktree,
+        context.busy,
+        has_managed_worktrees,
+    )
+    .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?
+    {
+        return Err((axum::http::StatusCode::CONFLICT, reason));
+    }
+    Ok(root)
+}
+
+fn switch_branch_impl(context: SessionGitContext, raw_branch: String) -> BranchActionResult {
+    let root = branch_action_ready(&context)?;
+    let branch = valid_branch_name(&root, &raw_branch)
+        .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+    let current = git_stdout(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+    if current.as_deref() == Some(branch.as_str()) {
+        return Ok(GitBranchActionResponse { ok: true, branch });
+    }
+
+    let local_ref = format!("refs/heads/{branch}");
+    if ref_exists(&root, &local_ref) {
+        let (worktrees, _) = worktree_state(&root)
+            .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+        if let Some(path) = worktrees.get(&branch) {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!("branch {branch} is checked out in worktree {path}"),
+            ));
+        }
+        git_raw(&root, &["switch", branch.as_str()])
+            .map_err(|message| (axum::http::StatusCode::CONFLICT, message))?;
+    } else {
+        let remote_ref = format!("refs/remotes/{branch}");
+        if !ref_exists(&root, &remote_ref) {
+            return Err((
+                axum::http::StatusCode::NOT_FOUND,
+                format!("no such local or remote branch: {branch}"),
+            ));
+        }
+        let Some((_, local_name)) = branch.split_once('/') else {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "remote branch must include its remote name".to_string(),
+            ));
+        };
+        let local_name = valid_branch_name(&root, local_name)
+            .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+        if ref_exists(&root, &format!("refs/heads/{local_name}")) {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!("local branch {local_name} already exists; select it instead"),
+            ));
+        }
+        git_raw(
+            &root,
+            &[
+                "switch",
+                "--track",
+                "-c",
+                local_name.as_str(),
+                branch.as_str(),
+            ],
+        )
+        .map_err(|message| (axum::http::StatusCode::CONFLICT, message))?;
+    }
+    let branch = git_stdout(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map_err(|message| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message))?;
+    Ok(GitBranchActionResponse { ok: true, branch })
+}
+
+fn create_branch_impl(context: SessionGitContext, raw_name: String) -> BranchActionResult {
+    let root = branch_action_ready(&context)?;
+    let name = valid_branch_name(&root, &raw_name)
+        .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+    if ref_exists(&root, &format!("refs/heads/{name}")) {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            format!("branch already exists: {name}"),
+        ));
+    }
+    git_raw(&root, &["switch", "-c", name.as_str()])
+        .map_err(|message| (axum::http::StatusCode::CONFLICT, message))?;
+    Ok(GitBranchActionResponse {
+        ok: true,
+        branch: name,
+    })
+}
+
+fn branch_action_response(result: Result<BranchActionResult, tokio::task::JoinError>) -> Response {
+    match result {
+        Ok(Ok(response)) => json_response(&response),
+        Ok(Err((status, message))) => err_response(status, &message),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "git branch action failed",
+        ),
+    }
+}
+
+/// `POST /api/git/switch` `{session, branch}`.
+pub(crate) async fn git_switch_branch(
+    State(state): State<Arc<DaemonState>>,
+    Json(request): Json<GitSwitchRequest>,
+) -> Response {
+    let Some(context) = session_git_context(&state, &request.session).await else {
+        return no_such_session();
+    };
+    branch_action_response(
+        tokio::task::spawn_blocking(move || switch_branch_impl(context, request.branch)).await,
+    )
+}
+
+/// `POST /api/git/branches` `{session, name}` — create and switch.
+pub(crate) async fn git_create_branch(
+    State(state): State<Arc<DaemonState>>,
+    Json(request): Json<GitCreateBranchRequest>,
+) -> Response {
+    let Some(context) = session_git_context(&state, &request.session).await else {
+        return no_such_session();
+    };
+    branch_action_response(
+        tokio::task::spawn_blocking(move || create_branch_impl(context, request.name)).await,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -324,9 +821,12 @@ pub(crate) async fn git_status(
     let Some(dir) = session_dir(&state, &params.session).await else {
         return no_such_session();
     };
-    let base_branch = worktree_repo_and_branch(&dir).map(|(_, branch)| branch);
+    let base_repo = worktree_repo_and_branch(&dir).map(|(repo, _)| repo);
     let result = tokio::task::spawn_blocking(move || -> Result<GitStatusResponse, String> {
         let root = repo_root_of(&dir)?;
+        let base_branch = base_repo.and_then(|repo| {
+            git_stdout(&repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()
+        });
         let status = String::from_utf8_lossy(&git_raw(
             &root,
             &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -722,6 +1222,50 @@ pub(crate) async fn session_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_porcelain_maps_local_branches_to_paths() {
+        let rows = parse_worktree_branches(
+            "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n\
+             worktree /repo/.forge/worktrees/child\nHEAD def\nbranch refs/heads/forge/subagent/child\n\n\
+             worktree /repo/detached\nHEAD 123\ndetached\n",
+        );
+        assert_eq!(rows.get("main").map(String::as_str), Some("/repo"));
+        assert_eq!(
+            rows.get("forge/subagent/child").map(String::as_str),
+            Some("/repo/.forge/worktrees/child")
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(is_forge_managed_worktree("/repo/.forge/worktrees/child"));
+        assert!(!is_forge_managed_worktree("/repo/other-worktree"));
+    }
+
+    #[test]
+    fn branch_rows_keep_remote_identity_and_worktree_occupancy() {
+        let raw = concat!(
+            "refs/heads/main\0aaa\0origin/main\n",
+            "refs/heads/feature/x\0bbb\0\n",
+            "refs/remotes/origin/HEAD\0aaa\0\n",
+            "refs/remotes/origin/main\0aaa\0\n",
+            "refs/remotes/origin/feature/y\0ccc\0\n",
+        );
+        let worktrees =
+            std::collections::HashMap::from([("feature/x".to_string(), "/repo/other".to_string())]);
+        let rows = parse_branch_rows(raw, Some("main"), Some("main"), &worktrees);
+
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].name, "main");
+        assert!(rows[0].current);
+        assert!(rows[0].default);
+        let occupied = rows.iter().find(|row| row.name == "feature/x").unwrap();
+        assert_eq!(occupied.worktree.as_deref(), Some("/repo/other"));
+        let remote = rows
+            .iter()
+            .find(|row| row.name == "origin/feature/y")
+            .unwrap();
+        assert!(remote.remote);
+        assert!(!rows.iter().any(|row| row.name == "origin/HEAD"));
+    }
 
     #[test]
     fn repo_relative_rejects_escapes_and_options() {

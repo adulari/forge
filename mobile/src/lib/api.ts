@@ -106,6 +106,27 @@ export interface UpdateMcpServerRequest { name: string; enabled: boolean; }
  * for tracked changes, `?` for untracked. A file edited after staging appears in BOTH buckets. */
 export interface GitFileRow { path: string; status: string; orig_path: string | null; adds: number; dels: number; binary: boolean; }
 export interface GitStatusResponse { root: string; branch: string; base_branch: string | null; staged: GitFileRow[]; unstaged: GitFileRow[]; untracked: GitFileRow[]; truncated: number; }
+export interface GitBranchRow {
+  name: string;
+  oid: string;
+  upstream: string | null;
+  remote: boolean;
+  current: boolean;
+  default: boolean;
+  worktree: string | null;
+}
+export interface GitBranchesResponse {
+  root: string;
+  current: string | null;
+  default_branch: string | null;
+  managed_worktree: boolean;
+  actions_blocked_reason: string | null;
+  branches: GitBranchRow[];
+  truncated: number;
+}
+export interface GitSwitchRequest { session: string; branch: string; }
+export interface GitCreateBranchRequest { session: string; name: string; }
+export interface GitBranchActionResponse { ok: boolean; branch: string; }
 /** Same shape as the WS snapshot's `DiffHunk` — the first character of each line is the gutter. */
 export interface GitDiffHunk { header: string; lines: string[]; }
 export interface GitDiffFile { path: string; kind: "created" | "modified" | "deleted" | "renamed"; orig_path: string | null; binary: boolean; adds: number; dels: number; hunks: GitDiffHunk[]; skipped_lines: number; }
@@ -561,6 +582,35 @@ export function updateMcpServer(baseUrl: string, body: UpdateMcpServerRequest): 
 // ---------------------------------------------------------------------------
 // Git review dock
 // ---------------------------------------------------------------------------
+
+export function getGitBranches(
+  baseUrl: string,
+  session: string,
+  query = "",
+  limit = 500,
+): Promise<GitBranchesResponse> {
+  return request(baseUrl, `/api/git/branches${qs({ session, q: query, limit })}`);
+}
+
+export function switchGitBranch(
+  baseUrl: string,
+  body: GitSwitchRequest,
+): Promise<GitBranchActionResponse> {
+  return request(baseUrl, "/api/git/switch", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function createGitBranch(
+  baseUrl: string,
+  body: GitCreateBranchRequest,
+): Promise<GitBranchActionResponse> {
+  return request(baseUrl, "/api/git/branches", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
 
 export function getGitStatus(baseUrl: string, session: string): Promise<GitStatusResponse> {
   return request(baseUrl, `/api/git/status${qs({ session })}`);

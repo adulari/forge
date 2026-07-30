@@ -39,6 +39,13 @@ import {
 
   type GitStatusResponse,
   getGitStatus,
+  type GitBranchesResponse,
+  getGitBranches,
+  type GitSwitchRequest,
+  type GitCreateBranchRequest,
+  type GitBranchActionResponse,
+  switchGitBranch,
+  createGitBranch,
   type GitDiffResponse,
   getGitDiff,
   type GitPathsRequest,
@@ -141,6 +148,7 @@ function keys(baseUrl: string | null) {
 
     mcp: ["mcp", baseUrl] as const,
     gitStatus: (sessionId: string) => ["git", "status", baseUrl, sessionId] as const,
+    gitBranches: (sessionId: string) => ["git", "branches", baseUrl, sessionId] as const,
     gitDiff: (sessionId: string, path: string, staged: boolean) =>
       ["git", "diff", baseUrl, sessionId, path, staged] as const,
     sessionDiff: (sessionId: string) => ["sessions", "diff", baseUrl, sessionId] as const,
@@ -300,6 +308,41 @@ export function useUpdateMcpServer() {
 // ---------------------------------------------------------------------------
 // Git review dock
 // ---------------------------------------------------------------------------
+
+export function useGitBranches(sessionId: string | null) {
+  const { baseUrl } = useAuth();
+  return useQuery<GitBranchesResponse>({
+    queryKey: keys(baseUrl).gitBranches(sessionId ?? ""),
+    queryFn: () => getGitBranches(baseUrl as string, sessionId as string),
+    enabled: baseUrl != null && sessionId != null,
+    refetchOnWindowFocus: true,
+  });
+}
+
+function useBranchMutation<TBody extends { session: string }>(
+  run: (baseUrl: string, body: TBody) => Promise<GitBranchActionResponse>,
+) {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation<GitBranchActionResponse, Error, TBody>({
+    mutationFn: (body) => run(baseUrl as string, body),
+    onSuccess: (_data, body) => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).gitBranches(body.session) });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).gitStatus(body.session) });
+      queryClient.invalidateQueries({ queryKey: ["git", "diff", baseUrl, body.session] });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionDiff(body.session) });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions });
+    },
+  });
+}
+
+export function useSwitchGitBranch() {
+  return useBranchMutation<GitSwitchRequest>(switchGitBranch);
+}
+
+export function useCreateGitBranch() {
+  return useBranchMutation<GitCreateBranchRequest>(createGitBranch);
+}
 
 /** The session's working-tree status. Refetched on focus because the agent edits files between
  * renders — there is no push channel for the index. */

@@ -52,5 +52,26 @@ cwd, never from a client-provided absolute path.
   project files; the surface explains how to reconnect directly instead of retrying a disallowed
   route.
 - Compact iOS/Android layouts expose Files as a session tab and keep file navigation/editor state
-  local to that route. Expanded desktop/web layouts open the same browser and editor as retained
-  workbench tabs.
+local to that route. Expanded desktop/web layouts open the same browser and editor as retained
+workbench tabs.
+
+## Branches and worktrees
+
+The Git surface includes a session-scoped branch/worktree picker backed by the daemon:
+
+- Local and remote refs are searchable and report current/default state, upstream, short OID, and
+  the absolute worktree currently owning a local branch. `origin/HEAD` is not presented as if it
+  were a checkout target.
+- Create-and-switch and branch switching are available only for a clean, idle shared workspace.
+  The daemon rechecks these preconditions when the action arrives; the UI's disabled explanation
+  is informative, not the safety boundary.
+- Forge-managed worktrees keep their generated `forge/subagent/<session>` branch until merge or
+  discard. Branch mutation is intentionally blocked there because merge/discard owns that branch
+  and its lifecycle.
+- Forge's branch actions refuse to change a shared repository while any managed worktree exists or
+  any session using that shared repository is busy. This avoids moving the base checkout under
+  active work and keeps merge-back targeted at the workspace users saw when isolation started.
+- A branch checked out by another Git worktree is visible but cannot be selected. Remote selection
+  creates a local tracking branch only when no same-named local branch exists.
+- Branch routes, like the rest of Git review, derive the repository exclusively from the addressed
+  live session and are Direct-only until Forge Anywhere carries an explicit filesystem/Git bridge.

@@ -13,6 +13,7 @@ import { GitBranch } from "lucide-react-native";
 import React, { useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import { GitBranchPicker } from "./GitBranchPicker";
 import { GitCommitBox } from "./GitCommitBox";
 import { GitDiffPane } from "./GitDiffPane";
 import { GitFileList, type GitSelection } from "./GitFileList";
@@ -152,6 +153,11 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
           { backgroundColor: tokens.bg1 },
         ]}
       >
+        <GitBranchPicker
+          sessionId={sessionId}
+          branch={data?.branch ?? ""}
+          baseBranch={data?.base_branch ?? null}
+        />
         <View style={styles.columnBody}>{column}</View>
         {data ? (
           <GitCommitBox

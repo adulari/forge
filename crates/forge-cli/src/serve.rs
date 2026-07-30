@@ -675,6 +675,14 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             get(crate::serve_git::git_status),
         )
         .route(
+            &format!("{base}/api/git/branches"),
+            get(crate::serve_git::git_branches).post(crate::serve_git::git_create_branch),
+        )
+        .route(
+            &format!("{base}/api/git/switch"),
+            post(crate::serve_git::git_switch_branch),
+        )
+        .route(
             &format!("{base}/api/git/diff"),
             get(crate::serve_git::git_diff),
         )
@@ -4661,6 +4669,7 @@ mod tests {
         std::fs::write(dir.join("tracked.txt"), "one\ntwo\n").unwrap();
         git(&["add", "tracked.txt"]);
         git(&["commit", "-qm", "init"]);
+        let initial_branch = git_stdout(&dir, &["branch", "--show-current"]).unwrap();
         std::fs::write(dir.join("tracked.txt"), "one\nTWO\nthree\n").unwrap();
         std::fs::write(dir.join("fresh.txt"), "brand new\n").unwrap();
 
@@ -4971,6 +4980,66 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("tracked.txt")).unwrap(),
             "saved from workspace\n"
+        );
+
+        // Branch/worktree browser is session-scoped and refuses mutation while this shared
+        // workspace is dirty. Once clean, create+switch and switch-back are real git operations.
+        let (status, body) = json(
+            router.clone(),
+            get(format!("/tok/api/git/branches?session={sid}")),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["current"].as_str(), Some(initial_branch.as_str()));
+        assert!(body["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |branch| branch["name"].as_str() == Some(initial_branch.as_str())
+                    && branch["current"] == true
+            ));
+        assert!(body["actions_blocked_reason"].is_string());
+
+        std::fs::write(dir.join(".git/info/exclude"), ".forge/\ngit-test.db*\n").unwrap();
+        git(&["add", "tracked.txt", "fresh.txt"]);
+        git(&["commit", "-qm", "workspace save"]);
+        let (status, body) = json(
+            router.clone(),
+            get(format!("/tok/api/git/branches?session={sid}")),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(body["actions_blocked_reason"].is_null());
+
+        let (status, body) = json(
+            router.clone(),
+            post(
+                "/tok/api/git/branches",
+                serde_json::json!({ "session": sid, "name": "feature/branch-ui" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["branch"], "feature/branch-ui");
+        assert_eq!(
+            git_stdout(&dir, &["branch", "--show-current"]).unwrap(),
+            "feature/branch-ui"
+        );
+
+        let (status, body) = json(
+            router.clone(),
+            post(
+                "/tok/api/git/switch",
+                serde_json::json!({ "session": sid, "branch": initial_branch.clone() }),
+            ),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["branch"].as_str(), Some(initial_branch.as_str()));
+        assert_eq!(
+            git_stdout(&dir, &["branch", "--show-current"]).unwrap(),
+            initial_branch
         );
 
         // The changelog route is session-independent and returns parsed releases.
