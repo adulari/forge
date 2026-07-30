@@ -6,6 +6,31 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.12.1] - 2026-07-30
+
+### Changed
+
+- Main-branch governance now strictly requires the aggregate `CI`, `mobile checks`, and
+  `security checks` results from the current branch, with no bypass actors
+  (`CONTRIBUTING.md` and repository ruleset 17796318).
+
+### Fixed
+
+- Persistent CI and release-runner storage is bounded after every relevant job: aggregate Cargo
+  targets are capped at 24 GiB, mobile `node_modules` at 4 GiB, and the exact allowlisted release
+  Docker volumes at 24 GiB, with dry-run and destructive-behavior regression coverage
+  (`scripts/ci/trim-runner-cache.sh` and workflow wiring).
+- Forge Anywhere prunes acknowledged superseded local revisions and terminal remote staging rows
+  after successful sync while retaining pending uploads, newest anchors, conflicts, cursors, and
+  materialized data (`crates/forge-store/src/sync_journal.rs`).
+- The mobile production graph pins patched `brace-expansion` and now fails the required mobile gate
+  on high-severity production advisories; its lockfile is compatible with CI's npm 10 resolver
+  (`mobile/package.json`, `mobile/package-lock.json`, and `mobile-typecheck.yml`).
+- crates.io publication now covers all 16 publishable Forge crates in dependency order, including
+  `forge-agent-anywhere-protocol`, and publishes the exact vendored provider fork as
+  `forge-agent-genai@0.6.5-forge.1` instead of silently falling back to unpatched upstream source
+  (`docs/RELEASING-crates.md` and `scripts/ci/test-crates-release-order.sh`).
+
 ## [2.12.0] - 2026-07-30
 
 ### Added
@@ -3221,7 +3246,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.12.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.12.1...HEAD
+[2.12.1]: https://github.com/Adulari/forge/compare/v2.12.0...v2.12.1
 [2.12.0]: https://github.com/Adulari/forge/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/Adulari/forge/compare/v2.10.2...v2.11.0
 [2.10.2]: https://github.com/Adulari/forge/compare/v2.10.1...v2.10.2
