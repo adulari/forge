@@ -9,11 +9,13 @@ use super::json_response;
 ///
 /// Embedded rather than read from disk because the daemon's cwd is a USER project, not the Forge
 /// checkout — there is no path at runtime that reliably holds the changelog for the binary that is
-/// actually running, and "what's new" is only true if it matches that binary. Same reach-out-to-the
-/// -repo-root pattern as `include_str!("../../../protocol/remote-v9.json")` in `remote.rs`. Only
-/// the top [`CHANGELOG_DEFAULT_RELEASES`] sections are ever parsed, so the ~200 KB is static
-/// rodata, never a per-request cost.
-const CHANGELOG_MD: &str = include_str!("../../../../CHANGELOG.md");
+/// actually running, and "what's new" is only true if it matches that binary. The package-local
+/// mirror makes the crates.io tarball self-contained. Only the top
+/// [`CHANGELOG_DEFAULT_RELEASES`] sections are ever parsed, so the ~200 KB is static rodata, never
+/// a per-request cost.
+// Kept byte-identical to the repository root by test-crates-release-order.sh so the published
+// crate is self-contained instead of reaching outside its tarball during compilation.
+const CHANGELOG_MD: &str = include_str!("../../CHANGELOG.md");
 
 const CHANGELOG_DEFAULT_RELEASES: usize = 10;
 const CHANGELOG_MAX_RELEASES: usize = 50;

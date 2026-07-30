@@ -21,6 +21,9 @@ install ALSA development headers and run `cargo install forge-agent --features m
 
 ## Prerequisites
 
+Root `CHANGELOG.md` and `crates/forge-cli/CHANGELOG.md` must be byte-identical; the latter is the
+package-local compile-time copy, and the publication harness enforces the invariant.
+
 - A crates.io API token with publish rights (`cargo login`).
 - A clean tree on a release tag; `Cargo.lock` committed and in sync (`cargo build --locked`).
 - All internal crates share one version (`workspace.package.version`) and the
