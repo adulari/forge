@@ -658,17 +658,10 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn memory_guard_stops_an_over_budget_process_tree() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let script = tmp.path().join("memory-hog-lsp.sh");
-        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let mut server =
-            LspServer::spawn_with_memory_limit(&script.to_string_lossy(), &[], Some(1), false)
-                .await
-                .unwrap();
+        let args = vec!["-c".to_owned(), "sleep 30".to_owned()];
+        let mut server = LspServer::spawn_with_memory_limit("/bin/sh", &args, Some(1), false)
+            .await
+            .unwrap();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         while server._child.try_wait().unwrap().is_none() && tokio::time::Instant::now() < deadline
         {
