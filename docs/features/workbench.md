@@ -75,3 +75,5 @@ The Git surface includes a session-scoped branch/worktree picker backed by the d
   creates a local tracking branch only when no same-named local branch exists.
 - Branch routes, like the rest of Git review, derive the repository exclusively from the addressed
   live session and are Direct-only until Forge Anywhere carries an explicit filesystem/Git bridge.
+- Compact iOS/Android exposes the same Git dock under Review → Working tree; Turn remains available
+  beside it for plan and per-turn diff artifacts. Expanded layouts can retain Git in the workbench.
