@@ -2,9 +2,9 @@
 # Release-boundary E2E for the self-hosted Arch Linux release gate.
 #
 # Installs the latest public Forge in a completely isolated HOME, creates real mock-provider
-# history plus a daemon session, swaps in the candidate, reconnects/resumes both, rolls back to
-# prove DB compatibility, then reinstalls the candidate. Nothing touches the operator's config,
-# keyring, sessions, daemon, or telemetry.
+# history plus a daemon session, snapshots the stopped pre-upgrade data, swaps in the candidate,
+# reconnects/resumes both, verifies rollback from the snapshot, then restores and reinstalls the
+# candidate state. Nothing touches the operator's config, keyring, sessions, daemon, or telemetry.
 #
 #   scripts/release-upgrade-e2e.sh [base-tag] [candidate-binary]
 #   scripts/release-upgrade-e2e.sh v2.6.4 target/release/forge
@@ -291,6 +291,12 @@ curl --fail --silent "$BASE_URL/api/sessions" > "$ROOT/old-active.json"
 contains_id "$ROOT/old-active.json" "$OLD_DAEMON_SESSION"
 stop_daemon
 
+# A schema migration is intentionally forward-only: an older binary must never open a database
+# migrated by the candidate. Real rollback therefore restores data captured while the old daemon
+# was stopped. Keep that snapshot outside the live data path for the remainder of the test.
+PRE_UPGRADE_DATA="$ROOT/data-before-upgrade"
+cp -a -- "$DATA" "$PRE_UPGRADE_DATA"
+
 install -m 0755 "$CANDIDATE" "$BIN/forge"
 [[ "$(forge_env "$BIN/forge" --version | awk '{print $NF}')" == "$CANDIDATE_VERSION" ]]
 (
@@ -334,21 +340,30 @@ contains_id "$ROOT/new-active.json" "$OLD_DAEMON_SESSION"
 contains_id "$ROOT/new-active.json" "$NEW_DAEMON_SESSION"
 stop_daemon
 
-# Roll back the executable only. The previous release must still understand the history touched by
-# the candidate; then reinstall the candidate and verify the same state one final time.
+# Preserve the migrated state, restore the pre-upgrade snapshot, and prove the previous release can
+# resume its own history. Then restore the candidate state and prove candidate-created history
+# survived the rollback exercise. Every data-directory swap happens with the daemon stopped.
+CANDIDATE_DATA="$ROOT/data-after-upgrade"
+mv -- "$DATA" "$CANDIDATE_DATA"
+cp -a -- "$PRE_UPGRADE_DATA" "$DATA"
 install -m 0755 "$OLD" "$BIN/forge"
 forge_env "$BIN/forge" replay "$CLI_SESSION" --json > "$ROOT/rollback-replay.json"
 grep -q UPGRADE_OLD_MARKER "$ROOT/rollback-replay.json"
-grep -q UPGRADE_NEW_MARKER "$ROOT/rollback-replay.json"
+! grep -q UPGRADE_NEW_MARKER "$ROOT/rollback-replay.json"
+
+ROLLBACK_DATA="$ROOT/data-after-rollback-check"
+mv -- "$DATA" "$ROLLBACK_DATA"
+mv -- "$CANDIDATE_DATA" "$DATA"
 install -m 0755 "$CANDIDATE" "$BIN/forge"
 forge_env "$BIN/forge" replay "$CLI_SESSION" --json > "$ROOT/final-replay.json"
+grep -q UPGRADE_OLD_MARKER "$ROOT/final-replay.json"
 grep -q UPGRADE_NEW_MARKER "$ROOT/final-replay.json"
 
 trap - ERR
 echo "release-upgrade-e2e: PASS"
 echo "  config + secret: byte-identical"
 [[ "$SELF_UPDATE_VERIFIED" == 1 ]] && echo "  updater: previous public release self-replaced to $BASE_TAG"
-echo "  history: resumed across upgrade and rollback"
+echo "  history: upgraded, snapshot-rolled back, and candidate state restored"
 echo "  daemon: restarted, old session resumed, new session created"
 echo "  telemetry: one anonymous install marker preserved"
 echo "  database: SQLite integrity_check=ok"
