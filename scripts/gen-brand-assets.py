@@ -83,6 +83,17 @@ def render(svg: str, out: Path, size: int) -> Path:
     return out
 
 
+def force_rgba(path: Path) -> Path:
+    """Keep Tauri PNGs RGBA even when their composed canvas is fully opaque."""
+    tmp = WORK / f"{path.stem}-rgba.png"
+    subprocess.run(
+        ["magick", str(path), "-alpha", "on", f"PNG32:{tmp}"],
+        check=True,
+    )
+    tmp.replace(path)
+    return path
+
+
 def write_icns(pngs: dict[str, Path], out: Path) -> None:
     """Minimal ICNS writer.
 
@@ -122,8 +133,12 @@ def main() -> None:
         (REPO / "mobile/src-tauri/icons/64x64.png", 64, icon_flat),
         (REPO / "mobile/src-tauri/icons/32x32.png", 32, icon_flat),
     ]
+    tauri_icons = REPO / "mobile/src-tauri/icons"
     for path, size, svg in targets:
         render(svg, path, size)
+        # tauri::generate_context! rejects RGB-only icons, even when the intended canvas is opaque.
+        if path.parent == tauri_icons:
+            force_rgba(path)
         print(f"  {path.relative_to(REPO)} ({size}px)")
 
     # Android adaptive. The foreground is masked to roughly the central 66%, so the mark is pulled
