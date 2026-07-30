@@ -7,21 +7,35 @@
 // Used both standalone in the Review segment (any diff, pending or landed) and
 // embedded inside PermissionCard when `diff.pending` (FEATURES.md §1.2).
 import * as Clipboard from "expo-clipboard";
-import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react-native";
-import React, { useEffect, useRef, useState } from "react";
+import { Check, ChevronDown, ChevronRight, Copy, MessageSquarePlus, X } from "lucide-react-native";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { DiffLines } from "./DiffLines";
+import { ReviewCommentSheet } from "./ReviewCommentSheet";
+import { type DiffCell, toUnifiedRows } from "../git/diffModel";
 import { Badge, type BadgeTone } from "../ds/Badge";
 import { Banner } from "../ds/Banner";
 import { IconButton } from "../ds/IconButton";
 import { type Diff, type DiffFile } from "../../lib/ws";
+import {
+  buildReviewLineSelection,
+  reviewDiffRevision,
+  reviewRangeLabel,
+  type ReviewCommentSource,
+  type ReviewCommentSide,
+  type ReviewLineSelection,
+  useReviewComments,
+} from "../../lib/reviewComments";
 import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
+import { radii, space } from "../../theme/tokens";
 import { monoFamily, type as typeScale } from "../../theme/typography";
 
 export interface DiffCardProps {
   diff: Diff;
+  /** Enables line annotations for this session. Omitted in context-free embedded permission cards. */
+  sessionId?: string;
+  reviewSource?: Extract<ReviewCommentSource, "turn" | "fork">;
   /** Caps the card at this height with its own internal ScrollView, so whatever sits below it
    * (PermissionCard's Allow/Deny bar) never gets pushed off-screen by a large diff. Omitted
    * (full height, no internal scroll) on the standalone Review screen, which is already
@@ -51,7 +65,7 @@ function kindTone(kind: DiffFile["kind"]): BadgeTone {
   }
 }
 
-export function DiffCard({ diff, maxHeight }: DiffCardProps) {
+export function DiffCard({ diff, sessionId, reviewSource = "turn", maxHeight }: DiffCardProps) {
   const tokens = useTokens();
 
   const body = (
@@ -61,7 +75,13 @@ export function DiffCard({ diff, maxHeight }: DiffCardProps) {
       ) : null}
 
       {diff.files.map((file, idx) => (
-        <DiffFileSection key={`${file.path}-${idx}`} file={file} isLast={idx === diff.files.length - 1} />
+        <DiffFileSection
+          key={`${file.path}-${idx}`}
+          file={file}
+          sessionId={sessionId}
+          reviewSource={reviewSource}
+          isLast={idx === diff.files.length - 1}
+        />
       ))}
 
       {diff.skipped_files > 0 ? (
@@ -85,14 +105,84 @@ export function DiffCard({ diff, maxHeight }: DiffCardProps) {
   );
 }
 
-function DiffFileSection({ file, isLast }: { file: DiffFile; isLast: boolean }) {
+function DiffFileSection({
+  file,
+  sessionId,
+  reviewSource,
+  isLast,
+}: {
+  file: DiffFile;
+  sessionId?: string;
+  reviewSource: Extract<ReviewCommentSource, "turn" | "fork">;
+  isLast: boolean;
+}) {
   const tokens = useTokens();
   const [expanded, setExpanded] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [selectionAnchor, setSelectionAnchor] = useState<{
+    side: ReviewCommentSide;
+    lineNo: number;
+  } | null>(null);
+  const [lineSelection, setLineSelection] = useState<ReviewLineSelection | null>(null);
+  const [commentVisible, setCommentVisible] = useState(false);
+  const reviewComments = useReviewComments(sessionId ?? "");
+  const fileRevision = useMemo(
+    () => reviewDiffRevision(file.path, file.hunks),
+    [file.hunks, file.path],
+  );
+  const unifiedRows = useMemo(() => toUnifiedRows(file.hunks), [file.hunks]);
+  const availableLines = useMemo(() => {
+    const oldLines = new Map<number, DiffCell>();
+    const newLines = new Map<number, DiffCell>();
+    unifiedRows.forEach((row) => {
+      if (row.kind !== "line") return;
+      const target = row.cell.kind === "del" ? oldLines : newLines;
+      target.set(row.cell.lineNo, row.cell);
+    });
+    return {
+      old: [...oldLines.values()].map(({ lineNo, kind, text }) => ({ lineNo, kind, text })),
+      new: [...newLines.values()].map(({ lineNo, kind, text }) => ({ lineNo, kind, text })),
+    };
+  }, [unifiedRows]);
+  const fileComments = useMemo(
+    () =>
+      reviewComments.filter(
+        (comment) =>
+          comment.source === reviewSource &&
+          comment.path === file.path &&
+          comment.revision === fileRevision,
+      ),
+    [file.path, fileRevision, reviewComments, reviewSource],
+  );
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
     if (resetTimer.current) clearTimeout(resetTimer.current);
   }, []);
+  useEffect(() => {
+    setSelectionAnchor(null);
+    setLineSelection(null);
+    setCommentVisible(false);
+  }, [file.path]);
+
+  const selectLine = (side: ReviewCommentSide, cell: DiffCell) => {
+    if (!sessionId) return;
+    const anchor =
+      selectionAnchor?.side === side ? selectionAnchor : { side, lineNo: cell.lineNo };
+    setSelectionAnchor(anchor);
+    setLineSelection(
+      buildReviewLineSelection(side, availableLines[side], anchor.lineNo, cell.lineNo),
+    );
+  };
+  const isSelected = (side: ReviewCommentSide, lineNo: number) =>
+    lineSelection?.side === side &&
+    lineNo >= lineSelection.startLine &&
+    lineNo <= lineSelection.endLine;
+  const commentCount = (side: ReviewCommentSide, lineNo: number) =>
+    fileComments.filter((comment) => comment.side === side && comment.endLine === lineNo).length;
+  const clearSelection = () => {
+    setSelectionAnchor(null);
+    setLineSelection(null);
+  };
 
   const onCopy = async () => {
     const patch = file.hunks.map((h) => [h.header, ...h.lines].join("\n")).join("\n");
@@ -149,13 +239,61 @@ function DiffFileSection({ file, isLast }: { file: DiffFile; isLast: boolean }) 
         ) : null}
       </View>
 
+      {lineSelection ? (
+        <View
+          style={[
+            styles.selectionBar,
+            { backgroundColor: tokens.bg2, borderColor: tokens.border },
+          ]}
+        >
+          <MessageSquarePlus size={14} strokeWidth={1.8} color={tokens.accent} />
+          <Text style={[typeScale.monoMeta, styles.selectionLabel, { color: tokens.ink2 }]}>
+            {reviewRangeLabel(
+              lineSelection.side,
+              lineSelection.startLine,
+              lineSelection.endLine,
+            )}{" "}
+            · {lineSelection.lines.length} line{lineSelection.lines.length === 1 ? "" : "s"}
+          </Text>
+          <Text style={[typeScale.monoMeta, styles.selectionHint, { color: tokens.ink4 }]}>
+            tap another line to extend
+          </Text>
+          <Pressable
+            onPress={() => setCommentVisible(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Comment on selected turn diff lines"
+            style={[
+              styles.selectionAction,
+              { borderColor: tokens.border, borderRadius: radii.radius4 },
+            ]}
+          >
+            <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>comment</Text>
+          </Pressable>
+          <Pressable
+            onPress={clearSelection}
+            accessibilityRole="button"
+            accessibilityLabel="Clear selected lines"
+            hitSlop={8}
+            style={styles.selectionClose}
+          >
+            <X size={14} strokeWidth={1.8} color={tokens.ink3} />
+          </Pressable>
+        </View>
+      ) : null}
+
       {expanded && !file.binary ? (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={[styles.hunkScroll, styles.horizontalScroll]}>
           <View>
             {file.hunks.map((hunk, hIdx) => (
               <View key={hIdx} style={styles.hunk}>
                 <Text selectable style={[typeScale.codeSmall, { color: tokens.info }, styles.hunkHeader]}>{hunk.header}</Text>
-                <DiffLines lines={hunk.lines} />
+                <DiffLines
+                  lines={hunk.lines}
+                  header={hunk.header}
+                  isSelected={sessionId ? isSelected : undefined}
+                  commentCount={sessionId ? commentCount : undefined}
+                  onSelect={sessionId ? selectLine : undefined}
+                />
               </View>
             ))}
             {file.skipped_lines > 0 ? (
@@ -168,6 +306,17 @@ function DiffFileSection({ file, isLast }: { file: DiffFile; isLast: boolean }) 
       ) : expanded && file.binary ? (
         <Text style={[typeScale.sub, { color: tokens.ink3 }, styles.footer]}>binary file</Text>
       ) : null}
+      <ReviewCommentSheet
+        visible={commentVisible && sessionId != null}
+        sessionId={sessionId ?? ""}
+        path={file.path}
+        revision={fileRevision}
+        source={reviewSource}
+        staged={false}
+        selection={lineSelection}
+        onClose={() => setCommentVisible(false)}
+        onAdded={clearSelection}
+      />
     </View>
   );
 }
@@ -187,6 +336,23 @@ const styles = StyleSheet.create({
   },
   filePath: { flex: 1 },
   counts: { flexShrink: 0 },
+  selectionBar: {
+    minHeight: 34,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: space.space12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  selectionLabel: { flexShrink: 0 },
+  selectionHint: { flex: 1 },
+  selectionAction: {
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: space.space8,
+    paddingVertical: 3,
+  },
+  selectionClose: { width: 24, height: 24, alignItems: "center", justifyContent: "center" },
   hunkScroll: { marginBottom: space.space4 },
   horizontalScroll: { flexGrow: 0, flexShrink: 0 },
   hunk: { paddingBottom: space.space8 },

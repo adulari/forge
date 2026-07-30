@@ -77,7 +77,7 @@ export default function Review() {
                   onQueueAnswer={setPendingAnswer}
                 />
               ) : null}
-              {diff ? <DiffCard diff={diff} /> : null}
+              {diff ? <DiffCard diff={diff} sessionId={sessionId} /> : null}
             </>
           )}
         </ScrollView>

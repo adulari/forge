@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { middleTruncate, parseHunkStart, toSplitRows, toUnifiedRows } from "./diffModel";
+import {
+  diffTextSegments,
+  middleTruncate,
+  parseHunkStart,
+  toSplitRows,
+  toUnifiedRows,
+} from "./diffModel";
 
 const hunk = {
   header: "@@ -62,6 +62,7 @@ def sweep(windows, targets):",
@@ -55,6 +61,46 @@ describe("git review diff model", () => {
       ["add", 65],
       ["context", 66],
     ]);
+  });
+
+  it("marks only changed tokens inside paired replacement lines", () => {
+    const segments = diffTextSegments(
+      " const timeout = config.shortTimeout;",
+      " const timeout = config.longTimeout;",
+    );
+    expect(segments.oldSegments).toEqual([
+      { text: " const timeout = config.", changed: false },
+      { text: "shortTimeout", changed: true },
+      { text: ";", changed: false },
+    ]);
+    expect(segments.newSegments).toEqual([
+      { text: " const timeout = config.", changed: false },
+      { text: "longTimeout", changed: true },
+      { text: ";", changed: false },
+    ]);
+
+    const split = toSplitRows([
+      {
+        header: "@@ -1 +1 @@",
+        lines: ["- const ready = false;", "+ const ready = true;"],
+      },
+    ]);
+    const pair = split.find((row) => row.kind === "pair");
+    expect(pair?.kind === "pair" ? pair.left?.segments : null).toContainEqual({
+      text: "false",
+      changed: true,
+    });
+    const unified = toUnifiedRows([
+      {
+        header: "@@ -1 +1 @@",
+        lines: ["- const ready = false;", "+ const ready = true;"],
+      },
+    ]);
+    const addition = unified.find((row) => row.kind === "line" && row.cell.kind === "add");
+    expect(addition?.kind === "line" ? addition.cell.segments : null).toContainEqual({
+      text: "true",
+      changed: true,
+    });
   });
 
   it("middle-truncates keeping the distinguishing tail", () => {

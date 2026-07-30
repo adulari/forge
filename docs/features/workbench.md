@@ -77,3 +77,20 @@ The Git surface includes a session-scoped branch/worktree picker backed by the d
   live session and are Direct-only until Forge Anywhere carries an explicit filesystem/Git bridge.
 - Compact iOS/Android exposes the same Git dock under Review → Working tree; Turn remains available
   beside it for plan and per-turn diff artifacts. Expanded layouts can retain Git in the workbench.
+
+## Diff review annotations
+
+Working-tree, staged, turn, and fork diffs use the same review model:
+
+- Paired deletion/addition lines receive bounded token-level intraline highlights. The algorithm is
+  quadratic only below a strict token cap and falls back to a linear prefix/suffix comparison for
+  generated or minified lines.
+- Tapping a line starts an old/new-side range; tapping another line on that side extends it.
+  Selection is explicit in split and unified modes and can be cleared without creating feedback.
+- A review annotation records repository path, old/new range, staged/working-tree/turn/fork source,
+  selected line context, exact patch fingerprint, and the operator's comment. Markers only restore
+  against that fingerprint, so a later shifted diff cannot display feedback on the wrong line.
+- Pending annotations live for the session, appear as removable composer chips, and are formatted
+  as readable line-addressed context only after the next prompt is successfully sent or queued.
+- The compact Review tab remains marked while annotations are pending. Turn and working-tree views
+  both feed the same composer, so mobile and expanded desktop/web have one feedback contract.

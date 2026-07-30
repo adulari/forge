@@ -17,7 +17,7 @@
 //            call TelemetrySheet's "Model" row already makes.
 //   effort → the existing EffortPicker, mounted headless (`showTrigger={false}`), which commits
 //            `/effort <level>` (or bare `/effort` to reset) over the same prompt path.
-import { ArrowUp, ChevronDown, Clock, FileCode2, FileText, Image as ImageIcon, Mic, RotateCcw, Sparkles, Square } from "lucide-react-native";
+import { ArrowUp, ChevronDown, Clock, FileCode2, FileText, Image as ImageIcon, MessageSquare, Mic, RotateCcw, Sparkles, Square } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ColorValue, Image, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
@@ -28,6 +28,13 @@ import { useAuth } from "../../lib/auth";
 import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
 import { mergeCommandSources } from "../../lib/commandSources";
 import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
+import {
+  clearReviewComments,
+  formatReviewCommentsPrompt,
+  removeReviewComment,
+  reviewRangeLabel,
+  useReviewComments,
+} from "../../lib/reviewComments";
 import { isMacOS } from "../../lib/platform";
 import { useUpload, useWorkspaceSearch } from "../../lib/queries";
 import { useSessionCtx } from "../../lib/sessionContext";
@@ -131,6 +138,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     // slash-command path (see file header), which is a `RemoteInput`, not an `onSend` prompt.
     send,
   } = useSessionCtx();
+  const reviewComments = useReviewComments(sessionId);
   const toast = useToast();
   const [recording, setRecording] = useState(false);
   const [goalVisible, setGoalVisible] = useState(false);
@@ -202,7 +210,9 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     inputRef.current?.focus();
   }, [commandFocusSignal]);
 
-  const canSend = text.trim().length > 0 && !attachments.some((a) => a.state === "uploading");
+  const canSend =
+    (text.trim().length > 0 || reviewComments.length > 0) &&
+    !attachments.some((a) => a.state === "uploading");
   const action = busy ? "stop" : online ? "send" : "queue";
   const reduced = useReducedMotion();
   const actionProgress = useSharedValue(action === "stop" ? 1 : 0);
@@ -291,6 +301,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     text.trim().length === 0 &&
     !recording &&
     attachments.length === 0 &&
+    reviewComments.length === 0 &&
     !busy;
   const showGhost = Platform.OS === "web" && suggestionActive;
   const showSuggestionChip = Platform.OS !== "web" && suggestionActive;
@@ -336,7 +347,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
 
   const commit = (value: string) => {
     const trimmed = value.trim();
-    if (!trimmed) return;
+    if (!trimmed && reviewComments.length === 0) return;
     // An attachment still in flight (or failed) must never be silently dropped from the send —
     // block it with a toast instead so the user notices and can wait/remove/retry.
     if (attachments.some((a) => a.state === "uploading")) {
@@ -353,8 +364,9 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     const sent: SentAttachment[] = attachments
       .filter((a) => a.state === "done")
       .map((a) => ({ id: a.id, name: a.name, image: a.image, uri: a.uri, path: a.path }));
-    if (!onSend(trimmed, sent)) return;
-    setLastPrompt(trimmed);
+    const prompt = formatReviewCommentsPrompt(trimmed, reviewComments);
+    if (!onSend(prompt, sent)) return;
+    setLastPrompt(prompt);
     // Whatever suggestion is live right now belongs to the turn that's ending, not the one this
     // send just started — mask it so it can't flash back in once the draft clears below.
     if (suggestedPrompt) setSuppressedSuggestion(suggestedPrompt);
@@ -362,6 +374,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     setText("");
     void clearDraft(sessionId);
     setAttachments([]);
+    clearReviewComments(sessionId);
     if (Platform.OS === "web") setHeight(MIN_HEIGHT);
   };
   // `commit` closes over `onSend` (and whatever connection state it reads), so it's a new
@@ -563,6 +576,28 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
         },
       ]}
     >
+      {!recording && reviewComments.length > 0 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.commandScroll}
+          contentContainerStyle={styles.chipsRow}
+          keyboardShouldPersistTaps="handled"
+          accessibilityLabel="Pending review annotations"
+        >
+          {reviewComments.map((comment) => (
+            <Chip
+              key={comment.id}
+              icon={<MessageSquare size={14} strokeWidth={1.75} color={tokens.accent} />}
+              label={`${comment.path} ${reviewRangeLabel(comment.side, comment.startLine, comment.endLine)}`}
+              selected
+              onPress={() => removeReviewComment(sessionId, comment.id)}
+              testID={`review-comment-${comment.id}`}
+            />
+          ))}
+        </ScrollView>
+      ) : null}
+
       {!recording && attachments.length > 0 ? (
         <ScrollView
           horizontal

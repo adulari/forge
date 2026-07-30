@@ -180,6 +180,7 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
       </View>
 
       <GitDiffPane
+        sessionId={sessionId}
         file={diff.data?.files[0] ?? null}
         staged={selection?.staged ?? false}
         hasSelection={selection != null}

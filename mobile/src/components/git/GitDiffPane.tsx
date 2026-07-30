@@ -7,20 +7,30 @@
 // The pane renders whatever `GET /api/git/diff` returned and nothing else: a binary file gets
 // the daemon's one-line fact and no hunks, a rename shows both names, and a diff the daemon
 // capped reports the omitted-line count rather than ending mid-file with no explanation.
-import { FileDiff } from "lucide-react-native";
-import React, { useState } from "react";
+import { FileDiff, MessageSquare, MessageSquarePlus, X } from "lucide-react-native";
+import React, { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { type DiffCell, middleTruncate, type SplitRow, toSplitRows, toUnifiedRows } from "./diffModel";
 import { type GitDiffFile } from "../../lib/api";
+import {
+  buildReviewLineSelection,
+  reviewDiffRevision,
+  reviewRangeLabel,
+  type ReviewCommentSide,
+  type ReviewLineSelection,
+  useReviewComments,
+} from "../../lib/reviewComments";
 import { useTokens } from "../../theme/ThemeProvider";
 import { type ColorTokens, hexToRgba, radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { EmptyState } from "../ds/EmptyState";
+import { ReviewCommentSheet } from "../review/ReviewCommentSheet";
 
 export type DiffViewMode = "split" | "unified";
 
 export interface GitDiffPaneProps {
+  sessionId: string;
   /** The single file `GET /api/git/diff?path=…` returned, or null when the request came back
    * with no files (path unchanged in the requested index/worktree). */
   file: GitDiffFile | null;
@@ -84,9 +94,76 @@ function DiffLine({ cell, gutterChar }: { cell: DiffCell | null; gutterChar?: bo
       <Text style={[styles.lineNo, tabularNums, { color: gutterInk }]}>{cell.lineNo}</Text>
       {gutterChar ? <Text style={[styles.gutterChar, { color: gutterInk }]}>{prefix}</Text> : null}
       <Text selectable style={[styles.lineText, { color: ink }]}>
-        {cell.text.length > 0 ? cell.text : " "}
+        {cell.segments?.length
+          ? cell.segments.map((segment, index) => (
+              <Text
+                key={`${index}:${segment.text}`}
+                style={
+                  segment.changed
+                    ? {
+                        backgroundColor:
+                          cell.kind === "add"
+                            ? hexToRgba(tokens.success, 0.24)
+                            : hexToRgba(tokens.danger, 0.22),
+                      }
+                    : undefined
+                }
+              >
+                {segment.text}
+              </Text>
+            ))
+          : cell.text.length > 0
+            ? cell.text
+            : " "}
       </Text>
     </View>
+  );
+}
+
+function ReviewableDiffLine({
+  cell,
+  gutterChar,
+  side,
+  selected,
+  commentCount,
+  onPress,
+}: {
+  cell: DiffCell | null;
+  gutterChar?: boolean;
+  side: ReviewCommentSide;
+  selected: boolean;
+  commentCount: number;
+  onPress: () => void;
+}) {
+  const tokens = useTokens();
+  if (!cell) return <DiffLine cell={null} gutterChar={gutterChar} />;
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Select ${side} line ${cell.lineNo} for review`}
+      accessibilityState={{ selected }}
+      style={[
+        styles.reviewableLine,
+        { borderLeftColor: selected ? tokens.accent : "transparent" },
+      ]}
+    >
+      <DiffLine cell={cell} gutterChar={gutterChar} />
+      {selected ? (
+        <View
+          pointerEvents="none"
+          style={[styles.selectionOverlay, { backgroundColor: hexToRgba(tokens.accent, 0.1) }]}
+        />
+      ) : null}
+      {commentCount > 0 ? (
+        <View pointerEvents="none" style={styles.commentMarker}>
+          <MessageSquare size={11} strokeWidth={1.8} color={tokens.accent} />
+          {commentCount > 1 ? (
+            <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>{commentCount}</Text>
+          ) : null}
+        </View>
+      ) : null}
+    </Pressable>
   );
 }
 
@@ -101,7 +178,18 @@ function HunkHeader({ header }: { header: string }) {
   );
 }
 
-function SplitBody({ hunkRows }: { hunkRows: SplitRow[] }) {
+interface DiffReviewCallbacks {
+  isSelected: (side: ReviewCommentSide, lineNo: number) => boolean;
+  commentCount: (side: ReviewCommentSide, lineNo: number) => number;
+  onSelect: (side: ReviewCommentSide, cell: DiffCell) => void;
+}
+
+function SplitBody({
+  hunkRows,
+  isSelected,
+  commentCount,
+  onSelect,
+}: { hunkRows: SplitRow[] } & DiffReviewCallbacks) {
   const tokens = useTokens();
   return (
     <>
@@ -116,14 +204,36 @@ function SplitBody({ hunkRows }: { hunkRows: SplitRow[] }) {
             >
               <View style={styles.columnBody}>
                 {block.pairs.map((pair) => (
-                  <DiffLine key={`l:${pair.key}`} cell={pair.left} />
+                  pair.left ? (
+                    <ReviewableDiffLine
+                      key={`l:${pair.key}`}
+                      cell={pair.left}
+                      side="old"
+                      selected={isSelected("old", pair.left.lineNo)}
+                      commentCount={commentCount("old", pair.left.lineNo)}
+                      onPress={() => onSelect("old", pair.left as DiffCell)}
+                    />
+                  ) : (
+                    <DiffLine key={`l:${pair.key}`} cell={null} />
+                  )
                 ))}
               </View>
             </ScrollView>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.columnLast}>
               <View style={styles.columnBody}>
                 {block.pairs.map((pair) => (
-                  <DiffLine key={`r:${pair.key}`} cell={pair.right} />
+                  pair.right ? (
+                    <ReviewableDiffLine
+                      key={`r:${pair.key}`}
+                      cell={pair.right}
+                      side="new"
+                      selected={isSelected("new", pair.right.lineNo)}
+                      commentCount={commentCount("new", pair.right.lineNo)}
+                      onPress={() => onSelect("new", pair.right as DiffCell)}
+                    />
+                  ) : (
+                    <DiffLine key={`r:${pair.key}`} cell={null} />
+                  )
                 ))}
               </View>
             </ScrollView>
@@ -183,10 +293,78 @@ function ModeToggle({
   );
 }
 
-export function GitDiffPane({ file, staged, hasSelection, loading, error }: GitDiffPaneProps) {
+export function GitDiffPane({
+  sessionId,
+  file,
+  staged,
+  hasSelection,
+  loading,
+  error,
+}: GitDiffPaneProps) {
   const tokens = useTokens();
   const [mode, setMode] = useState<DiffViewMode>("split");
   const [width, setWidth] = useState(0);
+  const [selectionAnchor, setSelectionAnchor] = useState<{
+    side: ReviewCommentSide;
+    lineNo: number;
+  } | null>(null);
+  const [lineSelection, setLineSelection] = useState<ReviewLineSelection | null>(null);
+  const [commentVisible, setCommentVisible] = useState(false);
+  const reviewComments = useReviewComments(sessionId);
+  const fileRevision = useMemo(
+    () => (file ? reviewDiffRevision(file.path, file.hunks) : ""),
+    [file],
+  );
+  const splitRows = useMemo(() => (file ? toSplitRows(file.hunks) : []), [file]);
+  const unifiedRows = useMemo(() => (file ? toUnifiedRows(file.hunks) : []), [file]);
+  const availableLines = useMemo(() => {
+    const oldLines = new Map<number, DiffCell>();
+    const newLines = new Map<number, DiffCell>();
+    splitRows.forEach((row) => {
+      if (row.kind !== "pair") return;
+      if (row.left) oldLines.set(row.left.lineNo, row.left);
+      if (row.right) newLines.set(row.right.lineNo, row.right);
+    });
+    return {
+      old: [...oldLines.values()].map(({ lineNo, kind, text }) => ({ lineNo, kind, text })),
+      new: [...newLines.values()].map(({ lineNo, kind, text }) => ({ lineNo, kind, text })),
+    };
+  }, [splitRows]);
+  const fileComments = useMemo(
+    () =>
+      reviewComments.filter(
+        (comment) =>
+          comment.path === file?.path &&
+          comment.revision === fileRevision &&
+          comment.staged === staged,
+      ),
+    [file?.path, fileRevision, reviewComments, staged],
+  );
+
+  useEffect(() => {
+    setSelectionAnchor(null);
+    setLineSelection(null);
+    setCommentVisible(false);
+  }, [file?.path, staged]);
+
+  const selectLine = (side: ReviewCommentSide, cell: DiffCell) => {
+    const anchor =
+      selectionAnchor?.side === side ? selectionAnchor : { side, lineNo: cell.lineNo };
+    setSelectionAnchor(anchor);
+    setLineSelection(
+      buildReviewLineSelection(side, availableLines[side], anchor.lineNo, cell.lineNo),
+    );
+  };
+  const isSelected = (side: ReviewCommentSide, lineNo: number) =>
+    lineSelection?.side === side &&
+    lineNo >= lineSelection.startLine &&
+    lineNo <= lineSelection.endLine;
+  const commentCount = (side: ReviewCommentSide, lineNo: number) =>
+    fileComments.filter((comment) => comment.side === side && comment.endLine === lineNo).length;
+  const clearSelection = () => {
+    setSelectionAnchor(null);
+    setLineSelection(null);
+  };
 
   const splitAvailable = width === 0 || width >= SPLIT_MIN_WIDTH;
   const effectiveMode: DiffViewMode = splitAvailable ? mode : "unified";
@@ -230,18 +408,39 @@ export function GitDiffPane({ file, staged, hasSelection, loading, error }: GitD
   } else {
     body = (
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollBody}>
-        {effectiveMode === "split" ? (
-          <SplitBody hunkRows={toSplitRows(file.hunks)} />
-        ) : (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            <View style={styles.columnBody}>
-              {toUnifiedRows(file.hunks).map((row) =>
-                row.kind === "hunk" ? (
-                  <HunkHeader key={row.key} header={row.header} />
-                ) : (
-                  <DiffLine key={row.key} cell={row.cell} gutterChar />
-                ),
-              )}
+          {effectiveMode === "split" ? (
+            <SplitBody
+              hunkRows={splitRows}
+              isSelected={isSelected}
+              commentCount={commentCount}
+              onSelect={selectLine}
+            />
+          ) : (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={styles.columnBody}>
+                {unifiedRows.map((row) =>
+                  row.kind === "hunk" ? (
+                    <HunkHeader key={row.key} header={row.header} />
+                  ) : (
+                    <ReviewableDiffLine
+                      key={row.key}
+                      cell={row.cell}
+                      gutterChar
+                      side={row.cell.kind === "del" ? "old" : "new"}
+                      selected={isSelected(
+                        row.cell.kind === "del" ? "old" : "new",
+                        row.cell.lineNo,
+                      )}
+                      commentCount={commentCount(
+                        row.cell.kind === "del" ? "old" : "new",
+                        row.cell.lineNo,
+                      )}
+                      onPress={() =>
+                        selectLine(row.cell.kind === "del" ? "old" : "new", row.cell)
+                      }
+                    />
+                  ),
+                )}
             </View>
           </ScrollView>
         )}
@@ -281,7 +480,58 @@ export function GitDiffPane({ file, staged, hasSelection, loading, error }: GitD
         <View style={styles.headerSpacer} />
         <ModeToggle mode={effectiveMode} onChange={setMode} splitAvailable={splitAvailable} />
       </View>
+      {lineSelection ? (
+        <View
+          style={[
+            styles.selectionBar,
+            { backgroundColor: tokens.bg2, borderBottomColor: tokens.border },
+          ]}
+        >
+          <MessageSquarePlus size={14} strokeWidth={1.8} color={tokens.accent} />
+          <Text style={[typeScale.monoMeta, styles.selectionLabel, { color: tokens.ink2 }]}>
+            {reviewRangeLabel(
+              lineSelection.side,
+              lineSelection.startLine,
+              lineSelection.endLine,
+            )}{" "}
+            · {lineSelection.lines.length} line{lineSelection.lines.length === 1 ? "" : "s"}
+          </Text>
+          <Text style={[typeScale.monoMeta, styles.selectionHint, { color: tokens.ink4 }]}>
+            tap another line to extend
+          </Text>
+          <Pressable
+            onPress={() => setCommentVisible(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Comment on selected lines"
+            style={[
+              styles.selectionAction,
+              { borderColor: tokens.border, borderRadius: radii.radius4 },
+            ]}
+          >
+            <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>comment</Text>
+          </Pressable>
+          <Pressable
+            onPress={clearSelection}
+            accessibilityRole="button"
+            accessibilityLabel="Clear selected lines"
+            hitSlop={8}
+            style={styles.selectionClose}
+          >
+            <X size={14} strokeWidth={1.8} color={tokens.ink3} />
+          </Pressable>
+        </View>
+      ) : null}
       {body}
+      <ReviewCommentSheet
+        visible={commentVisible && file != null}
+        sessionId={sessionId}
+        path={file?.path ?? ""}
+        revision={fileRevision}
+        staged={staged}
+        selection={lineSelection}
+        onClose={() => setCommentVisible(false)}
+        onAdded={clearSelection}
+      />
     </View>
   );
 }
@@ -308,6 +558,25 @@ const styles = StyleSheet.create({
   column: { flex: 1, borderRightWidth: StyleSheet.hairlineWidth },
   columnLast: { flex: 1 },
   columnBody: { minWidth: "100%", paddingVertical: space.space4 },
+  reviewableLine: { position: "relative", borderLeftWidth: 2 },
+  selectionOverlay: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  commentMarker: {
+    position: "absolute",
+    right: space.space4,
+    top: 3,
+    minWidth: 16,
+    height: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 1,
+  },
   line: {
     height: LINE_HEIGHT,
     flexDirection: "row",
@@ -325,5 +594,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
+  selectionBar: {
+    minHeight: 32,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: space.space12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  selectionLabel: { flexShrink: 0 },
+  selectionHint: { flex: 1 },
+  selectionAction: {
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: space.space8,
+    paddingVertical: 3,
+  },
+  selectionClose: { width: 24, height: 24, alignItems: "center", justifyContent: "center" },
   notice: { paddingHorizontal: space.space16, paddingVertical: space.space12 },
 });

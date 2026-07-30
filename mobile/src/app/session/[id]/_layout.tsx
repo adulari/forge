@@ -59,6 +59,7 @@ import { useAuth } from "../../../lib/auth";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
 import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
+import { useReviewComments } from "../../../lib/reviewComments";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
@@ -94,6 +95,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const activeRightSurface = activeWorkbenchSurface(workbench.state, "right");
   const activeBottomSurface = activeWorkbenchSurface(workbench.state, "bottom");
   const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
+  const reviewComments = useReviewComments(sessionId);
   const [duelVisible, setDuelVisible] = useState(false);
   const [planVisible, setPlanVisible] = useState(false);
 
@@ -202,7 +204,8 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const segmentOptions = useMemo<TabStripOption<SegmentValue>[]>(() => {
     const taskCount = snapshot?.tasks.length ?? 0;
     const agentCount = snapshot?.subagents.length ?? 0;
-    const reviewPending = snapshot?.plan != null || snapshot?.diff != null;
+    const reviewPending =
+      snapshot?.plan != null || snapshot?.diff != null || reviewComments.length > 0;
     return [
       { value: "chat", label: "Chat" },
       { value: "tasks", label: "Tasks", badge: taskCount || undefined },
@@ -211,7 +214,13 @@ function SessionShell({ sessionId }: { sessionId: string }) {
       { value: "files", label: "Files" },
       { value: "replay", label: "Replay" },
     ];
-  }, [snapshot?.tasks.length, snapshot?.subagents.length, snapshot?.plan, snapshot?.diff]);
+  }, [
+    reviewComments.length,
+    snapshot?.tasks.length,
+    snapshot?.subagents.length,
+    snapshot?.plan,
+    snapshot?.diff,
+  ]);
 
   const reduced = useReducedMotion();
   const segmentOpacity = useSharedValue(1);
