@@ -349,7 +349,10 @@ cp -a -- "$PRE_UPGRADE_DATA" "$DATA"
 install -m 0755 "$OLD" "$BIN/forge"
 forge_env "$BIN/forge" replay "$CLI_SESSION" --json > "$ROOT/rollback-replay.json"
 grep -q UPGRADE_OLD_MARKER "$ROOT/rollback-replay.json"
-! grep -q UPGRADE_NEW_MARKER "$ROOT/rollback-replay.json"
+if grep -q UPGRADE_NEW_MARKER "$ROOT/rollback-replay.json"; then
+  echo "release-upgrade-e2e: candidate history leaked into the pre-upgrade snapshot" >&2
+  exit 1
+fi
 
 ROLLBACK_DATA="$ROOT/data-after-rollback-check"
 mv -- "$DATA" "$ROLLBACK_DATA"
