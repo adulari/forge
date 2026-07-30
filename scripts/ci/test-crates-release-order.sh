@@ -3,7 +3,25 @@ set -euo pipefail
 
 runbook="docs/RELEASING-crates.md"
 fork_manifest="vendor/genai-0.6.5/Cargo.toml"
+cli_changelog="crates/forge-cli/CHANGELOG.md"
 metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+
+cmp -s CHANGELOG.md "$cli_changelog" || {
+  echo "forge-agent package changelog must match repository CHANGELOG.md" >&2
+  exit 1
+}
+
+grep -Fq 'include_str!("../../CHANGELOG.md")' \
+  crates/forge-cli/src/serve/serve_changelog.rs || {
+  echo "serve changelog must use the package-local crates.io-safe mirror" >&2
+  exit 1
+}
+
+cargo package --locked -p forge-agent --allow-dirty --list \
+  | grep -Fxq 'CHANGELOG.md' || {
+  echo "forge-agent crate tarball must contain CHANGELOG.md" >&2
+  exit 1
+}
 mapfile -t documented_order < <(
   sed -n \
     '/Then publish the versioned Forge graph:/,/^(`forge-relay`/s/^[0-9][0-9]*\. `\([^`]*\)`.*/\1/p' \
