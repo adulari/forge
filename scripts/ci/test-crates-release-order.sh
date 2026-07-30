@@ -2,6 +2,7 @@
 set -euo pipefail
 
 runbook="docs/RELEASING-crates.md"
+fork_manifest="vendor/genai-0.6.5/Cargo.toml"
 metadata="$(cargo metadata --locked --no-deps --format-version 1)"
 mapfile -t documented_order < <(
   sed -n \
@@ -11,6 +12,46 @@ mapfile -t documented_order < <(
 mapfile -t publishable < <(
   jq -r '.packages[] | select(.publish != []) | .name' <<<"$metadata" | sort
 )
+
+readarray -t fork_identity < <(
+  python3 - "$fork_manifest" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as handle:
+    package = tomllib.load(handle)["package"]
+print(package["name"])
+print(package["version"])
+PY
+)
+[[ "${fork_identity[0]}" == "forge-agent-genai" ]] || {
+  echo "vendored provider fork must publish as forge-agent-genai" >&2
+  exit 1
+}
+[[ "${fork_identity[1]}" == "0.6.5-forge.1" ]] || {
+  echo "unexpected forge-agent-genai version: ${fork_identity[1]}" >&2
+  exit 1
+}
+grep -Fq \
+  '0. `forge-agent-genai` (`0.6.5-forge.1`; published once, not once per Forge release)' \
+  "$runbook" || {
+  echo "release runbook does not match the vendored provider fork identity" >&2
+  exit 1
+}
+jq -e '
+  .packages[]
+  | select(.name == "forge-agent-provider")
+  | any(
+      .dependencies[];
+      .name == "forge-agent-genai"
+      and .rename == "genai"
+      and .req == "=0.6.5-forge.1"
+      and .path != null
+    )
+' <<<"$metadata" >/dev/null || {
+  echo "forge-agent-provider must publish against the exact vendored forge-agent-genai fork" >&2
+  exit 1
+}
 
 declare -A position=()
 for index in "${!documented_order[@]}"; do
