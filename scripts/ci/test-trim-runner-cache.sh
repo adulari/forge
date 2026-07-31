@@ -3,25 +3,63 @@ set -euo pipefail
 
 scratch="$(mktemp -d)"
 trap 'rm -rf -- "$scratch"' EXIT
-mkdir -p "$scratch/target" "$scratch/mobile/node_modules" "$scratch/keep"
+mkdir -p \
+  "$scratch/target" \
+  "$scratch/mobile/node_modules" \
+  "$scratch/npm/_cacache" \
+  "$scratch/npm/_npx" \
+  "$scratch/npm/keep" \
+  "$scratch/keep"
 dd if=/dev/zero of="$scratch/target/oversized" bs=1024 count=8 status=none
 dd if=/dev/zero of="$scratch/mobile/node_modules/oversized" bs=1024 count=8 status=none
+dd if=/dev/zero of="$scratch/npm/_cacache/oversized" bs=1024 count=8 status=none
+dd if=/dev/zero of="$scratch/npm/_npx/oversized" bs=1024 count=8 status=none
 
+FORGE_NPM_CACHE_ROOT="$scratch/npm" \
 FORGE_MAX_TARGET_CACHE_KIB=1 \
 FORGE_MAX_NODE_MODULES_CACHE_KIB=1 \
+FORGE_MAX_NPM_CONTENT_CACHE_KIB=1 \
+FORGE_MAX_NPX_CACHE_KIB=1 \
   bash scripts/ci/trim-runner-cache.sh "$scratch"
 
 test ! -e "$scratch/target"
 test ! -e "$scratch/mobile/node_modules"
+test ! -e "$scratch/npm/_cacache"
+test ! -e "$scratch/npm/_npx"
+test -d "$scratch/npm/keep"
 test -d "$scratch/keep"
 
-mkdir -p "$scratch/target"
+mkdir -p "$scratch/target" "$scratch/npm/_cacache" "$scratch/npm/_npx"
 dd if=/dev/zero of="$scratch/target/preserved" bs=1024 count=8 status=none
+dd if=/dev/zero of="$scratch/npm/_cacache/preserved" bs=1024 count=8 status=none
+dd if=/dev/zero of="$scratch/npm/_npx/preserved" bs=1024 count=8 status=none
+FORGE_NPM_CACHE_ROOT="$scratch/npm" \
 FORGE_MAX_TARGET_CACHE_KIB=1 \
 FORGE_MAX_NODE_MODULES_CACHE_KIB=1 \
+FORGE_MAX_NPM_CONTENT_CACHE_KIB=1 \
+FORGE_MAX_NPX_CACHE_KIB=1 \
 FORGE_CACHE_TRIM_DRY_RUN=1 \
   bash scripts/ci/trim-runner-cache.sh "$scratch"
 test -e "$scratch/target/preserved"
+test -e "$scratch/npm/_cacache/preserved"
+test -e "$scratch/npm/_npx/preserved"
+
+mkdir -p "$scratch/symlink-target"
+mkdir -p "$scratch/npm-with-child-link"
+ln -s "$scratch/symlink-target" "$scratch/npm-with-child-link/_cacache"
+FORGE_NPM_CACHE_ROOT="$scratch/npm-with-child-link" \
+FORGE_MAX_NPM_CONTENT_CACHE_KIB=0 \
+  bash scripts/ci/trim-runner-cache.sh "$scratch"
+test -L "$scratch/npm-with-child-link/_cacache"
+test -d "$scratch/symlink-target"
+
+ln -s "$scratch/symlink-target" "$scratch/npm-link"
+if FORGE_NPM_CACHE_ROOT="$scratch/npm-link" \
+  bash scripts/ci/trim-runner-cache.sh "$scratch" >/dev/null 2>&1; then
+  echo "cache trimmer accepted a symlinked npm cache root" >&2
+  exit 1
+fi
+test -d "$scratch/symlink-target"
 
 if bash scripts/ci/trim-runner-cache.sh / >/dev/null 2>&1; then
   echo "cache trimmer accepted filesystem root" >&2
@@ -55,6 +93,7 @@ chmod +x "$fake_bin/docker"
 
 PATH="$fake_bin:$PATH" \
 FORGE_TEST_DOCKER_LOG="$docker_log" \
+FORGE_NPM_CACHE_ROOT="$scratch/npm" \
 FORGE_TRIM_RELEASE_DOCKER_VOLUMES=1 \
 FORGE_MAX_RELEASE_DOCKER_CACHE_KIB=1 \
   bash scripts/ci/trim-runner-cache.sh "$scratch"
@@ -66,6 +105,7 @@ grep -Fxq "forge-release-cargo-registry" "$docker_log"
 : >"$docker_log"
 PATH="$fake_bin:$PATH" \
 FORGE_TEST_DOCKER_LOG="$docker_log" \
+FORGE_NPM_CACHE_ROOT="$scratch/npm" \
 FORGE_TRIM_RELEASE_DOCKER_VOLUMES=1 \
 FORGE_MAX_RELEASE_DOCKER_CACHE_KIB=1 \
 FORGE_CACHE_TRIM_DRY_RUN=1 \

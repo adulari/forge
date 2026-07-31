@@ -11,13 +11,15 @@ if [[ -z "$workspace" || "$workspace" == "/" ]]; then
   exit 2
 fi
 
-max_target_kib="${FORGE_MAX_TARGET_CACHE_KIB:-25165824}" # 24 GiB
+max_target_kib="${FORGE_MAX_TARGET_CACHE_KIB:-16777216}" # 16 GiB
 max_node_modules_kib="${FORGE_MAX_NODE_MODULES_CACHE_KIB:-4194304}" # 4 GiB
+max_npm_content_cache_kib="${FORGE_MAX_NPM_CONTENT_CACHE_KIB:-4194304}" # 4 GiB
+max_npx_cache_kib="${FORGE_MAX_NPX_CACHE_KIB:-1048576}" # 1 GiB
 max_release_docker_kib="${FORGE_MAX_RELEASE_DOCKER_CACHE_KIB:-25165824}" # 24 GiB
 trim_release_docker="${FORGE_TRIM_RELEASE_DOCKER_VOLUMES:-0}"
 dry_run="${FORGE_CACHE_TRIM_DRY_RUN:-0}"
 
-case "$max_target_kib:$max_node_modules_kib:$max_release_docker_kib" in
+case "$max_target_kib:$max_node_modules_kib:$max_npm_content_cache_kib:$max_npx_cache_kib:$max_release_docker_kib" in
   *[!0-9:]*)
     echo "runner-cache limits must be non-negative integers" >&2
     exit 2
@@ -77,6 +79,32 @@ fi
 
 trim_if_oversized \
   "$workspace/mobile/node_modules" "$max_node_modules_kib" "mobile node_modules"
+
+npm_cache_root="${FORGE_NPM_CACHE_ROOT:-${npm_config_cache:-${NPM_CONFIG_CACHE:-}}}"
+if [[ -z "$npm_cache_root" ]]; then
+  if [[ -z "${HOME:-}" ]]; then
+    echo "HOME or an explicit npm cache root is required" >&2
+    exit 2
+  fi
+  npm_cache_root="$HOME/.npm"
+fi
+if [[ -L "$npm_cache_root" ]]; then
+  echo "refusing symlinked npm cache root: $npm_cache_root" >&2
+  exit 2
+fi
+npm_cache_root="$(realpath -m -- "$npm_cache_root")"
+if [[ -z "$npm_cache_root" || "$npm_cache_root" == "/" ]]; then
+  echo "refusing unsafe npm cache root: ${npm_cache_root:-<empty>}" >&2
+  exit 2
+fi
+
+# npm's content-addressed cache and npx's installed package trees grow independently. Trim only
+# those exact npm-owned subdirectories; logs, credentials, configuration, and unrelated home
+# directories are never in scope.
+trim_if_oversized \
+  "$npm_cache_root/_cacache" "$max_npm_content_cache_kib" "npm content"
+trim_if_oversized \
+  "$npm_cache_root/_npx" "$max_npx_cache_kib" "npx package"
 
 trim_release_docker_volumes() {
   (( trim_release_docker == 1 )) || return 0
