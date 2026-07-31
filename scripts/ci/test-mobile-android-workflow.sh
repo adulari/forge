@@ -26,6 +26,42 @@ const installedCli = lockfile.packages?.["node_modules/eas-cli"]?.version;
 if (!installedCli || config.cli?.version !== installedCli) {
   throw new Error("eas.json must pin the EAS CLI version resolved in package-lock.json");
 }
+
+const configuredNode = config.build?.base?.node;
+const parseVersion = (version) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version ?? "");
+  if (!match) throw new Error(`invalid exact Node version in eas.json: ${version}`);
+  return match.slice(1).map(Number);
+};
+const compareVersions = (left, right) => {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return 0;
+};
+const satisfiesNodeRange = (version, range) => {
+  const actual = parseVersion(version);
+  return range.split("||").some((alternative) => {
+    const requirement = alternative.trim();
+    const match = /^(\^|>=)\s*(\d+\.\d+\.\d+)$/.exec(requirement);
+    if (!match) return false;
+    const minimum = parseVersion(match[2]);
+    if (match[1] === "^") {
+      return actual[0] === minimum[0] && compareVersions(actual, minimum) >= 0;
+    }
+    return compareVersions(actual, minimum) >= 0;
+  });
+};
+for (const dependency of ["react-native", "metro", "vite", "rolldown"]) {
+  const engine = lockfile.packages?.[`node_modules/${dependency}`]?.engines?.node;
+  if (!engine) throw new Error(`${dependency} must declare its Node engine in package-lock.json`);
+  if (!satisfiesNodeRange(configuredNode, engine)) {
+    throw new Error(
+      `EAS Node ${configuredNode} does not satisfy ${dependency}'s locked engine ${engine}`,
+    );
+  }
+}
+
 const expected = {
   preview: "apk",
   production: "app-bundle",
