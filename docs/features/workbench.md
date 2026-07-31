@@ -118,3 +118,28 @@ app:
   fragile cross-origin iframe. Remote-host port tunnelling, screenshots/recording, console/network
   capture, and agent-driven browser automation remain later explicit capabilities rather than
   being implied by this first isolated preview slice.
+
+## Persistent terminals
+
+The Terminal surface attaches to daemon-owned PTYs instead of making a WebSocket own a shell:
+
+- Each session may own up to eight terminals with stable, validated IDs (`term-1`, `term-2`, …).
+  Disconnecting a desktop, browser, or phone only detaches that client. The shell keeps running
+  until it exits, the operator stops it, or the owning session is archived, merged, or discarded.
+- Every terminal retains at most 2 MiB of raw output. Reconnect sends a sequence-consistent
+  snapshot before live events; lagged clients are reset to the latest bounded history instead of
+  silently losing an unknown output range.
+- Multiple clients can attach concurrently. Input and resize commands are serialized through the
+  terminal runtime; metadata reports running/exited state, attachment count, and last activity.
+  Clear removes daemon history for every client. Stop removes the terminal from the registry.
+  Restart replaces only that terminal identity.
+- Expanded desktop/web uses resource-specific bottom-lane workbench tabs. The compact session
+  Terminal route provides its own horizontally scrollable terminal tabs plus Escape, Tab, arrow,
+  Control-C, Control-L, and keyboard-focus controls for touch devices.
+- Forge Anywhere explicitly allowlists terminal metadata and a dedicated terminal stream route.
+  Relay frames preserve WebSocket text/binary type: JSON lifecycle controls remain text while PTY
+  bytes remain binary for streaming UTF-8 decoding. Terminal IDs and geometry are validated on
+  both controller and host; encrypted bridge traffic cannot select an arbitrary local path.
+- The React Native terminal view intentionally remains a bounded ANSI scrollback rather than
+  claiming full xterm/Ghostty emulation. Mouse protocols, alternate-screen fidelity, terminal
+  recording, and native Ghostty integration are separate future capabilities.

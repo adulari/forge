@@ -811,43 +811,76 @@ export function unsubscribePush(
 // Terminal dock (WS /ws/terminal)
 // ---------------------------------------------------------------------------
 
-/** Client → server frames on `/ws/terminal`. Server → client is raw binary pty output. */
+/** Client → server frames on `/ws/terminal`. */
 export type TerminalClientFrame =
   | { kind: "input"; data: string }
-  | { kind: "resize"; cols: number; rows: number };
+  | { kind: "resize"; cols: number; rows: number }
+  | { kind: "clear" }
+  | { kind: "close" };
+
+export type TerminalStatus = "running" | "exited";
+
+export interface TerminalSessionSummary {
+  terminal_id: string;
+  status: TerminalStatus;
+  clients: number;
+  updated_at_ms: number;
+}
+
+type TerminalServerFrame =
+  | { kind: "status"; status: TerminalStatus }
+  | { kind: "cleared" };
 
 export interface TerminalSocketHandlers {
   /** Decoded pty output. UTF-8 is decoded in STREAMING mode, so a multi-byte glyph split across
    * two frames is reassembled instead of turning into replacement characters. */
   onOutput: (chunk: string) => void;
+  onStatus?: (status: TerminalStatus) => void;
+  onClear?: () => void;
   onOpen?: () => void;
   onClose?: (event: { code: number; reason: string }) => void;
   onError?: (error: unknown) => void;
 }
 
+export interface TerminalSocketOptions {
+  terminalId?: string;
+  size?: { cols: number; rows: number };
+  restart?: boolean;
+}
+
 export interface TerminalSocket {
   send: (data: string) => boolean;
   resize: (cols: number, rows: number) => boolean;
+  clear: () => boolean;
+  kill: () => boolean;
+  /** Detach this client without stopping the daemon-owned terminal process. */
   close: () => void;
 }
 
-/** Open a PTY-backed shell in a session's directory. The daemon token already rides in `baseUrl`
- * as a path segment (there is no extra privilege here — see serve_terminal.rs), so the URL is
- * built exactly like the session socket's. */
+export function listTerminalSessions(
+  baseUrl: string,
+  sessionId: string,
+): Promise<TerminalSessionSummary[]> {
+  return request(baseUrl, `/api/terminals${qs({ session: sessionId })}`);
+}
+
+/** Attach to a daemon-owned PTY in a session's directory. The process survives socket detach. */
 export function openTerminalSocket(
   baseUrl: string,
   sessionId: string,
   handlers: TerminalSocketHandlers,
-  size?: { cols: number; rows: number },
+  options: TerminalSocketOptions = {},
 ): TerminalSocket {
   const url = new URL(`${baseUrl}/ws/terminal`);
   url.protocol =
     url.protocol === "fany:" ? "fany-ws:" : url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("session", sessionId);
-  if (size) {
-    url.searchParams.set("cols", String(size.cols));
-    url.searchParams.set("rows", String(size.rows));
+  url.searchParams.set("terminal", options.terminalId ?? "term-1");
+  if (options.size) {
+    url.searchParams.set("cols", String(options.size.cols));
+    url.searchParams.set("rows", String(options.size.rows));
   }
+  if (options.restart) url.searchParams.set("restart", "true");
 
   const socket = new TWebSocket(url.toString());
   socket.binaryType = "arraybuffer";
@@ -860,7 +893,15 @@ export function openTerminalSocket(
   socket.onmessage = (event: MessageEvent) => {
     const { data } = event;
     if (typeof data === "string") {
-      // The daemon only sends text for a pre-shell failure message (pty/spawn errors).
+      const control = parseTerminalServerFrame(data);
+      if (control?.kind === "status") {
+        handlers.onStatus?.(control.status);
+        return;
+      }
+      if (control?.kind === "cleared") {
+        handlers.onClear?.();
+        return;
+      }
       handlers.onOutput(data);
       return;
     }
@@ -876,6 +917,24 @@ export function openTerminalSocket(
   return {
     send: (data: string) => post({ kind: "input", data }),
     resize: (cols: number, rows: number) => post({ kind: "resize", cols, rows }),
+    clear: () => post({ kind: "clear" }),
+    kill: () => post({ kind: "close" }),
     close: () => socket.close(),
   };
+}
+
+function parseTerminalServerFrame(value: string): TerminalServerFrame | null {
+  try {
+    const frame = JSON.parse(value) as Partial<TerminalServerFrame>;
+    if (frame.kind === "cleared") return { kind: "cleared" };
+    if (
+      frame.kind === "status"
+      && (frame.status === "running" || frame.status === "exited")
+    ) {
+      return { kind: "status", status: frame.status };
+    }
+  } catch {
+    // A non-control text frame is a human-readable daemon error.
+  }
+  return null;
 }

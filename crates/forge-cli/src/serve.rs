@@ -339,6 +339,7 @@ fn attention_became_required(was_waiting: bool, is_waiting: bool) -> bool {
 /// Shared HTTP state for the daemon router.
 pub(crate) struct DaemonState {
     pub(crate) registry: Arc<SessionRegistry>,
+    pub(crate) terminals: Arc<crate::serve_terminal::TerminalRegistry>,
     pub(crate) store: Arc<forge_store::Store>,
     /// `/ <token>` — injected into the page/manifest like the single-session server does.
     base: String,
@@ -492,6 +493,7 @@ pub(crate) async fn serve_cmd(
     let (anywhere_enable, anywhere_rx) = tokio::sync::watch::channel(config.anywhere.enabled);
     let state = Arc::new(DaemonState {
         registry: registry.clone(),
+        terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
         store,
         base: base.clone(),
         mock,
@@ -736,6 +738,10 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(
             &format!("{base}/ws/terminal"),
             get(crate::serve_terminal::terminal_ws),
+        )
+        .route(
+            &format!("{base}/api/terminals"),
+            get(crate::serve_terminal::terminal_list),
         )
         .route(&format!("{base}/api/usage"), get(usage_page))
         .route(&format!("{base}/api/hooks"), get(hooks_page))
@@ -1186,6 +1192,7 @@ async fn archive_session(
     let Some(handle) = state.registry.remove(&id).await else {
         return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
     };
+    state.terminals.close_session(&id).await;
     handle.shutdown();
     handle.join(ARCHIVE_JOIN_TIMEOUT).await;
     if let Some(wt) = &handle.worktree {
@@ -1562,6 +1569,7 @@ async fn merge_session(
             "session is already being merged or discarded",
         );
     };
+    state.terminals.close_session(&id).await;
     let resume_spec = DriverSpec {
         cwd: handle.cwd.clone(),
         worktree: handle.worktree.clone(),
@@ -1665,6 +1673,7 @@ async fn discard_session(
             "session is already being merged or discarded",
         );
     };
+    state.terminals.close_session(&id).await;
     stop_and_join(handle).await;
     let _ = state.store.archive_session(&id);
     let errs = {
@@ -2467,6 +2476,7 @@ mod tests {
 
         let state = Arc::new(DaemonState {
             registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -2515,6 +2525,7 @@ mod tests {
         let canonical_root = root.path().canonicalize().unwrap();
         let state = Arc::new(DaemonState {
             registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -2595,6 +2606,7 @@ mod tests {
 
         let state = Arc::new(DaemonState {
             registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store,
             base: "/tok".into(),
             mock: true,
@@ -3141,6 +3153,7 @@ mod tests {
 
         let state = Arc::new(DaemonState {
             registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -3241,6 +3254,7 @@ mod tests {
 
         let state = Arc::new(DaemonState {
             registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -3313,6 +3327,7 @@ mod tests {
 
         let state = Arc::new(DaemonState {
             registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -3370,6 +3385,7 @@ mod tests {
 
         let state = Arc::new(DaemonState {
             registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -3470,6 +3486,7 @@ mod tests {
 
         let state = Arc::new(DaemonState {
             registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(crate::open_store().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -3576,6 +3593,7 @@ mod tests {
         let registry = Arc::new(SessionRegistry::new());
         let state = Arc::new(DaemonState {
             registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(crate::open_store().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -3668,6 +3686,7 @@ mod tests {
     async fn push_routes_degrade_cleanly_without_a_vapid_key() {
         let state = Arc::new(DaemonState {
             registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -3700,6 +3719,7 @@ mod tests {
     async fn apns_routes_degrade_cleanly_without_a_key() {
         let state = Arc::new(DaemonState {
             registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -3765,6 +3785,7 @@ mod tests {
             Arc::new(crate::apns::ApnsNotifier::new_direct(store.clone(), apns_config).unwrap());
         let state = Arc::new(DaemonState {
             registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: store.clone(),
             base: "/tok".into(),
             mock: true,
@@ -3891,6 +3912,7 @@ mod tests {
 
         let state = Arc::new(DaemonState {
             registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: store.clone(),
             base: "/tok".into(),
             mock: true,
@@ -4046,6 +4068,7 @@ mod tests {
             .await;
         let state = Arc::new(DaemonState {
             registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: store.clone(),
             base: "/tok".into(),
             mock: true,
@@ -4410,6 +4433,7 @@ mod tests {
             .await;
         let state = Arc::new(DaemonState {
             registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
             base: "/tok".into(),
             mock: true,
@@ -4694,6 +4718,7 @@ mod tests {
         let sid = handle.session_id.clone();
         let router = daemon_router(Arc::new(DaemonState {
             registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
             store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
             base: "/tok".into(),
             mock: true,

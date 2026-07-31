@@ -30,7 +30,8 @@ export type BridgeRoute =
   | "answer"
   | "push_key"
   | "push_subscribe"
-  | "push_unsubscribe";
+  | "push_unsubscribe"
+  | "list_terminals";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -60,6 +61,14 @@ export interface AnywhereRelay {
     hostId: string;
     sessionId: string;
     revision: number;
+  }): RemoteSocket;
+  openTerminalSocket?(request: {
+    hostId: string;
+    sessionId: string;
+    terminalId: string;
+    cols: number;
+    rows: number;
+    restart: boolean;
   }): RemoteSocket;
 }
 
@@ -108,19 +117,51 @@ export class AnywhereTransport implements RemoteTransport {
   openWebSocket(urlValue: string): RemoteSocket {
     const url = new URL(urlValue);
     assertHost(url, this.hostId);
-    if (url.pathname !== "/ws") {
-      throw new Error("Forge Anywhere only permits the /ws session stream");
+    if (url.pathname !== "/ws" && url.pathname !== "/ws/terminal") {
+      throw new Error("Forge Anywhere only permits session and terminal streams");
     }
     const sessionId = url.searchParams.get("session");
-    const revision = Number(url.searchParams.get("rev") ?? "0");
-    if (!sessionId || !Number.isSafeInteger(revision) || revision < 0) {
-      throw new Error("invalid Forge Anywhere session stream parameters");
+    if (!sessionId) throw new Error("invalid Forge Anywhere stream session");
+    if (url.pathname === "/ws") {
+      const revision = Number(url.searchParams.get("rev") ?? "0");
+      if (!Number.isSafeInteger(revision) || revision < 0) {
+        throw new Error("invalid Forge Anywhere session stream parameters");
+      }
+      return this.relay.openSessionSocket({
+        hostId: this.hostId,
+        sessionId,
+        revision,
+      });
     }
-    return this.relay.openSessionSocket({
-      hostId: this.hostId,
-      sessionId,
-      revision,
-    });
+    if (url.pathname === "/ws/terminal") {
+      if (!this.relay.openTerminalSocket) {
+        throw new Error("Forge Anywhere terminal streaming is unavailable");
+      }
+      const terminalId = url.searchParams.get("terminal") || "term-1";
+      const cols = Number(url.searchParams.get("cols") ?? "80");
+      const rows = Number(url.searchParams.get("rows") ?? "24");
+      const restart = url.searchParams.get("restart") === "true";
+      if (
+        !/^[a-zA-Z0-9_-]{1,64}$/.test(terminalId) ||
+        !Number.isSafeInteger(cols) ||
+        !Number.isSafeInteger(rows) ||
+        cols < 1 ||
+        rows < 1 ||
+        cols > 1_000 ||
+        rows > 1_000
+      ) {
+        throw new Error("invalid Forge Anywhere terminal stream parameters");
+      }
+      return this.relay.openTerminalSocket({
+        hostId: this.hostId,
+        sessionId,
+        terminalId,
+        cols,
+        rows,
+        restart,
+      });
+    }
+    throw new Error("Forge Anywhere only permits session and terminal streams");
   }
 }
 
@@ -157,6 +198,7 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/push/key": { GET: "push_key" },
     "/api/push/subscribe": { POST: "push_subscribe" },
     "/api/push/unsubscribe": { POST: "push_unsubscribe" },
+    "/api/terminals": { GET: "list_terminals" },
   };
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };

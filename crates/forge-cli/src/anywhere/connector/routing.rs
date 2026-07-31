@@ -33,6 +33,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::PushKey => exact(Method::GET, "/api/push/key"),
         RouteId::PushSubscribe => exact(Method::POST, "/api/push/subscribe"),
         RouteId::PushUnsubscribe => exact(Method::POST, "/api/push/unsubscribe"),
+        RouteId::ListTerminals => exact(Method::GET, "/api/terminals"),
         RouteId::ArchiveSession
         | RouteId::ForkSession
         | RouteId::MergeSession
@@ -54,9 +55,11 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
                 query: query_parameter(&request.parameters, 1)?,
             })
         }
-        RouteId::Health | RouteId::SessionSnapshot | RouteId::SessionInput | RouteId::WebSocket => {
-            bail!("route is not an HTTP bridge route")
-        }
+        RouteId::Health
+        | RouteId::SessionSnapshot
+        | RouteId::SessionInput
+        | RouteId::WebSocket
+        | RouteId::TerminalWebSocket => bail!("route is not an HTTP bridge route"),
     }
 }
 

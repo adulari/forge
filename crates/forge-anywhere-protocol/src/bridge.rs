@@ -38,7 +38,9 @@ pub enum RouteId {
     PushKey,
     PushSubscribe,
     PushUnsubscribe,
+    ListTerminals,
     WebSocket,
+    TerminalWebSocket,
 }
 
 /// Authenticated reference to a temporary encrypted relay object.
@@ -140,6 +142,9 @@ pub struct WebSocketFrame {
     pub stream_id: [u8; 16],
     pub direction: FrameDirection,
     pub kind: WebSocketFrameKind,
+    /// Preserve the original WebSocket frame type. Older peers omit this and default to binary.
+    #[serde(default)]
+    pub text: bool,
     #[serde(default)]
     pub bytes: Vec<u8>,
     /// Temporary encrypted object containing `bytes` when it exceeds the inline limit.
@@ -226,6 +231,7 @@ mod tests {
             "kind": "close"
         }))
         .expect("decode legacy frame");
+        assert!(!frame.text);
         assert!(frame.bytes.is_empty());
         assert_eq!(frame.bytes_blob, None);
         assert!(serde_json::to_value(frame)

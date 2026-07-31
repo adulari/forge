@@ -110,6 +110,7 @@ describe("EncryptedAnywhereRelay blobs", () => {
         request_id?: number[];
         bytes?: number[];
         bytes_blob?: { blob_id: string };
+        text?: boolean;
       };
       if (opened.metadata.kind === 1) {
         socket.emit(hostEnvelope(2, { request_id: payload.request_id, status: 200, body: [] }, 50n));
@@ -117,6 +118,7 @@ describe("EncryptedAnywhereRelay blobs", () => {
         expect(opened.metadata.kind).toBe(3);
         expect(payload.bytes).toBeUndefined();
         expect(payload.bytes_blob?.blob_id).toBe(blobId);
+        expect(payload.text).toBe(false);
         resolveFrame?.();
       }
     });
@@ -126,6 +128,79 @@ describe("EncryptedAnywhereRelay blobs", () => {
     await new Promise<void>((resolve) => { socket.onopen = () => resolve(); });
     socket.send(new Uint8Array(INLINE_LIMIT + 1));
     await frameSent;
+  });
+
+  it("preserves text controls and binary PTY frames on terminal streams", async () => {
+    const outbound: { text?: boolean; bytes?: number[] }[] = [];
+    let streamId: number[] = [];
+    installWebSocket((socket, value) => {
+      const opened = openEnvelope(value, dataKey, ed25519.getPublicKey(controllerSeed));
+      const payload = JSON.parse(new TextDecoder().decode(opened.plaintext)) as {
+        request_id?: number[];
+        route?: string;
+        text?: boolean;
+        bytes?: number[];
+      };
+      if (opened.metadata.kind === 1) {
+        expect(payload.route).toBe("terminal_web_socket");
+        streamId = payload.request_id ?? [];
+        socket.emit(hostEnvelope(2, {
+          request_id: streamId,
+          status: 200,
+          body: [],
+        }, 60n));
+        socket.emit(hostEnvelope(3, {
+          stream_id: streamId,
+          direction: "host_to_controller",
+          kind: "data",
+          text: true,
+          bytes: Array.from(new TextEncoder().encode('{"kind":"status","status":"running"}')),
+        }, 61n));
+        socket.emit(hostEnvelope(3, {
+          stream_id: streamId,
+          direction: "host_to_controller",
+          kind: "data",
+          text: false,
+          bytes: [0xff, 0x00, 0x61],
+        }, 62n));
+      } else {
+        expect(opened.metadata.kind).toBe(3);
+        outbound.push(payload);
+      }
+    });
+    globalThis.fetch = vi.fn(async (input) => {
+      if (input.toString().endsWith("/v1/relay/tickets")) {
+        return jsonResponse({ ticket: "ticket" });
+      }
+      throw new Error(`unexpected fetch ${input.toString()}`);
+    }) as typeof fetch;
+
+    const relay = new EncryptedAnywhereRelay(credentials());
+    const socket = relay.openTerminalSocket({
+      hostId: hostIdHex,
+      sessionId: "session",
+      terminalId: "term-2",
+      cols: 100,
+      rows: 30,
+      restart: false,
+    });
+    const received: unknown[] = [];
+    socket.onmessage = (event) => received.push(event.data);
+    await new Promise<void>((resolve) => {
+      socket.onopen = () => {
+        socket.send("pwd\r");
+        socket.send(new Uint8Array([1, 2, 3]));
+        resolve();
+      };
+    });
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+    await vi.waitFor(() => expect(outbound).toHaveLength(2));
+
+    expect(received[0]).toBe('{"kind":"status","status":"running"}');
+    expect(received[1]).toBeInstanceOf(ArrayBuffer);
+    expect(Array.from(new Uint8Array(received[1] as ArrayBuffer))).toEqual([0xff, 0x00, 0x61]);
+    expect(outbound.map((frame) => frame.text)).toEqual([true, false]);
+    expect(outbound[0]?.bytes).toEqual(Array.from(new TextEncoder().encode("pwd\r")));
   });
 
   it("rejects a tampered download without consuming it", async () => {

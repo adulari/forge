@@ -337,20 +337,27 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                 let Some(event) = event else {
                     bail!("local WebSocket event channel closed");
                 };
-                let (stream_id, owner_device_id, kind, bytes) = match event {
-                    LocalSocketEvent::Data { stream_id, owner_device_id, bytes } => {
-                        (stream_id, owner_device_id, WebSocketFrameKind::Data, bytes)
-                    }
-                    LocalSocketEvent::Closed { stream_id, owner_device_id } => {
-                        streams.remove(&stream_id);
-                        (stream_id, owner_device_id, WebSocketFrameKind::Close, Vec::new())
-                    }
-                };
+                    let (stream_id, owner_device_id, kind, bytes, text) = match event {
+                        LocalSocketEvent::Data { stream_id, owner_device_id, bytes, text } => {
+                            (stream_id, owner_device_id, WebSocketFrameKind::Data, bytes, text)
+                        }
+                        LocalSocketEvent::Closed { stream_id, owner_device_id } => {
+                            streams.remove(&stream_id);
+                            (
+                                stream_id,
+                                owner_device_id,
+                                WebSocketFrameKind::Close,
+                                Vec::new(),
+                                false,
+                            )
+                        }
+                    };
                 let mut frame = WebSocketFrame {
                     stream_id,
-                    direction: FrameDirection::HostToController,
-                    kind,
-                    bytes,
+                        direction: FrameDirection::HostToController,
+                        kind,
+                        text,
+                        bytes,
                     bytes_blob: None,
                 };
                 if frame.bytes.len() > MAX_OUTBOUND_INLINE_BODY {
@@ -630,7 +637,10 @@ where
                 request.body_blob = None;
             }
 
-            let mut response = if request.route == RouteId::WebSocket {
+            let mut response = if matches!(
+                request.route,
+                RouteId::WebSocket | RouteId::TerminalWebSocket
+            ) {
                 open_stream(
                     local_base_url,
                     &request,
@@ -731,7 +741,10 @@ where
             match frame.kind {
                 WebSocketFrameKind::Data => handle
                     .commands
-                    .send(LocalSocketCommand::Data(frame.bytes))
+                    .send(LocalSocketCommand::Data {
+                        bytes: frame.bytes,
+                        text: frame.text,
+                    })
                     .await
                     .context("forward controller frame to local daemon")?,
                 WebSocketFrameKind::Close => {
@@ -1329,6 +1342,20 @@ mod tests {
         assert_eq!(target.method, Method::POST);
         assert_eq!(target.path, "/api/sessions/session-1/archive");
         assert_eq!(target.query.as_deref(), Some("force=0"));
+        let terminals = request(RouteId::ListTerminals, "GET", &["?session=session-1"]);
+        let target = route_target(&terminals).expect("terminal metadata route");
+        assert_eq!(target.method, Method::GET);
+        assert_eq!(target.path, "/api/terminals");
+        assert_eq!(target.query.as_deref(), Some("session=session-1"));
+        assert!(
+            route_target(&request(
+                RouteId::TerminalWebSocket,
+                "GET",
+                &["session-1", "term-1", "80", "24", "0"],
+            ))
+            .is_err(),
+            "stream routes never enter the ordinary HTTP bridge"
+        );
         assert!(route_target(&request(RouteId::SessionInput, "POST", &[])).is_err());
     }
 

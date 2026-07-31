@@ -24,11 +24,13 @@ import {
   type WorkbenchSurface,
   type WorkbenchSurfaceKind,
 } from "../workbench/model";
+import { useWorkbench } from "../workbench/WorkbenchProvider";
 import { GitReviewDock } from "../git/GitReviewDock";
 import { BrowserPreviewDock } from "../preview/BrowserPreviewDock";
 import { WorkspaceDock } from "../workspace/WorkspaceDock";
 import { useSessionRow } from "./activeSession";
 import { TerminalDock } from "./TerminalDock";
+import { terminalTitle } from "./terminalModel";
 import { UsageDock } from "./UsageDock";
 
 export type DockKind = WorkbenchSurfaceKind;
@@ -36,6 +38,7 @@ export type DockKind = WorkbenchSurfaceKind;
 export interface DockContext {
   sessionId: string | null;
   surface: WorkbenchSurface | null;
+  openTerminal: (terminalId: string) => void;
 }
 
 interface DockDefinition {
@@ -60,7 +63,13 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
       sessionId && surface ? <BrowserPreviewDock sessionId={sessionId} surface={surface} /> : null,
   },
   terminal: {
-    render: ({ sessionId }) => <TerminalDock sessionId={sessionId} />,
+    render: ({ sessionId, surface, openTerminal }) => (
+      <TerminalDock
+        sessionId={sessionId}
+        terminalId={surface?.resourceId ?? "term-1"}
+        onOpenTerminal={openTerminal}
+      />
+    ),
   },
 };
 
@@ -90,10 +99,23 @@ export function DockHost({
   onClose,
 }: DockHostProps) {
   const tokens = useTokens();
+  const workbench = useWorkbench();
   const kind = surface?.kind ?? dock;
   const definition = DOCK_REGISTRY[kind];
   const surfaceDefinition = WORKBENCH_SURFACE_DEFINITIONS[kind];
   const effectiveSessionId = surface?.sessionId ?? sessionId;
+  const openTerminal = useCallback(
+    (terminalId: string) => {
+      if (!effectiveSessionId) return;
+      workbench.openSurface({
+        kind: "terminal",
+        sessionId: effectiveSessionId,
+        resourceId: terminalId,
+        title: terminalTitle(terminalId),
+      });
+    },
+    [effectiveSessionId, workbench],
+  );
   const row = useSessionRow(surfaceDefinition.sessionScoped ? effectiveSessionId : null);
   const [height, setHeight] = useState(surfaceDefinition.defaultSize);
   // Drag bookkeeping lives entirely in handlers (never read during render): `height` mirrors
@@ -207,7 +229,7 @@ export function DockHost({
         />
         {header(true)}
         <View style={styles.body}>
-          {definition.render({ sessionId: effectiveSessionId, surface })}
+          {definition.render({ sessionId: effectiveSessionId, surface, openTerminal })}
         </View>
       </View>
     );
@@ -226,7 +248,7 @@ export function DockHost({
     >
       {header(false)}
       <View style={styles.body}>
-        {definition.render({ sessionId: effectiveSessionId, surface })}
+        {definition.render({ sessionId: effectiveSessionId, surface, openTerminal })}
       </View>
     </View>
   );

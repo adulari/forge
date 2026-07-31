@@ -133,4 +133,45 @@ describe("AnywhereTransport", () => {
     expect(() => transport.openWebSocket("fany-ws://host-1/admin"))
       .toThrow("only permits");
   });
+
+  it("maps terminal metadata and a validated terminal socket to typed relay routes", async () => {
+    const bridgeRequests: AnywhereBridgeRequest[] = [];
+    let terminalRequest: Parameters<NonNullable<AnywhereRelay["openTerminalSocket"]>>[0] | null =
+      null;
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        bridgeRequests.push(request);
+        return { status: 200, body: new TextEncoder().encode("[]") };
+      },
+      openSessionSocket: socket,
+      openTerminalSocket: (request) => {
+        terminalRequest = request;
+        return socket();
+      },
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+
+    await transport.fetch("fany://host-1/api/terminals?session=session-7");
+    transport.openWebSocket(
+      "fany-ws://host-1/ws/terminal?session=session-7&terminal=term-3&cols=120&rows=42&restart=true",
+    );
+
+    expect(bridgeRequests[0]).toMatchObject({
+      route: "list_terminals",
+      parameters: ["?session=session-7"],
+    });
+    expect(terminalRequest).toEqual({
+      hostId: "host-1",
+      sessionId: "session-7",
+      terminalId: "term-3",
+      cols: 120,
+      rows: 42,
+      restart: true,
+    });
+    expect(() =>
+      transport.openWebSocket(
+        "fany-ws://host-1/ws/terminal?session=session-7&terminal=bad%2Fid&cols=80&rows=24",
+      ),
+    ).toThrow("invalid Forge Anywhere terminal stream parameters");
+  });
 });

@@ -92,6 +92,7 @@ interface WebSocketPayload {
   stream_id: number[];
   direction: "controller_to_host" | "host_to_controller";
   kind: "data" | "close";
+  text?: boolean;
   bytes?: number[];
   bytes_blob?: RelayBlobReference;
 }
@@ -155,15 +156,48 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     sessionId: string;
     revision: number;
   }): RemoteSocket {
+    return this.openSocket(request.hostId, "web_socket", [
+      request.sessionId,
+      request.revision.toString(),
+    ]);
+  }
+
+  openTerminalSocket(request: {
+    hostId: string;
+    sessionId: string;
+    terminalId: string;
+    cols: number;
+    rows: number;
+    restart: boolean;
+  }): RemoteSocket {
+    return this.openSocket(request.hostId, "terminal_web_socket", [
+      request.sessionId,
+      request.terminalId,
+      request.cols.toString(),
+      request.rows.toString(),
+      request.restart ? "1" : "0",
+    ]);
+  }
+
+  private openSocket(
+    hostId: string,
+    route: "web_socket" | "terminal_web_socket",
+    parameters: string[],
+  ): RemoteSocket {
     const streamId = this.credentials.randomBytes(16);
     assertLength("stream id", streamId, 16);
-    const socket = new AnywhereRemoteSocket(streamId, request.hostId, this);
+    const socket = new AnywhereRemoteSocket(
+      streamId,
+      hostId,
+      route === "terminal_web_socket",
+      this,
+    );
     this.streams.set(bytesToHex(streamId), socket);
-    void this.sendBridgeRequest(request.hostId, {
+    void this.sendBridgeRequest(hostId, {
       request_id: Array.from(streamId),
-      route: "web_socket",
+      route,
       method: "GET",
-      parameters: [request.sessionId, request.revision.toString()],
+      parameters,
       headers: [],
       body: [],
     }).then(
@@ -184,6 +218,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
         stream_id: payload.stream_id,
         direction: payload.direction,
         kind: payload.kind,
+        text: payload.text,
         bytes_blob: await this.uploadBlob(hostId, frameBytes),
       };
     }
@@ -524,6 +559,12 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
   private async prepareStreamFrame(plaintext: Uint8Array, senderId: string): Promise<PreparedDelivery> {
     const payload = JSON.parse(new TextDecoder().decode(plaintext)) as WebSocketPayload;
     if (payload.direction !== "host_to_controller") throw new Error("invalid Anywhere stream direction");
+    if (payload.kind !== "data" && payload.kind !== "close") {
+      throw new Error("invalid Anywhere stream frame kind");
+    }
+    if (payload.text !== undefined && typeof payload.text !== "boolean") {
+      throw new Error("invalid Anywhere stream frame type");
+    }
     const streamId = new Uint8Array(payload.stream_id);
     assertLength("stream id", streamId, 16);
     const stream = this.streams.get(bytesToHex(streamId));
@@ -548,7 +589,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       precedingSequences: preparedBlob === undefined ? undefined : [preparedBlob.sequence],
       deliver: () => {
         if (payload.kind === "close") stream.remoteClose();
-        else stream.receive(frameBytes);
+        else stream.receive(frameBytes, payload.text);
       },
     };
   }
@@ -567,6 +608,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
 
 class AnywhereRemoteSocket implements RemoteSocket {
   private state: number = WebSocket.CONNECTING;
+  private readonly textDecoder = new TextDecoder();
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
@@ -575,6 +617,7 @@ class AnywhereRemoteSocket implements RemoteSocket {
   constructor(
     private readonly streamId: Uint8Array,
     private readonly hostId: string,
+    private readonly binaryByDefault: boolean,
     private readonly relay: EncryptedAnywhereRelay,
   ) {}
 
@@ -588,9 +631,12 @@ class AnywhereRemoteSocket implements RemoteSocket {
     this.onopen?.({ type: "open" } as Event);
   }
 
-  receive(bytes: Uint8Array): void {
+  receive(bytes: Uint8Array, text = !this.binaryByDefault): void {
     if (this.state !== WebSocket.OPEN) return;
-    this.onmessage?.({ data: new TextDecoder().decode(bytes), type: "message" } as MessageEvent);
+    const data = text
+      ? this.textDecoder.decode(bytes, { stream: true })
+      : bytes.slice().buffer;
+    this.onmessage?.({ data, type: "message" } as MessageEvent);
   }
 
   send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
@@ -600,6 +646,7 @@ class AnywhereRemoteSocket implements RemoteSocket {
         stream_id: Array.from(this.streamId),
         direction: "controller_to_host",
         kind: "data",
+        text: typeof data === "string",
         bytes: Array.from(bytes),
       }),
     ).catch((error) => this.fail(asError(error)));
