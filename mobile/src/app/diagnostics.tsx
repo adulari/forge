@@ -1,4 +1,5 @@
 import * as Clipboard from "expo-clipboard";
+import * as Updates from "expo-updates";
 import React, { useCallback, useEffect, useMemo } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 
@@ -64,6 +65,7 @@ export default function DiagnosticsScreen() {
   const query = useDiagnostics();
   const appVersion = useAppVersion();
   const update = useDesktopUpdateState();
+  const nativeRuntimeVersion = Updates.runtimeVersion ?? null;
   const diagnostics = query.data;
   const compatibility = useMemo(
     () => assessCompatibility(
@@ -109,11 +111,17 @@ export default function DiagnosticsScreen() {
 
   const copySummary = useCallback(() => {
     if (!diagnostics) return;
-    const summary = buildSupportSummary(diagnostics, appVersion, PROTOCOL_VERSION, update);
+    const summary = buildSupportSummary(
+      diagnostics,
+      appVersion,
+      PROTOCOL_VERSION,
+      update,
+      nativeRuntimeVersion,
+    );
     void Clipboard.setStringAsync(summary)
       .then(() => toast.show("Copied sanitized support summary.", { tone: "neutral" }))
       .catch(() => toast.show("couldn't copy the support summary.", { tone: "danger" }));
-  }, [appVersion, diagnostics, toast, update]);
+  }, [appVersion, diagnostics, nativeRuntimeVersion, toast, update]);
 
   const oldDaemon = query.error instanceof ApiError && query.error.status === 404;
 
@@ -173,6 +181,12 @@ export default function DiagnosticsScreen() {
                   title={`App v${appVersion}`}
                   subtitle={`Remote protocol v${PROTOCOL_VERSION}`}
                 />
+                {nativeRuntimeVersion ? (
+                  <ListRow
+                    title={nativeRuntimeVersion}
+                    subtitle="Embedded native/OTA runtime fingerprint"
+                  />
+                ) : null}
                 <ListRow
                   title={`Daemon v${diagnostics.host.version}`}
                   subtitle={`Remote protocol v${diagnostics.host.protocol}`}

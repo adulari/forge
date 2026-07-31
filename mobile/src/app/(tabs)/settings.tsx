@@ -119,13 +119,14 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/appearance" | "/keybindings" | "/diagnostics" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
+type SettingsRoute = "/settings" | "/appearance" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
   { key: "appearance", label: "Appearance", href: "/appearance" },
   { key: "keybindings", label: "Keyboard shortcuts", href: "/keybindings" },
   { key: "diagnostics", label: "Diagnostics & updates", href: "/diagnostics" },
+  { key: "legal", label: "Legal & support", href: "/legal" },
   { key: "anywhere", label: "Forge Anywhere", href: "/anywhere" },
   { key: "usage", label: "Usage", href: "/usage" },
   { key: "providers", label: "Providers & accounts", href: "/providers" },
@@ -740,6 +741,11 @@ export function SettingsScreen() {
                     : "Compatibility, host health, resources, and support details"
             }
             onPress={() => router.push("/diagnostics")}
+          />
+          <ListRow
+            title="Legal & support"
+            subtitle="Privacy policy, license, source, and issue tracker"
+            onPress={() => router.push("/legal")}
             showSeparator={false}
           />
         </View>

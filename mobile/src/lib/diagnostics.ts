@@ -71,6 +71,7 @@ export function buildSupportSummary(
   clientVersion: string,
   clientProtocol: number,
   update: DesktopUpdateState,
+  nativeRuntimeVersion: string | null = null,
 ): string {
   const { host, resources, runtime } = diagnostics;
   const checks = diagnostics.checks
@@ -79,7 +80,7 @@ export function buildSupportSummary(
     .join(", ");
   return [
     "Forge sanitized support summary",
-    `client=${clientVersion} protocol=${clientProtocol}`,
+    `client=${clientVersion} protocol=${clientProtocol} native_runtime=${nativeRuntimeVersion ?? "unavailable"}`,
     `daemon=${host.version} protocol=${host.protocol}`,
     `platform=${host.os}/${host.arch} pid=${host.pid} uptime_s=${host.process_uptime_secs}`,
     `process_memory_b=${resources.process_memory_bytes} process_virtual_b=${resources.process_virtual_memory_bytes}`,

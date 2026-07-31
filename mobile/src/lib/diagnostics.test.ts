@@ -71,15 +71,22 @@ describe("assessCompatibility", () => {
 
 describe("buildSupportSummary", () => {
   it("copies only fixed aggregate fields and known check statuses", () => {
-    const summary = buildSupportSummary(diagnostics, "1.5.0", 9, {
-      phase: "available",
-      checkedAt: 123,
-      availableVersion: "1.6.0",
-      body: "release secret",
-      message: "connection token",
-    });
+    const summary = buildSupportSummary(
+      diagnostics,
+      "1.5.0",
+      9,
+      {
+        phase: "available",
+        checkedAt: 123,
+        availableVersion: "1.6.0",
+        body: "release secret",
+        message: "connection token",
+      },
+      "runtime-fingerprint",
+    );
 
     expect(summary).toContain("daemon=1.4.0 protocol=9");
+    expect(summary).toContain("native_runtime=runtime-fingerprint");
     expect(summary).toContain("Git=ok");
     expect(summary).toContain("desktop_update=available:1.6.0");
     expect(summary).not.toContain("secret-hostname");

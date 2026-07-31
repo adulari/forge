@@ -16,6 +16,7 @@ import { Platform, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { HostDot } from "../components/anywhere/HostDot";
+import { Banner } from "../components/ds/Banner";
 import { Button } from "../components/ds/Button";
 import { IconButton } from "../components/ds/IconButton";
 import { ListRow } from "../components/ds/ListRow";
@@ -32,6 +33,8 @@ import { hostStateText } from "../lib/anywhere/format";
 import { anywhereClient, useAnywhere, useAnywhereHosts } from "../lib/anywhere/store";
 import type { AnywhereHost } from "../lib/anywhere/types";
 import { useAuth } from "../lib/auth";
+import { useIncomingShare } from "../lib/incomingShare";
+import { appendIncomingShareText } from "../lib/incomingShareCore";
 import { goBackOr } from "../lib/nav";
 import { lastProjectStorageKey } from "../lib/projectSelection";
 import { useCreateSession, useProjects } from "../lib/queries";
@@ -149,13 +152,22 @@ export default function NewSessionScreen() {
   const tokens = useTokens();
   const { scheme } = useTheme();
   const { isCompact } = useBreakpoint();
-  const params = useLocalSearchParams<{ cwd?: string | string[]; title?: string | string[] }>();
+  const params = useLocalSearchParams<{
+    cwd?: string | string[];
+    title?: string | string[];
+    incomingShare?: string | string[];
+  }>();
   const requestedCwd = Array.isArray(params.cwd) ? params.cwd[0] : params.cwd;
   // Fleet/rail TaskComposer hands its typed text over as ?title= — the composer IS the
   // new-session affordance (HANDOFF rule 6), so that text must survive the navigation.
   const requestedTitle = Array.isArray(params.title) ? params.title[0] : params.title;
+  const incomingShareId = Array.isArray(params.incomingShare)
+    ? params.incomingShare[0]
+    : params.incomingShare;
+  const { pendingShare, consumeShare } = useIncomingShare();
   const { activeServerId, servers } = useAuth();
   const projects = useProjects();
+  const importedShareId = useRef<string | null>(null);
   const initializedProjectKey = useRef<string | null>(null);
   const projectSelectionRevision = useRef(0);
   const [cwd, setCwd] = useState(requestedCwd ?? "");
@@ -165,6 +177,17 @@ export default function NewSessionScreen() {
   const [temper, setTemper] = useState<Temper>("Ask");
   const create = useCreateSession();
   const toast = useToast();
+
+  useEffect(() => {
+    if (
+      incomingShareId
+      && pendingShare?.id === incomingShareId
+      && importedShareId.current !== incomingShareId
+    ) {
+      importedShareId.current = incomingShareId;
+      setTask((current) => appendIncomingShareText(current, pendingShare.text));
+    }
+  }, [incomingShareId, pendingShare]);
 
   // Forge Anywhere: "Host" row only appears once signed in with at least one host —
   // zero visual/behavioral change otherwise.
@@ -222,6 +245,7 @@ export default function NewSessionScreen() {
       anywhereClient
         .queueJob({ hostId: host.id, prompt: task.trim() })
         .then(() => {
+          if (incomingShareId) void consumeShare(incomingShareId);
           toast.show(`queued for ${host.name}`);
           router.push("/anywhere/jobs");
         })
@@ -244,12 +268,13 @@ export default function NewSessionScreen() {
       },
       {
         onSuccess: (res) => {
+          if (incomingShareId) void consumeShare(incomingShareId);
           if (activeServerId) void setSecureItem(lastProjectStorageKey(activeServerId), res.cwd);
           router.replace(`/session/${res.id}`);
         },
       },
     );
-  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktree, temper, activeServerId]);
+  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktree, temper, activeServerId, consumeShare, incomingShareId]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
 
@@ -275,6 +300,18 @@ export default function NewSessionScreen() {
   const submitPending = isOfflineHostQueue ? queuing : create.isPending;
   const canSubmit = !submitPending;
   const submitLabel = isOfflineHostQueue ? "Queue remote job" : "Forge session";
+  const sharedCallout = incomingShareId && pendingShare?.id === incomingShareId ? (
+    <Banner
+      compact
+      tone="neutral"
+      message="Shared text is stored only on this device until you forge or discard it."
+      actionLabel="Discard"
+      onAction={() => {
+        setTask("");
+        void consumeShare(incomingShareId);
+      }}
+    />
+  ) : null;
 
   const whereAndHow = (
     <View>
@@ -342,6 +379,7 @@ export default function NewSessionScreen() {
 
         <Screen edges={["left", "right", "bottom"]} scroll keyboardAvoiding contentContainerStyle={styles.content}>
           <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} onSubmitKey={handleSubmit} />
+          {sharedCallout}
           {whereAndHow}
           <View style={styles.spacer} />
           <Button
@@ -381,6 +419,7 @@ export default function NewSessionScreen() {
         </View>
 
         <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} onSubmitKey={handleSubmit} wide />
+        {sharedCallout}
         {whereAndHow}
 
         <View style={styles.modalFooterRow}>

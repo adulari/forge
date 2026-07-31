@@ -16,6 +16,9 @@ As of 2026-07-17, the Apple Developer membership, App Store Connect app, Xcode C
 production OTA bootstrap, and TestFlight OTA delivery have all been exercised. TestFlight build
 74 was the installed binary used while verifying the latest OTA fixes. Do not interpret that as
 proof that every future native or OTA release is compatible; run the checks below for each one.
+As of 2026-07-31, the Android workflow has still never completed a GitHub Actions run and the
+installed-archive source baseline is not configured; neither distribution path may be called
+verified until its unchecked gates below pass.
 
 ## Checked-in release configuration
 
@@ -25,6 +28,12 @@ proof that every future native or OTA release is compatible; run the checks belo
       `app.config.ts`.
 - [x] Camera, photo-library, microphone, Face ID, document access, App Group, Live Activity, and
       export-compliance declarations are present.
+- [x] The iOS text/URL share extension and Android `text/plain` share intent are generated from
+      `app.config.ts`; the Xcode Cloud entitlement guard verifies the extension bundle, activation
+      rules, main-app handoff marker, and shared App Group.
+- [x] Android notifications use a dedicated white-mask status icon, Forge tint, and
+      `forge-sessions` default channel.
+- [x] `npx expo install --check` accepts the Expo SDK 57 / React Native dependency set.
 - [x] The privacy manifest is declared through `ios.privacyManifests` and checked in as
       [`PrivacyInfo.xcprivacy`](../../mobile/PrivacyInfo.xcprivacy).
 - [x] `expo-splash-screen` has light and dark launch backgrounds.
@@ -69,6 +78,8 @@ Before App Store submission:
       analytics property, relay payload, or stored data.
 - [ ] Ensure the privacy policy and App Review notes disclose the hosted notification relay and
       user-selected tunnel rather than making a blanket “no third party sees session data” claim.
+- [ ] Publish and review the in-app-linked
+      [mobile privacy policy](PRIVACY.md); keep the public URL stable for both stores.
 
 ## Signed iOS and TestFlight (Xcode Cloud)
 
@@ -85,13 +96,17 @@ been removed.
       `scripts/trigger-ios-build.mjs`; set `TESTFLIGHT_GROUPS` so the processed build is assigned to
       testers automatically. If the build was triggered separately, run
       `scripts/testflight-assign-group.mjs` or dispatch `testflight-autogroup.yml`.
+- [ ] Confirm automatic signing registered `dev.adulari.forge.sharing`, embedded the share
+      extension, and provisioned `group.dev.adulari.forge` for both the app and extension.
 - [ ] Confirm the Xcode Cloud archive succeeded, Apple finished processing it, the intended beta
       group can install it, and its marketing/build versions exceed the previously uploaded pair.
 - [ ] On a physical device, smoke-test cold launch, pairing, session creation/chat, permission and
       question prompts, background/foreground reconnect, attachments, voice input, Face ID,
-      widget, Live Activity, and native push.
+      widget, Live Activity, native push, Share → Forge for text and a web URL, pending-share
+      recovery after relaunch, and every Legal & support link.
 - [ ] Keep App Store screenshots, description, keywords, Developer Tools category, support URL,
-      copyright, age rating, and reviewer contact current.
+      copyright, age rating, and reviewer contact current. Use the version-controlled
+      [store listing and screenshot matrix](STORE_LISTING.md) as the source draft.
 
 The App Store reviewer has no Forge daemon by default. Provide a short-lived, sandboxed demo:
 
@@ -109,13 +124,14 @@ The App Store reviewer has no Forge daemon by default. Provide a short-lived, sa
 EAS Update publishes iOS JavaScript and assets only. The workflow validates the complete diff from
 the reviewed installed-runtime baseline, not merely the files in the triggering commit.
 
-- [ ] Repository variable `IOS_OTA_COMPATIBLE_BASE_SHA` is not configured yet. Set it to the
-      reviewed installed archive's source commit before the next production OTA; keep the workflow
-      fail-closed until that baseline and `IOS_OTA_RUNTIME_VERSION` are both verified.
+- [ ] After the next native archive is installed, set repository variable
+      `IOS_OTA_COMPATIBLE_BASE_SHA` to that archive's exact source commit. It is intentionally
+      missing as of 2026-07-31, so the repaired workflow fails closed instead of trusting only the
+      latest push.
 - [ ] Before publication, confirm the baseline is the newest commit whose complete mobile diff has
       been reviewed as compatible with the installed Xcode archive, and the runtime value is that
-      archive's exact Expo fingerprint. Initially the baseline is the archive source commit; it may
-      advance without a rebuild only after that compatibility review.
+      archive's exact Expo fingerprint shown in Settings → Diagnostics & updates. Advance the
+      baseline only to a source commit actually represented by the installed native binary.
 - [ ] Use OTA only when every iOS-relevant change since the baseline is JavaScript, assets, tests,
       docs, Android-only config, or independent Tauri-shell code accepted by
       `eas-update.yml`'s guard. Native dependencies, Expo/RN upgrades, config plugins,
@@ -125,7 +141,8 @@ the reviewed installed-runtime baseline, not merely the files in the triggering 
       twice and verify the expected behavior. Keep the preceding embedded bundle usable in case the
       update cannot load.
 - [ ] Use `gh workflow run eas-update.yml --ref main` only to recover a failed automatic
-      publication from the current `main`; manual dispatch cannot bypass the compatibility guard.
+      publication from current `main`; manual dispatch uses the same installed-archive baseline and
+      cannot bypass the compatibility guard.
 
 ## APNs, widgets, and Live Activities
 

@@ -539,9 +539,9 @@ available separately via `install.ps1` below.
 
 The fastest mobile install is the PWA served by `forge serve`: open or scan its URL, then use
 **Add to Home Screen** on iOS Safari or Android Chrome. The native Expo app adds camera QR pairing,
-secure token storage, attachment and voice capture, actionable push notifications, and iOS
-Live Activities/Dynamic Island. It receives compatible JavaScript fixes through the production
-OTA channel without replacing the native binary.
+secure token storage, attachment and voice capture, Share-to-Forge text/URL handoff, actionable push
+notifications, and iOS Live Activities/Dynamic Island. It receives compatible JavaScript fixes
+through the production OTA channel without replacing the native binary.
 
 Unsigned iOS sideload builds and their SideStore manifests are published from protected `main`
 against existing `mobile-v*` tags. The live SideStore source is

@@ -46,6 +46,7 @@ import { isTauri, isWeb } from "../lib/platform";
 import { checkDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useDesktopMenuAction } from "../lib/desktopMenu";
+import { IncomingShareProvider } from "../lib/incomingShare";
 import {
   useAppShortcut,
   useGlobalShortcuts,
@@ -86,12 +87,12 @@ const asyncStoragePersister = createAsyncStoragePersister({
 // Hearth: settings-family routes bring their own 240px nav rail (SettingsShell), so the
 // persistent Fleet rail collapses there — one rail on screen at a time. Connect is a
 // full-bleed pairing screen on every surface.
-const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
+const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|legal|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
 
 // Reachable without a paired daemon: /shares/[id] is a public read-only replay link
-// (no sign-in, no server), and /anywhere/* is the relay onboarding Connect itself
-// deep-links into before any Direct server exists.
-const UNPAIRED_ROUTES = /^\/(shares|anywhere)(\/|$)/;
+// (no sign-in, no server), /anywhere/* is the relay onboarding Connect itself deep-links into
+// before any Direct server exists, and /legal keeps privacy/support available before pairing.
+const UNPAIRED_ROUTES = /^\/(shares|anywhere|legal)(\/|$)/;
 
 function RootNavigator() {
   const { isLoading, isPaired } = useAuth();
@@ -197,6 +198,7 @@ function RootNavigator() {
         <Stack.Screen name="appearance" />
           <Stack.Screen name="keybindings" />
           <Stack.Screen name="diagnostics" />
+          <Stack.Screen name="legal" />
         <Stack.Screen name="models" />
         <Stack.Screen name="session-tree" />
 
@@ -324,27 +326,29 @@ export default function RootLayout() {
               <RealAnywhereProvider>
                 <LegacyAnywhereProvider>
                   <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
-                  <ToastHost>
-                    <AnonymousTelemetry />
-                    <FleetWatcher />
-                    {/* Inside the query provider because it reads the daemon's changelog, and above
-                        the navigator so it is not tied to whichever tab happens to be open. */}
-                    <UpdateNotice />
-                    {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
-                        `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
-                    <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
-                      <OperationalNotice />
-                      <PaletteHost>
-                        <WorkbenchProvider>
-                          <AppLock>
-                            <RootNavigator />
-                          </AppLock>
-                          {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
-                          <DesktopWindowChrome />
-                        </WorkbenchProvider>
-                      </PaletteHost>
-                    </View>
-                  </ToastHost>
+                    <ToastHost>
+                      <IncomingShareProvider>
+                        <AnonymousTelemetry />
+                        <FleetWatcher />
+                        {/* Inside the query provider because it reads the daemon's changelog, and above
+                            the navigator so it is not tied to whichever tab happens to be open. */}
+                        <UpdateNotice />
+                        {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
+                            `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
+                        <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
+                          <OperationalNotice />
+                          <PaletteHost>
+                            <WorkbenchProvider>
+                              <AppLock>
+                                <RootNavigator />
+                              </AppLock>
+                              {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
+                              <DesktopWindowChrome />
+                            </WorkbenchProvider>
+                          </PaletteHost>
+                        </View>
+                      </IncomingShareProvider>
+                    </ToastHost>
                   </PersistQueryClientProvider>
                 </LegacyAnywhereProvider>
               </RealAnywhereProvider>
