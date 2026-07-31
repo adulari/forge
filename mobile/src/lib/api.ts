@@ -208,6 +208,21 @@ export interface PastSessionRow {
   preview: string | null;
 }
 
+export interface SessionSearchResult {
+  id: string;
+  title: string;
+  cwd: string;
+  archived: boolean;
+  running: boolean;
+  message_count: number;
+  cost_usd: number;
+  last_activity: number;
+  match_source: "title" | "cwd" | "id" | "message";
+  match_seq: number | null;
+  match_role: "user" | "assistant" | null;
+  match_excerpt: string | null;
+}
+
 /** Mirrors `TranscriptKind` in lib/ws.ts — same vocabulary on both wires, declared here so the
  * HTTP client keeps no dependency on the socket module. */
 export type TranscriptKind = "user" | "assistant" | "tool" | "system";
@@ -519,6 +534,31 @@ export function getPastSessions(
   params: { limit?: number; before?: number } = {},
 ): Promise<PastSessionRow[]> {
   return request(baseUrl, `/api/sessions/past${qs(params)}`);
+}
+
+export function searchSessions(
+  baseUrl: string,
+  query: string,
+  limit = 30,
+): Promise<SessionSearchResult[]> {
+  return request(baseUrl, `/api/sessions/search${qs({ q: query, limit })}`);
+}
+
+export function renameSession(
+  baseUrl: string,
+  id: string,
+  title: string,
+): Promise<OkResponse & { title: string }> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export function deleteSession(baseUrl: string, id: string): Promise<OkResponse> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function archiveSession(baseUrl: string, id: string): Promise<OkResponse> {

@@ -48,6 +48,47 @@ describe("AnywhereTransport", () => {
     expect(captured[0]?.route).toBe("list_sessions");
   });
 
+  it("maps global search and session lifecycle requests without widening the allowlist", async () => {
+    const captured: AnywhereBridgeRequest[] = [];
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        captured.push(request);
+        return { status: 200, body: new TextEncoder().encode("{}") };
+      },
+      openSessionSocket: socket,
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+
+    await transport.fetch("fany://host-1/api/sessions/search?q=needle&limit=30");
+    await transport.fetch("fany://host-1/api/sessions/session_7", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Renamed" }),
+    });
+    await transport.fetch("fany://host-1/api/sessions/session_7", { method: "DELETE" });
+
+    expect(captured.map(({ route, method, parameters }) => ({ route, method, parameters }))).toEqual([
+      {
+        route: "search_sessions",
+        method: "GET",
+        parameters: ["?q=needle&limit=30"],
+      },
+      {
+        route: "rename_session",
+        method: "PATCH",
+        parameters: ["session_7"],
+      },
+      {
+        route: "delete_session",
+        method: "DELETE",
+        parameters: ["session_7"],
+      },
+    ]);
+    await expect(
+      transport.fetch("fany://host-1/api/sessions/unsafe%2Fid", { method: "DELETE" }),
+    ).rejects.toThrow("invalid Forge Anywhere session path parameter");
+  });
+
   it("relays a FormData body as real multipart bytes with a matching boundary", async () => {
     const captured: AnywhereBridgeRequest[] = [];
     const relay: AnywhereRelay = {

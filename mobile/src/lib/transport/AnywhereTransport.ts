@@ -10,6 +10,9 @@ export type BridgeRoute =
   | "session_input"
   | "archive_session"
   | "past_sessions"
+  | "search_sessions"
+  | "rename_session"
+  | "delete_session"
   | "session_tree"
   | "fork_session"
   | "merge_session"
@@ -102,7 +105,7 @@ export class AnywhereTransport implements RemoteTransport {
     const response = await this.relay.request({
       hostId: this.hostId,
       route: mapping.route,
-      parameters: [...mapping.parameters, url.search],
+      parameters: url.search ? [...mapping.parameters, url.search] : mapping.parameters,
       method,
       headers: Array.from(headers.entries()),
       body: encoded.bytes,
@@ -177,10 +180,24 @@ function assertHost(url: URL, hostId: string): void {
   }
 }
 
+function sessionPathParameter(encoded: string): string {
+  let value: string;
+  try {
+    value = decodeURIComponent(encoded);
+  } catch {
+    throw new Error("invalid Forge Anywhere session path parameter");
+  }
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new Error("invalid Forge Anywhere session path parameter");
+  }
+  return value;
+}
+
 function routeFor(path: string, method: string): { route: BridgeRoute; parameters: string[] } {
   const exact: Record<string, Partial<Record<string, BridgeRoute>>> = {
     "/api/sessions": { GET: "list_sessions", POST: "create_session" },
     "/api/sessions/past": { GET: "past_sessions" },
+    "/api/sessions/search": { GET: "search_sessions" },
     "/api/sessions/tree": { GET: "session_tree" },
     "/api/projects": { GET: "list_projects" },
     "/api/projects/browse": { GET: "browse_projects" },
@@ -213,7 +230,19 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     };
     const expectedMethod = "POST";
     if (method === expectedMethod) {
-      return { route: operation[session[2]], parameters: [decodeURIComponent(session[1])] };
+      return { route: operation[session[2]], parameters: [sessionPathParameter(session[1])] };
+    }
+  }
+  const sessionMetadata = path.match(/^\/api\/sessions\/([^/]+)$/);
+  if (sessionMetadata) {
+    const route =
+      method === "PATCH"
+        ? "rename_session"
+        : method === "DELETE"
+          ? "delete_session"
+          : null;
+    if (route) {
+      return { route, parameters: [sessionPathParameter(sessionMetadata[1])] };
     }
   }
   throw new Error(`Forge Anywhere route is not allowlisted: ${method} ${path}`);

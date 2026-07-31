@@ -82,6 +82,7 @@ import {
   forkSession,
   answer as apiAnswer,
   archiveSession,
+  deleteSession,
   type CreateSessionRequest,
   createSession,
   discardSession,
@@ -90,6 +91,8 @@ import {
   type UsageResponse,
   getPastSessions,
   getSessions,
+  renameSession,
+  searchSessions,
   getProjects,
   browseProjects,
   type ProjectCatalog,
@@ -132,6 +135,10 @@ function keys(baseUrl: string | null) {
     projectBrowse: (path?: string) => ["projects", "browse", baseUrl, path ?? "default"] as const,
     sessionTree: ["sessions", "tree", baseUrl] as const,
     pastSessions: ["sessions", "past", baseUrl] as const,
+    sessionSearch: (query?: string, limit?: number) =>
+      query === undefined
+        ? (["sessions", "search", baseUrl] as const)
+        : (["sessions", "search", baseUrl, query, limit ?? 30] as const),
     // A tools page and a plain page are DIFFERENT row sets (and different `elapsed_ms` zero
     // points), so they get separate cache entries. The tools key extends the plain one, so the
     // prefix invalidation below still refreshes both after a turn completes.
@@ -240,6 +247,29 @@ export function usePastSessions() {
         ? undefined
         : lastPage[lastPage.length - 1]?.last_activity,
   });
+}
+
+/** Server-side search across every session's title/path/id and user-facing transcript. */
+export function useSessionSearch(query: string, limit = 30) {
+  const { baseUrl } = useAuth();
+  const normalized = query.trim();
+  const [debounced, setDebounced] = useState(normalized);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(normalized), 180);
+    return () => clearTimeout(timer);
+  }, [normalized]);
+  const settledQuery = normalized === debounced ? debounced : "";
+  const result = useQuery({
+    queryKey: keys(baseUrl).sessionSearch(settledQuery, limit),
+    queryFn: () => searchSessions(baseUrl as string, settledQuery, limit),
+    enabled: baseUrl != null && settledQuery.length >= 2,
+    staleTime: 15_000,
+  });
+  return {
+    ...result,
+    settledQuery,
+    isDebouncing: normalized.length >= 2 && settledQuery.length === 0,
+  };
 }
 
 /** Transcript history for a session, infinite upward by `before` = oldest seq.
@@ -616,6 +646,36 @@ export function useArchiveSession() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions });
       queryClient.invalidateQueries({ queryKey: keys(baseUrl).pastSessions });
+    },
+  });
+}
+
+export function useRenameSession() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) =>
+      renameSession(baseUrl as string, id, title),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).pastSessions });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionSearch() });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionTree });
+    },
+  });
+}
+
+export function useDeleteSession() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => deleteSession(baseUrl as string, id),
+    onSuccess: (_response, id) => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).pastSessions });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionSearch() });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionTree });
+      queryClient.removeQueries({ queryKey: keys(baseUrl).history(id) });
     },
   });
 }

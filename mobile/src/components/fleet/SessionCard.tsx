@@ -7,7 +7,7 @@
 // and discard warnings never render as a generic toast (FEATURES.md §1.1), they get their
 // own result sheet.
 import { router } from "expo-router";
-import { Archive, GitMerge, Trash2 } from "lucide-react-native";
+import { Archive, GitMerge, MoreHorizontal, Settings2, Trash2 } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
@@ -24,7 +24,7 @@ import { haptics } from "../../lib/haptics";
 import { useArchiveSession, useDiscardSession, useMergeSession } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { springs, useForgeline, useSettle } from "../../theme/motion";
-import { space, type StatusDotState } from "../../theme/tokens";
+import { cardPadding, space, type StatusDotState } from "../../theme/tokens";
 import { formatCost, formatCwd, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { Card } from "../ds/Card";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
@@ -34,6 +34,7 @@ import { RelativeTime } from "../ds/RelativeTime";
 import { Sheet } from "../ds/Sheet";
 import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
+import { SessionLifecycleSheet } from "../session/SessionLifecycleSheet";
 
 // Hearth "ONE right-aligned mono metric" (HANDOFF Fleet rows): cost while forging,
 // relative time while cool, elapsed while waiting — never stacked, never with CostMetric's
@@ -92,6 +93,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const discard = useDiscardSession();
 
   const [actionsVisible, setActionsVisible] = useState(false);
+  const [lifecycleVisible, setLifecycleVisible] = useState(false);
   const [archiveConfirmVisible, setArchiveConfirmVisible] = useState(false);
   const [discardConfirmVisible, setDiscardConfirmVisible] = useState(false);
   const [mergeResult, setMergeResult] = useState<MergeDirtyConflictResponse | null>(null);
@@ -120,6 +122,12 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const openActions = useCallback(() => {
     closeSwipe();
     setActionsVisible(true);
+  }, [closeSwipe]);
+
+  const openLifecycle = useCallback(() => {
+    closeSwipe();
+    setActionsVisible(false);
+    setLifecycleVisible(true);
   }, [closeSwipe]);
 
   const runArchive = useCallback(() => {
@@ -246,15 +254,22 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
 
           <GestureDetector gesture={pan}>
             <Animated.View style={cardStyle}>
-              <Pressable
-                ref={rowRef}
-                onPress={goToSession}
-                onLongPress={openActions}
-                accessibilityRole={Platform.OS === "web" ? undefined : "button"}
-                accessibilityLabel={`${title}, ${state}, ${row.cwd}`}
-                accessibilityState={{ selected }}
+              <Card
+                padded={false}
+                style={[
+                  styles.card,
+                  { backgroundColor: row.waiting || selected ? tokens.selection : tokens.bg2 },
+                ]}
               >
-                <Card style={[styles.card, { backgroundColor: row.waiting || selected ? tokens.selection : tokens.bg2 }]}>
+                <Pressable
+                  ref={rowRef}
+                  onPress={goToSession}
+                  onLongPress={openActions}
+                  accessibilityRole={Platform.OS === "web" ? undefined : "button"}
+                  accessibilityLabel={`${title}, ${state}, ${row.cwd}`}
+                  accessibilityState={{ selected }}
+                  style={styles.cardPressable}
+                >
                   <View style={styles.row1}>
                     <StatusDot state={state} size={state === "idle" ? 7 : 8} />
                     <Text
@@ -284,12 +299,24 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                     ]}
                     numberOfLines={1}
                     ellipsizeMode={row.waiting ? "tail" : "head"}
-                    accessibilityLabel={row.waiting ? undefined : `path: ${row.cwd}`}
-                  >
-                    {row.waiting ? "needs a decision" : `${hostLabel} · direct · ${cwdLabel} · ${row.model}`}
-                  </Text>
-                </Card>
-              </Pressable>
+                      accessibilityLabel={row.waiting ? undefined : `path: ${row.cwd}`}
+                    >
+                      {row.waiting ? "needs a decision" : `${hostLabel} · direct · ${cwdLabel} · ${row.model}`}
+                    </Text>
+                </Pressable>
+                <IconButton
+                  icon={
+                    <MoreHorizontal
+                      size={ICON_SIZE}
+                      strokeWidth={ICON_STROKE}
+                      color={tokens.ink3}
+                    />
+                  }
+                  onPress={openActions}
+                  accessibilityLabel={`Actions for ${title}`}
+                  style={styles.moreButton}
+                />
+              </Card>
             </Animated.View>
           </GestureDetector>
         </View>
@@ -297,6 +324,11 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
 
       <Sheet visible={actionsVisible} onClose={() => setActionsVisible(false)} accessibilityLabel="Session actions">
         <View style={styles.sheetBody}>
+          <ListRow
+            title="Rename or archive session"
+            leading={<Settings2 size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />}
+            onPress={openLifecycle}
+          />
           <ListRow
             title="Archive"
             leading={<Archive size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />}
@@ -319,6 +351,17 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
           ) : null}
         </View>
       </Sheet>
+      <SessionLifecycleSheet
+        target={{
+          id: row.id,
+          title,
+          cwd: row.cwd,
+          archived: false,
+          running: true,
+        }}
+        visible={lifecycleVisible}
+        onClose={() => setLifecycleVisible(false)}
+      />
 
       <ConfirmDialog
         visible={archiveConfirmVisible}
@@ -406,9 +449,11 @@ const styles = StyleSheet.create({
   // Machined card row — same gap-separated bordered treatment as DecisionCard, so the
   // quiet rows and the needs-you card read as one consistent list.
   card: { marginHorizontal: space.space16, marginBottom: space.space12 },
+  cardPressable: { paddingHorizontal: cardPadding.x, paddingVertical: cardPadding.y },
+  moreButton: { position: "absolute", right: 0, bottom: 0 },
   row1: { flexDirection: "row", alignItems: "center", gap: 9 },
   title: { flex: 1, fontWeight: "600" },
-  meta: { marginTop: 2 },
+  meta: { marginTop: 2, paddingRight: 36 },
   metric: { fontSize: 11, lineHeight: 15 },
   sheetBody: { paddingHorizontal: space.space4, paddingBottom: space.space16, gap: space.space4 },
   fileRow: { paddingHorizontal: space.space16 },

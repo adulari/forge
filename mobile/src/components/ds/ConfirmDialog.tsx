@@ -13,7 +13,7 @@
 // state machine, so keeping this file self-contained avoids a fragile
 // cross-task prop-shape dependency.
 import React, { useCallback, useRef, useState } from "react";
-import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated, {
   cancelAnimation,
   runOnJS,
@@ -37,6 +37,8 @@ export interface ConfirmDialogProps {
   cancelLabel?: string;
   /** Destructive variant: Cancel is the prominent action, Confirm requires a press-and-hold. */
   destructive?: boolean;
+  /** Prevent duplicate confirmations while the action is in flight. */
+  loading?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -50,6 +52,7 @@ export function ConfirmDialog({
   confirmLabel = "Confirm",
   cancelLabel = "Cancel",
   destructive = false,
+  loading = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -60,13 +63,14 @@ export function ConfirmDialog({
   const [focusedAction, setFocusedAction] = useState<"cancel" | "confirm" | null>(null);
 
   const complete = useCallback(() => {
-    if (firedRef.current) return;
+    if (loading || firedRef.current) return;
     firedRef.current = true;
     haptics.deny();
     onConfirm();
-  }, [onConfirm]);
+  }, [loading, onConfirm]);
 
   const onHoldIn = () => {
+    if (loading) return;
     firedRef.current = false;
     if (reduced) {
       fill.value = 1;
@@ -128,32 +132,56 @@ export function ConfirmDialog({
                 onPressIn={onHoldIn}
                 onPressOut={onHoldOut}
                 onPress={complete}
+                disabled={loading}
                 onFocus={() => setFocusedAction("confirm")}
                 onBlur={() => setFocusedAction(null)}
                 accessibilityRole="button"
                 accessibilityLabel={confirmLabel}
                 accessibilityHint="Press and hold to confirm"
+                accessibilityState={{ disabled: loading, busy: loading }}
                 accessibilityActions={[{ name: "activate", label: confirmLabel }]}
                 onAccessibilityAction={(e) => {
                   if (e.nativeEvent.actionName === "activate") complete();
                 }}
-                style={[styles.button, styles.holdButton, { borderColor: focusedAction === "confirm" ? tokens.accent : tokens.danger }]}
+                style={[
+                  styles.button,
+                  styles.holdButton,
+                  loading && styles.disabled,
+                  { borderColor: focusedAction === "confirm" ? tokens.accent : tokens.danger },
+                ]}
               >
                 <Animated.View
                   style={[styles.holdFill, { backgroundColor: tokens.dangerBg, pointerEvents: "none" }, fillStyle]}
                 />
-                <Text style={[type.bodyBold, { color: tokens.danger }]}>{confirmLabel}</Text>
+                {loading ? (
+                  <ActivityIndicator color={tokens.danger} />
+                ) : (
+                  <Text style={[type.bodyBold, { color: tokens.danger }]}>{confirmLabel}</Text>
+                )}
               </Pressable>
             ) : (
               <Pressable
-                onPress={onConfirm}
+                onPress={() => {
+                  if (!loading) onConfirm();
+                }}
+                disabled={loading}
                 onFocus={() => setFocusedAction("confirm")}
                 onBlur={() => setFocusedAction(null)}
                 accessibilityRole="button"
                 accessibilityLabel={confirmLabel}
-                style={[styles.button, styles.ghostButton, { borderColor: focusedAction === "confirm" ? tokens.accent : tokens.border }]}
+                accessibilityState={{ disabled: loading, busy: loading }}
+                style={[
+                  styles.button,
+                  styles.ghostButton,
+                  loading && styles.disabled,
+                  { borderColor: focusedAction === "confirm" ? tokens.accent : tokens.border },
+                ]}
               >
-                <Text style={[type.bodyBold, { color: tokens.ink }]}>{confirmLabel}</Text>
+                {loading ? (
+                  <ActivityIndicator color={tokens.ink} />
+                ) : (
+                  <Text style={[type.bodyBold, { color: tokens.ink }]}>{confirmLabel}</Text>
+                )}
               </Pressable>
             )}
           </View>
@@ -187,4 +215,5 @@ const styles = StyleSheet.create({
   ghostButton: { borderWidth: StyleSheet.hairlineWidth },
   holdButton: { borderWidth: StyleSheet.hairlineWidth },
   holdFill: { position: "absolute", left: 0, top: 0, bottom: 0 },
+  disabled: { opacity: 0.6 },
 });

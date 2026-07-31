@@ -19,6 +19,7 @@ import {
   Plus,
   Search,
   Send,
+  Settings2,
   Share2,
   SquareTerminal,
   Swords,
@@ -61,6 +62,7 @@ export interface SessionHeaderProps {
   onPullRequest: () => void;
   onMemory: () => void;
   onLattice: () => void;
+  onManageLifecycle: () => void;
   /** Expanded workbench controls. Compact layouts use their native navigation instead. */
   onToggleGitReview?: () => void;
   onToggleFiles?: () => void;
@@ -169,6 +171,7 @@ export function SessionHeader(props: SessionHeaderProps) {
           <ListRow title="Start another session here" leading={<Plus size={20} color={tokens.ink2} />} onPress={() => run(props.onNewHere)} />
           <ListRow title="Start model duel" leading={<Swords size={20} color={tokens.ink2} />} onPress={() => run(props.onDuel)} />
           <ListRow title="Open session replay" leading={<History size={20} color={tokens.ink2} />} onPress={() => run(props.onReplay)} />
+          <ListRow title="Rename or archive session" leading={<Settings2 size={20} color={tokens.ink2} />} onPress={() => run(props.onManageLifecycle)} />
           <ListRow title="Open workflows" leading={<Workflow size={20} color={tokens.ink2} />} onPress={() => run(props.onWorkflows)} />
           <ListRow title="Create implementation plan" leading={<Map size={20} color={tokens.ink2} />} onPress={() => run(props.onPlan)} />
           <ListRow title="Fork session" leading={<GitFork size={20} color={tokens.ink2} />} onPress={() => run(props.onFork)} />

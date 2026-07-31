@@ -27,6 +27,7 @@ import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
+import { SessionLifecycleSheet } from "../../../components/session/SessionLifecycleSheet";
 import { useWorkbench } from "../../../components/workbench/WorkbenchProvider";
 import { activeWorkbenchSurface } from "../../../components/workbench/model";
 import { GoalBanner } from "../../../components/session/GoalBanner";
@@ -133,6 +134,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
   const [latticeVisible, setLatticeVisible] = useState(false);
+  const [lifecycleVisible, setLifecycleVisible] = useState(false);
 
   // Forge Anywhere — session-surface features (host·transport meta, handoff, share-replay).
   // Gated on `signedIn` so a session opened without an Anywhere account renders identically
@@ -348,6 +350,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
             onLattice={() => setLatticeVisible(true)}
+            onManageLifecycle={() => setLifecycleVisible(true)}
             onToggleFiles={() => {
               if (activeRightSurface?.kind === "files") workbench.hidePlacement("right");
               else workbench.openSurface({ kind: "files" });
@@ -428,6 +431,17 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
         <LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} />
+        <SessionLifecycleSheet
+          target={{
+            id: sessionId,
+            title: snapshot?.title || `session ${sessionId.slice(0, 8)}`,
+            cwd: snapshot?.cwd ?? "",
+            archived: false,
+            running: !(closed || sessionEnded),
+          }}
+          visible={lifecycleVisible}
+          onClose={() => setLifecycleVisible(false)}
+        />
 
         <HandoffSheet
           visible={handoffVisible}

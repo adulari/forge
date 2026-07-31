@@ -52,8 +52,8 @@ cwd, never from a client-provided absolute path.
   project files; the surface explains how to reconnect directly instead of retrying a disallowed
   route.
 - Compact iOS/Android layouts expose Files as a session tab and keep file navigation/editor state
-local to that route. Expanded desktop/web layouts open the same browser and editor as retained
-workbench tabs.
+  local to that route. Expanded desktop/web layouts open the same browser and editor as retained
+  workbench tabs.
 
 ## Branches and worktrees
 
@@ -143,3 +143,25 @@ The Terminal surface attaches to daemon-owned PTYs instead of making a WebSocket
 - The React Native terminal view intentionally remains a bounded ANSI scrollback rather than
   claiming full xterm/Ghostty emulation. Mouse protocols, alternate-screen fidelity, terminal
   recording, and native Ghostty integration are separate future capabilities.
+
+## Session search and lifecycle
+
+Thread search and lifecycle actions operate on durable session identity rather than whichever
+history page a client happened to load:
+
+- Queries of two or more characters use a bounded SQLite search over top-level session title, id,
+  cwd, and active user/assistant transcript rows. Tool and system output are excluded to avoid
+  surfacing generated noise or secrets; the daemon ranks metadata matches ahead of content and
+  returns at most 100 rows with a bounded nearby excerpt.
+- Search results distinguish running, past, and archived sessions. Opening a running result routes
+  to its existing driver; opening a past result resumes the original session id and transcript
+  instead of creating a visually similar empty session.
+- Rename updates both durable metadata and the running driver's snapshot. The current header,
+  Fleet, History, command palette, and Anywhere clients therefore converge on one title.
+- Archive stops a running driver or archives a naturally finished persisted session, closes its
+  retained terminals, and keeps history. Resuming an archived session unarchives it.
+- Permanent delete is unavailable while a session is running or still owns a managed worktree.
+  Once safe, deletion removes the session, transcript, subagent descendants, and session-scoped
+  operational artifacts; queue execution history is retained with its session link cleared.
+- Search, rename, and delete are explicit typed Forge Anywhere bridge routes. Controller and host
+  both validate method and session-id shape, preserving the bridge's no-arbitrary-proxy boundary.

@@ -62,7 +62,7 @@ use anyhow::{Context, Result};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::Router;
 
 use crate::cli::commands::run::{spawn_session_driver, DriverSpec, SessionDriverHandle};
@@ -73,6 +73,9 @@ const FLEET_INVALIDATION_MIN_INTERVAL: std::time::Duration = std::time::Duration
 
 /// How long an archive waits for the driver task to wind down before letting go.
 const ARCHIVE_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_SESSION_SEARCH_QUERY_CHARS: usize = 256;
+const MAX_SESSION_SEARCH_RESULTS: usize = 100;
+const MAX_SESSION_TITLE_CHARS: usize = 120;
 
 /// The persisted daemon token's file name inside the forge config dir.
 const TOKEN_FILE: &str = "serve-token";
@@ -647,7 +650,12 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/identity"), get(identity))
         .route(&format!("{base}/api/projects/browse"), get(browse_projects))
         .route(&format!("{base}/api/sessions/past"), get(past_sessions))
+        .route(&format!("{base}/api/sessions/search"), get(search_sessions))
         .route(&format!("{base}/api/sessions/tree"), get(session_tree))
+        .route(
+            &format!("{base}/api/sessions/{{id}}"),
+            patch(rename_session).delete(delete_session),
+        )
         .route(
             &format!("{base}/api/sessions/{{id}}/fork"),
             post(fork_session),
@@ -903,7 +911,7 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
         let snap = h.snapshot_rx.borrow().snapshot.clone();
         rows.push(SessionRow {
             id: h.session_id.clone(),
-            title: h.title.clone(),
+            title: h.title(),
             cwd: h.cwd.clone(),
             worktree: h.worktree.clone(),
             busy: snap.busy,
@@ -1068,7 +1076,7 @@ async fn create_session(
         if let Some(existing) = state.registry.get(rid).await {
             return json_response(&serde_json::json!({
                 "id": existing.session_id,
-                "title": existing.title,
+                "title": existing.title(),
                 "cwd": existing.cwd,
                 "worktree": existing.worktree,
             }));
@@ -1102,7 +1110,7 @@ async fn create_session(
             let handle = state.registry.insert(handle).await;
             json_response(&serde_json::json!({
                 "id": handle.session_id,
-                "title": handle.title,
+                "title": handle.title(),
                 "cwd": handle.cwd,
                 "worktree": handle.worktree,
             }))
@@ -1171,7 +1179,7 @@ async fn fork_session(
             let handle = state.registry.insert(handle).await;
             json_response(&serde_json::json!({
                 "id": handle.session_id,
-                "title": handle.title,
+                "title": handle.title(),
                 "cwd": handle.cwd,
                 "worktree": handle.worktree,
             }))
@@ -1189,19 +1197,134 @@ async fn archive_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    let Some(handle) = state.registry.remove(&id).await else {
-        return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
+    let handle = state.registry.remove(&id).await;
+    let worktree = if let Some(handle) = &handle {
+        handle.worktree.clone()
+    } else {
+        match state.store.session_worktree(&id) {
+            Ok(worktree) => worktree,
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("reading session failed: {error}"),
+                );
+            }
+        }
     };
+    if handle.is_none() {
+        match state.store.session_exists(&id) {
+            Ok(true) => {}
+            Ok(false) => {
+                return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
+            }
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("reading session failed: {error}"),
+                );
+            }
+        }
+    }
     state.terminals.close_session(&id).await;
-    handle.shutdown();
-    handle.join(ARCHIVE_JOIN_TIMEOUT).await;
-    if let Some(wt) = &handle.worktree {
+    if let Some(handle) = handle {
+        handle.shutdown();
+        handle.join(ARCHIVE_JOIN_TIMEOUT).await;
+    }
+    if let Some(wt) = worktree {
         // Best-effort snapshot: uncommitted edits land on the session's branch so nothing is
         // lost; the worktree + branch stay in place for a manual review/merge.
-        let _ = forge_core::worktree::commit_worktree(std::path::Path::new(wt));
+        let _ = forge_core::worktree::commit_worktree(std::path::Path::new(&wt));
     }
-    let _ = state.store.archive_session(&id);
+    if let Err(error) = state.store.archive_session(&id) {
+        return err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("archiving session failed: {error}"),
+        );
+    }
     json_response(&serde_json::json!({ "ok": true }))
+}
+
+#[derive(serde::Deserialize)]
+struct RenameSessionReq {
+    title: String,
+}
+
+async fn rename_session(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id): AxumPath<String>,
+    axum::Json(req): axum::Json<RenameSessionReq>,
+) -> Response {
+    let title = req.title.trim();
+    if title.is_empty()
+        || title.chars().count() > MAX_SESSION_TITLE_CHARS
+        || title.chars().any(char::is_control)
+    {
+        return err_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "title must contain 1 to 120 visible characters",
+        );
+    }
+    match state.store.session_exists(&id) {
+        Ok(true) => {}
+        Ok(false) => return err_response(axum::http::StatusCode::NOT_FOUND, "no such session"),
+        Err(error) => {
+            return err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("reading session failed: {error}"),
+            );
+        }
+    }
+    if let Err(error) = state.store.set_session_title(&id, title) {
+        return err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("renaming session failed: {error}"),
+        );
+    }
+    if let Some(handle) = state.registry.get(&id).await {
+        handle.set_title(title.to_string());
+    }
+    json_response(&serde_json::json!({ "ok": true, "title": title }))
+}
+
+async fn delete_session(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if state.registry.get(&id).await.is_some() {
+        return err_response(
+            axum::http::StatusCode::CONFLICT,
+            "stop or archive the running session before deleting it",
+        );
+    }
+    let worktree = match state.store.session_worktree(&id) {
+        Ok(worktree) => worktree,
+        Err(error) => {
+            return err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("reading session failed: {error}"),
+            );
+        }
+    };
+    if worktree
+        .as_deref()
+        .is_some_and(|path| std::path::Path::new(path).exists())
+    {
+        return err_response(
+            axum::http::StatusCode::CONFLICT,
+            "session still owns a worktree; resume it and merge or discard that worktree first",
+        );
+    }
+    match state.store.delete_session(&id) {
+        Ok(true) => {
+            state.terminals.close_session(&id).await;
+            json_response(&serde_json::json!({ "ok": true }))
+        }
+        Ok(false) => err_response(axum::http::StatusCode::NOT_FOUND, "no such session"),
+        Err(error) => err_response(
+            axum::http::StatusCode::CONFLICT,
+            &format!("deleting session failed: {error}"),
+        ),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1254,6 +1377,88 @@ struct PastSessionRow {
     created_at: i64,
     /// First user message — a one-line hint of what the session was about.
     preview: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SessionSearchParams {
+    #[serde(default)]
+    q: String,
+    limit: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+struct SessionSearchResponseRow {
+    id: String,
+    title: String,
+    cwd: String,
+    archived: bool,
+    running: bool,
+    message_count: i64,
+    cost_usd: f64,
+    last_activity: i64,
+    match_source: String,
+    match_seq: Option<i64>,
+    match_role: Option<String>,
+    match_excerpt: Option<String>,
+}
+
+async fn search_sessions(
+    State(state): State<Arc<DaemonState>>,
+    Query(params): Query<SessionSearchParams>,
+) -> Response {
+    let query = params.q.trim();
+    let query_chars = query.chars().count();
+    if query_chars < 2 {
+        return json_response(&Vec::<SessionSearchResponseRow>::new());
+    }
+    if query_chars > MAX_SESSION_SEARCH_QUERY_CHARS {
+        return err_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "search query is too long",
+        );
+    }
+    let limit = params
+        .limit
+        .unwrap_or(30)
+        .clamp(1, MAX_SESSION_SEARCH_RESULTS);
+    let running: std::collections::HashSet<String> = state
+        .registry
+        .all()
+        .await
+        .into_iter()
+        .map(|handle| handle.session_id.clone())
+        .collect();
+    let store = state.store.clone();
+    let query = query.to_string();
+    match tokio::task::spawn_blocking(move || store.search_sessions(&query, limit)).await {
+        Ok(Ok(rows)) => json_response(
+            &rows
+                .into_iter()
+                .map(|row| SessionSearchResponseRow {
+                    running: running.contains(&row.id),
+                    id: row.id,
+                    title: row.title.unwrap_or_default(),
+                    cwd: row.cwd,
+                    archived: row.archived,
+                    message_count: row.message_count,
+                    cost_usd: row.total_cost_usd,
+                    last_activity: row.last_activity,
+                    match_source: row.match_source,
+                    match_seq: row.match_seq,
+                    match_role: row.match_role,
+                    match_excerpt: row.match_excerpt,
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Ok(Err(error)) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("searching sessions failed: {error}"),
+        ),
+        Err(error) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("search task failed: {error}"),
+        ),
+    }
 }
 
 /// Query for `GET /api/sessions/past` — cursor pagination over most-recently-used past sessions.
@@ -1573,7 +1778,7 @@ async fn merge_session(
     let resume_spec = DriverSpec {
         cwd: handle.cwd.clone(),
         worktree: handle.worktree.clone(),
-        title: handle.title.clone(),
+        title: handle.title(),
         mock: state.mock,
         model: state
             .store
@@ -2365,7 +2570,7 @@ async fn plans_page(State(state): State<Arc<DaemonState>>) -> Response {
         if let Some(plan) = snapshot.plan {
             plans.push(PlanRow {
                 session_id: handle.session_id.clone(),
-                session_title: handle.title.clone(),
+                session_title: handle.title(),
                 title: plan.title,
                 steps: plan.steps,
                 notes: plan.notes,
@@ -3131,6 +3336,210 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_search_and_lifecycle_routes_cover_running_and_past_sessions() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!(
+            "forge-serve-session-lifecycle-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("lifecycle.db"));
+
+        let store = Arc::new(crate::open_store().unwrap());
+        let past_id = store
+            .create_session(dir.to_str().unwrap(), "default")
+            .unwrap();
+        store.set_session_title(&past_id, "Past original").unwrap();
+        store
+            .add_message(
+                &past_id,
+                0,
+                forge_types::Role::User,
+                "shared needle in persisted history",
+                None,
+            )
+            .unwrap();
+
+        let registry = Arc::new(SessionRegistry::new());
+        let live = registry
+            .insert(
+                spawn_session_driver(DriverSpec {
+                    cwd: dir.display().to_string(),
+                    worktree: None,
+                    title: "Running original".into(),
+                    mock: true,
+                    model: None,
+                    resume: None,
+                    temper: None,
+                    push: None,
+                    apns: None,
+                })
+                .await
+                .unwrap(),
+            )
+            .await;
+        store
+            .add_message(
+                &live.session_id,
+                0,
+                forge_types::Role::User,
+                "shared needle in a live session",
+                None,
+            )
+            .unwrap();
+
+        let blocked_id = store
+            .create_session(dir.to_str().unwrap(), "default")
+            .unwrap();
+        store
+            .add_message(
+                &blocked_id,
+                0,
+                forge_types::Role::User,
+                "worktree owner",
+                None,
+            )
+            .unwrap();
+        let existing_worktree = dir.join("managed-worktree");
+        std::fs::create_dir_all(&existing_worktree).unwrap();
+        store
+            .set_session_worktree(&blocked_id, existing_worktree.to_str().unwrap())
+            .unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::get("/tok/api/sessions/search?q=shared%20needle&limit=1000")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let rows = json_body(response).await;
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .any(|row| row["id"] == live.session_id && row["running"] == true));
+        assert!(rows
+            .iter()
+            .any(|row| row["id"] == past_id && row["match_source"] == "message"));
+
+        let patch = |id: &str, title: &str| {
+            axum::http::Request::builder()
+                .method(axum::http::Method::PATCH)
+                .uri(format!("/tok/api/sessions/{id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "title": title }).to_string(),
+                ))
+                .unwrap()
+        };
+        let response = router
+            .clone()
+            .oneshot(patch(&live.session_id, "Running renamed"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(live.title(), "Running renamed");
+        assert_eq!(
+            store.session_title(&live.session_id).unwrap().as_deref(),
+            Some("Running renamed")
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if live.snapshot_rx.borrow().snapshot.title == "Running renamed" {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("renamed title must reach the live session snapshot");
+
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::delete(format!("/tok/api/sessions/{}", live.session_id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+
+        let response = router
+            .clone()
+            .oneshot(post_req(&format!(
+                "/tok/api/sessions/{}/archive",
+                live.session_id
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(registry.get(&live.session_id).await.is_none());
+        assert!(store.session_archived(&live.session_id).unwrap());
+
+        let response = router
+            .clone()
+            .oneshot(patch(&past_id, "Past renamed"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let response = router
+            .clone()
+            .oneshot(post_req(&format!("/tok/api/sessions/{past_id}/archive")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(store.session_archived(&past_id).unwrap());
+
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::delete(format!("/tok/api/sessions/{blocked_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+
+        let response = router
+            .oneshot(
+                axum::http::Request::delete(format!("/tok/api/sessions/{past_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(!store.session_exists(&past_id).unwrap());
+        assert!(store.load_all_messages(&past_id).unwrap().is_empty());
+
+        drop(live);
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A clean worktree merge: the branch's new file applies onto the base tree (staged), and the
     /// worktree directory + branch are removed. Runs over the REAL router + a REAL driver.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3654,7 +4063,7 @@ mod tests {
             .get(&archived_id)
             .await
             .expect("resumed driver registered");
-        assert_eq!(resumed.title, "was-archived");
+        assert_eq!(resumed.title(), "was-archived");
         assert_eq!(resumed.cwd, stored_dir.display().to_string());
         assert_eq!(
             resumed.worktree.as_deref(),
