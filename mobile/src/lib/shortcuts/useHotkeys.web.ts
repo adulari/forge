@@ -3,12 +3,15 @@
 // ⌘1..4/⌘N/⌘Enter on top of the same `useHotkey` primitive — do not build those here.
 import { useEffect } from "react";
 
+import { normalizeShortcutKey } from "./bindings";
+
 export type HotkeyHandler = () => void;
 
 interface HotkeyEntry {
   key: string;
   meta: boolean;
   alt: boolean;
+  shift: boolean;
   handler: HotkeyHandler;
 }
 
@@ -27,11 +30,13 @@ function ensureListener(): void {
   window.addEventListener("keydown", (e: KeyboardEvent) => {
     const meta = e.metaKey || e.ctrlKey;
     const alt = e.altKey;
-    const key = e.key.toLowerCase();
+    const shift = e.shiftKey;
+    const key = normalizeShortcutKey(e.key);
+    if (!key) return;
     for (const entry of registry) {
-      if (entry.meta !== meta || entry.alt !== alt || entry.key !== key) continue;
-      // A meta-combo (⌘K) always fires even while a text field is focused (that's the
-      // whole point of a global palette shortcut); a bare key never does.
+      if (entry.meta !== meta || entry.alt !== alt || entry.shift !== shift || entry.key !== key) continue;
+      // A Mod/Alt combo always fires even while a text field is focused (that's the
+      // point of global app shortcuts); an unmodified or Shift-only key never does.
       if (!meta && !alt && isTypingTarget(e.target)) continue;
       e.preventDefault();
       entry.handler();
@@ -48,21 +53,19 @@ function ensureListener(): void {
 export function useHotkey(
   key: string,
   handler: HotkeyHandler,
-  options?: { meta?: boolean; alt?: boolean },
+  options?: { meta?: boolean; alt?: boolean; shift?: boolean },
 ): void {
-  const meta = options?.alt ? false : (options?.meta ?? true);
+  const meta = options?.meta ?? (options?.alt || options?.shift ? false : true);
   const alt = options?.alt ?? false;
+  const shift = options?.shift ?? false;
   useEffect(() => {
     ensureListener();
-    const entry: HotkeyEntry = { key: key.toLowerCase(), meta, alt, handler };
+    const normalizedKey = normalizeShortcutKey(key);
+    if (!normalizedKey) return;
+    const entry: HotkeyEntry = { key: normalizedKey, meta, alt, shift, handler };
     registry.add(entry);
     return () => {
       registry.delete(entry);
     };
-  }, [key, meta, alt, handler]);
-}
-
-/** ⌘K / Ctrl+K opens the command palette (DESIGN_SYSTEM.md §6 CommandPalette). */
-export function usePaletteHotkey(onOpen: HotkeyHandler): void {
-  useHotkey("k", onOpen, { meta: true });
+  }, [key, meta, alt, shift, handler]);
 }

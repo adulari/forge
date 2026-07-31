@@ -57,8 +57,9 @@ import { LatticeSheet } from "../../../components/session/LatticeSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { useAnywhere } from "../../../lib/anywhere/store";
 import { useAuth } from "../../../lib/auth";
+import { useDesktopMenuAction } from "../../../lib/desktopMenu";
 import { goBackOr } from "../../../lib/nav";
-import { useHotkey } from "../../../lib/shortcuts";
+import { useAppShortcut } from "../../../lib/shortcuts";
 import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
 import { useReviewComments } from "../../../lib/reviewComments";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
@@ -265,12 +266,13 @@ function SessionShell({ sessionId }: { sessionId: string }) {
       toast.show("not sent — reconnect and try again", { tone: "danger" });
     }
   }, [snapshot?.busy, send, toast]);
-  useHotkey("c", () => onSegmentChange("chat"), { alt: true });
-  useHotkey("t", () => onSegmentChange("tasks"), { alt: true });
-  useHotkey("a", () => onSegmentChange("agents"), { alt: true });
-  useHotkey("r", () => onSegmentChange("review"), { alt: true });
-  useHotkey("e", focusComposer, { meta: true });
-  useHotkey(".", interrupt, { meta: true });
+  useAppShortcut("session.chat", () => onSegmentChange("chat"));
+  useAppShortcut("session.tasks", () => onSegmentChange("tasks"));
+  useAppShortcut("session.agents", () => onSegmentChange("agents"));
+  useAppShortcut("session.review", () => onSegmentChange("review"));
+  useAppShortcut("session.focusComposer", focusComposer);
+  useAppShortcut("session.interrupt", interrupt);
+  useDesktopMenuAction("session:interrupt", interrupt);
 
   const closed = snapshot?.closed ?? false;
   const protocolMismatch = snapshot != null && snapshot.protocol !== PROTOCOL_VERSION;

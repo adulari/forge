@@ -17,6 +17,9 @@
 use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+#[cfg(target_os = "macos")]
+use tauri::menu::{MenuItem, MenuItemKind};
+
 use crate::about;
 
 /// Webview event carrying an activated menu/tray item id. Listened for in `desktopMenu.ts`.
@@ -63,6 +66,101 @@ pub const HELP_ACKNOWLEDGEMENTS: &str = "help:acknowledgements";
 
 /// Debug-only webview reload (pre-existing behaviour, kept).
 pub const DEV_RELOAD: &str = "dev:reload";
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct MenuAccelerator {
+    id: String,
+    accelerator: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+fn mutable_accelerator(id: &str) -> bool {
+    matches!(
+        id,
+        SESSION_NEW
+            | SESSION_QUICK_COMPOSER
+            | SESSION_SEARCH
+            | SESSION_INTERRUPT
+            | VIEW_SIDEBAR
+            | VIEW_SPLIT_PANE
+            | VIEW_TERMINAL
+            | VIEW_USAGE
+            | VIEW_GIT_REVIEW
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn find_menu_items<R: Runtime>(items: Vec<MenuItemKind<R>>, id: &str) -> Vec<MenuItem<R>> {
+    let mut matches = Vec::new();
+    for item in items {
+        match item {
+            MenuItemKind::MenuItem(item) if item.id().as_ref() == id => matches.push(item),
+            MenuItemKind::Submenu(submenu) => {
+                if let Ok(children) = submenu.items() {
+                    matches.extend(find_menu_items(children, id));
+                }
+            }
+            _ => {}
+        }
+    }
+    matches
+}
+
+/// Keeps macOS menu key equivalents aligned with the persisted webview shortcut
+/// preferences. Only the closed list above is mutable: standard Edit, Quit, and
+/// window-management accelerators remain native platform behavior.
+#[tauri::command]
+pub fn set_menu_accelerators<R: Runtime>(
+    app: AppHandle<R>,
+    accelerators: Vec<MenuAccelerator>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let menu = app
+            .menu()
+            .ok_or_else(|| "application menu is not installed".to_string())?;
+        let mut resolved = Vec::with_capacity(accelerators.len());
+        for update in accelerators {
+            if !mutable_accelerator(&update.id) {
+                return Err(format!("menu accelerator is not mutable: {}", update.id));
+            }
+            let items =
+                find_menu_items(menu.items().map_err(|error| error.to_string())?, &update.id);
+            if items.is_empty() {
+                return Err(format!("menu item is missing: {}", update.id));
+            }
+            resolved.push((items, update.accelerator));
+        }
+
+        // Clear the closed set first so swapping two bindings never collides with
+        // the key equivalent that the other item still owns. SESSION_NEW occurs
+        // in File and Session with one shared event id; clear both duplicates.
+        for (items, _) in &resolved {
+            for item in items {
+                item.set_accelerator(None::<&str>)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        for (items, accelerator) in resolved {
+            // Keep a duplicated command's key equivalent on its final menu
+            // occurrence. For New Session that is the canonical Session menu,
+            // matching the initial menu construction above.
+            if let Some(item) = items.last() {
+                item.set_accelerator(accelerator.as_deref())
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, accelerators);
+        Ok(())
+    }
+}
 
 /// Accelerators are written with `keyboard-types` code names (`Period`, `Backslash`, `Comma`)
 /// rather than raw punctuation — the raw forms are accepted inconsistently by the accelerator

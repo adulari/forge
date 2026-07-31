@@ -11,6 +11,7 @@ import { Check, Copy } from "lucide-react-native";
 import React, { useEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, Text, View, type TextStyle } from "react-native";
 
+import { useAppearancePreferences } from "../../lib/appearancePreferences";
 import { type ColorTokens } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
 import { useTheme } from "../../theme/ThemeProvider";
@@ -153,6 +154,7 @@ export interface CodeBlockProps {
 
 export function CodeBlock({ code, language }: CodeBlockProps) {
   const { tokens, scheme } = useTheme();
+  const { wrapCodeBlocks } = useAppearancePreferences();
   const keywordColor = scheme === "dark" ? tokens.ember.ember300 : tokens.ember.ember600;
   const hlTokens = React.useMemo(() => highlightTokens(code, (language ?? "").toLowerCase()), [code, language]);
 
@@ -168,6 +170,20 @@ export function CodeBlock({ code, language }: CodeBlockProps) {
     if (resetTimer.current) clearTimeout(resetTimer.current);
     resetTimer.current = setTimeout(() => setCopied(false), COPY_RESET_MS);
   };
+
+  const renderedCode = (
+    <Text
+      accessibilityRole="text"
+      selectable
+      style={[type.code, styles.code, wrapCodeBlocks ? styles.codeWrapped : null, { color: tokens.ink }]}
+    >
+      {hlTokens.map((t, idx) => (
+        <Text key={idx} style={tokenStyle(t.kind, tokens, keywordColor)}>
+          {t.text}
+        </Text>
+      ))}
+    </Text>
+  );
 
   return (
     <View style={[styles.container, { backgroundColor: tokens.bg0, borderColor: tokens.border }]}>
@@ -185,15 +201,13 @@ export function CodeBlock({ code, language }: CodeBlockProps) {
           }
         />
       </View>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.codeScroll}>
-        <Text accessibilityRole="text" selectable style={[type.code, styles.code, { color: tokens.ink }]}>
-          {hlTokens.map((t, idx) => (
-            <Text key={idx} style={tokenStyle(t.kind, tokens, keywordColor)}>
-              {t.text}
-            </Text>
-          ))}
-        </Text>
-      </ScrollView>
+      {wrapCodeBlocks ? (
+        <View style={styles.codeWrap}>{renderedCode}</View>
+      ) : (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.codeScroll}>
+          {renderedCode}
+        </ScrollView>
+      )}
     </View>
   );
 }
@@ -213,8 +227,12 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   codeScroll: { flexGrow: 0, flexShrink: 0 },
+  codeWrap: { width: "100%" },
   code: {
     padding: 12,
     fontFamily: monoFamily.regular,
+  },
+  codeWrapped: {
+    flexShrink: 1,
   },
 });

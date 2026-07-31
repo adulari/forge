@@ -46,8 +46,8 @@ import { checkForDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useDesktopMenuAction } from "../lib/desktopMenu";
 import {
+  useAppShortcut,
   useGlobalShortcuts,
-  useHotkey,
   useQuickComposerHotkey,
   useSidebarCollapseHotkey,
   useUsageDockHotkey,
@@ -85,7 +85,7 @@ const asyncStoragePersister = createAsyncStoragePersister({
 // Hearth: settings-family routes bring their own 240px nav rail (SettingsShell), so the
 // persistent Fleet rail collapses there — one rail on screen at a time. Connect is a
 // full-bleed pairing screen on every surface.
-const RAILLESS_ROUTES = /^\/(settings|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
+const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
 
 // Reachable without a paired daemon: /shares/[id] is a public read-only replay link
 // (no sign-in, no server), and /anywhere/* is the relay onboarding Connect itself
@@ -156,11 +156,11 @@ function RootNavigator() {
       workbench.toggleSurface({ kind: "preview", sessionId: activeSessionId });
     }
   };
-  useHotkey("d", toggleSplit, { meta: true });
+  useAppShortcut("workbench.split", toggleSplit);
   useDesktopMenuAction("view:split-pane", toggleSplit);
-  useHotkey("j", toggleTerminal, { meta: true });
+  useAppShortcut("workbench.terminal", toggleTerminal);
   useDesktopMenuAction("view:terminal", toggleTerminal);
-  useHotkey("g", openGitReview, { meta: true });
+  useAppShortcut("workbench.gitReview", openGitReview);
   useDesktopMenuAction("view:git-review", openGitReview);
   useDesktopMenuAction("view:browser-preview", toggleBrowserPreview);
 
@@ -193,6 +193,8 @@ function RootNavigator() {
         <Stack.Screen name="skills" />
         <Stack.Screen name="hooks" />
         <Stack.Screen name="providers" />
+        <Stack.Screen name="appearance" />
+        <Stack.Screen name="keybindings" />
         <Stack.Screen name="models" />
         <Stack.Screen name="session-tree" />
 
@@ -282,7 +284,7 @@ const styles = StyleSheet.create({
 
 export default function RootLayout() {
   const persistOptions = useMemo(() => ({ persister: asyncStoragePersister }), []);
-  useGlobalShortcuts(); // HANDOFF(T5.1): ⌘1..4 tabs / ⌘N new session — web/desktop only, no-op native
+  useGlobalShortcuts(); // Persisted desktop/web app bindings; hardware-keyboard no-op on native.
   useOtaUpdates(); // EAS Update OTA check on launch + foreground (no-op in dev / when disabled)
 
   useEffect(() => {

@@ -48,6 +48,7 @@ pub fn run() {
             preview::preview_hide,
             preview::preview_close,
             tray::set_tray_summary,
+            menu::set_menu_accelerators,
             about::set_about_info,
             about::open_about_window,
         ])

@@ -40,7 +40,6 @@ import { ListRow } from "../../components/ds/ListRow";
 import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
 import { Sheet } from "../../components/ds/Sheet";
-import { Segmented } from "../../components/ds/Segmented";
 import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
 import { entitlementBadge } from "../../lib/anywhere/format";
@@ -70,7 +69,7 @@ import { persistTabBadge, publishTabBadge, useTabBadgePreference } from "../../l
 import { PROTOCOL_VERSION } from "../../lib/remoteProtocol";
 import { checkForDesktopUpdate, type DesktopUpdate } from "../../lib/updater";
 import { useStrike } from "../../theme/motion";
-import { useTheme, useTokens } from "../../theme/ThemeProvider";
+import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, rowHeight, space } from "../../theme/tokens";
 import { formatCost, type, tabularNums } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
@@ -120,10 +119,12 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
+type SettingsRoute = "/settings" | "/appearance" | "/keybindings" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
+  { key: "appearance", label: "Appearance", href: "/appearance" },
+  { key: "keybindings", label: "Keyboard shortcuts", href: "/keybindings" },
   { key: "anywhere", label: "Forge Anywhere", href: "/anywhere" },
   { key: "usage", label: "Usage", href: "/usage" },
   { key: "providers", label: "Providers & accounts", href: "/providers" },
@@ -303,7 +304,6 @@ function NavListRow({ label, meta, onPress, showSeparator = true }: { label: str
 export function SettingsScreen() {
   const tokens = useTokens();
   const toast = useToast();
-  const { preference, setScheme } = useTheme();
   const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, renameServer } = useAuth();
   const { account: anywhereAccount, signedIn: anywhereSignedIn } = useAnywhere();
 
@@ -616,19 +616,13 @@ export function SettingsScreen() {
         </View>
 
         <View>
-          <SectionHeader>Appearance</SectionHeader>
-          <Segmented
-            options={[
-              { value: "light", label: "Light" },
-              { value: "dark", label: "Dark" },
-              { value: "system", label: "System" },
-            ]}
-            value={preference}
-            onChange={setScheme}
-          />
-          {/* iOS's native push toggle stays here (Appearance); the web equivalent moves to
-              its own Behavior section below — W Settings (L153-186) shows Behavior as a
-              distinct group from Appearance, not folded into it. */}
+          <SectionHeader>Preferences</SectionHeader>
+          <NavListRow label="Appearance" onPress={() => router.push("/appearance")} />
+          <NavListRow label="Keyboard shortcuts" onPress={() => router.push("/keybindings")} showSeparator={false} />
+        </View>
+
+        <View>
+          <SectionHeader>Security &amp; device</SectionHeader>
           {isIOS && NOTIFICATIONS_SUPPORTED ? (
             <DenseRow
               accessibilityLabel="Push notifications"
