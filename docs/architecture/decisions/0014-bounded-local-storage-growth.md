@@ -11,7 +11,8 @@ subagents deliberately share the parent repository's Cargo target directory. Car
 garbage-collect obsolete build hashes. A workstation incident left hundreds of gigabytes in
 runner `target/` directories before manual cleanup. The existing weekly timer was insufficient:
 its installed version searched only four levels deep, did not include `node_modules`, and an
-actively used target directory never becomes old enough for age-only cleanup.
+actively used target directory never becomes old enough for age-only cleanup. The same runner
+also accumulated unbounded npm content and `npx` package caches under `~/.npm`.
 
 The same audit found a separate unbounded database path. A live 1.50 GiB `forge.db` contained:
 
@@ -29,12 +30,13 @@ Forge uses independent bounds for the two storage owners:
 
 1. Every cache-producing persistent self-hosted workflow runs
    `scripts/ci/trim-runner-cache.sh` in an `always()` step. It removes only allow-listed cache
-   roots after the job finishes and only when an aggregate exceeds its hard budget: 24 GiB for
-   workspace Cargo targets, 24 GiB for the four named release-build Docker volumes, and 4 GiB for
-   mobile `node_modules`. The script rejects `/`, ignores symlinks, refuses ambiguous boolean
-   controls, and has an executable destructive-behavior test. Release Docker volumes are trimmed
-   in one downstream job after both parallel platform builds finish, so an in-use shared cache is
-   never force-removed.
+   roots after the job finishes and only when an aggregate exceeds its hard budget: 16 GiB for
+   workspace Cargo targets, 24 GiB for the four named release-build Docker volumes, 4 GiB for
+   mobile `node_modules`, 4 GiB for npm's content-addressed cache, and 1 GiB for `npx` package
+   installs. The script rejects `/`, rejects a symlinked npm cache root, ignores symlinked cache
+   directories, refuses ambiguous boolean controls, and has an executable destructive-behavior
+   test. Release Docker volumes are trimmed in one downstream job after both parallel platform
+   builds finish, so an in-use shared cache is never force-removed.
 2. Each successful Anywhere sync pass deletes at most 1,000 acknowledged local revisions older
    than the newest `(record_kind, stable_id)` revision and at most 1,000 remote staging rows whose
    outcome is `applied` or `superseded`.
@@ -50,9 +52,10 @@ Forge uses independent bounds for the two storage owners:
 - `terminal_sync_pruning_keeps_latest_revision_and_unresolved_conflicts` covers acknowledged
   revision compaction, terminal remote deletion, conflict retention, duplicate retry, and next
   revision creation.
-- `scripts/ci/test-trim-runner-cache.sh` covers oversized-cache deletion, unrelated-directory and
-  unrelated-Docker-volume preservation, dry-run behavior, rejection of filesystem root, exact
-  Docker allow-listing, and workflow wiring.
+- `scripts/ci/test-trim-runner-cache.sh` covers oversized Cargo, `node_modules`, npm content, and
+  `npx` cache deletion; unrelated-directory and unrelated-Docker-volume preservation; dry-run
+  behavior; rejection of filesystem and symlinked npm cache roots; exact Docker allow-listing;
+  and workflow wiring.
 - The mobile production dependency audit reports zero vulnerabilities after the lockfile update;
   the required `mobile checks` aggregate now includes this audit.
 
@@ -68,9 +71,9 @@ Forge uses independent bounds for the two storage owners:
 
 ## Consequences
 
-- A busy three-runner host now has a deterministic approximately 72 GiB ceiling for primary
-  workspace Cargo caches, plus a separate 24 GiB ceiling for release Docker caches, instead of
-  age-dependent unbounded growth.
+- A busy three-runner host now has a deterministic approximately 48 GiB ceiling for primary
+  workspace Cargo caches, plus up to 5 GiB of npm caches per runner account and a separate 24 GiB
+  ceiling for release Docker caches, instead of age-dependent unbounded growth.
 - Sync staging converges toward newest local anchors plus unresolved conflicts instead of retaining
   duplicate payload history forever.
 - Crossing a build-cache cap makes the next job cold; this is an intentional speed-for-disk safety
