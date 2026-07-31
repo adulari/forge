@@ -32,6 +32,49 @@ export interface ConfigResponse {
 
 export interface HostIdentity {
   hostname: string;
+  /** Added in Forge 0.1 diagnostics; optional so older daemons remain pairable. */
+  version?: string;
+  /** Remote session protocol spoken by this daemon. */
+  protocol?: number;
+}
+
+export interface DiagnosticsResponse {
+  checked_at: number;
+  host: {
+    hostname: string;
+    version: string;
+    protocol: number;
+    pid: number;
+    process_uptime_secs: number;
+    os: string;
+    arch: string;
+  };
+  resources: {
+    process_memory_bytes: number;
+    process_virtual_memory_bytes: number;
+    system_total_memory_bytes: number;
+    system_available_memory_bytes: number;
+    cpu_count: number;
+    load_average_one: number;
+    load_average_five: number;
+    load_average_fifteen: number;
+  };
+  runtime: {
+    sessions: number;
+    busy_sessions: number;
+    waiting_sessions: number;
+    terminals: number;
+    terminal_clients: number;
+    web_push_ready: boolean;
+    native_push_ready: boolean;
+  };
+  checks: {
+    id: string;
+    status: "ok" | "warn";
+    label: string;
+    detail: string;
+    fix: string | null;
+  }[];
 }
 
 export interface ConfigField {
@@ -933,6 +976,11 @@ export function probeConnection(baseUrl: string): Promise<SessionRow[]> {
 
 export function getIdentity(baseUrl: string): Promise<HostIdentity> {
   return request(baseUrl, "/api/identity");
+}
+
+/** Bounded aggregate diagnostics; deliberately excludes secrets, paths, prompts, and logs. */
+export function getDiagnostics(baseUrl: string): Promise<DiagnosticsResponse> {
+  return request(baseUrl, "/api/diagnostics");
 }
 
 /** 503 (`ApiError.status === 503`) when the daemon has no VAPID key configured. */

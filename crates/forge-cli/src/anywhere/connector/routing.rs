@@ -30,6 +30,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::ReadMcp => exact(Method::GET, "/api/mcp"),
         RouteId::UpdateMcp => exact(Method::POST, "/api/mcp"),
         RouteId::Usage => exact(Method::GET, "/api/usage"),
+        RouteId::Diagnostics => exact(Method::GET, "/api/diagnostics"),
         RouteId::Answer => exact(Method::POST, "/api/answer"),
         RouteId::PushKey => exact(Method::GET, "/api/push/key"),
         RouteId::PushSubscribe => exact(Method::POST, "/api/push/subscribe"),
@@ -152,5 +153,17 @@ mod tests {
         ))
         .is_err());
         assert!(route_target(&request(RouteId::RenameSession, "PATCH", &["unsafe/id"],)).is_err());
+    }
+
+    #[test]
+    fn diagnostics_route_is_typed_and_method_checked() {
+        let diagnostics = request(RouteId::Diagnostics, "GET", &[]);
+        let target = route_target(&diagnostics).unwrap();
+        assert_eq!(target.method, Method::GET);
+        assert_eq!(target.path, "/api/diagnostics");
+        assert_eq!(target.query, None);
+        assert!(validate_command_request(&diagnostics).is_ok());
+
+        assert!(validate_command_request(&request(RouteId::Diagnostics, "POST", &[])).is_err());
     }
 }

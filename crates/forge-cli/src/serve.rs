@@ -358,10 +358,10 @@ pub(crate) struct DaemonState {
     project_roots: Vec<PathBuf>,
     /// The Web Push sender (`None` when the VAPID key couldn't be loaded/minted — the push
     /// routes then answer 503 and everything else works normally).
-    push: Option<Arc<crate::push::PushNotifier>>,
+    pub(crate) push: Option<Arc<crate::push::PushNotifier>>,
     /// The native iOS (APNs) sender (`None` when `FORGE_APNS_TEAM_ID`/`_KEY_ID`/`_KEY_PATH`
     /// aren't all set — same graceful-absence contract as `push`).
-    apns: Option<Arc<crate::apns::ApnsNotifier>>,
+    pub(crate) apns: Option<Arc<crate::apns::ApnsNotifier>>,
     /// Local whisper.cpp speech-to-text (`POST /api/voice/transcribe`) — caches the loaded model
     /// across requests.
     voice: crate::voice::VoiceState,
@@ -650,6 +650,10 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         )
         .route(&format!("{base}/api/projects"), get(project_catalog))
         .route(&format!("{base}/api/identity"), get(identity))
+        .route(
+            &format!("{base}/api/diagnostics"),
+            get(crate::serve_diagnostics::diagnostics),
+        )
         .route(&format!("{base}/api/projects/browse"), get(browse_projects))
         .route(&format!("{base}/api/sessions/past"), get(past_sessions))
         .route(&format!("{base}/api/sessions/search"), get(search_sessions))
@@ -847,11 +851,15 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
 #[derive(serde::Serialize)]
 struct HostIdentity {
     hostname: String,
+    version: &'static str,
+    protocol: u32,
 }
 
 async fn identity() -> axum::Json<HostIdentity> {
     axum::Json(HostIdentity {
         hostname: crate::anywhere::default_host_name(),
+        version: env!("CARGO_PKG_VERSION"),
+        protocol: crate::remote::PROTOCOL_VERSION,
     })
 }
 
@@ -2741,6 +2749,7 @@ mod tests {
         assert_eq!(unauthorized.status(), axum::http::StatusCode::NOT_FOUND);
 
         let response = router
+            .clone()
             .oneshot(
                 axum::http::Request::get("/tok/api/identity")
                     .body(axum::body::Body::empty())
@@ -2754,6 +2763,49 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["hostname"], crate::anywhere::default_host_name());
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["protocol"], crate::remote::PROTOCOL_VERSION);
+
+        let unauthorized = router
+            .clone()
+            .oneshot(
+                axum::http::Request::get("/api/diagnostics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), axum::http::StatusCode::NOT_FOUND);
+
+        let response = router
+            .oneshot(
+                axum::http::Request::get("/tok/api/diagnostics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["host"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["host"]["protocol"], crate::remote::PROTOCOL_VERSION);
+        assert!(body.get("resources").is_some());
+        assert!(body.get("runtime").is_some());
+        assert!(body.get("checks").is_some());
+        let encoded = serde_json::to_string(&body).unwrap();
+        for forbidden in [
+            "token",
+            "credential",
+            "workspace",
+            "prompt",
+            "environment",
+            "log_contents",
+        ] {
+            assert!(!encoded.contains(forbidden), "{forbidden} leaked");
+        }
     }
 
     #[tokio::test]

@@ -433,6 +433,9 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   Cargo/Homebrew/user-local installs and starts it
 - Actionable push notifications, iOS Live Activities/Dynamic Island status, Tauri-signed desktop
   updater artifacts, production iOS OTA updates, offline prompt queueing, and reconnect replay
+- Cross-surface [operational diagnostics](docs/features/diagnostics-and-updates.md) with explicit
+  client/daemon protocol guidance, bounded resource/runtime aggregates, safe host checks, a
+  centralized desktop update state, and a sanitized support-summary export
 - `--inline` for native scrollback; `--mock` offline deterministic provider (no key needed)
 
 **🔒 Safety**

@@ -48,6 +48,29 @@ describe("AnywhereTransport", () => {
     expect(captured[0]?.route).toBe("list_sessions");
   });
 
+  it("maps diagnostics to its read-only typed bridge route", async () => {
+    const captured: AnywhereBridgeRequest[] = [];
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        captured.push(request);
+        return { status: 200, body: new TextEncoder().encode("{}") };
+      },
+      openSessionSocket: socket,
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+
+    await transport.fetch("fany://host-1/api/diagnostics");
+
+    expect(captured[0]).toMatchObject({
+      route: "diagnostics",
+      method: "GET",
+      parameters: [],
+    });
+    await expect(
+      transport.fetch("fany://host-1/api/diagnostics", { method: "POST" }),
+    ).rejects.toThrow("not allowlisted");
+  });
+
   it("maps global search and session lifecycle requests without widening the allowlist", async () => {
     const captured: AnywhereBridgeRequest[] = [];
     const relay: AnywhereRelay = {

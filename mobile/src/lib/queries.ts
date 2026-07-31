@@ -93,6 +93,8 @@ import {
 
   type ChangelogRelease,
   getChangelog,
+  type DiagnosticsResponse,
+  getDiagnostics,
 
   type ForkSessionRequest,
   forkSession,
@@ -189,6 +191,7 @@ function keys(baseUrl: string | null) {
     ) => ["workspace", "search", baseUrl, sessionId, mode, query, limit] as const,
     schedules: ["schedules", baseUrl] as const,
     changelog: (limit?: number) => ["changelog", baseUrl, limit ?? null] as const,
+    diagnostics: ["diagnostics", baseUrl] as const,
   };
 }
 
@@ -199,6 +202,18 @@ export function useProjects() {
     queryFn: () => getProjects(baseUrl as string),
     enabled: baseUrl != null,
     staleTime: 30_000,
+  });
+}
+
+export function useDiagnostics() {
+  const { baseUrl } = useAuth();
+  return useQuery<DiagnosticsResponse>({
+    queryKey: keys(baseUrl).diagnostics,
+    queryFn: () => getDiagnostics(baseUrl as string),
+    enabled: baseUrl != null,
+    staleTime: 60_000,
+    retry: (failureCount, error) =>
+      !(error instanceof Error && "status" in error && error.status === 404) && failureCount < 1,
   });
 }
 

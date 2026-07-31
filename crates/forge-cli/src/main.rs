@@ -72,6 +72,7 @@ mod push;
 mod remote;
 mod replay;
 mod serve;
+mod serve_diagnostics;
 mod serve_git;
 mod serve_schedules;
 mod serve_terminal;

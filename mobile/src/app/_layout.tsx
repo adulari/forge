@@ -24,6 +24,7 @@ import { AnonymousTelemetry } from "../components/AnonymousTelemetry";
 import { DesktopWindowChrome, DESKTOP_WINDOW_CHROME_HEIGHT } from "../components/DesktopWindowChrome";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { UpdateNotice } from "../components/UpdateNotice";
+import { OperationalNotice } from "../components/OperationalNotice";
 import { Screen } from "../components/ds/Screen";
 import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
@@ -42,7 +43,7 @@ import { AnywhereProvider as LegacyAnywhereProvider } from "../lib/anywhere/stor
 import { AuthProvider, useAuth } from "../lib/auth";
 import { initHaptics } from "../lib/haptics";
 import { isTauri, isWeb } from "../lib/platform";
-import { checkForDesktopUpdate } from "../lib/updater";
+import { checkDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useDesktopMenuAction } from "../lib/desktopMenu";
 import {
@@ -85,7 +86,7 @@ const asyncStoragePersister = createAsyncStoragePersister({
 // Hearth: settings-family routes bring their own 240px nav rail (SettingsShell), so the
 // persistent Fleet rail collapses there — one rail on screen at a time. Connect is a
 // full-bleed pairing screen on every surface.
-const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
+const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
 
 // Reachable without a paired daemon: /shares/[id] is a public read-only replay link
 // (no sign-in, no server), and /anywhere/* is the relay onboarding Connect itself
@@ -194,7 +195,8 @@ function RootNavigator() {
         <Stack.Screen name="hooks" />
         <Stack.Screen name="providers" />
         <Stack.Screen name="appearance" />
-        <Stack.Screen name="keybindings" />
+          <Stack.Screen name="keybindings" />
+          <Stack.Screen name="diagnostics" />
         <Stack.Screen name="models" />
         <Stack.Screen name="session-tree" />
 
@@ -289,7 +291,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     void initHaptics();
-    if (isTauri) void checkForDesktopUpdate().catch(() => undefined);
+    if (isTauri) void checkDesktopUpdate().catch(() => undefined);
   }, []);
 
   // Native gets Geist + Geist Mono from the expo-font config plugin's build-time embed;
@@ -331,6 +333,7 @@ export default function RootLayout() {
                     {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
                         `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
                     <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
+                      <OperationalNotice />
                       <PaletteHost>
                         <WorkbenchProvider>
                           <AppLock>

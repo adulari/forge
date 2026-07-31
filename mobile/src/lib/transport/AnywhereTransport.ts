@@ -30,6 +30,7 @@ export type BridgeRoute =
   | "read_mcp"
   | "update_mcp"
   | "usage"
+  | "diagnostics"
   | "answer"
   | "push_key"
   | "push_subscribe"
@@ -210,6 +211,7 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/plans": { GET: "list_plans" },
     "/api/mcp": { GET: "read_mcp", POST: "update_mcp" },
     "/api/usage": { GET: "usage" },
+    "/api/diagnostics": { GET: "diagnostics" },
     "/api/history": { GET: "session_history" },
     "/api/answer": { POST: "answer" },
     "/api/push/key": { GET: "push_key" },

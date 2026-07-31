@@ -272,6 +272,15 @@ impl TerminalRegistry {
         }
     }
 
+    pub(crate) async fn diagnostic_counts(&self) -> (usize, usize) {
+        let terminals = self.terminals.lock().await;
+        let clients = terminals
+            .values()
+            .map(|handle| handle.clients.load(Ordering::Acquire))
+            .sum();
+        (terminals.len(), clients)
+    }
+
     async fn list(&self, session_id: &str) -> Vec<TerminalSummary> {
         let handles = self
             .terminals

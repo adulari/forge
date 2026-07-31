@@ -67,7 +67,7 @@ import { useHooks, useMcp, useModels, usePlans, useProviders, useServerFleets, u
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { persistTabBadge, publishTabBadge, useTabBadgePreference } from "../../lib/tabBadge";
 import { PROTOCOL_VERSION } from "../../lib/remoteProtocol";
-import { checkForDesktopUpdate, type DesktopUpdate } from "../../lib/updater";
+import { useDesktopUpdateState } from "../../lib/updater";
 import { useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, rowHeight, space } from "../../theme/tokens";
@@ -119,12 +119,13 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/appearance" | "/keybindings" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
+type SettingsRoute = "/settings" | "/appearance" | "/keybindings" | "/diagnostics" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
   { key: "appearance", label: "Appearance", href: "/appearance" },
   { key: "keybindings", label: "Keyboard shortcuts", href: "/keybindings" },
+  { key: "diagnostics", label: "Diagnostics & updates", href: "/diagnostics" },
   { key: "anywhere", label: "Forge Anywhere", href: "/anywhere" },
   { key: "usage", label: "Usage", href: "/usage" },
   { key: "providers", label: "Providers & accounts", href: "/providers" },
@@ -327,8 +328,7 @@ export function SettingsScreen() {
 
   const [notifyPermission, setNotifyPermission] = useState<NotifyPermission>("default");
   const [notifyBusy, setNotifyBusy] = useState(false);
-  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdate | null>(null);
-  const [updateBusy, setUpdateBusy] = useState(false);
+  const desktopUpdate = useDesktopUpdateState();
 
   // "forge" nav row trailing counts — real data from the same hooks each sub-page
   // uses (react-query dedupes by baseUrl-scoped key, so this doesn't add a
@@ -510,30 +510,6 @@ export function SettingsScreen() {
     }
   }, [notifyBusy, toast]);
 
-  useEffect(() => {
-    if (!isTauri) return;
-    void checkForDesktopUpdate().then(setDesktopUpdate).catch(() => undefined);
-  }, []);
-
-  const checkDesktopUpdate = useCallback(async () => {
-    setUpdateBusy(true);
-    try {
-      const update = await checkForDesktopUpdate();
-      setDesktopUpdate(update);
-      if (!update) toast.show("Forge is up to date.", { tone: "neutral" });
-    } catch {
-      toast.show("couldn't check for updates.", { tone: "danger" });
-    } finally {
-      setUpdateBusy(false);
-    }
-  }, [toast]);
-
-  const installDesktopUpdate = useCallback(async () => {
-    if (!desktopUpdate) return;
-    setUpdateBusy(true);
-    try { await desktopUpdate.install(); } catch { toast.show("couldn't install update.", { tone: "danger" }); }
-    finally { setUpdateBusy(false); }
-  }, [desktopUpdate, toast]);
   const versionMeta = useVersionMeta(PROTOCOL_VERSION);
 
   return (
@@ -750,12 +726,23 @@ export function SettingsScreen() {
           </View>
         ) : null}
 
-        {isTauri ? (
-          <View>
-            <SectionHeader>About &amp; diagnostics</SectionHeader>
-            <ListRow title={updateBusy ? "Checking for updates…" : desktopUpdate ? `Update available: ${desktopUpdate.version}` : "Check for updates"} subtitle={desktopUpdate ? "Install and relaunch Forge" : "Desktop releases are checked in the background"} onPress={updateBusy ? undefined : desktopUpdate ? installDesktopUpdate : checkDesktopUpdate} showSeparator={false} />
-          </View>
-        ) : null}
+        <View>
+          <SectionHeader>About &amp; diagnostics</SectionHeader>
+          <ListRow
+            title="Diagnostics & updates"
+            subtitle={
+              desktopUpdate.phase === "available"
+                ? `Desktop ${desktopUpdate.availableVersion} is ready to install`
+                : desktopUpdate.phase === "error"
+                  ? "Update check needs attention"
+                  : isTauri
+                    ? "Compatibility, host health, resources, and desktop updates"
+                    : "Compatibility, host health, resources, and support details"
+            }
+            onPress={() => router.push("/diagnostics")}
+            showSeparator={false}
+          />
+        </View>
 
         <ConfirmDialog
           visible={pendingRemove != null}

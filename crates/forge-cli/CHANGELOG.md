@@ -6,6 +6,16 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The companion app now has a cross-surface Diagnostics & Updates page backed by an authenticated,
+  bounded `/api/diagnostics` projection. It reports daemon/client protocol compatibility, aggregate
+  runtime and resource state, safe host checks, and one centralized signed-desktop-updater state.
+  Forge Anywhere exposes the same projection through a dedicated typed read-only route; arbitrary
+  daemon paths remain prohibited. The copied support summary uses a strict whitelist and excludes
+  host names, connection details, tokens, credentials, workspace data, prompts, logs, environment
+  values, and daemon-provided free text.
+
 ## [2.12.2] - 2026-07-30
 
 ### Fixed

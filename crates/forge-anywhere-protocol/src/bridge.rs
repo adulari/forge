@@ -37,6 +37,7 @@ pub enum RouteId {
     ReadMcp,
     UpdateMcp,
     Usage,
+    Diagnostics,
     Answer,
     PushKey,
     PushSubscribe,
