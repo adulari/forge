@@ -44,6 +44,45 @@ test -e "$scratch/target/preserved"
 test -e "$scratch/npm/_cacache/preserved"
 test -e "$scratch/npm/_npx/preserved"
 
+mkdir -p \
+  "$scratch/npm/_npx/active-process/node_modules/.bin" \
+  "$scratch/npm/_npx/active-environment/node_modules/.bin" \
+  "$scratch/npm/_npx/inactive-process" \
+  "$scratch/proc/123"
+dd if=/dev/zero \
+  of="$scratch/npm/_npx/active-process/node_modules/.bin/server" \
+  bs=1024 count=8 status=none
+dd if=/dev/zero \
+  of="$scratch/npm/_npx/active-environment/node_modules/.bin/server" \
+  bs=1024 count=8 status=none
+dd if=/dev/zero \
+  of="$scratch/npm/_npx/inactive-process/package" \
+  bs=1024 count=8 status=none
+printf 'node\0%s\0' \
+  "$scratch/npm/_npx/active-process/node_modules/.bin/server" \
+  >"$scratch/proc/123/cmdline"
+printf 'PATH=%s:/usr/bin\0' \
+  "$scratch/npm/_npx/active-environment/node_modules/.bin" \
+  >"$scratch/proc/123/environ"
+FORGE_NPM_CACHE_ROOT="$scratch/npm" \
+FORGE_PROC_ROOT="$scratch/proc" \
+FORGE_MAX_NPX_CACHE_KIB=1 \
+  bash scripts/ci/trim-runner-cache.sh "$scratch"
+test -e "$scratch/npm/_npx/active-process/node_modules/.bin/server"
+test -e "$scratch/npm/_npx/active-environment/node_modules/.bin/server"
+test ! -e "$scratch/npm/_npx/inactive-process"
+test ! -e "$scratch/npm/_npx/preserved"
+
+mkdir -p "$scratch/npm/_npx/uninspectable-process"
+dd if=/dev/zero \
+  of="$scratch/npm/_npx/uninspectable-process/package" \
+  bs=1024 count=8 status=none
+FORGE_NPM_CACHE_ROOT="$scratch/npm" \
+FORGE_PROC_ROOT="$scratch/missing-proc" \
+FORGE_MAX_NPX_CACHE_KIB=1 \
+  bash scripts/ci/trim-runner-cache.sh "$scratch"
+test -e "$scratch/npm/_npx/uninspectable-process/package"
+
 mkdir -p "$scratch/symlink-target"
 mkdir -p "$scratch/npm-with-child-link"
 ln -s "$scratch/symlink-target" "$scratch/npm-with-child-link/_cacache"
