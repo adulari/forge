@@ -56,7 +56,10 @@ npm run web        # primary inner loop — point it at a --local/--anywhere dae
 npm run tauri:dev  # desktop shell (Tauri v2), wraps the web build with a native window
 ```
 
-Gate before any PR: `npm run check` (lint, TypeScript, and Vitest) clean.
+Gate before any PR: `npm run check` (Expo Doctor, lint, TypeScript, and Vitest) must be clean.
+Expo Doctor's `appConfigFieldsNotSyncedCheck` is the sole disabled check: `ios/` is intentionally
+committed only as the Xcode Cloud bootstrap, and `ios/ci_scripts/ci_post_clone.sh` replaces it with
+a fresh `expo prebuild -p ios` result before every archive. All other Doctor checks remain enforced.
 
 ## Build matrix
 

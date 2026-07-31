@@ -107,7 +107,7 @@ jobs:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
           test -n "$EXPO_TOKEN" || { echo 'EXPO_TOKEN is not configured' >&2; exit 1; }
-          if ! ./node_modules/.bin/eas build --platform android --profile "$PROFILE" \
+          if ! npx --yes eas-cli@20.5.1 build --platform android --profile "$PROFILE" \
             --non-interactive --wait --json > build.json; then
             echo 'EAS build command failed; captured output:' >&2
             sed -n '1,200p' build.json >&2
@@ -153,7 +153,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.submit_to_play
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: ./node_modules/.bin/eas submit --platform android --profile production --id "${{ steps.eas.outputs.id }}" --non-interactive
+        run: npx --yes eas-cli@20.5.1 submit --platform android --profile production --id "${{ steps.eas.outputs.id }}" --non-interactive
       - name: Remove Google Play credentials
         if: always()
         run: '[ -z "${GOOGLE_PLAY_CREDENTIAL:-}" ] || rm -f "$GOOGLE_PLAY_CREDENTIAL"'

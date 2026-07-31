@@ -2,6 +2,7 @@
 set -euo pipefail
 
 workflow=".github/workflows/mobile-android.yml"
+ota_workflow=".github/workflows/eas-update.yml"
 config="mobile/eas.json"
 lockfile="mobile/package-lock.json"
 
@@ -18,13 +19,27 @@ grep -Fq "sed -n '1,200p' build.json >&2" "$workflow" || {
   exit 1
 }
 
-node - "$config" "$lockfile" <<'NODE'
+node - "$config" "$lockfile" "$workflow" "$ota_workflow" <<'NODE'
 const fs = require("node:fs");
 const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const lockfile = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
-const installedCli = lockfile.packages?.["node_modules/eas-cli"]?.version;
-if (!installedCli || config.cli?.version !== installedCli) {
-  throw new Error("eas.json must pin the EAS CLI version resolved in package-lock.json");
+const workflow = fs.readFileSync(process.argv[4], "utf8");
+const otaWorkflow = fs.readFileSync(process.argv[5], "utf8");
+const cliVersion = config.cli?.version;
+if (!/^\d+\.\d+\.\d+$/.test(cliVersion ?? "")) {
+  throw new Error("eas.json must pin an exact EAS CLI version");
+}
+if (lockfile.packages?.["node_modules/eas-cli"]) {
+  throw new Error("eas-cli must stay out of project dependencies; invoke the pinned CLI with npx");
+}
+const cliCommand = `npx --yes eas-cli@${cliVersion}`;
+for (const command of ["build", "submit"]) {
+  if (!workflow.includes(`${cliCommand} ${command}`)) {
+    throw new Error(`Android workflow must invoke pinned EAS CLI for ${command}`);
+  }
+}
+if (!otaWorkflow.includes(`${cliCommand} update`)) {
+  throw new Error("OTA workflow must invoke the same pinned EAS CLI");
 }
 
 const configuredNode = config.build?.base?.node;
@@ -39,6 +54,9 @@ const compareVersions = (left, right) => {
   }
   return 0;
 };
+if (compareVersions(parseVersion(configuredNode), parseVersion("22.13.0")) < 0) {
+  throw new Error("EAS Node must support the builder's pnpm 11 runtime (Node >=22.13.0)");
+}
 const satisfiesNodeRange = (version, range) => {
   const actual = parseVersion(version);
   return range.split("||").some((alternative) => {

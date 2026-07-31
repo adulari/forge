@@ -108,7 +108,7 @@ jobs:
           # job, so pointing TMPDIR there gives Metro a private, always-clearable cache.
           export TMPDIR="$RUNNER_TEMP/metro"
           mkdir -p "$TMPDIR"
-          npx eas-cli@latest update \
+          npx --yes eas-cli@20.5.1 update \
             --channel production \
             --environment production \
             --platform ios \
