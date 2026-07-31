@@ -107,8 +107,12 @@ jobs:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
           test -n "$EXPO_TOKEN" || { echo 'EXPO_TOKEN is not configured' >&2; exit 1; }
-          ./node_modules/.bin/eas build --platform android --profile "$PROFILE" \
-            --environment "$PROFILE" --non-interactive --wait --json > build.json
+          if ! ./node_modules/.bin/eas build --platform android --profile "$PROFILE" \
+            --non-interactive --wait --json > build.json; then
+            echo 'EAS build command failed; captured output:' >&2
+            sed -n '1,200p' build.json >&2
+            exit 1
+          fi
           node - <<'NODE'
           const fs = require('fs');
           const raw = JSON.parse(fs.readFileSync('build.json', 'utf8'));
