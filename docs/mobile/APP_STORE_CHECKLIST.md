@@ -16,9 +16,11 @@ As of 2026-07-17, the Apple Developer membership, App Store Connect app, Xcode C
 production OTA bootstrap, and TestFlight OTA delivery have all been exercised. TestFlight build
 74 was the installed binary used while verifying the latest OTA fixes. Do not interpret that as
 proof that every future native or OTA release is compatible; run the checks below for each one.
-As of 2026-07-31, the Android workflow has still never completed a GitHub Actions run and the
-installed-archive source baseline is not configured; neither distribution path may be called
-verified until its unchecked gates below pass.
+As of 2026-07-31, an Android preview workflow has completed through GitHub Actions and EAS. Its
+APK provenance, ZIP integrity, package/version/SDK/ABIs, non-debuggable manifest, permissions, and
+signature were verified. Physical-device installation and production AAB/Play submission remain
+unverified. The installed iOS archive source baseline is not configured; keep its unchecked gates
+closed until a current archive is installed and identified.
 
 ## Checked-in release configuration
 
@@ -174,8 +176,14 @@ health check proves reachability and configuration, but not delivery to a real d
       16.4). Open the stable Pages source URL from a clean client before announcing it.
 - [ ] Install that IPA through SideStore and complete the same core pairing/chat/reconnect smoke
       test. SideStore validates the unsigned distribution path, not App Store signing.
-- [ ] Dispatch `mobile-android.yml` for the intended ref. Install and smoke-test the APK; for a
-      tagged release, also verify the AAB artifact/release asset and Play Console upload if used.
+- [x] The 2026-07-31 `mobile-android.yml` preview run completed for commit `c96c129d`. Its GitHub
+      APK exactly matched the EAS artifact SHA-256, passed ZIP integrity and signature checks, had
+      the expected package/version/SDK/ABIs and release manifest, and omitted
+      `SYSTEM_ALERT_WINDOW`.
+- [ ] Install that exact verified APK on a physical Android device and complete the core
+      pairing/chat/background/reconnect smoke test.
+- [ ] For a tagged production release, build and verify the AAB/release asset and confirm any
+      intended Google Play upload and installation path separately.
 - [ ] Do not call an OTA, a SideStore IPA, or a GitHub Android artifact a complete mobile release
       until its matching install path has been exercised on a device.
 
