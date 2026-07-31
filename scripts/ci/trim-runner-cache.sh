@@ -103,8 +103,81 @@ fi
 # directories are never in scope.
 trim_if_oversized \
   "$npm_cache_root/_cacache" "$max_npm_content_cache_kib" "npm content"
-trim_if_oversized \
-  "$npm_cache_root/_npx" "$max_npx_cache_kib" "npx package"
+
+trim_npx_cache() {
+  local artifact="$npm_cache_root/_npx"
+  [[ -d "$artifact" && ! -L "$artifact" ]] || return 0
+
+  local size_kib
+  size_kib="$(du -skx -- "$artifact" | awk '{print $1}')"
+  if (( size_kib <= max_npx_cache_kib )); then
+    echo "npx package cache is within budget: ${size_kib} KiB <= ${max_npx_cache_kib} KiB"
+    return 0
+  fi
+
+  # Long-running MCP servers and other tools can execute directly from an npx cache entry. Do not
+  # remove an entry referenced by a live process. Command lines normally carry the executable
+  # path, while PATH in the environment covers wrappers that replace their argv after startup.
+  # cwd/exe links cover the remaining direct-launch cases. If process inspection is unavailable,
+  # fail safe by preserving the whole cache rather than risking a live unrelated process.
+  local proc_root="${FORGE_PROC_ROOT:-/proc}"
+  if [[ ! -d "$proc_root" ]]; then
+    echo "cannot inspect live processes; preserving oversized npx cache: $artifact" >&2
+    return 0
+  fi
+
+  declare -A active_entries=()
+  mark_npx_reference() {
+    local reference="$1"
+    [[ "$reference" == *"$artifact/"* ]] || return 0
+    local relative="${reference#*"$artifact/"}"
+    local entry_name="${relative%%/*}"
+    [[ "$entry_name" =~ ^[A-Za-z0-9._-]+$ ]] || return 0
+    active_entries["$entry_name"]=1
+  }
+
+  local proc_dir process_file reference
+  for proc_dir in "$proc_root"/[0-9]*; do
+    [[ -d "$proc_dir" ]] || continue
+    for process_file in "$proc_dir/cmdline" "$proc_dir/environ"; do
+      [[ -r "$process_file" ]] || continue
+      {
+        while IFS= read -r -d '' reference; do
+          mark_npx_reference "$reference"
+        done <"$process_file"
+      } 2>/dev/null || true
+    done
+    for process_file in "$proc_dir/cwd" "$proc_dir/exe"; do
+      reference="$(readlink -f -- "$process_file" 2>/dev/null || true)"
+      [[ -n "$reference" ]] && mark_npx_reference "$reference"
+    done
+  done
+
+  local entry entry_name
+  while IFS= read -r -d '' entry; do
+    entry_name="${entry##*/}"
+    if [[ -n "${active_entries[$entry_name]+x}" ]]; then
+      echo "preserving active npx cache entry: $entry"
+    elif (( dry_run == 1 )); then
+      echo "would remove inactive npx cache entry: $entry"
+    else
+      echo "removing inactive npx cache entry: $entry"
+      rm -rf -- "$entry"
+    fi
+  done < <(find "$artifact" -mindepth 1 -maxdepth 1 -print0)
+
+  (( dry_run == 1 )) && return 0
+  rmdir -- "$artifact" 2>/dev/null || true
+  [[ -d "$artifact" ]] || return 0
+  size_kib="$(du -skx -- "$artifact" | awk '{print $1}')"
+  if (( size_kib > max_npx_cache_kib )); then
+    echo "active npx cache remains over budget: ${size_kib} KiB > ${max_npx_cache_kib} KiB"
+  else
+    echo "npx package cache is within budget after trim: ${size_kib} KiB <= ${max_npx_cache_kib} KiB"
+  fi
+}
+
+trim_npx_cache
 
 trim_release_docker_volumes() {
   (( trim_release_docker == 1 )) || return 0

@@ -33,10 +33,12 @@ Forge uses independent bounds for the two storage owners:
    roots after the job finishes and only when an aggregate exceeds its hard budget: 16 GiB for
    workspace Cargo targets, 24 GiB for the four named release-build Docker volumes, 4 GiB for
    mobile `node_modules`, 4 GiB for npm's content-addressed cache, and 1 GiB for `npx` package
-   installs. The script rejects `/`, rejects a symlinked npm cache root, ignores symlinked cache
-   directories, refuses ambiguous boolean controls, and has an executable destructive-behavior
-   test. Release Docker volumes are trimmed in one downstream job after both parallel platform
-   builds finish, so an in-use shared cache is never force-removed.
+   installs. Before trimming `npx`, the script preserves entries referenced by a live process
+   command line, environment, working directory, or executable; an active entry may therefore
+   keep that cache temporarily above its target. The script rejects `/`, rejects a symlinked npm
+   cache root, ignores symlinked cache directories, refuses ambiguous boolean controls, and has an
+   executable destructive-behavior test. Release Docker volumes are trimmed in one downstream job
+   after both parallel platform builds finish, so an in-use shared cache is never force-removed.
 2. Each successful Anywhere sync pass deletes at most 1,000 acknowledged local revisions older
    than the newest `(record_kind, stable_id)` revision and at most 1,000 remote staging rows whose
    outcome is `applied` or `superseded`.
@@ -53,9 +55,9 @@ Forge uses independent bounds for the two storage owners:
   revision compaction, terminal remote deletion, conflict retention, duplicate retry, and next
   revision creation.
 - `scripts/ci/test-trim-runner-cache.sh` covers oversized Cargo, `node_modules`, npm content, and
-  `npx` cache deletion; unrelated-directory and unrelated-Docker-volume preservation; dry-run
-  behavior; rejection of filesystem and symlinked npm cache roots; exact Docker allow-listing;
-  and workflow wiring.
+  inactive `npx` cache deletion and live-process preservation; unrelated-directory and
+  unrelated-Docker-volume preservation; dry-run behavior; rejection of filesystem and symlinked
+  npm cache roots; exact Docker allow-listing; and workflow wiring.
 - The mobile production dependency audit reports zero vulnerabilities after the lockfile update;
   the required `mobile checks` aggregate now includes this audit.
 
