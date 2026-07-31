@@ -88,7 +88,7 @@ instead of returning a green skipped run, so the reconciler cannot confuse refus
 When the guard passes, it publishes to the `production` channel with:
 
 ```
-EXPO_RUNTIME_VERSION_OVERRIDE="<installed archive fingerprint>" ./node_modules/.bin/eas update --channel production --environment production --platform ios --message "<commit SHA> <commit subject>" --non-interactive
+EXPO_RUNTIME_VERSION_OVERRIDE="<installed archive fingerprint>" npx --yes eas-cli@20.5.1 update --channel production --environment production --platform ios --message "<commit SHA> <commit subject>" --non-interactive
 ```
 
 The workflow reads that value from the `IOS_OTA_RUNTIME_VERSION` GitHub repository variable.

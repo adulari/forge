@@ -294,7 +294,7 @@ Guideline 4.2 (minimum functionality / "app-like") defenses, all real:
 | iOS | Xcode Cloud runs `ios/ci_scripts/ci_post_clone.sh` (`npm ci` + Expo prebuild) and archives/signs the generated project | TestFlight/App Store; `mobile-sidestore.yml` separately publishes an unsigned IPA + SideStore source |
 | Android | `mobile-android` Actions workflow / `eas build -p android` | Internal APK artifact, tagged AAB release, optional Play internal-track submission |
 | Web | `npx expo export -p web` → `dist/` | Any static host; version-stamped; served over HTTPS |
-| Windows | `npm run tauri build` on windows runner → NSIS `.exe` | GitHub Releases |
+| Windows | `npm run tauri:build` on windows runner → NSIS `.exe` | GitHub Releases |
 | macOS | tauri build → `.dmg` (unsigned initially; notarization when the Apple account lands) | GitHub Releases |
 | Linux | tauri build → `.AppImage` + `.deb` | GitHub Releases |
 
@@ -304,7 +304,7 @@ artifact, `mobile-android.yml` builds APK/AAB artifacts and can submit to Play i
 builds. Compatible iOS JavaScript/assets ship through the production EAS Update workflow.
 
 Dev loops: `npx expo start` (native dev client / Expo Go where possible), `npx expo start --web`
-(primary inner loop against a `--local`/`--anywhere` daemon), `npm run tauri dev` (desktop).
+(primary inner loop against a `--local`/`--anywhere` daemon), `npm run tauri:dev` (desktop).
 
 ---
 

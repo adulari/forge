@@ -50,10 +50,9 @@ ios/DerivedData/
 ios/*.xcuserstate
 ios/**/xcuserdata/
 
-# @bacons/apple-targets writes these into the target source dir at prebuild
-# time (alongside the hand-authored Swift files, which ARE committed).
+# @bacons/apple-targets writes these at prebuild time; hand-authored Swift files remain committed.
 targets/*/Info.plist
-targets/*/generated.entitlements
+ios/.targets/
 targets/*/Assets.xcassets
 # ...except the widget's, which is hand-owned: it carries UIAppFonts so the extension
 # bundle can resolve Geist/Geist Mono (the plugin only writes an Info.plist when none
