@@ -110,6 +110,10 @@ const config: ExpoConfig = {
   },
   android: {
     package: BUNDLE_ID,
+    // React Native's debug manifest contributes this special permission during manifest merging
+    // even for the EAS release variant. Forge never draws over other apps, so keep it out of APKs
+    // explicitly instead of shipping an unnecessary Play-policy-sensitive capability.
+    blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW"],
     adaptiveIcon: {
       // Same pre-Machined hex as the old root/splash backgroundColor above — kept in sync
       // with it (theme/tokens.ts darkTokens.bg0, "#09090B") rather than left to drift now
