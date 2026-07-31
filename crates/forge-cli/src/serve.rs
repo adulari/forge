@@ -39,6 +39,8 @@
 //!   ([`crate::serve_terminal`]); no privilege beyond the daemon token that already grants it
 //! - `PATCH /api/mcp`                 enable/disable a configured MCP server in the same
 //!   `mcp.toml` the CLI writes
+//! - `GET|POST|PATCH|DELETE /api/providers/*`  Direct-only provider keys, OAuth accounts, custom
+//!   endpoints, Azure, and enable/disable state; never exposed through Forge Anywhere
 //! - `GET  /api/push/key`             the VAPID public key (`applicationServerKey`)
 //! - `POST /api/push/subscribe`       store a Web Push subscription (dedupe by endpoint)
 //! - `POST /api/push/unsubscribe`     remove one
@@ -767,6 +769,37 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             &format!("{base}/api/config"),
             get(config_page).put(update_config),
         )
+        // Provider/account management is deliberately Direct-only. These routes are absent from
+        // forge-anywhere-protocol's typed allowlist, and responses never contain raw credentials.
+        .route(&format!("{base}/api/providers"), get(providers_page))
+        .route(
+            &format!("{base}/api/providers/{{provider}}/keys"),
+            post(store_provider_key).delete(remove_provider_keys),
+        )
+        .route(
+            &format!("{base}/api/providers/{{provider}}"),
+            patch(set_provider_enabled),
+        )
+        .route(
+            &format!("{base}/api/providers/oauth/{{provider}}/switch"),
+            post(switch_oauth_account),
+        )
+        .route(
+            &format!("{base}/api/providers/oauth/{{provider}}/accounts/{{account_id}}"),
+            axum::routing::delete(remove_oauth_account),
+        )
+        .route(
+            &format!("{base}/api/providers/custom"),
+            post(save_custom_provider),
+        )
+        .route(
+            &format!("{base}/api/providers/custom/{{namespace}}"),
+            axum::routing::delete(remove_custom_provider),
+        )
+        .route(
+            &format!("{base}/api/providers/azure"),
+            axum::routing::put(save_azure_provider).delete(remove_azure_provider),
+        )
         // File/image upload (v7): multipart, session-addressed, stored under the session's
         // `.forge/uploads/<id>/` and delivered to its driver as `RemoteInput::Attach`. The
         // per-route body limit replaces axum's 2 MB default.
@@ -893,6 +926,7 @@ mod serve_config;
 mod serve_mcp;
 mod serve_models;
 mod serve_projects;
+mod serve_providers;
 mod serve_usage;
 mod serve_workflows;
 use serve_assets::*;
@@ -901,6 +935,7 @@ use serve_config::*;
 use serve_mcp::*;
 use serve_models::*;
 use serve_projects::*;
+use serve_providers::*;
 use serve_usage::*;
 use serve_workflows::*;
 

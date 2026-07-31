@@ -64,7 +64,7 @@ import {
   isAnonymousTelemetryEnabled,
   setAnonymousTelemetryEnabled,
 } from "../../lib/anonymousTelemetry";
-import { useHooks, useMcp, useModels, usePlans, useServerFleets, useSkills, useUsage } from "../../lib/queries";
+import { useHooks, useMcp, useModels, usePlans, useProviders, useServerFleets, useSkills, useUsage } from "../../lib/queries";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { persistTabBadge, publishTabBadge, useTabBadgePreference } from "../../lib/tabBadge";
 import { PROTOCOL_VERSION } from "../../lib/remoteProtocol";
@@ -120,12 +120,13 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/anywhere" | "/usage" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
+type SettingsRoute = "/settings" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
   { key: "anywhere", label: "Forge Anywhere", href: "/anywhere" },
   { key: "usage", label: "Usage", href: "/usage" },
+  { key: "providers", label: "Providers & accounts", href: "/providers" },
   { key: "models", label: "Models & mesh", href: "/models" },
   { key: "plans", label: "Plans", href: "/plans" },
   { key: "mcp", label: "MCP servers", href: "/mcp" },
@@ -333,6 +334,7 @@ export function SettingsScreen() {
   // uses (react-query dedupes by baseUrl-scoped key, so this doesn't add a
   // duplicate network round-trip beyond the shared cache).
   const modelsQuery = useModels();
+  const providersQuery = useProviders();
   const mcpQuery = useMcp();
   const plansQuery = usePlans();
   const skillsQuery = useSkills();
@@ -347,6 +349,9 @@ export function SettingsScreen() {
     const ready = modelsQuery.data.providers.flatMap((p) => p.models).filter((m) => m.health == null).length;
     return `${ready} ready`;
   }, [modelsQuery.data]);
+  const providersConfiguredLabel = providersQuery.data
+    ? `${providersQuery.data.providers.filter((provider) => provider.configured).length} configured`
+    : undefined;
   const plansOpenLabel = plansQuery.data ? `${plansQuery.data.length} open` : undefined;
   const mcpEnabledLabel = mcpQuery.data ? `${mcpQuery.data.servers.filter((s) => s.enabled).length} enabled` : undefined;
   const skillsCountLabel = skillsQuery.data ? `${skillsQuery.data.length}` : undefined;
@@ -600,6 +605,7 @@ export function SettingsScreen() {
           <SectionHeader>Forge</SectionHeader>
           <NavListRow label="Forge Anywhere" meta={anywhereMetaLabel} onPress={() => router.push("/anywhere")} />
           <NavListRow label="Usage" meta={usageWeekLabel} onPress={() => router.push("/usage")} />
+          <NavListRow label="Providers & accounts" meta={providersConfiguredLabel} onPress={() => router.push("/providers")} />
           <NavListRow label="Models & mesh health" meta={modelsReadyLabel} onPress={() => router.push("/models")} />
           <NavListRow label="Plans" meta={plansOpenLabel} onPress={() => router.push("/plans")} />
           <NavListRow label="MCP servers" meta={mcpEnabledLabel} onPress={() => router.push("/mcp")} />

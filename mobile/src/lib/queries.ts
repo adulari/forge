@@ -22,6 +22,22 @@ import {
   getWorkflows,
   type ModelsResponse,
   getModels,
+  type ProvidersResponse,
+  type StoreProviderKeyRequest,
+  type SetProviderEnabledRequest,
+  type OAuthAccountRequest,
+  type CustomProviderRequest,
+  type AzureProviderRequest,
+  getProviders,
+  storeProviderKey,
+  removeProviderKeys,
+  setProviderEnabled,
+  switchOAuthAccount,
+  removeOAuthAccount,
+  saveCustomProvider,
+  removeCustomProvider,
+  saveAzureProvider,
+  removeAzureProvider,
   type ConfigResponse,
   type UpdateConfigRequest,
   getConfig,
@@ -109,6 +125,7 @@ import {
 import { useAuth } from "./auth";
 import { useIsPeeking } from "./peek";
 import { pastSessionsRefetchPolicy, sessionsRefetchPolicy } from "./peekQueries";
+import { supportsDirectDaemonEndpoints } from "./transport";
 import type { Snapshot } from "./ws";
 import { syncWidgetSessions } from "./widgetData";
 import {
@@ -150,6 +167,7 @@ function keys(baseUrl: string | null) {
     skills: ["skills", baseUrl] as const,
     workflows: (sessionId?: string) => ["workflows", baseUrl, sessionId ?? null] as const,
     models: ["models", baseUrl] as const,
+    providers: ["providers", baseUrl] as const,
     hooks: ["hooks", baseUrl] as const,
     plans: ["plans", baseUrl] as const,
 
@@ -304,7 +322,107 @@ export function useSkills() { const { baseUrl } = useAuth(); return useQuery<Ski
 export function useWorkflows(sessionId?: string) { const { baseUrl } = useAuth(); return useQuery<WorkflowRow[]>({ queryKey: keys(baseUrl).workflows(sessionId), queryFn: () => getWorkflows(baseUrl as string, sessionId), enabled: baseUrl != null }); }
 export function useHooks() { const { baseUrl } = useAuth(); return useQuery<HookRow[]>({ queryKey: keys(baseUrl).hooks, queryFn: () => getHooks(baseUrl as string), enabled: baseUrl != null }); }
 export function useModels() { const { baseUrl } = useAuth(); const isFocused = useIsFocused(); return useQuery<ModelsResponse>({ queryKey: keys(baseUrl).models, queryFn: () => getModels(baseUrl as string), enabled: baseUrl != null, refetchOnWindowFocus: isFocused }); }
+export function useProviders() {
+  const { baseUrl } = useAuth();
+  const isFocused = useIsFocused();
+  return useQuery<ProvidersResponse>({
+    queryKey: keys(baseUrl).providers,
+    queryFn: () => getProviders(baseUrl as string),
+    enabled: baseUrl != null && supportsDirectDaemonEndpoints(baseUrl),
+    refetchOnWindowFocus: isFocused,
+  });
+}
 export function usePlans() { const { baseUrl } = useAuth(); const isFocused = useIsFocused(); return useQuery<PlanRow[]>({ queryKey: keys(baseUrl).plans, queryFn: () => getPlans(baseUrl as string), enabled: baseUrl != null, refetchInterval: isFocused ? 30000 : false }); }
+
+function seedProviders(
+  queryClient: ReturnType<typeof useQueryClient>,
+  baseUrl: string | null,
+  data: ProvidersResponse,
+) {
+  queryClient.setQueryData(keys(baseUrl).providers, data);
+  void queryClient.invalidateQueries({ queryKey: keys(baseUrl).models });
+}
+
+export function useStoreProviderKey() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: StoreProviderKeyRequest) => storeProviderKey(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useRemoveProviderKeys() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (provider: string) => removeProviderKeys(baseUrl as string, provider),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useSetProviderEnabled() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SetProviderEnabledRequest) => setProviderEnabled(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useSwitchOAuthAccount() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: OAuthAccountRequest) => switchOAuthAccount(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useRemoveOAuthAccount() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: OAuthAccountRequest) => removeOAuthAccount(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useSaveCustomProvider() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CustomProviderRequest) => saveCustomProvider(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useRemoveCustomProvider() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (namespace: string) => removeCustomProvider(baseUrl as string, namespace),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useSaveAzureProvider() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AzureProviderRequest) => saveAzureProvider(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useRemoveAzureProvider() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => removeAzureProvider(baseUrl as string),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
 
 export function useCreateMcpServer() {
   const { baseUrl } = useAuth();

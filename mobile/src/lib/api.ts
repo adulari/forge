@@ -89,6 +89,66 @@ export interface ModelRow { id: string; name: string; frontier: boolean; free: b
 export interface SessionTreeRow { id: string; title: string | null; forked_from: string | null; forked_at_seq: number | null; created_at: number; }
 export interface PlanRow { session_id: string; session_title: string; title: string; steps: { title: string; detail: string }[]; notes: string | null; }
 
+// --- Direct-only provider/account management (crates/forge-cli/src/serve/serve_providers.rs) ---
+
+export type ProviderKind = "api_key" | "custom" | "azure" | "oauth" | "cli" | "local";
+export type ProviderAuthStatus = "configured" | "missing" | "expired" | "unverified" | "ready" | "stopped";
+export interface ProviderOAuthAccount {
+  id: string;
+  active: boolean;
+  expires_at: number | null;
+  expiry_status: "valid" | "expired" | "unknown";
+}
+export interface ProviderRow {
+  id: string;
+  label: string;
+  kind: ProviderKind;
+  enabled: boolean;
+  configured: boolean;
+  auth_status: ProviderAuthStatus;
+  keyless: boolean;
+  env_var: string | null;
+  environment_key_present: boolean;
+  stored_key_fingerprints: string[];
+  free: boolean;
+  endpoint: string | null;
+  azure_resource: string | null;
+  azure_api_version: string | null;
+  models: string[];
+  accounts: ProviderOAuthAccount[];
+  login_command: string | null;
+  installed: boolean | null;
+  version: string | null;
+  serving: boolean | null;
+  restart_required: boolean;
+}
+export interface ProvidersResponse {
+  direct_only: true;
+  restart_required: boolean;
+  notice: string | null;
+  providers: ProviderRow[];
+}
+export interface StoreProviderKeyRequest { provider: string; key: string; mode: "append" | "replace"; }
+export interface SetProviderEnabledRequest { provider: string; enabled: boolean; }
+export interface OAuthAccountRequest { provider: "codex-oauth" | "xai-oauth"; account_id: string; }
+export interface CustomProviderRequest {
+  namespace: string;
+  base_url: string;
+  api_key_env?: string;
+  free?: boolean;
+  models?: string[];
+  label?: string;
+}
+export interface AzureProviderRequest {
+  resource?: string;
+  endpoint?: string;
+  api_version?: string;
+  api_key_env?: string;
+  deployments?: string[];
+  free?: boolean;
+  label?: string;
+}
+
 export interface CreateMcpServerRequest { name: string; transport: "stdio" | "http" | "sse"; command?: string; args?: string[]; url?: string; token_env?: string; }
 
 export interface McpResponse { servers: McpServerRow[]; allowed_servers: string[]; allowed_tools: string[]; call_timeout_secs: number; connect_timeout_secs: number; }
@@ -595,6 +655,59 @@ export function getWorkflows(baseUrl: string, session?: string): Promise<Workflo
 
 export function getModels(baseUrl: string): Promise<ModelsResponse> {
   return request(baseUrl, "/api/models");
+}
+
+export function getProviders(baseUrl: string): Promise<ProvidersResponse> {
+  return request(baseUrl, "/api/providers");
+}
+
+export function storeProviderKey(baseUrl: string, body: StoreProviderKeyRequest): Promise<ProvidersResponse> {
+  return request(baseUrl, `/api/providers/${encodeURIComponent(body.provider)}/keys`, {
+    method: "POST",
+    body: JSON.stringify({ key: body.key, mode: body.mode }),
+  });
+}
+
+export function removeProviderKeys(baseUrl: string, provider: string): Promise<ProvidersResponse> {
+  return request(baseUrl, `/api/providers/${encodeURIComponent(provider)}/keys`, { method: "DELETE" });
+}
+
+export function setProviderEnabled(baseUrl: string, body: SetProviderEnabledRequest): Promise<ProvidersResponse> {
+  return request(baseUrl, `/api/providers/${encodeURIComponent(body.provider)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: body.enabled }),
+  });
+}
+
+export function switchOAuthAccount(baseUrl: string, body: OAuthAccountRequest): Promise<ProvidersResponse> {
+  return request(baseUrl, `/api/providers/oauth/${encodeURIComponent(body.provider)}/switch`, {
+    method: "POST",
+    body: JSON.stringify({ account_id: body.account_id }),
+  });
+}
+
+export function removeOAuthAccount(baseUrl: string, body: OAuthAccountRequest): Promise<ProvidersResponse> {
+  return request(
+    baseUrl,
+    `/api/providers/oauth/${encodeURIComponent(body.provider)}/accounts/${encodeURIComponent(body.account_id)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function saveCustomProvider(baseUrl: string, body: CustomProviderRequest): Promise<ProvidersResponse> {
+  return request(baseUrl, "/api/providers/custom", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function removeCustomProvider(baseUrl: string, namespace: string): Promise<ProvidersResponse> {
+  return request(baseUrl, `/api/providers/custom/${encodeURIComponent(namespace)}`, { method: "DELETE" });
+}
+
+export function saveAzureProvider(baseUrl: string, body: AzureProviderRequest): Promise<ProvidersResponse> {
+  return request(baseUrl, "/api/providers/azure", { method: "PUT", body: JSON.stringify(body) });
+}
+
+export function removeAzureProvider(baseUrl: string): Promise<ProvidersResponse> {
+  return request(baseUrl, "/api/providers/azure", { method: "DELETE" });
 }
 
 export function getConfig(baseUrl: string): Promise<ConfigResponse> {
