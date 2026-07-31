@@ -60,7 +60,7 @@ pub(crate) struct DriverSpec {
 /// LocalSessionManager shape: one task per session, addressed by id.
 pub(crate) struct SessionDriverHandle {
     pub session_id: String,
-    pub title: String,
+    title: std::sync::Arc<std::sync::RwLock<String>>,
     pub cwd: String,
     pub worktree: Option<String>,
     pub created_at: i64,
@@ -80,6 +80,20 @@ pub(crate) struct SessionDriverHandle {
 }
 
 impl SessionDriverHandle {
+    pub(crate) fn title(&self) -> String {
+        self.title
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn set_title(&self, title: String) {
+        *self
+            .title
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = title;
+    }
+
     /// Ask the driver to stop (archive): the loop aborts any running turn, runs SessionEnd
     /// hooks, broadcasts one final `closed` frame, and exits. Idempotent.
     pub fn shutdown(&self) {
@@ -191,11 +205,12 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let last_activity = std::sync::Arc::new(AtomicI64::new(now_secs()));
     let ws_clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let title = std::sync::Arc::new(std::sync::RwLock::new(spec.title));
 
     let task = tokio::spawn(drive_session(
         session,
         session_id.clone(),
-        spec.title.clone(),
+        title.clone(),
         spec.cwd.clone(),
         spec.worktree.clone(),
         ui_rx,
@@ -211,7 +226,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
 
     Ok(SessionDriverHandle {
         session_id,
-        title: spec.title,
+        title,
         cwd: spec.cwd,
         worktree: spec.worktree,
         created_at: now_secs(),
@@ -282,7 +297,7 @@ impl Drop for DriverState {
 async fn drive_session(
     session: std::sync::Arc<tokio::sync::Mutex<Session>>,
     session_id: String,
-    title: String,
+    title: std::sync::Arc<std::sync::RwLock<String>>,
     cwd: String,
     worktree: Option<String>,
     ui_rx: std::sync::mpsc::Receiver<UiMsg>,
@@ -404,6 +419,16 @@ async fn drive_session(
         if *shutdown_rx.borrow_and_update() {
             break;
         }
+        let current_title = title
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if last_snap
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.title != current_title)
+        {
+            dirty = true;
+        }
         // 1. Presenter events from the (possibly running) turn task.
         while let Ok(msg) = ui_rx.try_recv() {
             dirty = true;
@@ -480,7 +505,7 @@ async fn drive_session(
                 &st.app,
                 SnapshotIdentity {
                     session_id: &session_id,
-                    title: &title,
+                    title: &current_title,
                     cwd: &cwd,
                     worktree: worktree.as_deref(),
                     project_initialized: project.initialized,
@@ -861,7 +886,7 @@ mod tests {
         let (input_tx, _) = tokio::sync::mpsc::channel(1);
         drop(SessionDriverHandle {
             session_id: "test".into(),
-            title: String::new(),
+            title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
             cwd: String::new(),
             worktree: None,
             created_at: 0,
@@ -889,7 +914,7 @@ mod tests {
         let (input_tx, _) = tokio::sync::mpsc::channel(1);
         let handle = SessionDriverHandle {
             session_id: "test".into(),
-            title: String::new(),
+            title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
             cwd: String::new(),
             worktree: None,
             created_at: 0,

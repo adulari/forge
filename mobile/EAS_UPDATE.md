@@ -76,12 +76,14 @@ publish an update automatically.
 
 ## CI workflow
 
-`.github/workflows/eas-update.yml` runs on pushes to `main` that touch OTA-safe app source
-(`mobile/src/**` or `mobile/assets/**`). It compares the complete range from the repository variable
-`IOS_OTA_COMPATIBLE_BASE_SHA` to current `main`, not only the triggering commit. The baseline starts
-at the installed archive's source commit and may advance only after every intervening mobile change
-has been reviewed as compatible with that archive. This protects against a mixed or earlier commit
-quietly changing native/config inputs alongside JavaScript.
+`.github/workflows/eas-update.yml` runs on pushes to `main` that touch any `mobile/**` path. It
+compares the complete range from the repository variable `IOS_OTA_COMPATIBLE_BASE_SHA` to current
+`main`, not only the triggering push. The baseline is the installed archive's source commit and may
+advance only when a new native archive built from that commit is the release baseline. This catches
+the important two-push failure case: a native change is skipped, then a later source-only push would
+otherwise publish the combined current bundle to the old binary. Manual and release-triggered
+dispatches use the same baseline and cannot bypass it. An incompatible range fails the OTA workflow
+instead of returning a green skipped run, so the reconciler cannot confuse refusal with publication.
 
 When the guard passes, it publishes to the `production` channel with:
 
@@ -93,9 +95,10 @@ The workflow reads that value from the `IOS_OTA_RUNTIME_VERSION` GitHub reposito
 It must be the fingerprint stored inside the installed Xcode Cloud `.xcarchive`, not a locally
 recalculated fingerprint. Expo fingerprints include generated native state and can differ between
 Apple's archive environment and another macOS runner even from the same source commit. Update this
-runtime value after promoting a new native build to TestFlight. Separately advance
-`IOS_OTA_COMPATIBLE_BASE_SHA` after a successful compatibility review; both variables fail closed
-when missing or invalid.
+runtime value after promoting a new native build to TestFlight. The installed app exposes the same
+value in **Settings → Diagnostics & updates** as “Embedded native/OTA runtime fingerprint.”
+Separately advance `IOS_OTA_COMPATIBLE_BASE_SHA` to that archive's exact source commit; both
+variables fail closed when missing or invalid.
 
 ### `--platform ios` is required
 

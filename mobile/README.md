@@ -37,6 +37,11 @@ folder picker. A session can optionally start in an isolated git worktree, and t
 prioritizes discovered healthy models while retaining automatic mesh routing and an offline manual
 ID fallback.
 
+On native iOS and Android, share text or a web URL from another app into Forge. The content is
+durably staged on that device, opens the real new-session composer after pairing, and is removed
+only after successful creation/queueing or an explicit discard. Settings → Legal & support exposes
+the public privacy policy, AGPL license, issue tracker, and source repository.
+
 On desktop and web viewports at least 1024 px wide, the Fleet rail remains visible beside the active
 chat. Phones use focused full-screen navigation. Offline prompts queue locally in FIFO order, and a
 reconnect replays missed server frames before queued input is reconciled.
@@ -101,4 +106,6 @@ publishes the complete five-platform bundle and updater manifest to a versioned 
 `app-web.yml` always produces a build artifact, while its GitHub Pages deploy remains opt-in and off
 by default because this repository's Pages site hosts the SideStore source. See
 [`docs/mobile/APP_STORE_CHECKLIST.md`](../docs/mobile/APP_STORE_CHECKLIST.md) for the remaining
-manual App Store Connect steps (beta group assignment, App Store listing, etc).
+manual App Store Connect steps (beta group assignment, signing/device checks, etc) and
+[`docs/mobile/STORE_LISTING.md`](../docs/mobile/STORE_LISTING.md) for the version-controlled listing
+copy and screenshot matrix.

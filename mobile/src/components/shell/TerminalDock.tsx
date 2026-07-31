@@ -8,7 +8,7 @@
 // header, but DockHost's header is generic across every dock (usage/git/terminal) and has no
 // route to this component's socket. The interrupt/clear affordances therefore live in a dense
 // mono status strip at the foot of the dock instead.
-import { Terminal } from "lucide-react-native";
+import { Plus, RefreshCw, RotateCcw, Square, Terminal } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   NativeSyntheticEvent,
@@ -23,14 +23,24 @@ import {
   type TextStyle,
 } from "react-native";
 
-import { openTerminalSocket, type TerminalSocket } from "../../lib/api";
+import {
+  listTerminalSessions,
+  openTerminalSocket,
+  type TerminalSessionSummary,
+  type TerminalSocket,
+  type TerminalStatus,
+} from "../../lib/api";
 import { useAuth } from "../../lib/auth";
-import { supportsDirectDaemonEndpoints } from "../../lib/transport";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, space, type ColorTokens } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { EmptyState } from "../ds/EmptyState";
 import { AnsiScrollback, type AnsiColor, type AnsiLine, type AnsiSpan } from "./ansi";
+import {
+  compareTerminalIds,
+  nextTerminalId,
+  terminalTitle,
+} from "./terminalModel";
 
 /** Bounded scrollback — completed lines beyond this are dropped from the head. */
 const MAX_SCROLLBACK_LINES = 2000;
@@ -60,6 +70,17 @@ const CONTROL_KEYS: Record<string, string> = {
   PageUp: "\x1b[5~",
   PageDown: "\x1b[6~",
 };
+
+const COMPACT_KEYS = [
+  { label: "esc", value: "\x1b", accessibilityLabel: "Escape" },
+  { label: "tab", value: "\t", accessibilityLabel: "Tab" },
+  { label: "←", value: "\x1b[D", accessibilityLabel: "Left arrow" },
+  { label: "↑", value: "\x1b[A", accessibilityLabel: "Up arrow" },
+  { label: "↓", value: "\x1b[B", accessibilityLabel: "Down arrow" },
+  { label: "→", value: "\x1b[C", accessibilityLabel: "Right arrow" },
+  { label: "^C", value: "\x03", accessibilityLabel: "Control C" },
+  { label: "^L", value: "\x0c", accessibilityLabel: "Control L" },
+] as const;
 
 // ---------------------------------------------------------------------------
 // Colour resolution
@@ -171,9 +192,22 @@ const TerminalLine = React.memo(function TerminalLine({
 
 export interface TerminalDockProps {
   sessionId: string | null;
+  /** Stable daemon terminal identity. Desktop workbench tabs pin this explicitly. */
+  terminalId?: string;
+  /** Adds terminal tabs and touch-first modifier/navigation keys for compact layouts. */
+  compact?: boolean;
+  /** Desktop workbench callback used by the + control to open another resource tab. */
+  onOpenTerminal?: (terminalId: string) => void;
 }
 
-export function TerminalDock({ sessionId }: TerminalDockProps) {
+type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected";
+
+export function TerminalDock({
+  sessionId,
+  terminalId = "term-1",
+  compact = false,
+  onOpenTerminal,
+}: TerminalDockProps) {
   const tokens = useTokens();
   const { baseUrl } = useAuth();
   const palette = useMemo(() => ansiPalette(tokens), [tokens]);
@@ -183,17 +217,47 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
   const scrollRef = useRef<ScrollView | null>(null);
   const stickyRef = useRef(true);
   const inputRef = useRef<TextInput | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restartRef = useRef(false);
+  const suppressReconnectRef = useRef(false);
+  const terminalStatusRef = useRef<TerminalStatus>("running");
 
   const [lines, setLines] = useState<AnsiLine[]>([]);
   const [focused, setFocused] = useState(false);
-  const [status, setStatus] = useState<"idle" | "connecting" | "open" | "closed">("idle");
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("idle");
+  const [terminalStatus, setTerminalStatus] = useState<TerminalStatus>("running");
   const [size, setSize] = useState<{ cols: number; rows: number } | null>(null);
+  const [localTerminalId, setLocalTerminalId] = useState(terminalId);
+  const [terminals, setTerminals] = useState<TerminalSessionSummary[]>([]);
+  const [connectionGeneration, setConnectionGeneration] = useState(0);
+  const effectiveTerminalId = compact ? localTerminalId : terminalId;
 
-  // The PTY lives on `/ws/terminal`, which the Anywhere bridge does not carry (it allowlists the
-  // `/ws` session stream only). Asking anyway used to throw straight out of the connect effect
-  // below and take the whole shell down through the root ErrorBoundary, so the dock decides up
-  // front and renders its own explanation instead.
-  const supported = !baseUrl || supportsDirectDaemonEndpoints(baseUrl);
+  useEffect(() => {
+    if (!compact) setLocalTerminalId(terminalId);
+  }, [compact, terminalId]);
+
+  const refreshTerminals = useCallback(async () => {
+    if (!baseUrl || !sessionId) {
+      setTerminals([]);
+      return;
+    }
+    try {
+      setTerminals(await listTerminalSessions(baseUrl, sessionId));
+    } catch {
+      // The live terminal remains usable when metadata refresh fails.
+    }
+  }, [baseUrl, sessionId]);
+
+  useEffect(() => {
+    void refreshTerminals();
+  }, [refreshTerminals]);
+
+  const terminalIds = useMemo(
+    () =>
+      Array.from(new Set([...terminals.map((terminal) => terminal.terminal_id), effectiveTerminalId]))
+        .sort(compareTerminalIds),
+    [effectiveTerminalId, terminals],
+  );
 
   // Mirrors `size` for the socket-open effect below, which must not re-run (and re-spawn the
   // pty) every time the pane is resized. Declared first so it is already up to date when that
@@ -227,16 +291,20 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
     setSize((prev) => (prev && prev.cols === cols && prev.rows === rows ? prev : { cols, rows }));
   }, []);
 
-  // One socket per session, opened once the pane has been measured so the pty starts at the
-  // right geometry instead of the daemon's 80x24 default.
+  // One attachment per terminal identity, opened once the pane has been measured so the PTY
+  // starts at the right geometry. Closing this socket only detaches; the daemon owns the shell.
   const measured = size != null;
   useEffect(() => {
-    if (!baseUrl || !sessionId || !measured || !supported) return;
+    if (!baseUrl || !sessionId || !measured) return;
+    suppressReconnectRef.current = false;
     const buffer = bufferRef.current;
     buffer.clear();
     setLines(buffer.lines());
-    setStatus("connecting");
+    setConnectionStatus("connecting");
     let socket: TerminalSocket;
+    let disposed = false;
+    const restart = restartRef.current;
+    restartRef.current = false;
     try {
       socket = openTerminalSocket(
         baseUrl,
@@ -246,31 +314,69 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
             buffer.write(chunk);
             scheduleFlush();
           },
-          onOpen: () => setStatus("open"),
-          onClose: () => {
-            setStatus("closed");
-            buffer.write("\r\n[terminal closed]\r\n");
-            scheduleFlush();
+          onStatus: (nextStatus) => {
+            terminalStatusRef.current = nextStatus;
+            setTerminalStatus(nextStatus);
+            void refreshTerminals();
           },
-          onError: () => setStatus("closed"),
+          onClear: () => {
+            buffer.clear();
+            setLines(buffer.lines());
+          },
+          onOpen: () => {
+            setConnectionStatus("connected");
+            void refreshTerminals();
+          },
+          onClose: () => {
+            setConnectionStatus("disconnected");
+            void refreshTerminals();
+            if (
+              !disposed
+              && !suppressReconnectRef.current
+              && terminalStatusRef.current === "running"
+            ) {
+              reconnectTimerRef.current = setTimeout(
+                () => setConnectionGeneration((generation) => generation + 1),
+                1_500,
+              );
+            }
+          },
+          onError: () => setConnectionStatus("disconnected"),
         },
-        sizeRef.current ?? undefined,
+        {
+          terminalId: effectiveTerminalId,
+          size: sizeRef.current ?? undefined,
+          restart,
+        },
       );
     } catch (err) {
       // Transports reject an unroutable socket synchronously (an un-enrolled Anywhere host, a
       // malformed base URL). Uncaught, that unmounts the entire app via the root ErrorBoundary —
       // report it in the pane the user is already looking at instead.
-      setStatus("closed");
+      setConnectionStatus("disconnected");
       buffer.write(`\r\n[terminal unavailable: ${err instanceof Error ? err.message : String(err)}]\r\n`);
       scheduleFlush();
       return;
     }
     socketRef.current = socket;
     return () => {
+      disposed = true;
+      if (reconnectTimerRef.current != null) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       socketRef.current = null;
       socket.close();
     };
-  }, [baseUrl, sessionId, measured, supported, scheduleFlush]);
+  }, [
+    baseUrl,
+    connectionGeneration,
+    effectiveTerminalId,
+    measured,
+    refreshTerminals,
+    scheduleFlush,
+    sessionId,
+  ]);
 
   useEffect(() => {
     if (size) socketRef.current?.resize(size.cols, size.rows);
@@ -289,6 +395,38 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
     socketRef.current?.send(data);
     stickyRef.current = true;
   }, []);
+
+  const clear = useCallback(() => {
+    if (!socketRef.current?.clear()) {
+      bufferRef.current.clear();
+      setLines(bufferRef.current.lines());
+    }
+  }, []);
+
+  const reconnect = useCallback(() => {
+    suppressReconnectRef.current = false;
+    setConnectionGeneration((generation) => generation + 1);
+  }, []);
+
+  const restart = useCallback(() => {
+    restartRef.current = true;
+    suppressReconnectRef.current = false;
+    terminalStatusRef.current = "running";
+    setTerminalStatus("running");
+    setConnectionGeneration((generation) => generation + 1);
+  }, []);
+
+  const stop = useCallback(() => {
+    suppressReconnectRef.current = true;
+    socketRef.current?.kill();
+  }, []);
+
+  const openNewTerminal = useCallback(() => {
+    const next = nextTerminalId(terminalIds);
+    if (!next) return;
+    if (compact) setLocalTerminalId(next);
+    else onOpenTerminal?.(next);
+  }, [compact, onOpenTerminal, terminalIds]);
 
   const onKeyPress = useCallback(
     (event: NativeSyntheticEvent<{ key: string }>) => {
@@ -311,7 +449,10 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
     [send],
   );
 
-  const caretColor = focused && status === "open" ? tokens.accent : null;
+  const caretColor =
+    focused && connectionStatus === "connected" && terminalStatus === "running"
+      ? tokens.accent
+      : null;
 
   if (!sessionId) {
     return (
@@ -321,19 +462,51 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
     );
   }
 
-  if (!supported) {
-    return (
-      <View style={styles.empty}>
-        <EmptyState
-          icon={Terminal}
-          message="The terminal needs a direct connection to this host. Forge Anywhere carries sessions only — connect over your network or a tunnel to open a shell."
-        />
-      </View>
-    );
-  }
-
   return (
     <View style={styles.dock}>
+      {compact ? (
+        <View style={[styles.tabs, { borderBottomColor: tokens.border }]}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.tabsContent}
+          >
+            {terminalIds.map((id) => {
+              const summary = terminals.find((terminal) => terminal.terminal_id === id);
+              const active = id === effectiveTerminalId;
+              return (
+                <Pressable
+                  key={id}
+                  onPress={() => setLocalTerminalId(id)}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: active }}
+                  style={[
+                    styles.tab,
+                    {
+                      borderBottomColor: active ? tokens.accent : "transparent",
+                      backgroundColor: active ? hexToRgba(tokens.accent, 0.08) : "transparent",
+                    },
+                  ]}
+                >
+                  <Text style={[typeScale.monoMeta, { color: active ? tokens.ink : tokens.ink3 }]}>
+                    {terminalTitle(id)}
+                    {summary?.status === "exited" ? " · exited" : ""}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          <Pressable
+            onPress={openNewTerminal}
+            disabled={nextTerminalId(terminalIds) == null}
+            accessibilityRole="button"
+            accessibilityLabel="New terminal"
+            style={styles.tabAdd}
+          >
+            <Plus size={15} strokeWidth={1.75} color={tokens.ink3} />
+          </Pressable>
+        </View>
+      ) : null}
       <Pressable style={styles.body} onPress={() => inputRef.current?.focus()} accessibilityRole="none">
         <ScrollView
           ref={scrollRef}
@@ -372,11 +545,79 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
           accessibilityHint="Types straight into the session's shell"
         />
       </Pressable>
+      {compact ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={[styles.compactControls, { borderTopColor: tokens.border }]}
+          contentContainerStyle={styles.compactControlsContent}
+          keyboardShouldPersistTaps="always"
+        >
+          {COMPACT_KEYS.map((key) => (
+            <Pressable
+              key={key.label}
+              onPress={() => send(key.value)}
+              accessibilityRole="button"
+              accessibilityLabel={key.accessibilityLabel}
+              style={({ pressed }) => [
+                styles.compactKey,
+                { borderColor: tokens.border },
+                pressed && { backgroundColor: hexToRgba(tokens.accent, 0.12) },
+              ]}
+            >
+              <Text style={[typeScale.monoMeta, { color: tokens.ink2 }]}>{key.label}</Text>
+            </Pressable>
+          ))}
+          <Pressable
+            onPress={() => inputRef.current?.focus()}
+            accessibilityRole="button"
+            accessibilityLabel="Focus terminal keyboard"
+            style={({ pressed }) => [
+              styles.compactKey,
+              { borderColor: tokens.border },
+              pressed && { backgroundColor: hexToRgba(tokens.accent, 0.12) },
+            ]}
+          >
+            <Text style={[typeScale.monoMeta, { color: tokens.ink2 }]}>keyboard</Text>
+          </Pressable>
+        </ScrollView>
+      ) : null}
       <View style={[styles.status, { borderTopColor: tokens.border }]}>
         <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4 }]}>
-          {status === "open" ? "connected" : status} {size ? `· ${size.cols}×${size.rows}` : ""}
+          {connectionStatus}
+          {terminalStatus === "exited" ? " · exited" : ""}
+          {size ? ` · ${size.cols}×${size.rows}` : ""}
         </Text>
         <View style={styles.statusActions}>
+          {!compact && onOpenTerminal ? (
+            <Pressable
+              onPress={openNewTerminal}
+              disabled={nextTerminalId(terminalIds) == null}
+              accessibilityRole="button"
+              accessibilityLabel="New terminal"
+              style={({ pressed }) => [
+                styles.statusButton,
+                { borderColor: tokens.border },
+                pressed && { backgroundColor: hexToRgba(tokens.accent, 0.12) },
+              ]}
+            >
+              <Plus size={13} strokeWidth={1.75} color={tokens.ink3} />
+            </Pressable>
+          ) : null}
+          {connectionStatus === "disconnected" ? (
+            <Pressable
+              onPress={reconnect}
+              accessibilityRole="button"
+              accessibilityLabel="Reconnect to terminal"
+              style={({ pressed }) => [
+                styles.statusButton,
+                { borderColor: tokens.border },
+                pressed && { backgroundColor: hexToRgba(tokens.accent, 0.12) },
+              ]}
+            >
+              <RefreshCw size={13} strokeWidth={1.75} color={tokens.ink3} />
+            </Pressable>
+          ) : null}
           <Pressable
             onPress={() => send("\x03")}
             accessibilityRole="button"
@@ -391,12 +632,9 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
             <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>^C</Text>
           </Pressable>
           <Pressable
-            onPress={() => {
-              bufferRef.current.clear();
-              setLines(bufferRef.current.lines());
-            }}
+            onPress={clear}
             accessibilityRole="button"
-            accessibilityLabel="Clear terminal scrollback"
+            accessibilityLabel="Clear terminal history"
             style={({ pressed }) => [
               styles.statusButton,
               { borderColor: tokens.border },
@@ -404,6 +642,30 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
             ]}
           >
             <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>clear</Text>
+          </Pressable>
+          <Pressable
+            onPress={restart}
+            accessibilityRole="button"
+            accessibilityLabel="Restart terminal"
+            style={({ pressed }) => [
+              styles.statusButton,
+              { borderColor: tokens.border },
+              pressed && { backgroundColor: hexToRgba(tokens.accent, 0.12) },
+            ]}
+          >
+            <RotateCcw size={13} strokeWidth={1.75} color={tokens.ink3} />
+          </Pressable>
+          <Pressable
+            onPress={stop}
+            accessibilityRole="button"
+            accessibilityLabel="Stop terminal process"
+            style={({ pressed }) => [
+              styles.statusButton,
+              { borderColor: tokens.border },
+              pressed && { backgroundColor: hexToRgba(tokens.danger, 0.12) },
+            ]}
+          >
+            <Square size={12} strokeWidth={1.75} color={tokens.danger} />
           </Pressable>
         </View>
       </View>
@@ -414,6 +676,20 @@ export function TerminalDock({ sessionId }: TerminalDockProps) {
 const styles = StyleSheet.create({
   dock: { flex: 1 },
   empty: { flex: 1, justifyContent: "center" },
+  tabs: {
+    height: 36,
+    flexDirection: "row",
+    flexShrink: 0,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  tabsContent: { alignItems: "stretch" },
+  tab: {
+    minWidth: 92,
+    justifyContent: "center",
+    paddingHorizontal: space.space12,
+    borderBottomWidth: 2,
+  },
+  tabAdd: { width: 40, alignItems: "center", justifyContent: "center" },
   body: { flex: 1 },
   scroll: { flex: 1 },
   scrollContent: { paddingHorizontal: PADDING_H, paddingVertical: space.space8 },
@@ -421,8 +697,28 @@ const styles = StyleSheet.create({
   // The input is a keystroke sink, never a visible field: the pty echoes what it accepts, so
   // rendering the draft locally would double every character.
   input: { position: "absolute", width: 1, height: 1, opacity: 0 },
+  compactControls: {
+    flexGrow: 0,
+    flexShrink: 0,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  compactControlsContent: {
+    minHeight: 38,
+    alignItems: "center",
+    gap: space.space8,
+    paddingHorizontal: space.space8,
+  },
+  compactKey: {
+    minWidth: 34,
+    height: 28,
+    paddingHorizontal: space.space8,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 3,
+  },
   status: {
-    height: 22,
+    minHeight: 28,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
@@ -430,5 +726,13 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
   },
   statusActions: { flexDirection: "row", gap: space.space8 },
-  statusButton: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 2, paddingHorizontal: 6, paddingVertical: 1 },
+  statusButton: {
+    minWidth: 26,
+    height: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 2,
+    paddingHorizontal: 5,
+  },
 });

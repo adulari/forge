@@ -239,7 +239,7 @@ impl DriverState {
                 .note(&format!("⎇ prompt blocked by hook: {reason}")),
             Ok(prompt) => {
                 // Expand `@path` mentions exactly like the TUI submit path.
-                let (file_blocks, included, skipped) = expand_at_files(&prompt);
+                let (file_blocks, included, skipped) = expand_at_files_in(&prompt, &hook_workspace);
                 if !included.is_empty() {
                     self.app
                         .note(&format!("📎 included {}", included.join(", ")));

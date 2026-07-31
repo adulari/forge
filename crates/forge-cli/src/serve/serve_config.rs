@@ -11,7 +11,7 @@ use axum::response::Response;
 
 use super::{err_response, json_response};
 
-fn mutation_lock() -> &'static Mutex<()> {
+pub(super) fn mutation_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }

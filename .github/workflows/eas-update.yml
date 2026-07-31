@@ -28,16 +28,6 @@ on:
   # post-release hand-off from release.yml. The runtimeVersion fingerprint still gates delivery, so
   # a dispatch only reaches binaries whose native layer matches — never dispatch from a topic branch.
   workflow_dispatch:
-    inputs:
-      base_ref:
-        description: >-
-          Optional ref to classify the diff against (release.yml passes the previous release tag).
-          When set, the OTA-safety guard runs over base_ref..HEAD exactly as it does for a push, so
-          an automated dispatch cannot publish JS that expects native code the installed binary
-          does not have. Leave EMPTY for operator-driven recovery, which trusts the operator to
-          have confirmed the runtimeVersion fingerprint by hand.
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -56,32 +46,36 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # The guard validates the complete push range so a commit that mixes OTA-safe
-          # files with native/config files cannot publish an incompatible update. A push
-          # without a trustworthy base is refused rather than reduced to a partial diff.
+          # The guard validates the complete range from the installed archive's source commit,
+          # not merely this push. This keeps a later source-only push from publishing native-
+          # dependent JS after an earlier native change was correctly skipped.
           fetch-depth: 0
+
+      - name: Require installed archive baseline
+        env:
+          BASELINE: ${{ vars.IOS_OTA_COMPATIBLE_BASE_SHA }}
+        run: >-
+          test -n "$BASELINE" ||
+          { echo 'Set IOS_OTA_COMPATIBLE_BASE_SHA to the source commit of the installed Xcode archive.'; exit 1; }
 
       - name: Guard OTA-safe diff
         id: guard
         working-directory: .
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          # `inputs` is empty on push, so this resolves to the push base there and to the
-          # release hand-off's previous tag on an automated dispatch.
-          BASE_SHA: ${{ inputs.base_ref || github.event.before }}
+          BASE_SHA: ${{ vars.IOS_OTA_COMPATIBLE_BASE_SHA }}
           HEAD_SHA: ${{ github.sha }}
         run: bash scripts/ci/eas-ota-safety.sh
 
-      # A skip means installed phones keep running the OLD JS while main has moved on, so it must be
-      # loud. It used to write only to the step summary, which nobody opens: the run went green and
-      # the owed native build was invisible. `::warning` surfaces it on the run, in the checks list,
-      # and in the Actions inbox without failing a release-adjacent workflow.
-      - name: Skip incompatible OTA
+      # An incompatible bundle is not a successful publication. Fail this independent workflow so
+      # the reconciler cannot mistake a green no-op for coverage; release.yml only dispatches this
+      # workflow and does not make CLI/desktop artifacts depend on its conclusion.
+      - name: Refuse incompatible OTA
         if: steps.guard.outputs.safe != 'true'
         run: |
-          message='Skipped OTA publication: this change includes native, dependency, or build configuration changes, so the installed binary cannot run it. A native Xcode Cloud build + IOS_OTA_RUNTIME_VERSION refresh is required before mobile changes reach devices.'
-          echo "::warning title=OTA not published — native build required::$message"
+          message='Refused OTA publication: the installed-native-baseline..HEAD range includes native, dependency, or build configuration changes. Build and install a new Xcode Cloud archive, then refresh IOS_OTA_COMPATIBLE_BASE_SHA and IOS_OTA_RUNTIME_VERSION.'
+          echo "::error title=OTA not published — native build required::$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: No OTA content to publish
         if: steps.guard.outputs.safe == 'true' && steps.guard.outputs.ota_changed != 'true'

@@ -2,10 +2,13 @@
 //!
 //! Routes (all token-scoped under `{base}`, registered in [`crate::serve::daemon_router`]):
 //! - `GET  /api/git/status?session=<id>`                    staged / unstaged / untracked rows
+//! - `GET  /api/git/branches?session=<id>&q=<query>`        local / remote refs + worktree owners
 //! - `GET  /api/git/diff?session=<id>&path=<p>&staged=<b>`  one file's unified-diff hunks
 //! - `POST /api/git/stage`   `{session, paths[]}`
 //! - `POST /api/git/unstage` `{session, paths[]}`
 //! - `POST /api/git/commit`  `{session, message}` → the new commit sha
+//! - `POST /api/git/switch`  `{session, branch}` → switch a clean shared workspace
+//! - `POST /api/git/branches` `{session, name}` → create + switch a clean shared workspace
 //! - `GET  /api/sessions/{id}/diff`                         a forked session's worktree vs its base
 //!
 //! Every route resolves its repository from the SESSION (its worktree if it has one, else its
@@ -23,6 +26,9 @@ use crate::serve::{
     err_response, git_stdout, json_response, worktree_repo_and_branch, DaemonState,
 };
 
+mod branches;
+pub(crate) use branches::{git_branches, git_create_branch, git_switch_branch};
+
 /// Hunk lines returned per file. A review dock needs the whole change, but an unbounded diff of a
 /// generated file would push megabytes at a phone — the excess is reported as `skipped_lines`.
 const MAX_DIFF_LINES: usize = 4_000;
@@ -33,6 +39,12 @@ const MAX_STATUS_ROWS: usize = 2_000;
 
 /// Largest untracked file rendered as an all-additions hunk (bigger ones report size only).
 const MAX_UNTRACKED_BYTES: u64 = 512 * 1024;
+
+/// Ref rows returned after server-side filtering. This is deliberately lower than the status-row
+/// cap: the branch picker virtualises locally, while a pathological ref namespace must not turn a
+/// phone request into a multi-megabyte response.
+const DEFAULT_BRANCH_ROWS: usize = 200;
+const MAX_BRANCH_ROWS: usize = 500;
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -62,6 +74,32 @@ pub(crate) struct GitStatusResponse {
     unstaged: Vec<GitFileRow>,
     untracked: Vec<GitFileRow>,
     /// Rows dropped by [`MAX_STATUS_ROWS`], summed across the three buckets.
+    truncated: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct GitBranchRow {
+    /// Local names are `feature/x`; remote names retain their remote prefix (`origin/feature/x`).
+    name: String,
+    oid: String,
+    upstream: Option<String>,
+    remote: bool,
+    current: bool,
+    default: bool,
+    /// Absolute checkout path when this local branch is owned by a worktree.
+    worktree: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct GitBranchesResponse {
+    root: String,
+    current: Option<String>,
+    default_branch: Option<String>,
+    managed_worktree: bool,
+    /// Authoritative reason create/switch is unavailable. `None` means the daemon will accept a
+    /// branch action if repository state has not changed before the POST arrives.
+    actions_blocked_reason: Option<String>,
+    branches: Vec<GitBranchRow>,
     truncated: usize,
 }
 
@@ -119,6 +157,16 @@ pub(crate) struct GitSessionQuery {
 }
 
 #[derive(serde::Deserialize)]
+pub(crate) struct GitBranchesQuery {
+    #[serde(default)]
+    session: String,
+    #[serde(default)]
+    q: String,
+    #[serde(default = "default_branch_rows")]
+    limit: usize,
+}
+
+#[derive(serde::Deserialize)]
 pub(crate) struct GitDiffQuery {
     #[serde(default)]
     session: String,
@@ -142,9 +190,33 @@ pub(crate) struct GitCommitRequest {
     message: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GitSwitchRequest {
+    session: String,
+    branch: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GitCreateBranchRequest {
+    session: String,
+    name: String,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct GitBranchActionResponse {
+    ok: bool,
+    branch: String,
+}
+
 // ---------------------------------------------------------------------------
 // Session → repository resolution
 // ---------------------------------------------------------------------------
+
+fn default_branch_rows() -> usize {
+    DEFAULT_BRANCH_ROWS
+}
 
 /// The directory a session's git commands run in: its worktree when it has one (that is where the
 /// agent is actually editing), otherwise its cwd. `None` = no such session.
@@ -324,9 +396,12 @@ pub(crate) async fn git_status(
     let Some(dir) = session_dir(&state, &params.session).await else {
         return no_such_session();
     };
-    let base_branch = worktree_repo_and_branch(&dir).map(|(_, branch)| branch);
+    let base_repo = worktree_repo_and_branch(&dir).map(|(repo, _)| repo);
     let result = tokio::task::spawn_blocking(move || -> Result<GitStatusResponse, String> {
         let root = repo_root_of(&dir)?;
+        let base_branch = base_repo.and_then(|repo| {
+            git_stdout(&repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()
+        });
         let status = String::from_utf8_lossy(&git_raw(
             &root,
             &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -721,7 +796,52 @@ pub(crate) async fn session_diff(
 
 #[cfg(test)]
 mod tests {
+    use super::branches::{is_forge_managed_worktree, parse_branch_rows, parse_worktree_branches};
     use super::*;
+
+    #[test]
+    fn worktree_porcelain_maps_local_branches_to_paths() {
+        let rows = parse_worktree_branches(
+            "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n\
+             worktree /repo/.forge/worktrees/child\nHEAD def\nbranch refs/heads/forge/subagent/child\n\n\
+             worktree /repo/detached\nHEAD 123\ndetached\n",
+        );
+        assert_eq!(rows.get("main").map(String::as_str), Some("/repo"));
+        assert_eq!(
+            rows.get("forge/subagent/child").map(String::as_str),
+            Some("/repo/.forge/worktrees/child")
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(is_forge_managed_worktree("/repo/.forge/worktrees/child"));
+        assert!(!is_forge_managed_worktree("/repo/other-worktree"));
+    }
+
+    #[test]
+    fn branch_rows_keep_remote_identity_and_worktree_occupancy() {
+        let raw = concat!(
+            "refs/heads/main\0aaa\0origin/main\n",
+            "refs/heads/feature/x\0bbb\0\n",
+            "refs/remotes/origin/HEAD\0aaa\0\n",
+            "refs/remotes/origin/main\0aaa\0\n",
+            "refs/remotes/origin/feature/y\0ccc\0\n",
+        );
+        let worktrees =
+            std::collections::HashMap::from([("feature/x".to_string(), "/repo/other".to_string())]);
+        let rows = parse_branch_rows(raw, Some("main"), Some("main"), &worktrees);
+
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].name, "main");
+        assert!(rows[0].current);
+        assert!(rows[0].default);
+        let occupied = rows.iter().find(|row| row.name == "feature/x").unwrap();
+        assert_eq!(occupied.worktree.as_deref(), Some("/repo/other"));
+        let remote = rows
+            .iter()
+            .find(|row| row.name == "origin/feature/y")
+            .unwrap();
+        assert!(remote.remote);
+        assert!(!rows.iter().any(|row| row.name == "origin/HEAD"));
+    }
 
     #[test]
     fn repo_relative_rejects_escapes_and_options() {

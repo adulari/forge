@@ -1,9 +1,10 @@
-# Feature: configurable keybinds + interactive configurator
+# Feature: configurable TUI and app keybindings
 
 > **Status: shipped.** Every TUI action key is remappable via `[keybinds.binds]` in
-> `config.toml`. An in-app configurator (Ctrl-,) edits binds live, persists them per-action, and
-> resets to defaults. Production defaults cover interrupt, tier control, model skip, reasoning
-> toggle, undo, compact, model/effort/temper cycling, copy, scroll, help, checkpoint, new session.
+> `config.toml`. The desktop/web app has its own searchable Settings → Keyboard shortcuts
+> editor with live capture, conflict warnings, per-action reset, and reset-all. The two
+> surfaces are intentionally separate because the host TUI and client app have different
+> action lifecycles and persistence boundaries.
 
 ## 1. Problem (JTBD)
 
@@ -76,3 +77,19 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 - `tier_up`/`tier_down` currently emit a placeholder note; the routing-tier pin is future work.
 - Because `resolve_action` runs first, Ctrl-K maps to `skip_model` (not the old kill-line-forward)
   and Ctrl-R to `toggle_reasoning` by default; remap them if you want the editing shortcut back.
+
+## 5. Desktop/web app shortcuts
+
+The app registry lives in `mobile/src/lib/shortcuts/bindings.ts`. It persists only non-default
+overrides under the device-local `forge.appShortcuts.v1` key. All app call sites resolve a typed
+action through `useAppShortcut`; changing a row therefore changes the real handler rather than
+editing a disconnected copy of the host TUI configuration.
+
+The editor supports Mod, Alt, Shift, letters, digits, function keys, navigation keys, and common
+punctuation. Exact app conflicts and standard system/menu conflicts are shown before saving.
+Conflicts remain saveable for advanced layouts. On macOS, editable native menu accelerators are
+updated over a closed Tauri command so menu key equivalents and webview handlers stay aligned.
+Standard Cut/Copy/Paste, Quit, window, approval, and checkpoint accelerators are not mutable.
+
+Bare Y/N permission-decision shortcuts are deliberately outside the editable registry. They stay
+session-scoped, do not fire while typing, and cannot be remapped into an unsafe global chord.

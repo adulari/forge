@@ -6,11 +6,7 @@ export type HotkeyHandler = () => void;
 export function useHotkey(
   _key: string,
   _handler: HotkeyHandler,
-  _options?: { meta?: boolean; alt?: boolean },
+  _options?: { meta?: boolean; alt?: boolean; shift?: boolean },
 ): void {
-  // no-op on native
-}
-
-export function usePaletteHotkey(_onOpen: HotkeyHandler): void {
   // no-op on native
 }

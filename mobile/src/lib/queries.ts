@@ -22,6 +22,22 @@ import {
   getWorkflows,
   type ModelsResponse,
   getModels,
+  type ProvidersResponse,
+  type StoreProviderKeyRequest,
+  type SetProviderEnabledRequest,
+  type OAuthAccountRequest,
+  type CustomProviderRequest,
+  type AzureProviderRequest,
+  getProviders,
+  storeProviderKey,
+  removeProviderKeys,
+  setProviderEnabled,
+  switchOAuthAccount,
+  removeOAuthAccount,
+  saveCustomProvider,
+  removeCustomProvider,
+  saveAzureProvider,
+  removeAzureProvider,
   type ConfigResponse,
   type UpdateConfigRequest,
   getConfig,
@@ -39,6 +55,13 @@ import {
 
   type GitStatusResponse,
   getGitStatus,
+  type GitBranchesResponse,
+  getGitBranches,
+  type GitSwitchRequest,
+  type GitCreateBranchRequest,
+  type GitBranchActionResponse,
+  switchGitBranch,
+  createGitBranch,
   type GitDiffResponse,
   getGitDiff,
   type GitPathsRequest,
@@ -50,6 +73,16 @@ import {
   type SessionDiffResponse,
   getSessionDiff,
 
+  type WorkspaceEntriesResponse,
+  getWorkspaceEntries,
+  type WorkspaceFileResponse,
+  getWorkspaceFile,
+  type WorkspaceSearchMode,
+  type WorkspaceSearchResponse,
+  searchWorkspace,
+  type WorkspaceWriteRequest,
+  writeWorkspaceFile,
+
   type ScheduleRow,
   type CreateScheduleRequest,
   getSchedules,
@@ -60,11 +93,14 @@ import {
 
   type ChangelogRelease,
   getChangelog,
+  type DiagnosticsResponse,
+  getDiagnostics,
 
   type ForkSessionRequest,
   forkSession,
   answer as apiAnswer,
   archiveSession,
+  deleteSession,
   type CreateSessionRequest,
   createSession,
   discardSession,
@@ -73,6 +109,8 @@ import {
   type UsageResponse,
   getPastSessions,
   getSessions,
+  renameSession,
+  searchSessions,
   getProjects,
   browseProjects,
   type ProjectCatalog,
@@ -89,6 +127,7 @@ import {
 import { useAuth } from "./auth";
 import { useIsPeeking } from "./peek";
 import { pastSessionsRefetchPolicy, sessionsRefetchPolicy } from "./peekQueries";
+import { supportsDirectDaemonEndpoints } from "./transport";
 import type { Snapshot } from "./ws";
 import { syncWidgetSessions } from "./widgetData";
 import {
@@ -115,6 +154,10 @@ function keys(baseUrl: string | null) {
     projectBrowse: (path?: string) => ["projects", "browse", baseUrl, path ?? "default"] as const,
     sessionTree: ["sessions", "tree", baseUrl] as const,
     pastSessions: ["sessions", "past", baseUrl] as const,
+    sessionSearch: (query?: string, limit?: number) =>
+      query === undefined
+        ? (["sessions", "search", baseUrl] as const)
+        : (["sessions", "search", baseUrl, query, limit ?? 30] as const),
     // A tools page and a plain page are DIFFERENT row sets (and different `elapsed_ms` zero
     // points), so they get separate cache entries. The tools key extends the plain one, so the
     // prefix invalidation below still refreshes both after a turn completes.
@@ -126,16 +169,29 @@ function keys(baseUrl: string | null) {
     skills: ["skills", baseUrl] as const,
     workflows: (sessionId?: string) => ["workflows", baseUrl, sessionId ?? null] as const,
     models: ["models", baseUrl] as const,
+    providers: ["providers", baseUrl] as const,
     hooks: ["hooks", baseUrl] as const,
     plans: ["plans", baseUrl] as const,
 
     mcp: ["mcp", baseUrl] as const,
     gitStatus: (sessionId: string) => ["git", "status", baseUrl, sessionId] as const,
+    gitBranches: (sessionId: string) => ["git", "branches", baseUrl, sessionId] as const,
     gitDiff: (sessionId: string, path: string, staged: boolean) =>
       ["git", "diff", baseUrl, sessionId, path, staged] as const,
     sessionDiff: (sessionId: string) => ["sessions", "diff", baseUrl, sessionId] as const,
+    workspaceEntries: (sessionId: string, path: string) =>
+      ["workspace", "entries", baseUrl, sessionId, path] as const,
+    workspaceFile: (sessionId: string, path: string) =>
+      ["workspace", "file", baseUrl, sessionId, path] as const,
+    workspaceSearch: (
+      sessionId: string,
+      query: string,
+      mode: WorkspaceSearchMode,
+      limit: number,
+    ) => ["workspace", "search", baseUrl, sessionId, mode, query, limit] as const,
     schedules: ["schedules", baseUrl] as const,
     changelog: (limit?: number) => ["changelog", baseUrl, limit ?? null] as const,
+    diagnostics: ["diagnostics", baseUrl] as const,
   };
 }
 
@@ -146,6 +202,18 @@ export function useProjects() {
     queryFn: () => getProjects(baseUrl as string),
     enabled: baseUrl != null,
     staleTime: 30_000,
+  });
+}
+
+export function useDiagnostics() {
+  const { baseUrl } = useAuth();
+  return useQuery<DiagnosticsResponse>({
+    queryKey: keys(baseUrl).diagnostics,
+    queryFn: () => getDiagnostics(baseUrl as string),
+    enabled: baseUrl != null,
+    staleTime: 60_000,
+    retry: (failureCount, error) =>
+      !(error instanceof Error && "status" in error && error.status === 404) && failureCount < 1,
   });
 }
 
@@ -214,6 +282,29 @@ export function usePastSessions() {
   });
 }
 
+/** Server-side search across every session's title/path/id and user-facing transcript. */
+export function useSessionSearch(query: string, limit = 30) {
+  const { baseUrl } = useAuth();
+  const normalized = query.trim();
+  const [debounced, setDebounced] = useState(normalized);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(normalized), 180);
+    return () => clearTimeout(timer);
+  }, [normalized]);
+  const settledQuery = normalized === debounced ? debounced : "";
+  const result = useQuery({
+    queryKey: keys(baseUrl).sessionSearch(settledQuery, limit),
+    queryFn: () => searchSessions(baseUrl as string, settledQuery, limit),
+    enabled: baseUrl != null && settledQuery.length >= 2,
+    staleTime: 15_000,
+  });
+  return {
+    ...result,
+    settledQuery,
+    isDebouncing: normalized.length >= 2 && settledQuery.length === 0,
+  };
+}
+
 /** Transcript history for a session, infinite upward by `before` = oldest seq.
  *
  * `includeTools` opts into the tool call/result rows (see `getHistory`) — off by default, so the
@@ -246,7 +337,107 @@ export function useSkills() { const { baseUrl } = useAuth(); return useQuery<Ski
 export function useWorkflows(sessionId?: string) { const { baseUrl } = useAuth(); return useQuery<WorkflowRow[]>({ queryKey: keys(baseUrl).workflows(sessionId), queryFn: () => getWorkflows(baseUrl as string, sessionId), enabled: baseUrl != null }); }
 export function useHooks() { const { baseUrl } = useAuth(); return useQuery<HookRow[]>({ queryKey: keys(baseUrl).hooks, queryFn: () => getHooks(baseUrl as string), enabled: baseUrl != null }); }
 export function useModels() { const { baseUrl } = useAuth(); const isFocused = useIsFocused(); return useQuery<ModelsResponse>({ queryKey: keys(baseUrl).models, queryFn: () => getModels(baseUrl as string), enabled: baseUrl != null, refetchOnWindowFocus: isFocused }); }
+export function useProviders() {
+  const { baseUrl } = useAuth();
+  const isFocused = useIsFocused();
+  return useQuery<ProvidersResponse>({
+    queryKey: keys(baseUrl).providers,
+    queryFn: () => getProviders(baseUrl as string),
+    enabled: baseUrl != null && supportsDirectDaemonEndpoints(baseUrl),
+    refetchOnWindowFocus: isFocused,
+  });
+}
 export function usePlans() { const { baseUrl } = useAuth(); const isFocused = useIsFocused(); return useQuery<PlanRow[]>({ queryKey: keys(baseUrl).plans, queryFn: () => getPlans(baseUrl as string), enabled: baseUrl != null, refetchInterval: isFocused ? 30000 : false }); }
+
+function seedProviders(
+  queryClient: ReturnType<typeof useQueryClient>,
+  baseUrl: string | null,
+  data: ProvidersResponse,
+) {
+  queryClient.setQueryData(keys(baseUrl).providers, data);
+  void queryClient.invalidateQueries({ queryKey: keys(baseUrl).models });
+}
+
+export function useStoreProviderKey() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: StoreProviderKeyRequest) => storeProviderKey(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useRemoveProviderKeys() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (provider: string) => removeProviderKeys(baseUrl as string, provider),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useSetProviderEnabled() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SetProviderEnabledRequest) => setProviderEnabled(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useSwitchOAuthAccount() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: OAuthAccountRequest) => switchOAuthAccount(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useRemoveOAuthAccount() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: OAuthAccountRequest) => removeOAuthAccount(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useSaveCustomProvider() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CustomProviderRequest) => saveCustomProvider(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useRemoveCustomProvider() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (namespace: string) => removeCustomProvider(baseUrl as string, namespace),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useSaveAzureProvider() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AzureProviderRequest) => saveAzureProvider(baseUrl as string, body),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
+
+export function useRemoveAzureProvider() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => removeAzureProvider(baseUrl as string),
+    onSuccess: (data) => seedProviders(queryClient, baseUrl, data),
+  });
+}
 
 export function useCreateMcpServer() {
   const { baseUrl } = useAuth();
@@ -280,6 +471,41 @@ export function useUpdateMcpServer() {
 // ---------------------------------------------------------------------------
 // Git review dock
 // ---------------------------------------------------------------------------
+
+export function useGitBranches(sessionId: string | null) {
+  const { baseUrl } = useAuth();
+  return useQuery<GitBranchesResponse>({
+    queryKey: keys(baseUrl).gitBranches(sessionId ?? ""),
+    queryFn: () => getGitBranches(baseUrl as string, sessionId as string),
+    enabled: baseUrl != null && sessionId != null,
+    refetchOnWindowFocus: true,
+  });
+}
+
+function useBranchMutation<TBody extends { session: string }>(
+  run: (baseUrl: string, body: TBody) => Promise<GitBranchActionResponse>,
+) {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation<GitBranchActionResponse, Error, TBody>({
+    mutationFn: (body) => run(baseUrl as string, body),
+    onSuccess: (_data, body) => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).gitBranches(body.session) });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).gitStatus(body.session) });
+      queryClient.invalidateQueries({ queryKey: ["git", "diff", baseUrl, body.session] });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionDiff(body.session) });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions });
+    },
+  });
+}
+
+export function useSwitchGitBranch() {
+  return useBranchMutation<GitSwitchRequest>(switchGitBranch);
+}
+
+export function useCreateGitBranch() {
+  return useBranchMutation<GitCreateBranchRequest>(createGitBranch);
+}
 
 /** The session's working-tree status. Refetched on focus because the agent edits files between
  * renders — there is no push channel for the index. */
@@ -346,6 +572,68 @@ export function useSessionDiff(sessionId: string | null, enabled = true) {
     queryKey: keys(baseUrl).sessionDiff(sessionId ?? ""),
     queryFn: () => getSessionDiff(baseUrl as string, sessionId as string),
     enabled: enabled && baseUrl != null && sessionId != null,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workspace inspector/editor
+// ---------------------------------------------------------------------------
+
+export function useWorkspaceEntries(sessionId: string | null, path = "") {
+  const { baseUrl } = useAuth();
+  return useQuery<WorkspaceEntriesResponse>({
+    queryKey: keys(baseUrl).workspaceEntries(sessionId ?? "", path),
+    queryFn: () => getWorkspaceEntries(baseUrl as string, sessionId as string, path),
+    enabled: baseUrl != null && sessionId != null,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useWorkspaceFile(sessionId: string | null, path: string | null) {
+  const { baseUrl } = useAuth();
+  return useQuery<WorkspaceFileResponse>({
+    queryKey: keys(baseUrl).workspaceFile(sessionId ?? "", path ?? ""),
+    queryFn: () => getWorkspaceFile(baseUrl as string, sessionId as string, path as string),
+    enabled: baseUrl != null && sessionId != null && path != null && path !== "",
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useWorkspaceSearch(
+  sessionId: string | null,
+  query: string,
+  mode: WorkspaceSearchMode = "files",
+  limit = 50,
+) {
+  const { baseUrl } = useAuth();
+  const normalized = query.trim();
+  return useQuery<WorkspaceSearchResponse>({
+    queryKey: keys(baseUrl).workspaceSearch(sessionId ?? "", normalized, mode, limit),
+    queryFn: () =>
+      searchWorkspace(baseUrl as string, {
+        session: sessionId as string,
+        q: normalized,
+        mode,
+        limit,
+      }),
+    enabled: baseUrl != null && sessionId != null && normalized.length > 0,
+    staleTime: 15_000,
+  });
+}
+
+export function useWriteWorkspaceFile() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation<WorkspaceFileResponse, Error, WorkspaceWriteRequest>({
+    mutationFn: (body) => writeWorkspaceFile(baseUrl as string, body),
+    onSuccess: (data, body) => {
+      queryClient.setQueryData(keys(baseUrl).workspaceFile(body.session, body.path), data);
+      queryClient.invalidateQueries({
+        queryKey: keys(baseUrl).workspaceEntries(body.session, ""),
+      });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).gitStatus(body.session) });
+      queryClient.invalidateQueries({ queryKey: ["git", "diff", baseUrl, body.session] });
+    },
   });
 }
 
@@ -491,6 +779,36 @@ export function useArchiveSession() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions });
       queryClient.invalidateQueries({ queryKey: keys(baseUrl).pastSessions });
+    },
+  });
+}
+
+export function useRenameSession() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) =>
+      renameSession(baseUrl as string, id, title),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).pastSessions });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionSearch() });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionTree });
+    },
+  });
+}
+
+export function useDeleteSession() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => deleteSession(baseUrl as string, id),
+    onSuccess: (_response, id) => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).pastSessions });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionSearch() });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionTree });
+      queryClient.removeQueries({ queryKey: keys(baseUrl).history(id) });
     },
   });
 }

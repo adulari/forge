@@ -433,6 +433,9 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   Cargo/Homebrew/user-local installs and starts it
 - Actionable push notifications, iOS Live Activities/Dynamic Island status, Tauri-signed desktop
   updater artifacts, production iOS OTA updates, offline prompt queueing, and reconnect replay
+- Cross-surface [operational diagnostics](docs/features/diagnostics-and-updates.md) with explicit
+  client/daemon protocol guidance, bounded resource/runtime aggregates, safe host checks, a
+  centralized desktop update state, and a sanitized support-summary export
 - `--inline` for native scrollback; `--mock` offline deterministic provider (no key needed)
 
 **🔒 Safety**
@@ -536,9 +539,9 @@ available separately via `install.ps1` below.
 
 The fastest mobile install is the PWA served by `forge serve`: open or scan its URL, then use
 **Add to Home Screen** on iOS Safari or Android Chrome. The native Expo app adds camera QR pairing,
-secure token storage, attachment and voice capture, actionable push notifications, and iOS
-Live Activities/Dynamic Island. It receives compatible JavaScript fixes through the production
-OTA channel without replacing the native binary.
+secure token storage, attachment and voice capture, Share-to-Forge text/URL handoff, actionable push
+notifications, and iOS Live Activities/Dynamic Island. It receives compatible JavaScript fixes
+through the production OTA channel without replacing the native binary.
 
 Unsigned iOS sideload builds and their SideStore manifests are published from protected `main`
 against existing `mobile-v*` tags. The live SideStore source is

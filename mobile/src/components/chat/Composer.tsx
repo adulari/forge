@@ -17,19 +17,35 @@
 //            call TelemetrySheet's "Model" row already makes.
 //   effort → the existing EffortPicker, mounted headless (`showTrigger={false}`), which commits
 //            `/effort <level>` (or bare `/effort` to reset) over the same prompt path.
-import { ArrowUp, ChevronDown, Clock, FileText, Image as ImageIcon, Mic, RotateCcw, Sparkles, Square } from "lucide-react-native";
+import { ArrowUp, ChevronDown, Clock, FileCode2, FileText, Image as ImageIcon, MessageSquare, Mic, MousePointer2, RotateCcw, Sparkles, Square } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ColorValue, Image, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
+import { useAuth } from "../../lib/auth";
 import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
 import { mergeCommandSources } from "../../lib/commandSources";
 import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
+import {
+  clearReviewComments,
+  formatReviewCommentsPrompt,
+  removeReviewComment,
+  reviewRangeLabel,
+  useReviewComments,
+} from "../../lib/reviewComments";
+import {
+  clearVisualAnnotations,
+  formatVisualAnnotationsPrompt,
+  removeVisualAnnotation,
+  useVisualAnnotations,
+  visualAnnotationLabel,
+} from "../../lib/visualAnnotations";
 import { isMacOS } from "../../lib/platform";
-import { useUpload } from "../../lib/queries";
+import { useUpload, useWorkspaceSearch } from "../../lib/queries";
 import { useSessionCtx } from "../../lib/sessionContext";
+import { supportsDirectDaemonEndpoints } from "../../lib/transport";
 import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
 import { durations, easings } from "../../theme/motion";
@@ -60,6 +76,11 @@ import {
   nativeComposerMirrorText,
 } from "./composerSizing";
 import { EffortPicker } from "../session/EffortPicker";
+import {
+  replaceWorkspaceMention,
+  workspaceBasename,
+  workspaceMentionAtEnd,
+} from "../workspace/workspaceModel";
 import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
 
@@ -100,6 +121,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const depth = scheme === "dark" ? depthDark : depthLight;
   const usesNativeMirror = composerUsesNativeMirror(Platform.OS);
   const upload = useUpload();
+  const { baseUrl } = useAuth();
   const insets = useSafeAreaInsets();
   const [commandFocusSignal, setCommandFocusSignal] = useState(0);
 
@@ -123,6 +145,8 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     // slash-command path (see file header), which is a `RemoteInput`, not an `onSend` prompt.
     send,
   } = useSessionCtx();
+  const reviewComments = useReviewComments(sessionId);
+  const visualAnnotations = useVisualAnnotations(sessionId);
   const toast = useToast();
   const [recording, setRecording] = useState(false);
   const [goalVisible, setGoalVisible] = useState(false);
@@ -194,7 +218,9 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     inputRef.current?.focus();
   }, [commandFocusSignal]);
 
-  const canSend = text.trim().length > 0 && !attachments.some((a) => a.state === "uploading");
+  const canSend =
+    (text.trim().length > 0 || reviewComments.length > 0 || visualAnnotations.length > 0) &&
+    !attachments.some((a) => a.state === "uploading");
   const action = busy ? "stop" : online ? "send" : "queue";
   const reduced = useReducedMotion();
   const actionProgress = useSharedValue(action === "stop" ? 1 : 0);
@@ -210,6 +236,49 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const commandHints = allCommands.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
   const leadingCommand = text.match(/^\/(\S*)/)?.[0].toLowerCase();
   const recognizedCommand = leadingCommand != null && isKnownCommand(leadingCommand, skillCommands.map((s) => s.name));
+  const workspaceMention = workspaceMentionAtEnd(text);
+  const workspaceMentionQuery = workspaceMention?.query ?? "";
+  const workspaceSearchSession =
+    !baseUrl || supportsDirectDaemonEndpoints(baseUrl) ? sessionId : null;
+  const workspaceSearch = useWorkspaceSearch(
+    workspaceSearchSession,
+    workspaceMentionQuery,
+    "files",
+    8,
+  );
+  const workspaceMentionResults = useMemo(
+    () => workspaceSearch.data?.results ?? [],
+    [workspaceSearch.data],
+  );
+  const [workspaceMentionSelection, setWorkspaceMentionSelection] = useState(0);
+  const workspaceMentionRef = useRef(workspaceMention);
+  const workspaceMentionResultsRef = useRef(workspaceMentionResults);
+  const workspaceMentionSelectionRef = useRef(workspaceMentionSelection);
+
+  useEffect(() => {
+    setWorkspaceMentionSelection(0);
+  }, [workspaceMentionQuery, workspaceSearch.data]);
+
+  const insertWorkspaceMention = useCallback((path: string) => {
+    const mention = workspaceMentionRef.current;
+    if (!mention) return;
+    const next = replaceWorkspaceMention(textRef.current, mention, path);
+    if (Platform.OS !== "web") setNativeText(next);
+    setText(next);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [setText]);
+  const insertWorkspaceMentionRef = useRef(insertWorkspaceMention);
+  useEffect(() => {
+    workspaceMentionRef.current = workspaceMention;
+    workspaceMentionResultsRef.current = workspaceMentionResults;
+    workspaceMentionSelectionRef.current = workspaceMentionSelection;
+    insertWorkspaceMentionRef.current = insertWorkspaceMention;
+  }, [
+    insertWorkspaceMention,
+    workspaceMention,
+    workspaceMentionResults,
+    workspaceMentionSelection,
+  ]);
   const insertSuggestion = (suggestion: string) => {
     setText(suggestion);
     requestAnimationFrame(() => {
@@ -240,6 +309,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     text.trim().length === 0 &&
     !recording &&
     attachments.length === 0 &&
+    reviewComments.length === 0 &&
     !busy;
   const showGhost = Platform.OS === "web" && suggestionActive;
   const showSuggestionChip = Platform.OS !== "web" && suggestionActive;
@@ -285,7 +355,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
 
   const commit = (value: string) => {
     const trimmed = value.trim();
-    if (!trimmed) return;
+    if (!trimmed && reviewComments.length === 0 && visualAnnotations.length === 0) return;
     // An attachment still in flight (or failed) must never be silently dropped from the send —
     // block it with a toast instead so the user notices and can wait/remove/retry.
     if (attachments.some((a) => a.state === "uploading")) {
@@ -302,8 +372,12 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     const sent: SentAttachment[] = attachments
       .filter((a) => a.state === "done")
       .map((a) => ({ id: a.id, name: a.name, image: a.image, uri: a.uri, path: a.path }));
-    if (!onSend(trimmed, sent)) return;
-    setLastPrompt(trimmed);
+    const prompt = formatVisualAnnotationsPrompt(
+      formatReviewCommentsPrompt(trimmed, reviewComments),
+      visualAnnotations,
+    );
+    if (!onSend(prompt, sent)) return;
+    setLastPrompt(prompt);
     // Whatever suggestion is live right now belongs to the turn that's ending, not the one this
     // send just started — mask it so it can't flash back in once the draft clears below.
     if (suggestedPrompt) setSuppressedSuggestion(suggestedPrompt);
@@ -311,6 +385,8 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     setText("");
     void clearDraft(sessionId);
     setAttachments([]);
+    clearReviewComments(sessionId);
+    clearVisualAnnotations(sessionId);
     if (Platform.OS === "web") setHeight(MIN_HEIGHT);
   };
   // `commit` closes over `onSend` (and whatever connection state it reads), so it's a new
@@ -387,6 +463,26 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     const onKeyDown = (e: KeyboardEvent) => {
       // An IME candidate-confirming Enter (CJK input) must only confirm the candidate, not send.
       if (e.isComposing) return;
+      const mentionResults = workspaceMentionResultsRef.current;
+      if (workspaceMentionRef.current && mentionResults.length > 0) {
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          const delta = e.key === "ArrowDown" ? 1 : -1;
+          setWorkspaceMentionSelection((current) => {
+            const next = (current + delta + mentionResults.length) % mentionResults.length;
+            workspaceMentionSelectionRef.current = next;
+            return next;
+          });
+          return;
+        }
+        if (e.key === "Enter" || e.key === "Tab") {
+          e.preventDefault();
+          const selected =
+            mentionResults[workspaceMentionSelectionRef.current] ?? mentionResults[0];
+          if (selected) insertWorkspaceMentionRef.current(selected.path);
+          return;
+        }
+      }
       // Enter (no Shift) already sends; ⌘/Ctrl+Enter (T5.1 alias) sends too, even in the
       // edge case both modifiers are held at once, so the desktop shortcut always works.
       if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) {
@@ -492,6 +588,50 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
         },
       ]}
     >
+      {!recording && visualAnnotations.length > 0 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.commandScroll}
+          contentContainerStyle={styles.chipsRow}
+          keyboardShouldPersistTaps="handled"
+          accessibilityLabel="Pending browser preview annotations"
+        >
+          {visualAnnotations.map((annotation) => (
+            <Chip
+              key={annotation.id}
+              icon={<MousePointer2 size={14} strokeWidth={1.75} color={tokens.accent} />}
+              label={visualAnnotationLabel(annotation)}
+              selected
+              onPress={() => removeVisualAnnotation(sessionId, annotation.id)}
+              testID={`visual-annotation-${annotation.id}`}
+            />
+          ))}
+        </ScrollView>
+      ) : null}
+
+      {!recording && reviewComments.length > 0 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.commandScroll}
+          contentContainerStyle={styles.chipsRow}
+          keyboardShouldPersistTaps="handled"
+          accessibilityLabel="Pending review annotations"
+        >
+          {reviewComments.map((comment) => (
+            <Chip
+              key={comment.id}
+              icon={<MessageSquare size={14} strokeWidth={1.75} color={tokens.accent} />}
+              label={`${comment.path} ${reviewRangeLabel(comment.side, comment.startLine, comment.endLine)}`}
+              selected
+              onPress={() => removeReviewComment(sessionId, comment.id)}
+              testID={`review-comment-${comment.id}`}
+            />
+          ))}
+        </ScrollView>
+      ) : null}
+
       {!recording && attachments.length > 0 ? (
         <ScrollView
           horizontal
@@ -516,6 +656,61 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
             />
           ))}
         </ScrollView>
+      ) : null}
+
+      {!recording && workspaceMention && workspaceMentionQuery.length > 0 ? (
+        <View
+          style={[
+            styles.mentionMenu,
+            { backgroundColor: tokens.bg2, borderColor: tokens.border },
+          ]}
+          accessibilityRole="menu"
+          accessibilityLabel="Workspace file suggestions"
+        >
+          {workspaceSearch.isLoading ? (
+            <Text style={[type.meta, styles.mentionNotice, { color: tokens.ink3 }]}>
+              searching workspace…
+            </Text>
+          ) : workspaceMentionResults.length > 0 ? (
+            workspaceMentionResults.map((result, index) => {
+              const selected = index === workspaceMentionSelection;
+              return (
+                <Pressable
+                  key={result.path}
+                  onPress={() => insertWorkspaceMention(result.path)}
+                  accessibilityRole="menuitem"
+                  accessibilityLabel={`Mention ${result.path}`}
+                  style={[
+                    styles.mentionRow,
+                    { backgroundColor: selected ? tokens.selection : "transparent" },
+                  ]}
+                >
+                  <FileCode2
+                    size={15}
+                    strokeWidth={1.75}
+                    color={selected ? tokens.accent : tokens.ink3}
+                  />
+                  <Text
+                    style={[type.body, styles.mentionPath, { color: tokens.ink }]}
+                    numberOfLines={1}
+                  >
+                    {workspaceBasename(result.path)}
+                  </Text>
+                  <Text
+                    style={[type.monoMeta, styles.mentionParent, { color: tokens.ink3 }]}
+                    numberOfLines={1}
+                  >
+                    {result.path}
+                  </Text>
+                </Pressable>
+              );
+            })
+          ) : workspaceSearch.isFetched ? (
+            <Text style={[type.meta, styles.mentionNotice, { color: tokens.ink3 }]}>
+              no matching workspace files
+            </Text>
+          ) : null}
+        </View>
       ) : null}
 
       {!recording ? (
@@ -753,6 +948,23 @@ const styles = StyleSheet.create({
   },
   chipsRow: { flexDirection: "row", gap: space.space8, paddingRight: space.space12 },
   commandScroll: { flexGrow: 0, flexShrink: 0 },
+  mentionMenu: {
+    maxHeight: 260,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radii.radius8,
+    overflow: "hidden",
+  },
+  mentionRow: {
+    minHeight: 36,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space8,
+    paddingHorizontal: space.space12,
+    paddingVertical: 6,
+  },
+  mentionPath: { flexShrink: 0, maxWidth: "38%" },
+  mentionParent: { flex: 1 },
+  mentionNotice: { paddingHorizontal: space.space12, paddingVertical: space.space8 },
   chipThumb: { width: 20, height: 20, borderRadius: radii.radius4 },
   // D Main / M Session Chat composer: one bordered card (radius4, hairline) wrapping the
   // optional model/effort meta row and the icon+input control row beneath it.

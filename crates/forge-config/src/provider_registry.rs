@@ -614,6 +614,33 @@ pub fn add_azure_provider(cfg: &AzureConfig) -> Result<PathBuf, ConfigError> {
     Ok(path)
 }
 
+/// Remove the user `[providers.azure]` block while preserving every other config key.
+/// `Ok(true)` means a block was removed; absent config is an idempotent `Ok(false)`.
+pub fn remove_azure_provider() -> Result<bool, ConfigError> {
+    let dir = config_dir().ok_or(ConfigError::NoConfigDir)?;
+    remove_azure_provider_at(&dir.join("config.toml"))
+}
+
+fn remove_azure_provider_at(path: &std::path::Path) -> Result<bool, ConfigError> {
+    let Some(text) = std::fs::read_to_string(path).ok() else {
+        return Ok(false);
+    };
+    let mut root: toml::Table = text.parse().unwrap_or_default();
+    let removed = root
+        .get_mut("providers")
+        .and_then(toml::Value::as_table_mut)
+        .is_some_and(|providers| providers.remove("azure").is_some());
+    if removed {
+        let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
+        Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string(&body))
+            .extract::<Config>()
+            .map_err(|e| ConfigError::Write(format!("invalid config after Azure removal: {e}")))?;
+        std::fs::write(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    }
+    Ok(removed)
+}
+
 /// The file half of [`add_azure_provider`] against an explicit path — testable without the real
 /// per-user config dir (mirrors [`add_custom_provider_at`]).
 fn add_azure_provider_at(path: &std::path::Path, cfg: &AzureConfig) -> Result<(), ConfigError> {
@@ -698,6 +725,10 @@ pub(crate) mod test_support {
         config: &AzureConfig,
     ) -> Result<(), ConfigError> {
         super::add_azure_provider_at(path, config)
+    }
+
+    pub(crate) fn remove_azure_provider_at(path: &std::path::Path) -> Result<bool, ConfigError> {
+        super::remove_azure_provider_at(path)
     }
 
     pub(crate) fn build_custom_registry(runtime: &[RuntimeCustomProvider]) -> Vec<CustomProvider> {

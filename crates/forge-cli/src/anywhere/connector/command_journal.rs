@@ -63,7 +63,10 @@ pub(super) fn validate_command_request(
     }) {
         return Err(CommandErrorCode::PermissionDenied);
     }
-    if request.route == RouteId::WebSocket {
+    if matches!(
+        request.route,
+        RouteId::WebSocket | RouteId::TerminalWebSocket
+    ) {
         return Err(CommandErrorCode::PermissionDenied);
     }
     if request.route == RouteId::Health {

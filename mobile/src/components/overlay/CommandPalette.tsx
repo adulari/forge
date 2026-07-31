@@ -42,6 +42,7 @@ import React, {
   useState,
 } from "react";
 import {
+  ActivityIndicator,
   BackHandler,
   Keyboard,
   Modal,
@@ -70,7 +71,13 @@ import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { useAuth } from "../../lib/auth";
 import { haptics } from "../../lib/haptics";
 import { modKey } from "../../lib/platform";
-import { useArchiveSession, useCreateSession, usePastSessions, useSessions } from "../../lib/queries";
+import {
+  useArchiveSession,
+  useCreateSession,
+  usePastSessions,
+  useSessions,
+  useSessionSearch,
+} from "../../lib/queries";
 import { usePaletteHotkey, useThreadSearchHotkey } from "../../lib/shortcuts";
 import { useSessionSocket } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
@@ -81,6 +88,7 @@ import { useBreakpoint } from "../../theme/useBreakpoint";
 import { HostDot } from "../anywhere/HostDot";
 import { DecisionPeek } from "../cards/DecisionPeek";
 import { Badge } from "../ds/Badge";
+import { Button } from "../ds/Button";
 import { EmptyState } from "../ds/EmptyState";
 import { IconButton } from "../ds/IconButton";
 import { ListRow } from "../ds/ListRow";
@@ -553,17 +561,45 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
   }, [anywhereSignedIn, anywhereHosts, anywhereAccount, tokens, close]);
 
   // -------------------------------------------------------------------------
-  // Thread search (⌘P) — reuses the SAME session/history data the Fleet and
-  // History screens already query; no new endpoint. Live sessions resume the
-  // existing session route directly; past sessions "resume" the same way
-  // History's row press does — `useCreateSession` at that cwd, then open it.
+  // Thread search (⌘P) — two-or-more-character queries use the daemon's bounded
+  // global metadata/transcript search. Live sessions open directly; past sessions
+  // resume their original id so their durable transcript remains attached.
   // -------------------------------------------------------------------------
   const createSession = useCreateSession();
   const pastSessionsQuery = usePastSessions();
   const pastRows = useMemo(() => pastSessionsQuery.data?.pages.flat() ?? [], [pastSessionsQuery.data]);
+  const globalSearch = useSessionSearch(mode === "search" ? query : "", 40);
 
   const threadItems = useMemo<PaletteItem[]>(() => {
     if (mode !== "search") return [];
+    if (query.trim().length >= 2) {
+      return (globalSearch.data ?? []).map((match) => {
+        const title = match.title || `session ${match.id.slice(0, 8)}`;
+        const age = formatRelativeTime(match.last_activity * 1000);
+        const excerpt = match.match_excerpt?.replace(/\s+/g, " ").trim();
+        return {
+          id: `thread:search:${match.id}`,
+          group: "sessions",
+          title,
+          subtitle: excerpt
+            ? `${formatCwd(match.cwd)} · ${age} — ${excerpt}`
+            : `${formatCwd(match.cwd)} · ${age}`,
+          keywords: `${match.id} ${title} ${match.cwd} ${excerpt ?? ""}`,
+          leading: <StatusDot state={match.running ? "idle" : "done"} />,
+          onSelect: () => {
+            close();
+            if (match.running) {
+              router.push(`/session/${match.id}`);
+              return;
+            }
+            createSession.mutate(
+              { resume: match.id },
+              { onSuccess: (res) => router.push(`/session/${res.id}`) },
+            );
+          },
+        };
+      });
+    }
     const live: PaletteItem[] = (sessions ?? []).map((s) => {
       const title = s.title || `session ${s.id.slice(0, 8)}`;
       const state: StatusDotState = s.waiting ? "waiting" : s.busy ? "busy" : "idle";
@@ -594,14 +630,14 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
         onSelect: () => {
           close();
           createSession.mutate(
-            { cwd: p.cwd, title: p.title || undefined },
+            { resume: p.id },
             { onSuccess: (res) => router.push(`/session/${res.id}`) },
           );
         },
       };
     });
     return [...live, ...past];
-  }, [mode, sessions, pastRows, close, createSession]);
+  }, [mode, query, globalSearch.data, sessions, pastRows, close, createSession]);
 
   const allItems = useMemo(
     () =>
@@ -746,6 +782,11 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
 
   const hasResults = filteredItems.length > 0;
   const isSearchMode = mode === "search";
+  const isSearching =
+    isSearchMode
+    && q.length >= 2
+    && (globalSearch.isDebouncing || globalSearch.isFetching);
+  const searchFailed = isSearchMode && q.length >= 2 && globalSearch.isError;
   const waitingBadge = (sessions ?? []).some((s) => s.waiting);
 
   const body = (
@@ -790,6 +831,29 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
               ) : null,
             )
           )
+        ) : isSearching ? (
+          <View style={styles.searching}>
+            <ActivityIndicator color={tokens.accent} />
+            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Searching every session…</Text>
+          </View>
+        ) : searchFailed ? (
+          <EmptyState
+            icon={Search}
+            message={
+              globalSearch.error instanceof ApiError
+                ? globalSearch.error.message
+                : "couldn't search session history"
+            }
+            action={
+              <Button
+                label="Retry"
+                variant="secondary"
+                onPress={() => {
+                  void globalSearch.refetch();
+                }}
+              />
+            }
+          />
         ) : (
           <EmptyState icon={Search} message={isSearchMode ? "no matching sessions" : "no matches for that search"} />
         )}
@@ -979,6 +1043,12 @@ const styles = StyleSheet.create({
   searchField: { flex: 1 },
   scroll: { flex: 1 },
   scrollContent: { paddingBottom: space.space24 },
+  searching: {
+    alignItems: "center",
+    justifyContent: "center",
+    gap: space.space8,
+    paddingVertical: space.space32,
+  },
   trailingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   centerWrap: { flex: 1, alignItems: "center", justifyContent: "center", padding: space.space32 },
   centeredPanel: { overflow: "hidden" },

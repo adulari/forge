@@ -24,14 +24,7 @@ classify_path() {
   esac
 }
 
-# An operator-driven dispatch with no base is trusted (RELEASING.md §6 recovery). An AUTOMATED
-# dispatch — release.yml's post-publish hand-off — passes a base so it is classified exactly like a
-# push; otherwise tying the OTA to releases would have quietly bypassed the very guard that stops a
-# JS bundle expecting new native code from reaching an older installed binary.
-if [[ ${EVENT_NAME:-} == workflow_dispatch && -z ${BASE_SHA:-} ]]; then
-  safe=true
-  ota_changed=true
-elif (($#)); then
+if (($#)); then
   for path in "$@"; do
     classify_path "$path"
   done
@@ -48,9 +41,22 @@ else
       exit 1
     fi
 
+    if ! base_commit=$(git rev-parse --verify --end-of-options "${base_sha}^{commit}"); then
+      echo "Unable to resolve OTA baseline as a commit" >&2
+      exit 1
+    fi
+    if ! head_commit=$(git rev-parse --verify --end-of-options "${head_sha}^{commit}"); then
+      echo "Unable to resolve OTA head as a commit" >&2
+      exit 1
+    fi
+    if ! git merge-base --is-ancestor "$base_commit" "$head_commit"; then
+      echo "OTA baseline is not an ancestor of the requested head" >&2
+      exit 1
+    fi
+
     changed_paths=$(mktemp)
     trap 'rm -f -- "$changed_paths"' EXIT
-    if git diff --no-renames --name-only -z "$base_sha" "$head_sha" > "$changed_paths"; then
+    if git diff --no-renames --name-only -z "$base_commit" "$head_commit" > "$changed_paths"; then
       while IFS= read -r -d '' path; do
         classify_path "$path"
       done < "$changed_paths"

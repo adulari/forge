@@ -1525,6 +1525,25 @@ pub struct SessionSummary {
     pub archived: bool,
 }
 
+/// One bounded global session-search result. Search spans session metadata plus active
+/// user/assistant transcript rows without loading every session into a client.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionSearchRow {
+    pub id: String,
+    pub title: Option<String>,
+    pub cwd: String,
+    pub archived: bool,
+    pub message_count: i64,
+    pub total_cost_usd: f64,
+    pub last_activity: i64,
+    /// `title`, `cwd`, `id`, or `message`.
+    pub match_source: String,
+    pub match_seq: Option<i64>,
+    pub match_role: Option<String>,
+    /// At most 240 SQLite characters, centered near the first case-insensitive match.
+    pub match_excerpt: Option<String>,
+}
+
 // ---- Lattice: code-intelligence graph (code-intelligence.md) ----
 
 /// A persisted source-file row in the Lattice graph.
@@ -1941,6 +1960,117 @@ mod tests {
         assert_eq!(sessions[0].message_count, 2);
         assert_eq!(sessions[1].id, a);
         assert_eq!(sessions[1].message_count, 1);
+    }
+
+    #[test]
+    fn global_session_search_spans_metadata_and_transcript_with_literal_wildcards() {
+        let store = Store::open_in_memory().unwrap();
+        let title_match = store.create_session("/projects/alpha", "default").unwrap();
+        store
+            .set_session_title(&title_match, "Needle parser")
+            .unwrap();
+        store
+            .add_message(&title_match, 0, Role::User, "ordinary task", None)
+            .unwrap();
+
+        let content_match = store.create_session("/projects/beta", "default").unwrap();
+        store
+            .add_message(
+                &content_match,
+                0,
+                Role::User,
+                &format!("{}needle appears near the end", "x".repeat(120)),
+                None,
+            )
+            .unwrap();
+        store.archive_session(&content_match).unwrap();
+
+        let wildcard_literal = store
+            .create_session("/projects/literal_%_path", "default")
+            .unwrap();
+        store
+            .add_message(&wildcard_literal, 0, Role::User, "literal marker", None)
+            .unwrap();
+
+        let matches = store.search_sessions("needle", 10).unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].id, title_match);
+        let content = matches.iter().find(|row| row.id == content_match).unwrap();
+        assert_eq!(content.match_source, "message");
+        assert_eq!(content.match_seq, Some(0));
+        assert_eq!(content.match_role.as_deref(), Some("user"));
+        assert!(content
+            .match_excerpt
+            .as_deref()
+            .is_some_and(|excerpt| excerpt.contains("needle")));
+        assert!(content.archived);
+
+        let literal = store.search_sessions("%_", 10).unwrap();
+        assert_eq!(literal.len(), 1);
+        assert_eq!(literal[0].id, wildcard_literal);
+        assert_eq!(literal[0].match_source, "cwd");
+        assert_eq!(store.search_sessions("needle", 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_session_removes_descendants_and_artifacts_but_keeps_queue_history() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/delete", "default").unwrap();
+        let child = store
+            .create_child_session("/delete", "default", &sid)
+            .unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "delete me", None)
+            .unwrap();
+        store
+            .add_message(&child, 0, Role::Assistant, "child output", None)
+            .unwrap();
+        store
+            .upsert_live_activity_token(&sid, "push-token", "sandbox")
+            .unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO mesh_outcome (
+                     session_id, model, tier, started_at, completed_at, latency_ms,
+                     outcome, failover_hop, tool_calls, verified_completion
+                 ) VALUES (?1, 'model', 'standard', 1, 2, 1, 'success', 0, 0, 1)",
+                [&sid],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO queue_task (id, task, cwd, status, session_id)
+                 VALUES ('queued-delete-test', 'task', '/delete', 'done', ?1)",
+                [&sid],
+            )
+            .unwrap();
+        }
+        assert!(store.delete_session(&sid).unwrap());
+        assert!(!store.session_exists(&sid).unwrap());
+        assert!(!store.session_exists(&child).unwrap());
+        assert!(store.load_all_messages(&sid).unwrap().is_empty());
+        assert!(store.load_all_messages(&child).unwrap().is_empty());
+        assert!(store.get_live_activity_token(&sid).unwrap().is_none());
+        {
+            let conn = store.lock().unwrap();
+            let mesh_rows: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM mesh_outcome WHERE session_id = ?1",
+                    [&sid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(mesh_rows, 0);
+            let queue_session: Option<String> = conn
+                .query_row(
+                    "SELECT session_id FROM queue_task WHERE id = 'queued-delete-test'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(queue_session, None);
+        }
+        assert!(!store.delete_session(&sid).unwrap());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 // count suffix or waiting dot. Distinct from Segmented (the pill control stays for true
 // value pickers like temper/appearance); these are navigation tabs, never a pill/fill.
 import React from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
@@ -28,7 +28,14 @@ export interface TabStripProps<T extends string> {
 export function TabStrip<T extends string>({ options, value, onChange, testID }: TabStripProps<T>) {
   const tokens = useTokens();
   return (
-    <View style={[styles.row, { borderBottomColor: tokens.hairline }]} testID={testID} accessibilityRole="tablist">
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={[styles.scroller, { borderBottomColor: tokens.hairline }]}
+      contentContainerStyle={styles.row}
+      testID={testID}
+      accessibilityRole="tablist"
+    >
       {options.map((option) => {
         const active = option.value === value;
         return (
@@ -54,15 +61,19 @@ export function TabStrip<T extends string>({ options, value, onChange, testID }:
           </Pressable>
         );
       })}
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
+  scroller: {
+    flexGrow: 0,
+    flexShrink: 0,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
   row: {
     flexDirection: "row",
     gap: space.space20,
-    borderBottomWidth: StyleSheet.hairlineWidth,
   },
   tab: { position: "relative", paddingBottom: 10 },
   labelRow: { flexDirection: "row", alignItems: "center", gap: space.space4 },

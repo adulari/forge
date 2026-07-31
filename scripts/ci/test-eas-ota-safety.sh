@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 classifier="$script_dir/eas-ota-safety.sh"
+workflow="$script_dir/../../.github/workflows/eas-update.yml"
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
 failures=0
@@ -26,6 +27,13 @@ fail() {
   echo "$*" >&2
   failures=$((failures + 1))
 }
+
+if ! grep -Fq 'BASE_SHA: ${{ vars.IOS_OTA_COMPATIBLE_BASE_SHA }}' "$workflow"; then
+  fail "eas-update must classify from IOS_OTA_COMPATIBLE_BASE_SHA"
+fi
+if grep -Eq 'BASE_SHA:.*(github\.event\.before|inputs\.base_ref)' "$workflow"; then
+  fail "eas-update must not narrow compatibility to a push or dispatch base"
+fi
 
 classify source_and_docs mobile/src/app.tsx docs/plan.md
 expect source_and_docs safe true
@@ -77,9 +85,9 @@ for index in "${!neutral_paths[@]}"; do
   expect "$output" ota_changed true
 done
 
-GITHUB_OUTPUT="$scratch/manual" EVENT_NAME=workflow_dispatch "$classifier" >/dev/null
-expect manual safe true
-expect manual ota_changed true
+GITHUB_OUTPUT="$scratch/missing_baseline" EVENT_NAME=workflow_dispatch "$classifier" >/dev/null
+expect missing_baseline safe false
+expect missing_baseline ota_changed false
 
 rename_repo="$scratch/rename-repo"
 git init -q "$rename_repo"
@@ -143,36 +151,34 @@ for base_case in all_zero empty; do
   expect "$base_case" ota_changed false
 done
 
-# release.yml's post-publish hand-off dispatches with `base_ref` set. That dispatch must be
-# classified exactly like a push: an unconditional trust would turn "tie the OTA to the release"
-# into a bypass of this entire guard, publishing JS that expects native code the installed binary
-# does not have. It also passes a TAG, not a sha, so the range resolution has to accept a ref name.
-dispatch_unsafe_base=$(git -C "$range_repo" rev-parse HEAD~2)
-dispatch_safe_base=$(git -C "$range_repo" rev-parse HEAD~1)
-git -C "$range_repo" tag previous-release "$dispatch_safe_base"
+# The installed binary's source commit is the only safe baseline. The latest push base (HEAD~1)
+# would classify the final source-only commit as safe even though the current bundle also contains
+# the preceding native dependency. Keeping the installed baseline at HEAD~2 must catch that native
+# change; advancing it to HEAD~1 is safe only after a binary containing that dependency exists.
+installed_old_base=$(git -C "$range_repo" rev-parse HEAD~2)
+installed_new_base=$(git -C "$range_repo" rev-parse HEAD~1)
+git -C "$range_repo" tag installed-native-build "$installed_new_base"
 
 (
   cd "$range_repo"
-  GITHUB_OUTPUT="$scratch/dispatch_unsafe" \
-    EVENT_NAME=workflow_dispatch \
-    BASE_SHA="$dispatch_unsafe_base" \
+  GITHUB_OUTPUT="$scratch/installed_old" \
+    BASE_SHA="$installed_old_base" \
     HEAD_SHA="$range_head" \
     "$classifier" >/dev/null
 )
-expect dispatch_unsafe safe false
-expect dispatch_unsafe ota_changed true
+expect installed_old safe false
+expect installed_old ota_changed true
 
-for dispatch_base in "$dispatch_safe_base" previous-release; do
+for installed_base in "$installed_new_base" installed-native-build; do
   (
     cd "$range_repo"
-    GITHUB_OUTPUT="$scratch/dispatch_safe" \
-      EVENT_NAME=workflow_dispatch \
-      BASE_SHA="$dispatch_base" \
+    GITHUB_OUTPUT="$scratch/installed_new" \
+      BASE_SHA="$installed_base" \
       HEAD_SHA="$range_head" \
       "$classifier" >/dev/null
   )
-  expect dispatch_safe safe true
-  expect dispatch_safe ota_changed true
+  expect installed_new safe true
+  expect installed_new ota_changed true
 done
 
 invalid_output="$scratch/invalid_range"

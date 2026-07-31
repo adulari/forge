@@ -80,20 +80,105 @@ pub(crate) const AT_FILE_MAX_BYTES: usize = 96 * 1024;
 /// line stays clean. Missing paths are treated as ordinary text (silently skipped — `@` is also a
 /// mention sigil); binary/oversized files are skipped with a visible note.
 pub(crate) fn expand_at_files(prompt: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
-    let mut seen = std::collections::HashSet::new();
-    let (mut blocks, mut included, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
-    // Split on Unicode whitespace. The previous byte-by-byte scan cast each byte to a `char` and
-    // sliced `&prompt[start..i]` on the result — which lands MID-CHARACTER for any multi-byte
-    // whitespace (a pasted non-breaking space `\u{a0}`, an em space, …) and PANICS ("not a char
-    // boundary"), crashing the whole turn. `split_whitespace` is UTF-8-correct and recognizes those.
-    for word in prompt.split_whitespace() {
-        let Some(path) = word.strip_prefix('@') else {
-            continue;
-        };
-        if path.is_empty() || !seen.insert(path.to_string()) {
+    expand_at_files_impl(prompt, None)
+}
+
+/// Remote/mobile counterpart to [`expand_at_files`]. Relative paths resolve against the
+/// addressed session's canonical workspace and cannot escape it through `..`, absolute paths,
+/// or symlinks. The unscoped wrapper above remains for the local TUI, whose process cwd is itself
+/// the user's chosen workspace.
+pub(crate) fn expand_at_files_in(
+    prompt: &str,
+    workspace: &std::path::Path,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    expand_at_files_impl(prompt, Some(workspace))
+}
+
+fn at_paths(prompt: &str) -> Vec<String> {
+    let chars: Vec<(usize, char)> = prompt.char_indices().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let (byte, character) = chars[index];
+        let boundary = index == 0 || chars[index - 1].1.is_whitespace();
+        if character != '@' || !boundary {
+            index += 1;
             continue;
         }
-        match std::fs::read(path) {
+        let value_start = byte + character.len_utf8();
+        if chars.get(index + 1).is_some_and(|(_, next)| *next == '{') {
+            let content_start = chars[index + 1].0 + 1;
+            let mut end_index = index + 2;
+            while end_index < chars.len() && chars[end_index].1 != '}' {
+                end_index += 1;
+            }
+            if end_index < chars.len() {
+                let path = &prompt[content_start..chars[end_index].0];
+                if !path.is_empty() {
+                    paths.push(path.to_string());
+                }
+                index = end_index + 1;
+                continue;
+            }
+        }
+
+        let mut end_index = index + 1;
+        while end_index < chars.len() && !chars[end_index].1.is_whitespace() {
+            end_index += 1;
+        }
+        let end_byte = chars
+            .get(end_index)
+            .map(|(position, _)| *position)
+            .unwrap_or(prompt.len());
+        let path = &prompt[value_start..end_byte];
+        if !path.is_empty() {
+            paths.push(path.to_string());
+        }
+        index = end_index;
+    }
+    paths
+}
+
+fn scoped_at_path(workspace: &std::path::Path, raw: &str) -> Option<std::path::PathBuf> {
+    let requested = std::path::Path::new(raw);
+    let root = std::fs::canonicalize(workspace).ok()?;
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        root.join(requested)
+    };
+    let path = std::fs::canonicalize(candidate).ok()?;
+    let relative = path.strip_prefix(&root).ok()?;
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) if part != ".git" => {}
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(path)
+}
+
+fn expand_at_files_impl(
+    prompt: &str,
+    workspace: Option<&std::path::Path>,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    let (mut blocks, mut included, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
+    // The scanner is UTF-8-safe and accepts `@{path with spaces}` in addition to the original
+    // whitespace-delimited `@path` syntax. The braced form is what graphical file pickers insert
+    // for a legitimate workspace path containing spaces.
+    for path in at_paths(prompt) {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let resolved = workspace
+            .and_then(|root| scoped_at_path(root, &path))
+            .or_else(|| workspace.is_none().then(|| std::path::PathBuf::from(&path)));
+        let Some(resolved) = resolved else {
+            continue;
+        };
+        match std::fs::read(resolved) {
             Ok(raw) if raw.len() > AT_FILE_MAX_BYTES => {
                 skipped.push(format!("@{path} (>{}KB)", AT_FILE_MAX_BYTES / 1024));
             }
@@ -108,4 +193,36 @@ pub(crate) fn expand_at_files(prompt: &str) -> (Vec<String>, Vec<String>, Vec<St
         }
     }
     (blocks, included, skipped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn braced_mentions_support_workspace_paths_with_spaces() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("My Docs")).unwrap();
+        std::fs::write(directory.path().join("My Docs/plan.md"), "the plan").unwrap();
+
+        let (blocks, included, skipped) =
+            expand_at_files_in("review @{My Docs/plan.md}", directory.path());
+        assert_eq!(included, vec!["My Docs/plan.md"]);
+        assert!(blocks[0].contains("the plan"));
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn remote_mentions_cannot_escape_the_session_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "nope").unwrap();
+        let absolute = outside.path().join("secret");
+        let prompt = format!("@../secret @{}", absolute.display());
+
+        let (blocks, included, skipped) = expand_at_files_in(&prompt, workspace.path());
+        assert!(blocks.is_empty());
+        assert!(included.is_empty());
+        assert!(skipped.is_empty());
+    }
 }

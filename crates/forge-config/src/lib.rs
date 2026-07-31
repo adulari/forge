@@ -2647,7 +2647,8 @@ use editor::test_support::{
 };
 #[cfg(test)]
 use provider_registry::test_support::{
-    add_azure_provider_at, add_custom_provider_at, build_custom_registry, remove_custom_provider_at,
+    add_azure_provider_at, add_custom_provider_at, build_custom_registry, remove_azure_provider_at,
+    remove_custom_provider_at,
 };
 
 /// Search providers Forge can authenticate (`forge auth brave`).
@@ -2768,6 +2769,20 @@ fn env_var_for(provider: &str) -> Option<&'static str> {
                 .flatten()
                 .map(|a| a.env_var.as_str())
         })
+}
+
+/// Conventional environment variable for a provider key, if this provider is keyed.
+///
+/// This exposes only the variable *name* for account-management UI; key contents never cross the
+/// config boundary.
+pub fn provider_key_env_var(provider: &str) -> Option<&'static str> {
+    env_var_for(provider)
+}
+
+/// Whether this process received a provider key from its environment (canonical name or alias).
+/// The value itself is deliberately never returned.
+pub fn provider_environment_key_present(provider: &str) -> bool {
+    env_var_for(provider).is_some_and(env_set) || env_aliases_for(provider).any(env_set)
 }
 
 /// Provider names Forge knows how to authenticate (for `forge auth` validation/help). Includes
@@ -2957,6 +2972,34 @@ pub fn api_key_fingerprints(provider: &str) -> Vec<String> {
                 .rev()
                 .collect();
             format!("…{tail}")
+        })
+        .collect()
+}
+
+/// Masked fingerprints of only the keys Forge owns in its keyring/encrypted fallback.
+///
+/// Unlike [`api_key_fingerprints`], this excludes environment-provided keys so a management UI can
+/// truthfully explain what its Remove action will and will not delete.
+pub fn stored_api_key_fingerprints(provider: &str) -> Vec<String> {
+    secret_store::get(provider)
+        .into_iter()
+        .flat_map(|stored| {
+            stored
+                .split('\n')
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(|key| {
+                    let tail: String = key
+                        .chars()
+                        .rev()
+                        .take(4)
+                        .collect::<Vec<char>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    format!("…{tail}")
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -3716,6 +3759,31 @@ auto = "local"
     }
 
     #[test]
+    fn stored_fingerprints_exclude_environment_keys() {
+        const PROVIDER: &str = "vertex";
+        const ENV_VAR: &str = "VERTEX_API_KEY";
+        let original = std::env::var_os(ENV_VAR);
+        std::env::set_var(ENV_VAR, "environment-only-ENV1");
+        secret_store::set(PROVIDER, "stored-primary-STO1\nstored-secondary-STO2").unwrap();
+
+        assert_eq!(
+            stored_api_key_fingerprints(PROVIDER),
+            vec!["…STO1", "…STO2"]
+        );
+        let all = api_key_fingerprints(PROVIDER);
+        assert!(all.contains(&"…ENV1".to_string()));
+        assert!(all.contains(&"…STO1".to_string()));
+        assert!(all.contains(&"…STO2".to_string()));
+
+        secret_store::delete(PROVIDER).unwrap();
+        if let Some(value) = original {
+            std::env::set_var(ENV_VAR, value);
+        } else {
+            std::env::remove_var(ENV_VAR);
+        }
+    }
+
+    #[test]
     fn bridge_external_mcp_is_on_by_default_and_toml_can_disable_it() {
         assert!(Config::default().mesh.bridge_mcp_external, "Rust default");
         let cfg: Config = Figment::from(Serialized::defaults(Config::default()))
@@ -4344,6 +4412,38 @@ deployments = ["gpt-4o", "gpt-4o-mini"]
 
         // An invalid block (no resource/endpoint) is rejected before writing.
         assert!(add_azure_provider_at(&path, &AzureConfig::default()).is_err());
+    }
+
+    #[test]
+    fn remove_azure_provider_preserves_config_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[mesh]
+self_review = true
+
+[providers.azure]
+resource = "acme"
+deployments = ["gpt-4o"]
+"#,
+        )
+        .unwrap();
+
+        assert!(remove_azure_provider_at(&path).unwrap());
+        assert!(!remove_azure_provider_at(&path).unwrap());
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("self_review = true"));
+        assert!(!body.contains("[providers.azure]"));
+
+        let parsed: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::file(&path))
+            .extract()
+            .unwrap();
+        assert!(parsed.mesh.self_review);
+        assert!(parsed.providers.azure.is_none());
     }
 
     #[test]

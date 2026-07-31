@@ -27,6 +27,9 @@ import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
+import { SessionLifecycleSheet } from "../../../components/session/SessionLifecycleSheet";
+import { useWorkbench } from "../../../components/workbench/WorkbenchProvider";
+import { activeWorkbenchSurface } from "../../../components/workbench/model";
 import { GoalBanner } from "../../../components/session/GoalBanner";
 import { StatusDot } from "../../../components/ds/StatusDot";
 import { DuelSheet } from "../../../components/session/DuelSheet";
@@ -54,9 +57,11 @@ import { LatticeSheet } from "../../../components/session/LatticeSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { useAnywhere } from "../../../lib/anywhere/store";
 import { useAuth } from "../../../lib/auth";
+import { useDesktopMenuAction } from "../../../lib/desktopMenu";
 import { goBackOr } from "../../../lib/nav";
-import { useHotkey } from "../../../lib/shortcuts";
+import { useAppShortcut } from "../../../lib/shortcuts";
 import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
+import { useReviewComments } from "../../../lib/reviewComments";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
@@ -65,7 +70,7 @@ import { radii, space, type StatusDotState } from "../../../theme/tokens";
 import { type as typeScale } from "../../../theme/typography";
 import { useBreakpoint } from "../../../theme/useBreakpoint";
 
-type SegmentValue = "chat" | "tasks" | "agents" | "review" | "replay";
+type SegmentValue = "chat" | "tasks" | "agents" | "review" | "files" | "terminal" | "replay";
 
 // Path suffix appended to `/session/{id}` for each segment ("" = the index/Chat route).
 const SEGMENT_SUFFIX: Record<SegmentValue, string> = {
@@ -73,12 +78,21 @@ const SEGMENT_SUFFIX: Record<SegmentValue, string> = {
   tasks: "tasks",
   agents: "agents",
   review: "review",
+  files: "files",
+  terminal: "terminal",
   replay: "replay",
 };
 
 function segmentFromPathname(pathname: string): SegmentValue {
   const last = pathname.split("/").filter(Boolean).pop();
-  if (last === "tasks" || last === "agents" || last === "review" || last === "replay") return last;
+  if (
+    last === "tasks"
+    || last === "agents"
+    || last === "review"
+    || last === "files"
+    || last === "terminal"
+    || last === "replay"
+  ) return last;
   return "chat";
 }
 
@@ -87,7 +101,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const toast = useToast();
   const pathname = usePathname();
   const { isCompact, isExpanded } = useBreakpoint();
+  const workbench = useWorkbench();
+  const activeRightSurface = activeWorkbenchSurface(workbench.state, "right");
+  const activeBottomSurface = activeWorkbenchSurface(workbench.state, "bottom");
   const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
+  const reviewComments = useReviewComments(sessionId);
   const [duelVisible, setDuelVisible] = useState(false);
   const [planVisible, setPlanVisible] = useState(false);
 
@@ -117,6 +135,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
   const [latticeVisible, setLatticeVisible] = useState(false);
+  const [lifecycleVisible, setLifecycleVisible] = useState(false);
 
   // Forge Anywhere — session-surface features (host·transport meta, handoff, share-replay).
   // Gated on `signedIn` so a session opened without an Anywhere account renders identically
@@ -196,15 +215,24 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const segmentOptions = useMemo<TabStripOption<SegmentValue>[]>(() => {
     const taskCount = snapshot?.tasks.length ?? 0;
     const agentCount = snapshot?.subagents.length ?? 0;
-    const reviewPending = snapshot?.plan != null || snapshot?.diff != null;
+    const reviewPending =
+      snapshot?.plan != null || snapshot?.diff != null || reviewComments.length > 0;
     return [
       { value: "chat", label: "Chat" },
       { value: "tasks", label: "Tasks", badge: taskCount || undefined },
       { value: "agents", label: "Agents", badge: agentCount || undefined },
       { value: "review", label: "Review", dot: reviewPending },
+      { value: "files", label: "Files" },
+      { value: "terminal", label: "Terminal" },
       { value: "replay", label: "Replay" },
     ];
-  }, [snapshot?.tasks.length, snapshot?.subagents.length, snapshot?.plan, snapshot?.diff]);
+  }, [
+    reviewComments.length,
+    snapshot?.tasks.length,
+    snapshot?.subagents.length,
+    snapshot?.plan,
+    snapshot?.diff,
+  ]);
 
   const reduced = useReducedMotion();
   const segmentOpacity = useSharedValue(1);
@@ -238,12 +266,13 @@ function SessionShell({ sessionId }: { sessionId: string }) {
       toast.show("not sent — reconnect and try again", { tone: "danger" });
     }
   }, [snapshot?.busy, send, toast]);
-  useHotkey("c", () => onSegmentChange("chat"), { alt: true });
-  useHotkey("t", () => onSegmentChange("tasks"), { alt: true });
-  useHotkey("a", () => onSegmentChange("agents"), { alt: true });
-  useHotkey("r", () => onSegmentChange("review"), { alt: true });
-  useHotkey("e", focusComposer, { meta: true });
-  useHotkey(".", interrupt, { meta: true });
+  useAppShortcut("session.chat", () => onSegmentChange("chat"));
+  useAppShortcut("session.tasks", () => onSegmentChange("tasks"));
+  useAppShortcut("session.agents", () => onSegmentChange("agents"));
+  useAppShortcut("session.review", () => onSegmentChange("review"));
+  useAppShortcut("session.focusComposer", focusComposer);
+  useAppShortcut("session.interrupt", interrupt);
+  useDesktopMenuAction("session:interrupt", interrupt);
 
   const closed = snapshot?.closed ?? false;
   const protocolMismatch = snapshot != null && snapshot.protocol !== PROTOCOL_VERSION;
@@ -323,6 +352,18 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
             onLattice={() => setLatticeVisible(true)}
+            onManageLifecycle={() => setLifecycleVisible(true)}
+            onToggleFiles={() => {
+              if (activeRightSurface?.kind === "files") workbench.hidePlacement("right");
+              else workbench.openSurface({ kind: "files" });
+            }}
+            onTogglePreview={() => workbench.toggleSurface({ kind: "preview", sessionId })}
+            onToggleGitReview={() => workbench.toggleSurface({ kind: "git" })}
+            onToggleTerminal={() => workbench.toggleSurface({ kind: "terminal" })}
+            filesActive={activeRightSurface?.kind === "files"}
+            previewActive={activeRightSurface?.kind === "preview"}
+            gitReviewActive={activeRightSurface?.kind === "git"}
+            terminalActive={activeBottomSurface?.kind === "terminal"}
 
             onHandoff={signedIn ? () => setHandoffVisible(true) : undefined}
             onShareReplay={signedIn ? () => setShareVisible(true) : undefined}
@@ -392,6 +433,17 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
         <LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} />
+        <SessionLifecycleSheet
+          target={{
+            id: sessionId,
+            title: snapshot?.title || `session ${sessionId.slice(0, 8)}`,
+            cwd: snapshot?.cwd ?? "",
+            archived: false,
+            running: !(closed || sessionEnded),
+          }}
+          visible={lifecycleVisible}
+          onClose={() => setLifecycleVisible(false)}
+        />
 
         <HandoffSheet
           visible={handoffVisible}

@@ -3,7 +3,7 @@
 // client-side search filter over title/cwd, tap-to-resume via useCreateSession.
 import { TabPager } from "../../components/TabPager";
 import { router } from "expo-router";
-import { Archive, History as HistoryIcon } from "lucide-react-native";
+import { History as HistoryIcon, MoreHorizontal } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
@@ -22,18 +22,26 @@ import { SectionHeader } from "../../components/ds/SectionHeader";
 import { Segmented } from "../../components/ds/Segmented";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { useToast } from "../../components/ds/ToastHost";
-import { ApiError, type PastSessionRow } from "../../lib/api";
+import { SessionLifecycleSheet } from "../../components/session/SessionLifecycleSheet";
+import { ApiError, type PastSessionRow, type SessionSearchResult } from "../../lib/api";
 import { useAnywhere } from "../../lib/anywhere/store";
 import { syncGlyph } from "../../lib/anywhere/format";
-import { useArchiveSession, useCreateSession, usePastSessions } from "../../lib/queries";
+import { useCreateSession, usePastSessions, useSessionSearch } from "../../lib/queries";
 import { useForgeline, useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, space } from "../../theme/tokens";
 import { formatCost, monoFamily, tabularNums, type } from "../../theme/typography";
 
-function matchesQuery(row: PastSessionRow, query: string): boolean {
+interface HistoryDisplayRow extends PastSessionRow {
+  running: boolean;
+  match_source?: SessionSearchResult["match_source"];
+  match_excerpt?: string | null;
+}
+
+function matchesQuery(row: HistoryDisplayRow, query: string): boolean {
   if (!query) return true;
-  const haystack = `${row.title} ${row.cwd}`.toLowerCase();
+  const haystack =
+    `${row.id} ${row.title} ${row.cwd} ${row.match_excerpt ?? ""} ${row.preview ?? ""}`.toLowerCase();
   return haystack.includes(query);
 }
 
@@ -58,11 +66,11 @@ export function bucketForActivity(nowSec: number, lastActivitySec: number): Acti
 type HistoryFilter = "all" | "archived" | "active";
 type HistoryListItem =
   | { type: "header"; bucket: ActivityBucket; label: string }
-  | { type: "row"; row: PastSessionRow; index: number };
+  | { type: "row"; row: HistoryDisplayRow; index: number };
 
 const FILTERS: { value: HistoryFilter; label: string }[] = [
   { value: "all", label: "All" },
-  { value: "active", label: "Active" },
+  { value: "active", label: "Unarchived" },
   { value: "archived", label: "Archived" },
 ];
 
@@ -73,19 +81,19 @@ const BUCKETS: { value: ActivityBucket; label: string }[] = [
   { value: "earlier", label: "Earlier" },
 ];
 
-function matchesFilter(row: PastSessionRow, filter: HistoryFilter): boolean {
+function matchesFilter(row: HistoryDisplayRow, filter: HistoryFilter): boolean {
   if (filter === "all") return true;
   return filter === "archived" ? row.archived : !row.archived;
 }
 
 interface HistoryRowProps {
-  row: PastSessionRow;
+  row: HistoryDisplayRow;
   index: number;
-  onPress: (row: PastSessionRow) => void;
-  onArchive: (row: PastSessionRow) => void;
+  onPress: (row: HistoryDisplayRow) => void;
+  onActions: (row: HistoryDisplayRow) => void;
 }
 
-function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
+function HistoryRowBase({ row, index, onPress, onActions }: HistoryRowProps) {
   const tokens = useTokens();
   const strike = useStrike();
   const entrance = useForgeline(index);
@@ -125,6 +133,7 @@ function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
                 <Text style={[type.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
                   {title}
                 </Text>
+                {row.running ? <Badge label="running" tone="success" /> : null}
                 {row.archived ? <Badge label="archived" tone="neutral" /> : null}
               </View>
               <Text
@@ -134,12 +143,12 @@ function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
               >
                 {row.cwd}
               </Text>
-              {row.preview ? (
+              {row.match_excerpt || row.preview ? (
                 <Text style={[type.sub, { color: tokens.ink2 }]} numberOfLines={2}>
-                  {stripLeadingAttachMentions(row.preview)}
+                  {stripLeadingAttachMentions(row.match_excerpt || row.preview || "")}
                 </Text>
               ) : null}
-              <View style={[styles.footerRow, !row.archived ? styles.footerWithArchive : undefined]}>
+              <View style={[styles.footerRow, styles.footerWithActions]}>
                 <RelativeTime timestampMs={row.last_activity * 1000} />
                 <View style={styles.metaRight}>
                   <Text style={[type.meta, styles.mono, { color: tokens.ink3 }, tabularNums]}>{row.message_count} msgs</Text>
@@ -149,7 +158,15 @@ function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
               </View>
             </View>
           </Pressable>
-          {!row.archived ? <Pressable style={styles.archiveButton} onPress={() => onArchive(row)} accessibilityRole="button" accessibilityLabel={`Archive ${title}`} hitSlop={space.space8}><Archive size={16} strokeWidth={1.75} color={tokens.ink3} /></Pressable> : null}
+          <Pressable
+            style={styles.actionsButton}
+            onPress={() => onActions(row)}
+            accessibilityRole="button"
+            accessibilityLabel={`Actions for ${title}`}
+            hitSlop={space.space8}
+          >
+            <MoreHorizontal size={17} strokeWidth={1.75} color={tokens.ink3} />
+          </Pressable>
         </View>
       </Animated.View>
     </Animated.View>
@@ -162,7 +179,7 @@ const HistoryRow = React.memo(HistoryRowBase, (prev, next) => {
   return (
     prev.index === next.index &&
     prev.onPress === next.onPress &&
-    prev.onArchive === next.onArchive &&
+    prev.onActions === next.onActions &&
     a.id === b.id &&
     a.title === b.title &&
     a.cwd === b.cwd &&
@@ -170,7 +187,9 @@ const HistoryRow = React.memo(HistoryRowBase, (prev, next) => {
     a.message_count === b.message_count &&
     a.cost_usd === b.cost_usd &&
     a.preview === b.preview &&
-    a.last_activity === b.last_activity
+    a.last_activity === b.last_activity &&
+    a.running === b.running &&
+    a.match_excerpt === b.match_excerpt
   );
 });
 
@@ -179,8 +198,8 @@ export function HistoryScreen() {
   const toast = useToast();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<HistoryFilter>("all");
-  const [confirmRow, setConfirmRow] = useState<PastSessionRow | null>(null);
-  const [archiveRow, setArchiveRow] = useState<PastSessionRow | null>(null);
+  const [confirmRow, setConfirmRow] = useState<HistoryDisplayRow | null>(null);
+  const [actionsRow, setActionsRow] = useState<HistoryDisplayRow | null>(null);
   const [resumingId, setResumingId] = useState<string | null>(null);
   const [nowSec] = useState(() => Math.floor(Date.now() / 1000));
 
@@ -195,17 +214,38 @@ export function HistoryScreen() {
     refetch,
     isRefetching,
   } = usePastSessions();
+  const globalSearch = useSessionSearch(query, 100);
   const createSession = useCreateSession();
-  const archiveSession = useArchiveSession();
 
-  const rows = useMemo(() => data?.pages.flat() ?? [], [data]);
   const normalizedQuery = query.trim().toLowerCase();
+  const serverSearching = normalizedQuery.length >= 2;
+  const rows = useMemo<HistoryDisplayRow[]>(
+    () =>
+      serverSearching
+        ? (globalSearch.data ?? []).map((row) => ({
+            id: row.id,
+            title: row.title,
+            cwd: row.cwd,
+            worktree: null,
+            archived: row.archived,
+            running: row.running,
+            message_count: row.message_count,
+            cost_usd: row.cost_usd,
+            last_activity: row.last_activity,
+            created_at: row.last_activity,
+            preview: row.match_excerpt,
+            match_source: row.match_source,
+            match_excerpt: row.match_excerpt,
+          }))
+        : (data?.pages.flat() ?? []).map((row) => ({ ...row, running: false })),
+    [data, globalSearch.data, serverSearching],
+  );
   const filteredRows = useMemo(
     () => rows.filter((row) => matchesQuery(row, normalizedQuery) && matchesFilter(row, filter)),
     [rows, normalizedQuery, filter],
   );
   const listItems = useMemo<HistoryListItem[]>(() => {
-    const groups = new Map<ActivityBucket, PastSessionRow[]>();
+    const groups = new Map<ActivityBucket, HistoryDisplayRow[]>();
     for (const row of filteredRows) {
       const bucket = bucketForActivity(nowSec, row.last_activity);
       const group = groups.get(bucket) ?? [];
@@ -224,7 +264,7 @@ export function HistoryScreen() {
   }, [filteredRows, nowSec]);
 
   const resume = useCallback(
-    (row: PastSessionRow) => {
+    (row: HistoryDisplayRow) => {
       setResumingId(row.id);
       createSession.mutate(
         { resume: row.id },
@@ -245,13 +285,28 @@ export function HistoryScreen() {
     [createSession, toast],
   );
 
-  const onRowPress = useCallback((row: PastSessionRow) => setConfirmRow(row), []);
-  const onArchive = useCallback((row: PastSessionRow) => setArchiveRow(row), []);
+  const onRowPress = useCallback((row: HistoryDisplayRow) => {
+    if (row.running) {
+      router.push(`/session/${row.id}`);
+      return;
+    }
+    setConfirmRow(row);
+  }, []);
+  const onActions = useCallback((row: HistoryDisplayRow) => setActionsRow(row), []);
 
   const renderItem = useCallback(
     ({ item }: { item: HistoryListItem }) =>
-      item.type === "header" ? <SectionHeader>{item.label}</SectionHeader> : <HistoryRow row={item.row} index={item.index} onPress={onRowPress} onArchive={onArchive} />,
-    [onRowPress, onArchive],
+      item.type === "header"
+        ? <SectionHeader>{item.label}</SectionHeader>
+        : (
+            <HistoryRow
+              row={item.row}
+              index={item.index}
+              onPress={onRowPress}
+              onActions={onActions}
+            />
+          ),
+    [onActions, onRowPress],
   );
   const keyExtractor = useCallback(
     (item: HistoryListItem) => (item.type === "header" ? `header:${item.bucket}` : item.row.id),
@@ -259,15 +314,26 @@ export function HistoryScreen() {
   );
 
   const onEndReached = useCallback(() => {
-    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+    if (!serverSearching && hasNextPage && !isFetchingNextPage) fetchNextPage();
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage, serverSearching]);
+
+  const visibleLoading =
+    serverSearching
+      ? globalSearch.isDebouncing || (globalSearch.isFetching && globalSearch.data == null)
+      : isLoading;
+  const visibleError = serverSearching ? globalSearch.error : error;
+  const visibleIsError = serverSearching ? globalSearch.isError : isError;
+  const visibleRefetch = serverSearching ? globalSearch.refetch : refetch;
+  const visibleIsRefetching = serverSearching
+    ? globalSearch.isFetching && !globalSearch.isDebouncing
+    : isRefetching;
 
   return (
     <Screen scroll={false} contentContainerStyle={styles.screenPad}>
       <SearchField
         value={query}
         onChangeText={setQuery}
-        placeholder="search title or path…"
+        placeholder="search every session and message…"
         autoCapitalize="none"
         autoCorrect={false}
         containerStyle={styles.search}
@@ -280,7 +346,7 @@ export function HistoryScreen() {
           full linking to /anywhere/storage. AnywhereAccount (lib/anywhere/types.ts) has no
           `syncBanner` field yet, so this is intentionally omitted rather than fabricated —
           wire it in once the foundation type grows that field. */}
-      {isLoading ? (
+      {visibleLoading ? (
         <View>
           {[0, 1, 2].map((i) => (
             <View key={i} style={styles.skeletonRow}>
@@ -296,11 +362,11 @@ export function HistoryScreen() {
           keyExtractor={keyExtractor}
           renderItem={renderItem}
           ListEmptyComponent={
-            isError ? (
+            visibleIsError ? (
               <EmptyState
                 icon={HistoryIcon}
-                message={error instanceof ApiError ? error.message : "something's wrong — couldn't load history."}
-                action={<Button label="Retry" variant="secondary" onPress={() => refetch()} />}
+                message={visibleError instanceof ApiError ? visibleError.message : "something's wrong — couldn't load history."}
+                action={<Button label="Retry" variant="secondary" onPress={() => visibleRefetch()} />}
               />
             ) : (
               <EmptyState
@@ -309,25 +375,13 @@ export function HistoryScreen() {
               />
             )
           }
-          refreshing={isRefetching}
-          onRefresh={refetch}
+          refreshing={visibleIsRefetching}
+          onRefresh={visibleRefetch}
           onEndReached={onEndReached}
-          loadingMore={isFetchingNextPage}
+          loadingMore={!serverSearching && isFetchingNextPage}
           contentContainerStyle={styles.listPad}
         />
       )}
-      <ConfirmDialog
-        visible={archiveRow != null}
-        title="Archive this session?"
-        message={archiveRow?.title || archiveRow?.id.slice(0, 8)}
-        confirmLabel="Archive"
-        destructive
-        onConfirm={() => {
-          if (archiveRow) archiveSession.mutate(archiveRow.id, { onError: (err) => toast.show(err instanceof ApiError ? err.message : "could not archive session.", { tone: "danger" }) });
-          setArchiveRow(null);
-        }}
-        onCancel={() => setArchiveRow(null)}
-      />
       <ConfirmDialog
         visible={confirmRow != null}
         title="Resume this session?"
@@ -338,6 +392,21 @@ export function HistoryScreen() {
           setConfirmRow(null);
         }}
         onCancel={() => setConfirmRow(null)}
+      />
+      <SessionLifecycleSheet
+        target={
+          actionsRow
+            ? {
+                id: actionsRow.id,
+                title: actionsRow.title,
+                cwd: actionsRow.cwd,
+                archived: actionsRow.archived,
+                running: actionsRow.running,
+              }
+            : null
+        }
+        visible={actionsRow != null}
+        onClose={() => setActionsRow(null)}
       />
       {resumingId ? (
         <View style={[StyleSheet.absoluteFill, styles.resumeOverlay, { backgroundColor: tokens.overlayScrim }]} accessibilityViewIsModal accessibilityRole="alert" accessibilityLabel="Resuming session">
@@ -370,10 +439,10 @@ const styles = StyleSheet.create({
   title: { flex: 1 },
   cwd: {},
   footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  footerWithArchive: { paddingRight: space.space32 },
+  footerWithActions: { paddingRight: space.space32 },
   metaRight: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   mono: { fontFamily: monoFamily.regular },
-  archiveButton: { position: "absolute", right: space.space16, bottom: space.space16 },
+  actionsButton: { position: "absolute", right: space.space16, bottom: space.space16 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonGap: { marginTop: space.space8 },
   resumeOverlay: { alignItems: "center", justifyContent: "center" },

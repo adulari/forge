@@ -40,7 +40,6 @@ import { ListRow } from "../../components/ds/ListRow";
 import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
 import { Sheet } from "../../components/ds/Sheet";
-import { Segmented } from "../../components/ds/Segmented";
 import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
 import { entitlementBadge } from "../../lib/anywhere/format";
@@ -64,13 +63,13 @@ import {
   isAnonymousTelemetryEnabled,
   setAnonymousTelemetryEnabled,
 } from "../../lib/anonymousTelemetry";
-import { useHooks, useMcp, useModels, usePlans, useServerFleets, useSkills, useUsage } from "../../lib/queries";
+import { useHooks, useMcp, useModels, usePlans, useProviders, useServerFleets, useSkills, useUsage } from "../../lib/queries";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { persistTabBadge, publishTabBadge, useTabBadgePreference } from "../../lib/tabBadge";
 import { PROTOCOL_VERSION } from "../../lib/remoteProtocol";
-import { checkForDesktopUpdate, type DesktopUpdate } from "../../lib/updater";
+import { useDesktopUpdateState } from "../../lib/updater";
 import { useStrike } from "../../theme/motion";
-import { useTheme, useTokens } from "../../theme/ThemeProvider";
+import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, rowHeight, space } from "../../theme/tokens";
 import { formatCost, type, tabularNums } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
@@ -120,12 +119,17 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/anywhere" | "/usage" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
+type SettingsRoute = "/settings" | "/appearance" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
+  { key: "appearance", label: "Appearance", href: "/appearance" },
+  { key: "keybindings", label: "Keyboard shortcuts", href: "/keybindings" },
+  { key: "diagnostics", label: "Diagnostics & updates", href: "/diagnostics" },
+  { key: "legal", label: "Legal & support", href: "/legal" },
   { key: "anywhere", label: "Forge Anywhere", href: "/anywhere" },
   { key: "usage", label: "Usage", href: "/usage" },
+  { key: "providers", label: "Providers & accounts", href: "/providers" },
   { key: "models", label: "Models & mesh", href: "/models" },
   { key: "plans", label: "Plans", href: "/plans" },
   { key: "mcp", label: "MCP servers", href: "/mcp" },
@@ -302,7 +306,6 @@ function NavListRow({ label, meta, onPress, showSeparator = true }: { label: str
 export function SettingsScreen() {
   const tokens = useTokens();
   const toast = useToast();
-  const { preference, setScheme } = useTheme();
   const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, renameServer } = useAuth();
   const { account: anywhereAccount, signedIn: anywhereSignedIn } = useAnywhere();
 
@@ -326,13 +329,13 @@ export function SettingsScreen() {
 
   const [notifyPermission, setNotifyPermission] = useState<NotifyPermission>("default");
   const [notifyBusy, setNotifyBusy] = useState(false);
-  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdate | null>(null);
-  const [updateBusy, setUpdateBusy] = useState(false);
+  const desktopUpdate = useDesktopUpdateState();
 
   // "forge" nav row trailing counts — real data from the same hooks each sub-page
   // uses (react-query dedupes by baseUrl-scoped key, so this doesn't add a
   // duplicate network round-trip beyond the shared cache).
   const modelsQuery = useModels();
+  const providersQuery = useProviders();
   const mcpQuery = useMcp();
   const plansQuery = usePlans();
   const skillsQuery = useSkills();
@@ -347,6 +350,9 @@ export function SettingsScreen() {
     const ready = modelsQuery.data.providers.flatMap((p) => p.models).filter((m) => m.health == null).length;
     return `${ready} ready`;
   }, [modelsQuery.data]);
+  const providersConfiguredLabel = providersQuery.data
+    ? `${providersQuery.data.providers.filter((provider) => provider.configured).length} configured`
+    : undefined;
   const plansOpenLabel = plansQuery.data ? `${plansQuery.data.length} open` : undefined;
   const mcpEnabledLabel = mcpQuery.data ? `${mcpQuery.data.servers.filter((s) => s.enabled).length} enabled` : undefined;
   const skillsCountLabel = skillsQuery.data ? `${skillsQuery.data.length}` : undefined;
@@ -505,30 +511,6 @@ export function SettingsScreen() {
     }
   }, [notifyBusy, toast]);
 
-  useEffect(() => {
-    if (!isTauri) return;
-    void checkForDesktopUpdate().then(setDesktopUpdate).catch(() => undefined);
-  }, []);
-
-  const checkDesktopUpdate = useCallback(async () => {
-    setUpdateBusy(true);
-    try {
-      const update = await checkForDesktopUpdate();
-      setDesktopUpdate(update);
-      if (!update) toast.show("Forge is up to date.", { tone: "neutral" });
-    } catch {
-      toast.show("couldn't check for updates.", { tone: "danger" });
-    } finally {
-      setUpdateBusy(false);
-    }
-  }, [toast]);
-
-  const installDesktopUpdate = useCallback(async () => {
-    if (!desktopUpdate) return;
-    setUpdateBusy(true);
-    try { await desktopUpdate.install(); } catch { toast.show("couldn't install update.", { tone: "danger" }); }
-    finally { setUpdateBusy(false); }
-  }, [desktopUpdate, toast]);
   const versionMeta = useVersionMeta(PROTOCOL_VERSION);
 
   return (
@@ -600,6 +582,7 @@ export function SettingsScreen() {
           <SectionHeader>Forge</SectionHeader>
           <NavListRow label="Forge Anywhere" meta={anywhereMetaLabel} onPress={() => router.push("/anywhere")} />
           <NavListRow label="Usage" meta={usageWeekLabel} onPress={() => router.push("/usage")} />
+          <NavListRow label="Providers & accounts" meta={providersConfiguredLabel} onPress={() => router.push("/providers")} />
           <NavListRow label="Models & mesh health" meta={modelsReadyLabel} onPress={() => router.push("/models")} />
           <NavListRow label="Plans" meta={plansOpenLabel} onPress={() => router.push("/plans")} />
           <NavListRow label="MCP servers" meta={mcpEnabledLabel} onPress={() => router.push("/mcp")} />
@@ -610,19 +593,13 @@ export function SettingsScreen() {
         </View>
 
         <View>
-          <SectionHeader>Appearance</SectionHeader>
-          <Segmented
-            options={[
-              { value: "light", label: "Light" },
-              { value: "dark", label: "Dark" },
-              { value: "system", label: "System" },
-            ]}
-            value={preference}
-            onChange={setScheme}
-          />
-          {/* iOS's native push toggle stays here (Appearance); the web equivalent moves to
-              its own Behavior section below — W Settings (L153-186) shows Behavior as a
-              distinct group from Appearance, not folded into it. */}
+          <SectionHeader>Preferences</SectionHeader>
+          <NavListRow label="Appearance" onPress={() => router.push("/appearance")} />
+          <NavListRow label="Keyboard shortcuts" onPress={() => router.push("/keybindings")} showSeparator={false} />
+        </View>
+
+        <View>
+          <SectionHeader>Security &amp; device</SectionHeader>
           {isIOS && NOTIFICATIONS_SUPPORTED ? (
             <DenseRow
               accessibilityLabel="Push notifications"
@@ -750,12 +727,28 @@ export function SettingsScreen() {
           </View>
         ) : null}
 
-        {isTauri ? (
-          <View>
-            <SectionHeader>About &amp; diagnostics</SectionHeader>
-            <ListRow title={updateBusy ? "Checking for updates…" : desktopUpdate ? `Update available: ${desktopUpdate.version}` : "Check for updates"} subtitle={desktopUpdate ? "Install and relaunch Forge" : "Desktop releases are checked in the background"} onPress={updateBusy ? undefined : desktopUpdate ? installDesktopUpdate : checkDesktopUpdate} showSeparator={false} />
-          </View>
-        ) : null}
+        <View>
+          <SectionHeader>About &amp; diagnostics</SectionHeader>
+          <ListRow
+            title="Diagnostics & updates"
+            subtitle={
+              desktopUpdate.phase === "available"
+                ? `Desktop ${desktopUpdate.availableVersion} is ready to install`
+                : desktopUpdate.phase === "error"
+                  ? "Update check needs attention"
+                  : isTauri
+                    ? "Compatibility, host health, resources, and desktop updates"
+                    : "Compatibility, host health, resources, and support details"
+            }
+            onPress={() => router.push("/diagnostics")}
+          />
+          <ListRow
+            title="Legal & support"
+            subtitle="Privacy policy, license, source, and issue tracker"
+            onPress={() => router.push("/legal")}
+            showSeparator={false}
+          />
+        </View>
 
         <ConfirmDialog
           visible={pendingRemove != null}

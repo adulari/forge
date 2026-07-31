@@ -32,6 +32,49 @@ export interface ConfigResponse {
 
 export interface HostIdentity {
   hostname: string;
+  /** Added in Forge 0.1 diagnostics; optional so older daemons remain pairable. */
+  version?: string;
+  /** Remote session protocol spoken by this daemon. */
+  protocol?: number;
+}
+
+export interface DiagnosticsResponse {
+  checked_at: number;
+  host: {
+    hostname: string;
+    version: string;
+    protocol: number;
+    pid: number;
+    process_uptime_secs: number;
+    os: string;
+    arch: string;
+  };
+  resources: {
+    process_memory_bytes: number;
+    process_virtual_memory_bytes: number;
+    system_total_memory_bytes: number;
+    system_available_memory_bytes: number;
+    cpu_count: number;
+    load_average_one: number;
+    load_average_five: number;
+    load_average_fifteen: number;
+  };
+  runtime: {
+    sessions: number;
+    busy_sessions: number;
+    waiting_sessions: number;
+    terminals: number;
+    terminal_clients: number;
+    web_push_ready: boolean;
+    native_push_ready: boolean;
+  };
+  checks: {
+    id: string;
+    status: "ok" | "warn";
+    label: string;
+    detail: string;
+    fix: string | null;
+  }[];
 }
 
 export interface ConfigField {
@@ -89,6 +132,66 @@ export interface ModelRow { id: string; name: string; frontier: boolean; free: b
 export interface SessionTreeRow { id: string; title: string | null; forked_from: string | null; forked_at_seq: number | null; created_at: number; }
 export interface PlanRow { session_id: string; session_title: string; title: string; steps: { title: string; detail: string }[]; notes: string | null; }
 
+// --- Direct-only provider/account management (crates/forge-cli/src/serve/serve_providers.rs) ---
+
+export type ProviderKind = "api_key" | "custom" | "azure" | "oauth" | "cli" | "local";
+export type ProviderAuthStatus = "configured" | "missing" | "expired" | "unverified" | "ready" | "stopped";
+export interface ProviderOAuthAccount {
+  id: string;
+  active: boolean;
+  expires_at: number | null;
+  expiry_status: "valid" | "expired" | "unknown";
+}
+export interface ProviderRow {
+  id: string;
+  label: string;
+  kind: ProviderKind;
+  enabled: boolean;
+  configured: boolean;
+  auth_status: ProviderAuthStatus;
+  keyless: boolean;
+  env_var: string | null;
+  environment_key_present: boolean;
+  stored_key_fingerprints: string[];
+  free: boolean;
+  endpoint: string | null;
+  azure_resource: string | null;
+  azure_api_version: string | null;
+  models: string[];
+  accounts: ProviderOAuthAccount[];
+  login_command: string | null;
+  installed: boolean | null;
+  version: string | null;
+  serving: boolean | null;
+  restart_required: boolean;
+}
+export interface ProvidersResponse {
+  direct_only: true;
+  restart_required: boolean;
+  notice: string | null;
+  providers: ProviderRow[];
+}
+export interface StoreProviderKeyRequest { provider: string; key: string; mode: "append" | "replace"; }
+export interface SetProviderEnabledRequest { provider: string; enabled: boolean; }
+export interface OAuthAccountRequest { provider: "codex-oauth" | "xai-oauth"; account_id: string; }
+export interface CustomProviderRequest {
+  namespace: string;
+  base_url: string;
+  api_key_env?: string;
+  free?: boolean;
+  models?: string[];
+  label?: string;
+}
+export interface AzureProviderRequest {
+  resource?: string;
+  endpoint?: string;
+  api_version?: string;
+  api_key_env?: string;
+  deployments?: string[];
+  free?: boolean;
+  label?: string;
+}
+
 export interface CreateMcpServerRequest { name: string; transport: "stdio" | "http" | "sse"; command?: string; args?: string[]; url?: string; token_env?: string; }
 
 export interface McpResponse { servers: McpServerRow[]; allowed_servers: string[]; allowed_tools: string[]; call_timeout_secs: number; connect_timeout_secs: number; }
@@ -106,6 +209,27 @@ export interface UpdateMcpServerRequest { name: string; enabled: boolean; }
  * for tracked changes, `?` for untracked. A file edited after staging appears in BOTH buckets. */
 export interface GitFileRow { path: string; status: string; orig_path: string | null; adds: number; dels: number; binary: boolean; }
 export interface GitStatusResponse { root: string; branch: string; base_branch: string | null; staged: GitFileRow[]; unstaged: GitFileRow[]; untracked: GitFileRow[]; truncated: number; }
+export interface GitBranchRow {
+  name: string;
+  oid: string;
+  upstream: string | null;
+  remote: boolean;
+  current: boolean;
+  default: boolean;
+  worktree: string | null;
+}
+export interface GitBranchesResponse {
+  root: string;
+  current: string | null;
+  default_branch: string | null;
+  managed_worktree: boolean;
+  actions_blocked_reason: string | null;
+  branches: GitBranchRow[];
+  truncated: number;
+}
+export interface GitSwitchRequest { session: string; branch: string; }
+export interface GitCreateBranchRequest { session: string; name: string; }
+export interface GitBranchActionResponse { ok: boolean; branch: string; }
 /** Same shape as the WS snapshot's `DiffHunk` — the first character of each line is the gutter. */
 export interface GitDiffHunk { header: string; lines: string[]; }
 export interface GitDiffFile { path: string; kind: "created" | "modified" | "deleted" | "renamed"; orig_path: string | null; binary: boolean; adds: number; dels: number; hunks: GitDiffHunk[]; skipped_lines: number; }
@@ -116,6 +240,17 @@ export interface GitCommitResponse { ok: boolean; sha: string; summary: string; 
 /** `GET /api/sessions/{id}/diff` — a fork's worktree against its `merge-base`, uncommitted edits
  * included. 400 for a session with no worktree. */
 export interface SessionDiffResponse { base: string; branch: string; worktree: string; files: GitDiffFile[]; }
+
+// --- Workspace inspector/editor (crates/forge-cli/src/serve_workspace.rs) ---
+
+export type WorkspaceEntryKind = "directory" | "file" | "symlink";
+export interface WorkspaceEntry { name: string; path: string; kind: WorkspaceEntryKind; size: number; modified_ms: number | null; }
+export interface WorkspaceEntriesResponse { root: string; path: string; entries: WorkspaceEntry[]; truncated: number; }
+export interface WorkspaceFileResponse { root: string; path: string; name: string; content: string; size: number; modified_ms: number | null; hash: string; extension: string | null; }
+export type WorkspaceSearchMode = "files" | "content";
+export interface WorkspaceSearchResult { path: string; kind: "file" | "match"; line: number | null; column: number | null; preview: string | null; }
+export interface WorkspaceSearchResponse { query: string; mode: WorkspaceSearchMode; results: WorkspaceSearchResult[]; scanned_files: number; truncated: boolean; }
+export interface WorkspaceWriteRequest { session: string; path: string; content: string; expected_hash: string; }
 
 // --- Schedules (crates/forge-cli/src/serve_schedules.rs) ---
 
@@ -174,6 +309,21 @@ export interface PastSessionRow {
   last_activity: number;
   created_at: number;
   preview: string | null;
+}
+
+export interface SessionSearchResult {
+  id: string;
+  title: string;
+  cwd: string;
+  archived: boolean;
+  running: boolean;
+  message_count: number;
+  cost_usd: number;
+  last_activity: number;
+  match_source: "title" | "cwd" | "id" | "message";
+  match_seq: number | null;
+  match_role: "user" | "assistant" | null;
+  match_excerpt: string | null;
 }
 
 /** Mirrors `TranscriptKind` in lib/ws.ts — same vocabulary on both wires, declared here so the
@@ -489,6 +639,31 @@ export function getPastSessions(
   return request(baseUrl, `/api/sessions/past${qs(params)}`);
 }
 
+export function searchSessions(
+  baseUrl: string,
+  query: string,
+  limit = 30,
+): Promise<SessionSearchResult[]> {
+  return request(baseUrl, `/api/sessions/search${qs({ q: query, limit })}`);
+}
+
+export function renameSession(
+  baseUrl: string,
+  id: string,
+  title: string,
+): Promise<OkResponse & { title: string }> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export function deleteSession(baseUrl: string, id: string): Promise<OkResponse> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 export function archiveSession(baseUrl: string, id: string): Promise<OkResponse> {
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/archive`, {
     method: "POST",
@@ -525,6 +700,59 @@ export function getModels(baseUrl: string): Promise<ModelsResponse> {
   return request(baseUrl, "/api/models");
 }
 
+export function getProviders(baseUrl: string): Promise<ProvidersResponse> {
+  return request(baseUrl, "/api/providers");
+}
+
+export function storeProviderKey(baseUrl: string, body: StoreProviderKeyRequest): Promise<ProvidersResponse> {
+  return request(baseUrl, `/api/providers/${encodeURIComponent(body.provider)}/keys`, {
+    method: "POST",
+    body: JSON.stringify({ key: body.key, mode: body.mode }),
+  });
+}
+
+export function removeProviderKeys(baseUrl: string, provider: string): Promise<ProvidersResponse> {
+  return request(baseUrl, `/api/providers/${encodeURIComponent(provider)}/keys`, { method: "DELETE" });
+}
+
+export function setProviderEnabled(baseUrl: string, body: SetProviderEnabledRequest): Promise<ProvidersResponse> {
+  return request(baseUrl, `/api/providers/${encodeURIComponent(body.provider)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: body.enabled }),
+  });
+}
+
+export function switchOAuthAccount(baseUrl: string, body: OAuthAccountRequest): Promise<ProvidersResponse> {
+  return request(baseUrl, `/api/providers/oauth/${encodeURIComponent(body.provider)}/switch`, {
+    method: "POST",
+    body: JSON.stringify({ account_id: body.account_id }),
+  });
+}
+
+export function removeOAuthAccount(baseUrl: string, body: OAuthAccountRequest): Promise<ProvidersResponse> {
+  return request(
+    baseUrl,
+    `/api/providers/oauth/${encodeURIComponent(body.provider)}/accounts/${encodeURIComponent(body.account_id)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function saveCustomProvider(baseUrl: string, body: CustomProviderRequest): Promise<ProvidersResponse> {
+  return request(baseUrl, "/api/providers/custom", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function removeCustomProvider(baseUrl: string, namespace: string): Promise<ProvidersResponse> {
+  return request(baseUrl, `/api/providers/custom/${encodeURIComponent(namespace)}`, { method: "DELETE" });
+}
+
+export function saveAzureProvider(baseUrl: string, body: AzureProviderRequest): Promise<ProvidersResponse> {
+  return request(baseUrl, "/api/providers/azure", { method: "PUT", body: JSON.stringify(body) });
+}
+
+export function removeAzureProvider(baseUrl: string): Promise<ProvidersResponse> {
+  return request(baseUrl, "/api/providers/azure", { method: "DELETE" });
+}
+
 export function getConfig(baseUrl: string): Promise<ConfigResponse> {
   return request(baseUrl, "/api/config");
 }
@@ -550,6 +778,35 @@ export function updateMcpServer(baseUrl: string, body: UpdateMcpServerRequest): 
 // ---------------------------------------------------------------------------
 // Git review dock
 // ---------------------------------------------------------------------------
+
+export function getGitBranches(
+  baseUrl: string,
+  session: string,
+  query = "",
+  limit = 500,
+): Promise<GitBranchesResponse> {
+  return request(baseUrl, `/api/git/branches${qs({ session, q: query, limit })}`);
+}
+
+export function switchGitBranch(
+  baseUrl: string,
+  body: GitSwitchRequest,
+): Promise<GitBranchActionResponse> {
+  return request(baseUrl, "/api/git/switch", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function createGitBranch(
+  baseUrl: string,
+  body: GitCreateBranchRequest,
+): Promise<GitBranchActionResponse> {
+  return request(baseUrl, "/api/git/branches", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
 
 export function getGitStatus(baseUrl: string, session: string): Promise<GitStatusResponse> {
   return request(baseUrl, `/api/git/status${qs({ session })}`);
@@ -582,6 +839,51 @@ export function commitStaged(baseUrl: string, body: GitCommitRequest): Promise<G
 
 export function getSessionDiff(baseUrl: string, id: string): Promise<SessionDiffResponse> {
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/diff`);
+}
+
+// ---------------------------------------------------------------------------
+// Workspace inspector/editor
+// ---------------------------------------------------------------------------
+
+export function getWorkspaceEntries(
+  baseUrl: string,
+  session: string,
+  path = "",
+): Promise<WorkspaceEntriesResponse> {
+  return request(baseUrl, `/api/workspace/entries${qs({ session, path })}`);
+}
+
+export function getWorkspaceFile(
+  baseUrl: string,
+  session: string,
+  path: string,
+): Promise<WorkspaceFileResponse> {
+  return request(baseUrl, `/api/workspace/file${qs({ session, path })}`);
+}
+
+export function searchWorkspace(
+  baseUrl: string,
+  params: { session: string; q: string; mode?: WorkspaceSearchMode; limit?: number },
+): Promise<WorkspaceSearchResponse> {
+  return request(
+    baseUrl,
+    `/api/workspace/search${qs({
+      session: params.session,
+      q: params.q,
+      mode: params.mode ?? "files",
+      limit: params.limit ?? 50,
+    })}`,
+  );
+}
+
+export function writeWorkspaceFile(
+  baseUrl: string,
+  body: WorkspaceWriteRequest,
+): Promise<WorkspaceFileResponse> {
+  return request(baseUrl, "/api/workspace/file", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -676,6 +978,11 @@ export function getIdentity(baseUrl: string): Promise<HostIdentity> {
   return request(baseUrl, "/api/identity");
 }
 
+/** Bounded aggregate diagnostics; deliberately excludes secrets, paths, prompts, and logs. */
+export function getDiagnostics(baseUrl: string): Promise<DiagnosticsResponse> {
+  return request(baseUrl, "/api/diagnostics");
+}
+
 /** 503 (`ApiError.status === 503`) when the daemon has no VAPID key configured. */
 export function getPushKey(baseUrl: string): Promise<PushKeyResponse> {
   return request(baseUrl, "/api/push/key");
@@ -705,43 +1012,76 @@ export function unsubscribePush(
 // Terminal dock (WS /ws/terminal)
 // ---------------------------------------------------------------------------
 
-/** Client → server frames on `/ws/terminal`. Server → client is raw binary pty output. */
+/** Client → server frames on `/ws/terminal`. */
 export type TerminalClientFrame =
   | { kind: "input"; data: string }
-  | { kind: "resize"; cols: number; rows: number };
+  | { kind: "resize"; cols: number; rows: number }
+  | { kind: "clear" }
+  | { kind: "close" };
+
+export type TerminalStatus = "running" | "exited";
+
+export interface TerminalSessionSummary {
+  terminal_id: string;
+  status: TerminalStatus;
+  clients: number;
+  updated_at_ms: number;
+}
+
+type TerminalServerFrame =
+  | { kind: "status"; status: TerminalStatus }
+  | { kind: "cleared" };
 
 export interface TerminalSocketHandlers {
   /** Decoded pty output. UTF-8 is decoded in STREAMING mode, so a multi-byte glyph split across
    * two frames is reassembled instead of turning into replacement characters. */
   onOutput: (chunk: string) => void;
+  onStatus?: (status: TerminalStatus) => void;
+  onClear?: () => void;
   onOpen?: () => void;
   onClose?: (event: { code: number; reason: string }) => void;
   onError?: (error: unknown) => void;
 }
 
+export interface TerminalSocketOptions {
+  terminalId?: string;
+  size?: { cols: number; rows: number };
+  restart?: boolean;
+}
+
 export interface TerminalSocket {
   send: (data: string) => boolean;
   resize: (cols: number, rows: number) => boolean;
+  clear: () => boolean;
+  kill: () => boolean;
+  /** Detach this client without stopping the daemon-owned terminal process. */
   close: () => void;
 }
 
-/** Open a PTY-backed shell in a session's directory. The daemon token already rides in `baseUrl`
- * as a path segment (there is no extra privilege here — see serve_terminal.rs), so the URL is
- * built exactly like the session socket's. */
+export function listTerminalSessions(
+  baseUrl: string,
+  sessionId: string,
+): Promise<TerminalSessionSummary[]> {
+  return request(baseUrl, `/api/terminals${qs({ session: sessionId })}`);
+}
+
+/** Attach to a daemon-owned PTY in a session's directory. The process survives socket detach. */
 export function openTerminalSocket(
   baseUrl: string,
   sessionId: string,
   handlers: TerminalSocketHandlers,
-  size?: { cols: number; rows: number },
+  options: TerminalSocketOptions = {},
 ): TerminalSocket {
   const url = new URL(`${baseUrl}/ws/terminal`);
   url.protocol =
     url.protocol === "fany:" ? "fany-ws:" : url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("session", sessionId);
-  if (size) {
-    url.searchParams.set("cols", String(size.cols));
-    url.searchParams.set("rows", String(size.rows));
+  url.searchParams.set("terminal", options.terminalId ?? "term-1");
+  if (options.size) {
+    url.searchParams.set("cols", String(options.size.cols));
+    url.searchParams.set("rows", String(options.size.rows));
   }
+  if (options.restart) url.searchParams.set("restart", "true");
 
   const socket = new TWebSocket(url.toString());
   socket.binaryType = "arraybuffer";
@@ -754,7 +1094,15 @@ export function openTerminalSocket(
   socket.onmessage = (event: MessageEvent) => {
     const { data } = event;
     if (typeof data === "string") {
-      // The daemon only sends text for a pre-shell failure message (pty/spawn errors).
+      const control = parseTerminalServerFrame(data);
+      if (control?.kind === "status") {
+        handlers.onStatus?.(control.status);
+        return;
+      }
+      if (control?.kind === "cleared") {
+        handlers.onClear?.();
+        return;
+      }
       handlers.onOutput(data);
       return;
     }
@@ -770,6 +1118,24 @@ export function openTerminalSocket(
   return {
     send: (data: string) => post({ kind: "input", data }),
     resize: (cols: number, rows: number) => post({ kind: "resize", cols, rows }),
+    clear: () => post({ kind: "clear" }),
+    kill: () => post({ kind: "close" }),
     close: () => socket.close(),
   };
+}
+
+function parseTerminalServerFrame(value: string): TerminalServerFrame | null {
+  try {
+    const frame = JSON.parse(value) as Partial<TerminalServerFrame>;
+    if (frame.kind === "cleared") return { kind: "cleared" };
+    if (
+      frame.kind === "status"
+      && (frame.status === "running" || frame.status === "exited")
+    ) {
+      return { kind: "status", status: frame.status };
+    }
+  } catch {
+    // A non-control text frame is a human-readable daemon error.
+  }
+  return null;
 }

@@ -125,6 +125,106 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// Search every top-level, used session by title, id, cwd, and active user/assistant content.
+    ///
+    /// The query is executed and ranked in SQLite and returns a bounded result set. This avoids
+    /// the old client-side behavior where search only saw whichever 50-row history page happened
+    /// to be loaded. Message search deliberately excludes tool/system rows: they are often huge,
+    /// can contain secrets or generated noise, and are not part of the user-facing thread.
+    pub fn search_sessions(&self, query: &str, limit: usize) -> Result<Vec<SessionSearchRow>> {
+        let query = query.trim();
+        if query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let escaped = escape_like_pattern(query);
+        let contains = format!("%{escaped}%");
+        let prefix = format!("{escaped}%");
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "WITH message_matches AS (
+                 SELECT m.session_id, MAX(m.seq) AS matched_seq
+                 FROM message m
+                 WHERE m.active = 1
+                   AND m.role IN ('user', 'assistant')
+                   AND m.content LIKE :contains ESCAPE '\\'
+                 GROUP BY m.session_id
+             )
+             SELECT s.id, s.title, s.cwd, s.archived,
+                    (SELECT COUNT(*) FROM message count_m
+                     WHERE count_m.session_id = s.id AND count_m.active = 1),
+                    s.total_cost_usd,
+                    COALESCE((SELECT MAX(activity_m.created_at) FROM message activity_m
+                              WHERE activity_m.session_id = s.id), s.created_at) AS last_activity,
+                    CASE
+                      WHEN COALESCE(s.title, '') LIKE :contains ESCAPE '\\' THEN 'title'
+                      WHEN s.id LIKE :contains ESCAPE '\\' THEN 'id'
+                      WHEN s.cwd LIKE :contains ESCAPE '\\' THEN 'cwd'
+                      ELSE 'message'
+                    END AS match_source,
+                    matched.seq,
+                    matched.role,
+                    CASE WHEN matched.content IS NULL THEN NULL ELSE
+                      substr(
+                        matched.content,
+                        max(1, instr(lower(matched.content), lower(:query)) - 80),
+                        240
+                      )
+                    END AS match_excerpt
+             FROM session s
+             LEFT JOIN message_matches mm ON mm.session_id = s.id
+             LEFT JOIN message matched
+               ON matched.session_id = s.id AND matched.seq = mm.matched_seq
+             WHERE s.parent_session_id IS NULL
+               AND EXISTS (
+                 SELECT 1 FROM message used
+                 WHERE used.session_id = s.id AND used.role = 'user'
+               )
+               AND (
+                 COALESCE(s.title, '') LIKE :contains ESCAPE '\\'
+                 OR s.id LIKE :contains ESCAPE '\\'
+                 OR s.cwd LIKE :contains ESCAPE '\\'
+                 OR mm.matched_seq IS NOT NULL
+               )
+             ORDER BY
+               CASE
+                 WHEN lower(COALESCE(s.title, '')) = lower(:query) THEN 0
+                 WHEN COALESCE(s.title, '') LIKE :prefix ESCAPE '\\' THEN 1
+                 WHEN COALESCE(s.title, '') LIKE :contains ESCAPE '\\' THEN 2
+                 WHEN s.id LIKE :prefix ESCAPE '\\' THEN 3
+                 WHEN s.cwd LIKE :contains ESCAPE '\\' THEN 4
+                 ELSE 5
+               END,
+               last_activity DESC,
+               s.rowid DESC
+             LIMIT :limit",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":query": query,
+                ":contains": contains,
+                ":prefix": prefix,
+                ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+            },
+            |row| {
+                Ok(SessionSearchRow {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    cwd: row.get(2)?,
+                    archived: row.get::<_, i64>(3)? != 0,
+                    message_count: row.get(4)?,
+                    total_cost_usd: row.get(5)?,
+                    last_activity: row.get(6)?,
+                    match_source: row.get(7)?,
+                    match_seq: row.get(8)?,
+                    match_role: row.get(9)?,
+                    match_excerpt: row.get(10)?,
+                })
+            },
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     /// Archive a session (`forge serve`): hidden from [`Store::list_sessions`] and the daemon's
     /// session list, but its full history stays intact (nothing is deleted).
     pub fn archive_session(&self, session_id: &str) -> Result<()> {
@@ -166,6 +266,67 @@ impl Store {
             [session_id],
         )?;
         Ok(())
+    }
+
+    /// Permanently delete a persisted session, its subagent descendants, and session-scoped
+    /// artifacts. Queue history is retained but detached from the deleted session.
+    ///
+    /// The daemon owns the running/worktree safety checks; the store still refuses frozen
+    /// Anywhere handoffs anywhere in the tree so a lifecycle command cannot invalidate an
+    /// in-flight transfer.
+    pub fn delete_session(&self, session_id: &str) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let session_ids = {
+            let mut stmt = tx.prepare(
+                "WITH RECURSIVE session_tree(id) AS (
+                     SELECT id FROM session WHERE id = ?1
+                     UNION ALL
+                     SELECT child.id
+                     FROM session child
+                     JOIN session_tree parent ON child.parent_session_id = parent.id
+                 )
+                 SELECT id FROM session_tree",
+            )?;
+            let rows = stmt.query_map([session_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if session_ids.is_empty() {
+            return Ok(false);
+        }
+        for id in &session_ids {
+            let blocked: bool = tx.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM anywhere_handoff_session_state WHERE session_id=?1
+                 )",
+                [id],
+                |row| row.get(0),
+            )?;
+            if blocked {
+                return Err(StoreError::InvalidValue(
+                    "session tree is frozen by an Anywhere handoff".into(),
+                ));
+            }
+        }
+        for id in &session_ids {
+            // These older operational tables intentionally have no foreign key. Do not leave
+            // session-scoped credentials/telemetry behind after a permanent deletion.
+            tx.execute(
+                "DELETE FROM live_activity_token WHERE session_id = ?1",
+                [id],
+            )?;
+            tx.execute("DELETE FROM mesh_outcome WHERE session_id = ?1", [id])?;
+            // Queue rows are user-visible execution history, not owned session artifacts.
+            tx.execute(
+                "UPDATE queue_task SET session_id = NULL WHERE session_id = ?1",
+                [id],
+            )?;
+        }
+        for id in session_ids.iter().rev() {
+            tx.execute("DELETE FROM session WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Record the isolated worktree a daemon session runs in (`forge serve` with `worktree:true`).

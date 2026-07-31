@@ -150,7 +150,13 @@ def main() -> None:
     # Themed icons recolour a silhouette, so this must be one flat ink on transparency.
     render(compose(flat(body, "#FFFFFF"), bg=None, glow=False, scale=0.75),
            REPO / "mobile/assets/android-icon-monochrome.png", 1024)
+    # Android notification trays need a small all-white transparent mask, not the full launcher
+    # icon. Keep it generated from the same silhouette so notification and launcher branding
+    # cannot drift.
+    render(compose(flat(body, "#FFFFFF"), bg=None, glow=False, scale=0.75),
+           REPO / "mobile/assets/android-notification-icon.png", 96)
     print("  mobile/assets/android-icon-{foreground,background,monochrome}.png")
+    print("  mobile/assets/android-notification-icon.png")
 
     # Splash marks: transparent, drawn at the size expo-splash-screen's imageWidth expects.
     splash_dark = compose(body, bg=None, glow=False, scale=0.92)

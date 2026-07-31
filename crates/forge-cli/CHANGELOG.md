@@ -6,6 +6,32 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The companion app now has a cross-surface Diagnostics & Updates page backed by an authenticated,
+  bounded `/api/diagnostics` projection. It reports daemon/client protocol compatibility, aggregate
+  runtime and resource state, safe host checks, and one centralized signed-desktop-updater state.
+  Forge Anywhere exposes the same projection through a dedicated typed read-only route; arbitrary
+  daemon paths remain prohibited. The copied support summary uses a strict whitelist and excludes
+  host names, connection details, tokens, credentials, workspace data, prompts, logs, environment
+  values, and daemon-provided free text.
+- Native iOS and Android clients can receive shared text or a web URL into a durable new-session
+  draft. The iOS share extension, Android share intent and notification channel/icon, in-app
+  privacy/license/support surface, public privacy policy, and store-listing source are generated or
+  version controlled with the release configuration.
+
+### Changed
+
+- The mobile native dependency set is aligned to Expo SDK 57's current compatible patch versions,
+  including Expo 57.0.9 and React Native 0.86.2, before producing the next native archives.
+
+### Fixed
+
+- Production iOS OTA safety now checks the complete range from the installed native archive's
+  source commit instead of only the latest push. A native change followed by a source-only push can
+  no longer publish a combined bundle under the old runtime fingerprint; push, release, recovery,
+  and reconciliation dispatches all use the same non-bypassable baseline.
+
 ## [2.12.2] - 2026-07-30
 
 ### Fixed

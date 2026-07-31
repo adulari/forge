@@ -7,55 +7,69 @@
 // else in this file changes.
 import { X } from "lucide-react-native";
 import React, { useCallback, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, View, type GestureResponderEvent } from "react-native";
+import {
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+  type GestureResponderEvent,
+} from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { formatCwd, type as typeScale } from "../../theme/typography";
+import {
+  WORKBENCH_SURFACE_DEFINITIONS,
+  type WorkbenchSurface,
+  type WorkbenchSurfaceKind,
+} from "../workbench/model";
+import { useWorkbench } from "../workbench/WorkbenchProvider";
 import { GitReviewDock } from "../git/GitReviewDock";
+import { BrowserPreviewDock } from "../preview/BrowserPreviewDock";
+import { WorkspaceDock } from "../workspace/WorkspaceDock";
 import { useSessionRow } from "./activeSession";
 import { TerminalDock } from "./TerminalDock";
+import { terminalTitle } from "./terminalModel";
 import { UsageDock } from "./UsageDock";
 
-export type DockKind = "usage" | "terminal" | "git";
-export type DockPlacement = "right" | "bottom";
+export type DockKind = WorkbenchSurfaceKind;
 
 export interface DockContext {
   sessionId: string | null;
+  surface: WorkbenchSurface | null;
+  openTerminal: (terminalId: string) => void;
 }
 
 interface DockDefinition {
-  title: string;
-  placement: DockPlacement;
-  /** Width for a right dock, resting height for a bottom one. */
-  size: number;
-  /** Docks scoped to one session show its project in the header and need an id to open. */
-  sessionScoped: boolean;
   render: (ctx: DockContext) => React.ReactNode;
 }
 
 const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
   usage: {
-    title: "Usage",
-    placement: "right",
-    size: 288,
-    sessionScoped: false,
     render: () => <UsageDock />,
   },
   git: {
-    title: "Git review",
-    placement: "right",
-    size: 420,
-    sessionScoped: true,
-    // GitReviewDock is a parallel builder's component; the contract is `{ sessionId: string }`.
+    // The dock follows the active routed session unless a future resource tab pins one.
     render: ({ sessionId }) => (sessionId ? <GitReviewDock sessionId={sessionId} /> : null),
   },
+  files: {
+    render: ({ sessionId, surface }) => (
+      <WorkspaceDock sessionId={sessionId} resourceId={surface?.resourceId ?? null} />
+    ),
+  },
+  preview: {
+    render: ({ sessionId, surface }) =>
+      sessionId && surface ? <BrowserPreviewDock sessionId={sessionId} surface={surface} /> : null,
+  },
   terminal: {
-    title: "Terminal",
-    placement: "bottom",
-    size: 190,
-    sessionScoped: true,
-    render: ({ sessionId }) => <TerminalDock sessionId={sessionId} />,
+    render: ({ sessionId, surface, openTerminal }) => (
+      <TerminalDock
+        sessionId={sessionId}
+        terminalId={surface?.resourceId ?? "term-1"}
+        onOpenTerminal={openTerminal}
+      />
+    ),
   },
 };
 
@@ -65,19 +79,52 @@ const BOTTOM_MAX_HEIGHT = 560;
 export interface DockHostProps {
   open: boolean;
   dock?: DockKind;
+  /** Concrete tab selected by the workbench. `dock` remains as a compact fallback for callers. */
+  surface?: WorkbenchSurface | null;
+  /** Other open tabs in this placement. They remain mounted in the workbench model when hidden. */
+  tabs?: readonly WorkbenchSurface[];
   /** Session the dock acts on — ignored by docks that aren't session-scoped. */
   sessionId?: string | null;
+  onActivateSurface?: (id: string) => void;
   onClose: () => void;
 }
 
-export function DockHost({ open, dock = "usage", sessionId = null, onClose }: DockHostProps) {
+export function DockHost({
+  open,
+  dock = "usage",
+  surface = null,
+  tabs = [],
+  sessionId = null,
+  onActivateSurface,
+  onClose,
+}: DockHostProps) {
   const tokens = useTokens();
-  const definition = DOCK_REGISTRY[dock];
-  const row = useSessionRow(definition.sessionScoped ? sessionId : null);
-  const [height, setHeight] = useState(definition.size);
+  const workbench = useWorkbench();
+  const kind = surface?.kind ?? dock;
+  const definition = DOCK_REGISTRY[kind];
+  const surfaceDefinition = WORKBENCH_SURFACE_DEFINITIONS[kind];
+  const effectiveSessionId = surface?.sessionId ?? sessionId;
+  const openTerminal = useCallback(
+    (terminalId: string) => {
+      if (!effectiveSessionId) return;
+      workbench.openSurface({
+        kind: "terminal",
+        sessionId: effectiveSessionId,
+        resourceId: terminalId,
+        title: terminalTitle(terminalId),
+      });
+    },
+    [effectiveSessionId, workbench],
+  );
+  const row = useSessionRow(surfaceDefinition.sessionScoped ? effectiveSessionId : null);
+  const [height, setHeight] = useState(surfaceDefinition.defaultSize);
   // Drag bookkeeping lives entirely in handlers (never read during render): `height` mirrors
   // `drag.current.height` for layout, the ref is what the gesture math reads.
-  const drag = useRef({ startY: 0, startHeight: definition.size, height: definition.size });
+  const drag = useRef({
+    startY: 0,
+    startHeight: surfaceDefinition.defaultSize,
+    height: surfaceDefinition.defaultSize,
+  });
 
   const onGrantResize = useCallback((event: GestureResponderEvent) => {
     drag.current.startY = event.nativeEvent.pageY;
@@ -94,31 +141,81 @@ export function DockHost({ open, dock = "usage", sessionId = null, onClose }: Do
   const header = useCallback(
     (compact: boolean) => (
       <View style={[styles.header, compact && styles.headerCompact, { borderBottomColor: tokens.border }]}>
-        <Text style={[typeScale.bodyBold, { color: tokens.ink }]} numberOfLines={1}>
-          {definition.title}
-        </Text>
-        {row ? (
+        {tabs.length > 1 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.tabs}
+            contentContainerStyle={styles.tabsContent}
+          >
+            {tabs.map((tab) => {
+              const active = tab.id === surface?.id;
+              return (
+                <Pressable
+                  key={tab.id}
+                  onPress={() => onActivateSurface?.(tab.id)}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={`Open ${tab.title} surface`}
+                  style={[
+                    styles.tab,
+                    {
+                      borderBottomColor: active ? tokens.accent : "transparent",
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      typeScale.bodyBold,
+                      { color: active ? tokens.ink : tokens.ink3 },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {tab.title}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        ) : (
+          <Text style={[typeScale.bodyBold, { color: tokens.ink }]} numberOfLines={1}>
+            {surface?.title ?? surfaceDefinition.title}
+          </Text>
+        )}
+        {row && tabs.length <= 1 ? (
           <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]} numberOfLines={1}>
             {formatCwd(row.cwd)}
           </Text>
         ) : null}
-        <View style={styles.headerSpacer} />
+        {tabs.length <= 1 ? <View style={styles.headerSpacer} /> : null}
         <Pressable
           onPress={onClose}
           accessibilityRole="button"
-          accessibilityLabel={`Close ${definition.title.toLowerCase()} dock`}
+          accessibilityLabel={`Close ${surfaceDefinition.title.toLowerCase()} dock`}
           style={styles.closeButton}
         >
           <X size={14} strokeWidth={1.75} color={tokens.ink3} />
         </Pressable>
       </View>
     ),
-    [definition.title, onClose, row, tokens.border, tokens.ink, tokens.ink3],
+    [
+      onActivateSurface,
+      onClose,
+      row,
+      surface?.id,
+      surface?.title,
+      surfaceDefinition.title,
+      tabs,
+      tokens.accent,
+      tokens.border,
+      tokens.ink,
+      tokens.ink3,
+    ],
   );
 
   if (!open) return null;
 
-  if (definition.placement === "bottom") {
+  if (surfaceDefinition.placement === "bottom") {
     return (
       <View style={[styles.bottomDock, { height, borderTopColor: tokens.border, backgroundColor: tokens.bg0 }]}>
         <View
@@ -128,20 +225,31 @@ export function DockHost({ open, dock = "usage", sessionId = null, onClose }: Do
           onResponderMove={onMoveResize}
           style={styles.grip}
           accessibilityRole="adjustable"
-          accessibilityLabel={`Resize ${definition.title.toLowerCase()} dock`}
+          accessibilityLabel={`Resize ${surfaceDefinition.title.toLowerCase()} dock`}
         />
         {header(true)}
-        <View style={styles.body}>{definition.render({ sessionId })}</View>
+        <View style={styles.body}>
+          {definition.render({ sessionId: effectiveSessionId, surface, openTerminal })}
+        </View>
       </View>
     );
   }
 
   return (
     <View
-      style={[styles.rightDock, { width: definition.size, borderLeftColor: tokens.border, backgroundColor: tokens.bg1 }]}
+      style={[
+        styles.rightDock,
+        {
+          width: surfaceDefinition.defaultSize,
+          borderLeftColor: tokens.border,
+          backgroundColor: tokens.bg1,
+        },
+      ]}
     >
       {header(false)}
-      <View style={styles.body}>{definition.render({ sessionId })}</View>
+      <View style={styles.body}>
+        {definition.render({ sessionId: effectiveSessionId, surface, openTerminal })}
+      </View>
     </View>
   );
 }
@@ -162,6 +270,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.space12,
   },
   headerCompact: { height: 30 },
+  tabs: { flex: 1, alignSelf: "stretch" },
+  tabsContent: { alignItems: "stretch" },
+  tab: {
+    minWidth: 72,
+    maxWidth: 150,
+    justifyContent: "center",
+    paddingHorizontal: space.space8,
+    borderBottomWidth: 2,
+  },
   headerSpacer: { flex: 1 },
   closeButton: { width: 26, height: 26, alignItems: "center", justifyContent: "center" },
   body: { flex: 1 },

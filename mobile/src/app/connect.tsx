@@ -441,6 +441,17 @@ export default function ConnectScreen() {
           </>
         )}
       </View>
+
+      <Pressable
+        onPress={() => router.push("/legal")}
+        accessibilityRole="link"
+        accessibilityLabel="Privacy, license, and support"
+        hitSlop={8}
+      >
+        <Text style={[typeScale.sub, styles.legalLink, { color: tokens.ink3 }]}>
+          Privacy · license · support
+        </Text>
+      </Pressable>
     </Screen>
   );
 }
@@ -475,4 +486,5 @@ const styles = StyleSheet.create({
   anywhereStateRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingVertical: space.space8 },
   anywhereStateText: { flex: 1 },
   anywhereActionText: { fontWeight: "600" },
+  legalLink: { textAlign: "center", paddingVertical: space.space8 },
 });

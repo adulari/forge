@@ -212,7 +212,7 @@ App is a single unified codebase (Expo RN + react-native-web + Tauri v2) under `
 
 #### D Menus — 900px · L901-955
 **Maps to:** NEW — native Tauri/macOS menu bar, no RN component; would be implemented via Tauri's native menu API, not `components/`.
-- Full macOS menu bar strip (Forge/File/Session/View/Go/Window/Help) with Session menu open (New Session ⌘N, Quick Composer ⌥Space, Search ⌘P, Approve Waiting Decision ⌘⏎, Interrupt ⌘., Fork, Checkpoint ⌘S, Hand Off, Share Replay, Archive) and View menu (Sidebar ⌘\, Split Pane ⌘D, Terminal ⌘J, Usage ⌘U, Notes, Git Review ⌘G, Appearance submenu) both shown, plus session-row and dock-icon right-click context menus.
+- Full macOS menu bar strip (Forge/File/Session/View/Go/Window/Help) with Session menu open (New Session ⌘N, Quick Composer ⌥Space, Search ⌘P, Approve Waiting Decision ⌘⏎, Interrupt ⌘., Fork, Checkpoint ⌘S, Hand Off, Share Replay, Archive) and View menu (Sidebar ⌘\, Split Pane ⌘D, Terminal ⌘J, Usage ⌘U, Notes, Git Review ⌘G, Appearance submenu) both shown, plus session-row and dock-icon right-click context menus. Editable app-action accelerators show these defaults and synchronize with Settings → Keyboard shortcuts.
 - Every session-scoped power-user action (fork, checkpoint, handoff, interrupt) is exposed as both a keyboard shortcut and a menu item — a discoverability layer with no mobile equivalent.
 
 #### D Tray Notif About — 560px · L960-988

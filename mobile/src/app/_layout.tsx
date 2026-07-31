@@ -24,15 +24,18 @@ import { AnonymousTelemetry } from "../components/AnonymousTelemetry";
 import { DesktopWindowChrome, DESKTOP_WINDOW_CHROME_HEIGHT } from "../components/DesktopWindowChrome";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { UpdateNotice } from "../components/UpdateNotice";
+import { OperationalNotice } from "../components/OperationalNotice";
 import { Screen } from "../components/ds/Screen";
 import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
 import { useActiveSessionId } from "../components/shell/activeSession";
-import { DockHost, type DockKind } from "../components/shell/DockHost";
+import { DockHost } from "../components/shell/DockHost";
 import { IconRail } from "../components/shell/IconRail";
 import { QuickComposer } from "../components/shell/QuickComposer";
 import { Sidebar } from "../components/shell/Sidebar";
 import { SplitPanes, useSplitPanes } from "../components/shell/SplitPanes";
+import { WorkbenchProvider, useWorkbench } from "../components/workbench/WorkbenchProvider";
+import { activeWorkbenchSurface } from "../components/workbench/model";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
 import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
@@ -40,12 +43,13 @@ import { AnywhereProvider as LegacyAnywhereProvider } from "../lib/anywhere/stor
 import { AuthProvider, useAuth } from "../lib/auth";
 import { initHaptics } from "../lib/haptics";
 import { isTauri, isWeb } from "../lib/platform";
-import { checkForDesktopUpdate } from "../lib/updater";
+import { checkDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useDesktopMenuAction } from "../lib/desktopMenu";
+import { IncomingShareProvider } from "../lib/incomingShare";
 import {
+  useAppShortcut,
   useGlobalShortcuts,
-  useHotkey,
   useQuickComposerHotkey,
   useSidebarCollapseHotkey,
   useUsageDockHotkey,
@@ -83,12 +87,12 @@ const asyncStoragePersister = createAsyncStoragePersister({
 // Hearth: settings-family routes bring their own 240px nav rail (SettingsShell), so the
 // persistent Fleet rail collapses there — one rail on screen at a time. Connect is a
 // full-bleed pairing screen on every surface.
-const RAILLESS_ROUTES = /^\/(settings|configuration|skills|hooks|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
+const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|legal|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
 
 // Reachable without a paired daemon: /shares/[id] is a public read-only replay link
-// (no sign-in, no server), and /anywhere/* is the relay onboarding Connect itself
-// deep-links into before any Direct server exists.
-const UNPAIRED_ROUTES = /^\/(shares|anywhere)(\/|$)/;
+// (no sign-in, no server), /anywhere/* is the relay onboarding Connect itself deep-links into
+// before any Direct server exists, and /legal keeps privacy/support available before pairing.
+const UNPAIRED_ROUTES = /^\/(shares|anywhere|legal)(\/|$)/;
 
 function RootNavigator() {
   const { isLoading, isPaired } = useAuth();
@@ -108,12 +112,11 @@ function RootNavigator() {
   // hotkeys unconditionally is harmless — the chrome they toggle only ever renders
   // below, gated on `isPaired && isExpanded`.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  // The right-edge dock is one slot: usage (⌘U) and git review (⌘G) take turns in it, null =
-  // closed. The terminal is a bottom dock (⌘J) and stacks with whichever right dock is open.
-  const [rightDock, setRightDock] = useState<DockKind | null>(null);
-  const [terminalOpen, setTerminalOpen] = useState(false);
   const [quickComposerOpen, setQuickComposerOpen] = useState(false);
-  const dockOpen = rightDock != null;
+  const workbench = useWorkbench();
+  const rightSurface = activeWorkbenchSurface(workbench.state, "right");
+  const bottomSurface = activeWorkbenchSurface(workbench.state, "bottom");
+  const dockOpen = rightSurface != null;
 
   const activeSessionId = useActiveSessionId();
   // Desktop-only: on compact/medium the split reports inactive and nothing extra renders.
@@ -132,9 +135,9 @@ function RootNavigator() {
       return next;
     });
   };
-  const toggleRightDock = (kind: DockKind) => setRightDock((current) => (current === kind ? null : kind));
+  const toggleUsageDock = () => workbench.toggleSurface({ kind: "usage" });
   useSidebarCollapseHotkey(toggleSidebarCollapsed);
-  useUsageDockHotkey(() => toggleRightDock("usage"));
+  useUsageDockHotkey(toggleUsageDock);
   useQuickComposerHotkey(() => setQuickComposerOpen(true));
 
   // ⌘D split · ⌘J terminal · ⌘G git review. Each claims the matching Tauri menu item as well
@@ -145,17 +148,23 @@ function RootNavigator() {
     if (isExpanded) split.toggle();
   };
   const toggleTerminal = () => {
-    if (isExpanded) setTerminalOpen((open) => !open);
+    if (isExpanded) workbench.toggleSurface({ kind: "terminal" });
   };
   const openGitReview = () => {
-    if (isExpanded) toggleRightDock("git");
+    if (isExpanded) workbench.toggleSurface({ kind: "git" });
   };
-  useHotkey("d", toggleSplit, { meta: true });
+  const toggleBrowserPreview = () => {
+    if (isExpanded && activeSessionId) {
+      workbench.toggleSurface({ kind: "preview", sessionId: activeSessionId });
+    }
+  };
+  useAppShortcut("workbench.split", toggleSplit);
   useDesktopMenuAction("view:split-pane", toggleSplit);
-  useHotkey("j", toggleTerminal, { meta: true });
+  useAppShortcut("workbench.terminal", toggleTerminal);
   useDesktopMenuAction("view:terminal", toggleTerminal);
-  useHotkey("g", openGitReview, { meta: true });
+  useAppShortcut("workbench.gitReview", openGitReview);
   useDesktopMenuAction("view:git-review", openGitReview);
+  useDesktopMenuAction("view:browser-preview", toggleBrowserPreview);
 
   useEffect(() => {
     if (!isLoading) {
@@ -185,6 +194,11 @@ function RootNavigator() {
         <Stack.Screen name="configuration" />
         <Stack.Screen name="skills" />
         <Stack.Screen name="hooks" />
+        <Stack.Screen name="providers" />
+        <Stack.Screen name="appearance" />
+          <Stack.Screen name="keybindings" />
+          <Stack.Screen name="diagnostics" />
+          <Stack.Screen name="legal" />
         <Stack.Screen name="models" />
         <Stack.Screen name="session-tree" />
 
@@ -200,9 +214,9 @@ function RootNavigator() {
   );
 
   const rail = railless ? null : sidebarCollapsed ? (
-    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={() => toggleRightDock("usage")} />
+    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} />
   ) : (
-    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={() => toggleRightDock("usage")} />
+    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} />
   );
 
   // The split wraps the live route stack rather than replacing it (see SplitPanes.tsx), and the
@@ -222,10 +236,13 @@ function RootNavigator() {
         appStack
       )}
       <DockHost
-        open={terminalOpen && !railless}
+        open={bottomSurface != null && !railless}
         dock="terminal"
+        surface={bottomSurface}
+        tabs={workbench.state.bottom.tabs}
         sessionId={activeSessionId}
-        onClose={() => setTerminalOpen(false)}
+        onActivateSurface={(id) => workbench.activateSurface("bottom", id)}
+        onClose={() => workbench.hidePlacement("bottom")}
       />
     </View>
   );
@@ -234,14 +251,21 @@ function RootNavigator() {
     <>
       {isPaired && isExpanded ? (
         <>
-          {isWeb && !isTauri ? <WebTopBar onToggleDock={() => toggleRightDock("usage")} dockOpen={dockOpen} /> : null}
+          {isWeb && !isTauri ? (
+            <WebTopBar
+              onToggleDock={toggleUsageDock}
+              dockOpen={rightSurface?.kind === "usage"}
+            />
+          ) : null}
           <View style={styles.shellRow}>
             <MasterDetail master={rail} detail={detail} railWidth={sidebarCollapsed ? ICON_RAIL_WIDTH : SIDEBAR_WIDTH} />
             <DockHost
               open={dockOpen && !railless}
-              dock={rightDock ?? "usage"}
+              surface={rightSurface}
+              tabs={workbench.state.right.tabs}
               sessionId={activeSessionId}
-              onClose={() => setRightDock(null)}
+              onActivateSurface={(id) => workbench.activateSurface("right", id)}
+              onClose={() => workbench.hidePlacement("right")}
             />
           </View>
           <QuickComposer visible={quickComposerOpen} onClose={() => setQuickComposerOpen(false)} />
@@ -264,12 +288,12 @@ const styles = StyleSheet.create({
 
 export default function RootLayout() {
   const persistOptions = useMemo(() => ({ persister: asyncStoragePersister }), []);
-  useGlobalShortcuts(); // HANDOFF(T5.1): ⌘1..4 tabs / ⌘N new session — web/desktop only, no-op native
+  useGlobalShortcuts(); // Persisted desktop/web app bindings; hardware-keyboard no-op on native.
   useOtaUpdates(); // EAS Update OTA check on launch + foreground (no-op in dev / when disabled)
 
   useEffect(() => {
     void initHaptics();
-    if (isTauri) void checkForDesktopUpdate().catch(() => undefined);
+    if (isTauri) void checkDesktopUpdate().catch(() => undefined);
   }, []);
 
   // Native gets Geist + Geist Mono from the expo-font config plugin's build-time embed;
@@ -302,24 +326,29 @@ export default function RootLayout() {
               <RealAnywhereProvider>
                 <LegacyAnywhereProvider>
                   <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
-                  <ToastHost>
-                    <AnonymousTelemetry />
-                    <FleetWatcher />
-                    {/* Inside the query provider because it reads the daemon's changelog, and above
-                        the navigator so it is not tied to whichever tab happens to be open. */}
-                    <UpdateNotice />
-                    {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
-                        `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
-                    <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
-                      <PaletteHost>
-                        <AppLock>
-                          <RootNavigator />
-                        </AppLock>
-                        {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
-                        <DesktopWindowChrome />
-                      </PaletteHost>
-                    </View>
-                  </ToastHost>
+                    <ToastHost>
+                      <IncomingShareProvider>
+                        <AnonymousTelemetry />
+                        <FleetWatcher />
+                        {/* Inside the query provider because it reads the daemon's changelog, and above
+                            the navigator so it is not tied to whichever tab happens to be open. */}
+                        <UpdateNotice />
+                        {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
+                            `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
+                        <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
+                          <OperationalNotice />
+                          <PaletteHost>
+                            <WorkbenchProvider>
+                              <AppLock>
+                                <RootNavigator />
+                              </AppLock>
+                              {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
+                              <DesktopWindowChrome />
+                            </WorkbenchProvider>
+                          </PaletteHost>
+                        </View>
+                      </IncomingShareProvider>
+                    </ToastHost>
                   </PersistQueryClientProvider>
                 </LegacyAnywhereProvider>
               </RealAnywhereProvider>

@@ -6,17 +6,22 @@ import {
   Bookmark,
   Bot,
   Brain,
+  Files,
   GitFork,
   GitPullRequest,
   History,
+  GitCompareArrows,
   Map,
   Microscope,
+  MonitorPlay,
   MoreHorizontal,
   Network,
   Plus,
   Search,
   Send,
+  Settings2,
   Share2,
+  SquareTerminal,
   Swords,
   Workflow,
 } from "lucide-react-native";
@@ -57,6 +62,16 @@ export interface SessionHeaderProps {
   onPullRequest: () => void;
   onMemory: () => void;
   onLattice: () => void;
+  onManageLifecycle: () => void;
+  /** Expanded workbench controls. Compact layouts use their native navigation instead. */
+  onToggleGitReview?: () => void;
+  onToggleFiles?: () => void;
+  onTogglePreview?: () => void;
+  onToggleTerminal?: () => void;
+  gitReviewActive?: boolean;
+  filesActive?: boolean;
+  previewActive?: boolean;
+  terminalActive?: boolean;
   /** Forge Anywhere — these three rows only render when their handler is provided, so
    * non-Anywhere sessions (no relay pairing) see this menu completely unchanged. */
   onHandoff?: () => void;
@@ -89,6 +104,64 @@ export function SessionHeader(props: SessionHeaderProps) {
         <StatusDot state={props.state} />
         <Text style={[typeScale.headingBold, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
         {isPublic ? <Text style={[typeScale.meta, { color: tokens.danger }]}>public</Text> : null}
+        {isExpanded && props.onToggleFiles ? (
+          <IconButton
+            icon={
+              <Files
+                size={19}
+                strokeWidth={1.75}
+                color={props.filesActive ? tokens.accent : tokens.ink2}
+              />
+            }
+            onPress={props.onToggleFiles}
+            accessibilityLabel={`${props.filesActive ? "Hide" : "Show"} workspace files`}
+            style={props.filesActive ? { backgroundColor: tokens.selection } : undefined}
+          />
+        ) : null}
+        {isExpanded && props.onTogglePreview ? (
+          <IconButton
+            icon={
+              <MonitorPlay
+                size={19}
+                strokeWidth={1.75}
+                color={props.previewActive ? tokens.accent : tokens.ink2}
+              />
+            }
+            onPress={props.onTogglePreview}
+            accessibilityLabel={`${props.previewActive ? "Hide" : "Show"} browser preview`}
+            style={props.previewActive ? { backgroundColor: tokens.selection } : undefined}
+          />
+        ) : null}
+        {isExpanded && props.onToggleGitReview ? (
+          <IconButton
+            icon={
+              <GitCompareArrows
+                size={19}
+                strokeWidth={1.75}
+                color={props.gitReviewActive ? tokens.accent : tokens.ink2}
+              />
+            }
+            onPress={props.onToggleGitReview}
+            accessibilityLabel={`${props.gitReviewActive ? "Hide" : "Show"} git review`}
+            accessibilityHint="Command G"
+            style={props.gitReviewActive ? { backgroundColor: tokens.selection } : undefined}
+          />
+        ) : null}
+        {isExpanded && props.onToggleTerminal ? (
+          <IconButton
+            icon={
+              <SquareTerminal
+                size={19}
+                strokeWidth={1.75}
+                color={props.terminalActive ? tokens.accent : tokens.ink2}
+              />
+            }
+            onPress={props.onToggleTerminal}
+            accessibilityLabel={`${props.terminalActive ? "Hide" : "Show"} terminal`}
+            accessibilityHint="Command J"
+            style={props.terminalActive ? { backgroundColor: tokens.selection } : undefined}
+          />
+        ) : null}
         <IconButton icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onPalette} accessibilityLabel="Open command palette" />
         <IconButton icon={<MoreHorizontal size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={() => setActionsVisible(true)} accessibilityLabel="Session actions" style={styles.trailingBleed} />
       </View>
@@ -98,6 +171,7 @@ export function SessionHeader(props: SessionHeaderProps) {
           <ListRow title="Start another session here" leading={<Plus size={20} color={tokens.ink2} />} onPress={() => run(props.onNewHere)} />
           <ListRow title="Start model duel" leading={<Swords size={20} color={tokens.ink2} />} onPress={() => run(props.onDuel)} />
           <ListRow title="Open session replay" leading={<History size={20} color={tokens.ink2} />} onPress={() => run(props.onReplay)} />
+          <ListRow title="Rename or archive session" leading={<Settings2 size={20} color={tokens.ink2} />} onPress={() => run(props.onManageLifecycle)} />
           <ListRow title="Open workflows" leading={<Workflow size={20} color={tokens.ink2} />} onPress={() => run(props.onWorkflows)} />
           <ListRow title="Create implementation plan" leading={<Map size={20} color={tokens.ink2} />} onPress={() => run(props.onPlan)} />
           <ListRow title="Fork session" leading={<GitFork size={20} color={tokens.ink2} />} onPress={() => run(props.onFork)} />

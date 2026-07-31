@@ -48,6 +48,70 @@ describe("AnywhereTransport", () => {
     expect(captured[0]?.route).toBe("list_sessions");
   });
 
+  it("maps diagnostics to its read-only typed bridge route", async () => {
+    const captured: AnywhereBridgeRequest[] = [];
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        captured.push(request);
+        return { status: 200, body: new TextEncoder().encode("{}") };
+      },
+      openSessionSocket: socket,
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+
+    await transport.fetch("fany://host-1/api/diagnostics");
+
+    expect(captured[0]).toMatchObject({
+      route: "diagnostics",
+      method: "GET",
+      parameters: [],
+    });
+    await expect(
+      transport.fetch("fany://host-1/api/diagnostics", { method: "POST" }),
+    ).rejects.toThrow("not allowlisted");
+  });
+
+  it("maps global search and session lifecycle requests without widening the allowlist", async () => {
+    const captured: AnywhereBridgeRequest[] = [];
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        captured.push(request);
+        return { status: 200, body: new TextEncoder().encode("{}") };
+      },
+      openSessionSocket: socket,
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+
+    await transport.fetch("fany://host-1/api/sessions/search?q=needle&limit=30");
+    await transport.fetch("fany://host-1/api/sessions/session_7", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Renamed" }),
+    });
+    await transport.fetch("fany://host-1/api/sessions/session_7", { method: "DELETE" });
+
+    expect(captured.map(({ route, method, parameters }) => ({ route, method, parameters }))).toEqual([
+      {
+        route: "search_sessions",
+        method: "GET",
+        parameters: ["?q=needle&limit=30"],
+      },
+      {
+        route: "rename_session",
+        method: "PATCH",
+        parameters: ["session_7"],
+      },
+      {
+        route: "delete_session",
+        method: "DELETE",
+        parameters: ["session_7"],
+      },
+    ]);
+    await expect(
+      transport.fetch("fany://host-1/api/sessions/unsafe%2Fid", { method: "DELETE" }),
+    ).rejects.toThrow("invalid Forge Anywhere session path parameter");
+  });
+
   it("relays a FormData body as real multipart bytes with a matching boundary", async () => {
     const captured: AnywhereBridgeRequest[] = [];
     const relay: AnywhereRelay = {
@@ -132,5 +196,46 @@ describe("AnywhereTransport", () => {
     expect(request).toEqual({ hostId: "host-1", sessionId: "session-7", revision: 12 });
     expect(() => transport.openWebSocket("fany-ws://host-1/admin"))
       .toThrow("only permits");
+  });
+
+  it("maps terminal metadata and a validated terminal socket to typed relay routes", async () => {
+    const bridgeRequests: AnywhereBridgeRequest[] = [];
+    let terminalRequest: Parameters<NonNullable<AnywhereRelay["openTerminalSocket"]>>[0] | null =
+      null;
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        bridgeRequests.push(request);
+        return { status: 200, body: new TextEncoder().encode("[]") };
+      },
+      openSessionSocket: socket,
+      openTerminalSocket: (request) => {
+        terminalRequest = request;
+        return socket();
+      },
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+
+    await transport.fetch("fany://host-1/api/terminals?session=session-7");
+    transport.openWebSocket(
+      "fany-ws://host-1/ws/terminal?session=session-7&terminal=term-3&cols=120&rows=42&restart=true",
+    );
+
+    expect(bridgeRequests[0]).toMatchObject({
+      route: "list_terminals",
+      parameters: ["?session=session-7"],
+    });
+    expect(terminalRequest).toEqual({
+      hostId: "host-1",
+      sessionId: "session-7",
+      terminalId: "term-3",
+      cols: 120,
+      rows: 42,
+      restart: true,
+    });
+    expect(() =>
+      transport.openWebSocket(
+        "fany-ws://host-1/ws/terminal?session=session-7&terminal=bad%2Fid&cols=80&rows=24",
+      ),
+    ).toThrow("invalid Forge Anywhere terminal stream parameters");
   });
 });

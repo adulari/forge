@@ -311,7 +311,11 @@ export default function SessionTreeScreen() {
             ) : diff.data && diff.data.files.length === 0 ? (
               <Text style={[typeScale.sub, { color: tokens.ink3 }]}>This fork has changed nothing since it branched.</Text>
             ) : diff.data ? (
-              <DiffCard diff={toSnapshotDiff(diff.data)} />
+              <DiffCard
+                diff={toSnapshotDiff(diff.data)}
+                sessionId={diffTarget}
+                reviewSource="fork"
+              />
             ) : null}
           </View>
         </Sheet>

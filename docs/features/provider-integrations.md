@@ -524,6 +524,42 @@ content (last-resort) rather than an empty success.
 
 ---
 
+## Provider & accounts control surface
+
+Forge's desktop/web/iOS/Android client exposes **Settings → Providers & accounts** over the direct
+Serve daemon origin. The surface projects the existing provider registry rather than maintaining a
+second catalog:
+
+- API providers show the conventional environment-variable **name**, whether that variable is
+  present, and masked fingerprints for Forge-owned keys. Key entry supports append/rotation and
+  replace; removal deletes only Forge-owned keyring/encrypted-fallback entries.
+- Codex and xAI subscription OAuth show account ids, active state, and token expiry metadata.
+  Switching and single-account removal use a closed provider mapping (`codex-oauth → codex`,
+  `xai-oauth → xai`). Login remains the explicit host CLI flow (`forge auth …`).
+- Official CLI bridges show installation/version status and their explicit login command. Forge does
+  not claim an installed CLI is authenticated without running the provider.
+- User OpenAI-compatible endpoints and Azure OpenAI can be added, edited, and removed. These registry
+  changes are persisted safely but require a daemon restart because the routing registries are
+  process-lifetime. The UI says so and never implies running sessions were rebuilt.
+- Enable/disable writes the user-level `mesh.disabled` provider entry. The response re-reads the
+  effective layered config; if a project/environment override wins, the UI reports that honestly.
+
+### Security boundary
+
+Provider routes live under the daemon's token-authenticated `/api/providers` surface but are
+deliberately absent from `forge-anywhere-protocol` and `AnywhereTransport`. The client disables the
+query and displays a Direct-connection requirement for `fany://` hosts. This is stricter than the
+normal model-catalog route: even sanitized provider metadata does not transit the hosted connector.
+
+No response contains an API key, OAuth access token, OAuth refresh token, or environment value.
+Responses contain only safe metadata: ids/labels/kinds, enabled state, environment-variable names
+and presence booleans, masked `…last4` stored-key fingerprints, endpoint configuration, account
+expiry state, CLI/local status, and restart requirements. Key writes reject empty, multiline,
+control-character, and oversized input. Successful credential changes clear stale auth exclusions
+and invalidate model/plan caches.
+
+---
+
 ## Update — bridge session resume (claude `--resume`): the efficiency win
 
 A bridge `complete()` is a fresh `claude`/`codex`/`agy` process each call, and originally it

@@ -129,7 +129,38 @@ const config: ExpoConfig = {
     "expo-router",
     "expo-secure-store",
     "expo-status-bar",
-    "expo-notifications",
+    [
+      "expo-notifications",
+      {
+        // Android status-bar icons must be an all-white transparent mask. The generated
+        // monochrome Forge mark already has exactly that shape; without this config Android
+        // falls back to an unsuitable launcher icon.
+        icon: "./assets/android-notification-icon.png",
+        color: "#C65A1E",
+        defaultChannel: "forge-sessions",
+        mode: "production",
+      },
+    ],
+    "./plugins/with-share-extension-display-name.cjs",
+    [
+      "expo-sharing",
+      {
+        ios: {
+          enabled: true,
+          extensionBundleIdentifier: `${BUNDLE_ID}.sharing`,
+          appGroupId: APP_GROUP,
+          activationRule: {
+            supportsText: true,
+            supportsWebUrlWithMaxCount: 1,
+          },
+        },
+        android: {
+          enabled: true,
+          singleShareMimeTypes: ["text/plain"],
+          multipleShareMimeTypes: [],
+        },
+      },
+    ],
     "@bacons/apple-targets",
     [
       "expo-font",
