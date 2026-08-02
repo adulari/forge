@@ -1262,6 +1262,45 @@ async fn ensure_managed_connector() -> Result<&'static str> {
     Ok("Started a local `forge serve` daemon with the managed connector.")
 }
 
+const PENDING_UPLOAD_WARN_THRESHOLD: usize = 5;
+
+struct AccountSnapshot {
+    me: Option<MeResponse>,
+    pending_uploads: usize,
+    conflicts: usize,
+}
+
+/// Fetch the live account state both `status` and `doctor` surface, so the two never drift.
+async fn account_snapshot(
+    store: &StateStore,
+    state: &mut LocalState,
+    config: &forge_config::Config,
+) -> Result<AccountSnapshot> {
+    let forge_store = crate::open_store()?;
+    let pending_uploads = forge_store.pending_sync_journal(1000)?.len();
+    let conflicts = forge_store.sync_apply_conflicts(1000)?.len();
+    if !state.is_logged_in() {
+        return Ok(AccountSnapshot {
+            me: None,
+            pending_uploads,
+            conflicts,
+        });
+    }
+    let token = ensure_access_token(store, state).await?;
+    let me: MeResponse = send_json(
+        client()?
+            .get(format!("{}/v1/me", config.anywhere.service_url()))
+            .bearer_auth(token),
+    )
+    .await
+    .context("load Anywhere account status")?;
+    Ok(AccountSnapshot {
+        me: Some(me),
+        pending_uploads,
+        conflicts,
+    })
+}
+
 async fn status() -> Result<()> {
     let store = StateStore::platform()?;
     let mut state = store.load()?;
@@ -1280,40 +1319,104 @@ async fn status() -> Result<()> {
         },
         if config.anywhere.sync { "on" } else { "off" }
     );
-    let forge_store = crate::open_store()?;
-    let pending = forge_store.pending_sync_journal(1000)?.len();
-    let conflicts = forge_store.sync_apply_conflicts(1000)?.len();
+    let snapshot = account_snapshot(&store, &mut state, &config).await?;
     println!(
-        "Sync local: {pending} pending upload(s) · {conflicts} visible conflict(s){}",
-        if pending == 1000 || conflicts == 1000 {
+        "Sync local: {} pending upload(s) · {} visible conflict(s){}",
+        snapshot.pending_uploads,
+        snapshot.conflicts,
+        if snapshot.pending_uploads == 1000 || snapshot.conflicts == 1000 {
             " (showing first 1000)"
         } else {
             ""
         }
     );
-    if !state.is_logged_in() {
-        return Ok(());
-    }
-    let token = ensure_access_token(&store, &mut state).await?;
-    let me: MeResponse = send_json(
-        client()?
-            .get(format!("{}/v1/me", config.anywhere.service_url()))
-            .bearer_auth(token),
-    )
-    .await
-    .context("load Anywhere account status")?;
-    println!(
-        "Service: {} · {} host(s) · {} device(s) · {} / {} encrypted storage",
-        me.entitlement,
-        me.active_hosts,
-        me.devices,
-        human_bytes(me.storage_used_bytes),
-        human_bytes(me.storage_limit_bytes)
-    );
-    if let Some(trial_end) = me.trial_ends_at {
-        println!("Trial ends: {trial_end}");
+    if let Some(me) = snapshot.me {
+        println!(
+            "Service: {} · {} host(s) · {} device(s) · {} / {} encrypted storage",
+            me.entitlement,
+            me.active_hosts,
+            me.devices,
+            human_bytes(me.storage_used_bytes),
+            human_bytes(me.storage_limit_bytes)
+        );
+        if let Some(trial_end) = me.trial_ends_at {
+            println!("Trial ends: {trial_end}");
+        }
     }
     Ok(())
+}
+
+/// True when the service's ISO deadline is strictly in the past. An unparseable deadline is
+/// treated as "cannot confirm" rather than guessed, so doctor never cries wolf on a format change.
+fn trial_has_expired(iso: &str, now_ms: u64) -> bool {
+    let Ok(end) = chrono::DateTime::parse_from_rfc3339(iso) else {
+        return false;
+    };
+    now_ms as i64 > end.timestamp_millis()
+}
+
+/// Classify the account entitlement into a concrete next action, or `None` when writes are allowed.
+fn entitlement_problem(
+    entitlement: &str,
+    trial_ends_at: Option<&str>,
+    now_ms: u64,
+) -> Option<String> {
+    match entitlement {
+        "active" => {
+            // A stale trial deadline is still worth flagging even if the account reports active.
+            if trial_ends_at.is_some_and(|end| trial_has_expired(end, now_ms)) {
+                Some(
+                    "the Anywhere trial deadline has passed — run `forge anywhere status` to confirm the entitlement"
+                        .into(),
+                )
+            } else {
+                None
+            }
+        }
+        "read_only" | "read-only" => Some(
+            "account is read-only — Forge Anywhere refuses uploads; renew the subscription and run `forge anywhere status`"
+                .into(),
+        ),
+        "grace" => Some(
+            "account is in grace — Forge Anywhere uploads will be refused; renew the subscription and run `forge anywhere status`"
+                .into(),
+        ),
+        "suspended" => Some(
+            "account is suspended — Forge Anywhere refuses uploads; renew the subscription and run `forge anywhere status`"
+                .into(),
+        ),
+        "trialing" | "trial" => {
+            if trial_ends_at.is_some_and(|end| trial_has_expired(end, now_ms)) {
+                Some(
+                    "the Anywhere trial has ended — uploads are refused; renew the subscription and run `forge anywhere status`"
+                        .into(),
+                )
+            } else {
+                None
+            }
+        }
+        other => Some(format!(
+            "unrecognized Forge Anywhere entitlement `{other}` — run `forge anywhere status`"
+        )),
+    }
+}
+
+/// The live problem doctor should surface, if any, once static setup is healthy.
+fn live_problem(snapshot: &AccountSnapshot) -> Option<String> {
+    if let Some(me) = &snapshot.me {
+        if let Some(problem) =
+            entitlement_problem(&me.entitlement, me.trial_ends_at.as_deref(), now_ms())
+        {
+            return Some(problem);
+        }
+    }
+    if snapshot.pending_uploads >= PENDING_UPLOAD_WARN_THRESHOLD {
+        return Some(format!(
+            "sync has {} queued upload(s) that are not draining — run `forge anywhere status` to see the entitlement and backlog",
+            snapshot.pending_uploads
+        ));
+    }
+    None
 }
 
 pub(crate) fn tui_status_summary() -> Result<String> {
@@ -1340,7 +1443,7 @@ async fn doctor() -> Result<()> {
     println!("  binary: Forge {}", env!("CARGO_PKG_VERSION"));
 
     let store = StateStore::platform()?;
-    let state = match store.load() {
+    let mut state = match store.load() {
         Ok(state) => state,
         Err(_) => {
             println!("  enrollment: local state is unreadable");
@@ -1394,16 +1497,33 @@ async fn doctor() -> Result<()> {
         }
     );
 
+    let snapshot = account_snapshot(&store, &mut state, &config).await?;
+    if let Some(me) = &snapshot.me {
+        if let Some(trial_end) = &me.trial_ends_at {
+            println!(
+                "  service entitlement: {} · trial ends {trial_end}",
+                me.entitlement
+            );
+        } else {
+            println!("  service entitlement: {}", me.entitlement);
+        }
+    }
+    if snapshot.pending_uploads > 0 {
+        println!("  sync: {} pending upload(s)", snapshot.pending_uploads);
+    }
+
     let next_action = if !state.is_logged_in() {
-        "run `forge anywhere setup`"
+        "run `forge anywhere setup`".to_owned()
     } else if state.host_id.is_none() {
-        "run `forge anywhere setup` to activate this host"
+        "run `forge anywhere setup` to activate this host".to_owned()
     } else if !config.anywhere.enabled {
-        "run `forge anywhere enable`"
+        "run `forge anywhere enable`".to_owned()
     } else if !service_ready {
-        "keep using local/LAN Forge and retry when the service is available"
+        "keep using local/LAN Forge and retry when the service is available".to_owned()
+    } else if let Some(problem) = live_problem(&snapshot) {
+        problem
     } else {
-        "none; setup is healthy"
+        "none; setup is healthy".to_owned()
     };
     println!("  next action: {next_action}");
     Ok(())
@@ -1925,19 +2045,36 @@ fn service_error(status: StatusCode, body: &[u8]) -> String {
     struct ErrorBody {
         code: Option<String>,
         message: Option<String>,
+        // The service also wraps errors in a versioned envelope: `{ version, error: { code, message } }`.
+        // Accept both shapes so the discriminator below works regardless of which the endpoint returns.
+        error: Option<Box<ErrorBody>>,
     }
     let error = serde_json::from_slice::<ErrorBody>(body).ok();
-    let searchable = error
+    let (code, message) = error
         .as_ref()
         .map(|error| {
-            format!(
-                "{} {}",
-                error.code.as_deref().unwrap_or_default(),
-                error.message.as_deref().unwrap_or_default()
+            // Prefer the nested envelope, falling back to the flat shape (mirrors the mobile client).
+            let detail = error.error.as_deref().unwrap_or(error);
+            (
+                detail.code.as_deref().unwrap_or_default(),
+                detail.message.as_deref().unwrap_or_default(),
             )
-            .to_ascii_lowercase()
         })
         .unwrap_or_default();
+    let searchable = format!("{code} {message}").to_ascii_lowercase();
+    // The service's stable `code` discriminates an account-entitlement rejection from a genuine
+    // device-enrollment problem, even though both surface as 401/403. Match on the code before the
+    // generic branch: a read-only/expired account must not be told to re-enroll, since that can
+    // rotate the data-key epoch and de-enroll other devices.
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        if code.contains("entitlement") {
+            return "Forge Anywhere refused the upload because the account is not entitled to write — renew the subscription and run `forge anywhere status`".into();
+        }
+        if code.contains("enrollment") || searchable.contains("enrollment") {
+            return "device enrollment is not authorized — run `forge anywhere setup`".into();
+        }
+        return "Forge Anywhere refused the request — run `forge anywhere status` to see the entitlement and backlog".into();
+    }
     if searchable.contains("expired") || status == StatusCode::GONE {
         "request expired — start the approval or setup again".into()
     } else if searchable.contains("denied") {
@@ -1953,8 +2090,6 @@ fn service_error(status: StatusCode, body: &[u8]) -> String {
         "recovery unavailable — use an enrolled device or your offline Recovery Kit".into()
     } else if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
         "service dependency unavailable — local and LAN Forge remain available; retry later".into()
-    } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        "device enrollment is not authorized — run `forge anywhere setup`".into()
     } else {
         format!(
             "Forge Anywhere could not complete the request (HTTP {}) — run `forge anywhere doctor`",
@@ -2298,6 +2433,96 @@ mod tests {
         );
         assert!(service_error(StatusCode::SERVICE_UNAVAILABLE, b"")
             .starts_with("service dependency unavailable"));
+    }
+
+    #[test]
+    fn entitlement_rejections_are_attributed_to_the_account_not_this_device() {
+        // Flat error body (the mobile client's `ApiErrorBody` shape).
+        let flat = service_error(
+            StatusCode::FORBIDDEN,
+            br#"{"code":"entitlement_read_only","message":"read only"}"#,
+        );
+        assert!(flat.contains("not entitled to write"), "got: {flat}");
+        assert!(flat.contains("run `forge anywhere status`"), "got: {flat}");
+        assert!(!flat.contains("forge anywhere setup"), "got: {flat}");
+
+        // Versioned envelope from the service.
+        let enveloped = service_error(
+            StatusCode::FORBIDDEN,
+            br#"{"version":1,"error":{"code":"entitlement_read_only","message":"read only"}}"#,
+        );
+        assert!(
+            enveloped.contains("not entitled to write"),
+            "got: {enveloped}"
+        );
+        assert!(
+            !enveloped.contains("forge anywhere setup"),
+            "got: {enveloped}"
+        );
+
+        // Other entitlement-flavoured codes are also account problems, not enrollment ones.
+        let expired = service_error(
+            StatusCode::FORBIDDEN,
+            br#"{"code":"entitlement_expired","message":"expired"}"#,
+        );
+        assert!(expired.contains("not entitled to write"), "got: {expired}");
+        assert!(!expired.contains("forge anywhere setup"), "got: {expired}");
+    }
+
+    #[test]
+    fn enrollment_rejections_keep_the_setup_advice() {
+        let error = service_error(
+            StatusCode::FORBIDDEN,
+            br#"{"code":"device_enrollment_required","message":"approve this device"}"#,
+        );
+        assert_eq!(
+            error,
+            "device enrollment is not authorized — run `forge anywhere setup`"
+        );
+    }
+
+    #[test]
+    fn unknown_authorization_rejections_use_neutral_wording() {
+        let error = service_error(
+            StatusCode::FORBIDDEN,
+            br#"{"code":"some_other_code","message":"opaque"}"#,
+        );
+        assert!(error.contains("refused the request"), "got: {error}");
+        assert!(
+            error.contains("run `forge anywhere status`"),
+            "got: {error}"
+        );
+        assert!(!error.contains("forge anywhere setup"), "got: {error}");
+    }
+
+    #[test]
+    fn entitlement_problem_classifies_account_state() {
+        let now = 1_700_000_000_000;
+        // Healthy non-expired trial.
+        assert_eq!(
+            entitlement_problem("trialing", Some("2030-01-01T00:00:00Z"), now),
+            None
+        );
+        // Active account with a stale trial deadline is still flagged.
+        assert!(entitlement_problem("active", Some("2020-01-01T00:00:00Z"), now).is_some());
+        // Read-only / grace / suspended are always problems.
+        assert!(entitlement_problem("read_only", None, now).is_some());
+        assert!(entitlement_problem("grace", None, now).is_some());
+        assert!(entitlement_problem("suspended", None, now).is_some());
+        // Expired trial is a problem; an in-flight trial is not.
+        assert!(entitlement_problem("trialing", Some("2020-01-01T00:00:00Z"), now).is_some());
+        assert!(entitlement_problem("active", None, now).is_none());
+    }
+
+    #[test]
+    fn trial_has_expired_ignores_unparseable_deadlines() {
+        // An unparseable deadline must not be treated as expired (no false alarm).
+        assert!(!trial_has_expired("not-a-date", 1_700_000_000_000));
+        assert!(trial_has_expired("2020-01-01T00:00:00Z", 1_700_000_000_000));
+        assert!(!trial_has_expired(
+            "2030-01-01T00:00:00Z",
+            1_700_000_000_000
+        ));
     }
 
     #[test]
