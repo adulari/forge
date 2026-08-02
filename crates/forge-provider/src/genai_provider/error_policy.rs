@@ -93,6 +93,15 @@ pub(super) fn classify_error_body(body: &serde_json::Value) -> Option<ProviderEr
         .unwrap_or_else(|| raw.clone());
     // Permanent incapability / payment markers win first (mirrors `classify_status`' ordering), so a
     // "requires more credits" / "function calling not supported" body is EXCLUDED, not retried.
+    // A throttling-flavoured quota (Alibaba `Throttling.AllocationQuota`) is TRANSIENT though —
+    // route it to RateLimited before the capability markers, which would otherwise misread the
+    // `insufficient_quota` marker it also carries.
+    if is_throttling_failure(&raw) {
+        return Some(ProviderError::RateLimited {
+            message: short(&msg),
+            retry_after: parse_retry_after_body(&raw),
+        });
+    }
     if is_capability_failure(&raw) {
         return Some(ProviderError::Capability(short(&msg)));
     }
@@ -129,6 +138,15 @@ pub(super) fn classify_error_body(body: &serde_json::Value) -> Option<ProviderEr
         .or_else(|| err.get("type").and_then(|t| t.as_str()));
     if let Some(ct) = code_type {
         let l = ct.to_lowercase();
+        // A throttling-flavoured quota (Alibaba `Throttling.AllocationQuota`) is TRANSIENT —
+        // back off and retry, never a permanent capability. Checked before the `insufficient_quota`
+        // marker below, which Alibaba's OpenAI-compatible error also carries.
+        if is_throttling_failure(&l) {
+            return Some(ProviderError::RateLimited {
+                message: m,
+                retry_after: parse_retry_after_body(&raw),
+            });
+        }
         if l.contains("rate_limit") || l.contains("resource_exhausted") || l.contains("overloaded")
         {
             return Some(ProviderError::RateLimited {
@@ -196,6 +214,20 @@ pub(super) fn quota_is_exhausted(s: &str) -> bool {
     l.contains("limit: 0") || l.contains("perday") || l.contains("per day") || l.contains("per-day")
 }
 
+/// Markers of a transient per-minute throughput throttle paraphrased as a quota error. Alibaba
+/// Model Studio's OpenAI-compatible endpoint returns HTTP 429 with the error code
+/// `Throttling.AllocationQuota` and a message like "Allocated quota exceeded, please increase
+/// your quota limit" — the SAME `insufficient_quota` marker OpenAI uses for a genuine, permanent
+/// out-of-credits condition. The two must be told apart: the throttle is transient (back-off +
+/// retry the same model), while real credit exhaustion is permanent (exclude the model). The
+/// discriminator is the `throttling` code and/or the "allocated quota exceeded" phrase — both
+/// present in Alibaba's payload and absent from OpenAI's "you exceeded your current quota" body.
+/// Checked BEFORE the capability markers so this never falls through to `Capability`.
+pub(super) fn is_throttling_failure(text: &str) -> bool {
+    let l = text.to_lowercase();
+    l.contains("throttling") || l.contains("allocated quota exceeded")
+}
+
 /// Markers of a PERMANENT, model-specific incapability — this model can never serve Forge's
 /// tool-using turns, or the account can't afford it. These errors recur identically on every
 /// call, so the model is *excluded* rather than benched-and-retried (the source of the
@@ -203,6 +235,13 @@ pub(super) fn quota_is_exhausted(s: &str) -> bool {
 /// provider's real message even when the HTTP status is generic (400/404).
 pub(super) fn is_capability_failure(text: &str) -> bool {
     let l = text.to_lowercase();
+    // A throttling-flavoured quota (Alibaba `Throttling.AllocationQuota` / "allocated quota
+    // exceeded") is TRANSIENT even though it carries the `insufficient_quota` marker below.
+    // Exclude it here so callers route it to RateLimited (back-off + retry) instead of excluding
+    // the model as permanently incapable.
+    if is_throttling_failure(text) {
+        return false;
+    }
     // Standalone markers that unambiguously mean "this model can't serve us".
     const MARKERS: &[&str] = &[
         // OpenRouter: no provider endpoint exposes tool use for this model.
@@ -305,6 +344,9 @@ pub(super) fn classify_status(
     let message = short(provider_message.as_deref().unwrap_or(&message));
     // A permanent incapability (no tool support / unaffordable) regardless of status code: 402
     // is always "can't afford", and 400/404 bodies often carry "tool calling not supported".
+    // A throttling-flavoured quota (Alibaba `Throttling.AllocationQuota` / "allocated quota
+    // exceeded") is NOT that — it's a transient per-minute limit, so it must reach the 429 branch
+    // below (RateLimited) rather than being excluded as permanently incapable.
     if code == 402
         || model_endpoint_is_missing(code, body)
         || is_capability_failure(body)
@@ -416,4 +458,93 @@ pub(super) fn parse_secs(s: &str) -> Option<f64> {
         }
     }
     num.parse::<f64>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Alibaba Model Studio's transient per-minute throughput throttle: HTTP 429, error code
+    /// `Throttling.AllocationQuota`, and a message that both says "allocated quota exceeded" and
+    /// carries the OpenAI-compatible `insufficient_quota` marker. Live-regressed: a pinned
+    /// `qwencloud::deepseek-v4-flash-0731` turn died with "model unsupported" (Capability) even
+    /// though the model recovered minutes later. It must classify as RATE-LIMITED (back-off +
+    /// retry the same model) — never the permanent Capability exclusion.
+    #[test]
+    fn alibaba_throttling_allocation_quota_is_rate_limited_not_capability() {
+        let body = r#"{"error":{"message":"Allocated quota exceeded, please increase your quota limit. For details, see: https://www.alibabacloud.com/help/en/model-studio/error-code#token-limit","type":"insufficient_quota","code":"Throttling.AllocationQuota"}}"#;
+        // The typed HTTP path (non-streaming) goes through classify_status.
+        match classify_status(429, "HTTP 429".into(), body, None) {
+            ProviderError::RateLimited { .. } => {}
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        // The OpenAI-compatible structured body (streaming ChatResponse path) uses classify_error_body.
+        let parsed = serde_json::from_str::<serde_json::Value>(body).unwrap();
+        match classify_error_body(&parsed) {
+            Some(ProviderError::RateLimited { .. }) => {}
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        // The free-text streaming path (no typed status) must agree too.
+        match classify_text(body, "HTTP 429".into()) {
+            ProviderError::RateLimited { .. } => {}
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    /// OpenAI's genuine out-of-credits condition shares the `insufficient_quota` marker but is
+    /// PERMANENT — the account is out of credits and won't recover by retrying. It must stay
+    /// Capability (excluded), not be swept into the transient throttle path.
+    #[test]
+    fn openai_insufficient_quota_stays_capability() {
+        let body = r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}"#;
+        match classify_status(429, "HTTP 429".into(), body, None) {
+            ProviderError::Capability(_) => {}
+            other => panic!("expected Capability, got {other:?}"),
+        }
+        let parsed = serde_json::from_str::<serde_json::Value>(body).unwrap();
+        match classify_error_body(&parsed) {
+            Some(ProviderError::Capability(_)) => {}
+            other => panic!("expected Capability, got {other:?}"),
+        }
+        match classify_text(body, "HTTP 429".into()) {
+            ProviderError::Capability(_) => {}
+            other => panic!("expected Capability, got {other:?}"),
+        }
+    }
+
+    /// SambaNova's "a payment method is required" — a genuinely permanent per-key/account
+    /// incapability — must remain Capability.
+    #[test]
+    fn sambanova_payment_method_required_stays_capability() {
+        let body = r#"{"error":{"message":"A payment method is required to use this model.","type":"payment_required","code":"payment_required"}}"#;
+        match classify_status(402, "HTTP 402".into(), body, None) {
+            ProviderError::Capability(_) => {}
+            other => panic!("expected Capability, got {other:?}"),
+        }
+        let parsed = serde_json::from_str::<serde_json::Value>(body).unwrap();
+        match classify_error_body(&parsed) {
+            Some(ProviderError::Capability(_)) => {}
+            other => panic!("expected Capability, got {other:?}"),
+        }
+        match classify_text(body, "HTTP 402".into()) {
+            ProviderError::Capability(_) => {}
+            other => panic!("expected Capability, got {other:?}"),
+        }
+    }
+
+    /// The throttle discriminator must be narrow: it recognizes the `throttling` code and the
+    /// "allocated quota exceeded" phrase, but not OpenAI's ordinary "exceeded your current quota".
+    #[test]
+    fn throttling_discriminator_is_narrow() {
+        assert!(is_throttling_failure("Throttling.AllocationQuota"));
+        assert!(is_throttling_failure(
+            "allocated quota exceeded, please increase your quota limit"
+        ));
+        assert!(!is_throttling_failure(
+            "you exceeded your current quota, please check your plan and billing details"
+        ));
+        assert!(!is_throttling_failure(
+            "A payment method is required to use this model."
+        ));
+    }
 }
