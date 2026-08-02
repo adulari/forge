@@ -172,7 +172,8 @@ before relying on this table, which has fallen behind as providers were added):
 | `ollama::` | Ollama | default | (none) |
 | `groq::` | Groq | default | `GROQ_API_KEY` |
 | `cohere::` | Cohere | default | `COHERE_API_KEY` |
-| `opencode_go::` | OpenCode Zen | default | `OPENCODE_GO_API_KEY` |
+| `opencode_go::` | OpenCode Go (subscription) | default | `OPENCODE_GO_API_KEY` |
+| `opencode::` | OpenCode Zen (credits + free tier) | `https://opencode.ai/zen/v1/` | `OPENCODE_API_KEY` |
 | `github_copilot::` | GitHub Models | default | `GITHUB_TOKEN` |
 | `mimo::` | MiMo | default | `MIMO_API_KEY` |
 | `minimax::` | MiniMax | default | `MINIMAX_API_KEY` |

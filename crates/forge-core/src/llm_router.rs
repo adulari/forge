@@ -316,7 +316,8 @@ impl Router for LlmRouter {
     ) -> RoutingDecision {
         match tier_override {
             // An explicit command/skill tier hint skips the classifier model call entirely.
-            Some(tier) => self.fallback.decide(
+            Some(tier) => self.fallback.decide_with_pin(
+                self.fallback.pin(),
                 tier,
                 format!("tier hint: {}", tier.as_str()),
                 budget,
@@ -340,6 +341,35 @@ impl Router for LlmRouter {
                 .await
             }
         }
+    }
+
+    async fn route_unpinned(
+        &self,
+        prompt: &str,
+        has_images: bool,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+    ) -> RoutingDecision {
+        // Subagent routing with pin inheritance disabled: delegate to the deterministic fallback
+        // with its pin stripped, so the child gets the mesh's normal failover chain instead of
+        // being forced onto the parent's `--model`. (The LLM classifier's own call is independent
+        // of the pin; only the pin applied to the selected model must be cleared.)
+        let activity = self.fallback.classification_activity(prompt);
+        let (tier, reason) = HeuristicRouter::classify(activity, project);
+        self.fallback.decide_with_pin(
+            None,
+            tier,
+            reason,
+            budget,
+            health,
+            RouteHints::from_prompt(activity),
+            quota,
+            effort,
+            has_images,
+        )
     }
 
     async fn route_contextual(
