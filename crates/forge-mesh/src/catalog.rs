@@ -87,8 +87,11 @@ fn de_named_models<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>
 }
 
 /// A $0-marginal subscription bridge (the locally-installed claude/codex CLI), subscription OAuth
-/// provider (`xai-oauth::`), or API-key subscription surface (`qwencloud::`), as opposed to a
-/// metered or genuinely-free API. Kept separate from "free" in the overview counts.
+/// provider (`xai-oauth::`), or API-key subscription surface (`qwencloud::`, `opencode_go::`), as
+/// opposed to a metered or genuinely-free API. Kept separate from "free" in the overview counts.
+/// OpenCode Go bills a flat subscription with $0 marginal cost, so it counts as subscription even
+/// though it is not a "free" tier; OpenCode Zen (the `opencode::` credit surface) is NOT — it is
+/// metered per-token and belongs in `is_free`'s per-model world.
 /// Documented in docs/features/mesh-routing.md.
 pub fn is_subscription(id: &str) -> bool {
     id.starts_with("claude-cli::")
@@ -97,18 +100,21 @@ pub fn is_subscription(id: &str) -> bool {
         || id.starts_with("xai-oauth::")
         || id.starts_with("codex-oauth::")
         || id.starts_with("qwencloud::")
+        || id.starts_with("opencode_go::")
 }
 
 /// Whether a model is genuinely free to call. "Free" needs *positive* evidence, not just a missing
 /// price: OpenRouter is a paid gateway exposing hundreds of metered models (incl. frontier ones
 /// like Claude Opus) that we hold no per-model price for — reading "unpriced" as "free" there is
 /// the bug. So for OpenRouter, only its `:free`-suffixed variants count; everything else is paid.
-/// OpenCode Zen (`opencode_go`) is the same trap: a curated gateway that mixes genuinely-free
-/// models with premium ones (glm/kimi/qwen-max) — all billed against ONE shared key balance, none
-/// priced in our table. Treating its unpriced premium models as free silently burns that balance
-/// (the bug the user hit), so it's paid-by-default too; mark a known-free one via a `:free` suffix
-/// or a config price of `0`. Other unpriced providers (local `ollama::`, free-tier
-/// `groq`/`cerebras`) are genuinely free.
+/// OpenCode Zen (`opencode::`) is the credit-billed surface: a metered gateway that mixes
+/// genuinely-free models with premium ones (glm/kimi/qwen-max) — all billed against ONE shared key
+/// balance, none priced in our table. Treating its unpriced premium models as free silently burns
+/// that balance (the bug the user hit), so it's paid-by-default too; Zen marks its genuinely-free
+/// models with a `-free` (hyphen) suffix, so those count as free. Note Zen's free tier is a
+/// different surface from OpenCode Go (`opencode_go::`), which is a flat subscription (see
+/// [`is_subscription`]) and is never free here because it is subscription-classified. Other
+/// unpriced providers (local `ollama::`, free-tier `groq`/`cerebras`) are genuinely free.
 /// Documented in docs/features/mesh-routing.md.
 pub fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
     if subscription {
@@ -128,8 +134,11 @@ pub fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
         return false;
     }
     match provider {
-        // Paid gateways: only their explicit `:free`-suffixed variants are free.
-        "openrouter" | "opencode_go" => id.contains(":free"),
+        // Paid gateways: only their explicit free-suffixed variants are free. OpenRouter's is a
+        // `:free` (colon) suffix; OpenCode Zen's is a `-free` (hyphen) suffix. Do NOT loosen the
+        // OpenRouter rule — an OpenRouter id ending in `-free` (hyphen) is still paid.
+        "openrouter" => id.contains(":free"),
+        "opencode" => id.ends_with("-free"),
         // Every other metered API provider (openai, xai, deepseek, anthropic, minimax, mimo, …) has
         // no standing free model tier — only temporary signup/trial credits — so an UNPRICED model
         // is paid-with-unknown-cost, NOT free. Reading "no price in our bundled table" as "free" was
@@ -1516,7 +1525,8 @@ mod tests {
             "claude-cli::sonnet".into(),                    // subscription bridge
             "openrouter::anthropic/claude-opus-4".into(), // frontier, PAID gateway (no price, no :free)
             "openrouter::deepseek/deepseek-r1:free".into(), // frontier, free (:free variant)
-            "opencode_go::glm-5.2".into(),                // PAID gateway model billing key balance
+            "opencode_go::glm-5.2".into(),                // subscription (Go flat plan)
+            "opencode::glm-5.2".into(), // credit-billed Zen premium, billing key balance
         ])
     }
 
@@ -1536,14 +1546,19 @@ mod tests {
 
     #[test]
     fn opencode_zen_unpriced_models_are_paid_not_free() {
-        // OpenCode Zen bills a shared key balance for premium models (glm/kimi/qwen-max). Reading
-        // its unpriced models as free silently drains that balance — they must read as paid.
+        // OpenCode Zen (`opencode::`) bills a shared key balance for premium models (glm/kimi/
+        // qwen-max). Reading its unpriced models as free silently drains that balance — they must
+        // read as paid. (OpenCode Go — `opencode_go::` — is a subscription surface, covered by
+        // `is_subscription`.)
         let infos = overview_catalog().infos(&Pricing::default());
-        let glm = infos
+        let glm = infos.iter().find(|m| m.id == "opencode::glm-5.2").unwrap();
+        assert!(glm.paid && !glm.free, "{glm:?}");
+        // The Go twin is a subscription, not a paid metered model.
+        let go = infos
             .iter()
             .find(|m| m.id == "opencode_go::glm-5.2")
             .unwrap();
-        assert!(glm.paid && !glm.free, "{glm:?}");
+        assert!(go.subscription && !go.paid && !go.free, "{go:?}");
     }
 
     #[test]
@@ -1659,10 +1674,10 @@ mod tests {
     #[test]
     fn stats_count_each_category() {
         let s = overview_catalog().stats(&Pricing::default());
-        assert_eq!(s.total, 9);
-        assert_eq!(s.providers, 7); // anthropic, openai, groq, ollama, claude-cli, openrouter, opencode_go
+        assert_eq!(s.total, 10);
+        assert_eq!(s.providers, 8); // anthropic, openai, groq, ollama, claude-cli, openrouter, opencode_go, opencode
         assert_eq!(s.frontier, 5); // anthropic-opus, groq-70b, claude-cli-sonnet, or-opus, or-deepseek-r1
-        assert_eq!(s.subscription, 1); // claude-cli
+        assert_eq!(s.subscription, 2); // claude-cli, opencode_go
         assert_eq!(s.free, 4); // groq-8b, groq-70b, ollama, or-deepseek-r1:free
         assert_eq!(s.paid, 4); // anthropic-opus, gpt-4o-mini, or-opus, opencode-glm
     }
@@ -2532,6 +2547,26 @@ mod tests {
         assert!(is_free("gemini::gemini-2.5-flash", 1.0, false));
         assert!(is_free("groq::llama-3.3-70b-versatile", 1.0, false));
         assert!(!is_free("gemini::gemini-2.5-pro", 1.0, false));
+    }
+
+    #[test]
+    fn opencode_zen_free_suffix_is_free_but_not_paid_models() {
+        // Zen's genuinely-free models carry a `-free` (hyphen) suffix; paid models are bare.
+        assert!(is_free("opencode::deepseek-v4-flash-free", 0.0, false));
+        assert!(!is_free("opencode::deepseek-v4-flash", 0.0, false));
+    }
+
+    #[test]
+    fn opencode_go_is_subscription_and_never_free() {
+        assert!(is_subscription("opencode_go::deepseek-v4-flash"));
+        assert!(!is_free("opencode_go::deepseek-v4-flash", 0.0, true));
+    }
+
+    #[test]
+    fn openrouter_free_suffix_is_colon_only() {
+        // A hyphen `-free` suffix is NOT free on OpenRouter — only the `:free` colon variant is.
+        assert!(!is_free("openrouter::something-free", 0.0, false));
+        assert!(is_free("openrouter::deepseek/deepseek-r1:free", 0.0, false));
     }
 
     #[test]

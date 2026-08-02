@@ -992,6 +992,33 @@ pub trait Router: Send + Sync {
     fn trivial_candidates(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// The model pinned on this router, if any (`--model`). `None` = no pin (classify normally).
+    /// Defaults to `None`; [`HeuristicRouter`] reports its `pin`. Subagent pin inheritance uses
+    /// this to know whether the mesh is pinned without reaching into the concrete type.
+    fn pin(&self) -> Option<&str> {
+        None
+    }
+
+    /// Route through the mesh IGNORING any pin this router holds — used when subagent pin
+    /// inheritance is disabled (`mesh.subagents.inherit_pin = false`), so a child can route
+    /// independently with its full failover chain intact even though the parent's router is
+    /// pinned. The default simply routes normally (a router that can't distinguish a pin must
+    /// not be silently unpinned); [`HeuristicRouter`] overrides this to strip its pin.
+    #[allow(clippy::too_many_arguments)]
+    async fn route_unpinned(
+        &self,
+        prompt: &str,
+        has_images: bool,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+    ) -> RoutingDecision {
+        self.route(prompt, has_images, budget, health, quota, effort, project)
+            .await
+    }
 }
 
 /// The default v0.1 router: deterministic heuristics over cheap local signals (ADR-0006).
@@ -1239,7 +1266,7 @@ impl HeuristicRouter {
         self
     }
 
-    fn classify(prompt: &str, project: &ProjectContext) -> (TaskTier, String) {
+    pub fn classify(prompt: &str, project: &ProjectContext) -> (TaskTier, String) {
         let c = score_prompt(prompt, project);
         (c.tier, c.reasons.join(", "))
     }
@@ -1877,10 +1904,44 @@ impl HeuristicRouter {
     /// reason it was chosen, apply pin / budget pressure / cost-aware candidate selection.
     /// Pure + sync, so any [`Router`] (incl. the LLM one) can reuse the whole selection path.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     /// Documented in docs/features/mesh-routing.md.
     pub fn decide(
         &self,
+        classified_tier: TaskTier,
+        classify_reason: String,
+        budget: BudgetState,
+        health: &ModelHealth,
+        hints: RouteHints,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        has_images: bool,
+    ) -> RoutingDecision {
+        self.decide_with_pin(
+            self.pin.as_deref(),
+            classified_tier,
+            classify_reason,
+            budget,
+            health,
+            hints,
+            quota,
+            effort,
+            has_images,
+        )
+    }
+
+    /// The pinned model on this router, if any (`--model`). `None` = classify normally.
+    pub fn pin(&self) -> Option<&str> {
+        self.pin.as_deref()
+    }
+
+    /// `decide` with an explicit pin — the router's own pin, or an externally-supplied override
+    /// (e.g. an in-session `/model` pin, or a subagent inheriting the parent's pin). `None` skips
+    /// the pin path entirely so the mesh routes normally (used by [`Router::route_unpinned`]).
+    /// Budget-override semantics are identical to a router-held pin.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decide_with_pin(
+        &self,
+        pin: Option<&str>,
         classified_tier: TaskTier,
         classify_reason: String,
         budget: BudgetState,
@@ -1895,11 +1956,7 @@ impl HeuristicRouter {
         let min_context = budget.min_context_tokens;
 
         // A pin bypasses classification unless an exhausted budget may override it.
-        if let Some(pin) = self
-            .pin
-            .as_ref()
-            .filter(|_| !(exhausted && bg_override_pin))
-        {
+        if let Some(pin) = pin.filter(|_| !(exhausted && bg_override_pin)) {
             let mut why = "pinned via --model".to_string();
             let mut chain = self.build_chain(
                 classified_tier,
@@ -1911,10 +1968,10 @@ impl HeuristicRouter {
                 has_images,
             );
             let model = if self.is_usable(pin, health, quota) {
-                pin.clone()
+                pin.to_string()
             } else {
                 why.push_str(" — unavailable");
-                pin.clone()
+                pin.to_string()
             };
             chain.retain(|m| m != &model);
             // An explicit pin remains explicit even if the provider is currently unavailable;
@@ -1941,7 +1998,7 @@ impl HeuristicRouter {
 
         // Apply budget pressure (FR-5).
         let mut tier = classified_tier;
-        let mut why = if self.pin.is_some() {
+        let mut why = if pin.is_some() {
             // pin was set but an exhausted budget overrode it (see filter above)
             tier = TaskTier::Trivial;
             "budget cap reached — pin overridden, trivial tier".to_string()
@@ -2071,6 +2128,33 @@ impl Router for HeuristicRouter {
         let activity = self.classification_activity(prompt);
         let (tier, reason) = Self::classify(activity, project);
         self.decide(
+            tier,
+            reason,
+            budget,
+            health,
+            RouteHints::from_prompt(activity),
+            quota,
+            effort,
+            has_images,
+        )
+    }
+
+    async fn route_unpinned(
+        &self,
+        prompt: &str,
+        has_images: bool,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+    ) -> RoutingDecision {
+        // Subagent routing with pin inheritance disabled: strip the router's own pin so the child
+        // gets the mesh's normal failover chain instead of being forced onto the parent's `--model`.
+        let activity = self.classification_activity(prompt);
+        let (tier, reason) = Self::classify(activity, project);
+        self.decide_with_pin(
+            None,
             tier,
             reason,
             budget,
@@ -2252,11 +2336,11 @@ mod tests {
         let models = vec![
             "codex-cli::gpt-5.6-sol".to_string(),
             "qwencloud::qwen3.6-flash".to_string(),
-            "opencode_go::kimi-k3".to_string(),
+            "opencode::kimi-k3".to_string(),
         ];
         let catalog = ModelCatalog::new(models.clone()).with_benchmarks(Some(bench.clone()));
         let router = HeuristicRouter::new(Config::default())
-            .with_availability(|model| !model.starts_with("opencode_go::"))
+            .with_availability(|model| !model.starts_with("opencode::"))
             .with_catalog(catalog);
         let quota = conserve_quota(0.7, "plus", "plus");
         let seed = (0..10_000)

@@ -27,6 +27,15 @@ impl Session {
         }
     }
 
+    /// The single effective pin for this turn's model choice: the in-session `/model` pin if set,
+    /// else the router's own `--model` pin. `None` = no pin (normal mesh routing). Kept as ONE
+    /// source so subagent pin inheritance and the parent's own routing agree on what "the pin" is.
+    pub(crate) fn effective_pin(&self) -> Option<String> {
+        self.pinned_model
+            .clone()
+            .or_else(|| self.router.pin().map(|p| p.to_string()))
+    }
+
     /// Explain how the mesh would route `prompt` right now, using this session's live catalog,
     /// quota, benched-model health and budget — the data behind the `/mesh` inspector. `None` when
     /// auto-discovery routing isn't active (no catalog), since the candidate table would be empty.

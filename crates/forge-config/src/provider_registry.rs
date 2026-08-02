@@ -295,6 +295,17 @@ pub const CUSTOM_OPENAI_PROVIDERS: &[CustomProvider] = &[
             "sonar-reasoning-pro",
         ],
     },
+    CustomProvider {
+        namespace: "opencode",
+        endpoint: "https://opencode.ai/zen/v1/",
+        env_var: "OPENCODE_API_KEY",
+        // Zen mixes genuinely-free and paid models under ONE shared key balance, so the
+        // provider-wide flag stays false; free-ness is per-model (a `-free` suffix on the id).
+        free: false,
+        label: "OpenCode Zen — API credits + free tier",
+        // Zen exposes a live `/models` endpoint, so authenticated discovery is authoritative.
+        seed_models: &[],
+    },
 ];
 
 /// Owned form of a runtime-registered custom provider (from a `[[providers.custom]]` block), after
