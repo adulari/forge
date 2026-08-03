@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, StyleSheet, Text, View } from "react-native";
 
 import { getDesktopPerformanceSnapshot, type DesktopPerformanceSnapshot } from "../lib/performance";
@@ -21,15 +21,22 @@ export default function PerformanceFixtureScreen() {
   const tokens = useTokens();
   const [snapshot, setSnapshot] = useState<DesktopPerformanceSnapshot>(() => getDesktopPerformanceSnapshot());
   const [streamedTokens, setStreamedTokens] = useState(0);
+  const listRef = useRef<FlatList<FixtureRow>>(null);
 
   useEffect(() => {
     if (!__DEV__) return;
     const refresh = setInterval(() => setSnapshot(getDesktopPerformanceSnapshot()), 1_000);
     let emitted = 0;
+    let scrollOffset = 0;
+    let direction = 1;
     const stream = setInterval(() => {
       emitted += 1;
       setStreamedTokens(emitted);
       if (emitted >= STREAM_TOKEN_COUNT) clearInterval(stream);
+      scrollOffset += direction * 480;
+      if (scrollOffset >= ROW_COUNT * 20) direction = -1;
+      if (scrollOffset <= 0) direction = 1;
+      listRef.current?.scrollToOffset({ offset: Math.max(0, scrollOffset), animated: false });
     }, STREAM_INTERVAL_MS);
     return () => {
       clearInterval(refresh);
@@ -60,6 +67,7 @@ export default function PerformanceFixtureScreen() {
     <View style={[styles.screen, { backgroundColor: tokens.bg1 }]}>
       <FlatList
         data={rows}
+        ref={listRef}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => <Text style={[styles.row, { color: tokens.ink2 }]}>{item.text}</Text>}
         ListHeaderComponent={header}

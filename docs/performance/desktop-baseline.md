@@ -31,7 +31,10 @@ Display-dependent measurements:
 
 No latency figure is presented as input-to-present. No display refresh-rate claim is made in this deferred capture.
 
-## Historical process attribution (previous capture)
+## Real-display capture attempt (2026-08-03)
+
+A real-display capture was attempted on HDMI-A-1/eDP-1 preference, but the retained Tauri development/release windows mapped on Hyprland monitor index 2 (DP-2) despite the requested placement override. No user window was moved or modified; the launched windows were terminated afterward. The instrumentation endpoint received no application snapshot beyond a connectivity probe, and the Diagnostics/fixture route could not be driven without interfering with the user's active workspace. Therefore every display-dependent figure remains **pending — capture did not produce an app measurement; no number is inferred**. The AppImage build produced the uncompressed AppDir but no compressed artifact before the bounded build command stopped; the existing cached linuxdeploy tool remains invalid as documented above.
+
 
 The earlier 10-second idle capture reported **785,520 KiB** total RSS. Its process table attributes that total as follows:
 
