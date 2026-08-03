@@ -21,11 +21,15 @@ export type DesktopPerformanceSnapshot = {
   composerImeToPaintMaxMs: number | null;
   composerInputPaintSamples: number[];
   composerImePaintSamples: number[];
+  composerInputEvents: { eventAtMs: number; paintAtMs: number; latencyMs: number }[];
+  composerImeEvents: { eventAtMs: number; paintAtMs: number; latencyMs: number }[];
 }
 
 const startedAt = typeof performance !== "undefined" ? performance.now() : null;
 const composerSamples: number[] = [];
 const composerImeSamples: number[] = [];
+const composerInputEvents: { eventAtMs: number; paintAtMs: number; latencyMs: number }[] = [];
+const composerImeEvents: { eventAtMs: number; paintAtMs: number; latencyMs: number }[] = [];
 const frameIntervals: number[] = [];
 const frameTimes: number[] = [];
 let startupToInteractiveMs: number | null = null;
@@ -86,17 +90,41 @@ export function markDesktopInteractive(): void {
 
 export function recordComposerInput(): void {
   if (typeof performance === "undefined") return;
-  const inputAt = performance.now();
+  const relativeNow = () => (startedAt == null || typeof performance === "undefined" ? 0 : performance.now() - startedAt);
+  const inputAt = relativeNow();
   requestAnimationFrame(() => {
-    requestAnimationFrame(() => composerSamples.push(performance.now() - inputAt));
+    requestAnimationFrame(() => {
+      const paintAt = relativeNow();
+      const latencyMs = paintAt - inputAt;
+      composerSamples.push(latencyMs);
+      composerInputEvents.push({ eventAtMs: inputAt, paintAtMs: paintAt, latencyMs });
+    });
   });
 }
 
+export function recordCompositorKey(): void {
+  if (typeof performance === "undefined") return;
+  const eventAt = startedAt == null ? 0 : performance.now() - startedAt;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const paintAt = startedAt == null ? eventAt : performance.now() - startedAt;
+      const latencyMs = paintAt - eventAt;
+      composerSamples.push(latencyMs);
+      composerInputEvents.push({ eventAtMs: eventAt, paintAtMs: paintAt, latencyMs });
+    });
+  });
+}
 export function recordComposerImeCommit(): void {
   if (typeof performance === "undefined") return;
-  const commitAt = performance.now();
+  const relativeNow = () => (startedAt == null ? 0 : performance.now() - startedAt);
+  const commitAt = relativeNow();
   requestAnimationFrame(() => {
-    requestAnimationFrame(() => composerImeSamples.push(performance.now() - commitAt));
+    requestAnimationFrame(() => {
+      const paintAt = relativeNow();
+      const latencyMs = paintAt - commitAt;
+      composerImeSamples.push(latencyMs);
+      composerImeEvents.push({ eventAtMs: commitAt, paintAtMs: paintAt, latencyMs });
+    });
   });
 }
 
@@ -125,6 +153,8 @@ export function getDesktopPerformanceSnapshot(): DesktopPerformanceSnapshot {
     composerImeToPaintMaxMs: percentile(composerImeSamples, 1),
     composerInputPaintSamples: [...composerSamples],
     composerImePaintSamples: [...composerImeSamples],
+    composerInputEvents: [...composerInputEvents],
+    composerImeEvents: [...composerImeEvents],
   };
 }
 
@@ -136,6 +166,8 @@ export async function dumpDesktopPerformanceSnapshot(): Promise<void> {
 export function resetDesktopPerformanceSamples(): void {
   composerSamples.length = 0;
   composerImeSamples.length = 0;
+  composerInputEvents.length = 0;
+  composerImeEvents.length = 0;
   frameIntervals.length = 0;
   frameTimes.length = 0;
   frameSamples = 0;

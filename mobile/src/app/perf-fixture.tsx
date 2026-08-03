@@ -1,8 +1,8 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { FlatList, StyleSheet, Text, View } from "react-native";
+import { FlatList, StyleSheet, Text, TextInput, View } from "react-native";
 
-import { dumpDesktopPerformanceSnapshot, getDesktopPerformanceSnapshot, type DesktopPerformanceSnapshot } from "../lib/performance";
+import { dumpDesktopPerformanceSnapshot, getDesktopPerformanceSnapshot, recordCompositorKey, recordComposerInput, type DesktopPerformanceSnapshot } from "../lib/performance";
 import { useTokens } from "../theme/ThemeProvider";
 import { type } from "../theme/typography";
 
@@ -24,7 +24,9 @@ export default function PerformanceFixtureScreen() {
   const tokens = useTokens();
   const [snapshot, setSnapshot] = useState<DesktopPerformanceSnapshot>(() => getDesktopPerformanceSnapshot());
   const [streamedTokens, setStreamedTokens] = useState(0);
+  const [draft, setDraft] = useState("");
   const [phase, setPhase] = useState("idle");
+  const inputRef = useRef<TextInput>(null);
   const listRef = useRef<FlatList<FixtureRow>>(null);
 
   useEffect(() => {
@@ -33,6 +35,12 @@ export default function PerformanceFixtureScreen() {
       const { invoke } = await import("@tauri-apps/api/core");
       setPhase(await invoke<string>("perf_phase"));
     })();
+  }, []);
+
+  useEffect(() => {
+    if (!PERF_FIXTURE_ENABLED) return;
+    window.addEventListener("keydown", recordCompositorKey);
+    return () => window.removeEventListener("keydown", recordCompositorKey);
   }, []);
 
   useEffect(() => {
@@ -75,7 +83,16 @@ export default function PerformanceFixtureScreen() {
       <View style={styles.header}>
         <Text style={[type.title, { color: tokens.ink }]}>Desktop performance fixture</Text>
         <Text style={[type.sub, { color: tokens.ink2 }]}>10,000 deterministic rows · local mock stream: {streamedTokens}/{STREAM_TOKEN_COUNT} tokens at {STREAM_INTERVAL_MS} ms intervals</Text>
-        <Text style={[type.codeSmall, { color: tokens.ink3 }]}>startup {snapshot.startupToInteractiveMs?.toFixed(1) ?? "pending"} ms · frames {snapshot.frameSamples} · dropped {snapshot.droppedFrames} · long tasks {snapshot.longTaskCount} / {snapshot.longestTaskMs.toFixed(1)} ms max</Text>
+        <TextInput
+          autoFocus
+          value={draft}
+          onChangeText={(next) => {
+            recordComposerInput();
+            setDraft(next);
+          }}
+          placeholder="Typing capture input"
+          style={[styles.input, { color: tokens.ink, borderColor: tokens.ink3 }]}
+        />
       </View>
     ),
     [snapshot, streamedTokens, tokens],
@@ -109,5 +126,6 @@ export default function PerformanceFixtureScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1 },
   header: { gap: 8, padding: 24 },
+  input: { borderWidth: 1, borderRadius: 6, padding: 8, minHeight: 40 },
   row: { fontFamily: "monospace", fontSize: 12, lineHeight: 20, paddingHorizontal: 24 },
 });
