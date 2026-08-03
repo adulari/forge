@@ -8,40 +8,57 @@ This baseline covers the retained Expo + react-native-web + Tauri client in `mob
 - Capture commit (harness/docs): `4a1f80a5`
 - Machine: x86_64 Linux workstation
 - OS/kernel: Arch Linux, `7.1.3-arch2-2`
-- Display strategy: real Hyprland display via `DISPLAY=:1`, `WAYLAND_DISPLAY=wayland-1`; monitor placement and refresh are recorded below from `hyprctl monitors -j` for every launch capture.
+- Display strategy: display-dependent capture is deferred at the user's request. No display or compositor was queried in this update.
 - Build: `npm ci`; `npx expo export -p web`; `npx tauri build --bundles appimage`
 
 ## Baseline capture status
 
-The harness and export are verified. Real-display launch captures were run on **DP-2**, Hyprland monitor index 2, 1920×1080 at **143.99899 Hz**, scale 1.0. The window landed on the requested headline monitor in all three captures. The helper measured a mapped Tauri window, not application interactivity; the Diagnostics surface was not reached through an automated route/input fixture, so those values remain pending rather than being inferred.
+The existing harness and export are verified. All display-dependent values below are pending: **requires a display; deferred at user's request**. No GUI process was launched and no compositor state was queried.
 
-Measured bundle artifacts from the release build:
+Measured packaging artifacts from the prior display-free release build:
 
 - `Forge.AppDir` install footprint: **12 MB** (`du -sh`; uncompressed AppDir)
 - bundled release executable: **11,678,824 bytes** (`stat`)
 - compressed `.AppImage`: **pending** — the available cached linuxdeploy plugin is not executable in this environment (`linuxdeploy` exits 127 while invoking it; the cached plugin file is not a valid SquashFS/AppImage). The uncompressed AppDir and executable sizes above are the reproducible packaging artifacts.
 
-Measured launch and process-tree captures on DP-2:
+Display-dependent measurements:
 
-- cold process launch to mapped window: **446.778 ms**, `scripts/perf/capture-tauri-process.sh ... cold`; this is process-start → Hyprland client mapping, not interactive readiness.
-- warm process launch to mapped window: **431.435 ms**, same helper after a prior launch; this is not a cache-controlled warm-start protocol and remains a mapped-window figure only.
-- idle process-tree RSS snapshot: **785,520 KiB (~767.1 MiB)** at the 10-second capture; root, bwrap/glycin-svg helper, WebKitNetworkProcess, and WebKitWebProcess included.
-- peak process-tree RSS during the 10-second idle sample: **785,520 KiB (~767.1 MiB)**; no user session or streaming turn was exercised.
-- RSS after a long session: **pending** — no authenticated/connected long-session fixture was used, so there is no honest long-session measurement.
+- cold/warm startup to interactive: **pending** — requires a display; deferred at user's request.
+- composer application-event-to-paint, including IME composition: **pending** — requires a display; deferred at user's request. Synthetic application events would not measure end-to-end input and are not substituted.
+- 10,000-row transcript scroll, dropped frames, and long tasks: **pending** — requires a display; deferred at user's request.
+- streaming-turn main-thread long tasks: **pending** — requires a display; deferred at user's request.
+- steady, peak, fixture, and long-session process-tree RSS: **pending** — requires a display; deferred at user's request.
 
-Still pending:
+No latency figure is presented as input-to-present. No display refresh-rate claim is made in this deferred capture.
 
-- cold/warm **interactive** startup: requires opening the app's Diagnostics route and defining the interactive milestone; mapped-window timing above is not substituted.
-- composer input-to-paint, including IME composition: requires controlled real-display input automation and a composition-capable IME fixture.
-- 10,000-row transcript scroll, dropped frames, and long tasks: requires a deterministic 10k-row fixture in the retained app; no fixture was available and no source estimate is reported.
-- streaming-turn main-thread long tasks: requires a connected streaming turn fixture; the 10-second idle sample is not substituted.
+## Historical process attribution (previous capture)
+
+The earlier 10-second idle capture reported **785,520 KiB** total RSS. Its process table attributes that total as follows:
+
+| Process | RSS KiB | Share of total | Method |
+| --- | ---: | ---: | --- |
+| Tauri root `forge-desktop` | 318,028 | 40.5% | `ps` process-tree sample |
+| `bwrap` helper | 1,988 | 0.3% | same sample |
+| nested `bwrap` helper | 1,212 | 0.2% | same sample |
+| `glycin-svg` helper | 19,148 | 2.4% | same sample |
+| `WebKitNetworkProcess` | 153,356 | 19.5% | same sample |
+| `WebKitWebProcess` | 291,788 | 37.2% | same sample |
+| **Total** | **785,520** | **100%** | sum of listed processes |
+
+This attribution is historical and workload-specific to that idle capture. Fixture, streaming, and long-session per-process values are **pending — requires a display; deferred at user's request**.
+
+## Reproducible fixtures
+
+`mobile/src/app/perf-fixture.tsx` is a deterministic debug-only route (`/perf-fixture`, available only in `__DEV__`). It renders exactly 10,000 stable rows through the retained `FlatList` settings and emits a local mock stream of 600 state updates at 50 ms intervals. The mock stream simulates token-arrival cadence and rendering pressure only; it does not simulate network, daemon, model, or authentication work. Display-dependent execution is deferred at the user's request. IME samples are tagged from browser composition commits and are unavailable on native surfaces that do not expose that event.
+
+The interactive startup milestone is **the first animation frame after hydration completes**: `RootNavigator` waits for `AuthProvider.isLoading` to become false, schedules one `requestAnimationFrame`, then calls `markDesktopInteractive`. This excludes OS process creation and WebView/module loading before the collector starts, but includes the app's hydration gate and first post-hydration frame. Cold runs must clear the WebView profile/cache and terminate all Forge processes; warm runs retain the profile/cache and relaunch without clearing it.
+
+## Render-path hypotheses (unmeasured)
+
+- **HYPOTHESIS:** `mobile/src/app/session/[id]/index.tsx:500-760` rebuilds timeline items and dispatches `renderItem` work when streaming state changes; this may allocate or reconcile per streamed update. Unmeasured; do not treat as a finding.
+- **HYPOTHESIS:** `mobile/src/components/chat/MessageRow.tsx:108-185` calls `parseReasoning` and renders `Markdown` while constructing each message row; large transcripts may repeat parsing/render allocation. Unmeasured; do not treat as a finding.
+- **HYPOTHESIS:** `mobile/src/app/perf-fixture.tsx:48-72` creates a 10,000-item data array and renders text rows through `FlatList`; row allocation and text layout may dominate fixture work. Unmeasured; do not treat as a finding.
 
 ## Phase 2 status
 
-Phase 2 assessment started with the largest measured value: the **785,520 KiB (~767.1 MiB) idle process-tree RSS**. No optimization is recorded because the measurement is an idle process-tree total with no connected session, 10k-row fixture, streaming turn, or long-session workload; it cannot identify which retained component causes the footprint. The new deterministic fixture and real-display operator harness make that next measurement reproducible. Applying a source change now would be an unmeasured optimization, so there is no before/after claim and nothing to revert.
-
-
-`mobile/src/app/perf-fixture.tsx` is a deterministic debug-only route (`/perf-fixture`, available only in `__DEV__`). It renders exactly 10,000 stable rows through the retained `FlatList` settings and emits a local mock stream of 600 state updates at 50 ms intervals. The mock stream simulates token-arrival cadence and rendering pressure only; it does not simulate network, daemon, model, or authentication work. Open the route, leave it running for at least 30 seconds, scroll from top to bottom and back, then record the Diagnostics collector values. IME samples are tagged from browser composition commits and are unavailable on native surfaces that do not expose that event.
-
-The interactive startup milestone is **the first animation frame after hydration completes**: `RootNavigator` waits for `AuthProvider.isLoading` to become false, schedules one `requestAnimationFrame`, then calls `markDesktopInteractive`. This excludes OS process creation and WebView/module loading before the collector starts, but includes the app's hydration gate and first post-hydration frame. Cold runs must clear the WebView profile/cache and terminate all Forge processes; warm runs retain the profile/cache and relaunch without clearing it. Record both conditions separately.
-
+Phase 2 assessment remains intentionally blocked. The historical idle total is attributed above, but fixture, streaming, and long-session attribution is unavailable without display execution. No optimization is recorded because changing source against the idle total alone would be an unmeasured optimization. The next valid Phase 2 candidate must be selected from a completed workload-specific capture and re-measured with the same harness.
