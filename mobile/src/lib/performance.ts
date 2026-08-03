@@ -1,5 +1,6 @@
-export interface DesktopPerformanceSnapshot {
+export type DesktopPerformanceSnapshot = {
   startupToInteractiveMs: number | null;
+  interactiveMilestone: "first-frame-after-hydration";
   frameSamples: number;
   droppedFrames: number;
   estimatedRefreshRateHz: number | null;
@@ -9,11 +10,14 @@ export interface DesktopPerformanceSnapshot {
   composerInputSamples: number;
   composerInputToPaintP50Ms: number | null;
   composerInputToPaintMaxMs: number | null;
+  composerImeSamples: number;
+  composerImeToPaintP50Ms: number | null;
   collectedAt: number;
 }
 
 const startedAt = typeof performance !== "undefined" ? performance.now() : null;
 const composerSamples: number[] = [];
+const composerImeSamples: number[] = [];
 const frameIntervals: number[] = [];
 let startupToInteractiveMs: number | null = null;
 let frameSamples = 0;
@@ -78,10 +82,19 @@ export function recordComposerInput(): void {
   });
 }
 
+export function recordComposerImeCommit(): void {
+  if (typeof performance === "undefined") return;
+  const commitAt = performance.now();
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => composerImeSamples.push(performance.now() - commitAt));
+  });
+}
+
 export function getDesktopPerformanceSnapshot(): DesktopPerformanceSnapshot {
   const refreshInterval = percentile(frameIntervals, 0.5);
   return {
     startupToInteractiveMs,
+    interactiveMilestone: "first-frame-after-hydration",
     frameSamples,
     droppedFrames,
     estimatedRefreshRateHz: refreshInterval && refreshInterval > 0 ? 1000 / refreshInterval : null,
@@ -91,12 +104,15 @@ export function getDesktopPerformanceSnapshot(): DesktopPerformanceSnapshot {
     composerInputSamples: composerSamples.length,
     composerInputToPaintP50Ms: percentile(composerSamples, 0.5),
     composerInputToPaintMaxMs: percentile(composerSamples, 1),
+    composerImeSamples: composerImeSamples.length,
+    composerImeToPaintP50Ms: percentile(composerImeSamples, 0.5),
     collectedAt: Date.now(),
   };
 }
 
 export function resetDesktopPerformanceSamples(): void {
   composerSamples.length = 0;
+  composerImeSamples.length = 0;
   frameIntervals.length = 0;
   frameSamples = 0;
   droppedFrames = 0;

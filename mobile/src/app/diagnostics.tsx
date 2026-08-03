@@ -276,7 +276,7 @@ export default function DiagnosticsScreen() {
                 />
                 <ListRow
                   title={`${performanceSnapshot.composerInputToPaintP50Ms == null ? "No composer samples" : `Composer p50 ${performanceSnapshot.composerInputToPaintP50Ms.toFixed(1)} ms`}`}
-                  subtitle={`${performanceSnapshot.composerInputSamples} input samples · max ${performanceSnapshot.composerInputToPaintMaxMs?.toFixed(1) ?? "—"} ms`}
+                  subtitle={`${performanceSnapshot.composerInputSamples} input samples · IME ${performanceSnapshot.composerImeSamples} samples (p50 ${performanceSnapshot.composerImeToPaintP50Ms?.toFixed(1) ?? "—"} ms) · max ${performanceSnapshot.composerInputToPaintMaxMs?.toFixed(1) ?? "—"} ms`}
                 />
                 <ListRow
                   title={`${performanceSnapshot.frameSamples} frame intervals · ${performanceSnapshot.droppedFrames} estimated dropped`}

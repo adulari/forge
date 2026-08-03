@@ -19,7 +19,7 @@ Measured bundle artifacts from the release build:
 
 - `Forge.AppDir` install footprint: **12 MB** (`du -sh`; uncompressed AppDir)
 - bundled release executable: **11,678,824 bytes** (`stat`)
-- compressed `.AppImage`: **pending** — Tauri built the release executable and AppDir but `linuxdeploy` failed before producing the final AppImage.
+- compressed `.AppImage`: **pending** — the available cached linuxdeploy plugin is not executable in this environment (`linuxdeploy` exits 127 while invoking it; the cached plugin file is not a valid SquashFS/AppImage). The uncompressed AppDir and executable sizes above are the reproducible packaging artifacts.
 
 Measured launch and process-tree captures on DP-2:
 
@@ -36,4 +36,9 @@ Still pending:
 - 10,000-row transcript scroll, dropped frames, and long tasks: requires a deterministic 10k-row fixture in the retained app; no fixture was available and no source estimate is reported.
 - streaming-turn main-thread long tasks: requires a connected streaming turn fixture; the 10-second idle sample is not substituted.
 
-No latency figure above is presented as input-to-present. The only display-dependent launch captures are explicitly tied to DP-2 at 143.99899 Hz. The harness records the full Hyprland monitor/client JSON before each capture, and its process cleanup only terminates the process it launched.
+## Reproducible fixtures
+
+`mobile/src/app/perf-fixture.tsx` is a deterministic debug-only route (`/perf-fixture`, available only in `__DEV__`). It renders exactly 10,000 stable rows through the retained `FlatList` settings and emits a local mock stream of 600 state updates at 50 ms intervals. The mock stream simulates token-arrival cadence and rendering pressure only; it does not simulate network, daemon, model, or authentication work. Open the route, leave it running for at least 30 seconds, scroll from top to bottom and back, then record the Diagnostics collector values. IME samples are tagged from browser composition commits and are unavailable on native surfaces that do not expose that event.
+
+The interactive startup milestone is **the first animation frame after hydration completes**: `RootNavigator` waits for `AuthProvider.isLoading` to become false, schedules one `requestAnimationFrame`, then calls `markDesktopInteractive`. This excludes OS process creation and WebView/module loading before the collector starts, but includes the app's hydration gate and first post-hydration frame. Cold runs must clear the WebView profile/cache and terminate all Forge processes; warm runs retain the profile/cache and relaunch without clearing it. Record both conditions separately.
+

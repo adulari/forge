@@ -88,7 +88,7 @@ const asyncStoragePersister = createAsyncStoragePersister({
 // Hearth: settings-family routes bring their own 240px nav rail (SettingsShell), so the
 // persistent Fleet rail collapses there — one rail on screen at a time. Connect is a
 // full-bleed pairing screen on every surface.
-const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|legal|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
+const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|perf-fixture|legal|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
 
 // Reachable without a paired daemon: /shares/[id] is a public read-only replay link
 // (no sign-in, no server), /anywhere/* is the relay onboarding Connect itself deep-links into
@@ -169,9 +169,11 @@ function RootNavigator() {
 
   useEffect(() => {
     if (!isLoading) {
-      markDesktopInteractive();
-      SplashScreen.hideAsync().catch(() => {
-        // best-effort — nothing sensible to do if the splash is already gone
+      requestAnimationFrame(() => {
+        markDesktopInteractive();
+        SplashScreen.hideAsync().catch(() => {
+          // best-effort — nothing sensible to do if the splash is already gone
+        });
       });
     }
   }, [isLoading]);
@@ -200,6 +202,7 @@ function RootNavigator() {
         <Stack.Screen name="appearance" />
           <Stack.Screen name="keybindings" />
           <Stack.Screen name="diagnostics" />
+        <Stack.Screen name="perf-fixture" />
           <Stack.Screen name="legal" />
         <Stack.Screen name="models" />
         <Stack.Screen name="session-tree" />
