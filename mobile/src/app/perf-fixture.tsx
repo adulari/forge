@@ -10,7 +10,7 @@ const STREAM_TOKEN_COUNT = 600;
 const RELEASE_PERF_FIXTURE = process.env.EXPO_PUBLIC_PERF_FIXTURE === "1";
 const PERF_FIXTURE_ENABLED = __DEV__ || RELEASE_PERF_FIXTURE;
 
- = { id: string; index: number; text: string };
+type FixtureRow = { id: string; index: number; text: string };
 
 const rows: FixtureRow[] = Array.from({ length: ROW_COUNT }, (_, index) => ({
   id: `fixture-${index}`,

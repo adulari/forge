@@ -36,7 +36,7 @@
   "bundle": {
     "active": true,
     "targets": ["appimage", "deb", "dmg", "nsis", "app"],
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "icon": [
       "icons/128x128.png",
       "icons/128x128@2x.png",
