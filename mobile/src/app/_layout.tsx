@@ -46,7 +46,7 @@ import { isTauri, isWeb } from "../lib/platform";
 import { checkDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useDesktopMenuAction } from "../lib/desktopMenu";
-import { markDesktopInteractive, startDesktopPerformanceMonitor } from "../lib/performance";
+import { dumpDesktopPerformanceSnapshot, markDesktopInteractive, startDesktopPerformanceMonitor } from "../lib/performance";
 import { IncomingShareProvider } from "../lib/incomingShare";
 import {
   useAppShortcut,
@@ -301,7 +301,11 @@ export default function RootLayout() {
   useEffect(() => {
     void initHaptics();
     startDesktopPerformanceMonitor();
+    const perfDump = process.env.FORGE_PERF_OUT ? window.setInterval(() => void dumpDesktopPerformanceSnapshot(), 1_000) : null;
     if (isTauri) void checkDesktopUpdate().catch(() => undefined);
+    return () => {
+      if (perfDump != null) window.clearInterval(perfDump);
+    };
   }, []);
 
   // Native gets Geist + Geist Mono from the expo-font config plugin's build-time embed;

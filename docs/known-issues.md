@@ -21,6 +21,16 @@ on the affected Wayland session.
 **Status:** source workaround verified in the native release binary and packaged child; the
 separate AppImage XWayland defect below remains release-blocking.
 
+## First-paint benchmark attribution correction
+
+A normal release route, with the performance fixture not mounted, was captured on eDP-1 (scale
+2.0, 60.012 Hz, logical 1890x1114 / estimated physical 3780x2228), native Wayland. It still showed
+a first-paint-region spike: startup-to-interactive 405 ms, max frame 134 ms at ~315 ms, 16 dropped
+frames, and zero long tasks. The fixture's module-scope 10,000-row construction therefore is not
+the sole cause of the stall. The earlier fixture figures remain fixture-route measurements, not
+normal-app figures; the normal route confirms a real startup/first-raster cost, while the exact
+remaining contributor (raster, font/asset load, or bundle evaluation) is not yet isolated.
+
 ## Release fixture frame-stall finding
 
 The isolated release measurements on eDP-1 (scale 2.0, 60.012 Hz, logical 1890x1114 /
