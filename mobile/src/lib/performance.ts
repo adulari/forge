@@ -4,15 +4,22 @@ export type DesktopPerformanceSnapshot = {
   frameSamples: number;
   droppedFrames: number;
   estimatedRefreshRateHz: number | null;
+  frameTimeP50Ms: number | null;
+  frameTimeP95Ms: number | null;
+  frameTimeMaxMs: number | null;
   longTaskCount: number;
   longTaskTotalMs: number;
   longestTaskMs: number;
   composerInputSamples: number;
   composerInputToPaintP50Ms: number | null;
+  composerInputToPaintP95Ms: number | null;
   composerInputToPaintMaxMs: number | null;
   composerImeSamples: number;
   composerImeToPaintP50Ms: number | null;
-  collectedAt: number;
+  composerImeToPaintP95Ms: number | null;
+  composerImeToPaintMaxMs: number | null;
+  composerInputPaintSamples: number[];
+  composerImePaintSamples: number[];
 }
 
 const startedAt = typeof performance !== "undefined" ? performance.now() : null;
@@ -98,18 +105,30 @@ export function getDesktopPerformanceSnapshot(): DesktopPerformanceSnapshot {
     frameSamples,
     droppedFrames,
     estimatedRefreshRateHz: refreshInterval && refreshInterval > 0 ? 1000 / refreshInterval : null,
+    frameTimeP50Ms: percentile(frameIntervals, 0.5),
+    frameTimeP95Ms: percentile(frameIntervals, 0.95),
+    frameTimeMaxMs: percentile(frameIntervals, 1),
     longTaskCount,
     longTaskTotalMs,
     longestTaskMs,
     composerInputSamples: composerSamples.length,
     composerInputToPaintP50Ms: percentile(composerSamples, 0.5),
+    composerInputToPaintP95Ms: percentile(composerSamples, 0.95),
     composerInputToPaintMaxMs: percentile(composerSamples, 1),
     composerImeSamples: composerImeSamples.length,
     composerImeToPaintP50Ms: percentile(composerImeSamples, 0.5),
-    collectedAt: Date.now(),
+    composerImeToPaintP95Ms: percentile(composerImeSamples, 0.95),
+    composerImeToPaintMaxMs: percentile(composerImeSamples, 1),
+    composerInputPaintSamples: [...composerSamples],
+    composerImePaintSamples: [...composerImeSamples],
   };
 }
 
+export async function dumpDesktopPerformanceSnapshot(): Promise<void> {
+  if (typeof window === "undefined" || process.env.EXPO_PUBLIC_PERF_FIXTURE !== "1") return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("perf_dump", { snapshot: JSON.stringify(getDesktopPerformanceSnapshot()) });
+}
 export function resetDesktopPerformanceSamples(): void {
   composerSamples.length = 0;
   composerImeSamples.length = 0;

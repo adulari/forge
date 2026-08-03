@@ -18,9 +18,25 @@ renderer path should be re-evaluated when the relevant WebKitGTK/wlroots defect 
 **Status:** fixed in source; release/AppImage before/after launch evidence remains to be captured
 on the affected Wayland session.
 
-## Auto-edit (AcceptEdits) temper — file edits auto-allowed (verified)
+**Status:** source workaround verified in the native release binary and packaged child; the
+separate AppImage XWayland defect below remains release-blocking.
 
-**Symptom (reported):** in the auto-edit temper, Forge seems to still ask for permission on
+## AppImage XWayland packaging defect
+
+**Finding (verified):** the locally-built release binary mapped as native Wayland (`xwayland=false`),
+while the packaged AppImage child mapped through XWayland (`xwayland=true`) on the same session and
+output. These are different rendering and input stacks; their performance figures must not be
+combined or compared. Native-binary figures describe GTK/WebKitGTK Wayland; AppImage figures
+currently describe XWayland.
+
+**Investigation:** the AppImage's packaged AppRun/AppDir path does not preserve the native Wayland
+launch environment. The AppImage child is `Forge-desktop`/XWayland while the direct binary is
+`forge-desktop`/Wayland. The packaging path needs explicit Wayland backend handling and dependency
+review (AppRun environment, `GDK_BACKEND`, and bundled GTK/WebKit libraries) before shipping.
+
+**Status:** release-blocking packaging defect; no AppImage number is comparable to the native
+binary until the packaged child is verified `xwayland=false`.
+
 actions the user expects to be auto-approved.
 
 **What we know (verified in code):** `permission::decide_mode` for `AcceptEdits` auto-allows

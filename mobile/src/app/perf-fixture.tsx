@@ -1,7 +1,8 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, StyleSheet, Text, View } from "react-native";
 
-import { getDesktopPerformanceSnapshot, type DesktopPerformanceSnapshot } from "../lib/performance";
+import { dumpDesktopPerformanceSnapshot, getDesktopPerformanceSnapshot, type DesktopPerformanceSnapshot } from "../lib/performance";
 import { useTokens } from "../theme/ThemeProvider";
 import { type } from "../theme/typography";
 
@@ -26,14 +27,17 @@ export default function PerformanceFixtureScreen() {
   const listRef = useRef<FlatList<FixtureRow>>(null);
 
   useEffect(() => {
-    if (typeof document !== "undefined") {
-      document.title = `Perf fixture | startup=${snapshot.startupToInteractiveMs?.toFixed(1) ?? "pending"}ms | frames=${snapshot.frameSamples} | dropped=${snapshot.droppedFrames} | long=${snapshot.longestTaskMs.toFixed(1)}ms`;
-    }
+    const title = `Perf fixture | startup=${snapshot.startupToInteractiveMs?.toFixed(1) ?? "pending"}ms | frames=${snapshot.frameSamples} | dropped=${snapshot.droppedFrames} | long=${snapshot.longestTaskMs.toFixed(1)}ms`;
+    void getCurrentWindow().setTitle(title);
+    if (typeof document !== "undefined") document.title = title;
   }, [snapshot]);
   useEffect(() => {
     if (!PERF_FIXTURE_ENABLED) return;
 
-    const refresh = setInterval(() => setSnapshot(getDesktopPerformanceSnapshot()), 1_000);
+    const refresh = setInterval(() => {
+      setSnapshot(getDesktopPerformanceSnapshot());
+      void dumpDesktopPerformanceSnapshot();
+    }, 1_000);
     let emitted = 0;
     let scrollOffset = 0;
     let direction = 1;
@@ -47,6 +51,7 @@ export default function PerformanceFixtureScreen() {
       listRef.current?.scrollToOffset({ offset: Math.max(0, scrollOffset), animated: false });
     }, STREAM_INTERVAL_MS);
     return () => {
+      void dumpDesktopPerformanceSnapshot();
       clearInterval(refresh);
       clearInterval(stream);
     };

@@ -18,6 +18,13 @@ mod preview;
 mod serve_discovery;
 mod tray;
 
+#[tauri::command]
+fn perf_dump(snapshot: String) -> Result<(), String> {
+    let Some(path) = std::env::var_os("FORGE_PERF_OUT") else {
+        return Ok(());
+    };
+    std::fs::write(path, snapshot).map_err(|error| error.to_string())
+}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -51,6 +58,7 @@ pub fn run() {
             menu::set_menu_accelerators,
             about::set_about_info,
             about::open_about_window,
+            perf_dump,
         ])
         .setup(|app| {
             #[cfg(not(target_os = "macos"))]
