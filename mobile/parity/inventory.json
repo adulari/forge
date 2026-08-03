@@ -1,0 +1,377 @@
+[
+  {
+    "file": "mobile/src/app/(tabs)/_layout.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/app/(tabs)/index.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/app/(tabs)/settings.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/app/_layout.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/app/anywhere/account.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/app/anywhere/first-host.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/app/anywhere/index.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/app/anywhere/notifications.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/app/anywhere/passkey.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/app/connect.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/app/diagnostics.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/app/keybindings.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/app/new-session.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/app/shares/[id].tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/AppLock.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/DesktopWindowChrome.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/components/cards/PermissionCard.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/chat/Composer.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/chat/Markdown.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/chat/MessageRow.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/chat/VoiceRecordingPill.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/chat/attach.ts",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/ds/BoundedList.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/ds/Input.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/ds/ListRow.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/ds/Screen.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/ds/Sheet.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/ds/ToastHost.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/components/fleet/SessionCard.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/git/gitReviewSupport.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/components/mcp/AddMcpServerSheet.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/overlay/CommandPalette.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/overlay/OverlayPanel.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/pairing/QRScan.native.tsx",
+    "platform": "native",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/components/pairing/QRScan.web.tsx",
+    "platform": "web",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/components/preview/BrowserPreviewDock.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/components/session/EffortPicker.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/session/ReplayView.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/shell/QuickComposer.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/components/shell/SplitPanes.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/lib/AnywhereProvider.tsx",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/anonymousTelemetry.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/anonymousTelemetry.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/anywhereEnrollmentStore.web.ts",
+    "platform": "web",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/lib/anywhereJobStore.web.ts",
+    "platform": "web",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/lib/anywherePush.ios.ts",
+    "platform": "ios",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/lib/appVersion.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/browserPreview.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/browserPreview.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/desktopMenu.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/desktopServe.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/folderPicker.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/haptics.ts",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/lib/incomingShare.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/lib/notify.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/platform.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/push/push.ios.ts",
+    "platform": "ios",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/lib/push/push.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/push/push.web.ts",
+    "platform": "web",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/lib/secureStore.web.ts",
+    "platform": "web",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/lib/shortcuts/bindings.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/shortcuts/bindings.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/shortcuts/useHotkeys.web.ts",
+    "platform": "web",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/lib/transport/anywhereCredentialStore.web.ts",
+    "platform": "web",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/lib/transport/index.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/transport/tauriWebSocket.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/updater.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/updater.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary"
+  },
+  {
+    "file": "mobile/src/lib/voice/chordHold.ts",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/lib/voice/voice.ts",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/lib/voice/voice.web.ts",
+    "platform": "web",
+    "reason": "platform-specific implementation required by Expo resolution"
+  },
+  {
+    "file": "mobile/src/lib/ws.ts",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/theme/ThemeProvider.tsx",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/theme/tokens.ts",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  },
+  {
+    "file": "mobile/src/theme/typography.ts",
+    "platform": "web/native",
+    "reason": "shared surface contains platform capability handling"
+  }
+]
