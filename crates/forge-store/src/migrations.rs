@@ -483,6 +483,13 @@ fn migration_0022(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "ALTER TABLE session ADD COLUMN pinned_model TEXT")
 }
 
+/// Migration #23: the reasoning-effort level a session is pinned to. Like the model pin this only
+/// existed in the running session, so resuming silently dropped it back to the provider default —
+/// a session driven at `whitehot` came back at `medium` without saying so.
+fn migration_0023(conn: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(conn, "ALTER TABLE session ADD COLUMN pinned_effort TEXT")
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -508,6 +515,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0020,
     migration_0021,
     migration_0022,
+    migration_0023,
 ];
 
 /// Create the singleton rows the Anywhere sync state machine expects, if they are missing.

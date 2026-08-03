@@ -8344,6 +8344,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_restores_the_pinned_effort_level() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let id = store.create_session(".", "default").unwrap();
+
+        let resumed = |store: Arc<Store>| {
+            Session::resume(
+                store,
+                Arc::new(MockProvider),
+                Arc::new(HeuristicRouter::new(Config::default())),
+                ToolRegistry::with_core_tools_in(test_workspace()),
+                Box::new(CapturePresenter::default()),
+                Config::default(),
+                &id,
+            )
+            .unwrap()
+        };
+
+        // A session that never pinned effort must resume unpinned, not at some default level:
+        // the absence of a pin is what lets the provider default apply.
+        assert_eq!(resumed(Arc::clone(&store)).pinned_effort(), None);
+
+        let mut session = resumed(Arc::clone(&store));
+        session.set_effort(Some(forge_types::EffortLevel::WhiteHot));
+        assert_eq!(
+            resumed(Arc::clone(&store)).pinned_effort(),
+            Some(forge_types::EffortLevel::WhiteHot),
+            "a raised effort must survive resume rather than silently dropping to the default"
+        );
+
+        // Lowering replaces rather than being ignored.
+        let mut session = resumed(Arc::clone(&store));
+        session.set_effort(Some(forge_types::EffortLevel::Low));
+        assert_eq!(
+            resumed(Arc::clone(&store)).pinned_effort(),
+            Some(forge_types::EffortLevel::Low)
+        );
+
+        // Clearing returns the session to the provider default.
+        let mut session = resumed(Arc::clone(&store));
+        session.set_effort(None);
+        assert_eq!(resumed(Arc::clone(&store)).pinned_effort(), None);
+    }
+
+    #[tokio::test]
     async fn resume_restores_the_task_list() {
         use forge_types::{TodoItem, TodoStatus};
         let store = Arc::new(Store::open_in_memory().unwrap());

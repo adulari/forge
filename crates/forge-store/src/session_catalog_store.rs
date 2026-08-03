@@ -390,6 +390,28 @@ impl Store {
         Ok(())
     }
 
+    /// The reasoning-effort level a session is pinned to, if `/effort` set one.
+    pub fn session_pinned_effort(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT pinned_effort FROM session WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Record (or clear, with `None`) the reasoning-effort level a session is pinned to.
+    pub fn set_session_pinned_effort(&self, session_id: &str, effort: Option<&str>) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE session SET pinned_effort = ?2 WHERE id = ?1",
+            rusqlite::params![session_id, effort],
+        )?;
+        Ok(())
+    }
+
     /// Full session ids whose id starts with `prefix` (git-style abbreviation). `prefix` is
     /// matched literally: any `%`/`_`/`\` it contains is escaped so it can't act as a SQL LIKE
     /// wildcard and broaden the match beyond a literal prefix.
