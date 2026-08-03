@@ -26,7 +26,6 @@ export default function PerformanceFixtureScreen() {
   const [streamedTokens, setStreamedTokens] = useState(0);
   const [draft, setDraft] = useState("");
   const [phase, setPhase] = useState("idle");
-  const inputRef = useRef<TextInput>(null);
   const listRef = useRef<FlatList<FixtureRow>>(null);
 
   useEffect(() => {
@@ -98,7 +97,7 @@ export default function PerformanceFixtureScreen() {
         />
       </View>
     ),
-    [snapshot, streamedTokens, tokens],
+    [draft, streamedTokens, tokens],
   );
 
   if (!PERF_FIXTURE_ENABLED) {
