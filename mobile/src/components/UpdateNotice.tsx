@@ -35,9 +35,10 @@ export function UpdateNotice() {
   React.useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const updateId = Updates.updateId ?? null;
-      if (process.env.FORGE_PERF_SEED_UPDATE_SEEN === "1") {
-        await rememberBuild({ updateId, appVersion });
+      const { invoke } = await import("@tauri-apps/api/core");
+      const seedUpdateSeen = await invoke<boolean>("perf_seed_update_seen");
+      if (seedUpdateSeen) {
+        await rememberBuild({ updateId: Updates.updateId ?? null, appVersion });
         return;
       }
       const seen = await loadLastSeenBuild();

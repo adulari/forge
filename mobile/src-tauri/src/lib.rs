@@ -26,7 +26,11 @@ fn perf_dump(snapshot: String) -> Result<(), String> {
     std::fs::write(path, snapshot).map_err(|error| error.to_string())
 }
 #[tauri::command]
-fn perf_phase() -> String {
+fn perf_seed_update_seen() -> bool {
+    std::env::var("FORGE_PERF_SEED_UPDATE_SEEN").ok().as_deref() == Some("1")
+}
+
+
     std::env::var("FORGE_PERF_PHASE").unwrap_or_else(|_| "idle".to_string())
 }
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -64,6 +68,7 @@ pub fn run() {
             about::open_about_window,
             perf_dump,
             perf_phase,
+            perf_seed_update_seen,
         ])
         .setup(|app| {
             #[cfg(not(target_os = "macos"))]
