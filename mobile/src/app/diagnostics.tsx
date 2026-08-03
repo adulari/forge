@@ -1,6 +1,6 @@
 import * as Clipboard from "expo-clipboard";
 import * as Updates from "expo-updates";
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 
 import { BackLink } from "../components/ds/BackLink";
@@ -16,6 +16,7 @@ import { formatBytes } from "../lib/anywhere/format";
 import { ApiError } from "../lib/api";
 import { useAppVersion } from "../lib/appVersion";
 import { assessCompatibility, buildSupportSummary } from "../lib/diagnostics";
+import { getDesktopPerformanceSnapshot, type DesktopPerformanceSnapshot } from "../lib/performance";
 import { isTauri } from "../lib/platform";
 import { useDiagnostics } from "../lib/queries";
 import { PROTOCOL_VERSION } from "../lib/remoteProtocol";
@@ -66,6 +67,7 @@ export default function DiagnosticsScreen() {
   const appVersion = useAppVersion();
   const update = useDesktopUpdateState();
   const nativeRuntimeVersion = Updates.runtimeVersion ?? null;
+  const [performanceSnapshot, setPerformanceSnapshot] = useState<DesktopPerformanceSnapshot>(() => getDesktopPerformanceSnapshot());
   const diagnostics = query.data;
   const compatibility = useMemo(
     () => assessCompatibility(
@@ -76,6 +78,11 @@ export default function DiagnosticsScreen() {
     ),
     [appVersion, diagnostics?.host.protocol, diagnostics?.host.version],
   );
+
+  useEffect(() => {
+    const timer = setInterval(() => setPerformanceSnapshot(getDesktopPerformanceSnapshot()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (isTauri && update.phase === "idle") {
@@ -259,6 +266,27 @@ export default function DiagnosticsScreen() {
                     ) : null}
                   </View>
                 ))}
+              </View>
+
+              <View>
+                <SectionHeader>Desktop performance</SectionHeader>
+                <ListRow
+                  title={performanceSnapshot.startupToInteractiveMs == null ? "Startup pending" : `Interactive in ${performanceSnapshot.startupToInteractiveMs.toFixed(0)} ms`}
+                  subtitle="Measured from module load until the paired app became interactive"
+                />
+                <ListRow
+                  title={`${performanceSnapshot.composerInputToPaintP50Ms == null ? "No composer samples" : `Composer p50 ${performanceSnapshot.composerInputToPaintP50Ms.toFixed(1)} ms`}`}
+                  subtitle={`${performanceSnapshot.composerInputSamples} input samples · max ${performanceSnapshot.composerInputToPaintMaxMs?.toFixed(1) ?? "—"} ms`}
+                />
+                <ListRow
+                  title={`${performanceSnapshot.frameSamples} frame intervals · ${performanceSnapshot.droppedFrames} estimated dropped`}
+                  subtitle={`Estimated refresh ${performanceSnapshot.estimatedRefreshRateHz?.toFixed(1) ?? "—"} Hz · long tasks ${performanceSnapshot.longTaskCount} (${performanceSnapshot.longestTaskMs.toFixed(1)} ms max)`}
+                />
+                <ListRow
+                  title={`Long-task time ${performanceSnapshot.longTaskTotalMs.toFixed(1)} ms`}
+                  subtitle="Browser/WebView PerformanceObserver; unavailable entries are excluded"
+                  showSeparator={false}
+                />
               </View>
 
               {isTauri ? (

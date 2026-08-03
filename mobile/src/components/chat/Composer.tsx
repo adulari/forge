@@ -43,6 +43,7 @@ import {
   visualAnnotationLabel,
 } from "../../lib/visualAnnotations";
 import { isMacOS } from "../../lib/platform";
+import { recordComposerInput } from "../../lib/performance";
 import { useUpload, useWorkspaceSearch } from "../../lib/queries";
 import { useSessionCtx } from "../../lib/sessionContext";
 import { supportsDirectDaemonEndpoints } from "../../lib/transport";
@@ -821,6 +822,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               ref={inputRef}
               value={Platform.OS === "web" ? text : nativeText}
               onChangeText={(next) => {
+                recordComposerInput();
                 if (Platform.OS !== "web") setNativeText(next);
                 setText(next);
               }}

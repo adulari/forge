@@ -46,6 +46,7 @@ import { isTauri, isWeb } from "../lib/platform";
 import { checkDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useDesktopMenuAction } from "../lib/desktopMenu";
+import { markDesktopInteractive, startDesktopPerformanceMonitor } from "../lib/performance";
 import { IncomingShareProvider } from "../lib/incomingShare";
 import {
   useAppShortcut,
@@ -168,6 +169,7 @@ function RootNavigator() {
 
   useEffect(() => {
     if (!isLoading) {
+      markDesktopInteractive();
       SplashScreen.hideAsync().catch(() => {
         // best-effort — nothing sensible to do if the splash is already gone
       });
@@ -293,6 +295,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     void initHaptics();
+    startDesktopPerformanceMonitor();
     if (isTauri) void checkDesktopUpdate().catch(() => undefined);
   }, []);
 
