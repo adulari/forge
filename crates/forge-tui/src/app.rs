@@ -3690,12 +3690,18 @@ mod tests {
             cost_cell("openrouter::cohere/north-mini-code:free", 0.0),
             "free"
         );
-        // Unpriced gateway/credit model: not a bridge, $0 only because we lack a price.
-        assert_eq!(cost_cell("opencode_go::glm-5.2", 0.0), "untracked");
+        // OpenCode Go bills a flat subscription, so its $0 marginal cost is real rather than a
+        // missing price. Distinct from OpenCode Zen (`opencode::`) below, despite the similar name.
+        assert_eq!(cost_cell("opencode_go::glm-5.2", 0.0), "subscription");
+        // Unpriced gateway/credit model: not a bridge, $0 only because we lack a price. Zen bills
+        // premium and free models against one shared key balance, so unpriced must not read free.
+        assert_eq!(cost_cell("opencode::glm-5.2", 0.0), "untracked");
         assert_eq!(
             cost_cell("openrouter::anthropic/claude-opus", 0.0),
             "untracked"
         );
+        // Zen marks genuinely-free models with a `-free` suffix — positive evidence, so "free".
+        assert_eq!(cost_cell("opencode::qwen3-coder-free", 0.0), "free");
     }
 
     /// Regression: an interrupted workflow (active=true, WorkflowFinished never arrived) used
