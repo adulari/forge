@@ -7,9 +7,10 @@ import { type } from "../theme/typography";
 
 const ROW_COUNT = 10_000;
 const STREAM_TOKEN_COUNT = 600;
-const STREAM_INTERVAL_MS = 50;
+const RELEASE_PERF_FIXTURE = process.env.EXPO_PUBLIC_PERF_FIXTURE === "1";
+const PERF_FIXTURE_ENABLED = __DEV__ || RELEASE_PERF_FIXTURE;
 
-type FixtureRow = { id: string; index: number; text: string };
+ = { id: string; index: number; text: string };
 
 const rows: FixtureRow[] = Array.from({ length: ROW_COUNT }, (_, index) => ({
   id: `fixture-${index}`,
@@ -24,7 +25,8 @@ export default function PerformanceFixtureScreen() {
   const listRef = useRef<FlatList<FixtureRow>>(null);
 
   useEffect(() => {
-    if (!__DEV__) return;
+    if (!PERF_FIXTURE_ENABLED) return;
+
     const refresh = setInterval(() => setSnapshot(getDesktopPerformanceSnapshot()), 1_000);
     let emitted = 0;
     let scrollOffset = 0;
@@ -55,7 +57,7 @@ export default function PerformanceFixtureScreen() {
     [snapshot, streamedTokens, tokens],
   );
 
-  if (!__DEV__) {
+  if (!PERF_FIXTURE_ENABLED) {
     return (
       <View style={[styles.screen, { backgroundColor: tokens.bg1 }]}>
         <Text style={[type.title, { color: tokens.ink }]}>Performance fixture unavailable</Text>

@@ -3,6 +3,21 @@
 Tracked limitations and intentionally-deferred features. Each entry: symptom, what
 we know, and the planned fix.
 
+## Linux Wayland/WebKitGTK launch crash (fixed by default renderer workaround)
+
+**Finding (verified):** the release desktop binary exited before mapping a window on a Hyprland/
+wlroots Wayland session with `Gdk-Message: Error 71 (Protocol error) dispatching to Wayland
+display`. The same binary mapped normally when launched with
+`WEBKIT_DISABLE_DMABUF_RENDERER=1`.
+
+**Fix:** Linux release launches now set `WEBKIT_DISABLE_DMABUF_RENDERER=1` in `main()` before
+Tauri/GTK/WebKitGTK initialization, but only when the variable is not already set. This preserves
+an explicit operator override and applies equally to the AppImage's packaged binary. The default
+renderer path should be re-evaluated when the relevant WebKitGTK/wlroots defect is resolved.
+
+**Status:** fixed in source; release/AppImage before/after launch evidence remains to be captured
+on the affected Wayland session.
+
 ## Auto-edit (AcceptEdits) temper — file edits auto-allowed (verified)
 
 **Symptom (reported):** in the auto-edit temper, Forge seems to still ask for permission on
@@ -18,20 +33,16 @@ auto-edit — that part is expected.
 `auto_edit_allows_file_writes_without_prompting` (forge-core) drives a live `AcceptEdits` session
 whose model calls `write_file` with a presenter that *denies* any prompt; the file is still
 written, proving the write was auto-allowed without a confirm. `--mode` sticks
-(`build_session_with`: `config.permission_mode = m.into()` → `Session.mode`), and with no
-matching allow/ask rule `decide` falls back to `decide_mode(AcceptEdits, Write) = Allow`.
+(`build_session_with`: `config.permission_mode = m.into()` → `Session.mode`), and with no matching
+allow/ask rule `decide` falls back to `decide_mode(AcceptEdits, Write) = Allow`.
 
-**Residual (by design, not a bug):** a live SHIFT+TAB temper switch applies on the **next** turn,
-not the in-flight one — the turn task holds the `Session` mutex for its duration, so the switch
-can't mutate `Session.mode` mid-turn. A configured `ask`/`deny` rule for `write_file` also still
-prompts (rules outrank the mode by design).
+**Residual (by design):** a live SHIFT+TAB temper switch applies on the **next** turn, not the
+in-flight one. A configured `ask`/`deny` rule for `write_file` also still prompts (rules outrank
+the mode by design).
 
 **Status:** common case verified + regression-tested; only the by-design residual remains.
 
 ## No way to remove / disable a provider key or model
-
-**Symptom:** Once a provider key is set (env or keyring) there is no command to remove
-it or to disable a specific provider/model. Workaround used in practice: set the key
 to a junk value so auth fails and the mesh benches/avoids it.
 
 **Shipped:**
@@ -44,6 +55,21 @@ to a junk value so auth fails and the mesh benches/avoids it.
 - `forge models --clear` wipes all stale model benches (`Store::clear_all_model_health`).
 
 **Status:** shipped + tested (`is_model_disabled`, `clear_all_model_health`).
+
+## No way to remove / disable a provider key or model
+
+**Symptom:** Once a provider key is set (env or keyring) there is no command to remove
+it or to disable a specific provider/model. Workaround used in practice: set the key
+to a junk value so auth fails and the mesh benches/avoids it.
+
+**Shipped:**
+- `forge auth --remove <provider>` deletes the keyring entry (idempotent — reports if nothing
+  was stored).
+- `[mesh] disabled = ["openai", "gemini::antigravity-preview-05-2026"]` excludes a provider
+  or exact model id from discovery and routing.
+- `forge models --clear` wipes stale model benches.
+
+**Status:** shipped + tested.
 
 ## Shell tool: Windows execution (fixed) — denylist OS-awareness (fixed)
 

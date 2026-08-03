@@ -61,4 +61,5 @@ targets/*/Assets.xcassets
 
 # Tauri (mobile/src-tauri/)
 src-tauri/target/
+Forge-*.AppImage
 src-tauri/gen/
