@@ -7,6 +7,7 @@ import { type } from "../theme/typography";
 
 const ROW_COUNT = 10_000;
 const STREAM_TOKEN_COUNT = 600;
+const STREAM_INTERVAL_MS = 50;
 const RELEASE_PERF_FIXTURE = process.env.EXPO_PUBLIC_PERF_FIXTURE === "1";
 const PERF_FIXTURE_ENABLED = __DEV__ || RELEASE_PERF_FIXTURE;
 

@@ -94,6 +94,7 @@ const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|perf-fi
 // (no sign-in, no server), /anywhere/* is the relay onboarding Connect itself deep-links into
 // before any Direct server exists, and /legal keeps privacy/support available before pairing.
 const UNPAIRED_ROUTES = /^\/(shares|anywhere|legal)(\/|$)/;
+const RELEASE_PERF_FIXTURE = process.env.EXPO_PUBLIC_PERF_FIXTURE === "1";
 
 function RootNavigator() {
   const { isLoading, isPaired } = useAuth();
@@ -281,6 +282,7 @@ function RootNavigator() {
       {/* Declarative redirect (rather than Stack.Protected) per T2.1 spec: whatever route
           expo-router resolved on cold start/deep-link, bounce to /connect once we know
           there's no active server. */}
+      {RELEASE_PERF_FIXTURE && pathname !== "/perf-fixture" ? <Redirect href="/perf-fixture" /> : null}
       {!isPaired && !UNPAIRED_ROUTES.test(pathname) ? <Redirect href="/connect" /> : null}
     </>
   );
