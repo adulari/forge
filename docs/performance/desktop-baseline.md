@@ -53,11 +53,14 @@ This attribution is historical and workload-specific to that idle capture. Fixtu
 
 The interactive startup milestone is **the first animation frame after hydration completes**: `RootNavigator` waits for `AuthProvider.isLoading` to become false, schedules one `requestAnimationFrame`, then calls `markDesktopInteractive`. This excludes OS process creation and WebView/module loading before the collector starts, but includes the app's hydration gate and first post-hydration frame. Cold runs must clear the WebView profile/cache and terminate all Forge processes; warm runs retain the profile/cache and relaunch without clearing it.
 
-## Render-path hypotheses (unmeasured)
+- **Measured pure-logic benchmark (Node/Vitest, no display):** `groupByPhase` over 10,000 rows and 100 phases: **0.2746 ms/op** across 20 iterations; a later rerun under variable host load measured **1.0950 ms/op**. This does not establish rendered list cost; the hypothesis is **disproven for this pure grouping workload**.
+- **Measured pure-logic benchmark (Node/Vitest, no display):** `parseReasoning` over a 560 kB streamed message: **0.0629 ms/op** across 20 iterations; a later rerun under variable host load measured **0.1805 ms/op**. This does not establish Markdown/render cost; the hypothesis is **disproven for parsing alone**.
+- **Measured pure-logic benchmark (Node/Vitest, no display):** `highlightTokens` over a 420 kB TypeScript block: **14.8464 ms/op** across 10 iterations; later reruns measured **13.7722 ms/op**, **17.3641 ms/op**, and **18.4768 ms/op** under variable host load. A first attempted keyword-set cache was re-measured at **17.3641 ms/op**, worse than the 14.8464 ms/op reference by **2.5177 ms/op (17.0%)**, so it was reverted and no optimization was retained. This is a measured pure-tokenization cost, but not a rendered text/layout cost.
 
-- **HYPOTHESIS:** `mobile/src/app/session/[id]/index.tsx:500-760` rebuilds timeline items and dispatches `renderItem` work when streaming state changes; this may allocate or reconcile per streamed update. Unmeasured; do not treat as a finding.
-- **HYPOTHESIS:** `mobile/src/components/chat/MessageRow.tsx:108-185` calls `parseReasoning` and renders `Markdown` while constructing each message row; large transcripts may repeat parsing/render allocation. Unmeasured; do not treat as a finding.
-- **HYPOTHESIS:** `mobile/src/app/perf-fixture.tsx:48-72` creates a 10,000-item data array and renders text rows through `FlatList`; row allocation and text layout may dominate fixture work. Unmeasured; do not treat as a finding.
+The benchmark output is emitted by `mobile/src/performance/render.bench.test.ts`; it reports elapsed milliseconds per operation rather than pass/fail assertions.
+- **HYPOTHESIS:** `mobile/src/app/session/[id]/index.tsx:500-760` rebuilds timeline items and dispatches `renderItem` work when streaming state changes; this may allocate or reconcile per streamed update. Unmeasured without rendering; no optimization applied.
+- **HYPOTHESIS:** `mobile/src/components/chat/MessageRow.tsx:108-185` calls `parseReasoning` and renders `Markdown` while constructing each message row; large transcripts may repeat parsing/render allocation. Parsing alone was measured cheap above; Markdown/render allocation remains unmeasured without rendering.
+- **HYPOTHESIS:** `mobile/src/app/perf-fixture.tsx:48-72` creates a 10,000-item data array and renders text rows through `FlatList`; grouping/windowing and text layout remain unmeasured without rendering.
 
 ## Phase 2 status
 
