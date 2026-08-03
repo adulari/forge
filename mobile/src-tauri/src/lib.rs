@@ -26,13 +26,15 @@ fn perf_dump(snapshot: String) -> Result<(), String> {
     std::fs::write(path, snapshot).map_err(|error| error.to_string())
 }
 #[tauri::command]
+fn perf_phase() -> String {
+    std::env::var("FORGE_PERF_PHASE").unwrap_or_else(|_| "idle".to_string())
+}
+
+#[tauri::command]
 fn perf_seed_update_seen() -> bool {
     std::env::var("FORGE_PERF_SEED_UPDATE_SEEN").ok().as_deref() == Some("1")
 }
 
-
-    std::env::var("FORGE_PERF_PHASE").unwrap_or_else(|_| "idle".to_string())
-}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
