@@ -1,3 +1,16 @@
+# Retained desktop performance baseline
+
+This baseline covers the retained Expo + react-native-web + Tauri client in `mobile/`. It excludes `desktop-native/`.
+
+## Run identity
+
+- Source commit for the instrumented app: `6dece827b4ee4dd449dfcd6717f2ec7d30962649`
+- Capture commit (harness/docs): `4a1f80a5`
+- Machine: x86_64 Linux workstation
+- OS/kernel: Arch Linux, `7.1.3-arch2-2`
+- Display strategy: real Hyprland display via `DISPLAY=:1`, `WAYLAND_DISPLAY=wayland-1`; monitor placement and refresh are recorded below from `hyprctl monitors -j` for every launch capture.
+- Build: `npm ci`; `npx expo export -p web`; `npx tauri build --bundles appimage`
+
 ## Baseline capture status
 
 The harness and export are verified. Real-display launch captures were run on **DP-2**, Hyprland monitor index 2, 1920×1080 at **143.99899 Hz**, scale 1.0. The window landed on the requested headline monitor in all three captures. The helper measured a mapped Tauri window, not application interactivity; the Diagnostics surface was not reached through an automated route/input fixture, so those values remain pending rather than being inferred.
