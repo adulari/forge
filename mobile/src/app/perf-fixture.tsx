@@ -26,6 +26,11 @@ export default function PerformanceFixtureScreen() {
   const listRef = useRef<FlatList<FixtureRow>>(null);
 
   useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.title = `Perf fixture | startup=${snapshot.startupToInteractiveMs?.toFixed(1) ?? "pending"}ms | frames=${snapshot.frameSamples} | dropped=${snapshot.droppedFrames} | long=${snapshot.longestTaskMs.toFixed(1)}ms`;
+    }
+  }, [snapshot]);
+  useEffect(() => {
     if (!PERF_FIXTURE_ENABLED) return;
 
     const refresh = setInterval(() => setSnapshot(getDesktopPerformanceSnapshot()), 1_000);
