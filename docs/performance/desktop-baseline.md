@@ -68,6 +68,13 @@ The benchmark output is emitted by `mobile/src/performance/render.bench.test.ts`
 - **HYPOTHESIS:** `mobile/src/components/chat/MessageRow.tsx:108-185` calls `parseReasoning` and renders `Markdown` while constructing each message row; large transcripts may repeat parsing/render allocation. Parsing alone was measured cheap above; Markdown/render allocation remains unmeasured without rendering.
 - **HYPOTHESIS:** `mobile/src/app/perf-fixture.tsx:48-72` creates a 10,000-item data array and renders text rows through `FlatList`; grouping/windowing and text layout remain unmeasured without rendering.
 
+## Parity guard live-PR evidence
+
+The parity guard caught undeclared platform drift on live PR #954: the desktop-only performance
+fixture and instrumentation (`mobile/src/app/perf-fixture.tsx` and `mobile/src/lib/performance.ts`)
+were rejected until explicitly inventoried as behavioral desktop boundaries. This is stronger
+than the synthetic negative test because the guard detected a real unreviewed change in the PR.
+
 ## Phase 2 status
 
 Phase 2 assessment remains intentionally blocked. The historical idle total is attributed above, but fixture, streaming, and long-session attribution is unavailable without display execution. No optimization is recorded because changing source against the idle total alone would be an unmeasured optimization. The next valid Phase 2 candidate must be selected from a completed workload-specific capture and re-measured with the same harness.

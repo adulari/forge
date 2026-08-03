@@ -78,6 +78,12 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/app/perf-fixture.tsx",
+    "platform": "desktop",
+    "reason": "Tauri-only release performance fixture and compositor measurement harness; intentionally excluded from web/native product parity",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/app/shares/[id].tsx",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
@@ -327,6 +333,12 @@
     "file": "mobile/src/lib/notify.ts",
     "platform": "desktop",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/lib/performance.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop performance instrumentation exports compositor and startup measurements through the gated perf_dump command",
     "category": "behavior"
   },
   {
