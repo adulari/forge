@@ -184,3 +184,28 @@ in-memory store is pinned to one connection. Covered by an 8-thread concurrency 
 **Status:** fixed + full workspace builds clean; clippy clean; 286 forge-core/forge-provider tests
 pass.
 </content>
+
+## Normal-route measurement correction
+
+The previously reported **405 ms startup, 134 ms maximum frame at ~315 ms, and 16 dropped
+frames** did not measure the user's connected application surface. They measured an **unconnected
+empty shell with the changelog sheet covering it**: no server, no session list, no transcript, and
+no chat. Those numbers are retained as an explicitly labeled empty-shell capture and must not be
+called an app baseline. The real connected application's first paint remains **unmeasured**.
+
+The capture harness now supports `FORGE_PERF_SEED_UPDATE_SEEN=1`, which seeds the existing
+`forge.lastSeenBuild.v1` AsyncStorage marker before the update notice is evaluated. This is a
+gated capture aid; it does not remove or weaken the user-facing update feature.
+
+## Unattended-launch and version-notice defects
+
+The empty-shell capture exposed a real automation/UX defect: an unattended desktop launch can land
+behind a changelog/update gate rather than in a usable connected state. The capture cannot proceed
+until the gate is seeded and a real server/session is connected.
+
+The screenshot also showed two distinct version sources at once: the updater banner reported
+**2.12.1 ready to install**, while the installed-build notice reported **2.6.6**. This is not one
+number being formatted two ways: `OperationalNotice` renders the updater plugin's available
+release version, while `UpdateNotice` renders the installed app version from `useAppVersion`.
+The notices are therefore internally consistent with different sources, but the unqualified
+presentation is confusing and is recorded as a version-notice UX defect requiring explicit labels.

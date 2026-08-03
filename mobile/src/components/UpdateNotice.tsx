@@ -35,6 +35,11 @@ export function UpdateNotice() {
   React.useEffect(() => {
     let cancelled = false;
     void (async () => {
+      const updateId = Updates.updateId ?? null;
+      if (process.env.FORGE_PERF_SEED_UPDATE_SEEN === "1") {
+        await rememberBuild({ updateId, appVersion });
+        return;
+      }
       const seen = await loadLastSeenBuild();
       if (cancelled) return;
       const found = updateNotice({
