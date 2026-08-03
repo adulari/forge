@@ -1447,9 +1447,9 @@ pub struct Session {
     /// the `use_skill` virtual tool (command-skill-system.md). `None` → the tool is not advertised
     /// and the turn runs exactly as before.
     skills: Option<Arc<forge_skills::Catalog>>,
-    /// In-session model pin (`/model <id>`). When set, mesh routing still classifies the prompt
-    /// (for stats), but this model is used instead of the routed pick. `None` = mesh routing.
-    pinned_model: Option<String>,
+    /// In-session model pin set (`/model <id>`). When set, mesh routing still classifies the prompt
+    /// (for stats), but this set is used instead of the routed pick. `None` = mesh routing.
+    pinned_model: Option<Vec<String>>,
     /// In-session reasoning-effort pin (`/effort <level>`). When set, forwarded to the provider
     /// as a `ReasoningEffort` hint each turn. `None` = provider default (no hint sent).
     pinned_effort: Option<EffortLevel>,
@@ -2331,24 +2331,42 @@ impl Session {
                 self.route_affinity.clone(),
                 self.estimated_reusable_prefix_tokens(),
             );
-        let decision = self
-            .router
-            .route_contextual(
-                prompt,
-                has_images,
-                budget,
-                &health,
-                &quota,
-                effective_tier,
-                self.pinned_effort,
-                &self.project,
-                &routing_context,
-            )
-            .await;
-        // `/model <id>` override: use the pinned model instead of the mesh-routed pick; mesh still
-        // classifies (for tier stats) but the actual call uses the pin.
-        let pinned = self.pinned_model.clone();
-        let routed_model = pinned.unwrap_or_else(|| decision.model.clone());
+        let decision = match self.pinned_model.as_deref() {
+            // `/model <id>`/`/model a,b` override: route restricted to the pinned set. The mesh
+            // still classifies (for tier stats) but the actual call + failover chain stay within
+            // the set — a single pin is strict (no cross-model fallback), a set ranks within
+            // itself and fails over only to other set members.
+            Some(pin) => {
+                self.router
+                    .route_with_pin_set(
+                        pin,
+                        prompt,
+                        has_images,
+                        budget,
+                        &health,
+                        &quota,
+                        self.pinned_effort,
+                        &self.project,
+                    )
+                    .await
+            }
+            None => {
+                self.router
+                    .route_contextual(
+                        prompt,
+                        has_images,
+                        budget,
+                        &health,
+                        &quota,
+                        effective_tier,
+                        self.pinned_effort,
+                        &self.project,
+                        &routing_context,
+                    )
+                    .await
+            }
+        };
+        let routed_model = decision.model.clone();
         let reuse_response_chain = should_reuse_response_chain(
             prompt,
             &routing_context,
@@ -8326,6 +8344,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_restores_the_pinned_effort_level() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let id = store.create_session(".", "default").unwrap();
+
+        let resumed = |store: Arc<Store>| {
+            Session::resume(
+                store,
+                Arc::new(MockProvider),
+                Arc::new(HeuristicRouter::new(Config::default())),
+                ToolRegistry::with_core_tools_in(test_workspace()),
+                Box::new(CapturePresenter::default()),
+                Config::default(),
+                &id,
+            )
+            .unwrap()
+        };
+
+        // A session that never pinned effort must resume unpinned, not at some default level:
+        // the absence of a pin is what lets the provider default apply.
+        assert_eq!(resumed(Arc::clone(&store)).pinned_effort(), None);
+
+        let mut session = resumed(Arc::clone(&store));
+        session.set_effort(Some(forge_types::EffortLevel::WhiteHot));
+        assert_eq!(
+            resumed(Arc::clone(&store)).pinned_effort(),
+            Some(forge_types::EffortLevel::WhiteHot),
+            "a raised effort must survive resume rather than silently dropping to the default"
+        );
+
+        // Lowering replaces rather than being ignored.
+        let mut session = resumed(Arc::clone(&store));
+        session.set_effort(Some(forge_types::EffortLevel::Low));
+        assert_eq!(
+            resumed(Arc::clone(&store)).pinned_effort(),
+            Some(forge_types::EffortLevel::Low)
+        );
+
+        // Clearing returns the session to the provider default.
+        let mut session = resumed(Arc::clone(&store));
+        session.set_effort(None);
+        assert_eq!(resumed(Arc::clone(&store)).pinned_effort(), None);
+    }
+
+    #[tokio::test]
     async fn resume_restores_the_task_list() {
         use forge_types::{TodoItem, TodoStatus};
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -9513,6 +9575,25 @@ mod tests {
                 rationale: "test".into(),
                 fallbacks: self.fallbacks.clone(),
                 pinned: false,
+            }
+        }
+        async fn route_with_pin_set(
+            &self,
+            pin: &[String],
+            _p: &str,
+            _has_images: bool,
+            _b: BudgetState,
+            _h: &forge_types::ModelHealth,
+            _q: &forge_types::SubscriptionQuota,
+            _effort: Option<forge_types::EffortLevel>,
+            _project: &forge_types::ProjectContext,
+        ) -> forge_mesh::RoutingDecision {
+            forge_mesh::RoutingDecision {
+                tier: forge_types::TaskTier::Trivial,
+                model: pin.first().cloned().unwrap_or_else(|| self.model.clone()),
+                rationale: "test".into(),
+                fallbacks: self.fallbacks.clone(),
+                pinned: true,
             }
         }
     }

@@ -1864,6 +1864,15 @@ pub struct SubagentsConfig {
     /// `0` disables the per-provider cap (global cap only).
     #[serde(default = "default_max_per_provider")]
     pub max_per_provider: usize,
+    /// Whether a pin active on the session (`--model` or in-session `/model`) is inherited by
+    /// every subagent, strictly (same model, `pinned: true`, no cross-model fallback chain) —
+    /// matching the strict-pin the parent gets. Default true: the user asked for this exact model,
+    /// so a delegated child must run the same model, and an agent-type tier default must not beat
+    /// it. When false, children route through the mesh independently (their normal failover chain
+    /// intact). A hard per-child pin (`/duel`'s `ResolvedAgent.pinned_model`) always wins regardless.
+    /// An absent key means `true`.
+    #[serde(default = "default_inherit_pin")]
+    pub inherit_pin: bool,
 }
 
 fn default_subagents_enabled() -> bool {
@@ -1881,6 +1890,9 @@ fn default_max_depth() -> usize {
 fn default_max_per_provider() -> usize {
     2
 }
+fn default_inherit_pin() -> bool {
+    true
+}
 fn default_agents_dir() -> String {
     ".forge/agents".to_string()
 }
@@ -1895,6 +1907,7 @@ impl Default for SubagentsConfig {
             agents_dir: default_agents_dir(),
             worktree_isolation: false,
             max_per_provider: default_max_per_provider(),
+            inherit_pin: default_inherit_pin(),
         }
     }
 }

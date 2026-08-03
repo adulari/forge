@@ -4588,7 +4588,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             session.lock().await.pinned_model(),
-            Some("groq::llama-3.3-70b"),
+            Some(&["groq::llama-3.3-70b".to_string()][..]),
             "the remote pick pinned the model"
         );
 

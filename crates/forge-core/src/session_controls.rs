@@ -110,13 +110,17 @@ impl Session {
     }
 
     /// Pin (or clear) the in-session model override. When `Some`, subsequent turns use this model
-    /// instead of the mesh-routed pick. `None` returns to normal mesh routing.
+    /// set instead of the mesh-routed pick. `None` returns to normal mesh routing. The list is
+    /// passed through `parse_pin_set` so a comma-separated `/model a,b,c` / pre-parsed set and a
+    /// single `/model a` share one representation.
     pub fn pin_model(&mut self, model_id: Option<String>) {
-        self.pinned_model = model_id;
+        self.pinned_model = model_id
+            .map(|s| forge_mesh::parse_pin_set(&s))
+            .filter(|set| !set.is_empty());
     }
 
-    /// The currently-pinned model, if any (`/model <id>` was called this session).
-    pub fn pinned_model(&self) -> Option<&str> {
+    /// The currently-pinned model set, if any (`/model <id>` was called this session).
+    pub fn pinned_model(&self) -> Option<&[String]> {
         self.pinned_model.as_deref()
     }
 
@@ -158,6 +162,13 @@ impl Session {
             self.whitehot_guidance_injected = false;
         }
         self.pinned_effort = e;
+        // Persisted here rather than at the call sites so every path that changes effort — the
+        // TUI slider, `/effort`, a remote client — is covered. Without it a resumed session
+        // silently drops back to the provider default, which reads as the agent quietly
+        // downgrading itself. Best-effort: a store failure must not fail the control.
+        let _ = self
+            .store
+            .set_session_pinned_effort(&self.id, e.map(|level| level.as_str()));
     }
 
     /// The currently-pinned effort level, if any (`/effort <level>` was called this session).

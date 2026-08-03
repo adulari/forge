@@ -992,14 +992,65 @@ pub trait Router: Send + Sync {
     fn trivial_candidates(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// The model set pinned on this router, if any (`--model "a,b"` / `--model a`). `None` = no
+    /// pin (classify normally). Defaults to `None`; [`HeuristicRouter`] reports its `pin`.
+    /// Subagent pin inheritance uses this to know whether the mesh is pinned without reaching
+    /// into the concrete type.
+    fn pin(&self) -> Option<&[String]> {
+        None
+    }
+
+    /// Route restricted to an EXPLICIT pin set (an in-session `/model` set, or a subagent
+    /// inheriting the parent's set). The mesh ranks WITHIN the set using its normal ordering
+    /// (tier fit, cost, health, quota, benchmarks) and never picks outside it; a single-element
+    /// set is a strict pin with no cross-model fallback. The default routes normally (a router
+    /// that can't apply a pin set must not be silently restricted); [`HeuristicRouter`] and
+    /// [`LlmRouter`] route through [`HeuristicRouter::decide_with_pin`].
+    #[allow(clippy::too_many_arguments)]
+    async fn route_with_pin_set(
+        &self,
+        _pin: &[String],
+        prompt: &str,
+        has_images: bool,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+    ) -> RoutingDecision {
+        self.route(prompt, has_images, budget, health, quota, effort, project)
+            .await
+    }
+
+    /// Route through the mesh IGNORING any pin this router holds — used when subagent pin
+    /// inheritance is disabled (`mesh.subagents.inherit_pin = false`), so a child can route
+    /// independently with its full failover chain intact even though the parent's router is
+    /// pinned. The default simply routes normally (a router that can't distinguish a pin must
+    /// not be silently unpinned); [`HeuristicRouter`] overrides this to strip its pin.
+    #[allow(clippy::too_many_arguments)]
+    async fn route_unpinned(
+        &self,
+        prompt: &str,
+        has_images: bool,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+    ) -> RoutingDecision {
+        self.route(prompt, has_images, budget, health, quota, effort, project)
+            .await
+    }
 }
 
 /// The default v0.1 router: deterministic heuristics over cheap local signals (ADR-0006).
 pub struct HeuristicRouter {
     config: Config,
-    /// A user-pinned model (`--model`) that bypasses classification, subject to the budget
-    /// contract. `None` = classify normally.
-    pin: Option<String>,
+    /// A user-pinned set of models (`--model "a,b"` / a single `--model a`) that bypasses
+    /// classification and restricts the routing pool, subject to the budget contract. `None` =
+    /// classify normally. Kept as a set so a single pin and a pin set share ONE selection path.
+    pin: Option<Vec<String>>,
     /// Whether `model`'s provider has a usable key (for provider fallback). Injectable so
     /// tests are deterministic; defaults to a real env/keyring check.
     model_available: fn(&str) -> bool,
@@ -1071,10 +1122,12 @@ impl HeuristicRouter {
         }
     }
 
-    /// Pin a model (`--model`); empty/`None` clears it.
+    /// Pin a model set (`--model "a,b"` / `--model a`); empty/`None` clears it. Comma-separated
+    /// ids are trimmed, empties dropped, and a single id is a one-element set — so a single pin
+    /// and a pin set share ONE selection path.
     /// Documented in docs/features/mesh-routing.md.
     pub fn with_pin(mut self, pin: Option<String>) -> Self {
-        self.pin = pin.filter(|s| !s.is_empty());
+        self.pin = pin.map(|s| parse_pin_set(&s)).filter(|set| !set.is_empty());
         self
     }
 
@@ -1239,7 +1292,7 @@ impl HeuristicRouter {
         self
     }
 
-    fn classify(prompt: &str, project: &ProjectContext) -> (TaskTier, String) {
+    pub fn classify(prompt: &str, project: &ProjectContext) -> (TaskTier, String) {
         let c = score_prompt(prompt, project);
         (c.tier, c.reasons.join(", "))
     }
@@ -1515,6 +1568,39 @@ impl HeuristicRouter {
         // usable OAuth surface elsewhere in this turn.
         Self::suppress_usable_oauth_superseded_bridges(&mut chain);
         chain
+    }
+
+    /// Build the ordered failover chain for a PIN SET: the set's members ranked by the mesh's
+    /// normal ordering (usable first, then by tier fit / cost / health / quota / benchmark), and
+    /// ONLY the set's members — failover never escapes the set. Usable members are ranked first;
+    /// unusable (benched/rate-limited/unhealthy) members are skipped during ranking. Returns
+    /// `Vec::new()` when no member is usable — the caller then dispatches the first member anyway
+    /// so the provider's real error surfaces (mirrors single-pin's "unavailable" behaviour).
+    #[allow(clippy::too_many_arguments)]
+    fn build_chain_restricted_to(
+        &self,
+        pin: &[String],
+        routed: TaskTier,
+        health: &ModelHealth,
+        hints: RouteHints,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        min_context: Option<u32>,
+        has_images: bool,
+    ) -> Vec<String> {
+        let full = self.build_chain(
+            routed,
+            health,
+            hints,
+            quota,
+            effort,
+            min_context,
+            has_images,
+        );
+        // Preserve the mesh's ranked order over the full chain, restricted to the set. This ranks
+        // WITHIN the set exactly as the mesh ranks the full catalog (tier fit, cost, health,
+        // quota, benchmarks), and drops every member the set didn't pin.
+        full.into_iter().filter(|m| pin.contains(m)).collect()
     }
 
     fn affinity_quality(&self, model: &str, code_heavy: bool) -> Option<f64> {
@@ -1856,6 +1942,21 @@ fn describe_affinity_quality(quality_gap: Option<f64>, quality_band: f64) -> Str
     )
 }
 
+/// Parse a comma-separated pin list (`--model "a,b,c"`, `/model a,b`, the daemon `model` field)
+/// into the ordered set of model ids. Whitespace is trimmed around each entry; empty entries
+/// (trailing/leading/double commas) and empty ids are dropped. An empty/whitespace-only input
+/// yields an empty vec (no pin). The mesh ranks WITHIN this set exactly as it ranks the full
+/// catalog, so the returned order is the user's declared order and the set is later re-ranked by
+/// the normal mesh ordering — not kept in input order.
+pub fn parse_pin_set(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// A `(u8, f64)`-comparable cost key. `f64` isn't `Ord`, so wrap it for use inside tuple
 /// `.cmp()`; NaN (no price → treated as a stable max) can't occur here as costs are finite.
 #[derive(PartialEq)]
@@ -1877,10 +1978,47 @@ impl HeuristicRouter {
     /// reason it was chosen, apply pin / budget pressure / cost-aware candidate selection.
     /// Pure + sync, so any [`Router`] (incl. the LLM one) can reuse the whole selection path.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     /// Documented in docs/features/mesh-routing.md.
     pub fn decide(
         &self,
+        classified_tier: TaskTier,
+        classify_reason: String,
+        budget: BudgetState,
+        health: &ModelHealth,
+        hints: RouteHints,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        has_images: bool,
+    ) -> RoutingDecision {
+        self.decide_with_pin(
+            self.pin.as_deref(),
+            classified_tier,
+            classify_reason,
+            budget,
+            health,
+            hints,
+            quota,
+            effort,
+            has_images,
+        )
+    }
+
+    /// The pinned model set on this router, if any (`--model "a,b"` / `--model a`). An empty
+    /// slice means no pin. `None` = classify normally.
+    pub fn pin(&self) -> Option<&[String]> {
+        self.pin.as_deref()
+    }
+
+    /// `decide` with an explicit pin set — the router's own pin, or an externally-supplied
+    /// override (e.g. an in-session `/model` pin, or a subagent inheriting the parent's pin).
+    /// `None` skips the pin path entirely so the mesh routes normally (used by
+    /// [`Router::route_unpinned`]). A single-element set behaves EXACTLY as a single pin did
+    /// before multi-pin support: `pinned: true` and an empty fallback chain (unless
+    /// `mesh.pin_failover`). Budget-override semantics are identical to a router-held pin.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decide_with_pin(
+        &self,
+        pin: Option<&[String]>,
         classified_tier: TaskTier,
         classify_reason: String,
         budget: BudgetState,
@@ -1895,39 +2033,77 @@ impl HeuristicRouter {
         let min_context = budget.min_context_tokens;
 
         // A pin bypasses classification unless an exhausted budget may override it.
-        if let Some(pin) = self
-            .pin
-            .as_ref()
-            .filter(|_| !(exhausted && bg_override_pin))
-        {
+        if let Some(pin) = pin.filter(|_| !(exhausted && bg_override_pin)) {
             let mut why = "pinned via --model".to_string();
-            let mut chain = self.build_chain(
-                classified_tier,
-                health,
-                hints,
-                quota,
-                effort,
-                min_context,
-                has_images,
-            );
-            let model = if self.is_usable(pin, health, quota) {
-                pin.clone()
+            // A single-member set is EXACTLY a single pin (hard compatibility): the model is the
+            // pin itself and the failover chain is the full mesh chain, cleared under strict
+            // semantics (unless `pin_failover`). A set of two or more restricts the pool to its
+            // members: the model is the best-ranked usable member and the chain is the remaining
+            // members, ranked by the mesh's normal ordering and confined to the set.
+            let model = if pin.len() == 1 {
+                if !self.is_usable(&pin[0], health, quota) {
+                    why.push_str(" — unavailable");
+                }
+                pin[0].clone()
             } else {
-                why.push_str(" — unavailable");
-                pin.clone()
+                let restricted = self.build_chain_restricted_to(
+                    pin,
+                    classified_tier,
+                    health,
+                    hints,
+                    quota,
+                    effort,
+                    min_context,
+                    has_images,
+                );
+                match restricted.first() {
+                    Some(m) => m.clone(),
+                    None => {
+                        // Every member is currently unusable (benched/rate-limited/unhealthy):
+                        // dispatch the first member anyway so the provider's real, actionable error
+                        // surfaces rather than silently falling through to a model outside the set.
+                        // Mirrors what a single pin does when its only model is unavailable.
+                        why.push_str(" — unavailable");
+                        pin[0].clone()
+                    }
+                }
+            };
+            let mut chain = if pin.len() == 1 {
+                self.build_chain(
+                    classified_tier,
+                    health,
+                    hints,
+                    quota,
+                    effort,
+                    min_context,
+                    has_images,
+                )
+            } else {
+                self.build_chain_restricted_to(
+                    pin,
+                    classified_tier,
+                    health,
+                    hints,
+                    quota,
+                    effort,
+                    min_context,
+                    has_images,
+                )
             };
             chain.retain(|m| m != &model);
             // An explicit pin remains explicit even if the provider is currently unavailable;
             // dispatching it surfaces the provider's actionable error instead of silently changing
             // the user's requested model.
             let pinned = true;
-            // Strict pin semantics (harness-robustness wave 2, fix 2): an explicit pin gets NO
+            // Strict pin semantics (harness-robustness wave 2, fix 2): a SINGLE pin gets NO
             // cross-model fallback chain — mid-turn failover off a pinned model silently
             // contaminated runs that depended on the exact model (the SWE-bench baseline switched
             // 2 pinned instances to a different model). A rate limit is waited out on the SAME
             // model (the pinned backoff in forge-core); a permanent error fails the turn with the
             // real cause. `mesh.pin_failover = true` restores the old switch-away behaviour.
-            if pinned && !self.config.mesh.pin_failover {
+            // A SET of two or more keeps its within-set chain (that is the whole point of pinning
+            // a set), which is still confined to the set and never escapes it.
+            if pin.len() == 1 && !self.config.mesh.pin_failover {
                 chain.clear();
             }
             return RoutingDecision {
@@ -1941,7 +2117,7 @@ impl HeuristicRouter {
 
         // Apply budget pressure (FR-5).
         let mut tier = classified_tier;
-        let mut why = if self.pin.is_some() {
+        let mut why = if pin.is_some() {
             // pin was set but an exhausted budget overrode it (see filter above)
             tier = TaskTier::Trivial;
             "budget cap reached — pin overridden, trivial tier".to_string()
@@ -2058,6 +2234,10 @@ impl HeuristicRouter {
 
 #[async_trait]
 impl Router for HeuristicRouter {
+    fn pin(&self) -> Option<&[String]> {
+        self.pin.as_deref()
+    }
+
     async fn route(
         &self,
         prompt: &str,
@@ -2071,6 +2251,59 @@ impl Router for HeuristicRouter {
         let activity = self.classification_activity(prompt);
         let (tier, reason) = Self::classify(activity, project);
         self.decide(
+            tier,
+            reason,
+            budget,
+            health,
+            RouteHints::from_prompt(activity),
+            quota,
+            effort,
+            has_images,
+        )
+    }
+
+    async fn route_unpinned(
+        &self,
+        prompt: &str,
+        has_images: bool,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+    ) -> RoutingDecision {
+        // Subagent routing with pin inheritance disabled: strip the router's own pin so the child
+        // gets the mesh's normal failover chain instead of being forced onto the parent's `--model`.
+        let activity = self.classification_activity(prompt);
+        let (tier, reason) = Self::classify(activity, project);
+        self.decide_with_pin(
+            None,
+            tier,
+            reason,
+            budget,
+            health,
+            RouteHints::from_prompt(activity),
+            quota,
+            effort,
+            has_images,
+        )
+    }
+
+    async fn route_with_pin_set(
+        &self,
+        pin: &[String],
+        prompt: &str,
+        has_images: bool,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+    ) -> RoutingDecision {
+        let activity = self.classification_activity(prompt);
+        let (tier, reason) = Self::classify(activity, project);
+        self.decide_with_pin(
+            Some(pin),
             tier,
             reason,
             budget,
@@ -2252,11 +2485,11 @@ mod tests {
         let models = vec![
             "codex-cli::gpt-5.6-sol".to_string(),
             "qwencloud::qwen3.6-flash".to_string(),
-            "opencode_go::kimi-k3".to_string(),
+            "opencode::kimi-k3".to_string(),
         ];
         let catalog = ModelCatalog::new(models.clone()).with_benchmarks(Some(bench.clone()));
         let router = HeuristicRouter::new(Config::default())
-            .with_availability(|model| !model.starts_with("opencode_go::"))
+            .with_availability(|model| !model.starts_with("opencode::"))
             .with_catalog(catalog);
         let quota = conserve_quota(0.7, "plus", "plus");
         let seed = (0..10_000)
@@ -3722,6 +3955,202 @@ mod tests {
         assert!(
             !d.fallbacks.is_empty(),
             "escape hatch keeps the old pin fallback chain"
+        );
+    }
+
+    // --- Multi-model pin set (docs/features/mesh-routing.md): a comma-separated `--model "a,b"`
+    // restricts the routing pool to EXACTLY that set, ranked within the set by the mesh. ---
+
+    #[tokio::test]
+    async fn two_model_pin_picks_one_and_fails_over_only_to_the_other() {
+        // A two-model pin set: the chosen model is one of the two, and the failover chain contains
+        // only the OTHER member — never a model outside the set.
+        let r = mixed_router();
+        let set = vec!["groq::llama-3.3-70b-versatile".to_string()];
+        let d = r.decide_with_pin(
+            Some(&set),
+            TaskTier::Standard,
+            "test".into(),
+            BudgetState::default(),
+            &ModelHealth::default(),
+            RouteHints::default(),
+            &SubscriptionQuota::default(),
+            None,
+            false,
+        );
+        assert_eq!(d.model, "groq::llama-3.3-70b-versatile");
+        assert!(d.pinned);
+        assert!(
+            d.fallbacks.is_empty(),
+            "a one-member set is a strict single pin: no fallback chain"
+        );
+
+        // Two members: the primary is one of them, the chain is the other.
+        let set = vec![
+            "groq::llama-3.3-70b-versatile".to_string(),
+            "gemini::gemini-2.5-flash".to_string(),
+        ];
+        let d = r.decide_with_pin(
+            Some(&set),
+            TaskTier::Standard,
+            "test".into(),
+            BudgetState::default(),
+            &ModelHealth::default(),
+            RouteHints::default(),
+            &SubscriptionQuota::default(),
+            None,
+            false,
+        );
+        assert!(
+            set.contains(&d.model),
+            "primary must be in the set: {}",
+            d.model
+        );
+        assert!(d.pinned);
+        assert!(
+            d.fallbacks.iter().all(|m| set.contains(m)),
+            "fallback chain must stay inside the set: {:?}",
+            d.fallbacks
+        );
+        assert_eq!(d.fallbacks.len(), 1, "only the other member is a fallback");
+        assert_ne!(d.fallbacks[0], d.model);
+    }
+
+    #[tokio::test]
+    async fn two_model_pin_skips_the_benched_member() {
+        // The mesh-preferred member is benched: the other member must be chosen instead.
+        let r = mixed_router();
+        let set = vec![
+            "groq::llama-3.3-70b-versatile".to_string(),
+            "gemini::gemini-2.5-flash".to_string(),
+        ];
+        // Bench the top-ranked member (the one the mesh would otherwise pick first). If the mesh
+        // prefers groq, benching it flips the pick to gemini; assert the pick is the non-benched
+        // member regardless of which one the mesh ranks first.
+        let health = ModelHealth::new(core::iter::once(set[0].clone()).collect());
+        let d = r.decide_with_pin(
+            Some(&set),
+            TaskTier::Standard,
+            "test".into(),
+            BudgetState::default(),
+            &health,
+            RouteHints::default(),
+            &SubscriptionQuota::default(),
+            None,
+            false,
+        );
+        assert_eq!(
+            d.model, "gemini::gemini-2.5-flash",
+            "benched member skipped"
+        );
+        assert!(d.pinned);
+        assert!(
+            d.fallbacks.iter().all(|m| set.contains(m)),
+            "chain stays inside the set: {:?}",
+            d.fallbacks
+        );
+    }
+
+    #[tokio::test]
+    async fn two_model_pin_both_unusable_dispatchs_the_first_anyway() {
+        // Both members are unusable (benched): the first is still dispatched so the provider's real
+        // error surfaces — never a model from outside the set.
+        let r = mixed_router();
+        let set = vec![
+            "groq::llama-3.3-70b-versatile".to_string(),
+            "gemini::gemini-2.5-flash".to_string(),
+        ];
+        let health = ModelHealth::new(
+            core::iter::once(set[0].clone())
+                .chain([set[1].clone()])
+                .collect(),
+        );
+        let d = r.decide_with_pin(
+            Some(&set),
+            TaskTier::Standard,
+            "test".into(),
+            BudgetState::default(),
+            &health,
+            RouteHints::default(),
+            &SubscriptionQuota::default(),
+            None,
+            false,
+        );
+        assert_eq!(
+            d.model, "groq::llama-3.3-70b-versatile",
+            "first member dispatched"
+        );
+        assert!(d.pinned);
+        assert!(d.rationale.contains("unavailable"));
+        assert!(
+            d.fallbacks.iter().all(|m| set.contains(m)),
+            "chain stays inside the set: {:?}",
+            d.fallbacks
+        );
+    }
+
+    #[tokio::test]
+    async fn single_model_pin_is_strict_and_has_no_fallback() {
+        // Regression guard: a set of exactly one must behave EXACTLY as a single pin did before —
+        // `pinned: true`, empty fallback chain, no cross-model failover.
+        let r = mixed_router();
+        let set = vec!["gemini::gemini-2.5-pro".to_string()];
+        let d = r.decide_with_pin(
+            Some(&set),
+            TaskTier::Complex,
+            "test".into(),
+            BudgetState::default(),
+            &ModelHealth::default(),
+            RouteHints::default(),
+            &SubscriptionQuota::default(),
+            None,
+            false,
+        );
+        assert_eq!(d.model, "gemini::gemini-2.5-pro");
+        assert!(d.pinned, "a single-member set is still a pin");
+        assert!(
+            d.fallbacks.is_empty(),
+            "a single-member set must have NO cross-model fallback chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_pinned_routes_via_the_mesh_unchanged() {
+        // No pin: the mesh routes normally (the full candidate pool, uncharted by any set).
+        let r = mixed_router();
+        let d = r.decide_with_pin(
+            None,
+            TaskTier::Standard,
+            "test".into(),
+            BudgetState::default(),
+            &ModelHealth::default(),
+            RouteHints::default(),
+            &SubscriptionQuota::default(),
+            None,
+            false,
+        );
+        assert!(!d.pinned);
+        assert!(
+            !d.fallbacks.is_empty(),
+            "unpinned routing keeps its normal failover chain"
+        );
+    }
+
+    #[test]
+    fn parse_pin_set_splits_commas_trims_and_drops_empties() {
+        assert_eq!(
+            parse_pin_set("a, b ,c"),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert_eq!(parse_pin_set("a"), vec!["a".to_string()]);
+        assert_eq!(
+            parse_pin_set("a,,b"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert!(parse_pin_set("").is_empty(), "empty string yields no pin");
+        assert!(
+            parse_pin_set("  , , ").is_empty(),
+            "whitespace-only yields no pin"
         );
     }
 

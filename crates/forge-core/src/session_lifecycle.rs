@@ -11,7 +11,7 @@ use forge_mesh::{pricing::Pricing, Router};
 use forge_provider::Provider;
 use forge_store::Store;
 use forge_tools::ToolRegistry;
-use forge_types::{Message, PermissionMode, Presenter, PresenterEvent};
+use forge_types::{EffortLevel, Message, PermissionMode, Presenter, PresenterEvent};
 
 use crate::{
     context_pack, current_git_branch, read_project_agents_md, turn_contract, CoreError,
@@ -93,7 +93,15 @@ impl Session {
                 config.permission_mode = m;
             }
         }
-        Ok(Self::build(
+        // Restore the reasoning-effort pin the same way, and for the same reason: without it a
+        // session driven at a raised effort silently comes back at the provider default, which
+        // reads as the agent quietly downgrading itself mid-goal.
+        let pinned_effort = store
+            .session_pinned_effort(session_id)
+            .ok()
+            .flatten()
+            .and_then(|stored| EffortLevel::parse(&stored));
+        let mut session = Self::build(
             session_id.to_string(),
             store,
             provider,
@@ -104,7 +112,11 @@ impl Session {
             workspace,
             transcript,
             seq,
-        ))
+        );
+        if let Some(level) = pinned_effort {
+            session.set_effort(Some(level));
+        }
+        Ok(session)
     }
 
     #[allow(clippy::too_many_arguments)]
