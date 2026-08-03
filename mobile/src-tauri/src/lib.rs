@@ -74,6 +74,18 @@ pub fn run() {
                 main_window.set_decorations(false)?;
 
                 #[cfg(target_os = "linux")]
+                {
+                    if let Some(size) = std::env::var("FORGE_CAPTURE_SIZE").ok().and_then(|value| {
+                        let (width, height) = value.split_once('x')?;
+                        Some((width.parse::<f64>().ok()?, height.parse::<f64>().ok()?))
+                    }) {
+                        main_window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+                            size.0, size.1,
+                        )))?;
+                    }
+                }
+
+                #[cfg(target_os = "linux")]
                 install_linux_microphone_permission(&main_window)?;
             }
 
