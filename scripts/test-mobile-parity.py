@@ -35,8 +35,9 @@ class ParityGuardTests(unittest.TestCase):
             'export function Screen() { return Platform.OS === "web" ? <Text>web</Text> : <Text>native</Text>; }',
             [],
         )
-        self.assertEqual(detected, {"mobile/src/Screen.tsx": "behavior"})
-        self.assertNotIn("mobile/src/Screen.tsx", declared)
+        errors = parity.validate(declared, detected)
+        self.assertTrue(errors)
+        self.assertIn("undeclared platform divergence", errors[0])
 
     def test_declared_behavior_passes(self) -> None:
         detected, declared = self.run_fixture(

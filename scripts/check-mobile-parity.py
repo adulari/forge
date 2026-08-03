@@ -62,6 +62,16 @@ def load_inventory() -> dict[str, dict[str, str]]:
     return result
 
 
+def validate(inventory: dict[str, dict[str, str]], detected: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+    declared = set(inventory)
+    missing = sorted(set(detected) - declared)
+    stale = sorted(declared - set(detected))
+    wrong_kind = sorted(file for file, kind in detected.items() if inventory.get(file, {}).get("category") != kind)
+    if missing: errors.append("undeclared platform divergence: " + ", ".join(missing))
+    if stale: errors.append("stale parity inventory rows: " + ", ".join(stale))
+    if wrong_kind: errors.append("parity inventory category mismatch: " + ", ".join(wrong_kind))
+    return errors
 def write_inventory() -> None:
     rows = []
     for file, category in sorted(detected_files().items()):
@@ -93,17 +103,9 @@ def main() -> int:
         return 0
     inventory = load_inventory()
     detected = detected_files()
-    declared = set(inventory)
-    missing = sorted(set(detected) - declared)
-    stale = sorted(declared - set(detected))
-    wrong_kind = sorted(file for file, kind in detected.items() if inventory.get(file, {}).get("category") != kind)
-    if missing or stale or wrong_kind:
-        if missing:
-            print("undeclared platform divergence:", *missing, sep="\n  ", file=sys.stderr)
-        if stale:
-            print("stale parity inventory rows:", *stale, sep="\n  ", file=sys.stderr)
-        if wrong_kind:
-            print("parity inventory category mismatch:", *wrong_kind, sep="\n  ", file=sys.stderr)
+    errors = validate(inventory, detected)
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
         return 1
     behavior = sum(kind == "behavior" for kind in detected.values())
     print(f"mobile parity inventory clean: {len(detected)} declared files ({behavior} behavioral boundaries)")
