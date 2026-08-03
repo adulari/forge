@@ -33,8 +33,11 @@ No latency figure is presented as input-to-present. No display refresh-rate clai
 
 ## Real-display capture attempt (2026-08-03)
 
-A real-display capture was attempted on HDMI-A-1/eDP-1 preference, but the retained Tauri development/release windows mapped on Hyprland monitor index 2 (DP-2) despite the requested placement override. No user window was moved or modified; the launched windows were terminated afterward. The instrumentation endpoint received no application snapshot beyond a connectivity probe, and the Diagnostics/fixture route could not be driven without interfering with the user's active workspace. Therefore every display-dependent figure remains **pending — capture did not produce an app measurement; no number is inferred**. The AppImage build produced the uncompressed AppDir but no compressed artifact before the bounded build command stopped; the existing cached linuxdeploy tool remains invalid as documented above.
+A real-display capture was attempted with `DISPLAY=:1`, `GDK_BACKEND=x11`, `WEBKIT_DISABLE_DMABUF_RENDERER=1`, and no `WAYLAND_DISPLAY`. Hyprland reported HDMI-A-1 at 1920×1080/60 Hz, eDP-1 at 60.012 Hz scale 2, and DP-2 at 143.99899 Hz. Despite the active runtime rule, the launched Forge windows mapped to DP-2 (monitor index 2), so the attempt was stopped without driving input or moving any window. No user window was moved or modified; the launched Forge processes and Expo server were terminated afterward.
 
+The instrumentation endpoint received no valid application snapshot from the attempted runs; the only line was a connectivity probe. Consequently there is **no measured startup, composer, IME, scroll, streaming, or workload RSS value from this attempt**. All display-dependent figures remain **pending — capture did not produce an app measurement; no number is inferred**. This is not a valid HDMI-A-1 measurement and must not be used as one.
+
+A release `npx tauri build --bundles appimage` attempt again produced the uncompressed AppDir but no compressed AppImage within the bounded run. The cached linuxdeploy/plugin path remains invalid as previously documented; compressed artifact size and packaged first-run startup remain pending.
 
 The earlier 10-second idle capture reported **785,520 KiB** total RSS. Its process table attributes that total as follows:
 
