@@ -36,7 +36,10 @@ Still pending:
 - 10,000-row transcript scroll, dropped frames, and long tasks: requires a deterministic 10k-row fixture in the retained app; no fixture was available and no source estimate is reported.
 - streaming-turn main-thread long tasks: requires a connected streaming turn fixture; the 10-second idle sample is not substituted.
 
-## Reproducible fixtures
+## Phase 2 status
+
+Phase 2 assessment started with the largest measured value: the **785,520 KiB (~767.1 MiB) idle process-tree RSS**. No optimization is recorded because the measurement is an idle process-tree total with no connected session, 10k-row fixture, streaming turn, or long-session workload; it cannot identify which retained component causes the footprint. The new deterministic fixture and real-display operator harness make that next measurement reproducible. Applying a source change now would be an unmeasured optimization, so there is no before/after claim and nothing to revert.
+
 
 `mobile/src/app/perf-fixture.tsx` is a deterministic debug-only route (`/perf-fixture`, available only in `__DEV__`). It renders exactly 10,000 stable rows through the retained `FlatList` settings and emits a local mock stream of 600 state updates at 50 ms intervals. The mock stream simulates token-arrival cadence and rendering pressure only; it does not simulate network, daemon, model, or authentication work. Open the route, leave it running for at least 30 seconds, scroll from top to bottom and back, then record the Diagnostics collector values. IME samples are tagged from browser composition commits and are unavailable on native surfaces that do not expose that event.
 
