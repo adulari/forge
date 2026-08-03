@@ -25,6 +25,10 @@ fn perf_dump(snapshot: String) -> Result<(), String> {
     };
     std::fs::write(path, snapshot).map_err(|error| error.to_string())
 }
+#[tauri::command]
+fn perf_phase() -> String {
+    std::env::var("FORGE_PERF_PHASE").unwrap_or_else(|_| "idle".to_string())
+}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -59,6 +63,7 @@ pub fn run() {
             about::set_about_info,
             about::open_about_window,
             perf_dump,
+            perf_phase,
         ])
         .setup(|app| {
             #[cfg(not(target_os = "macos"))]

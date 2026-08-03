@@ -7,6 +7,7 @@ export type DesktopPerformanceSnapshot = {
   frameTimeP50Ms: number | null;
   frameTimeP95Ms: number | null;
   frameTimeMaxMs: number | null;
+  frameEvents: { atMs: number; intervalMs: number }[];
   longTaskCount: number;
   longTaskTotalMs: number;
   longestTaskMs: number;
@@ -26,6 +27,7 @@ const startedAt = typeof performance !== "undefined" ? performance.now() : null;
 const composerSamples: number[] = [];
 const composerImeSamples: number[] = [];
 const frameIntervals: number[] = [];
+const frameTimes: number[] = [];
 let startupToInteractiveMs: number | null = null;
 let frameSamples = 0;
 let droppedFrames = 0;
@@ -46,6 +48,7 @@ function sampleFrame(now: number): void {
   if (lastFrameAt != null) {
     const interval = now - lastFrameAt;
     frameIntervals.push(interval);
+    frameTimes.push(startedAt == null ? now : now - startedAt);
     frameSamples += 1;
     const expected = percentile(frameIntervals, 0.5) ?? 16.67;
     if (interval > expected * 1.5) droppedFrames += Math.max(1, Math.round(interval / expected) - 1);
@@ -108,6 +111,7 @@ export function getDesktopPerformanceSnapshot(): DesktopPerformanceSnapshot {
     frameTimeP50Ms: percentile(frameIntervals, 0.5),
     frameTimeP95Ms: percentile(frameIntervals, 0.95),
     frameTimeMaxMs: percentile(frameIntervals, 1),
+    frameEvents: frameIntervals.map((intervalMs, index) => ({ atMs: frameTimes[index], intervalMs })),
     longTaskCount,
     longTaskTotalMs,
     longestTaskMs,
@@ -133,6 +137,7 @@ export function resetDesktopPerformanceSamples(): void {
   composerSamples.length = 0;
   composerImeSamples.length = 0;
   frameIntervals.length = 0;
+  frameTimes.length = 0;
   frameSamples = 0;
   droppedFrames = 0;
   longTaskCount = 0;

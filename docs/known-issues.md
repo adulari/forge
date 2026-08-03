@@ -21,6 +21,15 @@ on the affected Wayland session.
 **Status:** source workaround verified in the native release binary and packaged child; the
 separate AppImage XWayland defect below remains release-blocking.
 
+## Release fixture frame-stall finding
+
+The isolated release measurements on eDP-1 (scale 2.0, 60.012 Hz, logical 1890x1114 /
+estimated physical 3780x2228, native Wayland) show the largest observed frame spikes occur
+during the initial fixture phase rather than in a JavaScript long task. Idle measured 125 ms at
+~312 ms after monitor start; programmatic scroll measured 181 ms at ~342 ms; streaming measured
+180 ms at ~349 ms. All three recorded zero long tasks. This is evidence of a compositor/paint/
+raster or startup-resource stall, not a median-frame problem.
+
 ## AppImage XWayland packaging defect
 
 **Finding (verified):** the locally-built release binary mapped as native Wayland (`xwayland=false`),

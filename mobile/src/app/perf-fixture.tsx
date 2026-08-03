@@ -24,13 +24,22 @@ export default function PerformanceFixtureScreen() {
   const tokens = useTokens();
   const [snapshot, setSnapshot] = useState<DesktopPerformanceSnapshot>(() => getDesktopPerformanceSnapshot());
   const [streamedTokens, setStreamedTokens] = useState(0);
+  const [phase, setPhase] = useState("idle");
   const listRef = useRef<FlatList<FixtureRow>>(null);
 
   useEffect(() => {
-    const title = `Perf fixture | startup=${snapshot.startupToInteractiveMs?.toFixed(1) ?? "pending"}ms | frames=${snapshot.frameSamples} | dropped=${snapshot.droppedFrames} | long=${snapshot.longestTaskMs.toFixed(1)}ms`;
+    if (!PERF_FIXTURE_ENABLED) return;
+    void (async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      setPhase(await invoke<string>("perf_phase"));
+    })();
+  }, []);
+
+  useEffect(() => {
+    const title = `Perf fixture | phase=${phase} | startup=${snapshot.startupToInteractiveMs?.toFixed(1) ?? "pending"}ms | frames=${snapshot.frameSamples} | dropped=${snapshot.droppedFrames} | long=${snapshot.longestTaskMs.toFixed(1)}ms`;
     void getCurrentWindow().setTitle(title);
     if (typeof document !== "undefined") document.title = title;
-  }, [snapshot]);
+  }, [phase, snapshot]);
   useEffect(() => {
     if (!PERF_FIXTURE_ENABLED) return;
 
@@ -41,21 +50,25 @@ export default function PerformanceFixtureScreen() {
     let emitted = 0;
     let scrollOffset = 0;
     let direction = 1;
-    const stream = setInterval(() => {
-      emitted += 1;
-      setStreamedTokens(emitted);
-      if (emitted >= STREAM_TOKEN_COUNT) clearInterval(stream);
+    const driveScroll = () => {
       scrollOffset += direction * 480;
       if (scrollOffset >= ROW_COUNT * 20) direction = -1;
       if (scrollOffset <= 0) direction = 1;
       listRef.current?.scrollToOffset({ offset: Math.max(0, scrollOffset), animated: false });
-    }, STREAM_INTERVAL_MS);
+    };
+    const scroll = phase === "scroll" ? setInterval(driveScroll, STREAM_INTERVAL_MS) : null;
+    const stream = phase === "stream" ? setInterval(() => {
+      emitted += 1;
+      setStreamedTokens(emitted);
+      driveScroll();
+    }, STREAM_INTERVAL_MS) : null;
     return () => {
       void dumpDesktopPerformanceSnapshot();
       clearInterval(refresh);
-      clearInterval(stream);
+      if (scroll != null) clearInterval(scroll);
+      if (stream != null) clearInterval(stream);
     };
-  }, []);
+  }, [phase]);
 
   const header = useMemo(
     () => (
