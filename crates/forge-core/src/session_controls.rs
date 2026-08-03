@@ -162,6 +162,13 @@ impl Session {
             self.whitehot_guidance_injected = false;
         }
         self.pinned_effort = e;
+        // Persisted here rather than at the call sites so every path that changes effort — the
+        // TUI slider, `/effort`, a remote client — is covered. Without it a resumed session
+        // silently drops back to the provider default, which reads as the agent quietly
+        // downgrading itself. Best-effort: a store failure must not fail the control.
+        let _ = self
+            .store
+            .set_session_pinned_effort(&self.id, e.map(|level| level.as_str()));
     }
 
     /// The currently-pinned effort level, if any (`/effort <level>` was called this session).
