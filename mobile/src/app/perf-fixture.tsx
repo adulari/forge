@@ -2,7 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, StyleSheet, Text, TextInput, View } from "react-native";
 
-import { dumpDesktopPerformanceSnapshot, getDesktopPerformanceSnapshot, recordCompositorKey, recordComposerInput, type DesktopPerformanceSnapshot } from "../lib/performance";
+import { dumpDesktopPerformanceSnapshot, getDesktopPerformanceSnapshot, markFirstWorkloadEvent, markPerformancePhaseStart, recordCompositorKey, recordComposerInput, type DesktopPerformanceSnapshot } from "../lib/performance";
 import { useTokens } from "../theme/ThemeProvider";
 import { type } from "../theme/typography";
 
@@ -32,8 +32,10 @@ export default function PerformanceFixtureScreen() {
   useEffect(() => {
     if (!PERF_FIXTURE_ENABLED) return;
     void (async () => {
-      const { invoke } = await import("@tauri-apps/api/core");
-      setPhase(await invoke<string>("perf_phase"));
+    const { invoke } = await import("@tauri-apps/api/core");
+      const selectedPhase = await invoke<string>("perf_phase");
+      setPhase(selectedPhase);
+      markPerformancePhaseStart();
     })();
   }, []);
 
@@ -59,6 +61,7 @@ export default function PerformanceFixtureScreen() {
     let scrollOffset = 0;
     let direction = 1;
     const driveScroll = () => {
+      markFirstWorkloadEvent();
       scrollOffset += direction * 480;
       if (scrollOffset >= ROW_COUNT * 20) direction = -1;
       if (scrollOffset <= 0) direction = 1;

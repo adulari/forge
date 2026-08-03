@@ -8,6 +8,8 @@ export type DesktopPerformanceSnapshot = {
   frameTimeP95Ms: number | null;
   frameTimeMaxMs: number | null;
   frameEvents: { atMs: number; intervalMs: number }[];
+  phaseStartAtMs: number | null;
+  firstWorkloadAtMs: number | null;
   longTaskCount: number;
   longTaskTotalMs: number;
   longestTaskMs: number;
@@ -33,6 +35,8 @@ const composerImeEvents: { eventAtMs: number; paintAtMs: number; latencyMs: numb
 const frameIntervals: number[] = [];
 const frameTimes: number[] = [];
 let startupToInteractiveMs: number | null = null;
+let phaseStartAtMs: number | null = null;
+let firstWorkloadAtMs: number | null = null;
 let frameSamples = 0;
 let droppedFrames = 0;
 let longTaskCount = 0;
@@ -82,6 +86,13 @@ export function startDesktopPerformanceMonitor(): void {
   }
 }
 
+export function markPerformancePhaseStart(): void {
+  if (phaseStartAtMs == null && startedAt != null && typeof performance !== "undefined") phaseStartAtMs = performance.now() - startedAt;
+}
+
+export function markFirstWorkloadEvent(): void {
+  if (firstWorkloadAtMs == null && startedAt != null && typeof performance !== "undefined") firstWorkloadAtMs = performance.now() - startedAt;
+}
 export function markDesktopInteractive(): void {
   if (startupToInteractiveMs == null && startedAt != null && typeof performance !== "undefined") {
     startupToInteractiveMs = performance.now() - startedAt;
@@ -140,6 +151,8 @@ export function getDesktopPerformanceSnapshot(): DesktopPerformanceSnapshot {
     frameTimeP95Ms: percentile(frameIntervals, 0.95),
     frameTimeMaxMs: percentile(frameIntervals, 1),
     frameEvents: frameIntervals.map((intervalMs, index) => ({ atMs: frameTimes[index], intervalMs })),
+    phaseStartAtMs,
+    firstWorkloadAtMs,
     longTaskCount,
     longTaskTotalMs,
     longestTaskMs,
