@@ -12,7 +12,9 @@ These capability boundaries may diverge and must be listed in `mobile/parity/inv
 - safe-area, keyboard, pointer, touch, and IME input handling
 - platform-required WebView/browser or native implementation files
 
-Each inventory row names the source file, platform capability, and reason. The inventory is deliberately file-scoped for the first guard: a file containing a capability branch is reviewed as a unit, and adding a new source file or platform branch still requires an explicit inventory update and review.
+Each inventory row names the source file, platform, reason, and category. `capability` rows cover genuine platform APIs; `behavior` rows are reviewed more strictly because they sit near rendered state, copy, state setters, queries, or transport decisions. A behavioral row is not permission to fork product rules: it declares the narrow capability boundary that needs review. Adding a new source file or platform branch still requires an explicit inventory update and review.
+
+The guard deliberately does not treat every `Platform.OS` occurrence as behavioral. It uses a local context window around platform markers, ignores style-only branches as `capability`, and classifies branches near JSX, state updates, queries, copy, notifications, or transport as `behavior`. Both categories must be declared; a category mismatch fails CI.
 
 ## Accidental divergence
 
@@ -24,4 +26,4 @@ The following are not legitimate merely because they are convenient:
 - platform-only copy, labels, defaults, or accessibility behavior
 - a desktop-only feature implemented in shared UI without a capability boundary
 
-The check is `python3 scripts/check-mobile-parity.py`. It scans production TypeScript/TSX under `mobile/src` for `Platform.OS`, Tauri markers, and platform-suffixed modules. It fails if a detected file is absent from the checked-in inventory or if an inventory row points at a missing file. CI must run it before mobile checks. Reviewers should reject rows that describe product behavior rather than a capability boundary.
+The check is `python3 scripts/check-mobile-parity.py`. It scans production TypeScript/TSX under `mobile/src`, reports declared capability and behavioral boundaries, and fails if a detected file is absent, stale, or declared with the wrong category. CI must run it before mobile checks. Reviewers should reject rows that describe product behavior rather than a narrow capability boundary.
