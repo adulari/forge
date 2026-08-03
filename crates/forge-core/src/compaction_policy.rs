@@ -317,7 +317,7 @@ impl Session {
         let failover = self.config.mesh.failover;
         let guaranteed = self
             .pinned_model()
-            .map(str::to_string)
+            .and_then(|set| set.first().cloned())
             .unwrap_or_else(|| decision.model.clone());
         // The routed model + its failover chain, preserved so a rate-limited summarizer still walks
         // to the routed fallback (not just to the guaranteed model).

@@ -840,10 +840,24 @@ An explicit pin (`--model` / `/model` / a hard duel pin) bypasses classification
 credit-mode filter. `pin_is_dispatchable` (`crates/forge-mesh/src/lib.rs:367`) is the single
 source of truth for "can this pin be dispatched at all" (provider key present or keyless) shared
 by `forge run --model` and the OpenAI-compatible `forge api` endpoint, so the two paths cannot
-diverge. A pin that is usable routes with `pinned: true` and — unless `mesh.pin_failover = true`
-(default `false`, `crates/forge-config/src/lib.rs:1292`) — an **empty fallback chain**
-(`lib.rs:971-973`): a pin must pin. An unusable pin (no key) falls back to the mesh pick with
-`pinned: false`.
+diverge.
+
+A pin may be a **single model** or a **comma-separated set of models** —
+`--model "openai::gpt-4o,groq::llama-3.3-70b"`, `/model a,b,c`, or the daemon's session-create
+`model` field. Whitespace is trimmed around each entry and empty entries are dropped
+(`parse_pin_set`, `crates/forge-mesh/src/lib.rs`); a single id is a one-element set, so a single
+pin and a pin set share ONE representation and ONE selection path.
+
+- **Single pin** (one-element set): `pinned: true` and — unless `mesh.pin_failover = true`
+  (default `false`, `crates/forge-config/src/lib.rs:1292`) — an **empty fallback chain** (`lib.rs`
+  `decide_with_pin`): a pin must pin. An unusable pin (no key) still dispatches the pinned model
+  with `pinned: true` (so the provider's real error surfaces), not a silent mesh re-route.
+- **Pin set** (two or more): the routing pool is restricted to EXACTLY that set. The mesh ranks
+  WITHIN the set using its normal ordering (tier fit, cost, health, quota, benchmarks) — it never
+  picks outside the set. The failover chain contains only the OTHER members of the set, in
+  mesh-ranked order; failover never escapes the set. Members that are currently unusable
+  (benched/rate-limited/unhealthy) are skipped during ranking. If every member is unusable, the
+  first member is dispatched anyway so the provider's real, actionable error surfaces.
 
 What a mid-turn provider error may do is decided by exactly one chooser, `failover_policy`
 (`crates/forge-core/src/lib.rs:434`):
@@ -882,9 +896,11 @@ router's `--model` pin) and threaded into the `AgentCtx` used to route children.
 1. **`agent.pinned_model` (a hard per-child pin, e.g. `/duel`) always wins** — each duel candidate
    must run the exact model the arena picked to *compare* them; letting an inherited session pin
    override it would collapse every candidate onto one model and make the feature meaningless.
-2. Otherwise, when `inherit_pin = true` and an effective pin is active, the child runs the pinned
-   model with `pinned: true` and an **empty fallback chain** — the same strict-pin semantics the
-   parent gets. An explicit user pin overrides an agent-type tier default (`config.model_for(tier)`).
+2. Otherwise, when `inherit_pin = true` and an effective pin is active, the child is restricted to
+   the SAME pin set as the parent. A single-pin set is strict (`pinned: true`, empty fallback
+   chain) — the same semantics the parent gets; a two-or-more set ranks within the set exactly as
+   the parent's own routing does, with the failover chain confined to the set. An explicit user pin
+   overrides an agent-type tier default (`config.model_for(tier)`).
 3. Otherwise (no pin, or `inherit_pin = false`), the child routes via the mesh independently with
    its normal failover chain. When `inherit_pin = false`, the child uses `Router::route_unpinned`
    (a `decide` variant that ignores the router's own pin) — because the router itself holds the
