@@ -72,10 +72,10 @@ pub struct AgentCtx {
     pub worktree_root: Option<PathBuf>,
     /// The git repo root for this session (used to create/merge worktrees).
     pub repo_root: PathBuf,
-    /// The effective pin for this turn's children: the session `/model` pin if set, else the
-    /// router's own `--model` pin. `None` = no pin, children route via the mesh independently.
+    /// The effective pin set for this turn's children: the session `/model` pin if set, else the
+    /// router's own `--model` pin set. `None` = no pin, children route via the mesh independently.
     /// Used by [`route_child`] to decide whether (and which) subagents inherit the parent's pin.
-    pub effective_pin: Option<String>,
+    pub effective_pin: Option<Vec<String>>,
 }
 
 /// The result of running one child agent.
@@ -114,18 +114,29 @@ pub async fn route_child(
         };
     }
     // When a pin is active for the turn and subagent inheritance is on (the default), the child
-    // runs the EXACT same model as the parent — strictly (pinned, no cross-model fallback chain) —
-    // and an explicit user pin beats an agent-type tier default. `agent.pinned_model` (handled
-    // above) is the one exception.
+    // is restricted to the EXACT same model set as the parent — ranked within the set by the mesh
+    // (so a set of two or more keeps an intra-set failover chain, and a single pin is strict with
+    // no cross-model fallback). An explicit user pin beats an agent-type tier default.
+    // `agent.pinned_model` (handled above) is the one exception.
     if let Some(pin) = ctx.effective_pin.as_deref() {
         if ctx.config.mesh.subagents.inherit_pin {
-            return RoutingDecision {
-                tier: agent.tier.unwrap_or(TaskTier::Standard),
-                model: pin.to_string(),
-                rationale: "inherited pin".to_string(),
-                fallbacks: Vec::new(),
-                pinned: true,
-            };
+            let readiness = crate::readiness::ProviderReadiness::snapshot(&ctx.config, &ctx.store);
+            let health = readiness.health;
+            let quota = readiness.quota;
+            let project = crate::project_context::compute(&ctx.repo_root);
+            return ctx
+                .router
+                .route_with_pin_set(
+                    pin,
+                    &agent.task,
+                    false,
+                    budget,
+                    &health,
+                    &quota,
+                    None,
+                    &project,
+                )
+                .await;
         }
     }
     match agent
@@ -926,7 +937,7 @@ mod tests {
             mesh_model: "mesh::model".into(),
             mesh_fallbacks: vec!["mesh::fallback".into()],
         });
-        let ctx = ctx_with_pin(Arc::clone(&router), Some("pin::model".into()), true);
+        let ctx = ctx_with_pin(Arc::clone(&router), Some(vec!["pin::model".into()]), true);
         let decision = route_child(&ctx, &plain_agent(), BudgetState::default()).await;
         assert_eq!(decision.model, "pin::model");
         assert!(decision.pinned, "inherited pin must be flagged pinned");
@@ -945,7 +956,7 @@ mod tests {
             mesh_model: "mesh::model".into(),
             mesh_fallbacks: vec!["mesh::fallback".into()],
         });
-        let ctx = ctx_with_pin(Arc::clone(&router), Some("session::pin".into()), true);
+        let ctx = ctx_with_pin(Arc::clone(&router), Some(vec!["session::pin".into()]), true);
         let decision = route_child(&ctx, &plain_agent(), BudgetState::default()).await;
         assert_eq!(decision.model, "session::pin");
         assert!(decision.pinned);
@@ -961,7 +972,7 @@ mod tests {
             mesh_model: "mesh::model".into(),
             mesh_fallbacks: vec!["mesh::fallback".into()],
         });
-        let ctx = ctx_with_pin(Arc::clone(&router), Some("user::pin".into()), true);
+        let ctx = ctx_with_pin(Arc::clone(&router), Some(vec!["user::pin".into()]), true);
         let mut agent = plain_agent();
         agent.tier = Some(TaskTier::Complex);
         let decision = route_child(&ctx, &agent, BudgetState::default()).await;
@@ -979,7 +990,7 @@ mod tests {
             mesh_model: "mesh::model".into(),
             mesh_fallbacks: Vec::new(),
         });
-        let ctx = ctx_with_pin(Arc::clone(&router), Some("session::pin".into()), true);
+        let ctx = ctx_with_pin(Arc::clone(&router), Some(vec!["session::pin".into()]), true);
         let mut agent = plain_agent();
         agent.pinned_model = Some("duel::candidate".into());
         let decision = route_child(&ctx, &agent, BudgetState::default()).await;
@@ -999,7 +1010,7 @@ mod tests {
             mesh_model: "mesh::model".into(),
             mesh_fallbacks: vec!["mesh::fallback".into()],
         });
-        let ctx = ctx_with_pin(Arc::clone(&router), Some("pin::model".into()), false);
+        let ctx = ctx_with_pin(Arc::clone(&router), Some(vec!["pin::model".into()]), false);
         let decision = route_child(&ctx, &plain_agent(), BudgetState::default()).await;
         assert_ne!(decision.model, "pin::model");
         assert_eq!(decision.model, "mesh::model");
@@ -1022,6 +1033,57 @@ mod tests {
         let ctx = ctx_with_pin(Arc::clone(&router), None, true);
         let decision = route_child(&ctx, &plain_agent(), BudgetState::default()).await;
         assert_eq!(decision.model, "mesh::model");
+        assert!(!decision.pinned);
+        assert!(!decision.fallbacks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inherit_pin_true_with_a_two_model_set_restricts_the_child_to_the_set() {
+        // With `inherit_pin = true` (default) a child is restricted to the SAME pin SET as the
+        // parent: the model is one of the members and the fallback chain stays inside the set.
+        let router: Arc<dyn Router> = Arc::new(PinnedAwareRouter {
+            pinned: None,
+            mesh_model: "mesh::model".into(),
+            mesh_fallbacks: vec!["mesh::fallback".into()],
+        });
+        let set = vec!["a::model".to_string(), "b::model".to_string()];
+        let ctx = ctx_with_pin(Arc::clone(&router), Some(set.clone()), true);
+        let decision = route_child(&ctx, &plain_agent(), BudgetState::default()).await;
+        assert!(
+            set.contains(&decision.model),
+            "child must be in the set: {}",
+            decision.model
+        );
+        assert!(decision.pinned);
+        assert!(
+            decision.fallbacks.iter().all(|m| set.contains(m)),
+            "child chain must stay inside the set: {:?}",
+            decision.fallbacks
+        );
+        assert_eq!(
+            decision.fallbacks.len(),
+            1,
+            "only the other member is a fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn inherit_pin_false_routes_the_child_outside_the_set() {
+        // With `inherit_pin = false` a child routes via the full mesh — it may pick a model
+        // OUTSIDE the parent's set (here the mesh's unrelated model).
+        let router: Arc<dyn Router> = Arc::new(PinnedAwareRouter {
+            pinned: None,
+            mesh_model: "mesh::model".into(),
+            mesh_fallbacks: vec!["mesh::fallback".into()],
+        });
+        let set = vec!["a::model".to_string(), "b::model".to_string()];
+        let ctx = ctx_with_pin(Arc::clone(&router), Some(set.clone()), false);
+        let decision = route_child(&ctx, &plain_agent(), BudgetState::default()).await;
+        assert_eq!(
+            decision.model, "mesh::model",
+            "child routes via the full mesh"
+        );
+        assert!(!set.contains(&decision.model));
         assert!(!decision.pinned);
         assert!(!decision.fallbacks.is_empty());
     }
@@ -1182,15 +1244,41 @@ mod tests {
                 pinned: false,
             }
         }
-        fn pin(&self) -> Option<&str> {
-            self.pinned.as_deref()
+        async fn route_with_pin_set(
+            &self,
+            pin: &[String],
+            _p: &str,
+            _has_images: bool,
+            _b: BudgetState,
+            _h: &forge_types::ModelHealth,
+            _q: &forge_types::SubscriptionQuota,
+            _effort: Option<forge_types::EffortLevel>,
+            _project: &forge_types::ProjectContext,
+        ) -> RoutingDecision {
+            // A single pinned model: strict, no cross-model fallback. A set: ranked within the
+            // set, chain confined to the set.
+            let model = pin.first().cloned().unwrap_or_default();
+            RoutingDecision {
+                tier: TaskTier::Standard,
+                model,
+                rationale: "inherited pin".into(),
+                fallbacks: if pin.len() > 1 {
+                    pin[1..].to_vec()
+                } else {
+                    Vec::new()
+                },
+                pinned: true,
+            }
+        }
+        fn pin(&self) -> Option<&[String]> {
+            self.pinned.as_ref().map(std::slice::from_ref)
         }
     }
 
     /// Build a ctx with a configured effective pin and `inherit_pin`, for pin-inheritance tests.
     fn ctx_with_pin(
         router: Arc<dyn Router>,
-        effective_pin: Option<String>,
+        effective_pin: Option<Vec<String>>,
         inherit_pin: bool,
     ) -> AgentCtx {
         let mut ctx = ctx_with(

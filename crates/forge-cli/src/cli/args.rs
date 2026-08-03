@@ -316,7 +316,9 @@ pub(crate) enum Command {
         /// (picker requires --tui). Cannot be combined with --continue.
         #[arg(long, num_args = 0..=1, value_name = "ID")]
         resume: Option<Option<String>>,
-        /// Pin a specific model (e.g. `openai::gpt-4o`), bypassing mesh classification.
+        /// Pin a specific model or a comma-separated set (e.g. `openai::gpt-4o` or
+        /// `"openai::gpt-4o,groq::llama-3.3-70b"`), bypassing mesh classification. A set
+        /// restricts the routing pool to those models, ranked within the set by the mesh.
         #[arg(long)]
         model: Option<String>,
         /// Append standing system instructions for the provider without including them in mesh
@@ -367,7 +369,9 @@ pub(crate) enum Command {
         /// default; use `--inline` to opt out.
         #[arg(long)]
         fullscreen: bool,
-        /// Pin a specific model (e.g. `openai::gpt-4o`), bypassing mesh classification.
+        /// Pin a specific model or a comma-separated set (e.g. `openai::gpt-4o` or
+        /// `"openai::gpt-4o,groq::llama-3.3-70b"`), bypassing mesh classification. A set
+        /// restricts the routing pool to those models, ranked within the set by the mesh.
         #[arg(long)]
         model: Option<String>,
     },
