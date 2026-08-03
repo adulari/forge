@@ -53,7 +53,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -5616,6 +5616,44 @@ mod tests {
             store.list_sessions().unwrap().iter().any(|s| s.id == a),
             "unarchived session returns to normal list"
         );
+    }
+
+    #[test]
+    fn session_pinned_model_round_trips_and_defaults_to_unpinned() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+
+        // An unpinned session must read back as unpinned, never as some default model: the
+        // absence of a pin is what lets the mesh route.
+        assert_eq!(store.session_pinned_model(&sid).unwrap(), None);
+
+        store
+            .set_session_pinned_model(&sid, Some("codex-oauth::gpt-5.6-luna"))
+            .unwrap();
+        assert_eq!(
+            store.session_pinned_model(&sid).unwrap().as_deref(),
+            Some("codex-oauth::gpt-5.6-luna")
+        );
+
+        // Re-pinning replaces rather than accumulating.
+        store
+            .set_session_pinned_model(&sid, Some("anthropic::claude-opus-5"))
+            .unwrap();
+        assert_eq!(
+            store.session_pinned_model(&sid).unwrap().as_deref(),
+            Some("anthropic::claude-opus-5")
+        );
+
+        // Clearing returns the session to mesh routing.
+        store.set_session_pinned_model(&sid, None).unwrap();
+        assert_eq!(store.session_pinned_model(&sid).unwrap(), None);
+
+        // A pin on one session must not leak into another.
+        let other = store.create_session("/repo", "default").unwrap();
+        store
+            .set_session_pinned_model(&sid, Some("codex-oauth::gpt-5.6-luna"))
+            .unwrap();
+        assert_eq!(store.session_pinned_model(&other).unwrap(), None);
     }
 
     #[test]

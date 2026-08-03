@@ -364,6 +364,32 @@ impl Store {
             .flatten())
     }
 
+    /// The model a session is pinned to, if it was created with a pin.
+    ///
+    /// A pin is a standing instruction to use exactly one model, so it has to outlive the running
+    /// driver: resuming a session with the pin dropped hands the turn back to mesh classification,
+    /// which can answer on a different model than the session was pinned to.
+    pub fn session_pinned_model(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT pinned_model FROM session WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Record (or clear, with `None`) the model a session is pinned to.
+    pub fn set_session_pinned_model(&self, session_id: &str, model: Option<&str>) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE session SET pinned_model = ?2 WHERE id = ?1",
+            rusqlite::params![session_id, model],
+        )?;
+        Ok(())
+    }
+
     /// Full session ids whose id starts with `prefix` (git-style abbreviation). `prefix` is
     /// matched literally: any `%`/`_`/`\` it contains is escaped so it can't act as a SQL LIKE
     /// wildcard and broaden the match beyond a literal prefix.

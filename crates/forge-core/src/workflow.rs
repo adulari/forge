@@ -918,6 +918,7 @@ mod tests {
             agents: Arc::new(HashMap::new()),
             worktree_root: None,
             repo_root: std::path::PathBuf::from("."),
+            effective_pin: None,
         }
     }
 

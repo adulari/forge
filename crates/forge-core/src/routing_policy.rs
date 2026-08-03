@@ -27,6 +27,15 @@ impl Session {
         }
     }
 
+    /// The effective pin set for this turn's model choice: the in-session `/model` pin if set,
+    /// else the router's own `--model` pin set. `None` = no pin (normal mesh routing). Kept as ONE
+    /// source so subagent pin inheritance and the parent's own routing agree on what "the pin" is.
+    pub(crate) fn effective_pin(&self) -> Option<Vec<String>> {
+        self.pinned_model
+            .clone()
+            .or_else(|| self.router.pin().map(|p| p.to_vec()))
+    }
+
     /// Explain how the mesh would route `prompt` right now, using this session's live catalog,
     /// quota, benched-model health and budget — the data behind the `/mesh` inspector. `None` when
     /// auto-discovery routing isn't active (no catalog), since the candidate table would be empty.
@@ -220,9 +229,12 @@ Rules:\n\
     /// Resolve the model to use for the architect PLAN phase.
     /// Priority: in-session `/model` pin > `mesh.architect_model` config > mesh-routed Complex tier.
     pub(crate) fn resolve_planner_model(&self) -> String {
-        // An active /model pin overrides everything.
+        // An active /model pin overrides everything (its first member as the planner model).
         if let Some(pin) = &self.pinned_model {
-            return pin.clone();
+            return pin
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "anthropic::claude-opus-5".to_string());
         }
         // Explicit config override.
         if let Some(m) = &self.config.mesh.architect_model {
@@ -257,9 +269,13 @@ Rules:\n\
     /// Resolve the model to use for the architect EDIT phase.
     /// Priority: in-session `/model` pin > `mesh.editor_model` config > mesh-routed Standard tier.
     pub(crate) fn resolve_editor_model(&self) -> String {
-        // An active /model pin overrides everything (both phases use the same pinned model).
+        // An active /model pin overrides everything (both phases use the same pinned set's first
+        // member).
         if let Some(pin) = &self.pinned_model {
-            return pin.clone();
+            return pin
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "anthropic::claude-opus-5".to_string());
         }
         // Explicit config override.
         if let Some(m) = &self.config.mesh.editor_model {

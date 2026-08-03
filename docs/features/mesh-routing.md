@@ -263,11 +263,14 @@ classes — the two-currencies split (§5) starts here:
 
 - **0 = genuinely free** — `is_free` (`catalog.rs:80`) requires *positive* evidence, not just a
   missing price: local `ollama::`, free-tier `groq::`, `gemini::` non-Pro models, `:free`
-  variants on the paid gateways (`openrouter::`, `opencode_go::`), and custom OpenAI-compatible
-  providers whose registry row says `free: true`. An unpriced model on any *metered* provider is
-  **paid-with-unknown-cost, not free** — reading "no price in our table" as "free" is exactly
-  the bug that billed a user by routing to `gpt-5-pro` at "cost $0".
+  variants on the paid gateways (`openrouter::`), `-free` (hyphen) variants on OpenCode Zen
+  (`opencode::`), and custom OpenAI-compatible providers whose registry row says `free: true`.
+  An unpriced model on any *metered* provider is **paid-with-unknown-cost, not free** — reading
+  "no price in our table" as "free" is exactly the bug that billed a user by routing to
+  `gpt-5-pro` at "cost $0".
 - **1 = subscription** — `is_subscription` (`catalog.rs:61`): $0 marginal, burns plan quota (§5.2).
+  Includes OpenCode Go (`opencode_go::`), a flat subscription — distinct from Zen's
+  credit-billed `opencode::` surface.
 - **2 = metered/paid** — everything else; carries a real USD estimate (§5.1).
 
 ### 4.3 Per-tier cost preference
@@ -497,13 +500,15 @@ metered-provider models free, but their *estimated cost* still compares as 0.0.
 
 **What counts as free.** `is_free` (`crates/forge-mesh/src/catalog.rs:80`) — positive evidence
 only: `ollama::` (local) and `groq::` (standing free tier) are free when unpriced; `gemini::` is
-free *unless* the id contains "pro" (Pro left the free tier in Apr 2026); `openrouter::` and
-`opencode_go::` are paid gateways where **only `:free`-suffixed variants are free** (OpenCode
-Zen bills premium models against one shared key balance — treating its unpriced models as free
-silently drained it); custom OpenAI-compatible providers carry their own `free` flag in
-`CUSTOM_OPENAI_PROVIDERS` (`forge-config`); every other metered provider (openai, xai,
-anthropic, deepseek, …) has no standing free tier, so unpriced ⇒ paid. A config price of `0`
-is also positive evidence of free.
+free *unless* the id contains "pro" (Pro left the free tier in Apr 2026); `openrouter::` is a paid
+gateway where **only `:free`-suffixed variants are free** (a hyphen `-free` suffix is still paid
+there); OpenCode Zen (`opencode::`) is a **credit-billed** gateway where **`-free`-suffixed
+variants are free** (Zen bills premium models against one shared key balance — treating its
+unpriced models as free silently drained it); OpenCode Go (`opencode_go::`) is a **subscription**
+surface, never free, and is counted as subscription instead; custom OpenAI-compatible providers
+carry their own `free` flag in `CUSTOM_OPENAI_PROVIDERS` (`forge-config`); every other metered
+provider (openai, xai, anthropic, deepseek, …) has no standing free tier, so unpriced ⇒ paid. A
+config price of `0` is also positive evidence of free.
 
 **Budget caps.** Metered spend accumulates in the store and feeds `BudgetState`
 (`crates/forge-mesh/src/lib.rs:27`; built by `Session::budget_snapshot`,
@@ -835,10 +840,24 @@ An explicit pin (`--model` / `/model` / a hard duel pin) bypasses classification
 credit-mode filter. `pin_is_dispatchable` (`crates/forge-mesh/src/lib.rs:367`) is the single
 source of truth for "can this pin be dispatched at all" (provider key present or keyless) shared
 by `forge run --model` and the OpenAI-compatible `forge api` endpoint, so the two paths cannot
-diverge. A pin that is usable routes with `pinned: true` and — unless `mesh.pin_failover = true`
-(default `false`, `crates/forge-config/src/lib.rs:1292`) — an **empty fallback chain**
-(`lib.rs:971-973`): a pin must pin. An unusable pin (no key) falls back to the mesh pick with
-`pinned: false`.
+diverge.
+
+A pin may be a **single model** or a **comma-separated set of models** —
+`--model "openai::gpt-4o,groq::llama-3.3-70b"`, `/model a,b,c`, or the daemon's session-create
+`model` field. Whitespace is trimmed around each entry and empty entries are dropped
+(`parse_pin_set`, `crates/forge-mesh/src/lib.rs`); a single id is a one-element set, so a single
+pin and a pin set share ONE representation and ONE selection path.
+
+- **Single pin** (one-element set): `pinned: true` and — unless `mesh.pin_failover = true`
+  (default `false`, `crates/forge-config/src/lib.rs:1292`) — an **empty fallback chain** (`lib.rs`
+  `decide_with_pin`): a pin must pin. An unusable pin (no key) still dispatches the pinned model
+  with `pinned: true` (so the provider's real error surfaces), not a silent mesh re-route.
+- **Pin set** (two or more): the routing pool is restricted to EXACTLY that set. The mesh ranks
+  WITHIN the set using its normal ordering (tier fit, cost, health, quota, benchmarks) — it never
+  picks outside the set. The failover chain contains only the OTHER members of the set, in
+  mesh-ranked order; failover never escapes the set. Members that are currently unusable
+  (benched/rate-limited/unhealthy) are skipped during ranking. If every member is unusable, the
+  first member is dispatched anyway so the provider's real, actionable error surfaces.
 
 What a mid-turn provider error may do is decided by exactly one chooser, `failover_policy`
 (`crates/forge-core/src/lib.rs:434`):
@@ -864,6 +883,32 @@ budget. `0` disables outage backoff (immediate `FailTurn`).
 a context-overflow error rides the same `Unavailable` classification, but after the compact
 retries are spent, *waiting can never shrink the input* — backing off would burn the whole
 outage budget on a lost cause, so it is explicitly carved out of `transient_outage`.
+
+### 9.1 Subagent pin inheritance
+
+A pin active on the session — whether the router's `--model` pin or the in-session `/model` pin
+(`Session::pinned_model`) — applies to the main session *and* to every subagent, unless
+`mesh.subagents.inherit_pin` is `false` (default `true`). The two pin sources are unified into a
+single **effective pin** per turn (`Session::effective_pin`: the `/model` pin if set, else the
+router's `--model` pin) and threaded into the `AgentCtx` used to route children. `route_child`
+(`crates/forge-core/src/subagent.rs`) then:
+
+1. **`agent.pinned_model` (a hard per-child pin, e.g. `/duel`) always wins** — each duel candidate
+   must run the exact model the arena picked to *compare* them; letting an inherited session pin
+   override it would collapse every candidate onto one model and make the feature meaningless.
+2. Otherwise, when `inherit_pin = true` and an effective pin is active, the child is restricted to
+   the SAME pin set as the parent. A single-pin set is strict (`pinned: true`, empty fallback
+   chain) — the same semantics the parent gets; a two-or-more set ranks within the set exactly as
+   the parent's own routing does, with the failover chain confined to the set. An explicit user pin
+   overrides an agent-type tier default (`config.model_for(tier)`).
+3. Otherwise (no pin, or `inherit_pin = false`), the child routes via the mesh independently with
+   its normal failover chain. When `inherit_pin = false`, the child uses `Router::route_unpinned`
+   (a `decide` variant that ignores the router's own pin) — because the router itself holds the
+   pin, plain `route` would still return it, so skipping the new code path alone would not be
+   enough.
+
+The strict semantics (exact model, `pinned: true`, empty chain) hold for both pin mechanisms:
+`/model` now propagates to children for the first time, matching the router pin.
 
 ## 10. The benchmark layer (ADR-0011)
 
@@ -1000,6 +1045,7 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `rate_limit_wait_secs` | 75 | Longest in-turn wait for the best model's rate-limit reset (`lib.rs:1317`) |
 | `pin_failover` | `false` | Escape hatch: allow cross-model failover off a pin (§9) (`lib.rs:1292`) |
 | `pin_outage_wait_secs` | 600 | Pinned transient-outage wait budget; 0 disables (§9) (`lib.rs:1301`) |
+| `subagents.inherit_pin` | `true` | When a pin is active, subagents inherit it strictly (§9) (`crates/forge-config/src/lib.rs` `SubagentsConfig`) |
 
 Multi-key rotation: every key-based provider accepts multiple API keys (repeat
 `forge auth <provider>`, a comma-separated env value, or numbered `_2`… env siblings —

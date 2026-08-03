@@ -1021,13 +1021,22 @@ async fn create_session(
                 )
             }
         };
-        Some((cwd, title, worktree))
+        let pinned_model = match state.store.session_pinned_model(session_id) {
+            Ok(pinned_model) => pinned_model,
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("loading resumed session model pin failed: {error}"),
+                )
+            }
+        };
+        Some((cwd, title, worktree, pinned_model))
     } else {
         None
     };
     let cwd = resume_metadata
         .as_ref()
-        .map(|(cwd, _, _)| cwd.clone())
+        .map(|(cwd, _, _, _)| cwd.clone())
         .or_else(|| {
             req.cwd
                 .as_deref()
@@ -1063,7 +1072,7 @@ async fn create_session(
     // Once live, the worktree intentionally outlives the handle for manual review or merge.
     let mut worktree = resume_metadata
         .as_ref()
-        .and_then(|(_, _, worktree)| worktree.clone());
+        .and_then(|(_, _, worktree, _)| worktree.clone());
     let worktree_guard = if req.worktree {
         if !forge_core::worktree::is_git_repo(cwd_path) {
             return err_response(
@@ -1125,15 +1134,31 @@ async fn create_session(
             }));
         }
     }
+    // A pin is a standing "use exactly this model" instruction, so it has to survive being
+    // resumed. Without the fallback the resumed driver starts unpinned and the mesh answers by
+    // classification instead — a session pinned to one model comes back on another. An explicit
+    // `model` in the request still wins, which is how a resume re-pins to something else.
+    let pinned_model = req
+        .model
+        .or_else(|| {
+            resume_metadata
+                .as_ref()
+                .and_then(|(_, _, _, pinned_model)| pinned_model.clone())
+        })
+        .filter(|model| !model.trim().is_empty());
     let spec = DriverSpec {
         cwd: session_cwd,
         worktree: worktree.clone(),
         title: req
             .title
-            .or_else(|| resume_metadata.map(|(_, title, _)| title))
+            .or_else(|| {
+                resume_metadata
+                    .as_ref()
+                    .map(|(_, title, _, _)| title.clone())
+            })
             .unwrap_or_default(),
         mock: state.mock,
-        model: req.model,
+        model: pinned_model.clone(),
         resume: req.resume,
         temper,
         push: state.push.clone(),
@@ -1149,6 +1174,15 @@ async fn create_session(
             // way the archive button hid it.
             if is_resume {
                 let _ = state.store.unarchive_session(&handle.session_id);
+            }
+            // Record the pin so the next resume can restore it. Written after the driver exists
+            // because the session row is created as part of spawning it. Failing to persist the
+            // pin must not fail the request: the session is already live and correctly pinned,
+            // and only a later resume would lose it.
+            if let Some(model) = pinned_model.as_deref() {
+                let _ = state
+                    .store
+                    .set_session_pinned_model(&handle.session_id, Some(model));
             }
             let handle = state.registry.insert(handle).await;
             json_response(&serde_json::json!({
