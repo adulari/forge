@@ -102,6 +102,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/UpdateNotice.tsx",
+    "platform": "desktop",
+    "reason": "runtime-gated update-seen capture seeding for unattended desktop performance launches; normal update UX remains shared",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/components/cards/PermissionCard.tsx",
     "platform": "web/native",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
@@ -286,6 +292,12 @@
     "platform": "desktop",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
     "category": "behavior"
+  },
+  {
+    "file": "mobile/src/lib/auth.tsx",
+    "platform": "desktop",
+    "reason": "runtime-gated daemon pairing seed for connected desktop performance capture; normal pairing flow remains shared",
+    "category": "capability"
   },
   {
     "file": "mobile/src/lib/browserPreview.test.ts",

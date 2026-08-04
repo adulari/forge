@@ -255,3 +255,11 @@ number being formatted two ways: `OperationalNotice` renders the updater plugin'
 release version, while `UpdateNotice` renders the installed app version from `useAppVersion`.
 The notices are therefore internally consistent with different sources, but the unqualified
 presentation is confusing and is recorded as a version-notice UX defect requiring explicit labels.
+
+## Parity guard live catches
+
+The parity inventory guard has now caught undeclared platform drift twice on live pull requests:
+first for the performance fixture/performance library, and second for `UpdateNotice.tsx` and
+`auth.tsx` after the runtime update-seen and pairing-seed instrumentation was added. Both catches
+were genuine inventory omissions, not synthetic negative tests or checker loopholes; the files are
+being declared with their desktop capture-instrumentation boundary rather than weakening the guard.
