@@ -8,8 +8,9 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useIsFocused } from "expo-router";
+import { markFirstDataResolve } from "./performance";
 import { useEffect, useRef, useState } from "react";
+import { useIsFocused } from "expo-router";
 
 import {
   type SessionTreeRow,
@@ -233,7 +234,10 @@ export function useSessions() {
   const peeking = useIsPeeking();
   const query = useQuery<SessionRow[]>({
     queryKey: keys(baseUrl).sessions,
-    queryFn: () => getSessions(baseUrl as string),
+     queryFn: () => getSessions(baseUrl as string).then((rows) => {
+       markFirstDataResolve();
+       return rows;
+     }),
     enabled: baseUrl != null,
     refetchIntervalInBackground: false,
     ...sessionsRefetchPolicy({ peeking, isFocused }),

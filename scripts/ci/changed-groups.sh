@@ -81,6 +81,9 @@ classify() {
         enable rust_fmt
       fi
       ;;
+    scripts/check-mobile-parity.py|mobile/parity/*|docs/architecture/mobile-desktop-parity.md)
+      enable mobile_app
+      ;;
     mobile/src-tauri/*)
       enable mobile_tauri
       ;;

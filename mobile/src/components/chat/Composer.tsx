@@ -43,6 +43,7 @@ import {
   visualAnnotationLabel,
 } from "../../lib/visualAnnotations";
 import { isMacOS } from "../../lib/platform";
+import { recordComposerImeCommit, recordComposerInput } from "../../lib/performance";
 import { useUpload, useWorkspaceSearch } from "../../lib/queries";
 import { useSessionCtx } from "../../lib/sessionContext";
 import { supportsDirectDaemonEndpoints } from "../../lib/transport";
@@ -119,6 +120,7 @@ export interface ComposerProps {
 export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onInterrupt }: ComposerProps) {
   const { scheme, tokens } = useTheme();
   const depth = scheme === "dark" ? depthDark : depthLight;
+  const imeProps = { onCompositionEnd: recordComposerImeCommit } as unknown as React.ComponentProps<typeof TextInput>;
   const usesNativeMirror = composerUsesNativeMirror(Platform.OS);
   const upload = useUpload();
   const { baseUrl } = useAuth();
@@ -821,9 +823,11 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               ref={inputRef}
               value={Platform.OS === "web" ? text : nativeText}
               onChangeText={(next) => {
+                recordComposerInput();
                 if (Platform.OS !== "web") setNativeText(next);
                 setText(next);
               }}
+              {...imeProps}
               onFocus={() => setFocused(true)}
               onBlur={() => setFocused(false)}
               returnKeyType="default"

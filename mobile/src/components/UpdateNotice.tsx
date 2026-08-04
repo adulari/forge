@@ -35,6 +35,12 @@ export function UpdateNotice() {
   React.useEffect(() => {
     let cancelled = false;
     void (async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const seedUpdateSeen = await invoke<boolean>("perf_seed_update_seen");
+      if (seedUpdateSeen) {
+        await rememberBuild({ updateId: Updates.updateId ?? null, appVersion });
+        return;
+      }
       const seen = await loadLastSeenBuild();
       if (cancelled) return;
       const found = updateNotice({
