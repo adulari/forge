@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:8081",
     "beforeDevCommand": "",
-    "beforeBuildCommand": "npx expo export -p web"
+    "beforeBuildCommand": "node scripts/export-web-clean.mjs"
   },
   "app": {
     "withGlobalTauri": false,

@@ -13,7 +13,7 @@ import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client
 import { useFonts } from "expo-font";
 import { Redirect, Stack, usePathname } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -46,7 +46,7 @@ import { isTauri, isWeb } from "../lib/platform";
 import { checkDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useDesktopMenuAction } from "../lib/desktopMenu";
-import { dumpDesktopPerformanceSnapshot, markDesktopInteractive, startDesktopPerformanceMonitor } from "../lib/performance";
+import { dumpDesktopPerformanceSnapshot, markDesktopInteractive, markFirstPaint, markReactMountEnd, markReactMountStart, startDesktopPerformanceMonitor } from "../lib/performance";
 import { IncomingShareProvider } from "../lib/incomingShare";
 import {
   useAppShortcut,
@@ -94,12 +94,31 @@ const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|perf-fi
 // (no sign-in, no server), /anywhere/* is the relay onboarding Connect itself deep-links into
 // before any Direct server exists, and /legal keeps privacy/support available before pairing.
 const UNPAIRED_ROUTES = /^\/(shares|anywhere|legal)(\/|$)/;
-const RELEASE_PERF_FIXTURE = process.env.EXPO_PUBLIC_PERF_FIXTURE === "1";
 
 function RootNavigator() {
+  markReactMountStart();
   const { isLoading, isPaired } = useAuth();
+  const [perfFixtureEnabled, setPerfFixtureEnabled] = useState(false);
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
+
+  useLayoutEffect(() => {
+    markReactMountEnd();
+  }, []);
+  useEffect(() => {
+    if (!isTauri) return;
+    void import("@tauri-apps/api/core")
+      .then(({ invoke }) => Promise.all([
+        invoke<boolean>("perf_enabled"),
+        invoke<boolean>("perf_fixture_enabled"),
+      ]))
+      .then(([_, fixture]) => {
+        setPerfFixtureEnabled(fixture);
+      })
+      .catch(() => {
+        setPerfFixtureEnabled(false);
+      });
+  }, []);
   const pathname = usePathname();
   const railless = RAILLESS_ROUTES.test(pathname);
 
@@ -172,6 +191,7 @@ function RootNavigator() {
     if (!isLoading) {
       requestAnimationFrame(() => {
         markDesktopInteractive();
+        markFirstPaint();
         SplashScreen.hideAsync().catch(() => {
           // best-effort — nothing sensible to do if the splash is already gone
         });
@@ -282,7 +302,7 @@ function RootNavigator() {
       {/* Declarative redirect (rather than Stack.Protected) per T2.1 spec: whatever route
           expo-router resolved on cold start/deep-link, bounce to /connect once we know
           there's no active server. */}
-      {RELEASE_PERF_FIXTURE && pathname !== "/perf-fixture" ? <Redirect href="/perf-fixture" /> : null}
+      {perfFixtureEnabled && pathname !== "/perf-fixture" ? <Redirect href="/perf-fixture" /> : null}
       {!isPaired && !UNPAIRED_ROUTES.test(pathname) ? <Redirect href="/connect" /> : null}
     </>
   );
@@ -301,7 +321,7 @@ export default function RootLayout() {
   useEffect(() => {
     void initHaptics();
     startDesktopPerformanceMonitor();
-    const perfDump = process.env.FORGE_PERF_OUT ? window.setInterval(() => void dumpDesktopPerformanceSnapshot(), 1_000) : null;
+    const perfDump = isTauri ? window.setInterval(() => void dumpDesktopPerformanceSnapshot(), 1_000) : null;
     if (isTauri) void checkDesktopUpdate().catch(() => undefined);
     return () => {
       if (perfDump != null) window.clearInterval(perfDump);

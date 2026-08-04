@@ -12,6 +12,7 @@ import React, {
   useState,
 } from "react";
 
+import { isTauri } from "./platform";
 import { getIdentity, probeConnection } from "./api";
 import { deleteSecureItem, getSecureItem, setSecureItem } from "./secureStore";
 import { parseConnectUrl } from "./connectUrl";
@@ -89,6 +90,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         let list = await loadServers();
         let active = await getSecureItem(ACTIVE_SERVER_KEY);
+        const perfSeed = isTauri
+          ? await import("@tauri-apps/api/core").then(({ invoke }) => invoke<StoredServer | null>("perf_seed_server"))
+          : null;
+        if (perfSeed && !list.some((server) => server.id === perfSeed.id)) {
+          list = [...list, perfSeed];
+          await saveServers(list);
+        }
+        if (perfSeed && !active) {
+          active = perfSeed.id;
+          await setSecureItem(ACTIVE_SERVER_KEY, active);
+        }
 
         // One-time migration: fold the old single-server value into the list.
         if (list.length === 0) {

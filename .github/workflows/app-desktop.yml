@@ -259,11 +259,10 @@ jobs:
         working-directory: mobile
         run: npm ci
 
-      # The Tauri updater compares the app's built-in version against latest.json's version (which
-      # the updater job below derives from the release tag). If they differ, the app thinks an
-      # update is perpetually available, "updates" to a bundle that still reports the old version,
-      # and loops. On a tag build, stamp the app version to the tag so built == manifest.
-      - name: Sync desktop app version to release tag
+      # The updater compares the app's built-in version against latest.json's version. Derive the
+      # desktop stamp from the workspace release source, then require the tag to agree with it;
+      # tauri.conf.json is a generated build input, not a second hand-maintained version.
+      - name: Sync desktop app version to workspace release version
         if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         working-directory: mobile
         shell: bash
@@ -274,10 +273,15 @@ jobs:
             echo "release_tag must look like v2.6.5 or app-v2.6.5" >&2
             exit 1
           }
-          VERSION="${RELEASE_TAG#app-v}"
-          VERSION="${VERSION#v}"
-          node -e "const fs=require('fs'),f='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(f,'utf8'));j.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n')" "$VERSION"
-          echo "desktop app version stamped to $VERSION"
+          TAG_VERSION="${RELEASE_TAG#app-v}"
+          TAG_VERSION="${TAG_VERSION#v}"
+          WORKSPACE_VERSION="$(cargo metadata --manifest-path ../Cargo.toml --no-deps --format-version 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s).packages.find(p=>p.name==="forge-agent");if(!p) throw new Error("workspace package forge-agent not found");process.stdout.write(p.version)})')"
+          [ "$TAG_VERSION" = "$WORKSPACE_VERSION" ] || {
+            echo "release tag $TAG_VERSION does not match workspace Cargo.toml version $WORKSPACE_VERSION" >&2
+            exit 1
+          }
+          node -e "const fs=require('fs'),f='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(f,'utf8'));j.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n')" "$WORKSPACE_VERSION"
+          echo "desktop app version stamped from workspace Cargo.toml to $WORKSPACE_VERSION"
 
       - name: Build desktop bundle
         working-directory: mobile

@@ -2,6 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, StyleSheet, Text, TextInput, View } from "react-native";
 
+import { isTauri } from "../lib/platform";
 import { dumpDesktopPerformanceSnapshot, getDesktopPerformanceSnapshot, markFirstWorkloadEvent, markPerformancePhaseStart, recordCompositorKey, recordComposerInput, type DesktopPerformanceSnapshot } from "../lib/performance";
 import { useTokens } from "../theme/ThemeProvider";
 import { type } from "../theme/typography";
@@ -9,8 +10,6 @@ import { type } from "../theme/typography";
 const ROW_COUNT = 10_000;
 const STREAM_TOKEN_COUNT = 600;
 const STREAM_INTERVAL_MS = 50;
-const RELEASE_PERF_FIXTURE = process.env.EXPO_PUBLIC_PERF_FIXTURE === "1";
-const PERF_FIXTURE_ENABLED = __DEV__ || RELEASE_PERF_FIXTURE;
 
 type FixtureRow = { id: string; index: number; text: string };
 
@@ -22,6 +21,7 @@ const rows: FixtureRow[] = Array.from({ length: ROW_COUNT }, (_, index) => ({
 
 export default function PerformanceFixtureScreen() {
   const tokens = useTokens();
+  const [fixtureEnabled, setFixtureEnabled] = useState(false);
   const [snapshot, setSnapshot] = useState<DesktopPerformanceSnapshot>(() => getDesktopPerformanceSnapshot());
   const [streamedTokens, setStreamedTokens] = useState(0);
   const [draft, setDraft] = useState("");
@@ -29,20 +29,28 @@ export default function PerformanceFixtureScreen() {
   const listRef = useRef<FlatList<FixtureRow>>(null);
 
   useEffect(() => {
-    if (!PERF_FIXTURE_ENABLED) return;
+    if (!isTauri) return;
+    void import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke<boolean>("perf_fixture_enabled"))
+      .then(setFixtureEnabled)
+      .catch(() => setFixtureEnabled(false));
+  }, []);
+
+  useEffect(() => {
+    if (!fixtureEnabled) return;
     void (async () => {
-    const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("@tauri-apps/api/core");
       const selectedPhase = await invoke<string>("perf_phase");
       setPhase(selectedPhase);
       markPerformancePhaseStart();
     })();
-  }, []);
+  }, [fixtureEnabled]);
 
   useEffect(() => {
-    if (!PERF_FIXTURE_ENABLED) return;
+    if (!fixtureEnabled) return;
     window.addEventListener("keydown", recordCompositorKey);
     return () => window.removeEventListener("keydown", recordCompositorKey);
-  }, []);
+  }, [fixtureEnabled]);
 
   useEffect(() => {
     const title = `Perf fixture | phase=${phase} | startup=${snapshot.startupToInteractiveMs?.toFixed(1) ?? "pending"}ms | frames=${snapshot.frameSamples} | dropped=${snapshot.droppedFrames} | long=${snapshot.longestTaskMs.toFixed(1)}ms`;
@@ -50,7 +58,7 @@ export default function PerformanceFixtureScreen() {
     if (typeof document !== "undefined") document.title = title;
   }, [phase, snapshot]);
   useEffect(() => {
-    if (!PERF_FIXTURE_ENABLED) return;
+    if (!fixtureEnabled) return;
 
     const refresh = setInterval(() => {
       setSnapshot(getDesktopPerformanceSnapshot());
@@ -78,7 +86,7 @@ export default function PerformanceFixtureScreen() {
       if (scroll != null) clearInterval(scroll);
       if (stream != null) clearInterval(stream);
     };
-  }, [phase]);
+  }, [phase, fixtureEnabled]);
 
   const header = useMemo(
     () => (
@@ -100,7 +108,7 @@ export default function PerformanceFixtureScreen() {
     [draft, streamedTokens, tokens],
   );
 
-  if (!PERF_FIXTURE_ENABLED) {
+  if (!fixtureEnabled) {
     return (
       <View style={[styles.screen, { backgroundColor: tokens.bg1 }]}>
         <Text style={[type.title, { color: tokens.ink }]}>Performance fixture unavailable</Text>
