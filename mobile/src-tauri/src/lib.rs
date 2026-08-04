@@ -257,9 +257,8 @@ pub fn run(process_start: Instant) {
             }
         })
         .build(tauri::generate_context!())
-        .map(|app| {
+        .inspect(|_app| {
             perf_mark(|timeline| timeline.build_finished_ms = Some(perf_elapsed_ms()));
-            app
         })
         .expect("error while building tauri application")
         .run(|_app, event| match event {
