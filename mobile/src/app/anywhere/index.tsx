@@ -202,6 +202,11 @@ function ApprovalWaitingStep() {
         <DetailRow label="Expires" value={remaining} icon={<Clock3 size={14} color={tokens.ink3} />} />
       </View>
       <View style={styles.waitingRow}><ActivityIndicator size="small" color={tokens.accent} /><Text style={[typeScale.sub, { color: tokens.ink3 }]}>Waiting for approval…</Text></View>
+      <View style={[styles.safetyPanel, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
+        <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>No inbox on your other device?</Text>
+        <Text style={[typeScale.sub, styles.measure, { color: tokens.ink3 }]}>Approve from a signed-in terminal instead. The challenge below is what proves the approver saw this request, so it is never listed by the service — copy it across yourself.</Text>
+        <Text selectable style={[typeScale.codeSmall, { color: tokens.ink2 }]}>forge anywhere approve {approval.challenge}</Text>
+      </View>
       <Button label="Use Recovery Kit instead" variant="ghost" icon={<KeyRound size={17} color={tokens.ink2} />} onPress={anywhere.useRecoveryInstead} fullWidth />
     </View>
   );
