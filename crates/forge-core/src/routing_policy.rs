@@ -471,7 +471,8 @@ Rules:\n\
             &[],
             None,
         )?;
-        self.store.record_usage(&self.id, &msg_id, &resp.usage)?;
+        self.store
+            .record_usage(&self.id, &msg_id, &resp.usage, Some(&model))?;
 
         // Push the plan into the live transcript so the editor model sees it.
         self.transcript.push(Message::assistant(&resp.content));

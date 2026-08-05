@@ -1675,6 +1675,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_usage_row_records_the_model_that_produced_it() {
+        // `usage.provider` and `usage.model` were never written, so every row read back NULL and
+        // grouping on the column collapsed the whole page into one bucket. The read side works
+        // around it by deriving the provider from `message.model`; this keeps new rows honest so
+        // the columns stop being a trap for the next query that trusts them.
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/tmp/usage", "Default").unwrap();
+        let message = store
+            .add_message(
+                &session,
+                0,
+                forge_types::Role::Assistant,
+                "hi",
+                Some("codex-oauth::gpt-5.6-luna"),
+            )
+            .unwrap();
+        store
+            .record_usage(
+                &session,
+                &message,
+                &Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+                Some("codex-oauth::gpt-5.6-luna"),
+            )
+            .unwrap();
+
+        let (provider, model): (Option<String>, Option<String>) = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT provider, model FROM usage WHERE message_id = ?1",
+                [&message],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(provider.as_deref(), Some("codex-oauth"));
+        assert_eq!(model.as_deref(), Some("codex-oauth::gpt-5.6-luna"));
+    }
+
+    #[test]
+    fn usage_without_a_routed_model_stays_null_rather_than_inventing_one() {
+        // A side call with no routed model must not be attributed to a guess.
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/tmp/usage-none", "Default").unwrap();
+        let message = store
+            .add_message(&session, 0, forge_types::Role::User, "q", None)
+            .unwrap();
+        store
+            .record_usage(&session, &message, &Usage::default(), Some("   "))
+            .unwrap();
+
+        let provider: Option<String> = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT provider FROM usage WHERE message_id = ?1",
+                [&message],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(provider.is_none(), "blank model must not become a provider");
+    }
+
+    #[test]
     fn daemon_live_fleet_survives_a_restart_but_excludes_finished_sessions() {
         // Restarting `forge serve` came back with an empty fleet: sessions persisted, but nothing
         // put them back in the registry, so a mid-task session was invisible to every client until
@@ -1791,6 +1858,7 @@ mod tests {
                     cached_input_tokens: 7,
                     cost_usd: 0.02,
                 },
+                None,
             )
             .unwrap();
         store
@@ -1815,6 +1883,7 @@ mod tests {
                     cached_input_tokens: 0,
                     cost_usd: cost,
                 },
+                None,
             )
             .unwrap();
     }
@@ -1914,6 +1983,7 @@ mod tests {
                     cached_input_tokens: 0,
                     cost_usd: 0.03,
                 },
+                None,
             )
             .unwrap();
 
@@ -2742,7 +2812,9 @@ mod tests {
                 Some("codex-oauth::gpt-5.6-terra"),
             )
             .unwrap();
-        store.record_usage(&sid, &m0, &usage(100, 10, 60)).unwrap();
+        store
+            .record_usage(&sid, &m0, &usage(100, 10, 60), None)
+            .unwrap();
         let m1 = store
             .add_message(
                 &sid,
@@ -2752,11 +2824,15 @@ mod tests {
                 Some("codex-oauth::gpt-5.6-terra"),
             )
             .unwrap();
-        store.record_usage(&sid, &m1, &usage(50, 5, 25)).unwrap();
+        store
+            .record_usage(&sid, &m1, &usage(50, 5, 25), None)
+            .unwrap();
         let m2 = store
             .add_message(&sid, 2, Role::Assistant, "c", Some("nvidia::z-ai/glm-5.2"))
             .unwrap();
-        store.record_usage(&sid, &m2, &usage(30, 3, 15)).unwrap();
+        store
+            .record_usage(&sid, &m2, &usage(30, 3, 15), None)
+            .unwrap();
         store
             .record_side_call_usage(&sid, "compact", &usage(20, 2, 10))
             .unwrap();
@@ -3116,6 +3192,7 @@ mod tests {
                     output_tokens: 5,
                     ..Default::default()
                 },
+                None,
             )
             .unwrap();
         let m2 = store
@@ -3130,6 +3207,7 @@ mod tests {
                     output_tokens: 10,
                     ..Default::default()
                 },
+                None,
             )
             .unwrap();
         assert_eq!(store.session_step_count(&sid).unwrap(), 2);
