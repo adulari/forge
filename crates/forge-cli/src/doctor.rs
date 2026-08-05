@@ -80,6 +80,7 @@ pub async fn run() -> anyhow::Result<usize> {
         sections.push(("Bridge liveness", bridge_live));
     }
     sections.push(("Local LLM (Ollama)", ollama_checks()));
+    sections.push(("Session store", store_checks()));
     sections.push(("Environment", environment_checks()));
 
     let mut fails = 0;
@@ -114,6 +115,57 @@ pub async fn run() -> anyhow::Result<usize> {
         );
     }
     Ok(fails)
+}
+
+/// Can this binary actually open the session store?
+///
+/// A store migrated by a newer build is the failure this exists for. It crash-looped
+/// `forge-serve.service` and, more insidiously, took the Anywhere connector down while local Forge
+/// kept answering on a connection opened before the migration — so "the daemon is running" looked
+/// healthy while cloud sync was dead. Nothing in doctor asked the one question that explains it.
+fn store_checks() -> Vec<Check> {
+    let Some(path) = forge_config::data_dir().map(|dir| dir.join("forge.db")) else {
+        return vec![check(
+            Status::Warn,
+            "session store",
+            "no data directory resolves on this platform",
+            None,
+        )];
+    };
+    vec![store_check_at(&path)]
+}
+
+fn store_check_at(path: &std::path::Path) -> Check {
+    if !path.exists() {
+        return check(
+            Status::Ok,
+            "session store",
+            format!("not created yet — {}", path.display()),
+            None,
+        );
+    }
+    match forge_store::Store::open(path) {
+        Ok(_) => check(
+            Status::Ok,
+            "session store",
+            format!("opens cleanly — {}", path.display()),
+            None,
+        ),
+        Err(error) => {
+            let detail = error.to_string();
+            // `Store::open` already reports both versions in this case; the useful addition is
+            // saying what to do about it, which otherwise takes a journal hunt to work out.
+            let fix = if detail.contains("newer than this build supports") {
+                Some(
+                    "a newer Forge migrated this store — install the current release \
+                     (`forge update`), or point this build elsewhere with FORGE_DB",
+                )
+            } else {
+                Some("check the file is readable and not held by a broken process")
+            };
+            check(Status::Fail, "session store", detail, fix)
+        }
+    }
 }
 
 fn config_checks() -> Vec<Check> {
@@ -504,4 +556,47 @@ fn binary_on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|d| d.join(bin).is_file()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod store_check_tests {
+    use super::*;
+
+    #[test]
+    fn a_store_migrated_by_a_newer_build_fails_with_the_remedy() {
+        // The exact shape of today's outage: a dev build bumped user_version past what this binary
+        // supports, `forge serve` crash-looped, and the Anywhere connector died quietly. Doctor has
+        // to name it and say what to do.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forge.db");
+        forge_store::Store::open(&path).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 9_999i64).unwrap();
+        drop(conn);
+
+        let result = store_check_at(&path);
+        assert!(matches!(result.status, Status::Fail));
+        assert!(
+            result.detail.contains("newer than this build supports"),
+            "detail should name the mismatch, got: {}",
+            result.detail
+        );
+        assert!(
+            result
+                .fix
+                .as_deref()
+                .is_some_and(|f| f.contains("forge update")),
+            "a failure the user cannot act on is not a diagnostic"
+        );
+    }
+
+    #[test]
+    fn a_healthy_store_passes_and_a_missing_one_is_not_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forge.db");
+        assert!(matches!(store_check_at(&path).status, Status::Ok));
+
+        forge_store::Store::open(&path).unwrap();
+        assert!(matches!(store_check_at(&path).status, Status::Ok));
+    }
 }
