@@ -3290,13 +3290,12 @@ mod tests {
     /// token-gated WS path (expect it upgrades + delivers a snapshot). Catches the
     /// `Path<String>`-on-a-static-route regression where the WS would 400 and never connect.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "binds a real port + opens a real socket; run with --ignored (kills itself on success)"]
     async fn start_serves_page_and_upgrades_websocket() {
         // Wrap in a timeout so a stuck server/client can never hang forever. The server's spawned
         // accept loop can delay runtime shutdown on drop (a test-harness artifact, not a product
         // bug — the real loop runs under `forge chat`'s long-lived runtime), so we force-exit 0
         // once the assertions pass. Gated behind --ignored so it never runs in CI.
-        let _outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             use futures::StreamExt;
             let rc = start(Exposure::Local, None, None, None).expect("start loopback server");
             let port = rc.url.addr.port();
@@ -3386,14 +3385,12 @@ mod tests {
                 .await
                 .expect("GET styles.css");
             assert_eq!(css.status(), 200, "styles.css is 200");
-            // All assertions passed — force-exit so the lingering server task + WS close
-            // handshake can't stall the test runtime's shutdown (manual-only, --ignored).
-            std::process::exit(0);
         })
         .await;
-        // Unreachable on success (exit above); only reached if the 5s timeout elapsed.
-        let _ = _outcome;
-        panic!("WS round-trip did not complete within 5s");
+        // A timeout is the only failure this can report — every assertion inside panics on its
+        // own. `RemoteControl::drop` aborts the server task, so the runtime winds down without
+        // the force-exit this test used to need (which is why it could never run in CI).
+        outcome.expect("WS round-trip did not complete within 5s");
     }
 
     /// The v5 wire round-trip: connect → take snapshots → drop → reconnect with `?rev=` and
@@ -3402,9 +3399,8 @@ mod tests {
     /// `before`/`limit` and stays token-gated. Like its sibling above, it binds a real port and
     /// force-exits on success, so run it INDIVIDUALLY with --ignored.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "binds a real port + opens real sockets; run individually with --ignored (kills itself on success)"]
     async fn reconnect_replays_missed_frames_and_history_pages() {
-        let _outcome = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(8), async {
             use futures::StreamExt;
 
             // A canned history provider that echoes its inputs so the handler's passthrough
@@ -3563,12 +3559,9 @@ mod tests {
                 .await
                 .expect("GET history with wrong token");
             assert_eq!(wrong.status(), 404, "wrong token is a 404");
-
-            std::process::exit(0);
         })
         .await;
-        let _ = _outcome;
-        panic!("reconnect/replay round-trip did not complete within 8s");
+        outcome.expect("reconnect/replay round-trip did not complete within 8s");
     }
 
     // -----------------------------------------------------------------------
@@ -3700,8 +3693,7 @@ mod tests {
     // Ignored: start() binds a real socket + spawns a never-ending accept loop the test runtime
     // can't reliably abort on drop, so it hangs in CI. Cert/fingerprint correctness is covered by
     // the pure tests above; serving by start_serves_page_and_upgrades_websocket. Run with --ignored.
-    #[ignore = "binds + serves a real socket; hangs under the test runtime — see comment"]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn lan_start_url_is_https_with_fingerprint() {
         // `start(Exposure::Lan)` must return an https:// URL and a populated tls_fingerprint.
         // Requires a Tokio runtime because axum-server's from_tcp_rustls wires into the runtime.
@@ -3719,8 +3711,7 @@ mod tests {
         assert_eq!(fp.len(), 95, "fingerprint must be 95 chars: {fp}");
     }
 
-    #[ignore = "binds + serves a real socket; hangs under the test runtime — see comment above"]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_start_url_is_http_no_fingerprint() {
         // `start(Exposure::Local)` must stay plain HTTP with no fingerprint.
         // Requires a Tokio runtime because axum::serve wires into the runtime.
