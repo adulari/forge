@@ -2,9 +2,21 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   openBrowserAuthUrl,
+  openExternalAuthUrl,
   reserveBrowserAuthWindow,
   runReservedBrowserFlow,
 } from "./anywhereExternalAuth";
+
+const mocks = vi.hoisted(() => ({ isTauri: false, openUrl: vi.fn(async () => {}) }));
+
+// `./platform` pulls in react-native, which vitest cannot parse — mock it the way updater.test.ts
+// and browserPreview.test.ts already do. The getter lets one file cover both shells.
+vi.mock("./platform", () => ({
+  get isTauri() {
+    return mocks.isTauri;
+  },
+}));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: mocks.openUrl }));
 
 describe("Anywhere browser authentication", () => {
   it("keeps Forge loaded while GitHub authorization runs in a reserved tab", () => {
@@ -31,6 +43,35 @@ describe("Anywhere browser authentication", () => {
   it("opens a retry without navigating the Forge tab", () => {
     const openWindow = vi.fn(() => null);
     openBrowserAuthUrl("https://github.com/login/device", openWindow);
+    expect(openWindow).toHaveBeenCalledWith(
+      "https://github.com/login/device",
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
+  it("opens through the Tauri opener when the shell has no popups", async () => {
+    // WebKitGTK returns null from window.open, so the desktop shell must not depend on a reserved
+    // tab: "Sign in with GitHub" started the device flow and then opened nothing at all.
+    mocks.isTauri = true;
+    mocks.openUrl.mockClear();
+    const openWindow = vi.fn(() => null);
+
+    await openExternalAuthUrl("https://github.com/login/device", openWindow);
+
+    expect(mocks.openUrl).toHaveBeenCalledWith("https://github.com/login/device");
+    expect(openWindow).not.toHaveBeenCalled();
+    mocks.isTauri = false;
+  });
+
+  it("still uses window.open on the plain web build", async () => {
+    mocks.isTauri = false;
+    mocks.openUrl.mockClear();
+    const openWindow = vi.fn(() => null);
+
+    await openExternalAuthUrl("https://github.com/login/device", openWindow);
+
+    expect(mocks.openUrl).not.toHaveBeenCalled();
     expect(openWindow).toHaveBeenCalledWith(
       "https://github.com/login/device",
       "_blank",

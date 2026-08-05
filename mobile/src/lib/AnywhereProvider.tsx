@@ -47,11 +47,12 @@ import {
 import { clearAnywhereHostCache, readAnywhereHostCache, writeAnywhereHostCache } from "./anywhereHostCache";
 import { anywhereEnrollmentStore } from "./anywhereEnrollmentStore";
 import {
-  openBrowserAuthUrl,
+  openExternalAuthUrl,
   reserveBrowserAuthWindow,
   runReservedBrowserFlow,
   type ReservedBrowserAuthWindow,
 } from "./anywhereExternalAuth";
+import { isTauri } from "./platform";
 import {
   AnywhereJobClient,
   type CreateSessionJob,
@@ -703,7 +704,13 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       setFlowExpiresAtMs(expiresAtMs);
       await enrollmentStore.save(JSON.stringify(snapshotAuthorizing(keys, started, expiresAtMs)));
       setPhase("authorizing");
-      if (Platform.OS === "web") {
+      if (isTauri) {
+        // The reserved tab is always null here — WebKitGTK has no popups — so go through the
+        // opener plugin instead of navigating a window that was never opened.
+        void openExternalAuthUrl(started.verification_uri).catch(() => {
+          // The code and a retryable link remain visible if the shell cannot open the browser.
+        });
+      } else if (Platform.OS === "web") {
         reservedWindow?.navigate(started.verification_uri);
       } else {
         void Linking.openURL(started.verification_uri).catch(() => {
@@ -720,8 +727,8 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
 
   const openLoginPage = useCallback(async () => {
     if (!flow) return;
-    if (Platform.OS === "web") {
-      openBrowserAuthUrl(flow.verification_uri);
+    if (isTauri || Platform.OS === "web") {
+      await openExternalAuthUrl(flow.verification_uri);
       return;
     }
     await Linking.openURL(flow.verification_uri);
@@ -1002,14 +1009,15 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const registerRecoveryPasskey = useCallback(async (recoveryKit: string) => {
     const current = credentialsRef.current;
     if (!current) throw new Error("Sign in to register a recovery passkey.");
-    const reserved = Platform.OS === "web" ? reserveBrowserAuthWindow() : null;
+    // Not under Tauri: WebKitGTK cannot reserve a tab, and the opener plugin needs none.
+    const reserved = Platform.OS === "web" && !isTauri ? reserveBrowserAuthWindow() : null;
     await runReservedBrowserFlow(reserved, async () => {
       const entropy = recoveryEntropyFromInput(
         recoveryKit,
         current.serviceUrl ?? SERVICE_URL,
         current.accountIdHex,
       );
-      if (Platform.OS === "web" && !reserved) {
+      if (Platform.OS === "web" && !isTauri && !reserved) {
         entropy.fill(0);
         throw new Error("Allow Forge to open a browser tab for passkey registration.");
       }
@@ -1021,7 +1029,8 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
           current.accountIdHex,
           entropy,
           async (url) => {
-            if (Platform.OS === "web") reserved?.navigate(url);
+            if (isTauri) await openExternalAuthUrl(url);
+            else if (Platform.OS === "web") reserved?.navigate(url);
             else await Linking.openURL(url);
           },
         );
@@ -1045,7 +1054,8 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     if (!pending?.auth.recovery_wrap_envelope || !pending.auth.recovery_wrap_signing_public_key) {
       throw new Error("The encrypted recovery key is unavailable for this account.");
     }
-    const reserved = Platform.OS === "web" ? reserveBrowserAuthWindow() : null;
+    // Not under Tauri: WebKitGTK cannot reserve a tab, and the opener plugin needs none.
+    const reserved = Platform.OS === "web" && !isTauri ? reserveBrowserAuthWindow() : null;
     await runReservedBrowserFlow(reserved, async () => {
       const auth = await refreshPendingAnywhereAuth(
         pending.auth,
@@ -1064,7 +1074,9 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         exchange.publicKey,
         passkeyId,
       );
-      if (Platform.OS === "web") {
+      if (isTauri) {
+        await openExternalAuthUrl(created.browser_url);
+      } else if (Platform.OS === "web") {
         if (!reserved) throw new Error("Allow Forge to open a browser tab for passkey recovery.");
         reserved.navigate(created.browser_url);
       } else await Linking.openURL(created.browser_url);
@@ -1211,7 +1223,9 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         },
         token,
       );
-      await Linking.openURL(session.checkout_url);
+      // `Linking.openURL` is `window.open` on RN Web, which WebKitGTK blocks — see openLoginPage.
+      if (isTauri) await openExternalAuthUrl(session.checkout_url);
+      else await Linking.openURL(session.checkout_url);
     } catch (reason) {
       setError(message(reason));
       throw reason;
@@ -1230,7 +1244,8 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         { method: "POST", headers: { "Idempotency-Key": idempotencyKey() } },
         token,
       );
-      await Linking.openURL(session.portal_url);
+      if (isTauri) await openExternalAuthUrl(session.portal_url);
+      else await Linking.openURL(session.portal_url);
     } catch (reason) {
       setError(message(reason));
       throw reason;
