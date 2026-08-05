@@ -129,7 +129,12 @@ pub(super) fn classify_error_body(body: &serde_json::Value) -> Option<ProviderEr
         .or_else(|| err.get("type").and_then(|t| t.as_str()));
     if let Some(ct) = code_type {
         let l = ct.to_lowercase();
-        if l.contains("rate_limit") || l.contains("resource_exhausted") || l.contains("overloaded")
+        if l.contains("rate_limit")
+            || l.contains("resource_exhausted")
+            || l.contains("overloaded")
+            // Alibaba's string code (`Throttling.AllocationQuota`) on the streaming path, where no
+            // numeric status reaches us.
+            || l.contains("throttling")
         {
             return Some(ProviderError::RateLimited {
                 message: m,
@@ -196,12 +201,33 @@ pub(super) fn quota_is_exhausted(s: &str) -> bool {
     l.contains("limit: 0") || l.contains("perday") || l.contains("per day") || l.contains("per-day")
 }
 
+/// Markers of a TRANSIENT provider-side throttle that would otherwise be read as permanent.
+///
+/// Alibaba Model Studio answers a per-minute throughput throttle with HTTP 429 and code
+/// `Throttling.AllocationQuota` ("Allocated quota exceeded"), and its OpenAI-compatible shape
+/// carries `insufficient_quota` — a permanent marker in [`is_capability_failure`]. Classifying
+/// that as [`ProviderError::Capability`] excludes the model for days over a limit that clears in
+/// under a minute, and skips the rate-limit backoff a pinned turn depends on. The subscription
+/// quota was 96% unused when this was first observed.
+pub(super) fn is_transient_throttle(text: &str) -> bool {
+    let l = text.to_lowercase();
+    l.contains("throttling.allocationquota")
+        || l.contains("allocated quota exceeded")
+        || l.contains("requests throttling triggered")
+        || l.contains("throttling.ratequota")
+}
+
 /// Markers of a PERMANENT, model-specific incapability — this model can never serve Forge's
 /// tool-using turns, or the account can't afford it. These errors recur identically on every
 /// call, so the model is *excluded* rather than benched-and-retried (the source of the
 /// "every model is failing" churn). Checked against the raw error body, which carries the
 /// provider's real message even when the HTTP status is generic (400/404).
 pub(super) fn is_capability_failure(text: &str) -> bool {
+    // A transient throttle can carry a marker that otherwise reads as permanent, so it has to be
+    // ruled out before the permanent markers below — see [`is_transient_throttle`].
+    if is_transient_throttle(text) {
+        return false;
+    }
     let l = text.to_lowercase();
     // Standalone markers that unambiguously mean "this model can't serve us".
     const MARKERS: &[&str] = &[
