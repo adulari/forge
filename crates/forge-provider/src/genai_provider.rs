@@ -1940,6 +1940,41 @@ mod tests {
     }
 
     #[test]
+    fn alibaba_throughput_throttle_is_rate_limited_not_permanent() {
+        // Live failure: a pinned qwencloud turn died with "model unsupported: Allocated quota
+        // exceeded" while the account's subscription quota was 96% unused, and both models worked
+        // minutes later. Alibaba answers a per-minute throughput throttle with 429
+        // `Throttling.AllocationQuota`, whose OpenAI-compatible body carries `insufficient_quota` —
+        // a permanent marker. Excluding the model for days over that is wrong, and a pinned turn
+        // gets no backoff because that path only runs for RateLimited.
+        let body = r#"{"error":{"code":"Throttling.AllocationQuota","message":"Allocated quota exceeded, please try again later.","type":"insufficient_quota"}}"#;
+        assert!(!is_capability_failure(body));
+
+        let classified = classify_status(429, "HTTP error".into(), body, None);
+        assert!(
+            matches!(classified, ProviderError::RateLimited { .. }),
+            "expected RateLimited, got {classified:?}"
+        );
+        assert!(!classified.is_permanent());
+
+        // The streaming path has no numeric status — the string code must still classify.
+        let streamed = classify_error_body(&serde_json::from_str(body).unwrap());
+        assert!(
+            matches!(streamed, Some(ProviderError::RateLimited { .. })),
+            "expected RateLimited from the body classifier, got {streamed:?}"
+        );
+    }
+
+    #[test]
+    fn genuine_insufficient_quota_stays_permanent() {
+        // The transient-throttle guard must not blanket-rescue every `insufficient_quota`: an
+        // account that is actually out of credit is still a permanent Capability failure.
+        let body = r#"{"error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."}}"#;
+        assert!(is_capability_failure(body));
+        assert!(classify_status(429, "HTTP error".into(), body, None).is_permanent());
+    }
+
+    #[test]
     fn cooldown_prefers_server_value_then_default() {
         let rl = ProviderError::RateLimited {
             message: "x".into(),
