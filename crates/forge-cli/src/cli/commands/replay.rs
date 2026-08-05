@@ -13,18 +13,24 @@ use crate::*;
 /// killed the Anywhere connector, and on the self-hosted runner it broke an unrelated PR, because
 /// one branch's test run migrated the shared store past what the other branch's build supports.
 ///
-/// Process-scoped rather than per-test: `open_store` takes no arguments and tests run concurrently
-/// in one process, so a single temp store per run keeps them isolated from the user without
-/// needing an env var they could race on.
+/// Per-test rather than per-process. `open_store` takes no arguments, so the test's identity has
+/// to come from somewhere: libtest names each test's thread after the test itself, which gives a
+/// stable key without an env var concurrent tests would race on. One shared store per process was
+/// tried first and produced `database is locked` under the parallel harness — tests writing to one
+/// SQLite file contend on the immediate transactions the store takes.
 #[cfg(test)]
 fn test_store_path() -> std::path::PathBuf {
-    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("forge-test-store-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        dir.join("forge.db")
-    })
-    .clone()
+    let key = std::thread::current()
+        .name()
+        .map(|name| {
+            name.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| "unnamed".to_string());
+    let dir = std::env::temp_dir().join(format!("forge-test-store-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!("{key}.db"))
 }
 
 pub(crate) fn open_store() -> Result<Store> {
