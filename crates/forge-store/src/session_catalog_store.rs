@@ -412,6 +412,41 @@ impl Store {
         Ok(())
     }
 
+    /// Mark whether a session belongs to the daemon's live fleet.
+    ///
+    /// Set when `forge serve` starts or resumes a session, cleared when it is closed or archived,
+    /// so a restarted daemon can tell "was mid-task" from "the user was finished with it".
+    pub fn set_session_daemon_live(&self, session_id: &str, live: bool) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE session SET daemon_live = ?2 WHERE id = ?1",
+            rusqlite::params![session_id, i64::from(live)],
+        )?;
+        Ok(())
+    }
+
+    /// Sessions that were in the daemon's fleet when it last stopped, most recently active first.
+    ///
+    /// Archived sessions are excluded: archiving is an explicit "I am done with this", and it would
+    /// be worse to drag those back into a fleet the user deliberately cleared. Sessions that never
+    /// received a user message are excluded for the same reason [`Store::list_sessions`] skips
+    /// them — there is nothing to resume.
+    pub fn daemon_live_sessions(&self) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT s.id,
+                    COALESCE((SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id),
+                             s.created_at) AS last_activity
+             FROM session s
+             WHERE s.daemon_live = 1 AND s.archived = 0 AND s.parent_session_id IS NULL
+               AND EXISTS (SELECT 1 FROM message m
+                           WHERE m.session_id = s.id AND m.role = 'user')
+             ORDER BY last_activity DESC, s.rowid DESC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     /// Full session ids whose id starts with `prefix` (git-style abbreviation). `prefix` is
     /// matched literally: any `%`/`_`/`\` it contains is escaped so it can't act as a SQL LIKE
     /// wildcard and broaden the match beyond a literal prefix.
