@@ -13,6 +13,7 @@ import { ScrollView, StyleSheet, Text, View } from "react-native";
 import * as Updates from "expo-updates";
 
 import { useAppVersion } from "../lib/appVersion";
+import { useAuth } from "../lib/auth";
 import { useChangelog } from "../lib/queries";
 import {
   loadLastSeenBuild,
@@ -29,6 +30,7 @@ import { Sheet } from "./ds/Sheet";
 export function UpdateNotice() {
   const tokens = useTokens();
   const appVersion = useAppVersion();
+  const { isPaired } = useAuth();
   const [notice, setNotice] = React.useState<Notice | null>(null);
   const changelog = useChangelog(1);
 
@@ -41,6 +43,12 @@ export function UpdateNotice() {
         await rememberBuild({ updateId: Updates.updateId ?? null, appVersion });
         return;
       }
+      // The body of this sheet is the daemon's changelog, so before a server is connected it can
+      // only say "connect a server to read what changed" — while covering the connect flow that
+      // would let it. Defer WITHOUT recording the build as seen, so the notice still arrives the
+      // first time the app is actually usable instead of being silently consumed on a launch that
+      // could not display it.
+      if (!isPaired) return;
       const seen = await loadLastSeenBuild();
       if (cancelled) return;
       const found = updateNotice({
@@ -59,7 +67,7 @@ export function UpdateNotice() {
     return () => {
       cancelled = true;
     };
-  }, [appVersion]);
+  }, [appVersion, isPaired]);
 
   if (!notice) return null;
 
