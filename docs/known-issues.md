@@ -3,6 +3,21 @@
 Tracked limitations and intentionally-deferred features. Each entry: symptom, what
 we know, and the planned fix.
 
+## What is open right now
+
+Headings ending in `(fixed)` are kept as history. Currently open:
+
+- **AppImage XWayland packaging defect** — release-blocking; the packaged artifact runs a
+  different rendering stack than the binary it was built from.
+- **Changelog gate and unattended launch** — an unattended launch can land behind the gate rather
+  than in a usable state.
+- **Unattended-launch and version-notice defects** — the updater banner and the installed-build
+  notice show different versions without saying which is which.
+- **Lucide bundle import boundary** — 585,934 of 5,589,476 entry-bundle bytes for 83 icons of
+  3,490 shipped; blocked on the package's export map.
+
+Everything else below is either resolved or a recorded measurement finding.
+
 ## Linux Wayland/WebKitGTK launch crash (fixed by default renderer workaround)
 
 **Finding (verified):** the release desktop binary exited before mapping a window on a Hyprland/
@@ -122,20 +137,6 @@ in-flight one. A configured `ask`/`deny` rule for `write_file` also still prompt
 the mode by design).
 
 **Status:** common case verified + regression-tested; only the by-design residual remains.
-
-## No way to remove / disable a provider key or model
-to a junk value so auth fails and the mesh benches/avoids it.
-
-**Shipped:**
-- `forge auth --remove <provider>` deletes the keyring entry (idempotent — reports if nothing
-  was stored).
-- `[mesh] disabled = ["openai", "gemini::antigravity-preview-05-2026"]` excludes a provider
-  (bare prefix → all its `provider::*`) or an exact model id from discovery + routing, so the
-  mesh never routes to or fails over onto it. Filtered in `discover_catalog` via
-  `forge_config::is_model_disabled`; an explicit `--model` pin still overrides (deliberate).
-- `forge models --clear` wipes all stale model benches (`Store::clear_all_model_health`).
-
-**Status:** shipped + tested (`is_model_disabled`, `clear_all_model_health`).
 
 ## No way to remove / disable a provider key or model
 
