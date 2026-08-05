@@ -47,11 +47,12 @@ import {
 import { clearAnywhereHostCache, readAnywhereHostCache, writeAnywhereHostCache } from "./anywhereHostCache";
 import { anywhereEnrollmentStore } from "./anywhereEnrollmentStore";
 import {
-  openBrowserAuthUrl,
+  openExternalAuthUrl,
   reserveBrowserAuthWindow,
   runReservedBrowserFlow,
   type ReservedBrowserAuthWindow,
 } from "./anywhereExternalAuth";
+import { isTauri } from "./platform";
 import {
   AnywhereJobClient,
   type CreateSessionJob,
@@ -703,7 +704,13 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       setFlowExpiresAtMs(expiresAtMs);
       await enrollmentStore.save(JSON.stringify(snapshotAuthorizing(keys, started, expiresAtMs)));
       setPhase("authorizing");
-      if (Platform.OS === "web") {
+      if (isTauri) {
+        // The reserved tab is always null here — WebKitGTK has no popups — so go through the
+        // opener plugin instead of navigating a window that was never opened.
+        void openExternalAuthUrl(started.verification_uri).catch(() => {
+          // The code and a retryable link remain visible if the shell cannot open the browser.
+        });
+      } else if (Platform.OS === "web") {
         reservedWindow?.navigate(started.verification_uri);
       } else {
         void Linking.openURL(started.verification_uri).catch(() => {
@@ -720,8 +727,8 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
 
   const openLoginPage = useCallback(async () => {
     if (!flow) return;
-    if (Platform.OS === "web") {
-      openBrowserAuthUrl(flow.verification_uri);
+    if (isTauri || Platform.OS === "web") {
+      await openExternalAuthUrl(flow.verification_uri);
       return;
     }
     await Linking.openURL(flow.verification_uri);

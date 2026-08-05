@@ -1,3 +1,5 @@
+import { isTauri } from "./platform";
+
 interface BrowserAuthWindow {
   closed: boolean;
   close(): void;
@@ -59,4 +61,25 @@ export function openBrowserAuthUrl(
   openWindow: OpenBrowserWindow = defaultOpenWindow,
 ): void {
   openWindow(url, "_blank", "noopener,noreferrer");
+}
+
+/**
+ * Open an external URL from whichever shell is running.
+ *
+ * `Platform.OS` is `"web"` under Tauri too, because the desktop shell renders the same
+ * react-native-web bundle. But WebKitGTK has no popup support, so `window.open` returns null
+ * there: both the reserved-tab path and the retry link silently no-op and the user is left
+ * staring at a code with no browser. The opener plugin is the only route that works, and
+ * `opener:default` is already granted in src-tauri/capabilities/default.json.
+ */
+export async function openExternalAuthUrl(
+  url: string,
+  openWindow: OpenBrowserWindow = defaultOpenWindow,
+): Promise<void> {
+  if (isTauri) {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+    return;
+  }
+  openBrowserAuthUrl(url, openWindow);
 }

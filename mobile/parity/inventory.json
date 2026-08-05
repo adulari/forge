@@ -276,6 +276,18 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/lib/anywhereExternalAuth.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary: covers both shells for the external-auth open path",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/anywhereExternalAuth.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary: WebKitGTK has no popups, so external auth URLs open through the opener plugin",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/lib/anywhereJobStore.web.ts",
     "platform": "web",
     "reason": "platform-specific implementation required by Expo resolution",
