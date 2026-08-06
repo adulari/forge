@@ -459,6 +459,11 @@ pub(crate) enum Command {
         /// Only valid with a single session id.
         #[arg(long)]
         json: bool,
+        /// Render the transcript to one self-contained HTML file at this path (session metadata
+        /// header + a user/assistant/tool card per turn, inline CSS, no external assets). Only
+        /// valid with a single session id.
+        #[arg(long)]
+        html: Option<std::path::PathBuf>,
         /// Re-execute the session's user prompts on the CURRENT model/mesh in a fresh session,
         /// then diff the new run against the original (reproducibility audit). Tools run under
         /// your normal permission mode, exactly as `forge run` would. Single id only.

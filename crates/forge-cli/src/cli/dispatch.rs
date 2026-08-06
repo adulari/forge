@@ -98,11 +98,16 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             chat(mock, mode, resume_mode, plain, fullscreen, model).await
         }
         Command::Sessions => sessions(),
-        Command::Replay { ids, json, rerun } => {
+        Command::Replay {
+            ids,
+            json,
+            html,
+            rerun,
+        } => {
             if rerun {
                 replay_rerun_cmd(&ids).await
             } else {
-                replay_cmd(&ids, json)
+                replay_cmd(&ids, json, html.as_deref())
             }
         }
         Command::Fork {
