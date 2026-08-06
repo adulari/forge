@@ -35,6 +35,7 @@ pub(crate) mod completion;
 pub mod context_pack;
 pub(crate) mod context_pipeline;
 pub mod duel;
+pub mod fleet;
 pub mod hooks;
 pub mod llm_router;
 mod model_loop;
@@ -1447,6 +1448,10 @@ pub struct Session {
     /// the `use_skill` virtual tool (command-skill-system.md). `None` → the tool is not advertised
     /// and the turn runs exactly as before.
     skills: Option<Arc<forge_skills::Catalog>>,
+    /// Fleet agent-to-agent messaging callback (composition root; forge-cli's daemon driver wires
+    /// this in — see `fleet.rs`). `None` outside `forge serve`, so `message_session` is simply
+    /// not advertised there.
+    fleet: Option<Arc<dyn fleet::FleetMessaging>>,
     /// In-session model pin set (`/model <id>`). When set, mesh routing still classifies the prompt
     /// (for stats), but this set is used instead of the routed pick. `None` = mesh routing.
     pinned_model: Option<Vec<String>>,
@@ -2038,6 +2043,17 @@ impl Session {
             if !cat.skill_listing().is_empty() {
                 specs.push(use_skill_spec(cat));
             }
+        }
+        // Fleet agent-to-agent messaging — advertised only when this session is hosted by
+        // forge serve and wired to a live daemon fleet (ADR-0004: the callback is the only thing
+        // core knows about the daemon; a bare `forge run`/`forge chat` session never sees it).
+        if self.fleet.is_some()
+            && self
+                .task_scope
+                .as_ref()
+                .is_none_or(|scope| scope.permits_tool(fleet::MESSAGE_SESSION_TOOL))
+        {
+            specs.push(fleet::message_session_spec());
         }
         // External MCP servers: the meta-tools (search/expose/resources/prompt) + any exposed
         // server tools (deferred loading keeps this bounded). Empty unless servers are connected.

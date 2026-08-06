@@ -17,6 +17,7 @@ impl Session {
             || name == PRESENT_PLAN_TOOL
             || name == USE_SKILL_TOOL
             || name == REMEMBER_TOOL
+            || name == fleet::MESSAGE_SESSION_TOOL
         {
             return false;
         }
@@ -203,6 +204,12 @@ impl Session {
         // without waiting for end-of-turn auto-capture.
         if call.name == REMEMBER_TOOL {
             return self.remember(msg_id, call).await;
+        }
+        // Fleet agent-to-agent messaging is core-owned but surface-agnostic: it only touches the
+        // `FleetMessaging` callback the daemon wires in (ADR-0004) — never advertised, and so
+        // never called, unless this session is forge-serve-hosted.
+        if call.name == fleet::MESSAGE_SESSION_TOOL {
+            return self.message_session(msg_id, call).await;
         }
         // External MCP tools (meta-tools + exposed server tools) are owned by the manager, not the
         // built-in registry. Route them here, still through the permission broker (mcp-client.md).
