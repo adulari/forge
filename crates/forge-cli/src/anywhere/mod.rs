@@ -272,6 +272,21 @@ struct DeviceList {
 }
 
 #[derive(Deserialize)]
+struct PairingList {
+    pairings: Vec<ListedPairing>,
+}
+
+/// One pending enrollment request. `pairing_ref` is a HASH of the pairing id, not the id itself —
+/// the service never hands the raw id to a lister, because holding it is what proves a device saw
+/// the challenge out of band. So this inbox can show that a request exists, but approving still
+/// requires the challenge from the waiting device.
+#[derive(Deserialize)]
+struct ListedPairing {
+    device_name: String,
+    expires_at_ms: u64,
+}
+
+#[derive(Deserialize)]
 struct DeviceRow {
     id: String,
     name: String,
@@ -321,6 +336,7 @@ pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
     match command {
         AnywhereCmd::Setup { name, recovery } => setup(name, recovery).await,
         AnywhereCmd::Login { recovery } => login(recovery).await,
+        AnywhereCmd::Approvals => list_approvals().await,
         AnywhereCmd::Approve { challenge } => approve_pairing(&challenge).await,
         AnywhereCmd::Enable { name } => enable(name).await,
         AnywhereCmd::Status => status().await,
@@ -735,6 +751,46 @@ fn open_approved_device_wrap(
     plaintext
         .try_into()
         .map_err(|_| anyhow::anyhow!("approved Account Data Key has the wrong length"))
+}
+
+/// Show enrollment requests waiting on this account.
+///
+/// The wizard tells the user their request "appears automatically in the Approval inbox" of an
+/// enrolled device. When no enrolled surface shows it, there was previously no way to even confirm
+/// the request had reached the service — the pairing just expired with nothing to look at.
+async fn list_approvals() -> Result<()> {
+    let store = StateStore::platform()?;
+    let mut state = store.load()?;
+    let token = ensure_access_token(&store, &mut state).await?;
+    let service_url = forge_config::load()?.anywhere.service_url().to_owned();
+    let list: PairingList = send_json(
+        client()?
+            .get(format!("{service_url}/v1/pairings"))
+            .bearer_auth(token),
+    )
+    .await
+    .context("list pending device approvals")?;
+
+    if list.pairings.is_empty() {
+        println!("No enrollment requests are waiting for approval.");
+        return Ok(());
+    }
+    let now = now_ms();
+    println!("Enrollment requests waiting for approval:");
+    for pairing in &list.pairings {
+        let remaining = pairing.expires_at_ms.saturating_sub(now) / 1_000;
+        println!(
+            "  {}  expires in {remaining}s",
+            safe_display_text(&pairing.device_name)
+        );
+    }
+    println!();
+    println!("Approve with: forge anywhere approve <CHALLENGE>");
+    println!(
+        "The challenge is shown on the device that is waiting — it is deliberately not listed"
+    );
+    println!("here, so a stolen account token cannot approve a device on its own.");
+    Ok(())
 }
 
 async fn approve_pairing(encoded_challenge: &str) -> Result<()> {
