@@ -1545,6 +1545,12 @@ pub struct Session {
     last_context_pack: context_pack::ContextPack,
     /// The explicit completion expectation active during the latest turn.
     last_turn_contract: turn_contract::TurnContract,
+    /// In-memory abort handles for this session's currently-running detached children (retained
+    /// async subagents), so `cancel_subagent` can stop a live task in THIS process. The durable
+    /// half (status/result) lives in the `detached_child` store table and survives a restart;
+    /// this registry does not — it's rebuilt empty on every fresh `Session`, which is correct: a
+    /// new process has no live tasks to abort, only rows to reconcile (see `Session::resume`).
+    detached_registry: subagent::DetachedRegistry,
 }
 
 /// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
@@ -2006,6 +2012,11 @@ impl Session {
             // spawn_agents — a fresh session simply has no children yet and the tool says so.
             specs.push(subagent::send_to_agent_spec());
             specs.push(workflow::run_workflow_spec());
+            // Retained async subagents (RFC retained-async-subagents): status + cancellation for
+            // `spawn_agents(detached: true)` children. Advertised alongside spawn_agents — same
+            // gate, same "empty until first use" story as send_to_agent above.
+            specs.push(subagent::list_subagents_spec());
+            specs.push(subagent::cancel_subagent_spec());
         }
         if self
             .task_scope
@@ -2262,6 +2273,12 @@ impl Session {
         let mode = format!("{:?}", self.mode);
         self.store
             .ensure_session(&self.id, &self.workspace.display(), &mode)?;
+        // Retained async subagents (RFC retained-async-subagents, ADR-0004): deliver any detached
+        // child that finished since the last turn as a labeled turn in THIS turn's context, before
+        // routing/the prompt — so the model sees it as part of what it's responding to. Delivery
+        // goes through the ordinary session queue (a persisted message + transcript push), not a
+        // new presenter surface.
+        self.deliver_pending_detached_results()?;
         // A completed turn's bulky tool logs remain available in the store/replay and in the
         // working tree they inspected, but repeatedly resending them on every later model step
         // makes long sessions grow quadratically. Reclaim them at every user-turn boundary instead
