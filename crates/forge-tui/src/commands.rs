@@ -121,6 +121,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/uncompact",
     },
     Command {
+        name: "refine",
+        desc: "review the trajectory and persist learned harness state (prompt notes, skills, subagent specs)",
+        usage: "/refine [instructions] | /refine --global [instructions] | /refine rollback <id> | /refine status",
+    },
+    Command {
         name: "lattice",
         desc: "show a symbol's code-intelligence subgraph (callers + provenance)",
         usage: "/lattice <symbol>",
@@ -248,6 +253,21 @@ pub enum WorkflowAction {
     List,
 }
 
+/// `/refine` sub-actions (docs/features/continual-harness.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefineAction {
+    /// `/refine [--global] [instructions]` — propose and apply one refinement batch now. Targets
+    /// the session scope unless `global` is set.
+    Run {
+        instructions: Option<String>,
+        global: bool,
+    },
+    /// `/refine status` — list harness entries in scope plus recent refinement history.
+    Status,
+    /// `/refine rollback <id>` — invert a past refinement batch (id or a unique id prefix).
+    Rollback(String),
+}
+
 /// What the render loop must do when a command is accepted. forge-tui produces it; the binary
 /// (which owns the `Session`) executes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,6 +307,9 @@ pub enum CommandAction {
     Compact,
     /// Restore the full pre-compaction transcript after a `/compact` (`/uncompact`).
     Uncompact,
+    /// Continual Harness: review the trajectory and persist learned harness state (prompt notes,
+    /// skills, subagent specs) — see docs/features/continual-harness.md.
+    Refine(RefineAction),
     /// Show the code-intelligence subgraph for a symbol (`/lattice <symbol>`).
     Lattice(String),
     /// Set a session goal and decompose it into a tracked task plan (`/goal <objective>`).
@@ -612,6 +635,30 @@ pub fn parse_command(line: &str) -> CommandAction {
         "checkpoints" => CommandAction::ListCheckpoints,
         "compact" => CommandAction::Compact,
         "uncompact" => CommandAction::Uncompact,
+        "refine" => {
+            // `/refine [--global] [instructions]` | `/refine rollback <id>` | `/refine status`
+            let trimmed = arg.trim();
+            let action = if trimmed.eq_ignore_ascii_case("status") {
+                RefineAction::Status
+            } else if let Some(rest) = trimmed
+                .strip_prefix("rollback ")
+                .or_else(|| trimmed.strip_prefix("rollback"))
+            {
+                RefineAction::Rollback(rest.trim().to_string())
+            } else {
+                let global = has_flag(trimmed, "--global");
+                let instructions: String = trimmed
+                    .split_whitespace()
+                    .filter(|t| !t.eq_ignore_ascii_case("--global"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                RefineAction::Run {
+                    instructions: (!instructions.is_empty()).then_some(instructions),
+                    global,
+                }
+            };
+            CommandAction::Refine(action)
+        }
         "lattice" | "lat" => CommandAction::Lattice(arg),
         "goal" | "objective" => CommandAction::Goal(arg),
         "pr" | "pullrequest" => CommandAction::Pr(arg),
@@ -771,7 +818,7 @@ pub fn command_category(name: &str) -> &'static str {
     match name {
         "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
         "sessions" | "resume" | "replay" | "undo" | "checkpoint" | "checkpoints" | "compact"
-        | "uncompact" | "clear" => "Session",
+        | "uncompact" | "refine" | "clear" => "Session",
         "model" | "models" | "mode" | "effort" | "thinking" | "mesh" | "usage" => "Model & usage",
         "assay" | "lattice" | "pr" => "Review & ship",
         "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" => "Integrations",
@@ -1262,6 +1309,54 @@ mod tests {
         assert_eq!(parse_command("/go"), CommandAction::Execute);
         assert_eq!(parse_command("/voice"), CommandAction::Voice);
         assert_eq!(parse_command("/record"), CommandAction::Voice);
+    }
+
+    #[test]
+    fn parses_refine_command() {
+        assert_eq!(
+            parse_command("/refine"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: None,
+                global: false,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine be stricter about tool-call retries"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: Some("be stricter about tool-call retries".into()),
+                global: false,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine --global"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: None,
+                global: true,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine --global prefer smaller diffs"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: Some("prefer smaller diffs".into()),
+                global: true,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine status"),
+            CommandAction::Refine(RefineAction::Status)
+        );
+        assert_eq!(
+            parse_command("/refine STATUS"),
+            CommandAction::Refine(RefineAction::Status)
+        );
+        assert_eq!(
+            parse_command("/refine rollback abc123"),
+            CommandAction::Refine(RefineAction::Rollback("abc123".into()))
+        );
+        assert_eq!(
+            parse_command("/refine rollback"),
+            CommandAction::Refine(RefineAction::Rollback(String::new()))
+        );
     }
 
     #[test]

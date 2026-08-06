@@ -39,8 +39,8 @@ pub use app_remote::{
 };
 pub use commands::{
     arg_values, at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken,
-    Command, CommandAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow, RemoteMode,
-    SlashToken, StatuslineAction, WorkflowAction, COMMANDS,
+    Command, CommandAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow, RefineAction,
+    RemoteMode, SlashToken, StatuslineAction, WorkflowAction, COMMANDS,
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg};

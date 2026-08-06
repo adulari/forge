@@ -1663,6 +1663,22 @@ pub(crate) async fn run_chat_tui(
                                     &mut busy_since,
                                 ));
                             }
+                            DispatchOutcome::RunRefine {
+                                instructions,
+                                global,
+                            } => {
+                                turn_gen += 1;
+                                turn_handle = Some(spawn_refine(
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                    instructions,
+                                    global,
+                                ));
+                            }
                             DispatchOutcome::RunSavedWorkflow { name, args } => {
                                 turn_gen += 1;
                                 turn_handle = Some(spawn_saved_workflow(
@@ -2767,6 +2783,22 @@ pub(crate) async fn run_chat_tui(
                                         &mut busy_since,
                                     ));
                                 }
+                                DispatchOutcome::RunRefine {
+                                    instructions,
+                                    global,
+                                } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_refine(
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                        instructions,
+                                        global,
+                                    ));
+                                }
                                 DispatchOutcome::RunSavedWorkflow { name, args } => {
                                     turn_gen += 1;
                                     turn_handle = Some(spawn_saved_workflow(
@@ -3190,6 +3222,22 @@ pub(crate) async fn run_chat_tui(
                                         &mut app,
                                         &mut busy,
                                         &mut busy_since,
+                                    ));
+                                }
+                                DispatchOutcome::RunRefine {
+                                    instructions,
+                                    global,
+                                } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_refine(
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                        instructions,
+                                        global,
                                     ));
                                 }
                                 DispatchOutcome::RunSavedWorkflow { name, args } => {

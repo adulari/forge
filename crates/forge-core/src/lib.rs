@@ -48,6 +48,7 @@ pub mod permission;
 pub mod project_context;
 mod quality_gates;
 pub mod readiness;
+mod refinement;
 mod replay;
 mod routing_policy;
 mod session_controls;
@@ -1545,6 +1546,9 @@ pub struct Session {
     last_context_pack: context_pack::ContextPack,
     /// The explicit completion expectation active during the latest turn.
     last_turn_contract: turn_contract::TurnContract,
+    /// Completed turns since the last Continual Harness refinement (refinement.rs). Drives
+    /// `harness.auto_refine = "turns"`; reset whenever [`Session::refine`] runs, manual or auto.
+    turns_since_refine: u32,
 }
 
 /// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
@@ -2495,6 +2499,28 @@ impl Session {
                             "💭 recalled {} memories from past sessions",
                             mems.len()
                         )));
+                    }
+                }
+            }
+
+            // Continual Harness context injection (refinement.rs): surface the learned
+            // prompt/skill/subagent entries this agent has proposed about itself in past
+            // sessions, right alongside auto-memory recall above — same one-shot-per-session
+            // placement, same "durable context from earlier work" spirit, but scoped to how
+            // Forge itself should operate rather than facts about the project.
+            if self.config.harness.enabled {
+                if let Ok(overview) = self.harness_overview() {
+                    if let Some(block) = context_pipeline::harness_context_block(
+                        &overview,
+                        self.config.harness.max_context_entries,
+                        self.config.harness.max_entry_chars,
+                    ) {
+                        self.inject_context(
+                            &mut context_pack,
+                            context_pack::ContextSource::Harness,
+                            "learned harness context (Continual Harness)",
+                            &block,
+                        )?;
                     }
                 }
             }
@@ -3556,6 +3582,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.generate_recap(prompt, &final_text, &recap_tasks_before)
             .await;
         self.generate_suggestion(prompt, &final_text).await;
+        // Continual Harness auto-refine gate (`harness.auto_refine = "turns"`, refinement.rs).
+        // Runs inline (unlike recap/suggestion) rather than detaching onto the presenter's sink:
+        // it mutates durable harness state and its own presenter note should land in order with
+        // the turn it concluded, not race a later turn's output.
+        self.auto_refine_after_turns().await;
         // One-shot/headless mode must await memory persistence before the process exits. In the
         // interactive TUI, dropping a Tokio JoinHandle detaches (does not cancel) the capture, so
         // the completed answer and input become usable immediately while persistence finishes.
