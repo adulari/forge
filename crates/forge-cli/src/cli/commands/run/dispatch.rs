@@ -81,10 +81,24 @@ pub(crate) enum DispatchOutcome {
         args: serde_json::Value,
     },
     /// `/loop <task>` — run the task, then re-run each turn until the model signals completion.
-    StartLoop { prompt: String },
+    /// `gates`/`max_tokens`/`max_minutes` are the autonomous quality-gate/budget options
+    /// (docs/features/autonomous-gates.md) — empty/`None` for the bare form.
+    StartLoop {
+        prompt: String,
+        gates: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    },
     /// `/goal <objective>` — decompose into a tracked task plan, then keep re-running turns
-    /// autonomously until every task is done and the model signals completion.
-    StartGoal { prompt: String, goal: String },
+    /// autonomously until every task is done and the model signals completion. Same gate/budget
+    /// fields as [`DispatchOutcome::StartLoop`].
+    StartGoal {
+        prompt: String,
+        goal: String,
+        gates: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    },
     /// `/duel <task>` — race 2-3 mesh models on the same task, each in its own worktree
     /// (docs/features/duel.md), in a background task like a turn.
     RunDuel { task: String },
@@ -618,10 +632,18 @@ and keep going."
         }
         // `/goal <objective>` — pin a persisted north-star, then run a turn that decomposes it
         // into a tracked task plan (update_tasks).
-        CommandAction::Goal(text) => {
-            let text = text.trim().to_string();
+        CommandAction::Goal {
+            objective,
+            gates,
+            max_tokens,
+            max_minutes,
+        } => {
+            let text = objective.trim().to_string();
             if text.is_empty() {
-                app.note("usage: /goal <objective> — sets the goal and breaks it into tasks");
+                app.note(
+                    "usage: /goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
+                     — sets the goal and breaks it into tasks",
+                );
                 return Ok(DispatchOutcome::Handled);
             }
             {
@@ -638,6 +660,9 @@ and keep going."
                      update_tasks tool, then start on the first step.\n\nGoal: {text}"
                 ),
                 goal: text.clone(),
+                gates,
+                max_tokens,
+                max_minutes,
             });
         }
         // `/pr [title]` — turn this session's work into a branch + commit + PR whose body carries
@@ -671,13 +696,26 @@ and keep going."
             });
         }
         // `/loop <task>` — autonomous re-run until the model signals completion.
-        CommandAction::Loop(text) => {
-            let text = text.trim().to_string();
+        CommandAction::Loop {
+            prompt,
+            gates,
+            max_tokens,
+            max_minutes,
+        } => {
+            let text = prompt.trim().to_string();
             if text.is_empty() {
-                app.note("usage: /loop <task> — re-runs until the model signals it's complete");
+                app.note(
+                    "usage: /loop <task> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
+                     — re-runs until the model signals it's complete",
+                );
                 return Ok(DispatchOutcome::Handled);
             }
-            return Ok(DispatchOutcome::StartLoop { prompt: text });
+            return Ok(DispatchOutcome::StartLoop {
+                prompt: text,
+                gates,
+                max_tokens,
+                max_minutes,
+            });
         }
         // `/duel <task>` — model arena: race 2-3 mesh models on the same task, each in its own
         // isolated worktree, then pick a winner from a comparable picker.

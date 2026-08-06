@@ -137,8 +137,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "goal",
-        desc: "set a session goal and break it into a tracked task plan",
-        usage: "/goal <objective>",
+        desc: "set a session goal and break it into a tracked task plan — optionally gated on quality checks and a token/time budget",
+        usage: "/goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N]",
     },
     Command {
         name: "pr",
@@ -147,8 +147,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "loop",
-        desc: "re-run a task each turn until the model signals it's complete",
-        usage: "/loop <task>",
+        desc: "re-run a task each turn until the model signals it's complete — optionally gated on quality checks and a token/time budget",
+        usage: "/loop <task> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N]",
     },
     Command {
         name: "effort",
@@ -289,13 +289,27 @@ pub enum CommandAction {
     Uncompact,
     /// Show the code-intelligence subgraph for a symbol (`/lattice <symbol>`).
     Lattice(String),
-    /// Set a session goal and decompose it into a tracked task plan (`/goal <objective>`).
-    Goal(String),
+    /// Set a session goal and decompose it into a tracked task plan (`/goal <objective>
+    /// [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`). `gates`/`max_tokens`/
+    /// `max_minutes` are the shared autonomous-quality-gate/budget options
+    /// (docs/features/autonomous-gates.md) — empty/`None` for the bare form.
+    Goal {
+        objective: String,
+        gates: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    },
     /// Turn this session's work into a branch + commit + pull request with a provenance-rich
     /// body (`/pr [title]`).
     Pr(String),
-    /// Re-run a task each turn until the model signals completion (`/loop <task>`).
-    Loop(String),
+    /// Re-run a task each turn until the model signals completion (`/loop <task> [--gate "<cmd>"]...
+    /// [--max-tokens N] [--max-minutes N]`). See [`CommandAction::Goal`] for the shared fields.
+    Loop {
+        prompt: String,
+        gates: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    },
     /// Show a session transcript inline, or diff two sessions (`/replay <id> [<id2>]`).
     Replay(String, Option<String>),
     /// Open the usage overlay showing API spend + token breakdown (`/usage`).
@@ -560,6 +574,52 @@ fn has_flag(arg: &str, flag: &str) -> bool {
     arg.split_whitespace().any(|t| t == flag)
 }
 
+/// Parse the `/loop`/`/goal`-shared autonomous-gate/budget options out of a raw arg string:
+/// `[--gate "<cmd>"]... [--max-tokens N] [--max-minutes N] <prompt>` in any order, returning
+/// `(prompt, gates, max_tokens, max_minutes)`. `--gate` is repeatable; its value is quote-aware
+/// (via `shell_words`) so a gate command containing spaces survives (`--gate "cargo test"`).
+///
+/// The common bare case (no option flags at all) returns `arg` completely untouched — no
+/// tokenizing, no re-joining — so `/loop <task>`/`/goal <objective>` keep their exact prior
+/// behavior (whitespace and all) for backward compatibility. Malformed quoting in the slow path
+/// (unbalanced `"`) falls back the same way rather than erroring.
+fn parse_autonomy_options(arg: &str) -> (String, Vec<String>, Option<u64>, Option<u64>) {
+    let has_options =
+        arg.contains("--gate") || arg.contains("--max-tokens") || arg.contains("--max-minutes");
+    if !has_options {
+        return (arg.to_string(), Vec::new(), None, None);
+    }
+    let Ok(tokens) = shell_words::split(arg) else {
+        return (arg.to_string(), Vec::new(), None, None);
+    };
+    let mut gates = Vec::new();
+    let mut max_tokens = None;
+    let mut max_minutes = None;
+    let mut rest: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        match tokens[i].as_str() {
+            "--gate" if i + 1 < tokens.len() => {
+                gates.push(tokens[i + 1].clone());
+                i += 2;
+            }
+            "--max-tokens" if i + 1 < tokens.len() => {
+                max_tokens = tokens[i + 1].parse().ok();
+                i += 2;
+            }
+            "--max-minutes" if i + 1 < tokens.len() => {
+                max_minutes = tokens[i + 1].parse().ok();
+                i += 2;
+            }
+            _ => {
+                rest.push(tokens[i].clone());
+                i += 1;
+            }
+        }
+    }
+    (rest.join(" "), gates, max_tokens, max_minutes)
+}
+
 /// Parse a submitted command line (`"/resume ab12"`). The leading `/` is required; a `//`
 /// prefix is NOT a command (it escapes to a literal prompt — handled by the caller).
 pub fn parse_command(line: &str) -> CommandAction {
@@ -613,9 +673,25 @@ pub fn parse_command(line: &str) -> CommandAction {
         "compact" => CommandAction::Compact,
         "uncompact" => CommandAction::Uncompact,
         "lattice" | "lat" => CommandAction::Lattice(arg),
-        "goal" | "objective" => CommandAction::Goal(arg),
+        "goal" | "objective" => {
+            let (objective, gates, max_tokens, max_minutes) = parse_autonomy_options(&arg);
+            CommandAction::Goal {
+                objective,
+                gates,
+                max_tokens,
+                max_minutes,
+            }
+        }
         "pr" | "pullrequest" => CommandAction::Pr(arg),
-        "loop" => CommandAction::Loop(arg),
+        "loop" => {
+            let (prompt, gates, max_tokens, max_minutes) = parse_autonomy_options(&arg);
+            CommandAction::Loop {
+                prompt,
+                gates,
+                max_tokens,
+                max_minutes,
+            }
+        }
         "duel" => CommandAction::Duel(arg),
         "voice" | "record" => CommandAction::Voice,
         "replay" => {
@@ -1234,9 +1310,22 @@ mod tests {
         );
         assert_eq!(
             parse_command("/goal ship the parser"),
-            CommandAction::Goal("ship the parser".into())
+            CommandAction::Goal {
+                objective: "ship the parser".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+            }
         );
-        assert_eq!(parse_command("/goal"), CommandAction::Goal(String::new()));
+        assert_eq!(
+            parse_command("/goal"),
+            CommandAction::Goal {
+                objective: String::new(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+            }
+        );
         assert_eq!(
             parse_command("/pr feat: add rate limiter"),
             CommandAction::Pr("feat: add rate limiter".into())
@@ -1244,7 +1333,12 @@ mod tests {
         assert_eq!(parse_command("/pr"), CommandAction::Pr(String::new()));
         assert_eq!(
             parse_command("/loop fix all warnings"),
-            CommandAction::Loop("fix all warnings".into())
+            CommandAction::Loop {
+                prompt: "fix all warnings".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+            }
         );
         assert_eq!(
             parse_command("/duel add pagination to the /users endpoint"),
@@ -1262,6 +1356,61 @@ mod tests {
         assert_eq!(parse_command("/go"), CommandAction::Execute);
         assert_eq!(parse_command("/voice"), CommandAction::Voice);
         assert_eq!(parse_command("/record"), CommandAction::Voice);
+    }
+
+    #[test]
+    fn parses_loop_and_goal_gate_and_budget_options() {
+        // A single quoted gate, before the prompt.
+        assert_eq!(
+            parse_command("/loop --gate \"cargo test\" fix the bug"),
+            CommandAction::Loop {
+                prompt: "fix the bug".into(),
+                gates: vec!["cargo test".into()],
+                max_tokens: None,
+                max_minutes: None,
+            }
+        );
+        // Repeated gates, budgets, order-independent, prompt reassembled from remaining tokens.
+        assert_eq!(
+            parse_command(
+                "/loop --gate \"cargo test\" --max-tokens 50000 --gate \"cargo clippy\" --max-minutes 30 ship it"
+            ),
+            CommandAction::Loop {
+                prompt: "ship it".into(),
+                gates: vec!["cargo test".into(), "cargo clippy".into()],
+                max_tokens: Some(50_000),
+                max_minutes: Some(30),
+            }
+        );
+        assert_eq!(
+            parse_command("/goal --gate \"npm run lint\" ship the parser"),
+            CommandAction::Goal {
+                objective: "ship the parser".into(),
+                gates: vec!["npm run lint".into()],
+                max_tokens: None,
+                max_minutes: None,
+            }
+        );
+        // Bare form (no options) must be untouched — exact prior behavior, whitespace and all.
+        assert_eq!(
+            parse_command("/loop   fix   all   warnings"),
+            CommandAction::Loop {
+                prompt: "fix   all   warnings".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+            }
+        );
+        // A non-numeric budget value is dropped rather than panicking.
+        assert_eq!(
+            parse_command("/loop --max-tokens oops go"),
+            CommandAction::Loop {
+                prompt: "go".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+            }
+        );
     }
 
     #[test]

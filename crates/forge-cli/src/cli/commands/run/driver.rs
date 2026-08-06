@@ -732,12 +732,19 @@ impl DriverState {
                     Arc::clone(&self.pending_duel),
                 ));
             }
-            DispatchOutcome::StartLoop { prompt } => {
+            DispatchOutcome::StartLoop {
+                prompt,
+                gates,
+                max_tokens,
+                max_minutes,
+            } => {
                 self.turn_gen += 1;
-                self.loop_state = Some(LoopState {
-                    gen: self.turn_gen,
-                    iter: 1,
-                });
+                self.loop_state = Some(LoopState::new(
+                    self.turn_gen,
+                    gates,
+                    max_tokens,
+                    max_minutes,
+                ));
                 self.app.note("↻ loop started — Stop to interrupt");
                 self.turn_handle = Some(spawn_turn_with(
                     prompt,
@@ -751,15 +758,21 @@ impl DriverState {
                     &mut self.busy_since,
                 ));
             }
-            DispatchOutcome::StartGoal { prompt, goal } => {
+            DispatchOutcome::StartGoal {
+                prompt,
+                goal,
+                gates,
+                max_tokens,
+                max_minutes,
+            } => {
                 self.turn_gen += 1;
-                self.goal_state = Some(GoalState {
-                    gen: self.turn_gen,
-                    iter: 1,
-                    prev_done: 0,
-                    no_progress: 0,
+                self.goal_state = Some(GoalState::new(
+                    self.turn_gen,
                     goal,
-                });
+                    gates,
+                    max_tokens,
+                    max_minutes,
+                ));
                 self.app
                     .note("🎯 goal running autonomously — Stop to interrupt");
                 self.turn_handle = Some(spawn_turn_with(
@@ -1011,7 +1024,7 @@ mod tests {
     async fn queued_reprompt_steers_the_next_loop_iteration() {
         let mut state = test_driver_state().await;
         state.busy = true;
-        state.loop_state = Some(LoopState { gen: 10, iter: 1 });
+        state.loop_state = Some(LoopState::new(10, Vec::new(), None, None));
         state.queued_prompts = vec!["apply the correction".into(), "then verify".into()];
 
         state.on_turn_done(10).await;
@@ -1021,7 +1034,11 @@ mod tests {
         assert_eq!(state.prompt_history, vec!["apply the correction"]);
         assert!(matches!(
             state.loop_state,
-            Some(LoopState { gen: 11, iter: 2 })
+            Some(LoopState {
+                gen: 11,
+                iter: 2,
+                ..
+            })
         ));
         assert!(state.busy);
         state.turn_handle.take().unwrap().abort();
@@ -1031,13 +1048,13 @@ mod tests {
     async fn queued_reprompt_steers_the_next_goal_iteration() {
         let mut state = test_driver_state().await;
         state.busy = true;
-        state.goal_state = Some(GoalState {
-            gen: 10,
-            iter: 1,
-            prev_done: 0,
-            no_progress: 0,
-            goal: "finish the goal".into(),
-        });
+        state.goal_state = Some(GoalState::new(
+            10,
+            "finish the goal".into(),
+            Vec::new(),
+            None,
+            None,
+        ));
         state.queued_prompts = vec!["prioritize the regression".into()];
 
         state.on_turn_done(10).await;
