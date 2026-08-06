@@ -36,6 +36,12 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::PushSubscribe => exact(Method::POST, "/api/push/subscribe"),
         RouteId::PushUnsubscribe => exact(Method::POST, "/api/push/unsubscribe"),
         RouteId::ListTerminals => exact(Method::GET, "/api/terminals"),
+        // Read-only git review (see the note on `RouteId::GitStatus`). `GET` only: the daemon's
+        // mutating git endpoints stay unreachable over the bridge, so a compromised relay command
+        // cannot stage or commit in the user's repository.
+        RouteId::GitStatus => exact(Method::GET, "/api/git/status"),
+        RouteId::GitBranches => exact(Method::GET, "/api/git/branches"),
+        RouteId::GitDiff => exact(Method::GET, "/api/git/diff"),
         RouteId::ArchiveSession
         | RouteId::ForkSession
         | RouteId::MergeSession
@@ -153,6 +159,37 @@ mod tests {
         ))
         .is_err());
         assert!(route_target(&request(RouteId::RenameSession, "PATCH", &["unsafe/id"],)).is_err());
+    }
+
+    /// The three git routes read; nothing else about git is reachable over the bridge. A relay
+    /// command asking for a mutating method on them must be refused, so a phone (or anything that
+    /// can speak to the relay) can review a diff but never stage, commit or switch branches.
+    #[test]
+    fn git_review_routes_are_read_only_over_the_bridge() {
+        let status = request(RouteId::GitStatus, "GET", &["?session=abc"]);
+        let target = route_target(&status).unwrap();
+        assert_eq!(target.method, Method::GET);
+        assert_eq!(target.path, "/api/git/status");
+        assert_eq!(target.query.as_deref(), Some("session=abc"));
+        assert!(validate_command_request(&status).is_ok());
+
+        let diff = request(RouteId::GitDiff, "GET", &["?session=abc&path=src/main.rs"]);
+        let target = route_target(&diff).unwrap();
+        assert_eq!(target.path, "/api/git/diff");
+        assert!(validate_command_request(&diff).is_ok());
+
+        let branches = request(RouteId::GitBranches, "GET", &[]);
+        assert_eq!(route_target(&branches).unwrap().path, "/api/git/branches");
+        assert!(validate_command_request(&branches).is_ok());
+
+        for route in [RouteId::GitStatus, RouteId::GitBranches, RouteId::GitDiff] {
+            for method in ["POST", "PUT", "PATCH", "DELETE"] {
+                assert!(
+                    validate_command_request(&request(route, method, &[])).is_err(),
+                    "{route:?} must refuse {method} over the bridge"
+                );
+            }
+        }
     }
 
     #[test]
