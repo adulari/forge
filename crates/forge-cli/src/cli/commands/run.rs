@@ -12,6 +12,7 @@ mod autonomous;
 pub(crate) use autonomous::*;
 
 mod gates;
+mod mesh_overlay;
 pub(crate) use gates::*;
 
 mod setup;

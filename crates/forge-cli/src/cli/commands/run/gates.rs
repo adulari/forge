@@ -284,6 +284,70 @@ async fn capture_git(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
     }
 }
 
+/// `/goal` dispatch body — pins the goal guidance on the session and produces the decomposition
+/// turn. Lives here (not dispatch.rs) with the rest of the autonomy surface.
+pub(crate) async fn goal_outcome(
+    session: &std::sync::Arc<tokio::sync::Mutex<forge_core::Session>>,
+    app: &mut forge_tui::App,
+    objective: String,
+    gates: Vec<String>,
+    max_tokens: Option<u64>,
+    max_minutes: Option<u64>,
+) -> anyhow::Result<super::dispatch::DispatchOutcome> {
+    use super::dispatch::DispatchOutcome;
+    let text = objective.trim().to_string();
+    if text.is_empty() {
+        app.note(
+            "usage: /goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
+             — sets the goal and breaks it into tasks",
+        );
+        return Ok(DispatchOutcome::Handled);
+    }
+    {
+        let mut s = session.lock().await;
+        s.prime_guidance(&[format!(
+            "Session goal: {text}\nKeep every step aligned to this goal until it is fully met."
+        )])
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    app.note(&format!("🎯 goal set — {text}"));
+    Ok(DispatchOutcome::StartGoal {
+        prompt: format!(
+            "Break this goal into a concrete, ordered plan and record it with the \
+             update_tasks tool, then start on the first step.\n\nGoal: {text}"
+        ),
+        goal: text,
+        gates,
+        max_tokens,
+        max_minutes,
+    })
+}
+
+/// `/loop` dispatch body — validates and forwards into the autonomous loop.
+pub(crate) fn loop_outcome(
+    app: &mut forge_tui::App,
+    prompt: String,
+    gates: Vec<String>,
+    max_tokens: Option<u64>,
+    max_minutes: Option<u64>,
+) -> super::dispatch::DispatchOutcome {
+    use super::dispatch::DispatchOutcome;
+    let text = prompt.trim().to_string();
+    if text.is_empty() {
+        app.note(
+            "usage: /loop <task> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
+             — re-runs until the model signals it's complete",
+        );
+        return DispatchOutcome::Handled;
+    }
+    DispatchOutcome::StartLoop {
+        prompt: text,
+        gates,
+        max_tokens,
+        max_minutes,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
