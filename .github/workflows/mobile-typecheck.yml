@@ -74,6 +74,13 @@ jobs:
           # memory-bounded self-hosted runners that exceeds the service cgroup
           # before the export can finish, so use the same proven cap as OTA.
           METRO_MAX_WORKERS: "2"
+      # Roughly 400 ms of a measured 995 ms cold start to first paint is bundle
+      # fetch, parse, and evaluation, and nothing else here notices if that grows.
+      # Reads the export above rather than producing one, so it costs no build time.
+      - name: Check bundle size budget
+        working-directory: .
+        run: python3 scripts/ci/bundle_size.py
+
       - name: Bound persistent dependency cache
         if: always()
         working-directory: .
