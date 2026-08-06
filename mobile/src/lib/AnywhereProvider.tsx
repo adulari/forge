@@ -166,6 +166,12 @@ export interface AnywhereClaimantApproval {
   safetyCode: string;
   deviceName: string;
   githubLogin: string;
+  /**
+   * The pairing challenge this device is waiting on, so it can be approved from `forge anywhere
+   * approve` when no enrolled surface shows the request. Holding it is what proves an approver saw
+   * the request out of band, which is why the service never lists it — it has to come from here.
+   */
+  challenge: string;
 }
 
 export interface AnywhereLocalHostApproval {
@@ -1609,6 +1615,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       safetyCode: claimantPairing.safetyCode,
       deviceName: deviceName(),
       githubLogin: claimantPairing.login.auth.github_login,
+      challenge: claimantPairing.created.challenge,
     } : null,
     localHostApproval: pendingLocalHost ? {
       name: pendingLocalHost.name,

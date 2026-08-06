@@ -20,6 +20,8 @@ pub(crate) enum AnywhereCmd {
         #[arg(long)]
         recovery: bool,
     },
+    /// List enrollment requests waiting for approval.
+    Approvals,
     /// Approve a short-lived enrollment challenge from a new device.
     Approve {
         /// Challenge printed by `forge anywhere setup` on the new device.
