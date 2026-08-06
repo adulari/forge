@@ -36,6 +36,7 @@ pub mod context_pack;
 pub(crate) mod context_pipeline;
 pub mod duel;
 pub mod fleet;
+pub mod heartbeat;
 pub mod hooks;
 pub mod llm_router;
 mod model_loop;
@@ -2030,6 +2031,14 @@ impl Session {
             .is_none_or(|scope| scope.permits_tool(REMEMBER_TOOL))
         {
             specs.push(remember_spec());
+        }
+        // Agent-created recurring re-entry prompts — distinct from the user's own `/heartbeat`.
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(heartbeat::MANAGE_HEARTBEATS_TOOL))
+        {
+            specs.push(heartbeat::manage_heartbeats_spec());
         }
         // The plan-presentation tool — offered ONLY in planning mode, so the model proposes a plan
         // (rendered as an interactive card) instead of editing. Gating it to Plan mode also makes

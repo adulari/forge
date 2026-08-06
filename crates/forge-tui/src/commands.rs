@@ -91,6 +91,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/init",
     },
     Command {
+        name: "heartbeat",
+        desc: "a recurring prompt that re-enters this session (status/pause/resume/clear)",
+        usage: "/heartbeat every <interval> <prompt> | status | pause | resume | clear",
+    },
+    Command {
         name: "new",
         desc: "start a fresh session",
         usage: "/new",
@@ -248,6 +253,8 @@ pub enum WorkflowAction {
     List,
 }
 
+pub use crate::heartbeat_args::HeartbeatAction;
+
 /// What the render loop must do when a command is accepted. forge-tui produces it; the binary
 /// (which owns the `Session`) executes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +346,10 @@ pub enum CommandAction {
     Statusline(StatuslineAction),
     /// Mesh-routed multi-agent workflow scripts (`/workflow`, docs/rfcs/forge-workflow.md).
     Workflow(WorkflowAction),
+    /// The user's own recurring re-entry prompt for this session (`/heartbeat`,
+    /// docs/features/session-heartbeats.md). Distinct from — and never modifies — any
+    /// agent-created heartbeats (the `manage_heartbeats` virtual tool).
+    Heartbeat(HeartbeatAction),
     /// Model arena (`/duel <task>`, docs/features/duel.md): race 2-3 mesh models on the same task
     /// concurrently, each in its own worktree, then let the user pick a winner.
     Duel(String),
@@ -535,30 +546,7 @@ impl AtPathPicker {
     }
 }
 
-/// Extract a comma-separated lens list from `--flag <value>` in a raw arg string.
-/// `/assay --only dead-weight,unsafe` → `extract_flag(arg, "--only")` → `["dead-weight", "unsafe"]`
-fn extract_flag(arg: &str, flag: &str) -> Vec<String> {
-    let tokens: Vec<&str> = arg.split_whitespace().collect();
-    for (i, tok) in tokens.iter().enumerate() {
-        if *tok == flag {
-            if let Some(val) = tokens.get(i + 1) {
-                if !val.starts_with('-') {
-                    return val
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// Check whether a boolean flag (no value) is present in `arg`.
-fn has_flag(arg: &str, flag: &str) -> bool {
-    arg.split_whitespace().any(|t| t == flag)
-}
+use crate::heartbeat_args::{extract_flag, has_flag};
 
 /// Parse a submitted command line (`"/resume ab12"`). The leading `/` is required; a `//`
 /// prefix is NOT a command (it escapes to a literal prompt — handled by the caller).
@@ -705,6 +693,7 @@ pub fn parse_command(line: &str) -> CommandAction {
             };
             CommandAction::Workflow(action)
         }
+        "heartbeat" | "hb" => crate::heartbeat_args::heartbeat_action(&arg),
         other => CommandAction::Unknown(other.to_string()),
     }
 }
@@ -1271,6 +1260,44 @@ mod tests {
             CommandAction::Remember("tabs not spaces".into())
         );
         assert_eq!(parse_command("/memories"), CommandAction::Memories);
+    }
+
+    #[test]
+    fn parses_heartbeat_command_and_subactions() {
+        assert_eq!(
+            parse_command("/heartbeat every 5m check the CI status"),
+            CommandAction::Heartbeat(HeartbeatAction::Every {
+                interval: "5m".into(),
+                prompt: "check the CI status".into(),
+            })
+        );
+        assert_eq!(
+            parse_command("/heartbeat"),
+            CommandAction::Heartbeat(HeartbeatAction::Status)
+        );
+        assert_eq!(
+            parse_command("/heartbeat status"),
+            CommandAction::Heartbeat(HeartbeatAction::Status)
+        );
+        assert_eq!(
+            parse_command("/heartbeat pause"),
+            CommandAction::Heartbeat(HeartbeatAction::Pause)
+        );
+        assert_eq!(
+            parse_command("/heartbeat resume"),
+            CommandAction::Heartbeat(HeartbeatAction::Resume)
+        );
+        assert_eq!(
+            parse_command("/heartbeat clear"),
+            CommandAction::Heartbeat(HeartbeatAction::Clear)
+        );
+        assert_eq!(
+            parse_command("/hb every 30s ping"),
+            CommandAction::Heartbeat(HeartbeatAction::Every {
+                interval: "30s".into(),
+                prompt: "ping".into(),
+            })
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ mod app_remote;
 mod commands;
 pub mod config_editor;
 mod driver;
+mod heartbeat_args;
 mod help;
 pub mod init_wizard;
 mod keybind_configurator;
@@ -39,8 +40,8 @@ pub use app_remote::{
 };
 pub use commands::{
     arg_values, at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken,
-    Command, CommandAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow, RemoteMode,
-    SlashToken, StatuslineAction, WorkflowAction, COMMANDS,
+    Command, CommandAction, HeartbeatAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow,
+    RemoteMode, SlashToken, StatuslineAction, WorkflowAction, COMMANDS,
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg};

@@ -43,7 +43,8 @@ impl HelpTab {
 
 fn command_group(name: &str) -> &'static str {
     match name {
-        "help" | "keys" | "config" | "mode" | "thinking" | "effort" | "statusline" => "Session",
+        "help" | "keys" | "config" | "mode" | "thinking" | "effort" | "statusline"
+        | "heartbeat" => "Session",
         "sessions" | "replay" | "resume" | "new" | "undo" | "checkpoint" | "checkpoints"
         | "compact" | "uncompact" => "History",
         "model" | "models" | "usage" | "mesh" | "duel" => "Models & routing",
