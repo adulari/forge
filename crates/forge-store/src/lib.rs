@@ -53,7 +53,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 24;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1673,6 +1673,44 @@ pub struct WorkflowRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_live_fleet_survives_a_restart_but_excludes_finished_sessions() {
+        // Restarting `forge serve` came back with an empty fleet: sessions persisted, but nothing
+        // put them back in the registry, so a mid-task session was invisible to every client until
+        // someone resumed it by hand.
+        let store = Store::open_in_memory().unwrap();
+        let live = store.create_session("/tmp/live", "Default").unwrap();
+        let archived = store.create_session("/tmp/archived", "Default").unwrap();
+        let untouched = store.create_session("/tmp/untouched", "Default").unwrap();
+        for id in [&live, &archived, &untouched] {
+            store
+                .add_message(id, 0, forge_types::Role::User, "work", None)
+                .unwrap();
+        }
+
+        store.set_session_daemon_live(&live, true).unwrap();
+        store.set_session_daemon_live(&archived, true).unwrap();
+
+        // A session the user archived is explicitly finished with — restoring it would drag back a
+        // fleet they deliberately cleared.
+        store.archive_session(&archived).unwrap();
+
+        let restored = store.daemon_live_sessions().unwrap();
+        assert!(restored.contains(&live), "a live session must come back");
+        assert!(
+            !restored.contains(&archived),
+            "an archived session must stay out of the fleet"
+        );
+        assert!(
+            !restored.contains(&untouched),
+            "a session the daemon never hosted must stay out of the fleet"
+        );
+
+        // Closing a session removes it from the fleet a later restart would restore.
+        store.set_session_daemon_live(&live, false).unwrap();
+        assert!(store.daemon_live_sessions().unwrap().is_empty());
+    }
 
     #[test]
     fn model_reservation_conflicts_for_shared_database_but_not_distinct_contexts() {

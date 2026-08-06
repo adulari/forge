@@ -405,7 +405,7 @@ fn sort_session_rows(rows: &mut [SessionRow]) {
 }
 
 /// Body of `POST /api/sessions`.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 struct CreateSessionReq {
     /// Working directory; defaults to the daemon's cwd.
     cwd: Option<String>,
@@ -509,7 +509,15 @@ pub(crate) async fn serve_cmd(
         voice: crate::voice::VoiceState::new(),
         anywhere_enable,
     });
-    let app = daemon_router(state);
+    let app = daemon_router(state.clone());
+
+    // Restore the fleet this daemon was hosting when it last stopped. Without this a restart comes
+    // back with `GET /api/sessions` returning `[]`: sessions persist in the store, but nothing puts
+    // them back in the registry, so a mid-task session is invisible to every connected client until
+    // someone issues an explicit resume by hand. Replays the ordinary create-with-resume route
+    // rather than duplicating its spawn logic, so resurrected sessions are built exactly like
+    // requested ones — including the model and effort pins restored from the session row.
+    tokio::spawn(resurrect_fleet(state.clone()));
 
     // Forge Anywhere gets a private loopback copy of the SAME router. The public LAN/local/tunnel
     // listener below is unchanged, while the connector never needs to upload the daemon token or
@@ -1185,6 +1193,11 @@ async fn create_session(
                     .set_session_pinned_model(&handle.session_id, Some(model));
             }
             let handle = state.registry.insert(handle).await;
+            // Fleet membership has to outlive this process: without it a restart comes back with
+            // an empty fleet and a mid-task session is invisible until someone resumes it by hand.
+            let _ = state
+                .store
+                .set_session_daemon_live(&handle.session_id, true);
             json_response(&serde_json::json!({
                 "id": handle.session_id,
                 "title": handle.title(),
@@ -1254,6 +1267,11 @@ async fn fork_session(
     match spawn_session_driver(spec).await {
         Ok(handle) => {
             let handle = state.registry.insert(handle).await;
+            // Fleet membership has to outlive this process: without it a restart comes back with
+            // an empty fleet and a mid-task session is invisible until someone resumes it by hand.
+            let _ = state
+                .store
+                .set_session_daemon_live(&handle.session_id, true);
             json_response(&serde_json::json!({
                 "id": handle.session_id,
                 "title": handle.title(),
@@ -1270,6 +1288,54 @@ async fn fork_session(
 
 /// `POST /api/sessions/{id}/archive` — stop the driver, snapshot a worktree's uncommitted
 /// edits onto its branch (never silently lose work), and hide the session from lists.
+/// Sessions restored on one restart. A daemon that had been running for weeks can have a long tail
+/// of live sessions, and resurrecting all of them would spend startup rebuilding transcripts nobody
+/// is watching. The most recently active ones are the ones a client is waiting to see.
+const RESURRECT_LIMIT: usize = 16;
+
+/// Put the previous generation's fleet back into the registry.
+///
+/// Best-effort by design: a session whose cwd has since been deleted, or whose worktree is gone,
+/// must not stop the daemon from starting. Failures are reported and skipped.
+async fn resurrect_fleet(state: Arc<DaemonState>) {
+    let live = match state.store.daemon_live_sessions() {
+        Ok(live) => live,
+        Err(error) => {
+            eprintln!("⚠ could not read the previous fleet: {error}");
+            return;
+        }
+    };
+    if live.is_empty() {
+        return;
+    }
+    let restoring = live.len().min(RESURRECT_LIMIT);
+    if live.len() > RESURRECT_LIMIT {
+        println!(
+            "  restoring the {restoring} most recent of {} sessions from the previous run",
+            live.len()
+        );
+    } else {
+        println!("  restoring {restoring} session(s) from the previous run");
+    }
+    for id in live.into_iter().take(RESURRECT_LIMIT) {
+        let request = CreateSessionReq {
+            resume: Some(id.clone()),
+            ..Default::default()
+        };
+        let response = create_session(State(state.clone()), axum::Json(request)).await;
+        let status = response.status();
+        if status.is_success() {
+            continue;
+        }
+        // Stop retrying a session the daemon can no longer open — otherwise every restart repeats
+        // the same failure forever. A transient error keeps its flag and is tried again next time.
+        if status == axum::http::StatusCode::NOT_FOUND {
+            let _ = state.store.set_session_daemon_live(&id, false);
+        }
+        eprintln!("⚠ could not restore session {id}: {status}");
+    }
+}
+
 async fn archive_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
@@ -1303,6 +1369,8 @@ async fn archive_session(
         }
     }
     state.terminals.close_session(&id).await;
+    // Archiving is an explicit "done with this" — drop it from the fleet a restart would restore.
+    let _ = state.store.set_session_daemon_live(&id, false);
     if let Some(handle) = handle {
         handle.shutdown();
         handle.join(ARCHIVE_JOIN_TIMEOUT).await;
