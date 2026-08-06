@@ -253,20 +253,7 @@ pub enum WorkflowAction {
     List,
 }
 
-/// `/refine` sub-actions (docs/features/continual-harness.md).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RefineAction {
-    /// `/refine [--global] [instructions]` — propose and apply one refinement batch now. Targets
-    /// the session scope unless `global` is set.
-    Run {
-        instructions: Option<String>,
-        global: bool,
-    },
-    /// `/refine status` — list harness entries in scope plus recent refinement history.
-    Status,
-    /// `/refine rollback <id>` — invert a past refinement batch (id or a unique id prefix).
-    Rollback(String),
-}
+pub use crate::refine_args::RefineAction;
 
 /// What the render loop must do when a command is accepted. forge-tui produces it; the binary
 /// (which owns the `Session`) executes it.
@@ -558,30 +545,7 @@ impl AtPathPicker {
     }
 }
 
-/// Extract a comma-separated lens list from `--flag <value>` in a raw arg string.
-/// `/assay --only dead-weight,unsafe` → `extract_flag(arg, "--only")` → `["dead-weight", "unsafe"]`
-fn extract_flag(arg: &str, flag: &str) -> Vec<String> {
-    let tokens: Vec<&str> = arg.split_whitespace().collect();
-    for (i, tok) in tokens.iter().enumerate() {
-        if *tok == flag {
-            if let Some(val) = tokens.get(i + 1) {
-                if !val.starts_with('-') {
-                    return val
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// Check whether a boolean flag (no value) is present in `arg`.
-fn has_flag(arg: &str, flag: &str) -> bool {
-    arg.split_whitespace().any(|t| t == flag)
-}
+use crate::refine_args::{extract_flag, has_flag};
 
 /// Parse a submitted command line (`"/resume ab12"`). The leading `/` is required; a `//`
 /// prefix is NOT a command (it escapes to a literal prompt — handled by the caller).
@@ -635,30 +599,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "checkpoints" => CommandAction::ListCheckpoints,
         "compact" => CommandAction::Compact,
         "uncompact" => CommandAction::Uncompact,
-        "refine" => {
-            // `/refine [--global] [instructions]` | `/refine rollback <id>` | `/refine status`
-            let trimmed = arg.trim();
-            let action = if trimmed.eq_ignore_ascii_case("status") {
-                RefineAction::Status
-            } else if let Some(rest) = trimmed
-                .strip_prefix("rollback ")
-                .or_else(|| trimmed.strip_prefix("rollback"))
-            {
-                RefineAction::Rollback(rest.trim().to_string())
-            } else {
-                let global = has_flag(trimmed, "--global");
-                let instructions: String = trimmed
-                    .split_whitespace()
-                    .filter(|t| !t.eq_ignore_ascii_case("--global"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                RefineAction::Run {
-                    instructions: (!instructions.is_empty()).then_some(instructions),
-                    global,
-                }
-            };
-            CommandAction::Refine(action)
-        }
+        "refine" => crate::refine_args::refine_action(&arg),
         "lattice" | "lat" => CommandAction::Lattice(arg),
         "goal" | "objective" => CommandAction::Goal(arg),
         "pr" | "pullrequest" => CommandAction::Pr(arg),

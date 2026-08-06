@@ -20,6 +20,7 @@ pub mod init_wizard;
 mod keybind_configurator;
 pub mod keybinds;
 mod overlays;
+mod refine_args;
 mod render;
 pub mod select;
 mod surface;

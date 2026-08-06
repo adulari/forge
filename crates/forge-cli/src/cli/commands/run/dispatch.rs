@@ -132,164 +132,6 @@ pub(crate) enum VoiceStart {
     Error,
 }
 
-/// Build a fully-populated [`forge_tui::MeshOverlay`] from a routing explanation.
-/// Extracted so both the sync path and the background-task path can share the logic.
-pub(crate) fn build_mesh_overlay(
-    e: forge_mesh::RoutingExplanation,
-    prompt: &str,
-) -> forge_tui::MeshOverlay {
-    let conserve_line = if !e.conserve.enabled {
-        "off".to_string()
-    } else if !e.conserve.eligible {
-        "no frontier alternative → not applied".to_string()
-    } else if e.conserve.fired {
-        format!(
-            "FIRED (roll {:.2} < P {:.2}) → spread to free frontier",
-            e.conserve.roll, e.conserve.probability
-        )
-    } else {
-        format!(
-            "not fired (roll {:.2} ≥ P {:.2}) → subscription kept",
-            e.conserve.roll, e.conserve.probability
-        )
-    };
-    // Only show candidates `decide()` could actually route to — an unusable row (benched,
-    // exhausted, or excluded by credit_mode/context) is noise, not a real alternative. Top 12 of
-    // those by score; if the actual pick still ranks below that (ties, or a longer usable tail),
-    // always include it too, so the panel never shows 12 rows with none marked `selected`.
-    let candidates: Vec<forge_tui::MeshCandRow> = {
-        let mut top: Vec<_> = e.candidates.iter().filter(|c| c.usable).take(12).collect();
-        if !top.iter().any(|c| c.selected) {
-            if let Some(sel) = e.candidates.iter().find(|c| c.selected) {
-                top.push(sel);
-            }
-        }
-        top.into_iter()
-            .map(|c| forge_tui::MeshCandRow {
-                rank: c.rank,
-                model: c.row.model.clone(),
-                score: c.row.final_score,
-                cost_tag: match c.row.cost_class {
-                    0 => "free",
-                    1 => "subscription",
-                    _ => "paid",
-                }
-                .to_string(),
-                frontier: c.row.frontier,
-                usable: c.usable,
-                selected: c.selected,
-                penalty: c.row.conserve_penalty,
-            })
-            .collect()
-    };
-    forge_tui::MeshOverlay {
-        open: true,
-        loading: false,
-        prompt: prompt.to_string(),
-        classified: e.classified_tier.as_str().to_string(),
-        classifier: e.classifier_label.clone(),
-        routed: e.routed_tier.as_str().to_string(),
-        code_heavy: e.code_heavy,
-        reasons: e.classify_reasons.join(", "),
-        conserve_fired: e.conserve.fired,
-        conserve_line,
-        quota: e
-            .quota
-            .iter()
-            .map(|q| forge_tui::MeshQuotaRow {
-                provider: q.provider.clone(),
-                fraction: q.fraction,
-                plan: q.plan.clone(),
-                status: format!("{:?}", q.status),
-                spread_complex: q.spread_probability,
-                projected_fraction_at_reset: q.projected_fraction_at_reset,
-                exhaustion_warning: q.exhaustion_warning,
-            })
-            .collect(),
-        candidates: candidates.clone(),
-        pick: e.pick.clone(),
-        fallbacks: e.fallbacks.clone(),
-        rationale: e.rationale.clone(),
-        anim_tick: 0,
-        // Start the browsing cursor on the actual pick, not row 0 — that's the row the user is
-        // most likely to want to look at first.
-        cursor: candidates.iter().position(|c| c.selected).unwrap_or(0),
-    }
-}
-
-/// Resolve a user-typed `/refine rollback <id>` argument against this session's recent
-/// refinements: an exact id always wins; otherwise a prefix is accepted if it names exactly one
-/// candidate. `candidates` is the caller's own bounded `harness_refinements` page, so this stays a
-/// cheap in-memory scan rather than a new store query shape.
-fn resolve_refinement_id(
-    id_arg: &str,
-    candidates: &[forge_store::HarnessRefinement],
-) -> std::result::Result<String, String> {
-    if candidates.iter().any(|r| r.id == id_arg) {
-        return Ok(id_arg.to_string());
-    }
-    let matches: Vec<&str> = candidates
-        .iter()
-        .filter(|r| r.id.starts_with(id_arg))
-        .map(|r| r.id.as_str())
-        .collect();
-    match matches.as_slice() {
-        [one] => Ok(one.to_string()),
-        [] => Err(format!("no refinement matches id '{id_arg}'")),
-        _ => Err(format!(
-            "ambiguous id prefix '{id_arg}' — {} refinements match",
-            matches.len()
-        )),
-    }
-}
-
-#[cfg(test)]
-mod refine_tests {
-    use super::resolve_refinement_id;
-
-    fn refinement(id: &str) -> forge_store::HarnessRefinement {
-        forge_store::HarnessRefinement {
-            id: id.to_string(),
-            session_id: "s1".into(),
-            trigger: "manual".into(),
-            summary: "sum".into(),
-            rationale: "why".into(),
-            expected_outcome: "outcome".into(),
-            edits: Vec::new(),
-            created_at: 0,
-        }
-    }
-
-    #[test]
-    fn resolve_refinement_id_exact_match_wins() {
-        let candidates = vec![refinement("abc123"), refinement("abc999")];
-        assert_eq!(
-            resolve_refinement_id("abc123", &candidates).unwrap(),
-            "abc123"
-        );
-    }
-
-    #[test]
-    fn resolve_refinement_id_accepts_unique_prefix() {
-        let candidates = vec![refinement("abc123"), refinement("def456")];
-        assert_eq!(resolve_refinement_id("abc", &candidates).unwrap(), "abc123");
-    }
-
-    #[test]
-    fn resolve_refinement_id_rejects_ambiguous_prefix() {
-        let candidates = vec![refinement("abc123"), refinement("abc999")];
-        let err = resolve_refinement_id("abc", &candidates).unwrap_err();
-        assert!(err.contains("ambiguous"));
-    }
-
-    #[test]
-    fn resolve_refinement_id_rejects_unknown_id() {
-        let candidates = vec![refinement("abc123")];
-        let err = resolve_refinement_id("zzz", &candidates).unwrap_err();
-        assert!(err.contains("no refinement matches"));
-    }
-}
-
 /// Execute a slash command (command-skill-system.md). Builtins are matched first; an unrecognised
 /// `/name` falls through to the file-based command/skill [`forge_skills::Catalog`]. Returns
 /// [`DispatchOutcome`]. Session-mutating commands (`/new`, `/resume`, `/clear`) and file
@@ -571,71 +413,10 @@ pub(crate) async fn dispatch_command(
         // the actual refinement pass makes a model call, so it's handed to the render loop as a
         // background task (`RunRefine`), exactly like `/compact`.
         CommandAction::Refine(forge_tui::RefineAction::Status) => {
-            let (overview, history) = {
-                let s = session.lock().await;
-                let session_id = s.id().to_string();
-                let overview = s.harness_overview().map_err(|e| anyhow::anyhow!("{e}"))?;
-                let history = s
-                    .store
-                    .harness_refinements(Some(&session_id), 5)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                (overview, history)
-            };
-            if overview.is_empty() {
-                app.note("no harness entries yet");
-            } else {
-                app.note(&format!(
-                    "{} harness entr{}:",
-                    overview.len(),
-                    if overview.len() == 1 { "y" } else { "ies" }
-                ));
-                for e in &overview {
-                    app.note(&format!(
-                        "  {}  {} {} {:?}",
-                        &e.id[..e.id.len().min(8)],
-                        e.scope,
-                        e.kind,
-                        e.title
-                    ));
-                }
-            }
-            if history.is_empty() {
-                app.note("no refinements yet");
-            } else {
-                app.note("recent refinements:");
-                for r in &history {
-                    app.note(&format!(
-                        "  {}  {} — {}",
-                        &r.id[..r.id.len().min(8)],
-                        r.trigger,
-                        r.summary
-                    ));
-                }
-            }
+            refine_cmd::refine_status(session, app).await?;
         }
         CommandAction::Refine(forge_tui::RefineAction::Rollback(id_arg)) => {
-            let id_arg = id_arg.trim().to_string();
-            if id_arg.is_empty() {
-                app.note("usage: /refine rollback <id>");
-            } else {
-                let mut s = session.lock().await;
-                let session_id = s.id().to_string();
-                let candidates = s
-                    .store
-                    .harness_refinements(Some(&session_id), 200)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                match resolve_refinement_id(&id_arg, &candidates) {
-                    Ok(id) => match s.refine_rollback(&id) {
-                        Ok(r) => app.note(&format!(
-                            "↺ rolled back {}: {} edit(s) reverted",
-                            &id[..id.len().min(8)],
-                            r.edits.len()
-                        )),
-                        Err(e) => app.note(&format!("⚠ rollback failed: {e}")),
-                    },
-                    Err(msg) => app.note(&format!("⚠ {msg}")),
-                }
-            }
+            refine_cmd::refine_rollback_cmd(session, app, &id_arg).await?;
         }
         CommandAction::Refine(forge_tui::RefineAction::Run {
             instructions,
@@ -1056,7 +837,7 @@ and keep going."
                     Some(inspector) => Some(inspector.explain(&to_explain).await),
                     None => None,
                 };
-                let _ = tx.send(exp.map(|e| build_mesh_overlay(e, &prompt_str)));
+                let _ = tx.send(exp.map(|e| mesh_overlay::build_mesh_overlay(e, &prompt_str)));
             });
             return Ok(DispatchOutcome::PendingMesh(rx));
         }

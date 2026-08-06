@@ -41,6 +41,8 @@ pub(crate) use copy::*;
 mod pickers;
 pub(crate) use pickers::*;
 mod dispatch;
+mod mesh_overlay;
+mod refine_cmd;
 pub(crate) use dispatch::*;
 mod driver;
 pub(crate) use driver::*;
