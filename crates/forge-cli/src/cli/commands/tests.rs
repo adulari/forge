@@ -32,6 +32,20 @@ fn serve_prefers_tunnel_and_retains_deprecated_anywhere_flag() {
 }
 
 #[test]
+fn anywhere_lists_pending_approvals() {
+    // The wizard promises the request "appears automatically in the Approval inbox" of an enrolled
+    // device. When none does, there was no supported way to even see that the request had arrived.
+    let approvals =
+        Cli::try_parse_from(["forge", "anywhere", "approvals"]).expect("approvals command");
+    assert!(matches!(
+        approvals.command,
+        Command::Anywhere {
+            cmd: AnywhereCmd::Approvals
+        }
+    ));
+}
+
+#[test]
 fn anywhere_exposes_approval_and_explicit_recovery_fallback() {
     let approve = Cli::try_parse_from(["forge", "anywhere", "approve", "challenge"])
         .expect("approval command");

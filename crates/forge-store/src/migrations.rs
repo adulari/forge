@@ -490,6 +490,19 @@ fn migration_0023(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "ALTER TABLE session ADD COLUMN pinned_effort TEXT")
 }
 
+/// Migration #24: whether a session belonged to the daemon's live fleet when it was last seen.
+///
+/// Fleet membership lived only in the running `SessionRegistry`, so restarting `forge serve` came
+/// back with an empty fleet: `GET /api/sessions` returned `[]` and mid-task sessions were invisible
+/// until someone re-added them by hand with an explicit resume. Persisting the flag lets startup
+/// resurrect exactly the sessions that were live, and nothing the user had finished with.
+fn migration_0024(conn: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE session ADD COLUMN daemon_live INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -516,6 +529,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0021,
     migration_0022,
     migration_0023,
+    migration_0024,
 ];
 
 /// Create the singleton rows the Anywhere sync state machine expects, if they are missing.
