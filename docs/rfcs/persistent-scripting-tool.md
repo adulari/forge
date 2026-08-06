@@ -64,3 +64,17 @@ dependency is optional-with-graceful-absence.
 
 Python-backed skills (comparison item 8) until the interpreter exists; replacing any existing
 tool; trace upload (platform feature, skipped in the comparison).
+
+## Decision — 2026-08-06, Floris
+
+**Spike first; if the spike clears the success criteria, proceed to the full kernel** (option C
+ambition, not just the opt-in tool). Sequencing:
+
+1. Run the interpreter spike exactly as scoped above, including the brokered side-effect
+   criterion — the broker requirement carries into the full-kernel design (prime's host.request
+   pattern proves a kernel and a permission broker can coexist; Forge's version must route every
+   effect through the existing broker, not around it).
+2. If all 4 criteria pass: design doc for kernel-as-primary-tool (discrete tools remain for
+   weaker mesh models and as the broker's execution layer), then staged implementation.
+3. If any criterion fails: fall back to option B (opt-in tool) or drop, with the spike data
+   attached to this RFC.
