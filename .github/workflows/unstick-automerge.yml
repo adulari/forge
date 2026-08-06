@@ -75,7 +75,9 @@ jobs:
     # GitHub-hosted on purpose: this is a handful of API calls on a 30-minute schedule, and the
     # self-hosted runners are a real machine that should not be woken up for it.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 10 was sized for a handful of PRs and killed every run once the queue reached 15. The cap
+    # below bounds the work; this bounds the blast radius if an individual API call wedges.
+    timeout-minutes: 20
     steps:
       # THE STALL THIS WORKFLOW CAUSED ITSELF.
       #
@@ -142,11 +144,20 @@ jobs:
           # times the slowest pipeline, so an ordinary release does not trip it.
           STALE_AFTER_SECONDS=7200
 
-          for pr in $numbers; do
-            read -r state branch < <(gh pr view "$pr" \
-              --json mergeStateStatus,headRefName --jq '"\(.mergeStateStatus) \(.headRefName)"')
+          # Branch updates per run. Each one costs an update-branch plus three workflow dispatches,
+          # and every run has to finish inside the job timeout — with a large queue an unbounded
+          # loop is killed mid-flight and unsticks NOTHING (observed 2026-08-06: five consecutive
+          # runs cancelled at the 10-minute cap while 15 PRs were armed). The remainder is reported,
+          # never silently dropped, and the next scheduled run continues from where this one stopped.
+          MAX_UPDATES_PER_RUN=6
+          updates_done=0
 
-            armed_at=$(gh pr view "$pr" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // empty')
+          for pr in $numbers; do
+            # One view per PR, not two: the per-PR call exists to let mergeStateStatus settle, which
+            # a single query does just as well as two while halving the API round-trips.
+            read -r state branch armed_at < <(gh pr view "$pr" \
+              --json mergeStateStatus,headRefName,autoMergeRequest \
+              --jq '"\(.mergeStateStatus) \(.headRefName) \(.autoMergeRequest.enabledAt // "")"')
             if [ -n "$armed_at" ] && [ "$state" != "CLEAN" ] && [ "$state" != "HAS_HOOKS" ]; then
               armed_for=$(( $(date -u +%s) - $(date -u -d "$armed_at" +%s) ))
               if [ "$armed_for" -gt "$STALE_AFTER_SECONDS" ]; then
@@ -176,6 +187,11 @@ jobs:
               continue
             fi
 
+            if [ "$updates_done" -ge "$MAX_UPDATES_PER_RUN" ]; then
+              echo "#$pr: BEHIND — deferred to the next run (this run already updated $MAX_UPDATES_PER_RUN branches)"
+              continue
+            fi
+
             echo "#$pr: BEHIND — auto-merge cannot advance it, updating the branch"
             if ! gh pr update-branch "$pr"; then
               # A genuine conflict with main needs a human; say so rather than retrying every
@@ -191,5 +207,6 @@ jobs:
               gh workflow run "$workflow" --ref "$branch" \
                 || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
             done
+            updates_done=$(( updates_done + 1 ))
             echo "#$pr: branch updated and required checks re-dispatched"
           done
