@@ -283,6 +283,20 @@ jobs:
           node -e "const fs=require('fs'),f='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(f,'utf8'));j.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n')" "$WORKSPACE_VERSION"
           echo "desktop app version stamped from workspace Cargo.toml to $WORKSPACE_VERSION"
 
+      # Non-release builds use the checked-in pin as-is, so let drift fail fast here instead of
+      # shipping a local artifact stamped with a years-old version (the 2.6.6-vs-2.12.2 defect).
+      - name: Require the checked-in desktop version to match the workspace
+        if: "!(startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '')"
+        working-directory: mobile
+        shell: bash
+        run: |
+          WORKSPACE_VERSION="$(cargo metadata --manifest-path ../Cargo.toml --no-deps --format-version 1 | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s).packages.find(p=>p.name==="forge-agent");if(!p) throw new Error("workspace package forge-agent not found");process.stdout.write(p.version)})')"
+          PINNED_VERSION="$(node -p 'JSON.parse(require("fs").readFileSync("src-tauri/tauri.conf.json","utf8")).version')"
+          [ "$PINNED_VERSION" = "$WORKSPACE_VERSION" ] || {
+            echo "tauri.conf.json version $PINNED_VERSION drifted from workspace Cargo.toml $WORKSPACE_VERSION — update the pin in the same PR that bumps the workspace version" >&2
+            exit 1
+          }
+
       - name: Build desktop bundle
         working-directory: mobile
         shell: bash
