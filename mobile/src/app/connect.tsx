@@ -26,6 +26,7 @@ import { useAnywhere, useAnywhereHosts } from "../lib/anywhere/store";
 import { type ConnectTestState, parseConnectUrl, useAuth } from "../lib/auth";
 import {
   detectForgeServe,
+  resolveDesktopConnection,
   forgeBinaryAvailable,
   pollForForgeServe,
   startForgeServe,
@@ -183,22 +184,41 @@ export default function ConnectScreen() {
     let cancelled = false;
     setDesktopState({ kind: "detecting" });
     void (async () => {
-      const found = await detectForgeServe();
+      // Walk the whole ladder — detect, else start, else fall back — rather than parking behind a
+      // "Connect" button and then a second "Start server" button. A discoverable local daemon
+      // should not need two clicks, and a missing one should not be a dead end with a URL to paste.
+      const plan = await resolveDesktopConnection({
+        detect: detectForgeServe,
+        binaryAvailable: forgeBinaryAvailable,
+        start: startForgeServe,
+        poll: pollForForgeServe,
+      });
       if (cancelled) return;
-      if (found) {
-        setDesktopState(
-          found.exposure === "lan" ? { kind: "found-lan", state: found } : { kind: "found", state: found },
-        );
-        return;
+      switch (plan.kind) {
+        case "connect":
+          setDesktopState({ kind: "idle" });
+          void attemptConnect(plan.state.base_url);
+          return;
+        case "confirm-lan":
+          setDesktopState({ kind: "found-lan", state: plan.state });
+          return;
+        case "manual":
+          setDesktopState(
+            plan.reason === "no-binary"
+              ? { kind: "unavailable" }
+              : {
+                  kind: "start-failed",
+                  message:
+                    plan.message ??
+                    "forge serve didn't come up within 15s — check the terminal it prints to, or paste the connect url manually below.",
+                },
+          );
       }
-      const available = await forgeBinaryAvailable();
-      if (cancelled) return;
-      setDesktopState(available ? { kind: "offer-start" } : { kind: "unavailable" });
     })();
     return () => {
       cancelled = true;
     };
-  }, [noServersYet]);
+  }, [noServersYet, attemptConnect]);
 
   const onFoundConnectPress = useCallback(() => {
     if (desktopState.kind !== "found") return;
