@@ -8,7 +8,10 @@
         "agent",
         "--cwd",
         "/home/floris/Documents/Repositories/Personal/AI/forge"
-      ]
+      ],
+      "env": {
+        "FORGE_DB": "/home/floris/.local/share/forge/forge-dev.db"
+      }
     }
   }
 }
