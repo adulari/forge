@@ -370,6 +370,11 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 - Planning mode (`/plan` read-only → `/execute`); Architect mode (strong planner + cheap editor)
 - Live LSP diagnostics fed back after edits; opt-in autofix loop (lint/test self-heal)
 - Subagent fan-out (`spawn_agents`), mesh-routed children, opt-in git-worktree isolation
+- Fleet messaging: `forge send <target> "<msg>"` messages any daemon-hosted session from a shell,
+  and the `message_session` tool gives an agent the same reach — so two sessions in different
+  windows can coordinate, not just a parent and its own subagents. `--steer` jumps the target's
+  queue at its next turn boundary; neither mode ever interrupts a turn already streaming, and
+  pending messages survive a daemon restart
 - Workflow scripts (`/workflow`): sandboxed JS orchestration — `agent()` / `parallel()` /
   `pipeline()` fan-out with phases, saved scripts, and a dedicated animated workflow view
 - `/duel`: race up to 3 distinct-provider models on one task in parallel worktrees, merge the
@@ -724,7 +729,7 @@ top-level command so older, less-visible capabilities are still discoverable:
 | Area | Commands | Purpose |
 |------|----------|---------|
 | Work | `run`, `chat`, `nl`, `tour` | One turn, interactive TUI, natural-language shell, guided offline demo |
-| Remote/apps | `serve`, `attach`, `service`, `api` | Multi-session daemon, terminal attachment, always-on OS service, OpenAI-compatible mesh API |
+| Remote/apps | `serve`, `attach`, `send`, `service`, `api` | Multi-session daemon, terminal attachment, message another fleet session, always-on OS service, OpenAI-compatible mesh API |
 | Sessions | `sessions`, `replay`, `fork`, `tree`, `blame` | Browse, reconstruct/diff/rerun, counterfactual branch, lineage, per-line provenance |
 | Quality | `assay`, `bench` | Adversarial code-quality gate and SWE-bench/harness evaluation runner |
 | Models | `models`, `mesh`, `benchmarks`, `local`, `scoreboard` | Catalog/health, route explanation, capability data, Ollama, learned duel/queue outcomes |
@@ -777,6 +782,23 @@ always-on fleet. See `docs/features/remote-control.md`.
 Use `forge attach [session-id] [--url <daemon>]` to drive a running daemon session from a terminal, or install
 the daemon as a login service with `forge service install --local` and manage it with
 `forge service status|start|stop|restart|uninstall`.
+
+### 📨 `forge send` — message another fleet session
+
+Reach a running daemon session without attaching to it. Sessions used to be able to message only
+their own subagents, so a session in another window was unreachable; `forge send` and the
+`message_session` tool remove that wall in both directions — shell to session, and agent to agent.
+
+```bash
+forge send api-refactor "the migration landed on main, rebase before you continue"
+forge send 7f3a --steer "stop — that table is load-bearing"   # unique id prefix also works
+```
+
+The default queues the message for delivery when the target next goes idle. `--steer` jumps ahead
+of the target's queued backlog and lands at its very next turn boundary. Neither mode injects into
+a turn that is already streaming. Messages persist before delivery, so a daemon restart in between
+strands nothing — the backlog flushes when the target rejoins the fleet. Limits: 16KB per message,
+8 pending per sender/target pair. See [fleet messaging](docs/features/fleet-messaging.md).
 
 ### 🔌 `forge api` — put any OpenAI client behind the mesh
 
