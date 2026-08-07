@@ -16,7 +16,8 @@ import { isTauri } from "./platform";
 import { getIdentity, probeConnection } from "./api";
 import { deleteSecureItem, getSecureItem, setSecureItem } from "./secureStore";
 import { parseConnectUrl } from "./connectUrl";
-import { applyServerIdentity, reconcileAnywhereHosts, type ManagedAnywhereHost, type StoredServer } from "./serverTargets";
+import { applyServerIdentity, reconcileAnywhereHosts, repointMovedDaemons, type ManagedAnywhereHost, type StoredServer } from "./serverTargets";
+import { detectForgeServe } from "./desktopServe";
 export { parseConnectUrl, type ParsedConnectUrl } from "./connectUrl";
 export { type StoredServer } from "./serverTargets";
 
@@ -123,6 +124,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             }
           }
           await deleteSecureItem(LEGACY_STORAGE_KEY);
+        }
+
+        // A restarted daemon comes back on a new cloudflared hostname, which rots every stored
+        // direct URL. The token is stable across restarts, so a row holding it is the same daemon
+        // at a new address — repoint it instead of leaving the user to re-paste a connect URL.
+        if (isTauri && list.length > 0) {
+          const detected = await detectForgeServe();
+          const repointed = repointMovedDaemons(list, detected);
+          if (repointed !== list) {
+            list = [...repointed];
+            await saveServers(list);
+          }
         }
 
         if (cancelled) return;
