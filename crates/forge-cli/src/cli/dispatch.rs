@@ -64,6 +64,15 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             token,
             list,
         } => crate::attach::attach_cmd(id, url, token, list).await,
+        Command::Send {
+            target,
+            message,
+            steer,
+            // `--follow-up` is the default; accepted only for symmetry with `--steer`.
+            follow_up: _,
+            url,
+            token,
+        } => crate::cli::commands::send::send_cmd(target, message, steer, url, token).await,
         Command::Api {
             host,
             port,

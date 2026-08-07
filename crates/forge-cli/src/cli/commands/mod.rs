@@ -16,6 +16,7 @@ pub(crate) mod replay;
 pub(crate) mod run;
 pub(crate) mod schedule;
 pub(crate) mod self_mcp;
+pub(crate) mod send;
 pub(crate) mod service;
 pub(crate) mod skill;
 #[cfg(test)]

@@ -25,6 +25,7 @@ microphone = ["forge-voice/microphone"]
 
 [dependencies]
 forge-anywhere-protocol.workspace = true
+async-trait.workspace = true
 fs2 = "0.4"
 forge-types.workspace = true
 forge-config.workspace = true
