@@ -4,5 +4,6 @@ module.exports = function (api) {
     presets: ["babel-preset-expo"],
     // babel-preset-expo auto-detects react-native-worklets/react-native-reanimated
     // and injects the correct worklets babel plugin — no manual plugin entry needed.
+    plugins: ["./babel-plugin-lucide-direct.cjs"],
   };
 };
