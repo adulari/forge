@@ -26,6 +26,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { springs, useForgeline, useSettle } from "../../theme/motion";
 import { cardPadding, space, type StatusDotState } from "../../theme/tokens";
 import { formatCost, formatCwd, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
+import { Badge } from "../ds/Badge";
 import { Card } from "../ds/Card";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
 import { IconButton } from "../ds/IconButton";
@@ -119,10 +120,17 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
     translateX.value = reduced ? 0 : withSpring(0, springs.press);
   }, [reduced, translateX]);
 
+  // Archive/merge/discard all stop a driver — there is none for a terminal-local (`read_only`)
+  // session, so the daemon already 404s these; refuse in the UI too instead of surfacing that as
+  // a confusing error toast.
   const openActions = useCallback(() => {
+    if (row.read_only) {
+      toast.show("read-only — running in a terminal, not this daemon", { tone: "neutral" });
+      return;
+    }
     closeSwipe();
     setActionsVisible(true);
-  }, [closeSwipe]);
+  }, [closeSwipe, row.read_only, toast]);
 
   const openLifecycle = useCallback(() => {
     closeSwipe();
@@ -285,6 +293,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                     >
                       {title}
                     </Text>
+                    {row.read_only ? <Badge label="local" tone="outline" /> : null}
                     <SessionMetric row={row} state={state} />
                   </View>
 
