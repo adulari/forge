@@ -167,6 +167,19 @@ impl DriverState {
                 )
                 .await;
             }
+            remote::RemoteInput::Steer { text } => {
+                if self.busy {
+                    forge_core::fleet::insert_into_queue(
+                        &mut self.queued_prompts,
+                        forge_core::fleet::MessageMode::Steer,
+                        text,
+                    );
+                    self.app.set_queued(&self.queued_prompts);
+                    self.app.note("⚡ steered — next up when this turn ends");
+                } else {
+                    self.submit_line(text, None).await?;
+                }
+            }
         }
         Ok(())
     }

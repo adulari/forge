@@ -193,7 +193,9 @@ fn feature_event(command: &Command) -> Option<&'static str> {
     match command {
         Command::Mesh { .. } => Some("forge_feature_mesh"),
         Command::Voice { .. } => Some("forge_feature_voice"),
-        Command::Serve { .. } | Command::Attach { .. } => Some("forge_feature_remote"),
+        Command::Serve { .. } | Command::Attach { .. } | Command::Send { .. } => {
+            Some("forge_feature_remote")
+        }
         Command::Mcp { .. } | Command::McpServe { .. } => Some("forge_feature_mcp"),
         Command::Lattice { .. } => Some("forge_feature_lattice"),
         Command::Assay { .. } => Some("forge_feature_assay"),
