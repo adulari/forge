@@ -22,6 +22,41 @@ export function applyServerIdentity(server: StoredServer, identity: ServerIdenti
   return hostname && hostname !== server.name ? { ...server, name: hostname } : server;
 }
 
+/** The parts of a detected local daemon needed to recognise a server row that points at it. */
+export interface DetectedDaemon {
+  base_url: string;
+  token: string;
+}
+
+/**
+ * Repoint stored direct servers whose daemon has moved.
+ *
+ * A cloudflared quick tunnel gets a new random hostname on every start, so a stored direct URL
+ * rots the moment the daemon restarts and every paired client is orphaned with no signal beyond
+ * "unreachable". The daemon's token is stable across restarts while its address is not, so a row
+ * holding the same token is the same daemon at a new address — safe to repoint, and the only
+ * thing that makes reconnection automatic instead of a manual re-paste.
+ *
+ * Deliberately narrow: only `direct` rows, only an exact token match, and the array identity is
+ * preserved when nothing changed so callers can skip a pointless write.
+ */
+export function repointMovedDaemons(
+  servers: readonly StoredServer[],
+  detected: DetectedDaemon | null,
+): readonly StoredServer[] {
+  if (!detected?.token || !detected.base_url) return servers;
+  let changed = false;
+  const next = servers.map((server) => {
+    const direct = (server.transport ?? "direct") === "direct";
+    if (!direct || server.token !== detected.token || server.baseUrl === detected.base_url) {
+      return server;
+    }
+    changed = true;
+    return { ...server, baseUrl: detected.base_url };
+  });
+  return changed ? next : servers;
+}
+
 export interface ManagedAnywhereHost {
   id: string;
   name: string;
