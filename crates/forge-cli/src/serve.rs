@@ -261,7 +261,14 @@ impl SessionRegistry {
         self.fleet_tx.subscribe()
     }
 
-    pub(crate) async fn insert(&self, handle: SessionDriverHandle) -> Arc<SessionDriverHandle> {
+    /// Register a driver handle in the live fleet, then flush any fleet messages that were
+    /// persisted for it while it wasn't live (a new arrival before this session existed, or a
+    /// backlog that survived a daemon restart — see [`deliver_pending_fleet_messages`]).
+    pub(crate) async fn insert(
+        &self,
+        handle: SessionDriverHandle,
+        store: &forge_store::Store,
+    ) -> Arc<SessionDriverHandle> {
         let handle = Arc::new(handle);
         let mut snapshot_rx = handle.snapshot_rx.clone();
         let fleet_tx = self.fleet_tx.clone();
@@ -317,6 +324,7 @@ impl SessionRegistry {
             .await
             .insert(handle.session_id.clone(), handle.clone());
         self.notify_fleet();
+        deliver_pending_fleet_messages(store, self, &handle.session_id).await;
         handle
     }
 
@@ -339,6 +347,112 @@ impl SessionRegistry {
 
 fn attention_became_required(was_waiting: bool, is_waiting: bool) -> bool {
     !was_waiting && is_waiting
+}
+
+/// Deliver every not-yet-delivered [`forge_store::FleetMessage`] queued for `target_id` into its
+/// live driver's input queue, now that it has one — a fresh `POST .../message` arriving while the
+/// target is live, or a session that just (re)joined the registry (create/fork/merge-respawn/
+/// resurrect — [`SessionRegistry::insert`] calls this unconditionally). A no-op when the target
+/// still has no live handle: the row stays pending and is drained the next time this runs for it.
+/// Best-effort throughout — an individual send failure leaves that one row pending for the next
+/// call rather than losing it, and never fails the caller.
+pub(crate) async fn deliver_pending_fleet_messages(
+    store: &forge_store::Store,
+    registry: &SessionRegistry,
+    target_id: &str,
+) {
+    let Ok(pending) = store.pending_fleet_messages_for(target_id) else {
+        return;
+    };
+    if pending.is_empty() {
+        return;
+    }
+    let Some(handle) = registry.get(target_id).await else {
+        return;
+    };
+    for msg in pending {
+        let text = format!("[message from {}] {}", msg.sender_label, msg.body);
+        let input = if msg.mode == "steer" {
+            remote::RemoteInput::Steer { text }
+        } else {
+            remote::RemoteInput::Prompt {
+                text,
+                attachments: Vec::new(),
+            }
+        };
+        if handle.input_tx.send(input).await.is_ok() {
+            let _ = store.mark_fleet_message_delivered(&msg.id, chrono::Utc::now().timestamp());
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SendFleetMessageReq {
+    text: String,
+    #[serde(default)]
+    mode: Option<String>,
+    /// `"cli"` (a `forge send` invocation) or `"session"` (the CLI-bridge's `message_session`
+    /// mirror, on behalf of another fleet session). Defaults to `"cli"` — the only transport that
+    /// omits it today is `forge send` itself.
+    #[serde(default)]
+    sender_kind: Option<String>,
+    /// Display name for the delivered `"[message from <label>] ..."` turn. Defaults to the
+    /// sender_kind when absent.
+    #[serde(default)]
+    sender_label: Option<String>,
+    /// The sending session's id, when `sender_kind == "session"`.
+    #[serde(default)]
+    sender_id: Option<String>,
+}
+
+/// `POST /api/sessions/{id}/message` — the transport `forge send` and the CLI-bridge's
+/// `message_session` mirror both use to message a live fleet session (docs: fleet messaging).
+/// Persists the message first (survives a daemon restart before delivery — forge-store migration
+/// 25), then delivers immediately if `id` is already live.
+async fn send_fleet_message(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id): AxumPath<String>,
+    axum::Json(req): axum::Json<SendFleetMessageReq>,
+) -> Response {
+    if state.registry.get(&id).await.is_none() {
+        return err_response(
+            axum::http::StatusCode::NOT_FOUND,
+            "no live fleet session with that id — see GET /api/sessions",
+        );
+    }
+    let text = req.text.trim();
+    if text.is_empty() {
+        return err_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "message must not be empty",
+        );
+    }
+    let mode_raw = req.mode.as_deref().unwrap_or("follow_up");
+    let Some(mode) = forge_core::fleet::MessageMode::parse(mode_raw) else {
+        return err_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            &format!("unknown mode '{mode_raw}' — use follow_up or steer"),
+        );
+    };
+    let sender_kind = req.sender_kind.as_deref().unwrap_or("cli");
+    let sender_label = req
+        .sender_label
+        .clone()
+        .unwrap_or_else(|| sender_kind.to_string());
+    let msg_id = forge_types::new_id();
+    if let Err(error) = state.store.enqueue_fleet_message(
+        &msg_id,
+        sender_kind,
+        req.sender_id.as_deref(),
+        &sender_label,
+        &id,
+        text,
+        mode.as_str(),
+    ) {
+        return err_response(axum::http::StatusCode::BAD_REQUEST, &error.to_string());
+    }
+    deliver_pending_fleet_messages(&state.store, &state.registry, &id).await;
+    json_response(&serde_json::json!({ "ok": true, "mode": mode.as_str() }))
 }
 
 /// Shared HTTP state for the daemon router.
@@ -685,6 +799,10 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(
             &format!("{base}/api/sessions/{{id}}/discard"),
             post(discard_session),
+        )
+        .route(
+            &format!("{base}/api/sessions/{{id}}/message"),
+            post(send_fleet_message),
         )
         .route(
             &format!("{base}/api/sessions/{{id}}/diff"),
@@ -1171,6 +1289,7 @@ async fn create_session(
         temper,
         push: state.push.clone(),
         apns: state.apns.clone(),
+        registry: Some(state.registry.clone()),
     };
     match spawn_session_driver(spec).await {
         Ok(handle) => {
@@ -1192,7 +1311,7 @@ async fn create_session(
                     .store
                     .set_session_pinned_model(&handle.session_id, Some(model));
             }
-            let handle = state.registry.insert(handle).await;
+            let handle = state.registry.insert(handle, &state.store).await;
             // Fleet membership has to outlive this process: without it a restart comes back with
             // an empty fleet and a mid-task session is invisible until someone resumes it by hand.
             let _ = state
@@ -1263,10 +1382,11 @@ async fn fork_session(
         temper: None,
         push: state.push.clone(),
         apns: state.apns.clone(),
+        registry: Some(state.registry.clone()),
     };
     match spawn_session_driver(spec).await {
         Ok(handle) => {
-            let handle = state.registry.insert(handle).await;
+            let handle = state.registry.insert(handle, &state.store).await;
             // Fleet membership has to outlive this process: without it a restart comes back with
             // an empty fleet and a mid-task session is invisible until someone resumes it by hand.
             let _ = state
@@ -1934,6 +2054,7 @@ async fn merge_session(
         temper: None,
         push: state.push.clone(),
         apns: state.apns.clone(),
+        registry: Some(state.registry.clone()),
     };
     stop_and_join(handle).await;
     let outcome = {
@@ -1950,7 +2071,7 @@ async fn merge_session(
         let restart = spawn_session_driver(resume_spec).await;
         return match (outcome, restart) {
             (MergeOutcome::Conflicts(files), Ok(handle)) => {
-                state.registry.insert(handle).await;
+                state.registry.insert(handle, &state.store).await;
                 (
                     axum::http::StatusCode::CONFLICT,
                     [
@@ -1968,7 +2089,7 @@ async fn merge_session(
                     .into_response()
             }
             (MergeOutcome::Error(msg), Ok(handle)) => {
-                state.registry.insert(handle).await;
+                state.registry.insert(handle, &state.store).await;
                 err_response(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("merge failed: {msg} — nothing was merged, session left running"),
@@ -3219,12 +3340,20 @@ mod tests {
             temper: None,
             push: None,
             apns: None,
+            registry: None,
         };
+        let store_handle = forge_store::Store::open_in_memory().unwrap();
         let a = registry
-            .insert(spawn_session_driver(mk("alpha")).await.unwrap())
+            .insert(
+                spawn_session_driver(mk("alpha")).await.unwrap(),
+                &store_handle,
+            )
             .await;
         let b = registry
-            .insert(spawn_session_driver(mk("beta")).await.unwrap())
+            .insert(
+                spawn_session_driver(mk("beta")).await.unwrap(),
+                &store_handle,
+            )
             .await;
         assert_ne!(a.session_id, b.session_id);
         assert_eq!(registry.all().await.len(), 2, "both sessions listed");
@@ -3356,6 +3485,7 @@ mod tests {
             temper: Some(forge_types::PermissionMode::Bypass),
             push: None,
             apns: None,
+            registry: None,
         })
         .await
         .unwrap();
@@ -3421,6 +3551,7 @@ mod tests {
             temper: None,
             push: None,
             apns: None,
+            registry: None,
         })
         .await
         .unwrap();
@@ -3492,6 +3623,7 @@ mod tests {
         let guard = forge_core::worktree::WorktreeGuard::create(repo, &wt_id).unwrap();
         let wt_path = guard.path().display().to_string();
         std::mem::forget(guard);
+        let store_handle = forge_store::Store::open_in_memory().unwrap();
         let handle = registry
             .insert(
                 spawn_session_driver(DriverSpec {
@@ -3504,9 +3636,11 @@ mod tests {
                     temper: None,
                     push: None,
                     apns: None,
+                    registry: None,
                 })
                 .await
                 .unwrap(),
+                &store_handle,
             )
             .await;
         (handle, wt_path)
@@ -3564,9 +3698,11 @@ mod tests {
                     temper: None,
                     push: None,
                     apns: None,
+                    registry: None,
                 })
                 .await
                 .unwrap(),
+                &store,
             )
             .await;
         store
@@ -3725,6 +3861,151 @@ mod tests {
         assert!(store.load_all_messages(&past_id).unwrap().is_empty());
 
         drop(live);
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `POST /api/sessions/{id}/message` (the `forge send` / bridge `message_session` transport):
+    /// an unknown target 404s; a live target is delivered immediately (the pending row is marked
+    /// delivered); and — the persistence promise (forge-store migration 25) — a message enqueued
+    /// for a target that ISN'T live yet stays pending until that session (re)joins the registry,
+    /// exactly what happens across a real `forge serve` restart via `resurrect_fleet`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fleet_message_delivers_live_and_survives_until_the_target_rejoins() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir =
+            std::env::temp_dir().join(format!("forge-serve-fleet-msg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("fleet-msg.db"));
+
+        let store = Arc::new(crate::open_store().unwrap());
+        let registry = Arc::new(SessionRegistry::new());
+        let target = registry
+            .insert(
+                spawn_session_driver(DriverSpec {
+                    cwd: dir.display().to_string(),
+                    worktree: None,
+                    title: "target".into(),
+                    mock: true,
+                    model: None,
+                    resume: None,
+                    temper: None,
+                    push: None,
+                    apns: None,
+                    registry: None,
+                })
+                .await
+                .unwrap(),
+                &store,
+            )
+            .await;
+
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+
+        let post_message = |target: &str, text: &str, mode: &str| {
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri(format!("/tok/api/sessions/{target}/message"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "text": text, "mode": mode, "sender_kind": "cli" })
+                        .to_string(),
+                ))
+                .unwrap()
+        };
+
+        // Unknown target: 404, and nothing is persisted for it.
+        let response = router
+            .clone()
+            .oneshot(post_message("no-such-session", "hi", "follow_up"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+
+        // A live (idle) target: delivered immediately — handed to its input queue and marked
+        // delivered in the same request, so nothing is left pending.
+        let response = router
+            .clone()
+            .oneshot(post_message(&target.session_id, "hello there", "follow_up"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(store
+            .pending_fleet_messages_for(&target.session_id)
+            .unwrap()
+            .is_empty());
+
+        let response = router
+            .clone()
+            .oneshot(post_message(&target.session_id, "urgent", "steer"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(store
+            .pending_fleet_messages_for(&target.session_id)
+            .unwrap()
+            .is_empty());
+
+        // Persistence across a restart: a message enqueued for a session id that ISN'T in THIS
+        // registry yet (simulating a daemon that hasn't resurrected it — or hasn't even restarted
+        // — since the message was queued) stays pending...
+        let offline_id = store
+            .create_session(&dir.display().to_string(), "Default")
+            .unwrap();
+        store
+            .enqueue_fleet_message(
+                &forge_types::new_id(),
+                "cli",
+                None,
+                "cli",
+                &offline_id,
+                "still here?",
+                "follow_up",
+            )
+            .unwrap();
+        assert_eq!(
+            store.pending_fleet_messages_for(&offline_id).unwrap().len(),
+            1
+        );
+
+        // ...until that session (re)joins the registry — exactly what `resurrect_fleet` does on a
+        // real restart (via `create_session { resume: Some(id) }`) — at which point
+        // `SessionRegistry::insert` drains the backlog for it.
+        let resurrected = spawn_session_driver(DriverSpec {
+            cwd: dir.display().to_string(),
+            worktree: None,
+            title: "resurrected".into(),
+            mock: true,
+            model: None,
+            resume: Some(offline_id.clone()),
+            temper: None,
+            push: None,
+            apns: None,
+            registry: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(resurrected.session_id, offline_id);
+        registry.insert(resurrected, &store).await;
+        assert!(store
+            .pending_fleet_messages_for(&offline_id)
+            .unwrap()
+            .is_empty());
+
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4044,6 +4325,7 @@ mod tests {
             temper: None,
             push: None,
             apns: None,
+            registry: None,
         };
         // A "past" session: driven to completion (so it has a user message) but NOT registered.
         let past = Arc::new(spawn_session_driver(mk("gone")).await.unwrap());
@@ -4056,8 +4338,12 @@ mod tests {
             .unwrap();
         // A "running" session: registered in the registry, so it must be excluded from the list.
         let registry = Arc::new(SessionRegistry::new());
+        let store_handle = forge_store::Store::open_in_memory().unwrap();
         let running = registry
-            .insert(spawn_session_driver(mk("live")).await.unwrap())
+            .insert(
+                spawn_session_driver(mk("live")).await.unwrap(),
+                &store_handle,
+            )
             .await;
         running
             .input_tx
@@ -4151,6 +4437,7 @@ mod tests {
             temper: None,
             push: None,
             apns: None,
+            registry: None,
         };
         let archived = Arc::new(spawn_session_driver(mk("was-archived")).await.unwrap());
         archived
@@ -4659,9 +4946,11 @@ mod tests {
                     temper: None,
                     push: Some(notifier.clone()),
                     apns: None,
+                    registry: None,
                 })
                 .await
                 .unwrap(),
+                &store,
             )
             .await;
         let state = Arc::new(DaemonState {
@@ -5012,6 +5301,7 @@ mod tests {
         std::env::set_var("FORGE_DB", dir.join("upload-test.db"));
 
         let registry = Arc::new(SessionRegistry::new());
+        let store_handle = forge_store::Store::open_in_memory().unwrap();
         let handle = registry
             .insert(
                 spawn_session_driver(DriverSpec {
@@ -5024,9 +5314,11 @@ mod tests {
                     temper: None,
                     push: None,
                     apns: None,
+                    registry: None,
                 })
                 .await
                 .unwrap(),
+                &store_handle,
             )
             .await;
         let state = Arc::new(DaemonState {
@@ -5199,6 +5491,7 @@ mod tests {
             temper: Some(forge_types::PermissionMode::Bypass),
             push: None,
             apns: None,
+            registry: None,
         })
         .await
         .unwrap();
@@ -5296,6 +5589,7 @@ mod tests {
         std::fs::write(dir.join("fresh.txt"), "brand new\n").unwrap();
 
         let registry = Arc::new(SessionRegistry::new());
+        let store_handle = forge_store::Store::open_in_memory().unwrap();
         let handle = registry
             .insert(
                 spawn_session_driver(DriverSpec {
@@ -5306,11 +5600,13 @@ mod tests {
                     model: None,
                     resume: None,
                     temper: None,
+                    registry: None,
                     push: None,
                     apns: None,
                 })
                 .await
                 .unwrap(),
+                &store_handle,
             )
             .await;
         let sid = handle.session_id.clone();
