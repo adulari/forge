@@ -279,6 +279,12 @@ impl Session {
         self.skills.as_ref()
     }
 
+    /// Attach the fleet-messaging capability (composition root — `forge serve`'s daemon driver
+    /// wires this in). `None` leaves `message_session` unadvertised, exactly like an unset `mcp`.
+    pub fn set_fleet_messaging(&mut self, fleet: Option<Arc<dyn crate::fleet::FleetMessaging>>) {
+        self.fleet = fleet;
+    }
+
     /// Scoped subgraph for `symbol` from the session's live index (the `/lattice` view). `Ok(None)`
     /// when no index is attached.
     pub fn lattice_view(

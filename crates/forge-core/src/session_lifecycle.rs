@@ -178,6 +178,7 @@ impl Session {
             lattice_watch_enabled: false,
             lsp: None,
             skills: None,
+            fleet: None,
             pinned_model: None,
             pinned_effort: None,
             overflow_window_cap: None,
