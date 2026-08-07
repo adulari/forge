@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use forge_tui::{handle_key, App, ChannelPresenter, ConfirmOutcome, InputOutcome, KeyKind, UiMsg};
 
+mod daemon_fleet;
 mod input;
 mod submit;
 
@@ -52,6 +53,10 @@ pub(crate) struct DriverSpec {
     /// on the same notification-worthy transitions, plus a Live Activity content-state update at
     /// the same moments (see the dispatch site in `drive_session`).
     pub apns: Option<std::sync::Arc<crate::apns::ApnsNotifier>>,
+    /// The daemon's live fleet (`None` outside `forge serve`, e.g. tests that don't exercise
+    /// fleet messaging). When present, wires `message_session` on the constructed session —
+    /// see [`daemon_fleet::DaemonFleetMessaging`].
+    pub registry: Option<std::sync::Arc<crate::serve::SessionRegistry>>,
 }
 
 /// The daemon-side handle to a running session driver — everything `forge serve`'s HTTP layer
@@ -192,6 +197,16 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     // that touches nothing is unaffected.
     if spec.worktree.is_some() {
         session.set_expect_code_change(true);
+    }
+
+    if let Some(registry) = spec.registry.clone() {
+        session.set_fleet_messaging(Some(std::sync::Arc::new(
+            daemon_fleet::DaemonFleetMessaging {
+                registry,
+                store: session.store.clone(),
+                self_id: session_id.clone(),
+            },
+        )));
     }
 
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
@@ -961,6 +976,47 @@ mod tests {
         assert!(state.busy);
         assert_eq!(state.turn_gen, 12);
         state.turn_handle.take().unwrap().abort();
+    }
+
+    /// Fleet-messaging `RemoteInput::Steer` while a turn is BUSY jumps the queue (front, not
+    /// back) instead of touching the running turn — it must never interrupt it.
+    #[tokio::test]
+    async fn steer_input_while_busy_jumps_the_queue_without_touching_the_turn() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+        state.queued_prompts = vec!["backlog".into()];
+
+        state
+            .handle_input(remote::RemoteInput::Steer {
+                text: "urgent".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(state.queued_prompts, vec!["urgent", "backlog"]);
+        assert!(state.busy, "steer must not interrupt the running turn");
+        assert!(state.turn_handle.is_some());
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    /// The same input while IDLE has no backlog to outrank, so it behaves exactly like a normal
+    /// prompt — it starts a turn immediately instead of sitting in the queue.
+    #[tokio::test]
+    async fn steer_input_while_idle_starts_a_turn_immediately() {
+        let mut state = test_driver_state().await;
+        assert!(!state.busy);
+
+        state
+            .handle_input(remote::RemoteInput::Steer { text: "go".into() })
+            .await
+            .unwrap();
+
+        assert!(state.queued_prompts.is_empty());
+        assert!(state.busy, "an idle steer starts a turn immediately");
+        if let Some(h) = state.turn_handle.take() {
+            h.abort();
+        }
     }
 
     // Regression: the idle loop only broadcasts dirty frames, so a /mesh load resolving without

@@ -3048,6 +3048,30 @@ pub(crate) async fn run_chat_tui(
         if let Some(rc) = remote.as_mut() {
             while let Ok(input) = rc.input_rx.try_recv() {
                 dirty = true;
+                // Fleet-messaging "steer" delivery — outrank the queued backlog for the target's
+                // very next turn boundary without touching an in-flight turn (mirrors the headless
+                // daemon driver's `driver/submit.rs`). This TUI-attached remote loop is never the
+                // target of fleet messaging in practice (only `forge serve`-hosted sessions are
+                // fleet-addressable), but `RemoteInput` is one shared enum, so this normalizes
+                // Steer the same way regardless: while idle there's no backlog to outrank, so it
+                // behaves exactly like a normal Prompt.
+                let input = match input {
+                    remote::RemoteInput::Steer { text } if busy => {
+                        forge_core::fleet::insert_into_queue(
+                            &mut queued_prompts,
+                            forge_core::fleet::MessageMode::Steer,
+                            text,
+                        );
+                        app.set_queued(&queued_prompts);
+                        app.note("⚡ steered — next up when this turn ends");
+                        continue;
+                    }
+                    remote::RemoteInput::Steer { text } => remote::RemoteInput::Prompt {
+                        text,
+                        attachments: Vec::new(),
+                    },
+                    other => other,
+                };
                 match input {
                     remote::RemoteInput::Prompt { text, attachments } => {
                         // A fresh prompt starts a fresh interaction — drop the previous notices
@@ -3539,6 +3563,9 @@ pub(crate) async fn run_chat_tui(
                     remote::RemoteInput::OverlayCancel => {
                         remote_keys.extend(apply_overlay_input(&mut app, RemoteOverlayOp::Cancel));
                     }
+                    // Normalized away above (into a queue-front insert + `continue`, or a plain
+                    // `Prompt`) before this match ever sees it.
+                    remote::RemoteInput::Steer { .. } => unreachable!("Steer is normalized above"),
                 }
             }
         }
