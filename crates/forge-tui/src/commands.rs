@@ -121,6 +121,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/uncompact",
     },
     Command {
+        name: "refine",
+        desc: "review the trajectory and persist learned harness state (prompt notes, skills, subagent specs)",
+        usage: "/refine [instructions] | /refine --global [instructions] | /refine rollback <id> | /refine status",
+    },
+    Command {
         name: "lattice",
         desc: "show a symbol's code-intelligence subgraph (callers + provenance)",
         usage: "/lattice <symbol>",
@@ -248,6 +253,8 @@ pub enum WorkflowAction {
     List,
 }
 
+pub use crate::refine_args::RefineAction;
+
 /// What the render loop must do when a command is accepted. forge-tui produces it; the binary
 /// (which owns the `Session`) executes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,6 +294,9 @@ pub enum CommandAction {
     Compact,
     /// Restore the full pre-compaction transcript after a `/compact` (`/uncompact`).
     Uncompact,
+    /// Continual Harness: review the trajectory and persist learned harness state (prompt notes,
+    /// skills, subagent specs) — see docs/features/continual-harness.md.
+    Refine(RefineAction),
     /// Show the code-intelligence subgraph for a symbol (`/lattice <symbol>`).
     Lattice(String),
     /// Set a session goal and decompose it into a tracked task plan (`/goal <objective>`).
@@ -535,30 +545,7 @@ impl AtPathPicker {
     }
 }
 
-/// Extract a comma-separated lens list from `--flag <value>` in a raw arg string.
-/// `/assay --only dead-weight,unsafe` → `extract_flag(arg, "--only")` → `["dead-weight", "unsafe"]`
-fn extract_flag(arg: &str, flag: &str) -> Vec<String> {
-    let tokens: Vec<&str> = arg.split_whitespace().collect();
-    for (i, tok) in tokens.iter().enumerate() {
-        if *tok == flag {
-            if let Some(val) = tokens.get(i + 1) {
-                if !val.starts_with('-') {
-                    return val
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// Check whether a boolean flag (no value) is present in `arg`.
-fn has_flag(arg: &str, flag: &str) -> bool {
-    arg.split_whitespace().any(|t| t == flag)
-}
+use crate::refine_args::{extract_flag, has_flag};
 
 /// Parse a submitted command line (`"/resume ab12"`). The leading `/` is required; a `//`
 /// prefix is NOT a command (it escapes to a literal prompt — handled by the caller).
@@ -612,6 +599,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "checkpoints" => CommandAction::ListCheckpoints,
         "compact" => CommandAction::Compact,
         "uncompact" => CommandAction::Uncompact,
+        "refine" => crate::refine_args::refine_action(&arg),
         "lattice" | "lat" => CommandAction::Lattice(arg),
         "goal" | "objective" => CommandAction::Goal(arg),
         "pr" | "pullrequest" => CommandAction::Pr(arg),
@@ -771,7 +759,7 @@ pub fn command_category(name: &str) -> &'static str {
     match name {
         "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
         "sessions" | "resume" | "replay" | "undo" | "checkpoint" | "checkpoints" | "compact"
-        | "uncompact" | "clear" => "Session",
+        | "uncompact" | "refine" | "clear" => "Session",
         "model" | "models" | "mode" | "effort" | "thinking" | "mesh" | "usage" => "Model & usage",
         "assay" | "lattice" | "pr" => "Review & ship",
         "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" => "Integrations",
@@ -1262,6 +1250,54 @@ mod tests {
         assert_eq!(parse_command("/go"), CommandAction::Execute);
         assert_eq!(parse_command("/voice"), CommandAction::Voice);
         assert_eq!(parse_command("/record"), CommandAction::Voice);
+    }
+
+    #[test]
+    fn parses_refine_command() {
+        assert_eq!(
+            parse_command("/refine"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: None,
+                global: false,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine be stricter about tool-call retries"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: Some("be stricter about tool-call retries".into()),
+                global: false,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine --global"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: None,
+                global: true,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine --global prefer smaller diffs"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: Some("prefer smaller diffs".into()),
+                global: true,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine status"),
+            CommandAction::Refine(RefineAction::Status)
+        );
+        assert_eq!(
+            parse_command("/refine STATUS"),
+            CommandAction::Refine(RefineAction::Status)
+        );
+        assert_eq!(
+            parse_command("/refine rollback abc123"),
+            CommandAction::Refine(RefineAction::Rollback("abc123".into()))
+        );
+        assert_eq!(
+            parse_command("/refine rollback"),
+            CommandAction::Refine(RefineAction::Rollback(String::new()))
+        );
     }
 
     #[test]
