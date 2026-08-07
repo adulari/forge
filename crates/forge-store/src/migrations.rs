@@ -503,6 +503,33 @@ fn migration_0024(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #25: fleet agent-to-agent messaging (`forge send`, the `message_session` virtual
+/// tool). One row per message queued for a daemon-hosted (fleet) session, so a message that
+/// arrives while its target is offline — or sitting undelivered when the daemon itself restarts
+/// — is not lost. `delivered_at IS NULL` is the pending set; `forge serve` drains it into the
+/// target's live input queue as soon as that session (re)joins the registry. The two indexes
+/// serve the daemon's own hot paths: draining one target's backlog, and enforcing the
+/// per-sender-per-target pending cap at enqueue time.
+fn migration_0025(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS fleet_message (
+            id                TEXT PRIMARY KEY,
+            sender_kind       TEXT NOT NULL,   -- 'cli' | 'session'
+            sender_id         TEXT,            -- sending session id, when sender_kind = 'session'
+            sender_label      TEXT NOT NULL,   -- display name: 'cli', or the sender session's name/id
+            target_session_id TEXT NOT NULL,
+            body              TEXT NOT NULL,
+            mode              TEXT NOT NULL,   -- 'follow_up' | 'steer'
+            created_at        INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            delivered_at      INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS idx_fleet_message_target
+             ON fleet_message(target_session_id, delivered_at);
+         CREATE INDEX IF NOT EXISTS idx_fleet_message_cap
+             ON fleet_message(sender_label, target_session_id, delivered_at)",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -530,6 +557,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0022,
     migration_0023,
     migration_0024,
+    migration_0025,
 ];
 
 /// Create the singleton rows the Anywhere sync state machine expects, if they are missing.

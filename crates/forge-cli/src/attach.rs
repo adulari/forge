@@ -14,21 +14,23 @@ use futures::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 /// One row of `GET /api/sessions` — only the fields the client renders (the daemon sends more).
-#[derive(Debug, Clone, serde::Deserialize)]
-struct SessionInfo {
-    id: String,
+/// Shared (via `pub(crate)`) with `cli::commands::send` and `mcp_serve::fleet`, the other two
+/// consumers of this same daemon discovery/auth transport.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub(crate) struct SessionInfo {
+    pub(crate) id: String,
     #[serde(default)]
-    title: String,
+    pub(crate) title: String,
     #[serde(default)]
-    cwd: String,
+    pub(crate) cwd: String,
     #[serde(default)]
-    busy: bool,
+    pub(crate) busy: bool,
     #[serde(default)]
-    waiting: bool,
+    pub(crate) waiting: bool,
     #[serde(default)]
-    cost_usd: f64,
+    pub(crate) cost_usd: f64,
     #[serde(default)]
-    model: String,
+    pub(crate) model: String,
 }
 
 /// A pending question's option (tappable button on the web page; numbered line here).
@@ -119,7 +121,7 @@ pub(crate) async fn attach_cmd(
 /// Default base URL: the local daemon on the configured `[remote] port` (7420), loopback. The
 /// LAN default binds self-signed HTTPS which a same-machine attach can't validate, so the
 /// no-flag default is loopback HTTP — pair with `forge serve --local`, or pass `--url`.
-fn resolve_base_url(url: Option<String>) -> String {
+pub(crate) fn resolve_base_url(url: Option<String>) -> String {
     let raw = url.unwrap_or_else(|| {
         let port = forge_config::load().unwrap_or_default().remote.serve_port();
         format!("http://127.0.0.1:{port}")
@@ -128,7 +130,7 @@ fn resolve_base_url(url: Option<String>) -> String {
 }
 
 /// Default token: the persisted `serve-token` the daemon reads (never rotate from the client).
-fn resolve_token(token: Option<String>) -> Result<String> {
+pub(crate) fn resolve_token(token: Option<String>) -> Result<String> {
     match token {
         Some(t) => Ok(t),
         None => crate::serve::daemon_token(false).context(
@@ -149,7 +151,7 @@ fn ws_scheme(base: &str) -> Result<String> {
     }
 }
 
-async fn fetch_sessions(
+pub(crate) async fn fetch_sessions(
     http: &reqwest::Client,
     base: &str,
     token: &str,

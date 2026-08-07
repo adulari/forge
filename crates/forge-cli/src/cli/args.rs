@@ -428,6 +428,31 @@ pub(crate) enum Command {
         #[arg(long)]
         list: bool,
     },
+    /// Send a message to another daemon-hosted (fleet) session's `forge serve` daemon, without
+    /// attaching. `--follow-up` (default) queues the message for delivery when the target session
+    /// goes idle / at its current turn's end; `--steer` jumps the queue, delivered at the
+    /// target's very next turn boundary ahead of anything already queued (never injected into a
+    /// turn already streaming). Message text is capped at 16KB.
+    Send {
+        /// Target session name or a unique id prefix.
+        target: String,
+        /// The message text.
+        message: String,
+        /// Deliver at the target's next turn boundary, ahead of the queued backlog (default:
+        /// queue as a normal follow-up).
+        #[arg(long, conflicts_with = "follow_up")]
+        steer: bool,
+        /// Queue for delivery when the target goes idle (the default; accepted for symmetry).
+        #[arg(long)]
+        follow_up: bool,
+        /// Daemon base URL. Defaults to the local daemon's loopback origin on the configured
+        /// `[remote] port` (7420).
+        #[arg(long)]
+        url: Option<String>,
+        /// Daemon token. Defaults to the persisted `serve-token` in the config dir.
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Run an OpenAI-compatible HTTP endpoint backed by Forge's model mesh — embed Forge as your
     /// app's AI backend. Point any OpenAI-compatible client's `base_url` at `http://<host>:<port>/v1`
     /// and every chat completion is routed through the mesh (tier-based model choice, cross-provider
