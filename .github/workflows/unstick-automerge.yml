@@ -75,7 +75,9 @@ jobs:
     # GitHub-hosted on purpose: this is a handful of API calls on a 30-minute schedule, and the
     # self-hosted runners are a real machine that should not be woken up for it.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 10 was sized for a handful of PRs and killed every run once the queue reached 15. The cap
+    # below bounds the work; this bounds the blast radius if an individual API call wedges.
+    timeout-minutes: 20
     steps:
       # THE STALL THIS WORKFLOW CAUSED ITSELF.
       #
@@ -142,11 +144,31 @@ jobs:
           # times the slowest pipeline, so an ordinary release does not trip it.
           STALE_AFTER_SECONDS=7200
 
-          for pr in $numbers; do
-            read -r state branch < <(gh pr view "$pr" \
-              --json mergeStateStatus,headRefName --jq '"\(.mergeStateStatus) \(.headRefName)"')
+          # Branch updates per run. Each one costs an update-branch plus three workflow dispatches,
+          # and every run has to finish inside the job timeout — with a large queue an unbounded
+          # loop is killed mid-flight and unsticks NOTHING (observed 2026-08-06: five consecutive
+          # runs cancelled at the 10-minute cap while 15 PRs were armed). The remainder is reported,
+          # never silently dropped, and the next scheduled run continues from where this one stopped.
+          MAX_UPDATES_PER_RUN=6
+          updates_done=0
 
-            armed_at=$(gh pr view "$pr" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // empty')
+          # Same bounding for the missing-context dispatches below, and the same reporting rule:
+          # whatever this run does not reach is named, not dropped.
+          MAX_DISPATCHES_PER_RUN=4
+          dispatches_done=0
+
+          # How long a head SHA may carry no required context before that counts as a dropped event
+          # rather than checks that simply have not registered yet. A real `pull_request` run
+          # appears within seconds; ten minutes is far outside that and well inside the window where
+          # a PR still looks merely "queued" to a human.
+          CHECKS_MISSING_AFTER_SECONDS=600
+
+          for pr in $numbers; do
+            # One view per PR, not two: the per-PR call exists to let mergeStateStatus settle, which
+            # a single query does just as well as two while halving the API round-trips.
+            read -r state branch armed_at < <(gh pr view "$pr" \
+              --json mergeStateStatus,headRefName,autoMergeRequest \
+              --jq '"\(.mergeStateStatus) \(.headRefName) \(.autoMergeRequest.enabledAt // "")"')
             if [ -n "$armed_at" ] && [ "$state" != "CLEAN" ] && [ "$state" != "HAS_HOOKS" ]; then
               armed_for=$(( $(date -u +%s) - $(date -u -d "$armed_at" +%s) ))
               if [ "$armed_for" -gt "$STALE_AFTER_SECONDS" ]; then
@@ -155,24 +177,47 @@ jobs:
             fi
 
             if [ "$state" != "BEHIND" ]; then
-              # A `dist/` branch is bot-authored, so GitHub creates no `pull_request` runs for it and
-              # release.yml's dispatch is the ONLY thing that can ever produce its required `CI`
-              # context. If that dispatch failed at release time, the PR is unmergeable forever with
-              # no other mechanism to notice. Human PRs need no equivalent — their checks arrive on
-              # the `pull_request` event — so this stays narrowly scoped rather than racing real CI.
-              if [ "$state" = "BLOCKED" ] && case "$branch" in dist/*) true ;; *) false ;; esac; then
+              # A HEAD SHA CARRYING NO REQUIRED CONTEXT AT ALL IS THE INVISIBLE STALL.
+              #
+              # Originally this covered only `dist/*`: those branches are bot-authored, GitHub
+              # creates no `pull_request` runs for them, and release.yml's dispatch is the only
+              # thing that can produce their `CI` context. But the same end state reaches ordinary
+              # branches whenever GitHub simply drops the event. Measured 2026-08-06: after
+              # `gh pr update-branch` on eight PRs (owner token, so not the bot-parking case),
+              # GitHub created ZERO runs for those heads — statusCheckRollup empty, so the required
+              # contexts were not failing or pending, they did not exist, and every one of those
+              # PRs would have waited forever for something that was never coming. It is invisible
+              # precisely because "no checks" and "checks still queued" look identical everywhere.
+              #
+              # So the check is now about the CONDITION, not the branch name: no required context
+              # present on a head that has had time to produce one. The age floor keeps this from
+              # racing a genuinely fresh push, whose runs appear seconds later.
+              if [ "$state" = "BLOCKED" ]; then
                 head=$(gh pr view "$pr" --json headRefOid --jq .headRefOid)
-                if [ -z "$(gh api "repos/$GH_REPO/commits/$head/check-runs" \
-                     --jq '.check_runs[] | select(.name == "CI") | .name')" ]; then
-                  echo "#$pr: BLOCKED with no CI check on $head — dispatching the required workflows"
+                contexts=$(gh api "repos/$GH_REPO/commits/$head/check-runs" \
+                  --jq '[.check_runs[] | select(.name == "CI" or .name == "mobile checks" or .name == "security checks")] | length')
+                pushed_at=$(gh api "repos/$GH_REPO/commits/$head" --jq '.commit.committer.date')
+                head_age=$(( $(date -u +%s) - $(date -u -d "$pushed_at" +%s) ))
+                if [ "$contexts" -eq 0 ] && [ "$head_age" -gt "$CHECKS_MISSING_AFTER_SECONDS" ]; then
+                  if [ "$dispatches_done" -ge "$MAX_DISPATCHES_PER_RUN" ]; then
+                    echo "#$pr: no required context on $head — deferred to the next run (this run already dispatched for $MAX_DISPATCHES_PER_RUN PRs)"
+                    continue
+                  fi
+                  echo "::warning title=Required checks never arrived::#$pr has no CI/mobile/security context on $head after $(( head_age / 60 ))m — GitHub created no run for it. Dispatching the required workflows."
                   for workflow in ci.yml security.yml mobile-typecheck.yml; do
                     gh workflow run "$workflow" --ref "$branch" \
                       || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
                   done
+                  dispatches_done=$(( dispatches_done + 1 ))
                   continue
                 fi
               fi
               echo "#$pr: $state — leaving alone"
+              continue
+            fi
+
+            if [ "$updates_done" -ge "$MAX_UPDATES_PER_RUN" ]; then
+              echo "#$pr: BEHIND — deferred to the next run (this run already updated $MAX_UPDATES_PER_RUN branches)"
               continue
             fi
 
@@ -191,5 +236,6 @@ jobs:
               gh workflow run "$workflow" --ref "$branch" \
                 || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
             done
+            updates_done=$(( updates_done + 1 ))
             echo "#$pr: branch updated and required checks re-dispatched"
           done
