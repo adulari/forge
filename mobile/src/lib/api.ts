@@ -296,6 +296,10 @@ export interface SessionRow {
   model: string;
   created_at: number;
   last_activity: number;
+  /** Terminal-local session the daemon merely observes via the store, never drives — no remote
+   * input path exists for it. Additive field: optional so a response from an older daemon (which
+   * never emitted the key) still parses, defaulting to drivable. */
+  read_only?: boolean;
 }
 
 export interface PastSessionRow {
