@@ -13,6 +13,7 @@ mod assay_store;
 mod automation_store;
 mod checkpoint_store;
 mod duel_store;
+mod fleet_message_store;
 mod fork_store;
 mod handoff;
 mod handoff_types;
@@ -53,7 +54,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1668,6 +1669,28 @@ pub struct WorkflowRun {
     pub phases: i64,
     pub agents: i64,
     pub cost_usd: f64,
+}
+
+/// One queued fleet-agent-to-agent message (`forge send` / the `message_session` virtual tool).
+/// `delivered_at` is `None` while pending — either the target wasn't in the live registry yet, or
+/// it was and the message is still sitting in its input queue behind other work.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FleetMessage {
+    pub id: String,
+    /// `"cli"` (a `forge send` invocation) or `"session"` (the `message_session` tool, called by
+    /// another fleet session's model).
+    pub sender_kind: String,
+    /// The sending session's id, when `sender_kind == "session"`.
+    pub sender_id: Option<String>,
+    /// Display name rendered in the delivered `"[message from <sender_label>] ..."` turn, and the
+    /// key the per-sender-per-target pending cap is enforced against.
+    pub sender_label: String,
+    pub target_session_id: String,
+    pub body: String,
+    /// `"follow_up"` or `"steer"` — see [`Store::enqueue_fleet_message`].
+    pub mode: String,
+    pub created_at: i64,
+    pub delivered_at: Option<i64>,
 }
 
 #[cfg(test)]
