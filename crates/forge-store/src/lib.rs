@@ -54,7 +54,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 26;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1502,6 +1502,27 @@ pub struct CheckpointRow {
     pub created_at: i64,
 }
 
+/// A heartbeat older than this means the terminal that opened the session is gone (crashed,
+/// `kill -9`, laptop slept and never woke the process again) even though it never cleared
+/// `local_live` — see [`Store::local_live_sessions`].
+pub const LOCAL_PRESENCE_STALE_SECS: i64 = 60;
+
+/// One row of the terminal-local fleet: a session currently open in an interactive `forge` chat
+/// process, read straight from the store (there is no in-memory driver to ask, unlike a
+/// `forge serve`-hosted session).
+#[derive(Debug, Clone)]
+pub struct LocalPresenceRow {
+    pub id: String,
+    pub title: Option<String>,
+    pub cwd: String,
+    pub worktree_path: Option<String>,
+    pub busy: bool,
+    pub created_at: i64,
+    pub last_activity: i64,
+    /// The most recently routed model, or `None` if the session hasn't taken a turn yet.
+    pub model: Option<String>,
+}
+
 /// A one-line summary of a past session, for `forge sessions`.
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
@@ -1800,6 +1821,92 @@ mod tests {
         // Closing a session removes it from the fleet a later restart would restore.
         store.set_session_daemon_live(&live, false).unwrap();
         assert!(store.daemon_live_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_presence_upsert_reports_busy_state_and_model() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp/local", "Default").unwrap();
+        store
+            .add_message(&sid, 0, forge_types::Role::User, "work", None)
+            .unwrap();
+
+        // Not yet marked local-live: invisible to the fleet even though it exists.
+        assert!(store.local_live_sessions().unwrap().is_empty());
+
+        store.set_session_local_live(&sid, true).unwrap();
+        let rows = store.local_live_sessions().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, sid);
+        assert!(!rows[0].busy, "starts idle until a turn begins");
+        assert_eq!(rows[0].model, None, "no turn has routed a model yet");
+
+        store.touch_session_local_presence(&sid, true).unwrap();
+        let rows = store.local_live_sessions().unwrap();
+        assert!(rows[0].busy, "touch(busy=true) must flip the fleet row");
+
+        store.touch_session_local_presence(&sid, false).unwrap();
+        assert!(!store.local_live_sessions().unwrap()[0].busy);
+
+        // Clean exit removes the session from the fleet.
+        store.set_session_local_live(&sid, false).unwrap();
+        assert!(store.local_live_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_presence_touch_is_a_no_op_for_a_session_that_was_never_marked_live() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp/never-live", "Default").unwrap();
+        // No set_session_local_live(true) call — simulates a non-interactive path (e.g. an MCP
+        // agent) touching presence by mistake. Must not silently promote the session into the
+        // fleet.
+        store.touch_session_local_presence(&sid, true).unwrap();
+        assert!(store.local_live_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_presence_ages_out_a_stale_heartbeat() {
+        // A killed terminal (crash, `kill -9`, laptop that never woke back up) never runs its own
+        // cleanup — set_session_local_live(false) simply never happens. The read side must not
+        // show that session as live forever.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp/stale", "Default").unwrap();
+        store
+            .add_message(&sid, 0, forge_types::Role::User, "work", None)
+            .unwrap();
+        store.set_session_local_live(&sid, true).unwrap();
+        assert_eq!(store.local_live_sessions().unwrap().len(), 1);
+
+        // Back-date the heartbeat past the staleness threshold directly (no real sleep in a test).
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session SET local_last_seen = strftime('%s','now') - ?1 WHERE id = ?2",
+                rusqlite::params![LOCAL_PRESENCE_STALE_SECS + 1, sid],
+            )
+            .unwrap();
+
+        assert!(
+            store.local_live_sessions().unwrap().is_empty(),
+            "a stale heartbeat must age the session out of the fleet"
+        );
+    }
+
+    #[test]
+    fn local_presence_excludes_archived_and_subagent_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let archived = store.create_session("/tmp/archived", "Default").unwrap();
+        store
+            .add_message(&archived, 0, forge_types::Role::User, "work", None)
+            .unwrap();
+        store.set_session_local_live(&archived, true).unwrap();
+        store.archive_session(&archived).unwrap();
+
+        assert!(
+            store.local_live_sessions().unwrap().is_empty(),
+            "an archived session must stay out of the fleet even if still marked local_live"
+        );
     }
 
     #[test]
