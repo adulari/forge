@@ -530,6 +530,26 @@ fn migration_0025(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #26: terminal-local session presence — whether a plain `forge` chat process
+/// (not `forge serve`, not an MCP agent) currently has this session open, whether it is
+/// mid-turn, and when it last checked in.
+///
+/// This is what lets a local terminal session surface (read-only) in the Anywhere/tunnelled
+/// daemon's fleet list alongside `forge serve`-hosted sessions: `local_live` marks membership,
+/// `local_busy` mirrors the turn state, and `local_last_seen` is a heartbeat the read side ages
+/// out (`LOCAL_PRESENCE_STALE_SECS`) so a killed terminal — which never gets to clear its own
+/// row — silently drops out of the fleet instead of appearing live forever.
+fn migration_0026(conn: &Connection) -> rusqlite::Result<()> {
+    for stmt in [
+        "ALTER TABLE session ADD COLUMN local_live INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE session ADD COLUMN local_busy INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE session ADD COLUMN local_last_seen INTEGER",
+    ] {
+        add_column_if_missing(conn, stmt)?;
+    }
+    Ok(())
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -558,6 +578,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0023,
     migration_0024,
     migration_0025,
+    migration_0026,
 ];
 
 /// Create the singleton rows the Anywhere sync state machine expects, if they are missing.
