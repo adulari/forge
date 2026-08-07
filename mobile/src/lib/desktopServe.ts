@@ -57,6 +57,60 @@ export async function startForgeServe(): Promise<void> {
 }
 
 /**
+ * What the desktop shell should do on launch.
+ *
+ * `lan` is never auto-connected: it needs the self-signed certificate trusted first, so it stays
+ * a deliberate choice rather than a connection that silently fails.
+ */
+export type DesktopConnectionPlan =
+  | { kind: "connect"; state: DetectedServeState; started: boolean }
+  | { kind: "confirm-lan"; state: DetectedServeState }
+  | { kind: "manual"; reason: "no-binary" | "start-failed" | "start-timeout"; message?: string };
+
+export interface DesktopConnectionProbes {
+  detect: () => Promise<DetectedServeState | null>;
+  binaryAvailable: () => Promise<boolean>;
+  start: () => Promise<void>;
+  poll: () => Promise<DetectedServeState | null>;
+}
+
+/**
+ * Resolve the launch connection without asking the user to click through it.
+ *
+ * The desktop app used to detect a daemon and then wait behind a "Connect" button, and offer to
+ * start one behind a second button — so a perfectly discoverable local daemon still needed two
+ * clicks, and a missing one was a dead end with a URL to paste. Falling back should be automatic.
+ *
+ * Probes are injected so the ladder is testable without a Tauri shell.
+ */
+export async function resolveDesktopConnection(
+  probes: DesktopConnectionProbes,
+): Promise<DesktopConnectionPlan> {
+  const found = await probes.detect();
+  if (found) {
+    return found.exposure === "lan"
+      ? { kind: "confirm-lan", state: found }
+      : { kind: "connect", state: found, started: false };
+  }
+  if (!(await probes.binaryAvailable())) {
+    return { kind: "manual", reason: "no-binary" };
+  }
+  try {
+    await probes.start();
+  } catch (error) {
+    return {
+      kind: "manual",
+      reason: "start-failed",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+  const started = await probes.poll();
+  return started
+    ? { kind: "connect", state: started, started: true }
+    : { kind: "manual", reason: "start-timeout" };
+}
+
+/**
  * Polls `detectForgeServe` until it finds a live daemon or `timeoutMs` elapses. Used right
  * after `startForgeServe`, since the state file only appears after a successful bind — there's
  * no push signal, so polling is the only option.
