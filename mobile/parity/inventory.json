@@ -330,6 +330,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/lib/desktopServe.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary: covers the launch connection ladder for the desktop shell",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/lib/desktopServe.ts",
     "platform": "desktop",
     "reason": "Tauri desktop capability boundary",
