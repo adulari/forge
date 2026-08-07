@@ -636,16 +636,18 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn initialize_rejects_json_rpc_errors() {
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::TempDir::new().unwrap();
         let script = tmp.path().join("reject-lsp.sh");
         std::fs::write(
             &script,
-            "#!/bin/sh\nIFS= read -r header\nlen=${header#Content-Length: }\nIFS= read -r blank\ndd bs=1 count=$len of=/dev/null 2>/dev/null\nbody='{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"bad init\"}}'\nprintf 'Content-Length: %d\\r\\n\\r\\n%s' ${#body} \"$body\"\nsleep 1\n",
+            "IFS= read -r header\nlen=${header#Content-Length: }\nIFS= read -r blank\ndd bs=1 count=$len of=/dev/null 2>/dev/null\nbody='{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"bad init\"}}'\nprintf 'Content-Length: %d\\r\\n\\r\\n%s' ${#body} \"$body\"\nsleep 1\n",
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut server = LspServer::spawn(&script.to_string_lossy(), &[])
+        // Run the script as an argument to /bin/sh rather than exec'ing it directly. Exec'ing a
+        // file this process just wrote races every other test that spawns a child: a concurrent
+        // fork duplicates the still-open write fd, and exec on that inode fails ETXTBSY until the
+        // child execs. `sh` only ever *reads* this path, which no such race affects.
+        let mut server = LspServer::spawn("/bin/sh", &[script.to_string_lossy().into_owned()])
             .await
             .unwrap();
         let error = server
