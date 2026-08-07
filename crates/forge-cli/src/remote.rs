@@ -1241,6 +1241,12 @@ pub enum RemoteInput {
     /// this input exists only as the upload route's delivery leg, so an arbitrary host path
     /// (e.g. a WS client probing for secret files) is refused with a note.
     Attach { path: String, image: bool },
+    /// A fleet-messaging "steer" delivery (`message_session`/`forge send --steer`): outrank the
+    /// FIFO follow-up backlog for the target's very next turn boundary. Never injected into a
+    /// turn already streaming — while busy it jumps to the FRONT of the queue instead of the
+    /// back; while idle it starts a turn immediately, exactly like [`RemoteInput::Prompt`] (there
+    /// is no backlog to outrank).
+    Steer { text: String },
 }
 
 /// One message-correlated attachment riding a [`RemoteInput::Prompt`] (v7.1) — the client's own

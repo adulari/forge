@@ -65,6 +65,8 @@ fn report_to_sink(record: serde_json::Value) {
 mod bridge_budget;
 use bridge_budget::*;
 
+mod fleet;
+
 mod subagents;
 use subagents::SubagentSupport;
 
@@ -216,6 +218,12 @@ impl ServerHandler for ForgeMcp {
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "memory saved: [{kind_cat}] {text}"
             ))]));
+        }
+
+        // Fleet agent-to-agent messaging — resolves against a running `forge serve` daemon over
+        // HTTP (this process has no direct registry access; see `mcp_serve::fleet`).
+        if name == forge_core::fleet::MESSAGE_SESSION_TOOL {
+            return Ok(self.handle_message_session(&args).await);
         }
 
         // Plan presentation — report the plan to the out-of-band sink so the parent renders the
@@ -464,6 +472,9 @@ impl ForgeMcp {
         let rs = forge_core::remember_spec();
         let rs_schema: JsonObject = rs.schema.as_object().cloned().unwrap_or_default();
         tools.push(Tool::new(rs.name, rs.description, Arc::new(rs_schema)));
+        // Fleet agent-to-agent messaging — always advertised (unlike subagents, it needs no local
+        // setup: a call simply fails with a clear error if no `forge serve` daemon is reachable).
+        tools.push(self.message_session_tool());
         // Advertise plan presentation so a bridge model can propose a plan in planning mode. The
         // bridge can't see the parent's runtime temper, so it's advertised unconditionally; the
         // parent honors the plan only when it is actually in Plan mode (gated in run_model_loop).
