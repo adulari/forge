@@ -34,6 +34,7 @@ mod completeness;
 pub(crate) mod completion;
 pub mod context_pack;
 pub(crate) mod context_pipeline;
+mod detached_subagents;
 pub mod duel;
 pub mod fleet;
 pub mod hooks;
