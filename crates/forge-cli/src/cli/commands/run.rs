@@ -11,6 +11,10 @@ use crate::*;
 mod autonomous;
 pub(crate) use autonomous::*;
 
+mod gates;
+mod mesh_overlay;
+pub(crate) use gates::*;
+
 mod setup;
 pub(crate) use setup::*;
 
@@ -1795,12 +1799,15 @@ pub(crate) async fn run_chat_tui(
                                     Arc::clone(&pending_duel),
                                 ));
                             }
-                            DispatchOutcome::StartLoop { prompt } => {
+                            DispatchOutcome::StartLoop {
+                                prompt,
+                                gates,
+                                max_tokens,
+                                max_minutes,
+                            } => {
                                 turn_gen += 1;
-                                loop_state = Some(LoopState {
-                                    gen: turn_gen,
-                                    iter: 1,
-                                });
+                                loop_state =
+                                    Some(LoopState::new(turn_gen, gates, max_tokens, max_minutes));
                                 app.note("↻ loop started — Esc to stop");
                                 turn_handle = Some(spawn_turn_with(
                                     prompt,
@@ -1814,15 +1821,21 @@ pub(crate) async fn run_chat_tui(
                                     &mut busy_since,
                                 ));
                             }
-                            DispatchOutcome::StartGoal { prompt, goal } => {
+                            DispatchOutcome::StartGoal {
+                                prompt,
+                                goal,
+                                gates,
+                                max_tokens,
+                                max_minutes,
+                            } => {
                                 turn_gen += 1;
-                                goal_state = Some(GoalState {
-                                    gen: turn_gen,
-                                    iter: 1,
-                                    prev_done: 0,
-                                    no_progress: 0,
+                                goal_state = Some(GoalState::new(
+                                    turn_gen,
                                     goal,
-                                });
+                                    gates,
+                                    max_tokens,
+                                    max_minutes,
+                                ));
                                 app.note("🎯 goal started — Esc to stop");
                                 turn_handle = Some(spawn_turn_with(
                                     prompt,
@@ -2899,12 +2912,19 @@ pub(crate) async fn run_chat_tui(
                                         Arc::clone(&pending_duel),
                                     ));
                                 }
-                                DispatchOutcome::StartLoop { prompt } => {
+                                DispatchOutcome::StartLoop {
+                                    prompt,
+                                    gates,
+                                    max_tokens,
+                                    max_minutes,
+                                } => {
                                     turn_gen += 1;
-                                    loop_state = Some(LoopState {
-                                        gen: turn_gen,
-                                        iter: 1,
-                                    });
+                                    loop_state = Some(LoopState::new(
+                                        turn_gen,
+                                        gates,
+                                        max_tokens,
+                                        max_minutes,
+                                    ));
                                     app.note("↻ loop started — Esc to stop");
                                     turn_handle = Some(spawn_turn_with(
                                         prompt,
@@ -2918,15 +2938,21 @@ pub(crate) async fn run_chat_tui(
                                         &mut busy_since,
                                     ));
                                 }
-                                DispatchOutcome::StartGoal { prompt, goal } => {
+                                DispatchOutcome::StartGoal {
+                                    prompt,
+                                    goal,
+                                    gates,
+                                    max_tokens,
+                                    max_minutes,
+                                } => {
                                     turn_gen += 1;
-                                    goal_state = Some(GoalState {
-                                        gen: turn_gen,
-                                        iter: 1,
-                                        prev_done: 0,
-                                        no_progress: 0,
+                                    goal_state = Some(GoalState::new(
+                                        turn_gen,
                                         goal,
-                                    });
+                                        gates,
+                                        max_tokens,
+                                        max_minutes,
+                                    ));
                                     app.note("🎯 goal started — Esc to stop");
                                     turn_handle = Some(spawn_turn_with(
                                         prompt,
@@ -3324,12 +3350,19 @@ pub(crate) async fn run_chat_tui(
                                         Arc::clone(&pending_duel),
                                     ));
                                 }
-                                DispatchOutcome::StartLoop { prompt } => {
+                                DispatchOutcome::StartLoop {
+                                    prompt,
+                                    gates,
+                                    max_tokens,
+                                    max_minutes,
+                                } => {
                                     turn_gen += 1;
-                                    loop_state = Some(LoopState {
-                                        gen: turn_gen,
-                                        iter: 1,
-                                    });
+                                    loop_state = Some(LoopState::new(
+                                        turn_gen,
+                                        gates,
+                                        max_tokens,
+                                        max_minutes,
+                                    ));
                                     app.note("↻ loop started — Esc to stop");
                                     turn_handle = Some(spawn_turn_with(
                                         prompt,
@@ -3343,15 +3376,21 @@ pub(crate) async fn run_chat_tui(
                                         &mut busy_since,
                                     ));
                                 }
-                                DispatchOutcome::StartGoal { prompt, goal } => {
+                                DispatchOutcome::StartGoal {
+                                    prompt,
+                                    goal,
+                                    gates,
+                                    max_tokens,
+                                    max_minutes,
+                                } => {
                                     turn_gen += 1;
-                                    goal_state = Some(GoalState {
-                                        gen: turn_gen,
-                                        iter: 1,
-                                        prev_done: 0,
-                                        no_progress: 0,
+                                    goal_state = Some(GoalState::new(
+                                        turn_gen,
                                         goal,
-                                    });
+                                        gates,
+                                        max_tokens,
+                                        max_minutes,
+                                    ));
                                     app.note("🎯 goal started — Esc to stop");
                                     turn_handle = Some(spawn_turn_with(
                                         prompt,
@@ -3668,8 +3707,10 @@ pub(crate) async fn run_chat_tui(
                         duel_state = Some((report, guards));
                     }
                 }
-                // `/loop`: if this was a loop turn, decide whether to run another iteration.
-                if let Some(ls) = loop_state.take() {
+                // `/loop`: if this was a loop turn, decide whether to run another iteration —
+                // sentinel/iteration-cap policy, then (only on genuine completion) quality gates,
+                // then the token/wall-clock budget.
+                if let Some(mut ls) = loop_state.take() {
                     if ls.gen == g {
                         let last = {
                             session
@@ -3678,9 +3719,35 @@ pub(crate) async fn run_chat_tui(
                                 .last_assistant_text()
                                 .map(str::to_string)
                         };
-                        match loop_stop_reason(last.as_deref(), ls.iter) {
-                            Some(reason) => app.note(reason),
-                            None => {
+                        let tokens_this_turn = app.turn_in + app.turn_out;
+                        match next_loop_decision(
+                            &mut ls,
+                            last.as_deref(),
+                            tokens_this_turn,
+                            &project_cwd,
+                        )
+                        .await
+                        {
+                            LoopDecision::Stop(reason) => app.note(&reason),
+                            LoopDecision::GateFailed { prompt } => {
+                                last_prompt = Some(prompt.clone());
+                                turn_gen += 1;
+                                ls.iter += 1;
+                                ls.gen = turn_gen;
+                                loop_state = Some(ls);
+                                turn_handle = Some(spawn_turn_with(
+                                    prompt,
+                                    vec![LOOP_GUIDANCE.to_string()],
+                                    None,
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                ));
+                            }
+                            LoopDecision::Retry => {
                                 let prompt = dequeue_prompt(
                                     &mut queued_prompts,
                                     &mut app,
@@ -3689,10 +3756,9 @@ pub(crate) async fn run_chat_tui(
                                 .unwrap_or_else(|| "Continue toward completion.".to_string());
                                 last_prompt = Some(prompt.clone());
                                 turn_gen += 1;
-                                loop_state = Some(LoopState {
-                                    gen: turn_gen,
-                                    iter: ls.iter + 1,
-                                });
+                                ls.iter += 1;
+                                ls.gen = turn_gen;
+                                loop_state = Some(ls);
                                 turn_handle = Some(spawn_turn_with(
                                     prompt,
                                     vec![LOOP_GUIDANCE.to_string()],
@@ -3712,7 +3778,7 @@ pub(crate) async fn run_chat_tui(
                 }
                 // `/goal`: if this was a goal turn, decide whether to run another iteration off
                 // the tracked task plan (a session is either looping or goaling, never both).
-                if let Some(gs) = goal_state.take() {
+                if let Some(mut gs) = goal_state.take() {
                     if gs.gen == g {
                         let (done, total) = {
                             let s = session.lock().await;
@@ -3733,12 +3799,41 @@ pub(crate) async fn run_chat_tui(
                                 .map(str::to_string)
                         };
                         let said_complete = is_goal_complete_marker(last.as_deref());
-                        let progressed = done > gs.prev_done;
-                        let no_progress = if progressed { 0 } else { gs.no_progress + 1 };
-                        match goal_stop_reason(said_complete, done, total, gs.iter, no_progress) {
-                            Some(reason) if is_goal_complete_reason(reason) => {}
-                            Some(reason) => app.note(reason),
-                            None => {
+                        let tokens_this_turn = app.turn_in + app.turn_out;
+                        match next_goal_decision(
+                            &mut gs,
+                            said_complete,
+                            done,
+                            total,
+                            tokens_this_turn,
+                            &project_cwd,
+                        )
+                        .await
+                        {
+                            GoalDecision::Stop(reason) => {
+                                if !is_goal_complete_reason(&reason) {
+                                    app.note(&reason);
+                                }
+                            }
+                            GoalDecision::GateFailed { prompt } => {
+                                last_prompt = Some(prompt.clone());
+                                turn_gen += 1;
+                                gs.iter += 1;
+                                gs.gen = turn_gen;
+                                goal_state = Some(gs);
+                                turn_handle = Some(spawn_turn_with(
+                                    prompt,
+                                    vec![GOAL_GUIDANCE.to_string()],
+                                    Some(forge_types::TaskTier::Complex),
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                ));
+                            }
+                            GoalDecision::Retry => {
                                 let prompt = dequeue_prompt(
                                     &mut queued_prompts,
                                     &mut app,
@@ -3747,13 +3842,9 @@ pub(crate) async fn run_chat_tui(
                                 .unwrap_or_else(|| GOAL_CONTINUE_PROMPT.to_string());
                                 last_prompt = Some(prompt.clone());
                                 turn_gen += 1;
-                                goal_state = Some(GoalState {
-                                    gen: turn_gen,
-                                    iter: gs.iter + 1,
-                                    prev_done: done,
-                                    no_progress,
-                                    goal: gs.goal,
-                                });
+                                gs.iter += 1;
+                                gs.gen = turn_gen;
+                                goal_state = Some(gs);
                                 turn_handle = Some(spawn_turn_with(
                                     prompt,
                                     vec![GOAL_GUIDANCE.to_string()],
@@ -4974,19 +5065,34 @@ mod tests {
 
     #[test]
     fn model_skip_rebinds_autonomous_state_without_consuming_queued_work() {
-        let mut loop_state = Some(LoopState { gen: 7, iter: 3 });
-        let mut goal_state = Some(GoalState {
-            gen: 7,
-            iter: 4,
-            prev_done: 2,
-            no_progress: 1,
-            goal: "finish".to_string(),
-        });
+        let mut loop_state = Some(LoopState::new(7, Vec::new(), None, None));
+        if let Some(ls) = loop_state.as_mut() {
+            ls.iter = 3;
+        }
+        let mut goal_state = Some(GoalState::new(
+            7,
+            "finish".to_string(),
+            Vec::new(),
+            None,
+            None,
+        ));
+        if let Some(gs) = goal_state.as_mut() {
+            gs.iter = 4;
+            gs.prev_done = 2;
+            gs.no_progress = 1;
+        }
         let queue = vec!["apply correction".to_string(), "then verify".to_string()];
 
         rebind_autonomous_generation(&mut loop_state, &mut goal_state, 9);
 
-        assert!(matches!(loop_state, Some(LoopState { gen: 9, iter: 3 })));
+        assert!(matches!(
+            loop_state,
+            Some(LoopState {
+                gen: 9,
+                iter: 3,
+                ..
+            })
+        ));
         assert!(matches!(
             goal_state,
             Some(GoalState {

@@ -137,8 +137,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "goal",
-        desc: "set a session goal and break it into a tracked task plan",
-        usage: "/goal <objective>",
+        desc: "set a session goal and break it into a tracked task plan — optionally gated on quality checks and a token/time budget",
+        usage: "/goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N]",
     },
     Command {
         name: "pr",
@@ -147,8 +147,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "loop",
-        desc: "re-run a task each turn until the model signals it's complete",
-        usage: "/loop <task>",
+        desc: "re-run a task each turn until the model signals it's complete — optionally gated on quality checks and a token/time budget",
+        usage: "/loop <task> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N]",
     },
     Command {
         name: "effort",
@@ -289,13 +289,27 @@ pub enum CommandAction {
     Uncompact,
     /// Show the code-intelligence subgraph for a symbol (`/lattice <symbol>`).
     Lattice(String),
-    /// Set a session goal and decompose it into a tracked task plan (`/goal <objective>`).
-    Goal(String),
+    /// Set a session goal and decompose it into a tracked task plan (`/goal <objective>
+    /// [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`). `gates`/`max_tokens`/
+    /// `max_minutes` are the shared autonomous-quality-gate/budget options
+    /// (docs/features/autonomous-gates.md) — empty/`None` for the bare form.
+    Goal {
+        objective: String,
+        gates: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    },
     /// Turn this session's work into a branch + commit + pull request with a provenance-rich
     /// body (`/pr [title]`).
     Pr(String),
-    /// Re-run a task each turn until the model signals completion (`/loop <task>`).
-    Loop(String),
+    /// Re-run a task each turn until the model signals completion (`/loop <task> [--gate "<cmd>"]...
+    /// [--max-tokens N] [--max-minutes N]`). See [`CommandAction::Goal`] for the shared fields.
+    Loop {
+        prompt: String,
+        gates: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    },
     /// Show a session transcript inline, or diff two sessions (`/replay <id> [<id2>]`).
     Replay(String, Option<String>),
     /// Open the usage overlay showing API spend + token breakdown (`/usage`).
@@ -535,30 +549,7 @@ impl AtPathPicker {
     }
 }
 
-/// Extract a comma-separated lens list from `--flag <value>` in a raw arg string.
-/// `/assay --only dead-weight,unsafe` → `extract_flag(arg, "--only")` → `["dead-weight", "unsafe"]`
-fn extract_flag(arg: &str, flag: &str) -> Vec<String> {
-    let tokens: Vec<&str> = arg.split_whitespace().collect();
-    for (i, tok) in tokens.iter().enumerate() {
-        if *tok == flag {
-            if let Some(val) = tokens.get(i + 1) {
-                if !val.starts_with('-') {
-                    return val
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// Check whether a boolean flag (no value) is present in `arg`.
-fn has_flag(arg: &str, flag: &str) -> bool {
-    arg.split_whitespace().any(|t| t == flag)
-}
+use crate::arg_parse::{assay_action, goal_action, has_flag, loop_action};
 
 /// Parse a submitted command line (`"/resume ab12"`). The leading `/` is required; a `//`
 /// prefix is NOT a command (it escapes to a literal prompt — handled by the caller).
@@ -585,37 +576,16 @@ pub fn parse_command(line: &str) -> CommandAction {
         "mcp" => CommandAction::Mcp((!arg.is_empty()).then_some(arg)),
         "new" | "n" => CommandAction::New,
         "mode" | "m" | "temper" => CommandAction::Mode,
-        "assay" | "analyze" | "analyse" => {
-            // `/assay [--diff|--branch <b>|--since <ref>|<path>] [--only <lens,…>] [--skip <lens,…>]`
-            let only = extract_flag(&arg, "--only");
-            let skip = extract_flag(&arg, "--skip");
-            // Scope: --diff, --branch <b>, --since <ref>, a path, or empty (full repo).
-            let scope = if has_flag(&arg, "--diff") {
-                "--diff".to_string()
-            } else if let Some(b) = extract_flag(&arg, "--branch").into_iter().next() {
-                format!("--branch {b}")
-            } else if let Some(r) = extract_flag(&arg, "--since").into_iter().next() {
-                format!("--since {r}")
-            } else {
-                // Remaining tokens that aren't flags → treat as path.
-                let path: String = arg
-                    .split_whitespace()
-                    .filter(|t| !t.starts_with("--"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                path
-            };
-            CommandAction::Assay { only, skip, scope }
-        }
+        "assay" | "analyze" | "analyse" => assay_action(&arg),
         "undo" | "u" => CommandAction::Undo,
         "checkpoint" | "cp" => CommandAction::Checkpoint((!arg.is_empty()).then_some(arg)),
         "checkpoints" => CommandAction::ListCheckpoints,
         "compact" => CommandAction::Compact,
         "uncompact" => CommandAction::Uncompact,
         "lattice" | "lat" => CommandAction::Lattice(arg),
-        "goal" | "objective" => CommandAction::Goal(arg),
+        "goal" | "objective" => goal_action(&arg),
         "pr" | "pullrequest" => CommandAction::Pr(arg),
-        "loop" => CommandAction::Loop(arg),
+        "loop" => loop_action(&arg),
         "duel" => CommandAction::Duel(arg),
         "voice" | "record" => CommandAction::Voice,
         "replay" => {
@@ -1234,9 +1204,22 @@ mod tests {
         );
         assert_eq!(
             parse_command("/goal ship the parser"),
-            CommandAction::Goal("ship the parser".into())
+            CommandAction::Goal {
+                objective: "ship the parser".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+            }
         );
-        assert_eq!(parse_command("/goal"), CommandAction::Goal(String::new()));
+        assert_eq!(
+            parse_command("/goal"),
+            CommandAction::Goal {
+                objective: String::new(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+            }
+        );
         assert_eq!(
             parse_command("/pr feat: add rate limiter"),
             CommandAction::Pr("feat: add rate limiter".into())
@@ -1244,7 +1227,12 @@ mod tests {
         assert_eq!(parse_command("/pr"), CommandAction::Pr(String::new()));
         assert_eq!(
             parse_command("/loop fix all warnings"),
-            CommandAction::Loop("fix all warnings".into())
+            CommandAction::Loop {
+                prompt: "fix all warnings".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+            }
         );
         assert_eq!(
             parse_command("/duel add pagination to the /users endpoint"),
@@ -1262,6 +1250,61 @@ mod tests {
         assert_eq!(parse_command("/go"), CommandAction::Execute);
         assert_eq!(parse_command("/voice"), CommandAction::Voice);
         assert_eq!(parse_command("/record"), CommandAction::Voice);
+    }
+
+    #[test]
+    fn parses_loop_and_goal_gate_and_budget_options() {
+        // A single quoted gate, before the prompt.
+        assert_eq!(
+            parse_command("/loop --gate \"cargo test\" fix the bug"),
+            CommandAction::Loop {
+                prompt: "fix the bug".into(),
+                gates: vec!["cargo test".into()],
+                max_tokens: None,
+                max_minutes: None,
+            }
+        );
+        // Repeated gates, budgets, order-independent, prompt reassembled from remaining tokens.
+        assert_eq!(
+            parse_command(
+                "/loop --gate \"cargo test\" --max-tokens 50000 --gate \"cargo clippy\" --max-minutes 30 ship it"
+            ),
+            CommandAction::Loop {
+                prompt: "ship it".into(),
+                gates: vec!["cargo test".into(), "cargo clippy".into()],
+                max_tokens: Some(50_000),
+                max_minutes: Some(30),
+            }
+        );
+        assert_eq!(
+            parse_command("/goal --gate \"npm run lint\" ship the parser"),
+            CommandAction::Goal {
+                objective: "ship the parser".into(),
+                gates: vec!["npm run lint".into()],
+                max_tokens: None,
+                max_minutes: None,
+            }
+        );
+        // Bare form (no options) must be untouched — exact prior behavior, whitespace and all.
+        assert_eq!(
+            parse_command("/loop   fix   all   warnings"),
+            CommandAction::Loop {
+                prompt: "fix   all   warnings".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+            }
+        );
+        // A non-numeric budget value is dropped rather than panicking.
+        assert_eq!(
+            parse_command("/loop --max-tokens oops go"),
+            CommandAction::Loop {
+                prompt: "go".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+            }
+        );
     }
 
     #[test]

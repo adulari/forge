@@ -81,10 +81,24 @@ pub(crate) enum DispatchOutcome {
         args: serde_json::Value,
     },
     /// `/loop <task>` — run the task, then re-run each turn until the model signals completion.
-    StartLoop { prompt: String },
+    /// `gates`/`max_tokens`/`max_minutes` are the autonomous quality-gate/budget options
+    /// (docs/features/autonomous-gates.md) — empty/`None` for the bare form.
+    StartLoop {
+        prompt: String,
+        gates: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    },
     /// `/goal <objective>` — decompose into a tracked task plan, then keep re-running turns
-    /// autonomously until every task is done and the model signals completion.
-    StartGoal { prompt: String, goal: String },
+    /// autonomously until every task is done and the model signals completion. Same gate/budget
+    /// fields as [`DispatchOutcome::StartLoop`].
+    StartGoal {
+        prompt: String,
+        goal: String,
+        gates: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    },
     /// `/duel <task>` — race 2-3 mesh models on the same task, each in its own worktree
     /// (docs/features/duel.md), in a background task like a turn.
     RunDuel { task: String },
@@ -124,91 +138,6 @@ pub(crate) enum VoiceStart {
     /// Failed synchronously (e.g. no microphone device) — `App::voice` is already the error card
     /// (the message lives there, not duplicated here).
     Error,
-}
-
-/// Build a fully-populated [`forge_tui::MeshOverlay`] from a routing explanation.
-/// Extracted so both the sync path and the background-task path can share the logic.
-pub(crate) fn build_mesh_overlay(
-    e: forge_mesh::RoutingExplanation,
-    prompt: &str,
-) -> forge_tui::MeshOverlay {
-    let conserve_line = if !e.conserve.enabled {
-        "off".to_string()
-    } else if !e.conserve.eligible {
-        "no frontier alternative → not applied".to_string()
-    } else if e.conserve.fired {
-        format!(
-            "FIRED (roll {:.2} < P {:.2}) → spread to free frontier",
-            e.conserve.roll, e.conserve.probability
-        )
-    } else {
-        format!(
-            "not fired (roll {:.2} ≥ P {:.2}) → subscription kept",
-            e.conserve.roll, e.conserve.probability
-        )
-    };
-    // Only show candidates `decide()` could actually route to — an unusable row (benched,
-    // exhausted, or excluded by credit_mode/context) is noise, not a real alternative. Top 12 of
-    // those by score; if the actual pick still ranks below that (ties, or a longer usable tail),
-    // always include it too, so the panel never shows 12 rows with none marked `selected`.
-    let candidates: Vec<forge_tui::MeshCandRow> = {
-        let mut top: Vec<_> = e.candidates.iter().filter(|c| c.usable).take(12).collect();
-        if !top.iter().any(|c| c.selected) {
-            if let Some(sel) = e.candidates.iter().find(|c| c.selected) {
-                top.push(sel);
-            }
-        }
-        top.into_iter()
-            .map(|c| forge_tui::MeshCandRow {
-                rank: c.rank,
-                model: c.row.model.clone(),
-                score: c.row.final_score,
-                cost_tag: match c.row.cost_class {
-                    0 => "free",
-                    1 => "subscription",
-                    _ => "paid",
-                }
-                .to_string(),
-                frontier: c.row.frontier,
-                usable: c.usable,
-                selected: c.selected,
-                penalty: c.row.conserve_penalty,
-            })
-            .collect()
-    };
-    forge_tui::MeshOverlay {
-        open: true,
-        loading: false,
-        prompt: prompt.to_string(),
-        classified: e.classified_tier.as_str().to_string(),
-        classifier: e.classifier_label.clone(),
-        routed: e.routed_tier.as_str().to_string(),
-        code_heavy: e.code_heavy,
-        reasons: e.classify_reasons.join(", "),
-        conserve_fired: e.conserve.fired,
-        conserve_line,
-        quota: e
-            .quota
-            .iter()
-            .map(|q| forge_tui::MeshQuotaRow {
-                provider: q.provider.clone(),
-                fraction: q.fraction,
-                plan: q.plan.clone(),
-                status: format!("{:?}", q.status),
-                spread_complex: q.spread_probability,
-                projected_fraction_at_reset: q.projected_fraction_at_reset,
-                exhaustion_warning: q.exhaustion_warning,
-            })
-            .collect(),
-        candidates: candidates.clone(),
-        pick: e.pick.clone(),
-        fallbacks: e.fallbacks.clone(),
-        rationale: e.rationale.clone(),
-        anim_tick: 0,
-        // Start the browsing cursor on the actual pick, not row 0 — that's the row the user is
-        // most likely to want to look at first.
-        cursor: candidates.iter().position(|c| c.selected).unwrap_or(0),
-    }
 }
 
 /// Execute a slash command (command-skill-system.md). Builtins are matched first; an unrecognised
@@ -618,27 +547,14 @@ and keep going."
         }
         // `/goal <objective>` — pin a persisted north-star, then run a turn that decomposes it
         // into a tracked task plan (update_tasks).
-        CommandAction::Goal(text) => {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                app.note("usage: /goal <objective> — sets the goal and breaks it into tasks");
-                return Ok(DispatchOutcome::Handled);
-            }
-            {
-                let mut s = session.lock().await;
-                s.prime_guidance(&[format!(
-                    "Session goal: {text}\nKeep every step aligned to this goal until it is fully met."
-                )])
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            }
-            app.note(&format!("🎯 goal set — {text}"));
-            return Ok(DispatchOutcome::StartGoal {
-                prompt: format!(
-                    "Break this goal into a concrete, ordered plan and record it with the \
-                     update_tasks tool, then start on the first step.\n\nGoal: {text}"
-                ),
-                goal: text.clone(),
-            });
+        CommandAction::Goal {
+            objective,
+            gates,
+            max_tokens,
+            max_minutes,
+        } => {
+            return gates::goal_outcome(session, app, objective, gates, max_tokens, max_minutes)
+                .await;
         }
         // `/pr [title]` — turn this session's work into a branch + commit + PR whose body carries
         // real provenance (session id, models used, spend) so a reviewer can trace every change
@@ -671,13 +587,19 @@ and keep going."
             });
         }
         // `/loop <task>` — autonomous re-run until the model signals completion.
-        CommandAction::Loop(text) => {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                app.note("usage: /loop <task> — re-runs until the model signals it's complete");
-                return Ok(DispatchOutcome::Handled);
-            }
-            return Ok(DispatchOutcome::StartLoop { prompt: text });
+        CommandAction::Loop {
+            prompt,
+            gates,
+            max_tokens,
+            max_minutes,
+        } => {
+            return Ok(gates::loop_outcome(
+                app,
+                prompt,
+                gates,
+                max_tokens,
+                max_minutes,
+            ));
         }
         // `/duel <task>` — model arena: race 2-3 mesh models on the same task, each in its own
         // isolated worktree, then pick a winner from a comparable picker.
@@ -897,7 +819,7 @@ and keep going."
                     Some(inspector) => Some(inspector.explain(&to_explain).await),
                     None => None,
                 };
-                let _ = tx.send(exp.map(|e| build_mesh_overlay(e, &prompt_str)));
+                let _ = tx.send(exp.map(|e| mesh_overlay::build_mesh_overlay(e, &prompt_str)));
             });
             return Ok(DispatchOutcome::PendingMesh(rx));
         }
