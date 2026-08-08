@@ -100,7 +100,11 @@ jobs:
         run: |
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
           cargo audit --version 2>/dev/null | grep -q '0.22.2' || cargo install --locked cargo-audit --version 0.22.2
+      # Per-job store: these runners are persistent, so an unset FORGE_DB shares one file across
+      # branches and a migration on any of them breaks every other PR. See ci.yml's test job.
       - run: cargo test --locked --manifest-path mobile/src-tauri/Cargo.toml
+        env:
+          FORGE_DB: ${{ runner.temp }}/forge-ci-tauri.db
       - run: cargo clippy --locked --manifest-path mobile/src-tauri/Cargo.toml --all-targets -- -D warnings
       # Tauri's current Linux webview stack still pins gtk-rs/glib 0.18. RUSTSEC-2024-0429
       # concerns VariantStrIter, which Forge never calls; keep every other vulnerability blocking
