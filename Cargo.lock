@@ -2013,6 +2013,7 @@ dependencies = [
  "reqwest",
  "rmcp",
  "rpassword",
+ "rusqlite",
  "self_update",
  "serde",
  "serde_json",
