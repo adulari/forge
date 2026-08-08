@@ -366,7 +366,8 @@ async fn run_agent_loop(
             ctx.store
                 .record_routing(&msg_id, decision.tier, &active_model, &decision.rationale)?;
         }
-        ctx.store.record_usage(child_id, &msg_id, &resp.usage)?;
+        ctx.store
+            .record_usage(child_id, &msg_id, &resp.usage, Some(&active_model))?;
 
         if !resp.wants_tools() {
             final_text = resp.content;
