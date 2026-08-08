@@ -405,6 +405,40 @@ fn wait_for_stop(
     }
 }
 
+/// How long to keep retrying a spawn that fails `ETXTBSY`, and how long to wait between tries.
+/// Short: the holder of the write descriptor is always about to close it, so anything still busy
+/// after this is a genuine failure rather than a race worth waiting on.
+#[cfg(all(target_os = "linux", not(feature = "microphone")))]
+const BUSY_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
+#[cfg(all(target_os = "linux", not(feature = "microphone")))]
+const BUSY_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Spawn, retrying briefly while the OS reports the program as busy.
+///
+/// `ETXTBSY` means something still holds a writable descriptor for the executable, so the kernel
+/// refuses to exec it. It is transient by nature and has two real causes here: a package manager or
+/// installer rewriting `pw-record`/`arecord` while Forge starts one, and — inside the test suite —
+/// a concurrent fork inheriting the descriptor of a fake recorder the tests just wrote. Failing the
+/// recording outright for a condition that clears in microseconds is the wrong trade; the user sees
+/// "starting pw-record: Text file busy" and loses the take.
+#[cfg(all(target_os = "linux", not(feature = "microphone")))]
+fn spawn_retrying_while_busy(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let deadline = std::time::Instant::now() + BUSY_RETRY_WINDOW;
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(BUSY_RETRY_INTERVAL);
+            }
+            other => return other,
+        }
+    }
+}
+
 #[cfg(all(target_os = "linux", not(feature = "microphone")))]
 fn linux_record_thread(
     backend: LinuxBackend,
@@ -449,7 +483,7 @@ fn linux_record_thread(
         .stderr(std::process::Stdio::null());
 
     let result = (|| -> Result<Vec<f32>> {
-        let mut child = command.spawn().map_err(|error| {
+        let mut child = spawn_retrying_while_busy(&mut command).map_err(|error| {
             VoiceError::Record(format!("starting {}: {error}", backend.program.display()))
         })?;
         let keep = matches!(wait_for_stop(&cmd_rx, &wav, &level_tx), Some(Cmd::Stop));
@@ -753,6 +787,46 @@ mod tests {
             0,
             "cancel left recorder running"
         );
+    }
+
+    /// A held writable descriptor makes exec fail `ETXTBSY` deterministically — the same condition a
+    /// concurrent fork or a package manager rewriting the recorder produces by accident. The spawn
+    /// must ride it out rather than losing the take, and must still surface a real failure.
+    #[cfg(all(target_os = "linux", not(feature = "microphone")))]
+    #[test]
+    fn a_busy_recorder_binary_is_retried_not_surfaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("pw-record");
+        let mut handle = std::fs::File::create(&program).unwrap();
+        {
+            use std::io::Write;
+            handle.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+            handle.flush().unwrap();
+        }
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Still holding the write descriptor: exec is refused right now.
+        let blocked = std::process::Command::new(&program).spawn();
+        assert_eq!(
+            blocked.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::ExecutableFileBusy),
+            "the setup must actually reproduce ETXTBSY, or this test proves nothing"
+        );
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            drop(handle);
+        });
+        let mut command = std::process::Command::new(&program);
+        spawn_retrying_while_busy(&mut command)
+            .expect("the spawn must retry until the descriptor closes")
+            .wait()
+            .unwrap();
+
+        // A binary that is missing rather than busy still fails immediately.
+        let mut missing = std::process::Command::new(root.path().join("absent"));
+        assert!(spawn_retrying_while_busy(&mut missing).is_err());
     }
 
     #[cfg(all(target_os = "linux", not(feature = "microphone")))]
