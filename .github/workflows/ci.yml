@@ -16,7 +16,13 @@ on:
     - cron: "0 8 * * 1"
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Keyed on the BRANCH, not `github.ref`. A `pull_request` run's ref is `refs/pull/N/merge` while
+  # the `workflow_dispatch` this repo relies on when GitHub drops a branch-update event has ref
+  # `refs/heads/<branch>` — two different groups for the same logical check, so neither cancelled
+  # the other and both consumed a runner. Measured 2026-08-06: 19 such pairs in a 65-deep queue
+  # while a runner sat idle. `head_ref` is the branch on pull_request and empty elsewhere, where
+  # `ref_name` is already the branch, so both forms collapse to the same key.
+  group: ci-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
