@@ -841,7 +841,24 @@ impl DriverState {
 mod tests {
     use super::*;
 
+    /// Point this process's store at a throwaway file before any test opens one.
+    ///
+    /// `build_session_with` otherwise resolves the DEFAULT store. That is shared state: on the
+    /// persistent CI runners one file outlives the job and is common to every branch, so a branch
+    /// carrying a new migration upgrades it and every later job built from an older main fails
+    /// `database schema version N is newer than this build supports` — a failure with nothing to do
+    /// with the change under test. Set once, process-wide, so parallel tests cannot race on the
+    /// variable, and never unset so no test can observe it missing.
+    fn isolate_store() {
+        static STORE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let dir = STORE.get_or_init(|| tempfile::tempdir().expect("temp dir for the test store"));
+        if std::env::var_os("FORGE_DB").is_none() {
+            std::env::set_var("FORGE_DB", dir.path().join("forge-test.db"));
+        }
+    }
+
     async fn test_driver_state() -> DriverState {
+        isolate_store();
         let session = super::build_session_with(
             Box::new(forge_tui::HeadlessPresenter::default()),
             true,
