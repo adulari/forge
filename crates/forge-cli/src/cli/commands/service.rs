@@ -76,7 +76,7 @@ enum ServiceControl {
 // forge service install / uninstall / status / start / stop / restart
 // ---------------------------------------------------------------------------
 
-fn resolved_port(port: Option<u16>) -> u16 {
+pub(crate) fn resolved_port(port: Option<u16>) -> u16 {
     port.unwrap_or_else(|| forge_config::load().unwrap_or_default().remote.serve_port())
 }
 
@@ -153,7 +153,7 @@ fn control_cmd(action: ServiceControl) -> Result<()> {
 }
 
 /// TCP-connect probe with a short timeout — never blocks the CLI for long on a dead port.
-fn probe_port(port: u16) -> bool {
+pub(crate) fn probe_port(port: u16) -> bool {
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)).is_ok()
 }
@@ -173,10 +173,11 @@ struct InstallOutcome {
     note: Option<String>,
 }
 
-struct ServiceStatus {
-    installed: bool,
-    running: bool,
-    detail: String,
+pub(crate) struct ServiceStatus {
+    pub(crate) installed: bool,
+    pub(crate) running: bool,
+    /// Raw state word from the OS service manager: `active`, `failed`, `activating`, …
+    pub(crate) detail: String,
 }
 
 fn systemd_user_dir() -> Result<std::path::PathBuf> {
@@ -219,7 +220,7 @@ fn uninstall_service() -> Result<()> {
     }
 }
 
-fn query_service_status() -> Result<ServiceStatus> {
+pub(crate) fn query_service_status() -> Result<ServiceStatus> {
     if cfg!(target_os = "linux") {
         status_systemd()
     } else if cfg!(target_os = "macos") {
