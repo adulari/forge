@@ -17,7 +17,7 @@ import { GitBranchPicker } from "./GitBranchPicker";
 import { GitCommitBox } from "./GitCommitBox";
 import { GitDiffPane } from "./GitDiffPane";
 import { GitFileList, type GitSelection } from "./GitFileList";
-import { isGitReviewSupported } from "./gitReviewSupport";
+import { isGitReviewReadOnly, isGitReviewSupported } from "./gitReviewSupport";
 import { type GitStatusResponse } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useCommitStaged, useGitDiff, useGitStatus, useStagePaths, useUnstagePaths } from "../../lib/queries";
@@ -53,11 +53,12 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
   const [selection, setSelection] = useState<GitSelection | null>(null);
   const [message, setMessage] = useState("");
 
-  // Every row here comes from `/api/git/*`, which — like the terminal PTY — the Anywhere bridge
-  // does not carry (no git variant of RouteId in forge-anywhere-protocol/src/bridge.rs). Left
-  // unguarded, every request fails identically forever with an internal "route is not
-  // allowlisted" error and a dead retry button, so the dock decides up front instead.
+  // Every row here comes from `/api/git/*`. The bridge carries the READING routes (git_status,
+  // git_branches, git_diff), so reviewing works on every transport; it deliberately does not carry
+  // the mutating ones, which the host refuses. Over Anywhere the dock therefore drops its index
+  // and commit controls rather than offering presses whose requests come back denied.
   const supported = isGitReviewSupported(baseUrl);
+  const readOnly = isGitReviewReadOnly(baseUrl);
 
   const status = useGitStatus(supported ? sessionId : null);
   const diff = useGitDiff(supported ? sessionId : null, selection?.path ?? null, selection?.staged ?? false);
@@ -85,16 +86,6 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
     });
   }, [data]);
 
-  if (!supported) {
-    return (
-      <View style={styles.empty}>
-        <EmptyState
-          icon={GitBranch}
-          message="Git review needs a direct connection to this host. Forge Anywhere carries sessions only — connect over your network or a tunnel to review changes."
-        />
-      </View>
-    );
-  }
 
   const stacked = width > 0 && width < STACK_BELOW;
   const indexBusy = stage.isPending || unstage.isPending;
@@ -132,8 +123,8 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
         status={data}
         selected={selection}
         onSelect={setSelection}
-        onStage={(paths) => stage.mutate({ session: sessionId, paths })}
-        onUnstage={(paths) => unstage.mutate({ session: sessionId, paths })}
+        onStage={readOnly ? null : (paths) => stage.mutate({ session: sessionId, paths })}
+        onUnstage={readOnly ? null : (paths) => unstage.mutate({ session: sessionId, paths })}
         busy={indexBusy}
       />
     );
@@ -157,9 +148,10 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
           sessionId={sessionId}
           branch={data?.branch ?? ""}
           baseBranch={data?.base_branch ?? null}
+          readOnly={readOnly}
         />
         <View style={styles.columnBody}>{column}</View>
-        {data ? (
+        {data && !readOnly ? (
           <GitCommitBox
             branch={data.branch}
             baseBranch={data.base_branch}
