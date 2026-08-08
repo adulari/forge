@@ -285,6 +285,11 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
     format!(
         "[Unit]\nDescription=Forge serve — headless multi-session daemon\n\n\
          [Service]\nExecStart={forge_exe} serve {} --port {port}\nRestart=on-failure\n\
+         # A permanent failure (exit 78 = EX_CONFIG, e.g. a store this build cannot open) cannot be\n\
+         # fixed by retrying. Without this the daemon restarts forever — 632 times in one observed\n\
+         # case, with Anywhere down throughout and the unit still reporting `activating`. Stopping\n\
+         # makes it `failed`, which is at least visible. Transient failures still retry forever,\n\
+         # which is what the network-resilience drop-in wants.\nRestartPreventExitStatus=78\n\
          # An agent-owned compiler or language server may be the kernel's OOM victim. Keep the\n\
          # daemon and its recoverable session metadata alive in that case.\nOOMPolicy=continue\n\n\
          [Install]\nWantedBy=default.target\n",
