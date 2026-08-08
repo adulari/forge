@@ -721,6 +721,18 @@ impl DriverState {
                     &mut self.busy_since,
                 ));
             }
+            DispatchOutcome::RunBtw { question } => {
+                self.turn_gen += 1;
+                self.turn_handle = Some(spawn_btw(
+                    question,
+                    &self.session,
+                    &self.done_tx,
+                    self.turn_gen,
+                    &mut self.app,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                ));
+            }
             DispatchOutcome::RunSavedWorkflow { name, args } => {
                 self.turn_gen += 1;
                 self.turn_handle = Some(spawn_saved_workflow(
