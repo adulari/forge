@@ -295,11 +295,22 @@ impl WorkflowView {
 
     /// One `TranscriptView` per row for the Enter-zoom, rendered by the shared
     /// `transcript_lines` machinery (same header/entry-switching UX as the Ctrl+O viewer).
-    pub fn zoom_views(&self) -> Vec<TranscriptView> {
+    ///
+    /// Only `selected`'s transcript is materialised. The renderer reads `lines` from that row
+    /// alone (`transcript_lines_from_wrapped` indexes `views[selected]`; every other view
+    /// contributes just its metadata and the `[i/n]` count), so styling every row's whole log on
+    /// every frame produced garbage proportional to total captured output — on the one screen a
+    /// user sits and watches for minutes. `None` materialises nothing, for callers that only want
+    /// the metadata.
+    pub fn zoom_views(&self, selected: Option<usize>) -> Vec<TranscriptView> {
         self.rows
             .iter()
-            .map(|r| {
-                let lines: Vec<TextLine<'static>> = if r.log.iter().all(|l| l.trim().is_empty()) {
+            .enumerate()
+            .map(|(i, r)| {
+                let wanted = selected == Some(i);
+                let lines: Vec<TextLine<'static>> = if !wanted {
+                    Vec::new()
+                } else if r.log.iter().all(|l| l.trim().is_empty()) {
                     vec![TextLine::from(Span::styled(
                         "(no activity captured yet)",
                         Style::default().fg(DIM),
@@ -440,9 +451,9 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
 
     // ── Enter-zoom: the selected agent's transcript, via the shared viewer renderer. ──
     if let Some(z) = &wf.zoom {
-        let views = wf.zoom_views();
+        let selected = wf.selected.min(wf.rows.len().saturating_sub(1));
+        let views = wf.zoom_views(Some(selected));
         if !views.is_empty() {
-            let selected = wf.selected.min(views.len() - 1);
             let scroll = if z.follow { usize::MAX / 2 } else { z.scroll };
             let width = area.width.saturating_sub(1);
             let wrapped = wf.ensure_zoom_wrapped(&views, selected, width);
@@ -883,6 +894,41 @@ mod tests {
         assert!(!wf.band_visible(), "no band once the run is over");
     }
 
+    /// The zoom renders ONE row's transcript; styling every row's log each frame was work whose
+    /// result was discarded. Guards the laziness itself, not a timing: non-selected views must
+    /// carry metadata (status/title/count drive the header and the `[i/n]` switcher) and no lines.
+    #[test]
+    fn zoom_views_materialise_only_the_selected_transcript() {
+        let mut wf = WorkflowView::default();
+        wf.begin(None);
+        for name in ["a", "b", "c"] {
+            started(&mut wf, name, None);
+            wf.on_progress(name, "first line\nsecond line\n");
+        }
+
+        let views = wf.zoom_views(Some(1));
+        assert_eq!(views.len(), 3);
+        assert!(
+            views[0].lines.is_empty(),
+            "unselected row must not be styled"
+        );
+        assert!(
+            views[2].lines.is_empty(),
+            "unselected row must not be styled"
+        );
+        assert!(!views[1].lines.is_empty(), "selected row must be styled");
+
+        // Metadata every view still owes the renderer, selected or not.
+        for (i, v) in views.iter().enumerate() {
+            assert_eq!(v.line_count, wf.rows[i].log.len());
+            assert_eq!(v.revision, wf.rows[i].log.len() as u64);
+            assert!(!v.title.is_empty());
+        }
+
+        // `None` is the metadata-only form.
+        assert!(wf.zoom_views(None).iter().all(|v| v.lines.is_empty()));
+    }
+
     #[test]
     fn zoom_views_mirror_row_status() {
         let mut wf = WorkflowView::default();
@@ -890,7 +936,7 @@ mod tests {
         started(&mut wf, "a", None);
         started(&mut wf, "b", None);
         wf.on_result("b", false, "nope", 0.0);
-        let views = wf.zoom_views();
+        let views = wf.zoom_views(None);
         assert_eq!(views.len(), 2);
         assert_eq!(views[0].status, ActivityStatus::Running);
         assert_eq!(views[1].status, ActivityStatus::Failed);
