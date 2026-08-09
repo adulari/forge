@@ -1141,6 +1141,35 @@ mod tests {
 
     // ---- workspace confinement ----
 
+    /// A `..` traversal carrying enough segments to climb past the filesystem root from wherever
+    /// this checkout lives, so it lands on an absolute `/<target>` regardless of depth.
+    ///
+    /// A hardcoded count was location-dependent: from a checkout inside the system temp dir (CI
+    /// scratch directories and `mktemp -d` clones do this), six `..` collapsed to `<tmp>/etc/passwd`
+    /// — still inside a root `confine` allows deliberately. The assertion then failed while
+    /// `confine` was behaving correctly, reporting what looks like a sandbox escape. Deriving the
+    /// count from the actual depth removes the cliff rather than moving it.
+    fn escaping_traversal(target: &str) -> String {
+        let depth = std::env::current_dir()
+            .map(|cwd| cwd.components().count())
+            .unwrap_or(32);
+        "../".repeat(depth + 1) + target
+    }
+
+    #[test]
+    fn escaping_traversal_leaves_every_allowed_root() {
+        let escaped = resolve_target(Path::new(&escaping_traversal("etc/passwd")));
+        assert_eq!(
+            escaped,
+            Path::new("/etc/passwd"),
+            "the traversal must reach the filesystem root, or the escape tests prove nothing"
+        );
+        assert!(
+            !workspace_roots().iter().any(|r| escaped.starts_with(r)),
+            "the escape target must sit outside every allowed root, including the temp dir"
+        );
+    }
+
     #[test]
     fn confine_allows_in_workspace_and_temp_but_rejects_escapes() {
         // A relative path inside the workspace (the crate dir during tests) is allowed.
@@ -1159,7 +1188,7 @@ mod tests {
             );
         }
         // `..` traversal out of the workspace is refused (lexically collapsed before the check).
-        assert!(confine("../../../../../../etc/passwd").is_err());
+        assert!(confine(&escaping_traversal("etc/passwd")).is_err());
     }
 
     #[tokio::test]
@@ -1179,7 +1208,7 @@ mod tests {
         // Even with a real file existing, a `..`-escaping target must be refused before any fs op.
         let err = EditFileTool
             .run(&json!({
-                "path": "../../../../../../etc/hosts",
+                "path": escaping_traversal("etc/hosts"),
                 "old": "x",
                 "new": "y"
             }))
