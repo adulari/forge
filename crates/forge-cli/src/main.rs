@@ -158,7 +158,32 @@ async fn main() {
     telemetry::finish(telemetry_run, result.is_ok());
     if let Err(e) = result {
         print_top_level_error(&e);
-        std::process::exit(1);
+        std::process::exit(exit_code_for(&e));
+    }
+}
+
+/// `EX_CONFIG` from sysexits(3): the invocation cannot succeed as configured, so retrying it
+/// unchanged is pointless.
+///
+/// This exists for supervisors. `forge serve` runs under a unit whose drop-in sets
+/// `StartLimitIntervalSec=0` — deliberately, so a daemon whose tunnel or network is down retries
+/// forever instead of giving up. That is right for a transient failure and wrong for a permanent
+/// one: on 2026-08-07 a store the binary could not open (schema newer than it supports) produced
+/// **632 consecutive restarts**, roughly one every ten seconds, with Anywhere down throughout and
+/// nothing reporting it. Retrying could never have fixed it.
+///
+/// Returning a distinct code lets the unit say `RestartPreventExitStatus=78`, so a permanent
+/// failure stops the service and shows up as `failed` — visible — while network resilience is
+/// untouched.
+fn exit_code_for(e: &anyhow::Error) -> i32 {
+    const EX_CONFIG: i32 = 78;
+    if e.chain().any(|c| {
+        c.downcast_ref::<forge_store::StoreError>()
+            .is_some_and(|s| matches!(s, forge_store::StoreError::SchemaTooNew { .. }))
+    }) {
+        EX_CONFIG
+    } else {
+        1
     }
 }
 
