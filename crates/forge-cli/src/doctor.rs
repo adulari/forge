@@ -461,7 +461,29 @@ fn daemon_checks() -> Vec<Check> {
 ///
 /// Pure so every branch is testable without installing or breaking a real service.
 fn unit_drift_checks(unit: &str, current_exe: &str) -> Vec<Check> {
+    unit_drift_checks_at(unit, current_exe, env!("CARGO_PKG_VERSION"))
+}
+
+fn unit_drift_checks_at(unit: &str, current_exe: &str, running_version: &str) -> Vec<Check> {
+    use crate::cli::commands::service::UNIT_VERSION_PREFIX;
     let mut out = Vec::new();
+
+    // The general case: any future change to the rendered unit becomes visible, not just the
+    // directives someone thought to grep for. A unit with no marker predates the stamp entirely.
+    let unit_version = unit
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(UNIT_VERSION_PREFIX))
+        .map(str::trim);
+    if let Some(v) = unit_version {
+        if v != running_version {
+            out.push(check(
+                Status::Warn,
+                "daemon unit",
+                format!("rendered by Forge {v}, running {running_version}"),
+                Some("`forge service install` to re-render it (installing a new Forge does not)"),
+            ));
+        }
+    }
 
     if !unit.contains("RestartPreventExitStatus") {
         out.push(check(
@@ -717,6 +739,31 @@ mod unit_drift_tests {
         let unit = "[Service]\nExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
         let out = unit_drift_checks(unit, "");
         assert!(out.iter().all(|c| c.label != "daemon binary"));
+    }
+
+    /// A unit rendered by an older Forge is reported even when it carries every directive this
+    /// version happens to check for — the point of the stamp is catching drift nobody grepped for.
+    #[test]
+    fn a_unit_stamped_by_an_older_forge_is_reported() {
+        let unit = "[Unit]\n# forge-unit-version: 2.9.0\n[Service]\n\
+            ExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
+        let out = super::unit_drift_checks_at(unit, "/usr/bin/forge", "2.13.0");
+        let stale = out
+            .iter()
+            .find(|c| c.label == "daemon unit")
+            .expect("a version gap must be reported");
+        assert_eq!(stale.status, Status::Warn);
+        assert!(stale.detail.contains("2.9.0"), "{}", stale.detail);
+        assert!(stale.detail.contains("2.13.0"), "{}", stale.detail);
+    }
+
+    #[test]
+    fn a_unit_stamped_by_this_forge_is_not_reported() {
+        let unit = "[Unit]\n# forge-unit-version: 2.13.0\n[Service]\n\
+            ExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
+        let out = super::unit_drift_checks_at(unit, "/usr/bin/forge", "2.13.0");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].status, Status::Ok);
     }
 
     /// A dev build always differs from the installed unit. Warning every `cargo run -- doctor` is
