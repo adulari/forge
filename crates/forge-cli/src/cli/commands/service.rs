@@ -340,6 +340,16 @@ fn uninstall_systemd() -> Result<()> {
     Ok(())
 }
 
+/// The installed systemd unit's text, if there is one.
+///
+/// `forge service install` writes this file ONCE and nothing rewrites it afterwards, so an upgraded
+/// binary can be paired with a unit rendered by a much older version. Doctor reads it to report that
+/// drift; see `doctor::unit_drift_checks`.
+#[cfg(target_os = "linux")]
+pub(crate) fn installed_unit_text() -> Option<String> {
+    std::fs::read_to_string(systemd_user_dir().ok()?.join(SYSTEMD_UNIT_NAME)).ok()
+}
+
 fn status_systemd() -> Result<ServiceStatus> {
     let installed = systemd_user_dir()
         .map(|d| d.join(SYSTEMD_UNIT_NAME).is_file())

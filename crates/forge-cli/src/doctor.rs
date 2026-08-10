@@ -439,6 +439,73 @@ fn daemon_checks() -> Vec<Check> {
             None,
         ),
     });
+
+    #[cfg(target_os = "linux")]
+    if let Some(unit) = crate::cli::commands::service::installed_unit_text() {
+        let exe = std::env::current_exe()
+            .ok()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        out.extend(unit_drift_checks(&unit, &exe));
+    }
+    out
+}
+
+/// Does the installed unit match what THIS binary would render?
+///
+/// `forge service install` writes the unit once; upgrading Forge never rewrites it. So a fix that
+/// lives in the unit rather than the binary silently never reaches an existing install. That is not
+/// hypothetical: #996 stops the daemon restart-looping on an unfixable failure via BOTH an exit code
+/// (binary) and `RestartPreventExitStatus=78` (unit). Upgrade alone delivers half of it, and the
+/// daemon keeps looping — 25,218 consecutive restarts on the author's machine, silently.
+///
+/// Pure so every branch is testable without installing or breaking a real service.
+fn unit_drift_checks(unit: &str, current_exe: &str) -> Vec<Check> {
+    let mut out = Vec::new();
+
+    if !unit.contains("RestartPreventExitStatus") {
+        out.push(check(
+            Status::Warn,
+            "daemon unit",
+            "predates the permanent-failure guard — a failure retrying cannot fix will restart forever",
+            Some("`forge service install` to re-render the unit (it is rewritten only on install)"),
+        ));
+    }
+
+    // ExecStart pins an absolute path. Install Forge somewhere else afterwards (brew, cargo) and
+    // systemd keeps launching the OLD binary, so `forge --version` in a terminal can disagree with
+    // what the daemon is actually running, with nothing anywhere saying so.
+    let unit_exe = unit
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))
+        .and_then(|cmd| cmd.split_whitespace().next())
+        .unwrap_or_default();
+    // A dev build is EXPECTED to differ from the installed unit — warning about it every time
+    // someone runs `cargo run -- doctor` would be pure noise, and noise is how the real signal
+    // above gets ignored.
+    let from_build_tree =
+        current_exe.contains("/target/debug/") || current_exe.contains("/target/release/");
+    if !unit_exe.is_empty()
+        && !current_exe.is_empty()
+        && unit_exe != current_exe
+        && !from_build_tree
+    {
+        out.push(check(
+            Status::Warn,
+            "daemon binary",
+            format!("unit runs {unit_exe}, but this is {current_exe}"),
+            Some("`forge service install` to point the unit at this binary"),
+        ));
+    }
+
+    if out.is_empty() {
+        out.push(check(
+            Status::Ok,
+            "daemon unit",
+            "matches this binary",
+            None,
+        ));
+    }
     out
 }
 
@@ -595,6 +662,79 @@ fn binary_on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|d| d.join(bin).is_file()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod unit_drift_tests {
+    use super::{unit_drift_checks, Status};
+
+    /// The unit actually installed on the author's machine on 2026-08-10, verbatim. Its daemon had
+    /// restarted 25,218 times; #996's exit-code half would have arrived with an upgrade and changed
+    /// nothing, because this unit has no `RestartPreventExitStatus`.
+    const REAL_STALE_UNIT: &str = "[Unit]\nDescription=Forge serve\n\n[Service]\n\
+        ExecStart=/home/floris/.local/bin/forge serve --tunnel --port 7420\nRestart=on-failure\n";
+
+    #[test]
+    fn a_unit_without_the_permanent_failure_guard_is_flagged() {
+        let out = unit_drift_checks(REAL_STALE_UNIT, "/home/floris/.local/bin/forge");
+        let guard = out
+            .iter()
+            .find(|c| c.label == "daemon unit")
+            .expect("the missing guard must be reported");
+        assert_eq!(guard.status, Status::Warn);
+        assert!(guard.fix.is_some(), "must say how to fix it");
+        // Same binary path, so only the guard should be reported — not a spurious binary mismatch.
+        assert!(out.iter().all(|c| c.label != "daemon binary"));
+    }
+
+    #[test]
+    fn a_unit_pointing_at_another_binary_is_flagged() {
+        let unit = "[Service]\nExecStart=/usr/bin/forge serve --port 7420\n\
+            RestartPreventExitStatus=78\nRestart=on-failure\n";
+        let out = unit_drift_checks(unit, "/home/floris/.cargo/bin/forge");
+        let drift = out
+            .iter()
+            .find(|c| c.label == "daemon binary")
+            .expect("a different ExecStart path must be reported");
+        assert_eq!(drift.status, Status::Warn);
+        assert!(drift.detail.contains("/usr/bin/forge"), "{}", drift.detail);
+        assert!(drift.detail.contains("cargo"), "{}", drift.detail);
+    }
+
+    #[test]
+    fn a_current_unit_reports_ok_and_nothing_else() {
+        let unit = "[Service]\nExecStart=/usr/bin/forge serve --port 7420\n\
+            RestartPreventExitStatus=78\nRestart=on-failure\n";
+        let out = unit_drift_checks(unit, "/usr/bin/forge");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].status, Status::Ok);
+    }
+
+    /// An unknown current-exe path must not manufacture a mismatch — reporting drift against an
+    /// empty string would fire on every install that cannot resolve its own binary.
+    #[test]
+    fn an_unresolvable_current_binary_does_not_report_drift() {
+        let unit = "[Service]\nExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
+        let out = unit_drift_checks(unit, "");
+        assert!(out.iter().all(|c| c.label != "daemon binary"));
+    }
+
+    /// A dev build always differs from the installed unit. Warning every `cargo run -- doctor` is
+    /// noise, and noise is how the genuine warning above gets ignored.
+    #[test]
+    fn a_build_tree_binary_does_not_report_drift() {
+        let unit = "[Service]\nExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
+        for exe in [
+            "/home/me/src/forge/target/debug/forge",
+            "/home/me/src/forge/target/release/forge",
+        ] {
+            let out = unit_drift_checks(unit, exe);
+            assert!(
+                out.iter().all(|c| c.label != "daemon binary"),
+                "{exe} must not warn"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
