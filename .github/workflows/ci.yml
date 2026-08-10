@@ -49,6 +49,14 @@ jobs:
         run: python3 scripts/ci/test_architecture_size.py
       - name: Enforce architecture size guard
         run: python3 scripts/ci/architecture_size.py
+      - name: Test migration version guard
+        run: bash scripts/ci/test-migration-version-guard.sh
+      # Needs the mainline's CURRENT schema version, not the merge base: a branch that collides
+      # looks correct against its own base (that is how five PRs all claimed migration 25).
+      - name: Enforce migration version guard
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          MAIN_REF=FETCH_HEAD bash scripts/ci/migration-version-guard.sh
       - name: Test EAS OTA safety classifier
         run: bash scripts/ci/test-eas-ota-safety.sh
       - name: Test Android EAS build contract
