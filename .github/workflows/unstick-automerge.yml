@@ -251,13 +251,45 @@ jobs:
               continue
             fi
 
-            # The update above was pushed with GITHUB_TOKEN, so GitHub creates no `pull_request`
-            # runs for the new head SHA. Without these dispatches the required `CI` context would
-            # never appear on it and the PR would stall again, one state later.
-            for workflow in ci.yml security.yml mobile-typecheck.yml; do
-              gh workflow run "$workflow" --ref "$branch" \
-                || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
-            done
+            # The update above is pushed with GITHUB_TOKEN, which is SUPPOSED to create no
+            # `pull_request` runs for the new head SHA — hence these dispatches, without which the
+            # required `CI` context would never appear and the PR would stall one state later.
+            #
+            # THAT PREMISE DOES NOT ALWAYS HOLD, and when it does not this loop manufactures a
+            # duplicate every single time it updates a branch. Measured 2026-08-10, right after a
+            # merge to main made every open PR BEHIND: six branches each ended up with a
+            # `workflow_dispatch` CI run AND a `pull_request` CI run on the same head SHA, the
+            # dispatch created ~3 seconds BEFORE the pull_request run —
+            #     17:38:06 workflow_dispatch  fix/usage-model-attribution 6c6117aa
+            #     17:38:09 pull_request       fix/usage-model-attribution 6c6117aa
+            # Every duplicate costs a full set of heavy jobs on archlinux-1, the only runner
+            # carrying the `heavy`/`release` labels, which is already the sole bottleneck.
+            #
+            # So look before dispatching, on the NEW head SHA. The short wait exists because the
+            # evidence above shows GitHub creates its run seconds after the push, not instantly.
+            #
+            # Fails OPEN: if the head SHA or the run query is unavailable, dispatch exactly as
+            # before. And if GitHub is slower than the wait, the missing-context branch earlier in
+            # this job still dispatches once the head is older than CHECKS_MISSING_AFTER_SECONDS,
+            # so a genuinely run-less head is still rescued — one cycle later rather than never.
+            new_head=$(gh pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
+            live_after_update=0
+            if [ -n "$new_head" ]; then
+              sleep 20
+              live_after_update=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$new_head&per_page=100" \
+                --jq '[.workflow_runs[] | select(.status != "completed")] | length' 2>/dev/null || echo 0)
+            fi
+            if [ "$live_after_update" -gt 0 ]; then
+              echo "#$pr: branch updated; GitHub created $live_after_update run(s) for $new_head — not dispatching duplicates"
+            else
+              for workflow in ci.yml security.yml mobile-typecheck.yml; do
+                gh workflow run "$workflow" --ref "$branch" \
+                  || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
+              done
+            fi
             updates_done=$(( updates_done + 1 ))
-            echo "#$pr: branch updated and required checks re-dispatched"
+            # Deliberately not claiming "re-dispatched" here any more: the branch above decides
+            # whether that happened, and a log line asserting it unconditionally is how the
+            # duplicate dispatching stayed invisible in the first place.
+            echo "#$pr: branch updated"
           done
