@@ -1987,6 +1987,25 @@ fn mcp_startup_failed(stderr: &str) -> bool {
 /// hits its quota mid-turn emits e.g. claude's `rate_limit_error`; as a bare `Request` that is NOT
 /// retryable, so the model wouldn't be benched and no fallback ran. Map rate-limit → RateLimited,
 /// auth → Auth, overload/5xx → Unavailable (all retryable / failover-eligible).
+/// Whether `haystack` mentions `code` as a standalone number rather than as digits inside a longer
+/// run. The classifier's message carries the binary path, and a path like
+/// `/tmp/forge-fake-cli-3429080-2` contains "429" — which classified an authentication failure as a
+/// rate limit, benching the provider instead of excluding it. Same hazard for every other bare code
+/// below: any absolute path, port, session id, or byte count can contain 401/403/500/503.
+fn mentions_status_code(haystack: &str, code: &str) -> bool {
+    haystack.match_indices(code).any(|(at, _)| {
+        let before_ok = haystack[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_ascii_digit());
+        let after_ok = haystack[at + code.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_ascii_digit());
+        before_ok && after_ok
+    })
+}
+
 fn classify_in_band_error(binary: &str, e: &str) -> ProviderError {
     let lower = e.to_ascii_lowercase();
     let msg = format!("{binary} error: {e}");
@@ -1997,7 +2016,7 @@ fn classify_in_band_error(binary: &str, e: &str) -> ProviderError {
         || lower.contains("rate_limit")
         || lower.contains("rate-limit")
         || lower.contains("ratelimit")
-        || lower.contains("429")
+        || mentions_status_code(&lower, "429")
         || lower.contains("too many requests")
         || lower.contains("quota")
     {
@@ -2006,8 +2025,8 @@ fn classify_in_band_error(binary: &str, e: &str) -> ProviderError {
             retry_after: None,
         }
     } else if lower.contains("auth")
-        || lower.contains("401")
-        || lower.contains("403")
+        || mentions_status_code(&lower, "401")
+        || mentions_status_code(&lower, "403")
         || lower.contains("not logged in")
         || lower.contains("login required")
         || lower.contains("please log in")
@@ -2016,8 +2035,8 @@ fn classify_in_band_error(binary: &str, e: &str) -> ProviderError {
     } else if lower.contains("overload")
         || lower.contains("server_error")
         || lower.contains("internal")
-        || lower.contains("503")
-        || lower.contains("500")
+        || mentions_status_code(&lower, "503")
+        || mentions_status_code(&lower, "500")
     {
         // Claude emits `overloaded` under API load — transient, so the mesh should bench + fail
         // over, not surface a hard error. Mirrors genai_provider's Unavailable default.
@@ -4623,6 +4642,46 @@ mod tests {
             panic!("expected an error, got {parsed:?}");
         };
         assert!(e.contains("error_during_execution"), "got: {e}");
+    }
+
+    /// A status code embedded in a longer number is not a status code. This surfaced as a workspace
+    /// test flake whose only trigger was the PID: the fake CLI lives at `/tmp/forge-fake-cli-<pid>-<n>`,
+    /// and a PID containing "429" classified an authentication failure as a rate limit — benching the
+    /// provider for a cooldown instead of excluding it so the user is told to log in.
+    #[test]
+    fn status_codes_inside_longer_numbers_are_not_status_codes() {
+        let observed = "`/tmp/forge-fake-cli-3429080-2` exited with 1 and no output — \
+             Error: authentication required. Run 'agy' to log in, then retry.";
+        assert!(
+            matches!(
+                classify_in_band_error("agy", observed),
+                ProviderError::Auth(_)
+            ),
+            "a PID containing 429 must not make an auth failure look rate-limited"
+        );
+        for (code, path) in [
+            ("401", "4013"),
+            ("403", "14032"),
+            ("500", "35000"),
+            ("503", "5031"),
+        ] {
+            assert!(
+                matches!(
+                    classify_in_band_error("cli", &format!("/tmp/run-{path}/out: no such file")),
+                    ProviderError::Request(_)
+                ),
+                "{code} embedded in {path} must not be read as a status code"
+            );
+        }
+        // The real codes still classify.
+        assert!(matches!(
+            classify_in_band_error("cli", "HTTP 429 returned"),
+            ProviderError::RateLimited { .. }
+        ));
+        assert!(matches!(
+            classify_in_band_error("cli", "got 503 from upstream"),
+            ProviderError::Unavailable(_)
+        ));
     }
 
     #[test]
