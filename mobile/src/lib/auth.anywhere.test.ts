@@ -4,6 +4,7 @@ import {
   applyServerIdentity,
   mergeAnywhereHosts,
   reconcileAnywhereHosts,
+  repointMovedDaemons,
   unrepresentedAnywhereHosts,
   type StoredServer,
 } from "./serverTargets";
@@ -16,6 +17,41 @@ const direct: StoredServer = {
   host: "local.test",
   addedAt: 10,
 };
+
+describe("moved daemon recovery", () => {
+  // A cloudflared quick tunnel gets a new random hostname on every start, so a stored direct URL
+  // rots the moment the daemon restarts and orphans every paired client.
+  it("repoints a stored server at the daemon's new address", () => {
+    const [moved] = repointMovedDaemons([direct], {
+      base_url: "https://fresh-tunnel.test/token",
+      token: "daemon-secret",
+    });
+    expect(moved).toEqual({ ...direct, baseUrl: "https://fresh-tunnel.test/token" });
+  });
+
+  it("leaves a different daemon alone", () => {
+    const servers = [direct];
+    expect(
+      repointMovedDaemons(servers, { base_url: "https://other.test/x", token: "another-secret" }),
+    ).toBe(servers);
+  });
+
+  it("leaves managed Anywhere rows alone — they do not hold a daemon token", () => {
+    const managed: StoredServer = { ...direct, id: "anywhere:h1", transport: "anywhere" };
+    const servers = [managed];
+    expect(
+      repointMovedDaemons(servers, { base_url: "https://fresh.test/token", token: "daemon-secret" }),
+    ).toBe(servers);
+  });
+
+  it("keeps array identity when the address has not changed, so nothing is rewritten", () => {
+    const servers = [direct];
+    expect(repointMovedDaemons(servers, { base_url: direct.baseUrl, token: direct.token })).toBe(
+      servers,
+    );
+    expect(repointMovedDaemons(servers, null)).toBe(servers);
+  });
+});
 
 describe("Anywhere host target reconciliation", () => {
   it("uses daemon identity as the display name without changing the tunnel endpoint", () => {

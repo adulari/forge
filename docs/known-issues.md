@@ -7,16 +7,46 @@ we know, and the planned fix.
 
 Headings ending in `(fixed)` are kept as history. Currently open:
 
-- **AppImage XWayland packaging defect** — release-blocking; the packaged artifact runs a
-  different rendering stack than the binary it was built from.
-- **Changelog gate and unattended launch** — an unattended launch can land behind the gate rather
-  than in a usable state.
-- **Unattended-launch and version-notice defects** — the updater banner and the installed-build
-  notice show different versions without saying which is which.
-- **Lucide bundle import boundary** — 585,934 of 5,589,476 entry-bundle bytes for 83 icons of
-  3,490 shipped; blocked on the package's export map.
+- **Store poisoning by dev builds** — anything built from a working tree opens the real store and
+  migrates it to that branch's schema; the installed release binary then refuses it and
+  `forge serve` cannot start. Four occurrences; the most recent left the daemon restarting 632
+  times with Anywhere down. Per-route fixes in #985/#994, the class fix in #995, permanent-failure
+  exit in #996.
+- **No deadman alarm for the daemon** — those 632 restarts produced one journal line and nothing
+  else: no push, no notification, no statusline signal.
+- **Version-notice labelling** — `OperationalNotice` renders the updater's *available* version
+  while `UpdateNotice` headings a bare `Forge <version>` for the *installed* one. #978 removed the
+  drift that made them diverge wildly (2.6.6 vs 2.12.1), so the numbers now agree, but the
+  installed-build heading still carries no qualifier saying which it is.
 
 Everything else below is either resolved or a recorded measurement finding.
+
+## Store poisoning by dev builds
+
+**Symptom (four occurrences):** `forge serve` refuses to start with `database schema version <n> is
+newer than this build supports (<m>)`, Anywhere goes down, and local Forge may keep answering on a
+connection opened before the migration — so "the daemon is running" looks healthy while cloud sync
+is dead. Recovery has meant a hand-written `PRAGMA user_version` write each time.
+
+**Cause:** a binary built from a working tree opens `~/.local/share/forge/forge.db` and runs
+whatever migrations that branch carries. Routes found so far: the quota probe handing `FORGE_DB`
+and the project cwd to a `claude --print` child, which loads `.mcp.json` and spawns a `forge`
+grandchild (#985); and this repo's own `.mcp.json` / `.forge/mcp.toml` pointing the self-MCP agent
+directly at `target/debug/forge` (#994).
+
+**Occurrences:** 2026-07-17 (v17→v21), 2026-08-06 twice (24→25), 2026-08-07 (23→25). The last left
+`forge-serve.service` at **632 consecutive restarts** — roughly one every ten seconds, because the
+`network-resilience.conf` drop-in sets `StartLimitIntervalSec=0` so transient network failures
+retry forever, and nothing distinguished a permanent failure from a transient one.
+
+**Fixes:** #985 and #994 close the two known routes. #995 closes the class — a `debug_assertions`
+build resolves to `forge-dev.db`, so only installed releases touch the real store (explicit
+`FORGE_DB` still overrides). #996 makes a permanent failure exit 78 (`EX_CONFIG`) with
+`RestartPreventExitStatus=78` in the generated unit, so the service stops and shows as `failed`
+rather than looping — note that applies on the next `forge service install`.
+
+**Still open:** nothing reports the outage to the user (see the deadman-alarm entry), and
+recovering a poisoned store still needs a manual PRAGMA rather than a supported command.
 
 ## Linux Wayland/WebKitGTK launch crash (fixed by default renderer workaround)
 
@@ -37,7 +67,7 @@ on the affected Wayland session.
 this host crashes on the default renderer, so no A/B measurement is available. Do not treat the
 Wayland workaround as performance-neutral without an unaffected comparison host.
 
-## Changelog gate and unattended launch
+## Changelog gate and unattended launch (fixed)
 
 The update/changelog notice used a persisted seen-build gate. On an unattended launch with no
 paired state, the gate could cover the initial surface and leave the user at the changelog/connect
@@ -73,7 +103,15 @@ release fails before bundling if the tag and workspace version diverge.
 **Status:** release-tooling fix present; existing published `2.6.6` desktop artifacts remain
 historically affected and must be replaced by a correctly stamped release.
 
-## Lucide bundle import boundary
+## Lucide bundle import boundary (fixed)
+
+**Outcome (#981):** a local Babel plugin rewrites named imports to per-icon files, mapping icon
+name → dist file by parsing the package's own CJS barrel (so legacy aliases like
+`AlertTriangle`→`triangle-alert.js` stay correct). Entry bundle 5,586,699 → 3,814,586 bytes
+(−1,772,113, −31.7%), measured with the #968 machinery on fresh exports both sides; the budget
+baseline was ratcheted down to hold it. The export-map obstacle below was sidestepped: relative
+per-icon paths bypass the exports map entirely, so no resolver override was needed.
+
 
 The clean export attributed approximately **585,934 generated bytes** to the Lucide barrel inside
 the **5,589,476-byte** entry bundle; only 83 distinct icons are used while the package ships 3,490
@@ -101,7 +139,7 @@ during the initial fixture phase rather than in a JavaScript long task. Idle mea
 180 ms at ~349 ms. All three recorded zero long tasks. This is evidence of a compositor/paint/
 raster or startup-resource stall, not a median-frame problem.
 
-## AppImage XWayland packaging defect
+## AppImage XWayland packaging defect (fixed)
 
 **Finding (verified):** the locally-built release binary mapped as native Wayland (`xwayland=false`),
 while the packaged AppImage child mapped through XWayland (`xwayland=true`) on the same session and
@@ -244,7 +282,7 @@ The capture harness now supports `FORGE_PERF_SEED_UPDATE_SEEN=1`, which seeds th
 `forge.lastSeenBuild.v1` AsyncStorage marker before the update notice is evaluated. This is a
 gated capture aid; it does not remove or weaken the user-facing update feature.
 
-## Unattended-launch and version-notice defects
+## Unattended-launch and version-notice defects (gate fixed; labelling open)
 
 The empty-shell capture exposed a real automation/UX defect: an unattended desktop launch can land
 behind a changelog/update gate rather than in a usable connected state. The capture cannot proceed
