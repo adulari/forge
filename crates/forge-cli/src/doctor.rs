@@ -79,6 +79,7 @@ pub async fn run() -> anyhow::Result<usize> {
     if !bridge_live.is_empty() {
         sections.push(("Bridge liveness", bridge_live));
     }
+    sections.push(("Background daemon", daemon_checks()));
     sections.push(("Local LLM (Ollama)", ollama_checks()));
     sections.push(("Session store", store_checks()));
     sections.push(("Environment", environment_checks()));
@@ -432,6 +433,96 @@ fn short(s: &str) -> String {
     }
 }
 
+/// The background daemon (`forge service`). Doctor previously said nothing about it, so a machine
+/// whose daemon was dead — Anywhere unreachable, the phone unable to see any session — reported a
+/// clean bill of health. That is exactly what happened on 2026-08-07: `forge-serve` sat at 632
+/// consecutive failed restarts against a store it could not open, and the only evidence anywhere
+/// was one journal line.
+///
+/// Not installed is `Info`, not a failure: the daemon is opt-in and plenty of people never run it.
+/// What matters is an installed daemon that is NOT serving, and the state word distinguishes the
+/// cases that need different fixes (`failed` vs a restart loop vs simply stopped).
+fn daemon_checks() -> Vec<Check> {
+    let status = match crate::cli::commands::service::query_service_status() {
+        Ok(s) => s,
+        // A missing/unavailable service manager is not a Forge fault — report and move on.
+        Err(e) => {
+            return vec![check(
+                Status::Info,
+                "background daemon",
+                format!(
+                    "could not query the service manager: {}",
+                    short(&e.to_string())
+                ),
+                None,
+            )]
+        }
+    };
+    if !status.installed {
+        return vec![check(
+            Status::Info,
+            "background daemon",
+            "not installed",
+            Some(
+                "`forge service install` to run sessions in the background and reach them remotely",
+            ),
+        )];
+    }
+
+    let mut out = vec![daemon_state_check(status.detail.trim())];
+
+    // Installed and claiming to run is not the same as serving: a daemon that is up but whose
+    // listener never bound is invisible to every client, which is the failure a state word misses.
+    let port = crate::cli::commands::service::resolved_port(None);
+    let responding = crate::cli::commands::service::probe_port(port);
+    out.push(match (status.running, responding) {
+        (true, true) => check(Status::Ok, "daemon port", format!("{port} responding"), None),
+        (true, false) => check(
+            Status::Fail,
+            "daemon port",
+            format!("{port} not responding while the service reports running"),
+            Some("`forge service restart`; if it persists, check the port is not taken by another process"),
+        ),
+        // Not running — the state check above already reported why; don't double-count it.
+        (false, _) => check(
+            Status::Info,
+            "daemon port",
+            format!("{port} not responding (daemon not running)"),
+            None,
+        ),
+    });
+    out
+}
+
+/// State word from the service manager → the line doctor prints. Pure so every branch is testable
+/// without installing, starting or breaking a real service on the host running the tests.
+fn daemon_state_check(state: &str) -> Check {
+    match state {
+        "active" => check(Status::Ok, "background daemon", "running", None),
+        // The silent killer: systemd reports `activating` while a unit restart-loops, so nothing
+        // ever looks broken even after hundreds of consecutive failures.
+        "activating" | "auto-restart" => check(
+            Status::Fail,
+            "background daemon",
+            format!("{state} — restarting repeatedly, not serving"),
+            Some("`journalctl --user -u forge-serve.service -n 30` for the cause; a schema mismatch means the installed binary is older than the store"),
+        ),
+        "failed" => check(
+            Status::Fail,
+            "background daemon",
+            "failed",
+            Some("`journalctl --user -u forge-serve.service -n 30` for the cause, then `forge service restart`"),
+        ),
+        "inactive" => check(
+            Status::Warn,
+            "background daemon",
+            "installed but stopped",
+            Some("`forge service start`"),
+        ),
+        other => check(Status::Warn, "background daemon", other.to_string(), None),
+    }
+}
+
 /// LIVE: for each KEYED provider, can we actually list its models within a timeout? A keyed
 /// provider whose discovery times out silently drops out of routing and the mesh falls back to a
 /// keyless default (the "groq for everything" churn) — a key-PRESENCE check can't see this.
@@ -598,5 +689,45 @@ mod store_check_tests {
 
         forge_store::Store::open(&path).unwrap();
         assert!(matches!(store_check_at(&path).status, Status::Ok));
+    }
+}
+
+#[cfg(test)]
+mod daemon_tests {
+    use super::{daemon_state_check, Status};
+
+    /// A restart loop is the case that took the daemon down for 632 restarts while every view
+    /// reported it as coming up. It must be a hard failure, not a warning.
+    #[test]
+    fn a_restart_loop_is_a_hard_failure_with_a_next_step() {
+        for state in ["activating", "auto-restart"] {
+            let c = daemon_state_check(state);
+            assert_eq!(c.status, Status::Fail, "{state} must fail");
+            assert!(c.fix.is_some(), "{state} must carry a next step");
+        }
+    }
+
+    #[test]
+    fn running_is_ok_and_stopped_is_only_a_warning() {
+        assert_eq!(daemon_state_check("active").status, Status::Ok);
+        // Installed-but-stopped is a choice, not a fault: warn with the start command.
+        let stopped = daemon_state_check("inactive");
+        assert_eq!(stopped.status, Status::Warn);
+        assert!(stopped.fix.unwrap().contains("forge service start"));
+    }
+
+    #[test]
+    fn failed_reports_where_to_look() {
+        let c = daemon_state_check("failed");
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.fix.unwrap().contains("journalctl"));
+    }
+
+    /// An unrecognised state word must not be silently treated as healthy.
+    #[test]
+    fn an_unknown_state_is_surfaced_rather_than_assumed_fine() {
+        let c = daemon_state_check("reloading");
+        assert_eq!(c.status, Status::Warn);
+        assert_eq!(c.detail, "reloading");
     }
 }

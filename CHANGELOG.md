@@ -8,6 +8,17 @@ All notable changes to Forge are documented here. The format follows
 
 ### Added
 
+- **Fleet messaging — `forge send` and the `message_session` tool.** Any two daemon-hosted
+  sessions can now exchange messages, and a shell can message any of them: previously only a
+  parent could reach its own subagents inside one session tree, so a session in another window was
+  unreachable. `forge send <target> "<msg>"` addresses a session by name or unique id prefix;
+  `--steer` delivers at the target's next turn boundary ahead of its queued backlog, while the
+  default queues for when it goes idle. Neither ever interrupts a turn already streaming. The
+  `message_session` virtual tool gives an agent the same reach, advertised only when the session
+  is `forge serve`-hosted. Pending messages persist and the backlog flushes whenever a target
+  rejoins the fleet, so a daemon restart between send and delivery strands nothing. 16KB per
+  message, 8 pending per sender/target pair. See `docs/features/fleet-messaging.md`.
+
 - The companion app now has a cross-surface Diagnostics & Updates page backed by an authenticated,
   bounded `/api/diagnostics` projection. It reports daemon/client protocol compatibility, aggregate
   runtime and resource state, safe host checks, and one centralized signed-desktop-updater state.
