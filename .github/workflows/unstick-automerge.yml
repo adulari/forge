@@ -198,6 +198,28 @@ jobs:
                   --jq '[.check_runs[] | select(.name == "CI" or .name == "mobile checks" or .name == "security checks")] | length')
                 pushed_at=$(gh api "repos/$GH_REPO/commits/$head" --jq '.commit.committer.date')
                 head_age=$(( $(date -u +%s) - $(date -u -d "$pushed_at" +%s) ))
+                # THE CONTEXT COUNT ABOVE IS NOT ENOUGH ON ITS OWN: it looks for the AGGREGATE names
+                # (`CI`, `mobile checks`, `security checks`), and those check runs do not exist until
+                # the gating job that fans out to them has finished. A `pull_request` run sitting in
+                # the queue therefore looks exactly like "GitHub created no run at all", and this
+                # branch dispatches a second, redundant copy of all three workflows.
+                #
+                # That is not hypothetical. Measured 2026-08-10: 12 of 49 queued runs — 24% of the
+                # whole queue — were duplicate pairs on the SAME head SHA, one `pull_request` and one
+                # `workflow_dispatch`, across 8 PRs. Every heavy job in those 12 runs competes for
+                # archlinux-1, which is the only runner carrying the `heavy` and `release` labels, so
+                # the waste lands squarely on the one serialized resource.
+                #
+                # So also ask whether any run for this SHA is still live. Runs parked at
+                # `action_required` — the bot-merge-commit case this guard exists for — report
+                # `status=completed`, so they are correctly NOT counted here and dispatch still
+                # happens for them. Only a genuinely queued or running workflow suppresses it.
+                live_runs=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$head&per_page=100" \
+                  --jq '[.workflow_runs[] | select(.status != "completed")] | length')
+                if [ "$live_runs" -gt 0 ]; then
+                  echo "#$pr: $live_runs run(s) already queued or in progress on $head — not dispatching a duplicate"
+                  continue
+                fi
                 if [ "$contexts" -eq 0 ] && [ "$head_age" -gt "$CHECKS_MISSING_AFTER_SECONDS" ]; then
                   if [ "$dispatches_done" -ge "$MAX_DISPATCHES_PER_RUN" ]; then
                     echo "#$pr: no required context on $head — deferred to the next run (this run already dispatched for $MAX_DISPATCHES_PER_RUN PRs)"
