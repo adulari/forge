@@ -293,6 +293,11 @@ impl Presenter for HeadlessPresenter {
                     println!("    fix: {cmd}");
                 }
             }
+            PresenterEvent::BtwAnswer {
+                question, answer, ..
+            } => {
+                println!("  ◈ btw: {question}\n{answer}");
+            }
             PresenterEvent::Recap { text } => {
                 println!("  ※ recap  {text}");
             }
