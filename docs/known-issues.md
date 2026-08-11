@@ -7,13 +7,15 @@ we know, and the planned fix.
 
 Headings ending in `(fixed)` are kept as history. Currently open:
 
-- **Store poisoning by dev builds** — anything built from a working tree opens the real store and
-  migrates it to that branch's schema; the installed release binary then refuses it and
-  `forge serve` cannot start. Four occurrences; the most recent left the daemon restarting 632
-  times with Anywhere down. Per-route fixes in #985/#994, the class fix in #995, permanent-failure
-  exit in #996.
-- **No deadman alarm for the daemon** — those 632 restarts produced one journal line and nothing
-  else: no push, no notification, no statusline signal.
+- **Store poisoning by dev builds — LIVE RIGHT NOW** — anything built from a working tree opens the
+  real store and migrates it to that branch's schema; the installed release binary then refuses it
+  and `forge serve` cannot start. Four occurrences, and the store is *still* stranded (schema 25 vs
+  an installed binary supporting 23) with the daemon at **25,218 restarts** and Anywhere dark.
+  Per-route fixes in #985/#994, the class fix in #995, permanent-failure exit in #996 — none of
+  them released yet.
+- **No deadman alarm for the daemon** — those 25,218 restarts produced nothing but repeated journal
+  lines: no push, no notification, no statusline signal. The obvious sender reads its subscriber
+  list *from the store*, so it is silent in exactly the case it exists for.
 - **Version-notice labelling** — `OperationalNotice` renders the updater's *available* version
   while `UpdateNotice` headings a bare `Forge <version>` for the *installed* one. #978 removed the
   drift that made them diverge wildly (2.6.6 vs 2.12.1), so the numbers now agree, but the
@@ -34,10 +36,21 @@ and the project cwd to a `claude --print` child, which loads `.mcp.json` and spa
 grandchild (#985); and this repo's own `.mcp.json` / `.forge/mcp.toml` pointing the self-MCP agent
 directly at `target/debug/forge` (#994).
 
-**Occurrences:** 2026-07-17 (v17→v21), 2026-08-06 twice (24→25), 2026-08-07 (23→25). The last left
-`forge-serve.service` at **632 consecutive restarts** — roughly one every ten seconds, because the
-`network-resilience.conf` drop-in sets `StartLimitIntervalSec=0` so transient network failures
-retry forever, and nothing distinguished a permanent failure from a transient one.
+**Occurrences:** 2026-07-17 (v17→v21), 2026-08-06 twice (24→25), 2026-08-07 (23→25). Each left
+`forge-serve.service` restarting roughly every ten seconds, because the `network-resilience.conf`
+drop-in sets `StartLimitIntervalSec=0` so transient network failures retry forever, and nothing
+distinguished a permanent failure from a transient one.
+
+**This is not past tense.** As of 2026-08-10 the store is still stranded at schema 25 while the
+installed binary (2.12.2) supports 23, and `forge-serve` is at **NRestarts=25218** — days of
+continuous failure with Anywhere dark throughout. The 2026-08-07 recovery (a hand-written
+`PRAGMA user_version = 23`) did not hold.
+
+**What the version number tells you, and what it does not.** The store reads 25 while the tree and
+`forge-dev.db` both read 26. A build from the tree today carries 26 and would have taken the store
+to 26, so the last thing to migrate it was a build from the window when the tree was still at 25
+(before #980) — this is one stranded store, not an active leak. Do not read recency off the file's
+mtime: the crash loop opens it every ten seconds, so it is always freshly touched.
 
 **Fixes:** #985 and #994 close the two known routes. #995 closes the class — a `debug_assertions`
 build resolves to `forge-dev.db`, so only installed releases touch the real store (explicit
@@ -45,8 +58,17 @@ build resolves to `forge-dev.db`, so only installed releases touch the real stor
 `RestartPreventExitStatus=78` in the generated unit, so the service stops and shows as `failed`
 rather than looping — note that applies on the next `forge service install`.
 
-**Still open:** nothing reports the outage to the user (see the deadman-alarm entry), and
-recovering a poisoned store still needs a manual PRAGMA rather than a supported command.
+**Still open:** nothing reports the outage to the user (see the deadman-alarm entry); recovering a
+poisoned store still needs a manual PRAGMA rather than a supported command; and **none of the fixes
+above have been released** — the newest release is v2.12.1 (2026-07-30) and main is ~50 commits
+ahead, so an installed Forge has none of them.
+
+**The upgrade does not carry the whole of #996.** Its systemd half (`RestartPreventExitStatus=78`)
+lives in the unit that `forge service install` renders, and installing a new version never rewrites
+an existing unit. So on any install predating it, an upgraded binary exits 78 and systemd restarts
+it anyway. #1010 makes `forge doctor` report a unit that lacks the directive, and one whose
+`ExecStart` points at a different binary than the one running; re-rendering still means running
+`forge service install` deliberately.
 
 ## Linux Wayland/WebKitGTK launch crash (fixed by default renderer workaround)
 
