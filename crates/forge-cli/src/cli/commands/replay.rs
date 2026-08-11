@@ -119,8 +119,9 @@ pub(crate) fn sessions() -> Result<()> {
     Ok(())
 }
 
-/// `forge replay <id>` reconstructs a session's transcript; `forge replay <a> <b>` diffs two.
-pub(crate) fn replay_cmd(ids: &[String], json: bool) -> Result<()> {
+/// `forge replay <id>` reconstructs a session's transcript; `forge replay <a> <b>` diffs two;
+/// `forge replay <id> --html <path>` renders it to one self-contained HTML file.
+pub(crate) fn replay_cmd(ids: &[String], json: bool, html: Option<&Path>) -> Result<()> {
     let store = open_store()?;
     let resolve = |prefix: &str| -> Result<String> {
         let mut matches = store
@@ -137,7 +138,16 @@ pub(crate) fn replay_cmd(ids: &[String], json: bool) -> Result<()> {
             let id = resolve(one)?;
             let entries = store.load_replay(&id).context("loading replay")?;
             if entries.is_empty() {
-                if json {
+                if let Some(path) = html {
+                    let out = replay::render_html(&id[..id.len().min(8)], &entries);
+                    std::fs::write(path, out)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    println!(
+                        "session {} has no messages — wrote an empty transcript to {}",
+                        &id[..id.len().min(8)],
+                        path.display()
+                    );
+                } else if json {
                     println!(
                         "{{\"session_id\":\"{}\",\"turns\":[]}}",
                         &id[..id.len().min(8)]
@@ -147,7 +157,16 @@ pub(crate) fn replay_cmd(ids: &[String], json: bool) -> Result<()> {
                 }
                 return Ok(());
             }
-            if json {
+            if let Some(path) = html {
+                let out = replay::render_html(&id[..id.len().min(8)], &entries);
+                std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))?;
+                println!(
+                    "✓ wrote {} ({} turns) to {}",
+                    &id[..id.len().min(8)],
+                    entries.len(),
+                    path.display()
+                );
+            } else if json {
                 println!("{}", replay::render_json(&id, &entries));
             } else {
                 print!(
@@ -159,6 +178,9 @@ pub(crate) fn replay_cmd(ids: &[String], json: bool) -> Result<()> {
         [a, b] => {
             if json {
                 anyhow::bail!("--json is only valid with a single session id");
+            }
+            if html.is_some() {
+                anyhow::bail!("--html is only valid with a single session id");
             }
             let (ida, idb) = (resolve(a)?, resolve(b)?);
             let ea = store.load_replay(&ida).context("loading replay a")?;
