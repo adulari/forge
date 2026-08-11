@@ -184,11 +184,32 @@ jobs:
           CHECKS_MISSING_AFTER_SECONDS=600
 
           for pr in $numbers; do
-            # One view per PR, not two: the per-PR call exists to let mergeStateStatus settle, which
-            # a single query does just as well as two while halving the API round-trips.
-            read -r state branch armed_at < <(gh pr view "$pr" \
-              --json mergeStateStatus,headRefName,autoMergeRequest \
-              --jq '"\(.mergeStateStatus) \(.headRefName) \(.autoMergeRequest.enabledAt // "")"')
+            # The per-PR call exists because mergeStateStatus is computed on demand. It used to say
+            # one view settles it "just as well as two" — MEASURED FALSE. On the first sweep after
+            # #1020 merged, ten of twelve PRs came back `UNKNOWN` on that single view and were
+            # skipped by the `!= "BEHIND"` branch below, so the sweep re-armed exactly one of them.
+            # The whole set then waited for later triggers, which is the stall this workflow exists
+            # to prevent.
+            #
+            # A query STARTS GitHub's computation; it does not wait for it. So ask again. The first
+            # view is the trigger, a later one collects the answer. Bounded at 4 retries x 5s per
+            # PR — in practice the first PR's wait warms the rest, and the job's 20-minute timeout
+            # absorbs the worst case comfortably (observed sweeps take 2-3 minutes).
+            view_pr() {
+              read -r state branch armed_at < <(gh pr view "$1" \
+                --json mergeStateStatus,headRefName,autoMergeRequest \
+                --jq '"\(.mergeStateStatus) \(.headRefName) \(.autoMergeRequest.enabledAt // "")"')
+            }
+            view_pr "$pr"
+            unknown_retries=0
+            while [ "$state" = "UNKNOWN" ] && [ "$unknown_retries" -lt 4 ]; do
+              sleep 5
+              unknown_retries=$(( unknown_retries + 1 ))
+              view_pr "$pr"
+            done
+            if [ "$state" = "UNKNOWN" ]; then
+              echo "#$pr: mergeStateStatus still UNKNOWN after $unknown_retries retries — leaving for the next sweep"
+            fi
             if [ -n "$armed_at" ] && [ "$state" != "CLEAN" ] && [ "$state" != "HAS_HOOKS" ]; then
               armed_for=$(( $(date -u +%s) - $(date -u -d "$armed_at" +%s) ))
               if [ "$armed_for" -gt "$STALE_AFTER_SECONDS" ]; then
