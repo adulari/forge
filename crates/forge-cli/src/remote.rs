@@ -3290,20 +3290,53 @@ mod tests {
         }
     }
 
+    /// The next SNAPSHOT frame, skipping keepalives.
+    ///
+    /// The forwarder multiplexes snapshots and `{"keepalive":true}` on one socket via `select!`,
+    /// and its `tokio::time::interval` fires its FIRST tick immediately — so a keepalive can win
+    /// the select on a fresh connection, before any snapshot. A test that reads "the next frame"
+    /// and asserts on `revision` therefore fails whenever that race lands: reproduced at 4 in 30
+    /// runs, with `revision: Null` because the frame was `{"keepalive":true}`.
+    ///
+    /// Skipping them is what a real client does (they carry no state), so this asserts the
+    /// protocol's actual contract rather than papering over a race.
+    async fn next_snapshot<S>(ws: &mut S) -> serde_json::Value
+    where
+        S: futures::Stream<
+                Item = Result<
+                    tokio_tungstenite::tungstenite::Message,
+                    tokio_tungstenite::tungstenite::Error,
+                >,
+            > + Unpin,
+    {
+        use futures::StreamExt;
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+                .await
+                .expect("a frame arrives")
+                .expect("stream open")
+                .expect("text frame");
+            let text = frame.into_text().expect("text frame");
+            let v: serde_json::Value = serde_json::from_str(&text).expect("frame is JSON");
+            if v.get("keepalive").is_some() {
+                continue;
+            }
+            return v;
+        }
+    }
+
     /// `start()` binds a real port + spawns the server task. This is the real round-trip smoke:
     /// it does an HTTP GET on the control page (expect 200 + HTML), a wrong-token GET (expect
     /// 404, so the existence of remote control isn't leaked), and a WebSocket handshake on the
     /// token-gated WS path (expect it upgrades + delivers a snapshot). Catches the
     /// `Path<String>`-on-a-static-route regression where the WS would 400 and never connect.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "binds a real port + opens a real socket; run with --ignored (kills itself on success)"]
     async fn start_serves_page_and_upgrades_websocket() {
         // Wrap in a timeout so a stuck server/client can never hang forever. The server's spawned
         // accept loop can delay runtime shutdown on drop (a test-harness artifact, not a product
         // bug — the real loop runs under `forge chat`'s long-lived runtime), so we force-exit 0
         // once the assertions pass. Gated behind --ignored so it never runs in CI.
-        let _outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            use futures::StreamExt;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let rc = start(Exposure::Local, None, None, None).expect("start loopback server");
             let port = rc.url.addr.port();
             let token = rc.url.token.clone();
@@ -3336,13 +3369,7 @@ mod tests {
             let (mut ws, _resp) = tokio_tungstenite::connect_async(&ws_url)
                 .await
                 .expect("WS handshake upgrades");
-            let first = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-                .await
-                .expect("a snapshot arrives")
-                .expect("stream open")
-                .expect("text frame");
-            let text = first.into_text().expect("text frame");
-            let v: serde_json::Value = serde_json::from_str(&text).expect("snapshot is JSON");
+            let v: serde_json::Value = next_snapshot(&mut ws).await;
             assert!(v.get("busy").is_some(), "snapshot has `busy`: {v}");
             assert!(v.get("model").is_some(), "snapshot has `model`: {v}");
 
@@ -3392,14 +3419,12 @@ mod tests {
                 .await
                 .expect("GET styles.css");
             assert_eq!(css.status(), 200, "styles.css is 200");
-            // All assertions passed — force-exit so the lingering server task + WS close
-            // handshake can't stall the test runtime's shutdown (manual-only, --ignored).
-            std::process::exit(0);
         })
         .await;
-        // Unreachable on success (exit above); only reached if the 5s timeout elapsed.
-        let _ = _outcome;
-        panic!("WS round-trip did not complete within 5s");
+        // A timeout is the only failure this can report — every assertion inside panics on its
+        // own. `RemoteControl::drop` aborts the server task, so the runtime winds down without
+        // the force-exit this test used to need (which is why it could never run in CI).
+        outcome.expect("WS round-trip did not complete within 5s");
     }
 
     /// The v5 wire round-trip: connect → take snapshots → drop → reconnect with `?rev=` and
@@ -3408,11 +3433,8 @@ mod tests {
     /// `before`/`limit` and stays token-gated. Like its sibling above, it binds a real port and
     /// force-exits on success, so run it INDIVIDUALLY with --ignored.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "binds a real port + opens real sockets; run individually with --ignored (kills itself on success)"]
     async fn reconnect_replays_missed_frames_and_history_pages() {
-        let _outcome = tokio::time::timeout(std::time::Duration::from_secs(8), async {
-            use futures::StreamExt;
-
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(8), async {
             // A canned history provider that echoes its inputs so the handler's passthrough
             // (session id from the snapshot, before/limit/include_tools from the query) is
             // observable.
@@ -3452,12 +3474,7 @@ mod tests {
             let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
                 .await
                 .expect("WS handshake");
-            let first = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-                .await
-                .expect("first frame arrives")
-                .unwrap()
-                .unwrap();
-            let v: serde_json::Value = serde_json::from_str(&first.into_text().unwrap()).unwrap();
+            let v: serde_json::Value = next_snapshot(&mut ws).await;
             assert_eq!(v["revision"], 3, "fresh connect sees the current frame");
             assert_eq!(v["resync"], true, "fresh connect is a resync");
             drop(ws); // the phone goes through a tunnel…
@@ -3472,24 +3489,13 @@ mod tests {
                 .await
                 .expect("WS re-handshake");
             for want in [4u64, 5] {
-                let frame = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-                    .await
-                    .expect("replayed frame arrives")
-                    .unwrap()
-                    .unwrap();
-                let v: serde_json::Value =
-                    serde_json::from_str(&frame.into_text().unwrap()).unwrap();
+                let v: serde_json::Value = next_snapshot(&mut ws).await;
                 assert_eq!(v["revision"], want, "replay is exact and in order");
                 assert_eq!(v["resync"], false, "replayed frames are stream frames");
                 assert_eq!(v["notes"][0], format!("frame {want}"), "no content gap");
             }
             broadcast(6);
-            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-                .await
-                .expect("live frame follows the replay")
-                .unwrap()
-                .unwrap();
-            let v: serde_json::Value = serde_json::from_str(&frame.into_text().unwrap()).unwrap();
+            let v: serde_json::Value = next_snapshot(&mut ws).await;
             assert_eq!(
                 v["revision"], 6,
                 "live-follow after replay, no gap, no dupes"
@@ -3501,12 +3507,7 @@ mod tests {
             let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
                 .await
                 .expect("WS handshake with foreign rev");
-            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-                .await
-                .expect("resync frame arrives")
-                .unwrap()
-                .unwrap();
-            let v: serde_json::Value = serde_json::from_str(&frame.into_text().unwrap()).unwrap();
+            let v: serde_json::Value = next_snapshot(&mut ws).await;
             assert_eq!(v["resync"], true, "an unfillable gap resyncs");
             assert_eq!(v["revision"], 6, "resync carries the current state");
             drop(ws);
@@ -3569,12 +3570,9 @@ mod tests {
                 .await
                 .expect("GET history with wrong token");
             assert_eq!(wrong.status(), 404, "wrong token is a 404");
-
-            std::process::exit(0);
         })
         .await;
-        let _ = _outcome;
-        panic!("reconnect/replay round-trip did not complete within 8s");
+        outcome.expect("reconnect/replay round-trip did not complete within 8s");
     }
 
     // -----------------------------------------------------------------------
@@ -3706,8 +3704,7 @@ mod tests {
     // Ignored: start() binds a real socket + spawns a never-ending accept loop the test runtime
     // can't reliably abort on drop, so it hangs in CI. Cert/fingerprint correctness is covered by
     // the pure tests above; serving by start_serves_page_and_upgrades_websocket. Run with --ignored.
-    #[ignore = "binds + serves a real socket; hangs under the test runtime — see comment"]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn lan_start_url_is_https_with_fingerprint() {
         // `start(Exposure::Lan)` must return an https:// URL and a populated tls_fingerprint.
         // Requires a Tokio runtime because axum-server's from_tcp_rustls wires into the runtime.
@@ -3725,8 +3722,7 @@ mod tests {
         assert_eq!(fp.len(), 95, "fingerprint must be 95 chars: {fp}");
     }
 
-    #[ignore = "binds + serves a real socket; hangs under the test runtime — see comment above"]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_start_url_is_http_no_fingerprint() {
         // `start(Exposure::Local)` must stay plain HTTP with no fingerprint.
         // Requires a Tokio runtime because axum::serve wires into the runtime.

@@ -79,6 +79,26 @@ jobs:
     # below bounds the work; this bounds the blast radius if an individual API call wedges.
     timeout-minutes: 20
     steps:
+      # THE `push` TRIGGER FIRES TOO EARLY TO BE USEFUL, AND THAT COSTS ~AN HOUR PER MERGE.
+      #
+      # A merge to main fires this workflow within seconds — measured at **3s** after #1009
+      # (merged 00:18:04, sweep 00:18:07) and **6s** after #1011 (01:42:03 / 01:42:09). GitHub has
+      # not yet recomputed the other open PRs' mergeable state by then, so the sweep sees nothing
+      # BEHIND, updates nothing, and exits successfully having done no work.
+      #
+      # The open set then waits for the next `schedule`, which in practice runs closer to hourly
+      # than the declared */30 (observed firings 56 minutes apart, with several slots missed
+      # entirely — GitHub delays or drops scheduled workflows under load). Both merges tonight left
+      # eight PRs sitting BEHIND for 12+ minutes with a push sweep already run and wasted.
+      #
+      # Pausing briefly on this trigger alone is enough for the states to settle. 60s is a
+      # heuristic, not a measured floor — the `schedule` and `workflow_run` triggers remain the
+      # backstops if it is ever too short, exactly as they are today. The wait costs a
+      # GitHub-hosted runner a minute and never touches the self-hosted bottleneck.
+      - name: Let GitHub settle mergeable state after a merge to main
+        if: github.event_name == 'push'
+        run: sleep 60
+
       # THE STALL THIS WORKFLOW CAUSED ITSELF.
       #
       # `gh pr update-branch` below writes a merge commit authored by `github-actions[bot]`, and this
@@ -164,11 +184,32 @@ jobs:
           CHECKS_MISSING_AFTER_SECONDS=600
 
           for pr in $numbers; do
-            # One view per PR, not two: the per-PR call exists to let mergeStateStatus settle, which
-            # a single query does just as well as two while halving the API round-trips.
-            read -r state branch armed_at < <(gh pr view "$pr" \
-              --json mergeStateStatus,headRefName,autoMergeRequest \
-              --jq '"\(.mergeStateStatus) \(.headRefName) \(.autoMergeRequest.enabledAt // "")"')
+            # The per-PR call exists because mergeStateStatus is computed on demand. It used to say
+            # one view settles it "just as well as two" — MEASURED FALSE. On the first sweep after
+            # #1020 merged, ten of twelve PRs came back `UNKNOWN` on that single view and were
+            # skipped by the `!= "BEHIND"` branch below, so the sweep re-armed exactly one of them.
+            # The whole set then waited for later triggers, which is the stall this workflow exists
+            # to prevent.
+            #
+            # A query STARTS GitHub's computation; it does not wait for it. So ask again. The first
+            # view is the trigger, a later one collects the answer. Bounded at 4 retries x 5s per
+            # PR — in practice the first PR's wait warms the rest, and the job's 20-minute timeout
+            # absorbs the worst case comfortably (observed sweeps take 2-3 minutes).
+            view_pr() {
+              read -r state branch armed_at < <(gh pr view "$1" \
+                --json mergeStateStatus,headRefName,autoMergeRequest \
+                --jq '"\(.mergeStateStatus) \(.headRefName) \(.autoMergeRequest.enabledAt // "")"')
+            }
+            view_pr "$pr"
+            unknown_retries=0
+            while [ "$state" = "UNKNOWN" ] && [ "$unknown_retries" -lt 4 ]; do
+              sleep 5
+              unknown_retries=$(( unknown_retries + 1 ))
+              view_pr "$pr"
+            done
+            if [ "$state" = "UNKNOWN" ]; then
+              echo "#$pr: mergeStateStatus still UNKNOWN after $unknown_retries retries — leaving for the next sweep"
+            fi
             if [ -n "$armed_at" ] && [ "$state" != "CLEAN" ] && [ "$state" != "HAS_HOOKS" ]; then
               armed_for=$(( $(date -u +%s) - $(date -u -d "$armed_at" +%s) ))
               if [ "$armed_for" -gt "$STALE_AFTER_SECONDS" ]; then
@@ -198,6 +239,28 @@ jobs:
                   --jq '[.check_runs[] | select(.name == "CI" or .name == "mobile checks" or .name == "security checks")] | length')
                 pushed_at=$(gh api "repos/$GH_REPO/commits/$head" --jq '.commit.committer.date')
                 head_age=$(( $(date -u +%s) - $(date -u -d "$pushed_at" +%s) ))
+                # THE CONTEXT COUNT ABOVE IS NOT ENOUGH ON ITS OWN: it looks for the AGGREGATE names
+                # (`CI`, `mobile checks`, `security checks`), and those check runs do not exist until
+                # the gating job that fans out to them has finished. A `pull_request` run sitting in
+                # the queue therefore looks exactly like "GitHub created no run at all", and this
+                # branch dispatches a second, redundant copy of all three workflows.
+                #
+                # That is not hypothetical. Measured 2026-08-10: 12 of 49 queued runs — 24% of the
+                # whole queue — were duplicate pairs on the SAME head SHA, one `pull_request` and one
+                # `workflow_dispatch`, across 8 PRs. Every heavy job in those 12 runs competes for
+                # archlinux-1, which is the only runner carrying the `heavy` and `release` labels, so
+                # the waste lands squarely on the one serialized resource.
+                #
+                # So also ask whether any run for this SHA is still live. Runs parked at
+                # `action_required` — the bot-merge-commit case this guard exists for — report
+                # `status=completed`, so they are correctly NOT counted here and dispatch still
+                # happens for them. Only a genuinely queued or running workflow suppresses it.
+                live_runs=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$head&per_page=100" \
+                  --jq '[.workflow_runs[] | select(.status != "completed")] | length')
+                if [ "$live_runs" -gt 0 ]; then
+                  echo "#$pr: $live_runs run(s) already queued or in progress on $head — not dispatching a duplicate"
+                  continue
+                fi
                 if [ "$contexts" -eq 0 ] && [ "$head_age" -gt "$CHECKS_MISSING_AFTER_SECONDS" ]; then
                   if [ "$dispatches_done" -ge "$MAX_DISPATCHES_PER_RUN" ]; then
                     echo "#$pr: no required context on $head — deferred to the next run (this run already dispatched for $MAX_DISPATCHES_PER_RUN PRs)"
@@ -229,13 +292,45 @@ jobs:
               continue
             fi
 
-            # The update above was pushed with GITHUB_TOKEN, so GitHub creates no `pull_request`
-            # runs for the new head SHA. Without these dispatches the required `CI` context would
-            # never appear on it and the PR would stall again, one state later.
-            for workflow in ci.yml security.yml mobile-typecheck.yml; do
-              gh workflow run "$workflow" --ref "$branch" \
-                || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
-            done
+            # The update above is pushed with GITHUB_TOKEN, which is SUPPOSED to create no
+            # `pull_request` runs for the new head SHA — hence these dispatches, without which the
+            # required `CI` context would never appear and the PR would stall one state later.
+            #
+            # THAT PREMISE DOES NOT ALWAYS HOLD, and when it does not this loop manufactures a
+            # duplicate every single time it updates a branch. Measured 2026-08-10, right after a
+            # merge to main made every open PR BEHIND: six branches each ended up with a
+            # `workflow_dispatch` CI run AND a `pull_request` CI run on the same head SHA, the
+            # dispatch created ~3 seconds BEFORE the pull_request run —
+            #     17:38:06 workflow_dispatch  fix/usage-model-attribution 6c6117aa
+            #     17:38:09 pull_request       fix/usage-model-attribution 6c6117aa
+            # Every duplicate costs a full set of heavy jobs on archlinux-1, the only runner
+            # carrying the `heavy`/`release` labels, which is already the sole bottleneck.
+            #
+            # So look before dispatching, on the NEW head SHA. The short wait exists because the
+            # evidence above shows GitHub creates its run seconds after the push, not instantly.
+            #
+            # Fails OPEN: if the head SHA or the run query is unavailable, dispatch exactly as
+            # before. And if GitHub is slower than the wait, the missing-context branch earlier in
+            # this job still dispatches once the head is older than CHECKS_MISSING_AFTER_SECONDS,
+            # so a genuinely run-less head is still rescued — one cycle later rather than never.
+            new_head=$(gh pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
+            live_after_update=0
+            if [ -n "$new_head" ]; then
+              sleep 20
+              live_after_update=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$new_head&per_page=100" \
+                --jq '[.workflow_runs[] | select(.status != "completed")] | length' 2>/dev/null || echo 0)
+            fi
+            if [ "$live_after_update" -gt 0 ]; then
+              echo "#$pr: branch updated; GitHub created $live_after_update run(s) for $new_head — not dispatching duplicates"
+            else
+              for workflow in ci.yml security.yml mobile-typecheck.yml; do
+                gh workflow run "$workflow" --ref "$branch" \
+                  || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
+              done
+            fi
             updates_done=$(( updates_done + 1 ))
-            echo "#$pr: branch updated and required checks re-dispatched"
+            # Deliberately not claiming "re-dispatched" here any more: the branch above decides
+            # whether that happened, and a log line asserting it unconditionally is how the
+            # duplicate dispatching stayed invisible in the first place.
+            echo "#$pr: branch updated"
           done

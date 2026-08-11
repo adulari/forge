@@ -44,6 +44,55 @@ pub struct BridgeStats {
     pub claude_rl_age_secs: Option<i64>,
 }
 
+/// Environment this probe must NOT hand to its child.
+///
+/// THE PROBE HAS POISONED THE USER'S STORE THREE TIMES. `claude --print` loads the project's
+/// `.mcp.json` from its working directory, which names a `forge` binary; that grandchild inherits
+/// whatever `FORGE_DB` we were started with and migrates the shared store to ITS schema. Afterwards
+/// the installed release binary cannot open the store at all (`SchemaTooNew`), so the Anywhere
+/// connector dies while local Forge keeps answering on its pre-migration connection and looks
+/// healthy. Observed 2026-07-17 (v17 → v21) and twice on 2026-08-06 (24 → 25); each recovery needed
+/// a manual `PRAGMA user_version` write.
+///
+/// The store path is the one that corrupts state, but any variable that steers a Forge child is
+/// wrong to leak into a quota probe: a checkpoint id would attribute unrelated work, a sink path
+/// would inject lifecycle events into a session this probe has nothing to do with, and a permission
+/// mode would silently widen what that child may do.
+const PROBE_SCRUBBED_ENV: [&str; 5] = [
+    "FORGE_DB",
+    "FORGE_SUBAGENT_SINK",
+    "FORGE_CHECKPOINT_SESSION",
+    "FORGE_CHECKPOINT_SEQ",
+    "FORGE_PERMISSION_MODE",
+];
+
+/// Build the probe child. Split out so the isolation below is assertable without a `claude` binary
+/// on the machine running the tests.
+fn probe_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new("claude");
+    cmd.args([
+        "--debug",
+        "--print",
+        "--model",
+        "haiku",
+        "--append-system-prompt",
+        "Reply with a single period.",
+    ])
+    .arg(".")
+    .env("ANTHROPIC_LOG", "debug")
+    .stdin(std::process::Stdio::null());
+    for key in PROBE_SCRUBBED_ENV {
+        cmd.env_remove(key);
+    }
+    // A quota probe has no business in the project directory. Running there makes `claude` discover
+    // the project's `.mcp.json` and boot its whole MCP tree — the mechanism behind the store
+    // poisoning above, and separately a startup stall this repo already hit (mesh.bridge_mcp_external
+    // exists because of it). Credentials come from the home directory, not the cwd, so the probe
+    // works identically from a neutral one.
+    cmd.current_dir(std::env::temp_dir());
+    cmd
+}
+
 /// Harvest the CURRENT Claude rate-limit utilisation for BOTH windows by running one minimal
 /// `claude` turn with `--debug` and reading the `anthropic-ratelimit-unified-{5h,7d}-utilization`
 /// response headers it logs. Unlike the stream-json `rate_limit_event` (which only reports the
@@ -60,18 +109,7 @@ pub fn probe_claude_limits() -> Vec<(String, f64)> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         #[allow(unused_mut)]
-        let mut cmd = std::process::Command::new("claude");
-        cmd.args([
-            "--debug",
-            "--print",
-            "--model",
-            "haiku",
-            "--append-system-prompt",
-            "Reply with a single period.",
-        ])
-        .arg(".")
-        .env("ANTHROPIC_LOG", "debug")
-        .stdin(std::process::Stdio::null());
+        let mut cmd = probe_command();
         // `--debug` makes the real `claude` CLI write verbose diagnostic output straight to the
         // controlling terminal via /dev/tty, bypassing stdout/stderr redirection entirely (a
         // common "always show this even if piped" pattern). Stdio::piped() (what `.output()`
@@ -573,6 +611,44 @@ mod tests {
         assert!(
             (observed - now).abs() <= 5,
             "mtime of a just-written file should be ~now (got {observed}, now {now})"
+        );
+    }
+
+    /// The probe must not hand a Forge child the environment that lets it migrate the shared store.
+    /// Asserting on the built Command (rather than spawning) keeps this runnable without `claude`
+    /// installed, and pins the exact variables — a new one added to PROBE_SCRUBBED_ENV without a
+    /// reason is easier to notice than a silently missing removal.
+    #[test]
+    fn probe_child_gets_no_store_or_session_environment() {
+        let cmd = super::probe_command();
+        let removed: Vec<&str> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .filter_map(|(k, _)| k.to_str())
+            .collect();
+        for key in super::PROBE_SCRUBBED_ENV {
+            assert!(
+                removed.contains(&key),
+                "{key} must be removed from the probe child's environment, got {removed:?}"
+            );
+        }
+    }
+
+    /// A probe running in the project directory is what made `claude` load the project's .mcp.json
+    /// and spawn the forge grandchild that poisoned the store.
+    #[test]
+    fn probe_child_runs_outside_the_project_directory() {
+        let cmd = super::probe_command();
+        let cwd = cmd.get_current_dir().expect("probe must pin a cwd");
+        assert_eq!(
+            cwd,
+            std::env::temp_dir(),
+            "probe must run from a neutral cwd"
+        );
+        assert_ne!(
+            cwd,
+            std::env::current_dir().unwrap().as_path(),
+            "probe must not inherit the project cwd"
         );
     }
 }

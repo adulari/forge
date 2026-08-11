@@ -74,6 +74,15 @@ pub(crate) enum DispatchOutcome {
     },
     /// `/compact` — summarize older messages in a background task (it makes a model call).
     RunCompact,
+    /// `/refine [--global] [instructions]` — propose + apply one harness refinement batch in a
+    /// background task (it makes a model call), exactly like `/compact`.
+    RunRefine {
+        instructions: Option<String>,
+        global: bool,
+    },
+    /// `/btw <question>` — answer a side question in a background task (it makes a model call,
+    /// but the answer never joins the transcript — side-questions.md).
+    RunBtw { question: String },
     /// `/workflow run <name> [args]` — run a saved workflow script directly in a background task
     /// (docs/rfcs/forge-workflow.md), skipping the authoring turn entirely.
     RunSavedWorkflow {
@@ -160,6 +169,7 @@ pub(crate) async fn dispatch_command(
             | CommandAction::PinModel(_)
             | CommandAction::SetEffort(_)
             | CommandAction::Replay(_, _)
+            | CommandAction::Export(_)
             | CommandAction::Usage
             | CommandAction::Remote { .. }
             | CommandAction::Anywhere
@@ -388,6 +398,8 @@ pub(crate) async fn dispatch_command(
         }
         // `/compact` makes a model call → run it as a background task so the spinner ticks.
         CommandAction::Compact => return Ok(DispatchOutcome::RunCompact),
+        // `/btw <question>` also makes a model call — same background-task shape as `/compact`.
+        CommandAction::Btw(question) => return Ok(DispatchOutcome::RunBtw { question }),
         // `/uncompact` makes no model call (pure store + in-memory restore) → handled inline,
         // like `/undo`/`/checkpoint`, rather than spawned as a background task. On success
         // `Session::uncompact` emits its own `PresenterEvent::Warning` (mirrors `compact`'s
@@ -401,6 +413,25 @@ pub(crate) async fn dispatch_command(
             if before == after {
                 app.note("● nothing to uncompact — this session was never compacted");
             }
+        }
+        // `/refine` — Continual Harness (docs/features/continual-harness.md). `status` and
+        // `rollback` are pure store reads/writes handled inline, like `/memories`/`/uncompact`;
+        // the actual refinement pass makes a model call, so it's handed to the render loop as a
+        // background task (`RunRefine`), exactly like `/compact`.
+        CommandAction::Refine(forge_tui::RefineAction::Status) => {
+            refine_cmd::refine_status(session, app).await?;
+        }
+        CommandAction::Refine(forge_tui::RefineAction::Rollback(id_arg)) => {
+            refine_cmd::refine_rollback_cmd(session, app, &id_arg).await?;
+        }
+        CommandAction::Refine(forge_tui::RefineAction::Run {
+            instructions,
+            global,
+        }) => {
+            return Ok(DispatchOutcome::RunRefine {
+                instructions,
+                global,
+            })
         }
         // `/copy [N]` — resolve the Nth-latest assistant response and hand it to the loop to copy
         // (the loop owns the clipboard). N is 1-based from the most recent (1 = last response).
@@ -720,6 +751,8 @@ and keep going."
             };
             emit_text(tui, app, &text);
         }
+        // `/export [path]` — render THIS session's transcript to one self-contained HTML file.
+        CommandAction::Export(path_arg) => return export_cmd(session, path_arg, app).await,
         CommandAction::Usage => {
             // Open immediately with fast session data; bridge stats load in background.
             let (

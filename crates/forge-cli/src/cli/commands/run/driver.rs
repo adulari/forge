@@ -755,6 +755,34 @@ impl DriverState {
                     &mut self.busy_since,
                 ));
             }
+            DispatchOutcome::RunRefine {
+                instructions,
+                global,
+            } => {
+                self.turn_gen += 1;
+                self.turn_handle = Some(spawn_refine(
+                    &self.session,
+                    &self.done_tx,
+                    self.turn_gen,
+                    &mut self.app,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                    instructions,
+                    global,
+                ));
+            }
+            DispatchOutcome::RunBtw { question } => {
+                self.turn_gen += 1;
+                self.turn_handle = Some(spawn_btw(
+                    question,
+                    &self.session,
+                    &self.done_tx,
+                    self.turn_gen,
+                    &mut self.app,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                ));
+            }
             DispatchOutcome::RunSavedWorkflow { name, args } => {
                 self.turn_gen += 1;
                 self.turn_handle = Some(spawn_saved_workflow(
@@ -862,7 +890,41 @@ impl DriverState {
 mod tests {
     use super::*;
 
+    /// Point this process's store at a throwaway file before any test opens one.
+    ///
+    /// `build_session_with` otherwise resolves the DEFAULT store. That is shared state: on the
+    /// persistent CI runners one file outlives the job and is common to every branch, so a branch
+    /// carrying a new migration upgrades it and every later job built from an older main fails
+    /// `database schema version N is newer than this build supports` — a failure with nothing to do
+    /// with the change under test. Set once, process-wide, so parallel tests cannot race on the
+    /// variable, and never unset so no test can observe it missing.
+    ///
+    /// The store is also OPENED here, inside the initializer. Pointing every test at one file is
+    /// not enough on its own: the file starts out empty, so the tests that reach it first all run
+    /// the schema migration at once and one loses with `database is locked` (reproduced at 5/30
+    /// locally). `get_or_init` serializes exactly one caller, so migrating here means every test
+    /// afterwards opens a store that is already at the current schema.
+    fn isolate_store() {
+        static STORE: std::sync::OnceLock<Option<tempfile::TempDir>> = std::sync::OnceLock::new();
+        STORE.get_or_init(|| {
+            let (path, keep) = match std::env::var_os("FORGE_DB") {
+                // An explicitly configured store (CI pins one per job) still starts empty, so it
+                // needs the same one-shot migration before the tests race for it.
+                Some(configured) => (std::path::PathBuf::from(configured), None),
+                None => {
+                    let dir = tempfile::tempdir().expect("temp dir for the test store");
+                    let path = dir.path().join("forge-test.db");
+                    std::env::set_var("FORGE_DB", &path);
+                    (path, Some(dir))
+                }
+            };
+            forge_store::Store::open(&path).expect("migrate the test store");
+            keep
+        });
+    }
+
     async fn test_driver_state() -> DriverState {
+        isolate_store();
         let session = super::build_session_with(
             Box::new(forge_tui::HeadlessPresenter::default()),
             true,

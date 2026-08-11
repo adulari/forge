@@ -46,7 +46,7 @@ fn command_group(name: &str) -> &'static str {
         "help" | "keys" | "config" | "mode" | "thinking" | "effort" | "statusline"
         | "heartbeat" => "Session",
         "sessions" | "replay" | "resume" | "new" | "undo" | "checkpoint" | "checkpoints"
-        | "compact" | "uncompact" => "History",
+        | "compact" | "uncompact" | "refine" => "History",
         "model" | "models" | "usage" | "mesh" | "duel" => "Models & routing",
         "plan" | "execute" | "goal" | "pr" | "loop" | "workflow" | "assay" | "lattice" => "Work",
         _ => "Project & tools",

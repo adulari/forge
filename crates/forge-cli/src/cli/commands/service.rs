@@ -76,7 +76,7 @@ enum ServiceControl {
 // forge service install / uninstall / status / start / stop / restart
 // ---------------------------------------------------------------------------
 
-fn resolved_port(port: Option<u16>) -> u16 {
+pub(crate) fn resolved_port(port: Option<u16>) -> u16 {
     port.unwrap_or_else(|| forge_config::load().unwrap_or_default().remote.serve_port())
 }
 
@@ -153,7 +153,7 @@ fn control_cmd(action: ServiceControl) -> Result<()> {
 }
 
 /// TCP-connect probe with a short timeout — never blocks the CLI for long on a dead port.
-fn probe_port(port: u16) -> bool {
+pub(crate) fn probe_port(port: u16) -> bool {
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500)).is_ok()
 }
@@ -173,10 +173,11 @@ struct InstallOutcome {
     note: Option<String>,
 }
 
-struct ServiceStatus {
-    installed: bool,
-    running: bool,
-    detail: String,
+pub(crate) struct ServiceStatus {
+    pub(crate) installed: bool,
+    pub(crate) running: bool,
+    /// Raw state word from the OS service manager: `active`, `failed`, `activating`, …
+    pub(crate) detail: String,
 }
 
 fn systemd_user_dir() -> Result<std::path::PathBuf> {
@@ -219,7 +220,7 @@ fn uninstall_service() -> Result<()> {
     }
 }
 
-fn query_service_status() -> Result<ServiceStatus> {
+pub(crate) fn query_service_status() -> Result<ServiceStatus> {
     if cfg!(target_os = "linux") {
         status_systemd()
     } else if cfg!(target_os = "macos") {
@@ -281,13 +282,26 @@ fn run_capture(cmd: &str, args: &[&str]) -> Result<(bool, String, String)> {
 
 // --- systemd (Linux) ---
 
+/// Marker recording which Forge rendered a unit. `install` writes the unit once and nothing
+/// rewrites it, so without this there is no way to tell a current unit from one written years ago
+/// except by grepping for individual directives — which only finds drift someone already knew to
+/// look for. Doctor compares this to the running version and reports the gap generically.
+pub(crate) const UNIT_VERSION_PREFIX: &str = "# forge-unit-version: ";
+
 fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> String {
     format!(
-        "[Unit]\nDescription=Forge serve — headless multi-session daemon\n\n\
+        "[Unit]\nDescription=Forge serve — headless multi-session daemon\n\
+         {UNIT_VERSION_PREFIX}{}\n\n\
          [Service]\nExecStart={forge_exe} serve {} --port {port}\nRestart=on-failure\n\
+         # A permanent failure (exit 78 = EX_CONFIG, e.g. a store this build cannot open) cannot be\n\
+         # fixed by retrying. Without this the daemon restarts forever — 632 times in one observed\n\
+         # case, with Anywhere down throughout and the unit still reporting `activating`. Stopping\n\
+         # makes it `failed`, which is at least visible. Transient failures still retry forever,\n\
+         # which is what the network-resilience drop-in wants.\nRestartPreventExitStatus=78\n\
          # An agent-owned compiler or language server may be the kernel's OOM victim. Keep the\n\
          # daemon and its recoverable session metadata alive in that case.\nOOMPolicy=continue\n\n\
          [Install]\nWantedBy=default.target\n",
+        env!("CARGO_PKG_VERSION"),
         exposure.flag()
     )
 }
@@ -332,6 +346,16 @@ fn uninstall_systemd() -> Result<()> {
     let _ = std::fs::remove_file(dir.join(SYSTEMD_UNIT_NAME));
     let _ = run_checked("systemctl", &["--user", "daemon-reload"], hint);
     Ok(())
+}
+
+/// The installed systemd unit's text, if there is one.
+///
+/// `forge service install` writes this file ONCE and nothing rewrites it afterwards, so an upgraded
+/// binary can be paired with a unit rendered by a much older version. Doctor reads it to report that
+/// drift; see `doctor::unit_drift_checks`.
+#[cfg(target_os = "linux")]
+pub(crate) fn installed_unit_text() -> Option<String> {
+    std::fs::read_to_string(systemd_user_dir().ok()?.join(SYSTEMD_UNIT_NAME)).ok()
 }
 
 fn status_systemd() -> Result<ServiceStatus> {
@@ -581,6 +605,22 @@ mod tests {
             "an OOM-selected agent child must not stop the daemon"
         );
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    /// The unit records which Forge rendered it. Without the stamp there is no way to tell a
+    /// current unit from one written by a much older version, because installing a new Forge never
+    /// rewrites it — which is how #996's `RestartPreventExitStatus` silently failed to reach
+    /// existing installs.
+    #[test]
+    fn systemd_service_unit_records_the_version_that_rendered_it() {
+        let unit = render_systemd_service("/usr/local/bin/forge", Exposure::Lan, 7420);
+        assert!(
+            unit.contains(&format!(
+                "{UNIT_VERSION_PREFIX}{}",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "unit must carry the rendering version:\n{unit}"
+        );
     }
 
     #[test]

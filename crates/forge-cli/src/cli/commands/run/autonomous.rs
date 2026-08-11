@@ -266,3 +266,32 @@ pub(crate) fn spawn_compact(
         }
     })
 }
+
+/// Spawn `/refine` as a background task (it makes a cheap model call): the spinner ticks while the
+/// Continual Harness proposes + applies its edits, exactly like `/compact`. Success is reported by
+/// `Session::refine` itself via its own `PresenterEvent::Warning` (mirrors `compact`'s convention).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_refine(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    done_tx: &std::sync::mpsc::Sender<u64>,
+    gen: u64,
+    app: &mut forge_tui::App,
+    busy: &mut bool,
+    busy_since: &mut std::time::Instant,
+    instructions: Option<String>,
+    global: bool,
+) -> tokio::task::JoinHandle<()> {
+    app.done = false;
+    app.tick = 0;
+    *busy = true;
+    *busy_since = std::time::Instant::now();
+    let s = session.clone();
+    let dt = done_tx.clone();
+    tokio::spawn(async move {
+        let _done = DoneGuard(dt, gen);
+        let mut sess = s.lock().await;
+        if let Err(e) = sess.refine(instructions.as_deref(), global, "manual").await {
+            sess.notify_error(&format!("refine failed: {e}"));
+        }
+    })
+}

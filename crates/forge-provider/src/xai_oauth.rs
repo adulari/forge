@@ -24,11 +24,11 @@ use forge_types::Message;
 use crate::oauth_responses::{
     build_responses_request, error_message,
     execute_responses_request as shared_execute_responses_request, now_unix, should_hop_account,
-    REFRESH_SKEW_SECS,
+    watch_visible_output, REFRESH_SKEW_SECS,
 };
 use crate::{
     bundled_http_client, CompletionOptions, EventSink, ModelResponse, Provider, ProviderError,
-    StreamEvent, ToolSpec,
+    ToolSpec,
 };
 
 /// The `xai-oauth::` model-id namespace [`crate::DispatchProvider`] routes on.
@@ -535,24 +535,6 @@ fn seed_models() -> Vec<String> {
         .iter()
         .map(|m| format!("{XAI_OAUTH_NAMESPACE}::{m}"))
         .collect()
-}
-
-/// Wrap `inner` so the caller can tell whether anything user-visible was already streamed by the
-/// time a request fails — the condition that decides whether the next-account hop is still safe.
-/// A hop taken after the first delta would replay the reply from the beginning into the same
-/// sink, so once `streamed` is set the caller must surface the error instead of retrying. Mirrors
-/// `codex_oauth`'s `watch_visible_output` (kept as a local copy since that one is private to its
-/// own module). Only Text/Reasoning count: `ProviderActivity` is a private heartbeat.
-fn watch_visible_output<'a>(
-    inner: &'a mut EventSink<'_>,
-    streamed: &'a mut bool,
-) -> Box<EventSink<'a>> {
-    Box::new(move |event: StreamEvent| {
-        if matches!(event, StreamEvent::Text(_) | StreamEvent::Reasoning(_)) {
-            *streamed = true;
-        }
-        inner(event);
-    })
 }
 
 /// One HTTP+SSE completion against the Responses endpoint with a fixed bearer token.

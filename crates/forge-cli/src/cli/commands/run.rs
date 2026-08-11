@@ -34,6 +34,75 @@ pub(crate) type PendingDuel = Option<(
     Vec<forge_core::worktree::WorktreeGuard>,
 )>;
 
+/// Publishes (and, on drop, retracts) this terminal-local `forge` chat process's presence into
+/// the shared store — the read-only fleet entry a `forge serve`/Anywhere client sees alongside its
+/// own driven sessions (`forge_store::Store::local_live_sessions`, `SessionRow::read_only` in
+/// `serve.rs`).
+///
+/// `store: None` (open failed, or genuinely unavailable) makes every method a silent no-op:
+/// presence is a nice-to-have surfaced through remote clients, never something the interactive
+/// loop should degrade or fail over.
+struct LocalPresenceGuard {
+    store: Option<Arc<forge_store::Store>>,
+    /// The session id currently marked `local_live` in the store, if any. A plain `Mutex` (not
+    /// async) because every access here is a quick compare-and-maybe-write, never held across an
+    /// `.await`.
+    current: std::sync::Mutex<Option<String>>,
+}
+
+impl LocalPresenceGuard {
+    fn new(store: Option<Arc<forge_store::Store>>) -> Self {
+        Self {
+            store,
+            current: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Mark `session_id` as the locally-live session, clearing the previous one first (`/new` and
+    /// `/resume` swap the id this same terminal is driving without the process restarting).
+    /// Idempotent: retargeting to the id already current is a no-op.
+    fn retarget(&self, session_id: &str) {
+        let Some(store) = &self.store else { return };
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.as_deref() == Some(session_id) {
+            return;
+        }
+        if let Some(old) = current.take() {
+            let _ = store.set_session_local_live(&old, false);
+        }
+        let _ = store.set_session_local_live(session_id, true);
+        *current = Some(session_id.to_string());
+    }
+
+    /// Refresh the liveness heartbeat and busy flag for the currently-tracked session.
+    fn touch(&self, busy: bool) {
+        let Some(store) = &self.store else { return };
+        let current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(id) = current.as_deref() {
+            let _ = store.touch_session_local_presence(id, busy);
+        }
+    }
+}
+
+impl Drop for LocalPresenceGuard {
+    fn drop(&mut self) {
+        let Some(store) = &self.store else { return };
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(id) = current.take() {
+            let _ = store.set_session_local_live(&id, false);
+        }
+    }
+}
+
 mod atfiles;
 pub(crate) use atfiles::*;
 mod copy;
@@ -43,9 +112,14 @@ pub(crate) use pickers::*;
 mod dispatch;
 mod heartbeat_cmd;
 mod mesh_overlay;
+mod refine_cmd;
 pub(crate) use dispatch::*;
 mod driver;
 pub(crate) use driver::*;
+mod btw;
+pub(crate) use btw::*;
+mod export;
+pub(crate) use export::*;
 
 /// Ingest an external bridge-stat snapshot into the session's shared quota store.
 pub(crate) fn seed_subscription_stats(session: &Session, bstats: &bridge_stats::BridgeStats) {
@@ -489,7 +563,7 @@ pub(crate) async fn run_chat_tui(
     if git_coauthor {
         maybe_install_git_hook(&tui_config);
     }
-    {
+    let sid = {
         let (hooks, sid, workspace) = {
             let s = session.lock().await;
             (
@@ -505,7 +579,18 @@ pub(crate) async fn run_chat_tui(
             Some(&workspace),
         )
         .await;
-    }
+        sid
+    };
+
+    // Publish this terminal-local session into the shared store's presence table so a
+    // remote/Anywhere client sees it (read-only) in the fleet list alongside `forge serve`-hosted
+    // sessions — see docs/features/remote-control.md and forge_store::Store::local_live_sessions.
+    // Retargeted (below, in the render loop) on every heartbeat tick to the CURRENT session id
+    // rather than being set once here, because `/new` and `/resume` retarget `session` to a
+    // different id without this function returning. Store-open failure degrades to a silent no-op
+    // (`store: None`) rather than blocking chat on a presence feature that is read-only anyway.
+    let local_presence = LocalPresenceGuard::new(crate::open_store().ok().map(Arc::new));
+    local_presence.retarget(&sid);
 
     // On a resumed session (`--continue` / `--resume <id>`): render the FULL prior transcript into
     // scrollback (the user sees the entire original conversation, even the parts compaction folded
@@ -735,6 +820,15 @@ pub(crate) async fn run_chat_tui(
     }
     let mut observer: Option<ObserverState> = None;
 
+    // Coarse liveness heartbeat for `local_presence` (a killed terminal never runs its Drop
+    // cleanup, so the read side ages a session out once its heartbeat goes stale — see
+    // `forge_store::LOCAL_PRESENCE_STALE_SECS`). Ticks on a timer AND immediately on any busy-state
+    // edge, so a remote client sees "now busy"/"now idle" promptly instead of waiting out the
+    // full interval.
+    let mut local_presence_last_touch = std::time::Instant::now();
+    let mut local_presence_last_busy: Option<bool> = None;
+    const LOCAL_PRESENCE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(20);
+
     // Session workspace is a live binding: `/new` and `/resume` retarget it in place while this
     // render loop and any remote clients remain alive.
     let remote_workspace = session.lock().await.workspace_binding();
@@ -763,6 +857,23 @@ pub(crate) async fn run_chat_tui(
     }
 
     while !quit {
+        if local_presence_last_busy != Some(busy)
+            || local_presence_last_touch.elapsed() >= LOCAL_PRESENCE_HEARTBEAT
+        {
+            local_presence_last_busy = Some(busy);
+            local_presence_last_touch = std::time::Instant::now();
+            // `/new`/`/resume` retarget `session` to a different id in place; re-read it fresh
+            // each tick rather than trusting a value captured once. `try_lock`: same reasoning as
+            // the picker's `skip_model` — a turn parked in a permission/question prompt holds the
+            // session lock for the whole prompt, and this is the main render loop, so a busy
+            // session simply retargets/touches on its next idle tick instead of blocking here.
+            if let Ok(s) = session.try_lock() {
+                let current_id = s.session_id().to_string();
+                drop(s);
+                local_presence.retarget(&current_id);
+                local_presence.touch(busy);
+            }
+        }
         if let Some(obs) = &mut observer {
             if obs.last_poll.elapsed() >= std::time::Duration::from_millis(50) {
                 obs.last_poll = std::time::Instant::now();
@@ -1680,6 +1791,34 @@ pub(crate) async fn run_chat_tui(
                             DispatchOutcome::RunCompact => {
                                 turn_gen += 1;
                                 turn_handle = Some(spawn_compact(
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                ));
+                            }
+                            DispatchOutcome::RunRefine {
+                                instructions,
+                                global,
+                            } => {
+                                turn_gen += 1;
+                                turn_handle = Some(spawn_refine(
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                    instructions,
+                                    global,
+                                ));
+                            }
+                            DispatchOutcome::RunBtw { question } => {
+                                turn_gen += 1;
+                                turn_handle = Some(spawn_btw(
+                                    question,
                                     &session,
                                     &done_tx,
                                     turn_gen,
@@ -2641,6 +2780,18 @@ pub(crate) async fn run_chat_tui(
                             &mut busy_since,
                         ));
                     }
+                    DispatchOutcome::RunBtw { question } => {
+                        turn_gen += 1;
+                        turn_handle = Some(spawn_btw(
+                            question,
+                            &session,
+                            &done_tx,
+                            turn_gen,
+                            &mut app,
+                            &mut busy,
+                            &mut busy_since,
+                        ));
+                    }
                     DispatchOutcome::Quit => {
                         abort_turn_before_quit(
                             &mut turn_handle,
@@ -2784,6 +2935,34 @@ pub(crate) async fn run_chat_tui(
                                 DispatchOutcome::RunCompact => {
                                     turn_gen += 1;
                                     turn_handle = Some(spawn_compact(
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                    ));
+                                }
+                                DispatchOutcome::RunRefine {
+                                    instructions,
+                                    global,
+                                } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_refine(
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                        instructions,
+                                        global,
+                                    ));
+                                }
+                                DispatchOutcome::RunBtw { question } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_btw(
+                                        question,
                                         &session,
                                         &done_tx,
                                         turn_gen,
@@ -3209,6 +3388,34 @@ pub(crate) async fn run_chat_tui(
                                 DispatchOutcome::RunCompact => {
                                     turn_gen += 1;
                                     turn_handle = Some(spawn_compact(
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                    ));
+                                }
+                                DispatchOutcome::RunRefine {
+                                    instructions,
+                                    global,
+                                } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_refine(
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                        instructions,
+                                        global,
+                                    ));
+                                }
+                                DispatchOutcome::RunBtw { question } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_btw(
+                                        question,
                                         &session,
                                         &done_tx,
                                         turn_gen,

@@ -51,7 +51,7 @@
     "crates/forge-cli/src/cli/commands/mcp.rs": 865,
     "crates/forge-cli/src/cli/commands/models.rs": 1377,
     "crates/forge-cli/src/cli/commands/run.rs": 6111,
-    "crates/forge-cli/src/cli/commands/run/dispatch.rs": 1310,
+    "crates/forge-cli/src/cli/commands/run/dispatch.rs": 1318,
     "crates/forge-cli/src/cli/commands/run/driver.rs": 1661,
     "crates/forge-cli/src/cli/commands/schedule.rs": 1138,
     "crates/forge-cli/src/mcp_serve.rs": 1033,
@@ -74,7 +74,7 @@
     "crates/forge-tools/src/core_tools.rs": 1671,
     "crates/forge-tools/src/shell.rs": 879,
     "crates/forge-tui/src/app.rs": 7208,
-    "crates/forge-tui/src/commands.rs": 1146,
+    "crates/forge-tui/src/commands.rs": 1167,
     "crates/forge-types/src/lib.rs": 1346
   },
   "schema": 1,
