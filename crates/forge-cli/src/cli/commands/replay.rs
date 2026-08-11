@@ -4,11 +4,51 @@ use std::path::Path;
 
 use crate::*;
 
+/// Where a `cfg(test)` build keeps its store.
+///
+/// Unit tests reach `open_store` through the ordinary session builders, so without this they open
+/// the developer's REAL global store — and any test run from a branch carrying a new migration
+/// upgrades it in place. That has bitten twice: locally it crash-looped `forge-serve.service` and
+/// killed the Anywhere connector, and on the self-hosted runner it broke an unrelated PR, because
+/// one branch's test run migrated the shared store past what the other branch's build supports.
+///
+/// Per-test rather than per-process. `open_store` takes no arguments, so the test's identity has
+/// to come from somewhere: libtest names each test's thread after the test itself, which gives a
+/// stable key without an env var concurrent tests would race on. One shared store per process was
+/// tried first and produced `database is locked` under the parallel harness — tests writing to one
+/// SQLite file contend on the immediate transactions the store takes.
+#[cfg(test)]
+fn test_store_path() -> std::path::PathBuf {
+    let key = std::thread::current()
+        .name()
+        .map(|name| {
+            name.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| "unnamed".to_string());
+    let dir = std::env::temp_dir().join(format!("forge-test-store-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!("{key}.db"))
+}
+
 pub(crate) fn open_store() -> Result<Store> {
     // The store lives in a stable per-user data dir so usage/budget and session history persist
     // across restarts and don't reset when `forge` is launched from a different directory (the
     // budget is global per FR-5). Fall back to the legacy cwd-local path only if no data dir
     // resolves. `FORGE_DB` overrides both (tests / power users).
+    #[cfg(test)]
+    let store = {
+        // An explicit FORGE_DB still wins, so a test that wants a specific store keeps control.
+        let path = std::env::var("FORGE_DB")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| test_store_path());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).context("creating store directory")?;
+        }
+        Store::open(&path).context("opening session store")?
+    };
+    #[cfg(not(test))]
     let store = if let Ok(custom) = std::env::var("FORGE_DB") {
         let path = std::path::PathBuf::from(custom);
         if let Some(parent) = path.parent() {
