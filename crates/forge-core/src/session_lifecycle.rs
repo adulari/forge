@@ -59,6 +59,14 @@ impl Session {
         if !store.session_exists(session_id)? {
             return Err(CoreError::SessionNotFound(session_id.to_string()));
         }
+        // Retained async subagents (RFC retained-async-subagents): a row still `running` belonged
+        // to a task in whatever process last admitted it. This resume is a FRESH process (the
+        // common case is a daemon restart or `forge run --resume`), so that task is gone and will
+        // never call `finish_detached_child` — reconcile it to `failed` now, once, before this
+        // session's `detached_registry` (empty — no live tasks) is trusted as authoritative. Must
+        // NOT be called again on every turn: a legitimately still-running detached child in THIS
+        // process would otherwise be swept out from under itself.
+        let _ = store.reconcile_running_detached_children(session_id);
         let stored = store.load_messages(session_id)?;
         // The next seq is MAX(seq)+1 from the DB, NOT the loaded count — after compaction
         // `load_messages` returns only the active tail (+ summary), so its length is far below the
@@ -205,6 +213,7 @@ impl Session {
             project,
             last_context_pack: context_pack::ContextPack::default(),
             last_turn_contract: turn_contract::TurnContract::default(),
+            detached_registry: crate::subagent::DetachedRegistry::new(),
             turns_since_refine: 0,
         };
         let id = s.id.clone();
