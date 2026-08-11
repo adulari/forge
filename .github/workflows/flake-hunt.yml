@@ -1,0 +1,120 @@
+name: flake hunt
+
+# CI runs each suite ONCE, so a test that fails one run in ten shows as a red PR, goes green on a
+# re-run, and is never diagnosed. `scripts/flake-hunt.sh` is that method written down; this is the
+# schedule its header asks for ("Run it on a schedule or by hand").
+#
+# It earned the schedule the night it shipped: pointed at the TUI e2e suite it failed 6 of 8 runs,
+# a ~75% flake rate that a single green run had hidden and that would otherwise have been wired
+# into CI as a job failing most of the time.
+#
+# ADVISORY ONLY. Never add this to the repository's required checks. It runs `cargo test` in a loop
+# by design, so a genuine flake makes it red — a required check that goes red on the thing it is
+# built to detect would jam a merge queue whose PRs merge themselves.
+on:
+  schedule:
+    # Sundays 04:17 UTC. Off-peak for the one heavy runner, and a weekly cadence is enough: the
+    # races this finds accumulate over many merges, not within one.
+    - cron: '17 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: 'How many times to run the suite'
+        required: false
+        default: '15'
+      cargo_args:
+        description: 'Arguments passed through to cargo test (default: the workspace, as CI runs it)'
+        required: false
+        default: '--locked --all --all-features'
+
+concurrency:
+  group: flake-hunt
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  hunt:
+    # 'heavy' = archlinux-1 only, and this is NOT optional here. A flake hunt is a workspace-wide
+    # compile plus N test runs — exactly the memory profile the heavy label exists to serialize.
+    # Running it beside CI's own test/release builds is the case documented in ci.yml that OOM-killed
+    # every runner service on the 30G host.
+    runs-on: [self-hosted, linux, x64, heavy]
+    # One warm full-workspace test job measures ~5-6 min in CI; the compile is paid once here and
+    # subsequent runs are test execution only. 180 min leaves room for a slow default of 15 runs
+    # without letting a hang sit on the bottleneck runner indefinitely.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+
+      - name: Hunt for flaky tests
+        id: hunt
+        env:
+          RUNS: ${{ inputs.runs || '15' }}
+          CARGO_ARGS: ${{ inputs.cargo_args || '--locked --all --all-features' }}
+        run: |
+          # `set +e` is load-bearing: Actions runs this shell with `-e`, and flake-hunt.sh exits 1
+          # by design when it finds a flake. Without this the step dies before recording its status
+          # and the reporting steps below never run.
+          set -uo pipefail
+          set +e
+          mkdir -p flake-out
+          # FLAKE_OUT keeps the first failing log inside the workspace so it can be uploaded.
+          # Losing that log is how the cause of a race gets lost — see the script's header.
+          FLAKE_OUT="$PWD/flake-out" bash scripts/flake-hunt.sh "$RUNS" $CARGO_ARGS \
+            2>&1 | tee flake-out/summary.txt
+          echo "status=${PIPESTATUS[0]}" >>"$GITHUB_OUTPUT"
+
+      - name: Upload the kept failing logs
+        if: always() && steps.hunt.outputs.status != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: flake-hunt-logs
+          path: flake-out/
+          retention-days: 30
+
+      - name: Report flaky tests on a single tracking issue
+        if: always() && steps.hunt.outputs.status != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: Flaky tests detected by the scheduled flake hunt
+        run: |
+          set -euo pipefail
+          # One tracking issue, commented on repeatedly, rather than a new issue every week — a
+          # weekly duplicate is how a real signal gets tuned out. Match the title exactly via
+          # env.TITLE so a partial-text search cannot attach the comment to some other issue.
+          number=$(gh issue list --state open --limit 100 --json number,title \
+            --jq '[.[] | select(.title == env.TITLE)] | .[0].number // empty')
+
+          {
+            echo "The scheduled flake hunt found at least one test that fails intermittently."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo '```'
+            # The per-test failure counts are the actionable part: "4/15" is a race worth chasing,
+            # "it failed once" gets dismissed.
+            sed -n '/of .* runs failed/,$p' flake-out/summary.txt | head -40
+            echo '```'
+            echo
+            echo "The first failing log is attached to the run as the \`flake-hunt-logs\` artifact."
+            echo "Diagnose from that log rather than re-running until it passes."
+          } >body.md
+
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file body.md
+          else
+            gh issue create --title "$TITLE" --body-file body.md
+          fi
+
+      - name: Fail the run so a flake is visible in the Actions list
+        if: always() && steps.hunt.outputs.status != '0'
+        run: exit 1
+
+      - name: Bound persistent build cache
+        if: always()
+        run: bash scripts/ci/trim-runner-cache.sh
