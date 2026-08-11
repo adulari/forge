@@ -183,6 +183,14 @@ jobs:
           # a PR still looks merely "queued" to a human.
           CHECKS_MISSING_AFTER_SECONDS=600
 
+          # How long to wait, after updating a branch, for GitHub to register the runs it creates
+          # for the new head — before concluding it created none and dispatching replacements.
+          # Polled rather than slept in one block: the registration delay is variable, so a single
+          # fixed wait is either too short (and manufactures duplicate heavy jobs) or a tax paid on
+          # every update. 6 × 10s triples the old 20s ceiling while making the common case cheaper.
+          POST_UPDATE_SETTLE_ATTEMPTS=6
+          POST_UPDATE_SETTLE_INTERVAL_SECONDS=10
+
           for pr in $numbers; do
             # The per-PR call exists because mergeStateStatus is computed on demand. It used to say
             # one view settles it "just as well as two" — MEASURED FALSE. On the first sweep after
@@ -306,19 +314,38 @@ jobs:
             # Every duplicate costs a full set of heavy jobs on archlinux-1, the only runner
             # carrying the `heavy`/`release` labels, which is already the sole bottleneck.
             #
-            # So look before dispatching, on the NEW head SHA. The short wait exists because the
-            # evidence above shows GitHub creates its run seconds after the push, not instantly.
+            # So look before dispatching, on the NEW head SHA.
             #
-            # Fails OPEN: if the head SHA or the run query is unavailable, dispatch exactly as
-            # before. And if GitHub is slower than the wait, the missing-context branch earlier in
-            # this job still dispatches once the head is older than CHECKS_MISSING_AFTER_SECONDS,
+            # A FIXED WAIT IS THE WRONG SHAPE FOR THIS, and 20 seconds was measured to be too short.
+            # On 2026-08-11 #1026 was updated and GitHub created its `pull_request` runs at 14:19:20;
+            # this loop dispatched three duplicates at 14:19:36-40, sixteen seconds later. The
+            # duplicates were still queued on archlinux-1 twenty minutes after the PR had merged —
+            # heavy jobs burnt on a dead branch while fourteen other PRs waited behind them.
+            #
+            # The delay before GitHub registers a run is variable, so any single sleep is either a
+            # guess that is too short (duplicates) or a tax paid on every branch update. Poll
+            # instead: give it up to POST_UPDATE_SETTLE_ATTEMPTS chances, stop the moment a run
+            # appears. The common case now costs one interval rather than a flat 20s, and the slow
+            # case gets three times the old budget before concluding nothing is coming.
+            #
+            # Fails OPEN: if the head SHA or every run query is unavailable, dispatch exactly as
+            # before. And if GitHub is slower than the whole poll, the missing-context branch earlier
+            # in this job still dispatches once the head is older than CHECKS_MISSING_AFTER_SECONDS,
             # so a genuinely run-less head is still rescued — one cycle later rather than never.
             new_head=$(gh pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
             live_after_update=0
             if [ -n "$new_head" ]; then
-              sleep 20
-              live_after_update=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$new_head&per_page=100" \
-                --jq '[.workflow_runs[] | select(.status != "completed")] | length' 2>/dev/null || echo 0)
+              settle_attempt=0
+              while [ "$settle_attempt" -lt "$POST_UPDATE_SETTLE_ATTEMPTS" ]; do
+                sleep "$POST_UPDATE_SETTLE_INTERVAL_SECONDS"
+                settle_attempt=$(( settle_attempt + 1 ))
+                live_after_update=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$new_head&per_page=100" \
+                  --jq '[.workflow_runs[] | select(.status != "completed")] | length' 2>/dev/null || echo 0)
+                if [ "$live_after_update" -gt 0 ]; then
+                  echo "#$pr: GitHub's runs for $new_head appeared after ${settle_attempt} poll(s)"
+                  break
+                fi
+              done
             fi
             if [ "$live_after_update" -gt 0 ]; then
               echo "#$pr: branch updated; GitHub created $live_after_update run(s) for $new_head — not dispatching duplicates"
