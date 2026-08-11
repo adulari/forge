@@ -1135,6 +1135,12 @@ script with `return <final result>` so the run yields a relayable answer.\n\nGoa
                 }
             }
         }
+        // `/heartbeat` — the user's OWN recurring re-entry prompt for this session (at most
+        // one; a new `every` replaces it). Body lives in `heartbeat_cmd` so this file stays inside
+        // its architecture-size budget.
+        CommandAction::Heartbeat(action) => {
+            heartbeat_cmd::dispatch_heartbeat(session, app, action).await?;
+        }
         // Not a builtin → try the file-based command/skill catalog.
         CommandAction::Unknown(_) => {
             return dispatch_catalog(line, catalog, session, app, armed, trust_project, busy).await

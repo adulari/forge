@@ -110,6 +110,7 @@ pub(crate) use copy::*;
 mod pickers;
 pub(crate) use pickers::*;
 mod dispatch;
+mod heartbeat_cmd;
 mod mesh_overlay;
 mod refine_cmd;
 pub(crate) use dispatch::*;
@@ -780,6 +781,9 @@ pub(crate) async fn run_chat_tui(
     // (like Claude Code / aider). An interrupt cancels only the active response; queued user work
     // remains valid and starts immediately under a fresh generation.
     let mut queued_prompts: Vec<String> = Vec::new();
+    // Rate-limits the idle session-heartbeat check — the render loop iterates far more often than
+    // this needs to be re-checked (turn-end already checks it immediately).
+    let mut last_heartbeat_check = std::time::Instant::now();
     // Identity of the currently pending permission/question prompt, bumped every time a new one
     // is installed. Broadcast as `Snapshot::prompt_seq`; remote Allow/Answer must echo it back,
     // and a mismatch is ignored — a stale tap can never approve a prompt it never saw.
@@ -889,6 +893,26 @@ pub(crate) async fn run_chat_tui(
                         }
                     }
                 }
+            }
+        }
+
+        // Session heartbeats: turn-end already checks immediately (below); this coarse periodic
+        // check catches a heartbeat coming due while the session just sits idle.
+        if last_heartbeat_check.elapsed() >= std::time::Duration::from_secs(5) {
+            last_heartbeat_check = std::time::Instant::now();
+            if try_deliver_due_heartbeats(
+                &session,
+                &mut queued_prompts,
+                &mut app,
+                &mut prompt_history,
+                &mut last_prompt,
+                &done_tx,
+                &mut turn_gen,
+                &mut turn_handle,
+                &mut busy,
+                &mut busy_since,
+            ) {
+                dirty = true;
             }
         }
 
@@ -3891,6 +3915,22 @@ pub(crate) async fn run_chat_tui(
                             &mut busy_since,
                         ));
                     }
+                }
+                // A due heartbeat only gets to run when nothing else claimed the next turn above
+                // — a typed-while-busy prompt / active /loop or /goal always wins.
+                if turn_handle.is_none() {
+                    try_deliver_due_heartbeats(
+                        &session,
+                        &mut queued_prompts,
+                        &mut app,
+                        &mut prompt_history,
+                        &mut last_prompt,
+                        &done_tx,
+                        &mut turn_gen,
+                        &mut turn_handle,
+                        &mut busy,
+                        &mut busy_since,
+                    );
                 }
                 // Auto-compact: when no new turn was spawned (not a loop iteration) and the
                 // context gauge is above AUTO_COMPACT_THRESHOLD, quietly run /compact so the
