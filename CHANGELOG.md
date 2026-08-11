@@ -8,6 +8,34 @@ All notable changes to Forge are documented here. The format follows
 
 ### Added
 
+- **Continual Harness — `/refine`, a session that gets better at your project.** Forge can now
+  learn from how a session actually went and carry that forward: it journals prompt notes, skill
+  descriptions and subagent specs, injects them into later turns, and can roll any of it back.
+  `/refine` runs a pass on demand and `/refine status` shows what has been learned; every entry
+  records the trajectory evidence that produced it, so a lesson can be traced rather than taken on
+  faith. Automatic refinement ships **off by default** (`harness.auto_refine = "off"`; set it to
+  `"compact"` to run a pass after every `/compact`, or `"turns"` to run one every
+  `harness.auto_refine_turns` turns) — a self-modifying layer is opt-in until you have looked at
+  what it wants to change. See `docs/features/continual-harness.md`.
+
+- **`/btw` — ask a side question without derailing the turn.** A question asked mid-task previously
+  either waited for the turn to finish or knocked the agent off what it was doing. `/btw` answers
+  out of band and leaves the main thread's objective and context intact. The same change adds HTML
+  session export, so a transcript can be handed to someone who does not have Forge.
+  See `docs/features/side-questions.md`.
+
+- **`forge doctor` now reports the two things that actually take this setup down.** It checks the
+  background daemon — whether `forge serve` is running, failed, or restart-looping — and flags a
+  systemd unit that predates the running binary, which is how a unit silently keeps missing the
+  restart guards a newer release ships. Previously both failures were invisible to the one command
+  a user runs when something is wrong.
+
+- Forge Anywhere surfaces local terminal sessions read-only in the fleet, so a session started in a
+  terminal is visible from the phone instead of appearing only after it is daemon-hosted. A pending
+  device enrollment can also be approved without going through the inbox.
+
+- The desktop app connects on launch instead of asking first, and follows a daemon that moves.
+
 - **Fleet messaging — `forge send` and the `message_session` tool.** Any two daemon-hosted
   sessions can now exchange messages, and a shell can message any of them: previously only a
   parent could reach its own subagents inside one session tree, so a session in another window was
@@ -37,6 +65,44 @@ All notable changes to Forge are documented here. The format follows
   including Expo 57.0.9 and React Native 0.86.2, before producing the next native archives.
 
 ### Fixed
+
+- **A development build no longer migrates the store the installed Forge depends on.** This class of
+  failure took the daemon down repeatedly: something built from a working tree opened
+  `~/.local/share/forge/forge.db`, migrated it to whatever schema that branch carried, and the
+  installed release binary then correctly refused to open it — leaving `forge serve` crash-looping
+  and Forge Anywhere dark. It is now closed from both directions. A build with `debug_assertions`
+  resolves to `forge-dev.db`, covering `cargo run`, `target/debug/forge` and dev-built MCP agents;
+  unit tests get a per-test store instead of falling back to the default path. `FORGE_DB` still
+  overrides everything, so deliberately debugging against real data is unchanged. The repo's own
+  MCP configuration and the quota probe's child process, which each reached the real store by a
+  different route, are fixed alongside.
+
+- **A store written by a newer Forge now explains how to recover.** The error said only to run
+  `forge doctor` or retry with `RUST_LOG=debug`, neither of which leads to the remedy. It now names
+  it: install a build at least as new as the store, and use `forge doctor` to see the store path and
+  both schema versions.
+
+- **`forge serve` stops retrying a failure that retrying cannot fix.** A permanent configuration
+  error previously restarted forever, roughly every ten seconds, silently. It now exits in a way
+  systemd can recognise as terminal, so the service stops and shows as failed rather than looping
+  invisibly. The fleet is also restored after a daemon restart instead of being lost.
+
+- Each usage row records the model the mesh actually routed to, so cost and token attribution
+  reflect what ran rather than what was requested.
+
+- A provider error carrying a status code inside a longer number is no longer misread as that
+  status — the classifier matched digits anywhere in the string, so an unrelated identifier could be
+  mistaken for a rate limit or a permanent capability failure and change failover behaviour.
+
+- Desktop: AppImage users get native Wayland instead of XWayland; the changelog sheet no longer
+  covers the connect flow; and a local desktop build no longer ships a stale pinned version.
+
+- Mobile `lucide` barrel imports are rewritten to per-icon files, cutting the entry bundle that owns
+  a large share of cold start.
+
+- The voice recorder retries a spawn that fails with `ETXTBSY` instead of losing the take.
+
+- The TUI styles only the zoomed row's transcript rather than restyling every row each frame.
 
 - Production iOS OTA safety now checks the complete range from the installed native archive's
   source commit instead of only the latest push. A native change followed by a source-only push can
