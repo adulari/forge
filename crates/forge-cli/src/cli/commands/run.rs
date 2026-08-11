@@ -110,6 +110,8 @@ pub(crate) use copy::*;
 mod pickers;
 pub(crate) use pickers::*;
 mod dispatch;
+mod mesh_overlay;
+mod refine_cmd;
 pub(crate) use dispatch::*;
 mod driver;
 pub(crate) use driver::*;
@@ -1773,6 +1775,22 @@ pub(crate) async fn run_chat_tui(
                                     &mut busy_since,
                                 ));
                             }
+                            DispatchOutcome::RunRefine {
+                                instructions,
+                                global,
+                            } => {
+                                turn_gen += 1;
+                                turn_handle = Some(spawn_refine(
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                    instructions,
+                                    global,
+                                ));
+                            }
                             DispatchOutcome::RunBtw { question } => {
                                 turn_gen += 1;
                                 turn_handle = Some(spawn_btw(
@@ -2901,6 +2919,22 @@ pub(crate) async fn run_chat_tui(
                                         &mut busy_since,
                                     ));
                                 }
+                                DispatchOutcome::RunRefine {
+                                    instructions,
+                                    global,
+                                } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_refine(
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                        instructions,
+                                        global,
+                                    ));
+                                }
                                 DispatchOutcome::RunBtw { question } => {
                                     turn_gen += 1;
                                     turn_handle = Some(spawn_btw(
@@ -3336,6 +3370,22 @@ pub(crate) async fn run_chat_tui(
                                         &mut app,
                                         &mut busy,
                                         &mut busy_since,
+                                    ));
+                                }
+                                DispatchOutcome::RunRefine {
+                                    instructions,
+                                    global,
+                                } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_refine(
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                        instructions,
+                                        global,
                                     ));
                                 }
                                 DispatchOutcome::RunBtw { question } => {
