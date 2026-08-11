@@ -79,6 +79,26 @@ jobs:
     # below bounds the work; this bounds the blast radius if an individual API call wedges.
     timeout-minutes: 20
     steps:
+      # THE `push` TRIGGER FIRES TOO EARLY TO BE USEFUL, AND THAT COSTS ~AN HOUR PER MERGE.
+      #
+      # A merge to main fires this workflow within seconds — measured at **3s** after #1009
+      # (merged 00:18:04, sweep 00:18:07) and **6s** after #1011 (01:42:03 / 01:42:09). GitHub has
+      # not yet recomputed the other open PRs' mergeable state by then, so the sweep sees nothing
+      # BEHIND, updates nothing, and exits successfully having done no work.
+      #
+      # The open set then waits for the next `schedule`, which in practice runs closer to hourly
+      # than the declared */30 (observed firings 56 minutes apart, with several slots missed
+      # entirely — GitHub delays or drops scheduled workflows under load). Both merges tonight left
+      # eight PRs sitting BEHIND for 12+ minutes with a push sweep already run and wasted.
+      #
+      # Pausing briefly on this trigger alone is enough for the states to settle. 60s is a
+      # heuristic, not a measured floor — the `schedule` and `workflow_run` triggers remain the
+      # backstops if it is ever too short, exactly as they are today. The wait costs a
+      # GitHub-hosted runner a minute and never touches the self-hosted bottleneck.
+      - name: Let GitHub settle mergeable state after a merge to main
+        if: github.event_name == 'push'
+        run: sleep 60
+
       # THE STALL THIS WORKFLOW CAUSED ITSELF.
       #
       # `gh pr update-branch` below writes a merge commit authored by `github-actions[bot]`, and this
