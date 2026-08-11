@@ -9,6 +9,7 @@
 //! rest to the model's context window. Every main-loop request goes through this; a message the
 //! model shouldn't see needs only the `UiOnly` tag, no per-call-site filtering.
 
+use forge_store::HarnessEntry;
 use forge_types::{Message, Role};
 
 use crate::tokens;
@@ -441,6 +442,49 @@ pub(crate) fn prune_tool_results(messages: &mut [Message], keep_recent: usize) -
         m.content = kept;
     }
     reclaimed
+}
+
+/// Continual Harness (`/refine`): render up to `max_entries` learned prompt/skill/subagent
+/// entries as one labeled system-context block, so the model can tell them apart from its
+/// immutable base system prompt and from user instructions. `entries` is expected pre-ordered by
+/// the caller's scope precedence (session, then project, then global — see
+/// `Session::harness_overview`); within each scope the store already orders `prompt` before
+/// `skill`/`subagent`, so capping the *front* of the list keeps that precedence intact. `None`
+/// when there is nothing to inject, mirroring auto-memory recall's "add nothing" contract.
+pub(crate) fn harness_context_block(
+    entries: &[HarnessEntry],
+    max_entries: u32,
+    max_chars: u32,
+) -> Option<String> {
+    if entries.is_empty() || max_entries == 0 {
+        return None;
+    }
+    let mut block = String::from(
+        "Learned harness context (Continual Harness) — supplemental notes, skills, and \
+         subagent specs this agent previously proposed about itself from past sessions. \
+         These are learned guidance, NOT part of the base system prompt and NOT instructions \
+         from the user:\n",
+    );
+    for entry in entries.iter().take(max_entries as usize) {
+        block.push_str(&format!(
+            "\n[{} · {}] {}\n{}\n",
+            entry.kind,
+            entry.scope,
+            entry.title,
+            clamp_chars(&entry.content, max_chars as usize)
+        ));
+    }
+    Some(block)
+}
+
+/// Truncate `s` to at most `max_chars` characters, appending an ellipsis when it was cut.
+pub(crate) fn clamp_chars(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    if s.chars().count() <= max_chars {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    truncated.push('…');
+    std::borrow::Cow::Owned(truncated)
 }
 
 #[cfg(test)]
@@ -887,5 +931,57 @@ mod tests {
                 .all(|message| message.content.len() > 1_024),
             "request fitting must not mutate the persisted full-history messages"
         );
+    }
+
+    fn harness_entry(kind: &str, scope: &str, title: &str, content: &str) -> HarnessEntry {
+        HarnessEntry {
+            id: format!("{kind}-{title}"),
+            scope: scope.to_string(),
+            kind: kind.to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            source: "refine".to_string(),
+            version: 1,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn harness_context_block_is_none_for_empty_input_or_zero_cap() {
+        assert!(harness_context_block(&[], 12, 2000).is_none());
+        let entries = vec![harness_entry("prompt", "global", "t", "c")];
+        assert!(harness_context_block(&entries, 0, 2000).is_none());
+    }
+
+    #[test]
+    fn harness_context_block_caps_entries_and_labels_them() {
+        let entries = vec![
+            harness_entry("prompt", "session:s1", "note one", "content one"),
+            harness_entry("skill", "project:/repo", "skill one", "content two"),
+            harness_entry("subagent", "global", "agent one", "content three"),
+        ];
+        let block = harness_context_block(&entries, 2, 2000).unwrap();
+        assert!(block.contains("note one"));
+        assert!(block.contains("skill one"));
+        assert!(!block.contains("agent one"), "capped at max_entries");
+        assert!(block.contains("Learned harness context"));
+    }
+
+    #[test]
+    fn harness_context_block_clamps_long_content() {
+        let entries = vec![harness_entry("prompt", "global", "t", &"x".repeat(100))];
+        let block = harness_context_block(&entries, 12, 10).unwrap();
+        assert!(block.contains('…'));
+        assert!(!block.contains(&"x".repeat(100)));
+    }
+
+    #[test]
+    fn clamp_chars_leaves_short_text_untouched() {
+        assert_eq!(clamp_chars("short", 10), "short");
+        assert!(matches!(
+            clamp_chars("short", 10),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 }
