@@ -74,6 +74,12 @@ pub(crate) enum DispatchOutcome {
     },
     /// `/compact` — summarize older messages in a background task (it makes a model call).
     RunCompact,
+    /// `/refine [--global] [instructions]` — propose + apply one harness refinement batch in a
+    /// background task (it makes a model call), exactly like `/compact`.
+    RunRefine {
+        instructions: Option<String>,
+        global: bool,
+    },
     /// `/btw <question>` — answer a side question in a background task (it makes a model call,
     /// but the answer never joins the transcript — side-questions.md).
     RunBtw { question: String },
@@ -421,6 +427,25 @@ pub(crate) async fn dispatch_command(
             if before == after {
                 app.note("● nothing to uncompact — this session was never compacted");
             }
+        }
+        // `/refine` — Continual Harness (docs/features/continual-harness.md). `status` and
+        // `rollback` are pure store reads/writes handled inline, like `/memories`/`/uncompact`;
+        // the actual refinement pass makes a model call, so it's handed to the render loop as a
+        // background task (`RunRefine`), exactly like `/compact`.
+        CommandAction::Refine(forge_tui::RefineAction::Status) => {
+            refine_cmd::refine_status(session, app).await?;
+        }
+        CommandAction::Refine(forge_tui::RefineAction::Rollback(id_arg)) => {
+            refine_cmd::refine_rollback_cmd(session, app, &id_arg).await?;
+        }
+        CommandAction::Refine(forge_tui::RefineAction::Run {
+            instructions,
+            global,
+        }) => {
+            return Ok(DispatchOutcome::RunRefine {
+                instructions,
+                global,
+            })
         }
         // `/copy [N]` — resolve the Nth-latest assistant response and hand it to the loop to copy
         // (the loop owns the clipboard). N is 1-based from the most recent (1 = last response).
@@ -1116,6 +1141,12 @@ script with `return <final result>` so the run yields a relayable answer.\n\nGoa
                     }
                 }
             }
+        }
+        // `/heartbeat` — the user's OWN recurring re-entry prompt for this session (at most
+        // one; a new `every` replaces it). Body lives in `heartbeat_cmd` so this file stays inside
+        // its architecture-size budget.
+        CommandAction::Heartbeat(action) => {
+            heartbeat_cmd::dispatch_heartbeat(session, app, action).await?;
         }
         // Not a builtin → try the file-based command/skill catalog.
         CommandAction::Unknown(_) => {

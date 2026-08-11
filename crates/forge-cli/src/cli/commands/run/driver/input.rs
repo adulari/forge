@@ -599,6 +599,11 @@ impl DriverState {
                 self.start_turn(&next);
             }
         }
+        // A due heartbeat only gets to run when nothing else claimed the next turn above — a
+        // typed-while-busy prompt / active /loop or /goal always wins.
+        if self.turn_handle.is_none() {
+            self.try_deliver_due_heartbeats();
+        }
         if self.turn_handle.is_none() && self.turn_gen > self.last_auto_compact_gen {
             if let Some(lim) = self.app.context_limit {
                 let cap = self.session.lock().await.compact_cap_tokens();

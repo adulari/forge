@@ -4,11 +4,70 @@ use std::path::Path;
 
 use crate::*;
 
+/// Where a `cfg(test)` build keeps its store.
+///
+/// Unit tests reach `open_store` through the ordinary session builders, so without this they open
+/// the developer's REAL global store — and any test run from a branch carrying a new migration
+/// upgrades it in place. That has bitten twice: locally it crash-looped `forge-serve.service` and
+/// killed the Anywhere connector, and on the self-hosted runner it broke an unrelated PR, because
+/// one branch's test run migrated the shared store past what the other branch's build supports.
+///
+/// Per-test rather than per-process. `open_store` takes no arguments, so the test's identity has
+/// to come from somewhere: libtest names each test's thread after the test itself, which gives a
+/// stable key without an env var concurrent tests would race on. One shared store per process was
+/// tried first and produced `database is locked` under the parallel harness — tests writing to one
+/// SQLite file contend on the immediate transactions the store takes.
+#[cfg(test)]
+fn test_store_path() -> std::path::PathBuf {
+    let key = std::thread::current()
+        .name()
+        .map(|name| {
+            name.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| "unnamed".to_string());
+    let dir = std::env::temp_dir().join(format!("forge-test-store-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!("{key}.db"))
+}
+
+/// Which file in the data dir is "the store" for THIS build.
+///
+/// A debug build gets its own `forge-dev.db`. Four times now, something built from a working tree
+/// has opened the real `forge.db` and migrated it to whatever schema that branch carried; the
+/// installed release binary then refuses the store (`SchemaTooNew`, correctly) and `forge serve`
+/// crash-loops — most recently 632 consecutive restarts with Anywhere down throughout. The
+/// per-caller fixes (scrubbing the env from the quota probe, pointing MCP configs elsewhere) each
+/// close one route; this closes the class, because `cargo run`, `target/debug/forge`, a dev-built
+/// MCP agent and a test that forgot to set the env all resolve here.
+///
+/// `FORGE_DB` still overrides everything, so deliberately debugging against real data is unchanged.
+fn default_store_file_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "forge-dev.db"
+    } else {
+        "forge.db"
+    }
+}
+
 pub(crate) fn open_store() -> Result<Store> {
     // The store lives in a stable per-user data dir so usage/budget and session history persist
     // across restarts and don't reset when `forge` is launched from a different directory (the
     // budget is global per FR-5). Fall back to the legacy cwd-local path only if no data dir
     // resolves. `FORGE_DB` overrides both (tests / power users).
+    #[cfg(test)]
+    let store = {
+        // An explicit FORGE_DB still wins, so a test that wants a specific store keeps control.
+        let path = std::env::var("FORGE_DB")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| test_store_path());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).context("creating store directory")?;
+        }
+        Store::open(&path).context("opening session store")?
+    };
+    #[cfg(not(test))]
     let store = if let Ok(custom) = std::env::var("FORGE_DB") {
         let path = std::path::PathBuf::from(custom);
         if let Some(parent) = path.parent() {
@@ -17,7 +76,7 @@ pub(crate) fn open_store() -> Result<Store> {
         Store::open(&path).context("opening session store")?
     } else if let Some(dir) = forge_config::data_dir() {
         std::fs::create_dir_all(&dir).context("creating data directory")?;
-        let db = dir.join("forge.db");
+        let db = dir.join(default_store_file_name());
         // One-time migration: if there's no global store yet but a legacy `./.forge/forge.db` exists in
         // this directory, move its history over so the switch doesn't appear to wipe past usage.
         let legacy = Path::new(".forge/forge.db");
@@ -391,4 +450,20 @@ fn replay_preview(text: &str) -> String {
         out.push('…');
     }
     out
+}
+
+#[cfg(test)]
+mod store_path_tests {
+    use super::default_store_file_name;
+
+    /// The whole point of the split: a build with debug assertions — `cargo run`,
+    /// `target/debug/forge`, a dev-built MCP agent, a test that forgot `FORGE_DB` — must not
+    /// resolve to the release store and migrate it. This test necessarily runs in a debug profile,
+    /// so it pins the half that can actually be asserted here, and the release name is pinned as a
+    /// literal so renaming it is a deliberate act rather than a typo.
+    #[test]
+    fn a_debug_build_does_not_resolve_to_the_release_store() {
+        assert_eq!(default_store_file_name(), "forge-dev.db");
+        assert_ne!(default_store_file_name(), "forge.db");
+    }
 }

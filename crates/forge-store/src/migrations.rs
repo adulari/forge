@@ -550,6 +550,78 @@ fn migration_0026(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Migration #27: Continual Harness (`/refine`, port of prime-agent's `/refine`) persistence.
+///
+/// `harness_entry` holds the durable prompt/skill/subagent artifacts the agent proposes about
+/// itself, scoped to `global`, a `project:<abs path>`, or a `session:<session id>`. `kind` +
+/// `updated_at` are the hot lookup path (context injection reads the freshest entries per scope),
+/// hence the composite index. `harness_refinement` is the append-only audit log of every batch of
+/// edits applied to `harness_entry`: `edits_json` carries each edit's full before/after entry
+/// snapshot, so [`Store::rollback_harness_refinement`] can invert a refinement from the journal
+/// alone, without depending on `harness_entry`'s current (possibly further-mutated) state.
+fn migration_0027(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS harness_entry (
+            id         TEXT PRIMARY KEY,
+            scope      TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            title      TEXT NOT NULL,
+            content    TEXT NOT NULL,
+            source     TEXT NOT NULL,
+            version    INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );
+         CREATE INDEX IF NOT EXISTS idx_harness_entry_scope_kind ON harness_entry(scope, kind);
+
+         CREATE TABLE IF NOT EXISTS harness_refinement (
+            id               TEXT PRIMARY KEY,
+            session_id       TEXT NOT NULL,
+            trigger          TEXT NOT NULL,
+            summary          TEXT NOT NULL,
+            rationale        TEXT NOT NULL,
+            expected_outcome TEXT NOT NULL,
+            edits_json       TEXT NOT NULL,
+            created_at       INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );
+         CREATE INDEX IF NOT EXISTS idx_harness_refinement_session
+             ON harness_refinement(session_id, created_at DESC)",
+    )
+}
+
+/// Migration #28: `session_heartbeat` — recurring prompts that re-enter a LIVE session
+/// (docs/features/session-heartbeats.md), unlike `forge schedule`'s OS-timer-spawned fresh
+/// `forge run` processes. One row per heartbeat. `owner` distinguishes the single user-owned
+/// heartbeat (`/heartbeat every`) from model-created ones (`manage_heartbeats`); the partial
+/// unique index on `(session_id) WHERE owner = 'user'` enforces "at most one" at the database
+/// boundary, so a second `/heartbeat every` can only ever replace the row, never duplicate it.
+/// `label` addresses an agent heartbeat for pause/resume/delete (`(session_id, label) WHERE
+/// owner = 'agent'` is unique for the same reason); the user heartbeat has no label. Local
+/// machine state like `schedule`/`queue_task` — deliberately NOT in [`PORTABLE_METADATA_TABLES`].
+/// Cascades with its session: a pruned session's heartbeats go with it.
+fn migration_0028(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_heartbeat (
+            id            TEXT PRIMARY KEY,
+            session_id    TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+            owner         TEXT NOT NULL CHECK (owner IN ('user', 'agent')),
+            label         TEXT,
+            prompt        TEXT NOT NULL,
+            interval_secs INTEGER NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused')),
+            next_due_at   INTEGER NOT NULL,
+            created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            updated_at    INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );
+         CREATE INDEX IF NOT EXISTS idx_session_heartbeat_due
+             ON session_heartbeat(session_id, status, next_due_at);
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_session_heartbeat_user_singleton
+             ON session_heartbeat(session_id) WHERE owner = 'user';
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_session_heartbeat_agent_label
+             ON session_heartbeat(session_id, label) WHERE owner = 'agent'",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -579,6 +651,8 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0024,
     migration_0025,
     migration_0026,
+    migration_0027,
+    migration_0028,
 ];
 
 /// Create the singleton rows the Anywhere sync state machine expects, if they are missing.

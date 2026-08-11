@@ -15,6 +15,9 @@ pub enum ContextSource {
     Workflow,
     Attribution,
     Lattice,
+    /// Continual Harness (`/refine`): learned prompt/skill/subagent entries injected as
+    /// supplemental context (context_pipeline::harness_context_block).
+    Harness,
 }
 
 /// One persisted system-context contribution.

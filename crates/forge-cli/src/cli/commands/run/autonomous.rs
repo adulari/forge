@@ -398,6 +398,52 @@ pub(crate) fn goal_stop_reason(
     }
 }
 
+/// Check for due session heartbeats and, if the session is idle with no turn already running,
+/// deliver the claimed tick(s) as ordinary queued turns — the same FIFO a typed-while-busy prompt
+/// goes through, never injected mid-turn (docs/features/session-heartbeats.md). Shared by the
+/// interactive TUI loop and the daemon-hosted driver loop (`DriverState`), called both right after
+/// a turn ends and on a coarse periodic tick so a heartbeat fires even while the session sits
+/// fully idle. Uses `try_lock`: on contention (a turn is starting elsewhere right now) this simply
+/// skips the check and retries on the next call rather than blocking the render loop. Returns
+/// `true` if a turn was spawned (the caller should mark its frame dirty).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_deliver_due_heartbeats(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    queued_prompts: &mut Vec<String>,
+    app: &mut forge_tui::App,
+    prompt_history: &mut Vec<String>,
+    last_prompt: &mut Option<String>,
+    done_tx: &std::sync::mpsc::Sender<u64>,
+    turn_gen: &mut u64,
+    turn_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    busy: &mut bool,
+    busy_since: &mut std::time::Instant,
+) -> bool {
+    if *busy || turn_handle.is_some() {
+        return false;
+    }
+    let due = {
+        let Ok(s) = session.try_lock() else {
+            return false;
+        };
+        forge_core::heartbeat::claim_due_heartbeat_prompts(&s.store, s.id())
+    };
+    if due.is_empty() {
+        return false;
+    }
+    queued_prompts.extend(due);
+    app.set_queued(queued_prompts);
+    let Some(next) = dequeue_prompt(queued_prompts, app, prompt_history) else {
+        return false;
+    };
+    *last_prompt = Some(next.clone());
+    *turn_gen += 1;
+    *turn_handle = Some(spawn_turn(
+        &next, session, done_tx, *turn_gen, app, busy, busy_since,
+    ));
+    true
+}
+
 /// Echo a prompt + spawn the turn task (shared by normal submit and the `//` literal escape).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_turn(
@@ -482,6 +528,35 @@ pub(crate) fn spawn_compact(
         let mut sess = s.lock().await;
         if let Err(e) = sess.compact(false).await {
             sess.notify_error(&format!("compact failed: {e}"));
+        }
+    })
+}
+
+/// Spawn `/refine` as a background task (it makes a cheap model call): the spinner ticks while the
+/// Continual Harness proposes + applies its edits, exactly like `/compact`. Success is reported by
+/// `Session::refine` itself via its own `PresenterEvent::Warning` (mirrors `compact`'s convention).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_refine(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    done_tx: &std::sync::mpsc::Sender<u64>,
+    gen: u64,
+    app: &mut forge_tui::App,
+    busy: &mut bool,
+    busy_since: &mut std::time::Instant,
+    instructions: Option<String>,
+    global: bool,
+) -> tokio::task::JoinHandle<()> {
+    app.done = false;
+    app.tick = 0;
+    *busy = true;
+    *busy_since = std::time::Instant::now();
+    let s = session.clone();
+    let dt = done_tx.clone();
+    tokio::spawn(async move {
+        let _done = DoneGuard(dt, gen);
+        let mut sess = s.lock().await;
+        if let Err(e) = sess.refine(instructions.as_deref(), global, "manual").await {
+            sess.notify_error(&format!("refine failed: {e}"));
         }
     })
 }
