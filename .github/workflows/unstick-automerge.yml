@@ -290,12 +290,50 @@ jobs:
                 # declare `timeout-minutes: 90` and legitimately run for tens of minutes, so any
                 # threshold short enough to catch a dead 5-minute aggregate would re-dispatch healthy
                 # heavy jobs.
+                # NOW HEALS, NOT ONLY WARNS. The warn-only version shipped in #1030 with the dispatch
+                # deliberately off, because its candidates were minutes old and indistinguishable
+                # from transient API lag during that day's GitHub incident. They were then observed
+                # again: every one had passed its own declared timeout while its run stayed
+                # completed, and none recovered on its own. Detection has been 3 for 3 on genuine
+                # orphans with no false positive, so the remaining question is only how to keep it
+                # that way.
+                #
+                # PERSISTENCE IS THE GUARD. Requiring the run to have been finished for
+                # CHECKS_MISSING_AFTER_SECONDS before acting means momentary run/job disagreement —
+                # the plausible failure of a degraded API — has to survive ten minutes to be
+                # actioned, which lag does not.
+                #
+                # It dispatches ONLY the workflow that owns the orphaned job, via that run's own
+                # `.path`, rather than all three. Re-running a dead `mobile checks` must not
+                # manufacture a redundant CI run on archlinux-1.
                 for stuck in $(gh api "repos/$GH_REPO/actions/runs?head_sha=$head&per_page=100" \
                   --jq '.workflow_runs[] | select(.status == "completed") | .id' 2>/dev/null); do
                   orphans=$(gh api "repos/$GH_REPO/actions/runs/$stuck/jobs" \
                     --jq '[.jobs[] | select(.status != "completed") | .name] | join(", ")' 2>/dev/null || echo "")
-                  if [ -n "$orphans" ]; then
-                    echo "::warning title=Orphaned check job::#$pr run $stuck completed while job(s) [$orphans] are still in_progress on $head. A required context in that state never settles and will block this PR indefinitely — re-dispatch that workflow at the branch. See docs/ci/reading-ci-state.md trap 5."
+                  [ -z "$orphans" ] && continue
+
+                  run_path=$(gh api "repos/$GH_REPO/actions/runs/$stuck" --jq '.path' 2>/dev/null || echo "")
+                  run_ended=$(gh api "repos/$GH_REPO/actions/runs/$stuck" --jq '.updated_at' 2>/dev/null || echo "")
+                  stuck_age=0
+                  if [ -n "$run_ended" ]; then
+                    stuck_age=$(( $(date -u +%s) - $(date -u -d "$run_ended" +%s) ))
+                  fi
+
+                  echo "::warning title=Orphaned check job::#$pr run $stuck completed while job(s) [$orphans] are still in_progress on $head. A required context in that state never settles and will block this PR indefinitely. See docs/ci/reading-ci-state.md trap 5."
+
+                  if [ -z "$run_path" ] || [ "$stuck_age" -le "$CHECKS_MISSING_AFTER_SECONDS" ]; then
+                    echo "#$pr: orphan on $stuck not yet ${CHECKS_MISSING_AFTER_SECONDS}s old (or workflow path unknown) — leaving it one more cycle to settle"
+                    continue
+                  fi
+                  if [ "$dispatches_done" -ge "$MAX_DISPATCHES_PER_RUN" ]; then
+                    echo "#$pr: orphan on $stuck needs a re-dispatch — deferred to the next run (this run already dispatched for $MAX_DISPATCHES_PER_RUN PRs)"
+                    continue
+                  fi
+                  if gh workflow run "$run_path" --ref "$branch"; then
+                    dispatches_done=$(( dispatches_done + 1 ))
+                    echo "#$pr: re-dispatched $run_path to replace the orphaned job(s) [$orphans]"
+                  else
+                    echo "::warning title=Check dispatch failed::could not re-dispatch $run_path for #$pr ($branch)"
                   fi
                 done
 
