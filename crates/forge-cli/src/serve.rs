@@ -487,6 +487,14 @@ pub(crate) struct DaemonState {
 /// One row of `GET /api/sessions` — the fleet dashboard's data. `waiting` is the killer signal
 /// (a permission prompt or question is blocking the turn until a human decides); the list is
 /// served with waiting sessions FIRST so the dashboard surfaces them without client-side logic.
+///
+/// `read_only` (additive; absent/false on anything serialized before this field existed, so an
+/// older mobile client that doesn't know the key simply never shows the badge) marks a session
+/// this daemon is NOT driving: a plain terminal `forge` chat process published its presence into
+/// the shared store (see `forge_store::Store::local_live_sessions`). There is no input path for
+/// these — no driver task, no input queue — so remote clients must never offer to send one; the
+/// transcript/session-detail routes refuse writes server-side for these ids regardless of what a
+/// client tries (defense in depth, see `session_is_remote_writable`).
 #[derive(serde::Serialize)]
 struct SessionRow {
     id: String,
@@ -494,7 +502,9 @@ struct SessionRow {
     cwd: String,
     worktree: Option<String>,
     busy: bool,
-    /// A permission prompt or question is pending — the session is blocked on a human.
+    /// A permission prompt or question is pending — the session is blocked on a human. Always
+    /// `false` for a `read_only` row: local presence doesn't publish that state (see the struct
+    /// doc comment), and a remote client couldn't act on it anyway.
     waiting: bool,
     cost_usd: f64,
     /// Context-window fill (v7 fleet fields), same numbers the statusline gauge shows.
@@ -503,16 +513,24 @@ struct SessionRow {
     model: String,
     created_at: i64,
     last_activity: i64,
+    /// `true` for a terminal-local session this daemon merely observes via the store, never
+    /// drives. See the struct doc comment.
+    #[serde(default)]
+    read_only: bool,
 }
 
-/// Fleet ordering: waiting-on-decision first (they need a human NOW), then newest-created.
-/// Created-at (not last-activity) as the tiebreak keeps the list stable while sessions stream;
-/// the id breaks created-at ties (second granularity) so rows created in the same second don't
-/// shuffle between polls with the registry map's iteration order.
+/// Fleet ordering: waiting-on-decision first (they need a human NOW), then busy, then idle —
+/// drivable (daemon-hosted) sessions always sort ahead of `read_only` ones so the two groups stay
+/// visually separated instead of interleaving by recency. Created-at (not last-activity) as the
+/// tiebreak keeps the list stable while sessions stream; the id breaks created-at ties (second
+/// granularity) so rows created in the same second don't shuffle between polls with the registry
+/// map's iteration order.
 fn sort_session_rows(rows: &mut [SessionRow]) {
     rows.sort_by(|a, b| {
-        b.waiting
-            .cmp(&a.waiting)
+        a.read_only
+            .cmp(&b.read_only)
+            .then(b.waiting.cmp(&a.waiting))
+            .then(b.busy.cmp(&a.busy))
             .then(b.created_at.cmp(&a.created_at))
             .then_with(|| a.id.cmp(&b.id))
     });
@@ -1073,10 +1091,16 @@ use serve_providers::*;
 use serve_usage::*;
 use serve_workflows::*;
 
-/// `GET /api/sessions` — the fleet list, newest first.
+/// `GET /api/sessions` — the fleet list, newest first. Merges the daemon's own driven sessions
+/// with terminal-local sessions a plain `forge` chat process published presence for (read-only —
+/// see the [`SessionRow`] doc comment). A session id can't be in both groups in practice (a
+/// session is either daemon-driven or terminal-local, never both at once), but daemon-driven wins
+/// any collision defensively rather than showing the same id twice.
 async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
     let mut rows: Vec<SessionRow> = Vec::new();
+    let mut driven_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for h in state.registry.all().await {
+        driven_ids.insert(h.session_id.clone());
         let snap = h.snapshot_rx.borrow().snapshot.clone();
         rows.push(SessionRow {
             id: h.session_id.clone(),
@@ -1091,6 +1115,33 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             model: snap.model,
             created_at: h.created_at,
             last_activity: h.last_activity.load(std::sync::atomic::Ordering::Relaxed),
+            read_only: false,
+        });
+    }
+    let store = state.store.clone();
+    let local_rows = tokio::task::spawn_blocking(move || store.local_live_sessions())
+        .await
+        .ok()
+        .and_then(std::result::Result::ok)
+        .unwrap_or_default();
+    for local in local_rows {
+        if driven_ids.contains(&local.id) {
+            continue;
+        }
+        rows.push(SessionRow {
+            id: local.id,
+            title: local.title.unwrap_or_default(),
+            cwd: local.cwd,
+            worktree: local.worktree_path,
+            busy: local.busy,
+            waiting: false,
+            cost_usd: 0.0,
+            context_tokens: 0,
+            context_limit: None,
+            model: local.model.unwrap_or_default(),
+            created_at: local.created_at,
+            last_activity: local.last_activity,
+            read_only: true,
         });
     }
     sort_session_rows(&mut rows);
@@ -1747,7 +1798,7 @@ async fn past_sessions(
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     let before = params.before;
     // Ids the daemon is currently driving — these are shown by `/api/sessions`, not here.
-    let running: std::collections::HashSet<String> = state
+    let mut running: std::collections::HashSet<String> = state
         .registry
         .all()
         .await
@@ -1756,6 +1807,12 @@ async fn past_sessions(
         .collect();
     let store = state.store.clone();
     let rows: Vec<PastSessionRow> = tokio::task::spawn_blocking(move || {
+        // Terminal-local sessions are also shown by `/api/sessions` (read-only) rather than here,
+        // even though the daemon isn't driving them — without this a locally-live session would
+        // appear in BOTH lists until its heartbeat went stale.
+        if let Ok(local) = store.local_live_sessions() {
+            running.extend(local.into_iter().map(|row| row.id));
+        }
         store
             .list_sessions_for_resume()
             .unwrap_or_default()
@@ -2168,6 +2225,25 @@ struct WsParams {
     rev: u64,
 }
 
+/// Defense in depth for the WS input path: a terminal-local session is never in the daemon's
+/// registry (no driver task exists for it), so the registry lookup in [`ws_handler`] already
+/// fails closed. This turns that failure into a specific, honest error instead of the ambiguous
+/// "not found" a made-up id would also get — the client just saw this id, flagged `read_only`, in
+/// `GET /api/sessions` (see the [`SessionRow`] doc comment).
+fn reject_ws_if_local_read_only(store: &forge_store::Store, session_id: &str) -> Option<Response> {
+    if store
+        .is_session_local_read_only(session_id)
+        .unwrap_or(false)
+    {
+        Some(err_response(
+            axum::http::StatusCode::FORBIDDEN,
+            "session is terminal-local and read-only; it has no remote input path",
+        ))
+    } else {
+        None
+    }
+}
+
 /// Counts one attached WS client for the lifetime of its connection — the push debounce signal
 /// (`crate::push::should_push`): any client attached ⇒ someone is watching ⇒ no push.
 struct WsClientGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -2204,6 +2280,9 @@ async fn ws_handler(
             )
         }
         Ok(false) => {}
+    }
+    if let Some(rejection) = reject_ws_if_local_read_only(&state.store, &params.session) {
+        return rejection;
     }
     let Some(handle) = state.registry.get(&params.session).await else {
         return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
@@ -3079,6 +3158,92 @@ mod tests {
         assert_eq!(body["path"], canonical_root.display().to_string());
         assert_eq!(body["parent"], serde_json::Value::Null);
         assert_eq!(body["entries"][0]["name"], "project");
+    }
+
+    /// `GET /api/sessions` merges the daemon's (empty here) registry with terminal-local presence
+    /// rows the store carries, flagging the latter `read_only: true`. This is the same route
+    /// remote/Anywhere clients read through the tunnel (see `AnywhereTransport`'s `list_sessions`
+    /// mapping) — a plain `forge` chat session with no driver task must still show up there.
+    #[tokio::test]
+    async fn list_sessions_merges_in_local_presence_as_read_only() {
+        use tower::ServiceExt;
+
+        let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let local_id = store.create_session("/tmp/local-chat", "default").unwrap();
+        store
+            .add_message(&local_id, 0, forge_types::Role::User, "hi", None)
+            .unwrap();
+        store.set_session_local_live(&local_id, true).unwrap();
+        store.touch_session_local_presence(&local_id, true).unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: "/tmp".into(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let response = daemon_router(state)
+            .oneshot(
+                axum::http::Request::get("/tok/api/sessions")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let rows = json_body(response).await;
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], local_id);
+        assert_eq!(rows[0]["read_only"], true);
+        assert_eq!(rows[0]["busy"], true);
+        assert_eq!(
+            rows[0]["waiting"], false,
+            "local presence never reports waiting"
+        );
+    }
+
+    /// Defense in depth: a remote client that dials `/ws?session=<id>` for a terminal-local id
+    /// (e.g. one it just saw in the fleet list) is refused with a specific, honest error — not
+    /// silently accepted, and not the ambiguous "not found" a made-up id would also get.
+    ///
+    /// This exercises [`reject_ws_if_local_read_only`] directly rather than the full `/ws` route:
+    /// `WebSocketUpgrade` extraction needs a real hyper connection to populate `OnUpgrade` (it
+    /// 426s any request built by hand, headers or not — the extractor itself, not `ws_handler`'s
+    /// body, gates that), so `oneshot`-driving the actual route can't reach this check. The
+    /// extracted function is the one and only thing `ws_handler` consults for the decision, so
+    /// testing it directly still covers the real refusal logic.
+    #[test]
+    fn reject_ws_if_local_read_only_refuses_a_terminal_local_session() {
+        let store = forge_store::Store::open_in_memory().unwrap();
+        let local_id = store.create_session("/tmp/local-chat", "default").unwrap();
+        store
+            .add_message(&local_id, 0, forge_types::Role::User, "hi", None)
+            .unwrap();
+
+        // Not yet marked local-live (or an id the daemon should drive itself): no rejection —
+        // the registry lookup downstream is the real gate for that case.
+        assert!(reject_ws_if_local_read_only(&store, &local_id).is_none());
+
+        store.set_session_local_live(&local_id, true).unwrap();
+        let rejection = reject_ws_if_local_read_only(&store, &local_id)
+            .expect("a terminal-local session must be refused");
+        assert_eq!(rejection.status(), axum::http::StatusCode::FORBIDDEN);
+
+        // Cleared (clean terminal exit): the id is drivable/absent again, not read-only.
+        store.set_session_local_live(&local_id, false).unwrap();
+        assert!(reject_ws_if_local_read_only(&store, &local_id).is_none());
+
+        // An unknown id must never be reported read-only (that would leak presence information
+        // about ids that were never marked local-live in the first place).
+        assert!(reject_ws_if_local_read_only(&store, "does-not-exist").is_none());
     }
 
     #[tokio::test]
@@ -5252,6 +5417,7 @@ mod tests {
             model: "m".into(),
             created_at,
             last_activity: created_at,
+            read_only: false,
         };
         let mut rows = vec![
             mk("new-idle", false, 30),
@@ -5285,6 +5451,79 @@ mod tests {
         assert_eq!(v["context_limit"], 200_000);
         assert_eq!(v["cost_usd"], 0.5);
         assert_eq!(v["last_activity"], 10);
+    }
+
+    #[test]
+    fn fleet_rows_sort_read_only_sessions_after_every_drivable_one() {
+        let mk =
+            |id: &str, read_only: bool, waiting: bool, busy: bool, created_at: i64| SessionRow {
+                id: id.into(),
+                title: String::new(),
+                cwd: "/w".into(),
+                worktree: None,
+                busy,
+                waiting,
+                cost_usd: 0.0,
+                context_tokens: 0,
+                context_limit: None,
+                model: "m".into(),
+                created_at,
+                last_activity: created_at,
+                read_only,
+            };
+        // A read-only local session that is BOTH waiting and newer than every drivable session
+        // must still sort last: remote clients can't act on it, so it must never crowd out a
+        // session they can actually drive.
+        let mut rows = vec![
+            mk("local-waiting", true, true, false, 999),
+            mk("driven-idle", false, false, false, 1),
+            mk("driven-busy", false, false, true, 2),
+        ];
+        sort_session_rows(&mut rows);
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["driven-busy", "driven-idle", "local-waiting"],
+            "drivable sessions (waiting > busy > idle) sort ahead of every read_only one"
+        );
+
+        // Within the read_only tier, busy still beats idle.
+        let mut local_rows = vec![
+            mk("local-idle", true, false, false, 5),
+            mk("local-busy", true, false, true, 1),
+        ];
+        sort_session_rows(&mut local_rows);
+        assert_eq!(
+            local_rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["local-busy", "local-idle"]
+        );
+    }
+
+    #[test]
+    fn fleet_row_read_only_defaults_false_so_a_pre_flag_snapshot_still_parses() {
+        // An old server (or a cached response) never emitted `read_only` at all. `#[serde(default)]`
+        // is what lets a NEW client still parse it, degrading to "drivable" rather than erroring —
+        // the whole point of an additive field instead of a protocol version bump.
+        let legacy = serde_json::json!({
+            "id": "s1",
+            "title": "",
+            "cwd": "/w",
+            "worktree": null,
+            "busy": false,
+            "waiting": false,
+            "cost_usd": 0.0,
+            "context_tokens": 0,
+            "context_limit": null,
+            "model": "m",
+            "created_at": 1,
+            "last_activity": 1
+        });
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            #[serde(default)]
+            read_only: bool,
+        }
+        let parsed: Wire = serde_json::from_value(legacy).unwrap();
+        assert!(!parsed.read_only);
     }
 
     /// The whole upload promise over a REAL driver + the REAL router: a multipart POST with a

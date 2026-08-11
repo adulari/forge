@@ -257,6 +257,157 @@ pub fn render_json(id: &str, entries: &[ReplayEntry]) -> String {
     serde_json::to_string_pretty(&obj).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
 }
 
+/// Escape the five HTML-significant characters. Message/tool content is untrusted (it's whatever
+/// the user typed or the model/tools produced), so every dynamic value `render_html` interpolates
+/// goes through this — including the session id, which is normally a generated UUID but costs
+/// nothing to escape defensively too.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+const HTML_CSS: &str = r#"
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 14px;
+    margin: 0;
+    padding: 2rem;
+    max-width: 960px;
+    margin-inline: auto;
+    background: #f7f7f8;
+    color: #1a1a1a;
+    line-height: 1.55;
+}
+@media (prefers-color-scheme: dark) {
+    body { background: #16171b; color: #e4e4e7; }
+    .turn { background: #1f2024; border-color: #2c2d33; }
+    dd { color: #f0f0f2; }
+    .tool-call { background: #17181c; color: #a9b1c2; }
+}
+header { margin-bottom: 2rem; border-bottom: 1px solid rgba(127,127,127,0.35); padding-bottom: 1rem; }
+h1 { font-size: 1.05rem; margin: 0 0 0.9rem; font-weight: 600; }
+dl.summary { display: flex; flex-wrap: wrap; gap: 0.5rem 1.75rem; margin: 0; padding: 0; }
+dl.summary > div { display: flex; gap: 0.4rem; align-items: baseline; }
+dt { opacity: 0.6; }
+dd { margin: 0; font-weight: 600; }
+main { display: flex; flex-direction: column; gap: 0.75rem; }
+.turn {
+    border: 1px solid rgba(127,127,127,0.25);
+    border-radius: 8px;
+    padding: 0.65rem 0.9rem;
+    background: #ffffff;
+}
+.turn-header { display: flex; gap: 0.75rem; align-items: baseline; margin-bottom: 0.35rem; }
+.role { font-weight: 700; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.04em; padding: 0.1rem 0.4rem; border-radius: 4px; }
+.role-user { background: rgba(90,140,255,0.18); color: #3a67d4; }
+.role-assistant { background: rgba(90,200,140,0.18); color: #1f8a56; }
+.role-tool { background: rgba(200,150,60,0.18); color: #9a6a10; }
+.role-system { background: rgba(150,150,150,0.2); color: #6b6b6b; }
+@media (prefers-color-scheme: dark) {
+    .role-user { color: #8fb2ff; }
+    .role-assistant { color: #6fdba3; }
+    .role-tool { color: #e0b45c; }
+    .role-system { color: #a8a8a8; }
+}
+.meta { opacity: 0.55; font-size: 0.78rem; }
+.content { margin: 0; white-space: pre-wrap; word-break: break-word; font: inherit; }
+.tool-call { margin-top: 0.4rem; padding: 0.3rem 0.5rem; border-radius: 5px; background: #f0f0f2; font-size: 0.82rem; white-space: pre-wrap; word-break: break-word; color: #55596b; }
+footer { margin-top: 2rem; opacity: 0.5; font-size: 0.78rem; }
+"#;
+
+/// Self-contained HTML render of a session transcript — `forge replay <id> --html <path>` and the
+/// TUI's `/export`. One file: session metadata header (id, started/ended, models, cost, tokens)
+/// then the turn sequence as user/assistant/tool cards, inline CSS only, no external assets,
+/// dark-friendly via `prefers-color-scheme`. All dynamic content is HTML-escaped — message and
+/// tool-call content is untrusted text.
+pub fn render_html(id: &str, entries: &[ReplayEntry]) -> String {
+    let s = summarize(entries);
+    let started = s
+        .started_at
+        .map(fmt_time)
+        .unwrap_or_else(|| "—".to_string());
+    let ended = s.ended_at.map(fmt_time).unwrap_or_else(|| "—".to_string());
+    let models = if s.models.is_empty() {
+        "—".to_string()
+    } else {
+        s.models
+            .iter()
+            .map(|m| escape_html(m))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut turns = String::new();
+    for e in entries {
+        let role = role_label(&e.role);
+        let meta = match (&e.model, e.cost_usd) {
+            (Some(m), Some(c)) => format!(" · {} · ${c:.4}", escape_html(m)),
+            (Some(m), None) => format!(" · {}", escape_html(m)),
+            _ => String::new(),
+        };
+        let mut tool_html = String::new();
+        for tc in &e.tool_calls {
+            tool_html.push_str(&format!(
+                "<pre class=\"tool-call\">↳ {}({})</pre>\n",
+                escape_html(&tc.name),
+                escape_html(&tc.args.to_string()),
+            ));
+        }
+        turns.push_str(&format!(
+            "<article class=\"turn\" data-role=\"{role}\">\n\
+             <div class=\"turn-header\"><span class=\"role role-{role}\">{role}</span><span class=\"meta\">{}{meta}</span></div>\n\
+             <pre class=\"content\">{}</pre>\n\
+             {tool_html}\
+             </article>\n",
+            escape_html(&fmt_time(e.created_at)),
+            escape_html(&e.content),
+        ));
+    }
+
+    let esc_id = escape_html(id);
+    format!(
+        "<!doctype html>\n\
+<html lang=\"en\">\n\
+<head>\n\
+<meta charset=\"utf-8\">\n\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+<title>forge session {esc_id}</title>\n\
+<style>{HTML_CSS}</style>\n\
+</head>\n\
+<body>\n\
+<header>\n\
+<h1>session {esc_id}</h1>\n\
+<dl class=\"summary\">\n\
+<div><dt>started</dt><dd>{started}</dd></div>\n\
+<div><dt>ended</dt><dd>{ended}</dd></div>\n\
+<div><dt>prompts</dt><dd>{}</dd></div>\n\
+<div><dt>messages</dt><dd>{}</dd></div>\n\
+<div><dt>models</dt><dd>{models}</dd></div>\n\
+<div><dt>cost</dt><dd>${:.4}</dd></div>\n\
+<div><dt>tokens</dt><dd>{}↑ / {}↓</dd></div>\n\
+</dl>\n\
+</header>\n\
+<main>\n\
+{turns}</main>\n\
+<footer>generated by <code>forge replay --html</code> — a self-contained, offline snapshot</footer>\n\
+</body>\n\
+</html>\n",
+        s.prompts, s.messages, s.total_cost, s.total_in, s.total_out,
+    )
+}
+
 /// The original user prompts of a session, in turn order — the input to re-execution
 /// (`forge replay <id> --rerun`). Only `User` turns are real prompts; assistant/tool entries
 /// are model output. Blank entries are dropped so an empty turn can't feed the agent an empty
@@ -431,5 +582,89 @@ mod tests {
         assert_eq!(v["turns"].as_array().unwrap().len(), 2);
         assert_eq!(v["turns"][0]["role"], "user");
         assert_eq!(v["turns"][1]["model"], "openai::gpt-4o");
+    }
+
+    #[test]
+    fn render_html_escapes_a_script_tag_inert() {
+        let entries = vec![entry(
+            0,
+            Role::User,
+            "<script>alert(1)</script>",
+            None,
+            None,
+        )];
+        let out = render_html("abc123", &entries);
+        assert!(
+            !out.contains("<script>alert(1)</script>"),
+            "the raw tag must never appear unescaped in the output"
+        );
+        assert!(out.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    }
+
+    #[test]
+    fn render_html_escapes_tool_call_name_and_args() {
+        let mut e = entry(1, Role::Assistant, "running a tool", Some("m"), None);
+        e.tool_calls.push(ToolCall {
+            id: "c1".into(),
+            name: "<b>evil</b>".into(),
+            args: serde_json::json!({ "cmd": "<img src=x onerror=alert(1)>" }),
+        });
+        let out = render_html("abc123", &[e]);
+        assert!(!out.contains("<b>evil</b>"));
+        assert!(!out.contains("<img src=x onerror=alert(1)>"));
+        assert!(out.contains("&lt;b&gt;evil&lt;/b&gt;"));
+    }
+
+    #[test]
+    fn render_html_has_one_turn_marker_per_entry() {
+        let entries = vec![
+            entry(0, Role::User, "first", None, None),
+            entry(1, Role::Assistant, "second", Some("m"), Some(0.01)),
+            entry(2, Role::User, "third", None, None),
+            entry(3, Role::Assistant, "fourth", Some("m"), Some(0.02)),
+        ];
+        let out = render_html("full-id-here", &entries);
+        assert_eq!(
+            out.matches("class=\"turn\"").count(),
+            entries.len(),
+            "one turn card per replay entry"
+        );
+    }
+
+    #[test]
+    fn render_html_is_one_self_contained_well_formed_document() {
+        let entries = vec![
+            entry(0, Role::User, "hello", None, None),
+            entry(
+                1,
+                Role::Assistant,
+                "world",
+                Some("openai::gpt-4o"),
+                Some(0.01),
+            ),
+        ];
+        let out = render_html("full-id-here", &entries);
+        assert!(out.trim_start().starts_with("<!doctype html>"));
+        assert!(out.contains("<html"));
+        assert!(out.contains("</html>"));
+        assert!(out.contains("<style>"), "CSS is inlined, not linked");
+        assert!(
+            !out.contains("http://") && !out.contains("https://") && !out.contains("<link "),
+            "no external assets"
+        );
+        assert!(out.contains("session full-id-h"));
+        assert!(out.contains("openai::gpt-4o"));
+        // Balanced enough to be well-formed for this generator's own fixed structure.
+        assert_eq!(
+            out.matches("<article").count(),
+            out.matches("</article>").count()
+        );
+    }
+
+    #[test]
+    fn render_html_on_empty_transcript_still_produces_a_valid_shell() {
+        let out = render_html("empty-id", &[]);
+        assert!(out.contains("<!doctype html>"));
+        assert_eq!(out.matches("class=\"turn\"").count(), 0);
     }
 }

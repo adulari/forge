@@ -119,6 +119,7 @@ pub(super) const LEAN_DROPPED_TOOLS: &[&str] = &[
     "send_to_agent",
     "remember",
     "present_plan",
+    "manage_heartbeats",
 ];
 
 /// Hard cap (bytes) on the `use_skill` description advertised to a bridged CLI. The full skill

@@ -18,6 +18,8 @@ mod fleet_message_store;
 mod fork_store;
 mod handoff;
 mod handoff_types;
+mod harness_store;
+mod heartbeat_store;
 mod lattice_store;
 mod live_session_store;
 mod memory;
@@ -51,12 +53,13 @@ pub use handoff_types::{
     HandoffCheckpoint, HandoffImportProvenance, HandoffMessage, HandoffSessionExport,
     HandoffSessionImport, ImportedSessionMetadata,
 };
+pub use harness_store::{AppliedHarnessEdit, HarnessEdit, HarnessEntry, HarnessRefinement};
 pub use memory::Memory;
 
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 29;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1504,6 +1507,27 @@ pub struct CheckpointRow {
     pub created_at: i64,
 }
 
+/// A heartbeat older than this means the terminal that opened the session is gone (crashed,
+/// `kill -9`, laptop slept and never woke the process again) even though it never cleared
+/// `local_live` — see [`Store::local_live_sessions`].
+pub const LOCAL_PRESENCE_STALE_SECS: i64 = 60;
+
+/// One row of the terminal-local fleet: a session currently open in an interactive `forge` chat
+/// process, read straight from the store (there is no in-memory driver to ask, unlike a
+/// `forge serve`-hosted session).
+#[derive(Debug, Clone)]
+pub struct LocalPresenceRow {
+    pub id: String,
+    pub title: Option<String>,
+    pub cwd: String,
+    pub worktree_path: Option<String>,
+    pub busy: bool,
+    pub created_at: i64,
+    pub last_activity: i64,
+    /// The most recently routed model, or `None` if the session hasn't taken a turn yet.
+    pub model: Option<String>,
+}
+
 /// A one-line summary of a past session, for `forge sessions`.
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
@@ -1650,6 +1674,25 @@ pub struct QueueTask {
     pub gate: Option<String>,
 }
 
+/// One `session_heartbeat` row: a recurring prompt that re-enters a LIVE session, as opposed to
+/// `forge schedule`'s OS-timer-spawned fresh `forge run` processes (docs/features/
+/// session-heartbeats.md). `owner` is `"user"` (at most one per session, created by
+/// `/heartbeat every`) or `"agent"` (model-created via `manage_heartbeats`, addressed by
+/// `label`, up to a small cap per session). `status` is `"active"` or `"paused"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionHeartbeat {
+    pub id: String,
+    pub session_id: String,
+    pub owner: String,
+    pub label: Option<String>,
+    pub prompt: String,
+    pub interval_secs: i64,
+    pub status: String,
+    pub next_due_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 /// One recorded run of a saved workflow (`/workflow run <name>`). `status` lifecycle:
 /// `running` → `ok` / `failed` (the script returned) / `interrupted` (the turn was aborted, or the
 /// process died mid-run — see [`Store::list_workflow_runs`]). `phases`/`agents`/`cost_usd` are the
@@ -1700,6 +1743,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_usage_row_records_the_model_that_produced_it() {
+        // `usage.provider` and `usage.model` were never written, so every row read back NULL and
+        // grouping on the column collapsed the whole page into one bucket. The read side works
+        // around it by deriving the provider from `message.model`; this keeps new rows honest so
+        // the columns stop being a trap for the next query that trusts them.
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/tmp/usage", "Default").unwrap();
+        let message = store
+            .add_message(
+                &session,
+                0,
+                forge_types::Role::Assistant,
+                "hi",
+                Some("codex-oauth::gpt-5.6-luna"),
+            )
+            .unwrap();
+        store
+            .record_usage(
+                &session,
+                &message,
+                &Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+                Some("codex-oauth::gpt-5.6-luna"),
+            )
+            .unwrap();
+
+        let (provider, model): (Option<String>, Option<String>) = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT provider, model FROM usage WHERE message_id = ?1",
+                [&message],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(provider.as_deref(), Some("codex-oauth"));
+        assert_eq!(model.as_deref(), Some("codex-oauth::gpt-5.6-luna"));
+    }
+
+    #[test]
+    fn usage_without_a_routed_model_stays_null_rather_than_inventing_one() {
+        // A side call with no routed model must not be attributed to a guess.
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/tmp/usage-none", "Default").unwrap();
+        let message = store
+            .add_message(&session, 0, forge_types::Role::User, "q", None)
+            .unwrap();
+        store
+            .record_usage(&session, &message, &Usage::default(), Some("   "))
+            .unwrap();
+
+        let provider: Option<String> = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT provider FROM usage WHERE message_id = ?1",
+                [&message],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(provider.is_none(), "blank model must not become a provider");
+    }
+
+    #[test]
     fn daemon_live_fleet_survives_a_restart_but_excludes_finished_sessions() {
         // Restarting `forge serve` came back with an empty fleet: sessions persisted, but nothing
         // put them back in the registry, so a mid-task session was invisible to every client until
@@ -1735,6 +1845,92 @@ mod tests {
         // Closing a session removes it from the fleet a later restart would restore.
         store.set_session_daemon_live(&live, false).unwrap();
         assert!(store.daemon_live_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_presence_upsert_reports_busy_state_and_model() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp/local", "Default").unwrap();
+        store
+            .add_message(&sid, 0, forge_types::Role::User, "work", None)
+            .unwrap();
+
+        // Not yet marked local-live: invisible to the fleet even though it exists.
+        assert!(store.local_live_sessions().unwrap().is_empty());
+
+        store.set_session_local_live(&sid, true).unwrap();
+        let rows = store.local_live_sessions().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, sid);
+        assert!(!rows[0].busy, "starts idle until a turn begins");
+        assert_eq!(rows[0].model, None, "no turn has routed a model yet");
+
+        store.touch_session_local_presence(&sid, true).unwrap();
+        let rows = store.local_live_sessions().unwrap();
+        assert!(rows[0].busy, "touch(busy=true) must flip the fleet row");
+
+        store.touch_session_local_presence(&sid, false).unwrap();
+        assert!(!store.local_live_sessions().unwrap()[0].busy);
+
+        // Clean exit removes the session from the fleet.
+        store.set_session_local_live(&sid, false).unwrap();
+        assert!(store.local_live_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_presence_touch_is_a_no_op_for_a_session_that_was_never_marked_live() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp/never-live", "Default").unwrap();
+        // No set_session_local_live(true) call — simulates a non-interactive path (e.g. an MCP
+        // agent) touching presence by mistake. Must not silently promote the session into the
+        // fleet.
+        store.touch_session_local_presence(&sid, true).unwrap();
+        assert!(store.local_live_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_presence_ages_out_a_stale_heartbeat() {
+        // A killed terminal (crash, `kill -9`, laptop that never woke back up) never runs its own
+        // cleanup — set_session_local_live(false) simply never happens. The read side must not
+        // show that session as live forever.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp/stale", "Default").unwrap();
+        store
+            .add_message(&sid, 0, forge_types::Role::User, "work", None)
+            .unwrap();
+        store.set_session_local_live(&sid, true).unwrap();
+        assert_eq!(store.local_live_sessions().unwrap().len(), 1);
+
+        // Back-date the heartbeat past the staleness threshold directly (no real sleep in a test).
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session SET local_last_seen = strftime('%s','now') - ?1 WHERE id = ?2",
+                rusqlite::params![LOCAL_PRESENCE_STALE_SECS + 1, sid],
+            )
+            .unwrap();
+
+        assert!(
+            store.local_live_sessions().unwrap().is_empty(),
+            "a stale heartbeat must age the session out of the fleet"
+        );
+    }
+
+    #[test]
+    fn local_presence_excludes_archived_and_subagent_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let archived = store.create_session("/tmp/archived", "Default").unwrap();
+        store
+            .add_message(&archived, 0, forge_types::Role::User, "work", None)
+            .unwrap();
+        store.set_session_local_live(&archived, true).unwrap();
+        store.archive_session(&archived).unwrap();
+
+        assert!(
+            store.local_live_sessions().unwrap().is_empty(),
+            "an archived session must stay out of the fleet even if still marked local_live"
+        );
     }
 
     #[test]
@@ -1816,6 +2012,7 @@ mod tests {
                     cached_input_tokens: 7,
                     cost_usd: 0.02,
                 },
+                None,
             )
             .unwrap();
         store
@@ -1840,6 +2037,7 @@ mod tests {
                     cached_input_tokens: 0,
                     cost_usd: cost,
                 },
+                None,
             )
             .unwrap();
     }
@@ -1939,6 +2137,7 @@ mod tests {
                     cached_input_tokens: 0,
                     cost_usd: 0.03,
                 },
+                None,
             )
             .unwrap();
 
@@ -2767,7 +2966,9 @@ mod tests {
                 Some("codex-oauth::gpt-5.6-terra"),
             )
             .unwrap();
-        store.record_usage(&sid, &m0, &usage(100, 10, 60)).unwrap();
+        store
+            .record_usage(&sid, &m0, &usage(100, 10, 60), None)
+            .unwrap();
         let m1 = store
             .add_message(
                 &sid,
@@ -2777,11 +2978,15 @@ mod tests {
                 Some("codex-oauth::gpt-5.6-terra"),
             )
             .unwrap();
-        store.record_usage(&sid, &m1, &usage(50, 5, 25)).unwrap();
+        store
+            .record_usage(&sid, &m1, &usage(50, 5, 25), None)
+            .unwrap();
         let m2 = store
             .add_message(&sid, 2, Role::Assistant, "c", Some("nvidia::z-ai/glm-5.2"))
             .unwrap();
-        store.record_usage(&sid, &m2, &usage(30, 3, 15)).unwrap();
+        store
+            .record_usage(&sid, &m2, &usage(30, 3, 15), None)
+            .unwrap();
         store
             .record_side_call_usage(&sid, "compact", &usage(20, 2, 10))
             .unwrap();
@@ -3141,6 +3346,7 @@ mod tests {
                     output_tokens: 5,
                     ..Default::default()
                 },
+                None,
             )
             .unwrap();
         let m2 = store
@@ -3155,6 +3361,7 @@ mod tests {
                     output_tokens: 10,
                     ..Default::default()
                 },
+                None,
             )
             .unwrap();
         assert_eq!(store.session_step_count(&sid).unwrap(), 2);

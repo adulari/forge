@@ -28,6 +28,7 @@ use forge_types::{Presenter, PresenterEvent};
 
 pub mod assay;
 mod auxiliary_policy;
+mod btw_policy;
 pub mod capsule;
 mod compaction_policy;
 mod completeness;
@@ -37,6 +38,7 @@ pub(crate) mod context_pipeline;
 mod detached_subagents;
 pub mod duel;
 pub mod fleet;
+pub mod heartbeat;
 pub mod hooks;
 pub mod llm_router;
 mod model_loop;
@@ -49,6 +51,7 @@ pub mod permission;
 pub mod project_context;
 mod quality_gates;
 pub mod readiness;
+mod refinement;
 mod replay;
 mod routing_policy;
 mod session_controls;
@@ -1552,6 +1555,9 @@ pub struct Session {
     /// this registry does not — it's rebuilt empty on every fresh `Session`, which is correct: a
     /// new process has no live tasks to abort, only rows to reconcile (see `Session::resume`).
     detached_registry: subagent::DetachedRegistry,
+    /// Completed turns since the last Continual Harness refinement (refinement.rs). Drives
+    /// `harness.auto_refine = "turns"`; reset whenever [`Session::refine`] runs, manual or auto.
+    turns_since_refine: u32,
 }
 
 /// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
@@ -2043,6 +2049,14 @@ impl Session {
         {
             specs.push(remember_spec());
         }
+        // Agent-created recurring re-entry prompts — distinct from the user's own `/heartbeat`.
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(heartbeat::MANAGE_HEARTBEATS_TOOL))
+        {
+            specs.push(heartbeat::manage_heartbeats_spec());
+        }
         // The plan-presentation tool — offered ONLY in planning mode, so the model proposes a plan
         // (rendered as an interactive card) instead of editing. Gating it to Plan mode also makes
         // the approve→Auto-edit→build flow non-recursive (the build turn can't re-propose a plan).
@@ -2513,6 +2527,28 @@ impl Session {
                             "💭 recalled {} memories from past sessions",
                             mems.len()
                         )));
+                    }
+                }
+            }
+
+            // Continual Harness context injection (refinement.rs): surface the learned
+            // prompt/skill/subagent entries this agent has proposed about itself in past
+            // sessions, right alongside auto-memory recall above — same one-shot-per-session
+            // placement, same "durable context from earlier work" spirit, but scoped to how
+            // Forge itself should operate rather than facts about the project.
+            if self.config.harness.enabled {
+                if let Ok(overview) = self.harness_overview() {
+                    if let Some(block) = context_pipeline::harness_context_block(
+                        &overview,
+                        self.config.harness.max_context_entries,
+                        self.config.harness.max_entry_chars,
+                    ) {
+                        self.inject_context(
+                            &mut context_pack,
+                            context_pack::ContextSource::Harness,
+                            "learned harness context (Continual Harness)",
+                            &block,
+                        )?;
                     }
                 }
             }
@@ -3574,6 +3610,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.generate_recap(prompt, &final_text, &recap_tasks_before)
             .await;
         self.generate_suggestion(prompt, &final_text).await;
+        // Continual Harness auto-refine gate (`harness.auto_refine = "turns"`, refinement.rs).
+        // Runs inline (unlike recap/suggestion) rather than detaching onto the presenter's sink:
+        // it mutates durable harness state and its own presenter note should land in order with
+        // the turn it concluded, not race a later turn's output.
+        self.auto_refine_after_turns().await;
         // One-shot/headless mode must await memory persistence before the process exits. In the
         // interactive TUI, dropping a Tokio JoinHandle detaches (does not cancel) the capture, so
         // the completed answer and input become usable immediately while persistence finishes.
@@ -8055,6 +8096,85 @@ mod tests {
         assert!(session.transcript[0].content.contains("summarized"));
         // The most recent message is preserved verbatim at the tail.
         assert_eq!(session.transcript.last().unwrap().content, "message 11");
+    }
+
+    #[tokio::test]
+    async fn ask_btw_writes_nothing_to_the_message_table() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = fresh_session(Arc::clone(&store), Config::default());
+        let id = session.session_id().to_string();
+
+        let before = store.load_all_messages(&id).unwrap().len();
+        assert_eq!(before, 0, "fresh session starts with no persisted rows");
+
+        session.ask_btw("what is 2+2?").await;
+
+        let after = store.load_all_messages(&id).unwrap().len();
+        assert_eq!(
+            after, 0,
+            "/btw must not write ANY row (active or soft-deleted) to the message table"
+        );
+        // The transcript used for the NEXT real turn's context must also be untouched.
+        assert!(session.transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_btw_emits_a_btw_answer_event_not_a_transcript_message() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            Config::default(),
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.ask_btw("  what is forge?  ").await;
+
+        let captured = events.lock().unwrap();
+        let answer = captured.iter().find_map(|e| match e {
+            PresenterEvent::BtwAnswer {
+                question, answer, ..
+            } => Some((question.clone(), answer.clone())),
+            _ => None,
+        });
+        let (question, answer) = answer.expect("a BtwAnswer event was emitted");
+        assert_eq!(question, "what is forge?", "the question is trimmed");
+        assert!(!answer.is_empty());
+        assert!(session.transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_btw_on_blank_question_warns_and_makes_no_call() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            Config::default(),
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.ask_btw("   ").await;
+
+        let captured = events.lock().unwrap();
+        assert!(matches!(
+            captured.last(),
+            Some(PresenterEvent::Warning(msg)) if msg.contains("usage: /btw")
+        ));
+        assert!(!captured
+            .iter()
+            .any(|e| matches!(e, PresenterEvent::BtwAnswer { .. })));
     }
 
     #[tokio::test]

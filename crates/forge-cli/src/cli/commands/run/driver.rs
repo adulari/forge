@@ -298,7 +298,15 @@ struct DriverState {
     mesh_load_rx: Option<tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>>,
     usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>>,
     cwd: String,
+    /// Rate-limits the idle heartbeat check (see [`HEARTBEAT_CHECK_INTERVAL`]) — this loop ticks
+    /// every ~30ms, far too often to query the store on every iteration.
+    last_heartbeat_check: Instant,
 }
+
+/// How often the driver loop checks for a due session heartbeat while idle. Turn-end already
+/// checks immediately (`on_turn_done`); this coarse tick is only for a session that sits fully
+/// idle for a while, no new activity, with nothing else waking the loop up.
+const HEARTBEAT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Drop for DriverState {
     fn drop(&mut self) {
@@ -414,6 +422,7 @@ async fn drive_session(
         mesh_load_rx: None,
         usage_load_rx: None,
         cwd: cwd.clone(),
+        last_heartbeat_check: Instant::now(),
     };
 
     let mut last_snap: Option<remote::Snapshot> = None;
@@ -506,6 +515,15 @@ async fn drive_session(
         // 5. Background overlay loads (/mesh, /usage).
         if st.poll_overlay_loads() {
             dirty = true;
+        }
+        // 5b. Session heartbeats: `on_turn_done` already checks immediately when a turn ends; this
+        // coarse periodic check (see [`HEARTBEAT_CHECK_INTERVAL`]) catches a heartbeat coming due
+        // while the session just sits idle with nothing else waking this loop up.
+        if st.last_heartbeat_check.elapsed() >= HEARTBEAT_CHECK_INTERVAL {
+            st.last_heartbeat_check = Instant::now();
+            if st.try_deliver_due_heartbeats() {
+                dirty = true;
+            }
         }
         // 6. Fold finalized lines into the transcript ring (there is no terminal to print to)
         //    and broadcast a snapshot when anything changed. Change-only, like the TUI loop.
@@ -682,6 +700,22 @@ impl DriverState {
         )
     }
 
+    /// See [`try_deliver_due_heartbeats`] — the daemon-driver call site (turn-end + periodic tick).
+    fn try_deliver_due_heartbeats(&mut self) -> bool {
+        try_deliver_due_heartbeats(
+            &self.session,
+            &mut self.queued_prompts,
+            &mut self.app,
+            &mut self.prompt_history,
+            &mut self.last_prompt,
+            &self.done_tx,
+            &mut self.turn_gen,
+            &mut self.turn_handle,
+            &mut self.busy,
+            &mut self.busy_since,
+        )
+    }
+
     /// Act on a [`DispatchOutcome`] — the headless twin of the TUI's outcome match arms.
     fn handle_outcome(&mut self, outcome: DispatchOutcome) {
         match outcome {
@@ -713,6 +747,34 @@ impl DriverState {
             DispatchOutcome::RunCompact => {
                 self.turn_gen += 1;
                 self.turn_handle = Some(spawn_compact(
+                    &self.session,
+                    &self.done_tx,
+                    self.turn_gen,
+                    &mut self.app,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                ));
+            }
+            DispatchOutcome::RunRefine {
+                instructions,
+                global,
+            } => {
+                self.turn_gen += 1;
+                self.turn_handle = Some(spawn_refine(
+                    &self.session,
+                    &self.done_tx,
+                    self.turn_gen,
+                    &mut self.app,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                    instructions,
+                    global,
+                ));
+            }
+            DispatchOutcome::RunBtw { question } => {
+                self.turn_gen += 1;
+                self.turn_handle = Some(spawn_btw(
+                    question,
                     &self.session,
                     &self.done_tx,
                     self.turn_gen,
@@ -828,7 +890,41 @@ impl DriverState {
 mod tests {
     use super::*;
 
+    /// Point this process's store at a throwaway file before any test opens one.
+    ///
+    /// `build_session_with` otherwise resolves the DEFAULT store. That is shared state: on the
+    /// persistent CI runners one file outlives the job and is common to every branch, so a branch
+    /// carrying a new migration upgrades it and every later job built from an older main fails
+    /// `database schema version N is newer than this build supports` — a failure with nothing to do
+    /// with the change under test. Set once, process-wide, so parallel tests cannot race on the
+    /// variable, and never unset so no test can observe it missing.
+    ///
+    /// The store is also OPENED here, inside the initializer. Pointing every test at one file is
+    /// not enough on its own: the file starts out empty, so the tests that reach it first all run
+    /// the schema migration at once and one loses with `database is locked` (reproduced at 5/30
+    /// locally). `get_or_init` serializes exactly one caller, so migrating here means every test
+    /// afterwards opens a store that is already at the current schema.
+    fn isolate_store() {
+        static STORE: std::sync::OnceLock<Option<tempfile::TempDir>> = std::sync::OnceLock::new();
+        STORE.get_or_init(|| {
+            let (path, keep) = match std::env::var_os("FORGE_DB") {
+                // An explicitly configured store (CI pins one per job) still starts empty, so it
+                // needs the same one-shot migration before the tests race for it.
+                Some(configured) => (std::path::PathBuf::from(configured), None),
+                None => {
+                    let dir = tempfile::tempdir().expect("temp dir for the test store");
+                    let path = dir.path().join("forge-test.db");
+                    std::env::set_var("FORGE_DB", &path);
+                    (path, Some(dir))
+                }
+            };
+            forge_store::Store::open(&path).expect("migrate the test store");
+            keep
+        });
+    }
+
     async fn test_driver_state() -> DriverState {
+        isolate_store();
         let session = super::build_session_with(
             Box::new(forge_tui::HeadlessPresenter::default()),
             true,
@@ -873,6 +969,7 @@ mod tests {
             mesh_load_rx: None,
             usage_load_rx: None,
             cwd: String::new(),
+            last_heartbeat_check: Instant::now(),
         }
     }
 

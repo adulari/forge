@@ -79,6 +79,7 @@ pub async fn run() -> anyhow::Result<usize> {
     if !bridge_live.is_empty() {
         sections.push(("Bridge liveness", bridge_live));
     }
+    sections.push(("Background daemon", daemon_checks()));
     sections.push(("Local LLM (Ollama)", ollama_checks()));
     sections.push(("Environment", environment_checks()));
 
@@ -380,6 +381,185 @@ fn short(s: &str) -> String {
     }
 }
 
+/// The background daemon (`forge service`). Doctor previously said nothing about it, so a machine
+/// whose daemon was dead — Anywhere unreachable, the phone unable to see any session — reported a
+/// clean bill of health. That is exactly what happened on 2026-08-07: `forge-serve` sat at 632
+/// consecutive failed restarts against a store it could not open, and the only evidence anywhere
+/// was one journal line.
+///
+/// Not installed is `Info`, not a failure: the daemon is opt-in and plenty of people never run it.
+/// What matters is an installed daemon that is NOT serving, and the state word distinguishes the
+/// cases that need different fixes (`failed` vs a restart loop vs simply stopped).
+fn daemon_checks() -> Vec<Check> {
+    let status = match crate::cli::commands::service::query_service_status() {
+        Ok(s) => s,
+        // A missing/unavailable service manager is not a Forge fault — report and move on.
+        Err(e) => {
+            return vec![check(
+                Status::Info,
+                "background daemon",
+                format!(
+                    "could not query the service manager: {}",
+                    short(&e.to_string())
+                ),
+                None,
+            )]
+        }
+    };
+    if !status.installed {
+        return vec![check(
+            Status::Info,
+            "background daemon",
+            "not installed",
+            Some(
+                "`forge service install` to run sessions in the background and reach them remotely",
+            ),
+        )];
+    }
+
+    let mut out = vec![daemon_state_check(status.detail.trim())];
+
+    // Installed and claiming to run is not the same as serving: a daemon that is up but whose
+    // listener never bound is invisible to every client, which is the failure a state word misses.
+    let port = crate::cli::commands::service::resolved_port(None);
+    let responding = crate::cli::commands::service::probe_port(port);
+    out.push(match (status.running, responding) {
+        (true, true) => check(Status::Ok, "daemon port", format!("{port} responding"), None),
+        (true, false) => check(
+            Status::Fail,
+            "daemon port",
+            format!("{port} not responding while the service reports running"),
+            Some("`forge service restart`; if it persists, check the port is not taken by another process"),
+        ),
+        // Not running — the state check above already reported why; don't double-count it.
+        (false, _) => check(
+            Status::Info,
+            "daemon port",
+            format!("{port} not responding (daemon not running)"),
+            None,
+        ),
+    });
+
+    #[cfg(target_os = "linux")]
+    if let Some(unit) = crate::cli::commands::service::installed_unit_text() {
+        let exe = std::env::current_exe()
+            .ok()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        out.extend(unit_drift_checks(&unit, &exe));
+    }
+    out
+}
+
+/// Does the installed unit match what THIS binary would render?
+///
+/// `forge service install` writes the unit once; upgrading Forge never rewrites it. So a fix that
+/// lives in the unit rather than the binary silently never reaches an existing install. That is not
+/// hypothetical: #996 stops the daemon restart-looping on an unfixable failure via BOTH an exit code
+/// (binary) and `RestartPreventExitStatus=78` (unit). Upgrade alone delivers half of it, and the
+/// daemon keeps looping — 25,218 consecutive restarts on the author's machine, silently.
+///
+/// Pure so every branch is testable without installing or breaking a real service.
+fn unit_drift_checks(unit: &str, current_exe: &str) -> Vec<Check> {
+    unit_drift_checks_at(unit, current_exe, env!("CARGO_PKG_VERSION"))
+}
+
+fn unit_drift_checks_at(unit: &str, current_exe: &str, running_version: &str) -> Vec<Check> {
+    use crate::cli::commands::service::UNIT_VERSION_PREFIX;
+    let mut out = Vec::new();
+
+    // The general case: any future change to the rendered unit becomes visible, not just the
+    // directives someone thought to grep for. A unit with no marker predates the stamp entirely.
+    let unit_version = unit
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(UNIT_VERSION_PREFIX))
+        .map(str::trim);
+    if let Some(v) = unit_version {
+        if v != running_version {
+            out.push(check(
+                Status::Warn,
+                "daemon unit",
+                format!("rendered by Forge {v}, running {running_version}"),
+                Some("`forge service install` to re-render it (installing a new Forge does not)"),
+            ));
+        }
+    }
+
+    if !unit.contains("RestartPreventExitStatus") {
+        out.push(check(
+            Status::Warn,
+            "daemon unit",
+            "predates the permanent-failure guard — a failure retrying cannot fix will restart forever",
+            Some("`forge service install` to re-render the unit (it is rewritten only on install)"),
+        ));
+    }
+
+    // ExecStart pins an absolute path. Install Forge somewhere else afterwards (brew, cargo) and
+    // systemd keeps launching the OLD binary, so `forge --version` in a terminal can disagree with
+    // what the daemon is actually running, with nothing anywhere saying so.
+    let unit_exe = unit
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))
+        .and_then(|cmd| cmd.split_whitespace().next())
+        .unwrap_or_default();
+    // A dev build is EXPECTED to differ from the installed unit — warning about it every time
+    // someone runs `cargo run -- doctor` would be pure noise, and noise is how the real signal
+    // above gets ignored.
+    let from_build_tree =
+        current_exe.contains("/target/debug/") || current_exe.contains("/target/release/");
+    if !unit_exe.is_empty()
+        && !current_exe.is_empty()
+        && unit_exe != current_exe
+        && !from_build_tree
+    {
+        out.push(check(
+            Status::Warn,
+            "daemon binary",
+            format!("unit runs {unit_exe}, but this is {current_exe}"),
+            Some("`forge service install` to point the unit at this binary"),
+        ));
+    }
+
+    if out.is_empty() {
+        out.push(check(
+            Status::Ok,
+            "daemon unit",
+            "matches this binary",
+            None,
+        ));
+    }
+    out
+}
+
+/// State word from the service manager → the line doctor prints. Pure so every branch is testable
+/// without installing, starting or breaking a real service on the host running the tests.
+fn daemon_state_check(state: &str) -> Check {
+    match state {
+        "active" => check(Status::Ok, "background daemon", "running", None),
+        // The silent killer: systemd reports `activating` while a unit restart-loops, so nothing
+        // ever looks broken even after hundreds of consecutive failures.
+        "activating" | "auto-restart" => check(
+            Status::Fail,
+            "background daemon",
+            format!("{state} — restarting repeatedly, not serving"),
+            Some("`journalctl --user -u forge-serve.service -n 30` for the cause; a schema mismatch means the installed binary is older than the store"),
+        ),
+        "failed" => check(
+            Status::Fail,
+            "background daemon",
+            "failed",
+            Some("`journalctl --user -u forge-serve.service -n 30` for the cause, then `forge service restart`"),
+        ),
+        "inactive" => check(
+            Status::Warn,
+            "background daemon",
+            "installed but stopped",
+            Some("`forge service start`"),
+        ),
+        other => check(Status::Warn, "background daemon", other.to_string(), None),
+    }
+}
+
 /// LIVE: for each KEYED provider, can we actually list its models within a timeout? A keyed
 /// provider whose discovery times out silently drops out of routing and the mesh falls back to a
 /// keyless default (the "groq for everything" churn) — a key-PRESENCE check can't see this.
@@ -504,4 +684,142 @@ fn binary_on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|d| d.join(bin).is_file()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod unit_drift_tests {
+    use super::{unit_drift_checks, Status};
+
+    /// The unit actually installed on the author's machine on 2026-08-10, verbatim. Its daemon had
+    /// restarted 25,218 times; #996's exit-code half would have arrived with an upgrade and changed
+    /// nothing, because this unit has no `RestartPreventExitStatus`.
+    const REAL_STALE_UNIT: &str = "[Unit]\nDescription=Forge serve\n\n[Service]\n\
+        ExecStart=/home/floris/.local/bin/forge serve --tunnel --port 7420\nRestart=on-failure\n";
+
+    #[test]
+    fn a_unit_without_the_permanent_failure_guard_is_flagged() {
+        let out = unit_drift_checks(REAL_STALE_UNIT, "/home/floris/.local/bin/forge");
+        let guard = out
+            .iter()
+            .find(|c| c.label == "daemon unit")
+            .expect("the missing guard must be reported");
+        assert_eq!(guard.status, Status::Warn);
+        assert!(guard.fix.is_some(), "must say how to fix it");
+        // Same binary path, so only the guard should be reported — not a spurious binary mismatch.
+        assert!(out.iter().all(|c| c.label != "daemon binary"));
+    }
+
+    #[test]
+    fn a_unit_pointing_at_another_binary_is_flagged() {
+        let unit = "[Service]\nExecStart=/usr/bin/forge serve --port 7420\n\
+            RestartPreventExitStatus=78\nRestart=on-failure\n";
+        let out = unit_drift_checks(unit, "/home/floris/.cargo/bin/forge");
+        let drift = out
+            .iter()
+            .find(|c| c.label == "daemon binary")
+            .expect("a different ExecStart path must be reported");
+        assert_eq!(drift.status, Status::Warn);
+        assert!(drift.detail.contains("/usr/bin/forge"), "{}", drift.detail);
+        assert!(drift.detail.contains("cargo"), "{}", drift.detail);
+    }
+
+    #[test]
+    fn a_current_unit_reports_ok_and_nothing_else() {
+        let unit = "[Service]\nExecStart=/usr/bin/forge serve --port 7420\n\
+            RestartPreventExitStatus=78\nRestart=on-failure\n";
+        let out = unit_drift_checks(unit, "/usr/bin/forge");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].status, Status::Ok);
+    }
+
+    /// An unknown current-exe path must not manufacture a mismatch — reporting drift against an
+    /// empty string would fire on every install that cannot resolve its own binary.
+    #[test]
+    fn an_unresolvable_current_binary_does_not_report_drift() {
+        let unit = "[Service]\nExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
+        let out = unit_drift_checks(unit, "");
+        assert!(out.iter().all(|c| c.label != "daemon binary"));
+    }
+
+    /// A unit rendered by an older Forge is reported even when it carries every directive this
+    /// version happens to check for — the point of the stamp is catching drift nobody grepped for.
+    #[test]
+    fn a_unit_stamped_by_an_older_forge_is_reported() {
+        let unit = "[Unit]\n# forge-unit-version: 2.9.0\n[Service]\n\
+            ExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
+        let out = super::unit_drift_checks_at(unit, "/usr/bin/forge", "2.13.0");
+        let stale = out
+            .iter()
+            .find(|c| c.label == "daemon unit")
+            .expect("a version gap must be reported");
+        assert_eq!(stale.status, Status::Warn);
+        assert!(stale.detail.contains("2.9.0"), "{}", stale.detail);
+        assert!(stale.detail.contains("2.13.0"), "{}", stale.detail);
+    }
+
+    #[test]
+    fn a_unit_stamped_by_this_forge_is_not_reported() {
+        let unit = "[Unit]\n# forge-unit-version: 2.13.0\n[Service]\n\
+            ExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
+        let out = super::unit_drift_checks_at(unit, "/usr/bin/forge", "2.13.0");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].status, Status::Ok);
+    }
+
+    /// A dev build always differs from the installed unit. Warning every `cargo run -- doctor` is
+    /// noise, and noise is how the genuine warning above gets ignored.
+    #[test]
+    fn a_build_tree_binary_does_not_report_drift() {
+        let unit = "[Service]\nExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
+        for exe in [
+            "/home/me/src/forge/target/debug/forge",
+            "/home/me/src/forge/target/release/forge",
+        ] {
+            let out = unit_drift_checks(unit, exe);
+            assert!(
+                out.iter().all(|c| c.label != "daemon binary"),
+                "{exe} must not warn"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod daemon_tests {
+    use super::{daemon_state_check, Status};
+
+    /// A restart loop is the case that took the daemon down for 632 restarts while every view
+    /// reported it as coming up. It must be a hard failure, not a warning.
+    #[test]
+    fn a_restart_loop_is_a_hard_failure_with_a_next_step() {
+        for state in ["activating", "auto-restart"] {
+            let c = daemon_state_check(state);
+            assert_eq!(c.status, Status::Fail, "{state} must fail");
+            assert!(c.fix.is_some(), "{state} must carry a next step");
+        }
+    }
+
+    #[test]
+    fn running_is_ok_and_stopped_is_only_a_warning() {
+        assert_eq!(daemon_state_check("active").status, Status::Ok);
+        // Installed-but-stopped is a choice, not a fault: warn with the start command.
+        let stopped = daemon_state_check("inactive");
+        assert_eq!(stopped.status, Status::Warn);
+        assert!(stopped.fix.unwrap().contains("forge service start"));
+    }
+
+    #[test]
+    fn failed_reports_where_to_look() {
+        let c = daemon_state_check("failed");
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.fix.unwrap().contains("journalctl"));
+    }
+
+    /// An unrecognised state word must not be silently treated as healthy.
+    #[test]
+    fn an_unknown_state_is_surfaced_rather_than_assumed_fine() {
+        let c = daemon_state_check("reloading");
+        assert_eq!(c.status, Status::Warn);
+        assert_eq!(c.detail, "reloading");
+    }
 }

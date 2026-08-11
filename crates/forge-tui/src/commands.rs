@@ -3,6 +3,8 @@
 //! navigates; the render loop in the binary interprets the resulting [`CommandAction`] (it owns
 //! the `Session`, which this crate must not depend on).
 
+mod btw_args;
+
 /// One command's metadata, shown in the palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Command {
@@ -33,6 +35,16 @@ pub const COMMANDS: &[Command] = &[
         desc:
             "show a session transcript inline (/replay <id>) or diff two sessions (/replay <a> <b>)",
         usage: "/replay <id> [<id2>]",
+    },
+    Command {
+        name: "btw",
+        desc: "ask a side question that never joins this session's transcript (alias /side)",
+        usage: "/btw <question>",
+    },
+    Command {
+        name: "export",
+        desc: "export this session's transcript as one self-contained HTML file",
+        usage: "/export [path]",
     },
     Command {
         name: "resume",
@@ -91,6 +103,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/init",
     },
     Command {
+        name: "heartbeat",
+        desc: "a recurring prompt that re-enters this session (status/pause/resume/clear)",
+        usage: "/heartbeat every <interval> <prompt> | status | pause | resume | clear",
+    },
+    Command {
         name: "new",
         desc: "start a fresh session",
         usage: "/new",
@@ -119,6 +136,11 @@ pub const COMMANDS: &[Command] = &[
         name: "uncompact",
         desc: "restore full transcript after a /compact",
         usage: "/uncompact",
+    },
+    Command {
+        name: "refine",
+        desc: "review the trajectory and persist learned harness state (prompt notes, skills, subagent specs)",
+        usage: "/refine [instructions] | /refine --global [instructions] | /refine rollback <id> | /refine status",
     },
     Command {
         name: "lattice",
@@ -248,6 +270,9 @@ pub enum WorkflowAction {
     List,
 }
 
+pub use crate::heartbeat_args::HeartbeatAction;
+pub use crate::refine_args::RefineAction;
+
 /// What the render loop must do when a command is accepted. forge-tui produces it; the binary
 /// (which owns the `Session`) executes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,6 +312,9 @@ pub enum CommandAction {
     Compact,
     /// Restore the full pre-compaction transcript after a `/compact` (`/uncompact`).
     Uncompact,
+    /// Continual Harness: review the trajectory and persist learned harness state (prompt notes,
+    /// skills, subagent specs) — see docs/features/continual-harness.md.
+    Refine(RefineAction),
     /// Show the code-intelligence subgraph for a symbol (`/lattice <symbol>`).
     Lattice(String),
     /// Set a session goal and decompose it into a tracked task plan (`/goal <objective>`).
@@ -298,6 +326,13 @@ pub enum CommandAction {
     Loop(String),
     /// Show a session transcript inline, or diff two sessions (`/replay <id> [<id2>]`).
     Replay(String, Option<String>),
+    /// A side question that never joins this session's transcript or history — answered as a
+    /// distinct side-note card, not a turn (`/btw <question>`, alias `/side`). Each call is
+    /// independent (docs/features/side-questions.md).
+    Btw(String),
+    /// Export this session's transcript as one self-contained HTML file (`/export [path]`).
+    /// `None` uses the default `forge-session-<id8>.html` in the current directory.
+    Export(Option<String>),
     /// Open the usage overlay showing API spend + token breakdown (`/usage`).
     Usage,
     /// Open the mesh routing inspector; optional prompt to trace (`/mesh [task]`).
@@ -339,6 +374,10 @@ pub enum CommandAction {
     Statusline(StatuslineAction),
     /// Mesh-routed multi-agent workflow scripts (`/workflow`, docs/rfcs/forge-workflow.md).
     Workflow(WorkflowAction),
+    /// The user's own recurring re-entry prompt for this session (`/heartbeat`,
+    /// docs/features/session-heartbeats.md). Distinct from — and never modifies — any
+    /// agent-created heartbeats (the `manage_heartbeats` virtual tool).
+    Heartbeat(HeartbeatAction),
     /// Model arena (`/duel <task>`, docs/features/duel.md): race 2-3 mesh models on the same task
     /// concurrently, each in its own worktree, then let the user pick a winner.
     Duel(String),
@@ -535,30 +574,7 @@ impl AtPathPicker {
     }
 }
 
-/// Extract a comma-separated lens list from `--flag <value>` in a raw arg string.
-/// `/assay --only dead-weight,unsafe` → `extract_flag(arg, "--only")` → `["dead-weight", "unsafe"]`
-fn extract_flag(arg: &str, flag: &str) -> Vec<String> {
-    let tokens: Vec<&str> = arg.split_whitespace().collect();
-    for (i, tok) in tokens.iter().enumerate() {
-        if *tok == flag {
-            if let Some(val) = tokens.get(i + 1) {
-                if !val.starts_with('-') {
-                    return val
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// Check whether a boolean flag (no value) is present in `arg`.
-fn has_flag(arg: &str, flag: &str) -> bool {
-    arg.split_whitespace().any(|t| t == flag)
-}
+use crate::refine_args::{extract_flag, has_flag};
 
 /// Parse a submitted command line (`"/resume ab12"`). The leading `/` is required; a `//`
 /// prefix is NOT a command (it escapes to a literal prompt — handled by the caller).
@@ -612,6 +628,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "checkpoints" => CommandAction::ListCheckpoints,
         "compact" => CommandAction::Compact,
         "uncompact" => CommandAction::Uncompact,
+        "refine" => crate::refine_args::refine_action(&arg),
         "lattice" | "lat" => CommandAction::Lattice(arg),
         "goal" | "objective" => CommandAction::Goal(arg),
         "pr" | "pullrequest" => CommandAction::Pr(arg),
@@ -628,6 +645,8 @@ pub fn parse_command(line: &str) -> CommandAction {
                 .filter(|s| !s.is_empty());
             CommandAction::Replay(id_a, id_b)
         }
+        "btw" | "side" => CommandAction::Btw(btw_args::parse_btw_arg(&arg)),
+        "export" => CommandAction::Export((!arg.is_empty()).then(|| arg.trim().to_string())),
         "effort" => CommandAction::SetEffort((!arg.is_empty()).then_some(arg)),
         "remember" => CommandAction::Remember(arg.to_string()),
         "memories" => CommandAction::Memories,
@@ -705,6 +724,7 @@ pub fn parse_command(line: &str) -> CommandAction {
             };
             CommandAction::Workflow(action)
         }
+        "heartbeat" | "hb" => crate::heartbeat_args::heartbeat_action(&arg),
         other => CommandAction::Unknown(other.to_string()),
     }
 }
@@ -771,7 +791,7 @@ pub fn command_category(name: &str) -> &'static str {
     match name {
         "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
         "sessions" | "resume" | "replay" | "undo" | "checkpoint" | "checkpoints" | "compact"
-        | "uncompact" | "clear" => "Session",
+        | "uncompact" | "refine" | "clear" | "btw" | "export" => "Session",
         "model" | "models" | "mode" | "effort" | "thinking" | "mesh" | "usage" => "Model & usage",
         "assay" | "lattice" | "pr" => "Review & ship",
         "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" => "Integrations",
@@ -1261,7 +1281,71 @@ mod tests {
         assert_eq!(parse_command("/approve"), CommandAction::Execute);
         assert_eq!(parse_command("/go"), CommandAction::Execute);
         assert_eq!(parse_command("/voice"), CommandAction::Voice);
+        assert_eq!(
+            parse_command("/btw is this bug worth a ticket?"),
+            CommandAction::Btw("is this bug worth a ticket?".into())
+        );
+        assert_eq!(parse_command("/btw"), CommandAction::Btw(String::new()));
+        assert_eq!(parse_command("/btw   "), CommandAction::Btw(String::new()));
+        // /side is an alias for /btw — same action, same parsing.
+        assert_eq!(
+            parse_command("/side what does EAGAIN mean?"),
+            CommandAction::Btw("what does EAGAIN mean?".into())
+        );
+        assert_eq!(parse_command("/export"), CommandAction::Export(None));
+        assert_eq!(
+            parse_command("/export out/session.html"),
+            CommandAction::Export(Some("out/session.html".into()))
+        );
         assert_eq!(parse_command("/record"), CommandAction::Voice);
+    }
+
+    #[test]
+    fn parses_refine_command() {
+        assert_eq!(
+            parse_command("/refine"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: None,
+                global: false,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine be stricter about tool-call retries"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: Some("be stricter about tool-call retries".into()),
+                global: false,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine --global"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: None,
+                global: true,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine --global prefer smaller diffs"),
+            CommandAction::Refine(RefineAction::Run {
+                instructions: Some("prefer smaller diffs".into()),
+                global: true,
+            })
+        );
+        assert_eq!(
+            parse_command("/refine status"),
+            CommandAction::Refine(RefineAction::Status)
+        );
+        assert_eq!(
+            parse_command("/refine STATUS"),
+            CommandAction::Refine(RefineAction::Status)
+        );
+        assert_eq!(
+            parse_command("/refine rollback abc123"),
+            CommandAction::Refine(RefineAction::Rollback("abc123".into()))
+        );
+        assert_eq!(
+            parse_command("/refine rollback"),
+            CommandAction::Refine(RefineAction::Rollback(String::new()))
+        );
     }
 
     #[test]
@@ -1271,6 +1355,44 @@ mod tests {
             CommandAction::Remember("tabs not spaces".into())
         );
         assert_eq!(parse_command("/memories"), CommandAction::Memories);
+    }
+
+    #[test]
+    fn parses_heartbeat_command_and_subactions() {
+        assert_eq!(
+            parse_command("/heartbeat every 5m check the CI status"),
+            CommandAction::Heartbeat(HeartbeatAction::Every {
+                interval: "5m".into(),
+                prompt: "check the CI status".into(),
+            })
+        );
+        assert_eq!(
+            parse_command("/heartbeat"),
+            CommandAction::Heartbeat(HeartbeatAction::Status)
+        );
+        assert_eq!(
+            parse_command("/heartbeat status"),
+            CommandAction::Heartbeat(HeartbeatAction::Status)
+        );
+        assert_eq!(
+            parse_command("/heartbeat pause"),
+            CommandAction::Heartbeat(HeartbeatAction::Pause)
+        );
+        assert_eq!(
+            parse_command("/heartbeat resume"),
+            CommandAction::Heartbeat(HeartbeatAction::Resume)
+        );
+        assert_eq!(
+            parse_command("/heartbeat clear"),
+            CommandAction::Heartbeat(HeartbeatAction::Clear)
+        );
+        assert_eq!(
+            parse_command("/hb every 30s ping"),
+            CommandAction::Heartbeat(HeartbeatAction::Every {
+                interval: "30s".into(),
+                prompt: "ping".into(),
+            })
+        );
     }
 
     #[test]

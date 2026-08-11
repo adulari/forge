@@ -48,8 +48,8 @@ Status legend: **HAVE** (equivalent or better), **PARTIAL** (same idea, missing 
 | 11 | Auto + manual compaction, kernel state surviving it | **HAVE** (compaction) | kernel part n/a |
 | 12 | Session tree, `/fork`, `/clone`, branch summarization | **PARTIAL** — Forge `fork` is a counterfactual re-run CLI (`args.rs:472`), not in-TUI tree navigation | Low priority |
 | 13 | Steering vs follow-up queued messages | **HAVE-mostly** — prime's user "steering" also delivers between assistant turns (usage.md), same as Forge's queue drain; the true gap is the a2a `steer` delivery mode, covered in #4 | Fold into #4 |
-| 14 | `/btw` side questions (out-of-session Q&A) | **MISSING** | Small UX port |
-| 15 | `/export` HTML, `/share` gist | **MISSING** (Forge has `forge replay` TUI) | Small port |
+| 14 | `/btw` side questions (out-of-session Q&A) | **HAVE** — `/btw`/`/side`, deliberately stateless (no cross-call side-conversation memory, unlike prime-agent) | [side-questions.md](../features/side-questions.md) |
+| 15 | `/export` HTML, `/share` gist | **HAVE** (HTML only — no gist/share) — `forge replay <id> --html` + `/export` on top of `forge replay` TUI | [session-replay.md](../features/session-replay.md) |
 | 16 | TS extension API, npm/git packages, themes | **SKIP** | Forge = Rust single binary (ADR-0002); hooks+MCP+skills cover this |
 | 17 | ACP mode (Zed) | **MISSING** | Optional, low priority |
 | 18 | Model routing, multi-provider, OAuth subscriptions | **HAVE** (mesh is stronger: ranking, budget pressure, health, runtime failover, rationale; prime's only fallback is a startup `modelFallbackMessage` at session create, sdk.md) | — |
@@ -147,7 +147,8 @@ long-running session ergonomics prime is ahead. That is the gap to close.
 7. **Steer delivery for queued messages** (mid-turn injection option).
 8. **RFC: persistent scripting environment** (the kernel question) — write
    `docs/rfcs/persistent-scripting-tool.md` before any code; decide broker model.
-9. Small UX: `/btw` side questions; HTML session export.
+9. ~~Small UX: `/btw` side questions; HTML session export.~~ **Done** —
+   [side-questions.md](../features/side-questions.md), [session-replay.md](../features/session-replay.md).
 
 Not porting: TS extensions/packages/themes (16), ACP (17, revisit on demand), platform trace
 upload (9).

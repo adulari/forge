@@ -14,6 +14,28 @@ pub const REFRESH_SKEW_SECS: i64 = 120;
 pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 pub const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// Wrap `inner` so a caller can tell whether anything USER-VISIBLE was already streamed by the
+/// time a request fails. That is the condition deciding whether a retry — a next-account hop, a
+/// websocket reconnect — is still safe: taken after the first delta it replays the reply from the
+/// beginning into the same sink, so live output would show a partial first attempt with a complete
+/// second appended while the persisted transcript keeps only the second. Neither half is then
+/// identifiable as the real one. Once anything has been shown the retry is no longer ours to take:
+/// surface the error and let forge-core's failover own it. Mirrors `genai_provider`'s
+/// `can_reconnect` guard.
+///
+/// Only Text/Reasoning count: `ProviderActivity` is a private heartbeat and renders nothing.
+pub fn watch_visible_output<'a>(
+    inner: &'a mut EventSink<'_>,
+    streamed: &'a mut bool,
+) -> Box<EventSink<'a>> {
+    Box::new(move |event: StreamEvent| {
+        if matches!(event, StreamEvent::Text(_) | StreamEvent::Reasoning(_)) {
+            *streamed = true;
+        }
+        inner(event);
+    })
+}
+
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

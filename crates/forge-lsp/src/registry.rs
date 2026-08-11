@@ -803,14 +803,13 @@ mod tests {
         assert_eq!(entry.record_failure(now), BACKOFF_BASE);
     }
 
-    /// Write an executable fake language server that records every start, fails the handshake
-    /// until `fixed` exists, and afterwards answers `initialize` and publishes one diagnostic.
+    /// Write a fake language server that records every start, fails the handshake until `fixed`
+    /// exists, and afterwards answers `initialize` and publishes one diagnostic. Callers must run
+    /// it as an argument to `/bin/sh` (see `fake_server_entry`) rather than exec'ing it directly.
     #[cfg(unix)]
     fn write_fake_server(script: &Path, attempts: &Path, fixed: &Path, uri: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let body = format!(
-            "#!/bin/sh\n\
-             echo $$ >> {attempts}\n\
+            "echo $$ >> {attempts}\n\
              if [ ! -f {fixed} ]; then\n\
              echo \"error: 'rust-analyzer' is not installed for the toolchain\" 1>&2\n\
              exit 1\n\
@@ -825,7 +824,18 @@ mod tests {
             uri = uri,
         );
         fs::write(script, body).unwrap();
-        fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A config entry that runs `script` under `/bin/sh`. Exec'ing a file the test process just
+    /// wrote races every other test that spawns a child: a concurrent fork duplicates the still-open
+    /// write fd, and exec on that inode fails ETXTBSY until that child execs. `sh` only ever *reads*
+    /// the path, so no such race applies.
+    #[cfg(unix)]
+    fn fake_server_entry(script: &Path) -> forge_config::LspServerEntry {
+        forge_config::LspServerEntry {
+            command: "/bin/sh".to_string(),
+            args: vec![script.to_string_lossy().into_owned()],
+        }
     }
 
     #[cfg(unix)]
@@ -886,13 +896,7 @@ mod tests {
         write_fake_server(&script, &attempts, &fixed, &path_to_uri(&file));
 
         let mut servers = std::collections::HashMap::new();
-        servers.insert(
-            "rust".to_string(),
-            forge_config::LspServerEntry {
-                command: script.to_string_lossy().into_owned(),
-                args: vec![],
-            },
-        );
+        servers.insert("rust".to_string(), fake_server_entry(&script));
         let reg = LspRegistry::from_config(&LspConfig {
             enabled: true,
             timeout_ms: 500,
@@ -951,13 +955,7 @@ mod tests {
         let script = tmp.path().join("fake-lsp.sh");
         write_fake_server(&script, &attempts, &fixed, &path_to_uri(&file));
         let mut servers = std::collections::HashMap::new();
-        servers.insert(
-            "rust".to_string(),
-            forge_config::LspServerEntry {
-                command: script.to_string_lossy().into_owned(),
-                args: vec![],
-            },
-        );
+        servers.insert("rust".to_string(), fake_server_entry(&script));
         let reg = LspRegistry::from_config(&LspConfig {
             enabled: true,
             timeout_ms: 500,
@@ -1000,13 +998,7 @@ mod tests {
         let script = tmp.path().join("fake-lsp.sh");
         write_fake_server(&script, &attempts, &fixed, &path_to_uri(&file));
         let mut servers = std::collections::HashMap::new();
-        servers.insert(
-            "rust".to_string(),
-            forge_config::LspServerEntry {
-                command: script.to_string_lossy().into_owned(),
-                args: vec![],
-            },
-        );
+        servers.insert("rust".to_string(), fake_server_entry(&script));
         let reg = LspRegistry::from_config(&LspConfig {
             enabled: true,
             timeout_ms: 20,
@@ -1051,13 +1043,7 @@ mod tests {
             let file = root.join("main.rs");
             fs::write(&file, "fn main() {}").unwrap();
             let mut servers = std::collections::HashMap::new();
-            servers.insert(
-                "rust".to_string(),
-                forge_config::LspServerEntry {
-                    command: script.to_string_lossy().into_owned(),
-                    args: vec![],
-                },
-            );
+            servers.insert("rust".to_string(), fake_server_entry(&script));
             let reg = Arc::new(LspRegistry::from_config(&LspConfig {
                 enabled: true,
                 timeout_ms: 200,
@@ -1089,13 +1075,7 @@ mod tests {
         let script = tmp.path().join("fake-lsp.sh");
         write_fake_server(&script, &attempts, &fixed, "file:///unused.rs");
         let mut servers = std::collections::HashMap::new();
-        servers.insert(
-            "rust".to_string(),
-            forge_config::LspServerEntry {
-                command: script.to_string_lossy().into_owned(),
-                args: vec![],
-            },
-        );
+        servers.insert("rust".to_string(), fake_server_entry(&script));
         let reg = LspRegistry::from_config(&LspConfig {
             enabled: true,
             timeout_ms: 200,
@@ -1132,7 +1112,7 @@ mod tests {
         let script = tmp.path().join("fake-lsp.sh");
         write_fake_server(&script, &attempts, &tmp.path().join("never"), "file:///x");
 
-        let mut srv = LspServer::spawn(&script.to_string_lossy(), &[])
+        let mut srv = LspServer::spawn("/bin/sh", &[script.to_string_lossy().into_owned()])
             .await
             .unwrap();
         let err = srv

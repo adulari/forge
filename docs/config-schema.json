@@ -73,7 +73,8 @@
       "type": "object",
       "description": "Customizable statusline layout (left / center / right widget segments).",
       "additionalProperties": true
-    }
+    },
+    "harness": { "$ref": "#/$defs/HarnessConfig" }
   },
   "$defs": {
     "PermissionMode": {
@@ -215,6 +216,42 @@
           "type": "boolean",
           "default": true,
           "description": "Send anonymous installation and activity counters without a stable identifier."
+        }
+      }
+    },
+    "HarnessConfig": {
+      "type": "object",
+      "description": "Continual Harness (/refine): the agent proposes durable edits to its own prompts/skills/subagents, persisted across sessions.",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master toggle for Continual Harness persistence and context injection."
+        },
+        "auto_refine": {
+          "type": "string",
+          "enum": ["off", "compact", "turns"],
+          "default": "off",
+          "description": "When a refinement pass auto-triggers, if ever: never (off), after every /compact, or every auto_refine_turns turns."
+        },
+        "auto_refine_turns": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 20,
+          "description": "Turn interval for auto_refine = \"turns\"."
+        },
+        "max_context_entries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 12,
+          "description": "Max harness entries injected into a turn's context."
+        },
+        "max_entry_chars": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 2000,
+          "description": "Max characters per injected harness entry (longer entries are truncated)."
         }
       }
     }
