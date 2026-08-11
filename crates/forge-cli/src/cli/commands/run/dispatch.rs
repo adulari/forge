@@ -74,6 +74,9 @@ pub(crate) enum DispatchOutcome {
     },
     /// `/compact` — summarize older messages in a background task (it makes a model call).
     RunCompact,
+    /// `/btw <question>` — answer a side question in a background task (it makes a model call,
+    /// but the answer never joins the transcript — side-questions.md).
+    RunBtw { question: String },
     /// `/workflow run <name> [args]` — run a saved workflow script directly in a background task
     /// (docs/rfcs/forge-workflow.md), skipping the authoring turn entirely.
     RunSavedWorkflow {
@@ -245,6 +248,7 @@ pub(crate) async fn dispatch_command(
             | CommandAction::PinModel(_)
             | CommandAction::SetEffort(_)
             | CommandAction::Replay(_, _)
+            | CommandAction::Export(_)
             | CommandAction::Usage
             | CommandAction::Remote { .. }
             | CommandAction::Anywhere
@@ -473,6 +477,8 @@ pub(crate) async fn dispatch_command(
         }
         // `/compact` makes a model call → run it as a background task so the spinner ticks.
         CommandAction::Compact => return Ok(DispatchOutcome::RunCompact),
+        // `/btw <question>` also makes a model call — same background-task shape as `/compact`.
+        CommandAction::Btw(question) => return Ok(DispatchOutcome::RunBtw { question }),
         // `/uncompact` makes no model call (pure store + in-memory restore) → handled inline,
         // like `/undo`/`/checkpoint`, rather than spawned as a background task. On success
         // `Session::uncompact` emits its own `PresenterEvent::Warning` (mirrors `compact`'s
@@ -805,6 +811,8 @@ and keep going."
             };
             emit_text(tui, app, &text);
         }
+        // `/export [path]` — render THIS session's transcript to one self-contained HTML file.
+        CommandAction::Export(path_arg) => return export_cmd(session, path_arg, app).await,
         CommandAction::Usage => {
             // Open immediately with fast session data; bridge stats load in background.
             let (
