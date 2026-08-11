@@ -298,7 +298,15 @@ struct DriverState {
     mesh_load_rx: Option<tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>>,
     usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>>,
     cwd: String,
+    /// Rate-limits the idle heartbeat check (see [`HEARTBEAT_CHECK_INTERVAL`]) — this loop ticks
+    /// every ~30ms, far too often to query the store on every iteration.
+    last_heartbeat_check: Instant,
 }
+
+/// How often the driver loop checks for a due session heartbeat while idle. Turn-end already
+/// checks immediately (`on_turn_done`); this coarse tick is only for a session that sits fully
+/// idle for a while, no new activity, with nothing else waking the loop up.
+const HEARTBEAT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Drop for DriverState {
     fn drop(&mut self) {
@@ -414,6 +422,7 @@ async fn drive_session(
         mesh_load_rx: None,
         usage_load_rx: None,
         cwd: cwd.clone(),
+        last_heartbeat_check: Instant::now(),
     };
 
     let mut last_snap: Option<remote::Snapshot> = None;
@@ -506,6 +515,15 @@ async fn drive_session(
         // 5. Background overlay loads (/mesh, /usage).
         if st.poll_overlay_loads() {
             dirty = true;
+        }
+        // 5b. Session heartbeats: `on_turn_done` already checks immediately when a turn ends; this
+        // coarse periodic check (see [`HEARTBEAT_CHECK_INTERVAL`]) catches a heartbeat coming due
+        // while the session just sits idle with nothing else waking this loop up.
+        if st.last_heartbeat_check.elapsed() >= HEARTBEAT_CHECK_INTERVAL {
+            st.last_heartbeat_check = Instant::now();
+            if st.try_deliver_due_heartbeats() {
+                dirty = true;
+            }
         }
         // 6. Fold finalized lines into the transcript ring (there is no terminal to print to)
         //    and broadcast a snapshot when anything changed. Change-only, like the TUI loop.
@@ -679,6 +697,22 @@ impl DriverState {
             &mut self.queued_prompts,
             &mut self.app,
             &mut self.prompt_history,
+        )
+    }
+
+    /// See [`try_deliver_due_heartbeats`] — the daemon-driver call site (turn-end + periodic tick).
+    fn try_deliver_due_heartbeats(&mut self) -> bool {
+        try_deliver_due_heartbeats(
+            &self.session,
+            &mut self.queued_prompts,
+            &mut self.app,
+            &mut self.prompt_history,
+            &mut self.last_prompt,
+            &self.done_tx,
+            &mut self.turn_gen,
+            &mut self.turn_handle,
+            &mut self.busy,
+            &mut self.busy_since,
         )
     }
 
@@ -935,6 +969,7 @@ mod tests {
             mesh_load_rx: None,
             usage_load_rx: None,
             cwd: String::new(),
+            last_heartbeat_check: Instant::now(),
         }
     }
 
