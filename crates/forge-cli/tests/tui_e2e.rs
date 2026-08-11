@@ -11,9 +11,27 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
+/// These smokes synchronise with the TUI by sleeping fixed intervals — 1500ms for init, then the
+/// per-step `sleep_ms_after`. Those budgets hold when one test has the machine and do not when
+/// eight of them each spawn a real `forge` binary on its own PTY at once: the assertion then reads
+/// a capture containing only the startup banner, because the TUI has not got as far as rendering.
+///
+/// Measured on 2026-08-11 with `scripts/flake-hunt.sh 8`:
+///   parallel (cargo's default):  6 of 8 runs failed — `tui_wrapper_command_delegates_to_its_skill`
+///                                6/8, `tui_loop_starts_and_stops_on_interrupt` 5/8,
+///                                `tui_remote_control_toggles...` 4/8, `tui_autocheckpoints...` 3/8
+///   `--test-threads=1`:          8 of 8 runs clean
+///
+/// So the sleeps are adequate and the contention is the whole problem. Serialising here rather than
+/// relying on `--test-threads=1` keeps that guarantee wherever the suite is invoked from — a CI job,
+/// a local `cargo test`, or an IDE — instead of depending on every caller remembering the flag.
+/// Poison is deliberately ignored: one panicking test must not cascade into failing the other seven.
+static PTY_SERIAL: Mutex<()> = Mutex::new(());
+
 /// Launch `forge chat --mock` on a PTY in a throwaway cwd, answer DSR queries, then feed the
 /// `(keys, sleep_ms_after)` script. Returns `(clean_exit, plain_output)`.
 fn drive_pty(script: &[(&str, u64)]) -> (bool, String) {
+    let _serial = PTY_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 24,
