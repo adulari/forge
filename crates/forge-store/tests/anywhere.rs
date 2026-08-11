@@ -838,6 +838,7 @@ fn core_store_writes_enqueue_complete_sync_snapshots() {
                 cached_input_tokens: 2,
                 cost_usd: 0.01,
             },
+            Some("anthropic::claude-opus-5"),
         )
         .expect("record usage");
     store
