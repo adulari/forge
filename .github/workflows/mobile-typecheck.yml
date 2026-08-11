@@ -120,26 +120,13 @@ jobs:
     steps:
       - name: Check affected jobs passed
         run: |
-          # Name the job AND its state — see the note in ci.yml. `cancelled` is the common case
-          # (58% of heavy/release jobs), so a message that conflates it with a real failure sends
-          # readers hunting for a bug that is not there. The gate is unchanged: anything that is
-          # not success|skipped still exits 1.
-          for entry in \
-            "changes=${{ needs.changes.result }}" \
-            "app=${{ needs.app.result }}" \
-            "tauri=${{ needs.tauri.result }}"; do
-            name="${entry%%=*}"
-            result="${entry#*=}"
+          for result in \
+            "${{ needs.changes.result }}" \
+            "${{ needs.app.result }}" \
+            "${{ needs.tauri.result }}"; do
             case "$result" in
               success|skipped) ;;
-              cancelled)
-                echo "::error title=Mobile job cancelled, not failed::$name was CANCELLED — superseded by a newer run for this branch, not a failure. Re-run it."
-                exit 1
-                ;;
-              *)
-                echo "::error title=Mobile job $result::$name: $result"
-                exit 1
-                ;;
+              *) echo "An affected mobile job failed or was cancelled"; exit 1 ;;
             esac
           done
           echo "All affected mobile jobs passed"
