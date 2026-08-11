@@ -852,12 +852,29 @@ mod tests {
     /// `database schema version N is newer than this build supports` — a failure with nothing to do
     /// with the change under test. Set once, process-wide, so parallel tests cannot race on the
     /// variable, and never unset so no test can observe it missing.
+    ///
+    /// The store is also OPENED here, inside the initializer. Pointing every test at one file is
+    /// not enough on its own: the file starts out empty, so the tests that reach it first all run
+    /// the schema migration at once and one loses with `database is locked` (reproduced at 5/30
+    /// locally). `get_or_init` serializes exactly one caller, so migrating here means every test
+    /// afterwards opens a store that is already at the current schema.
     fn isolate_store() {
-        static STORE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-        let dir = STORE.get_or_init(|| tempfile::tempdir().expect("temp dir for the test store"));
-        if std::env::var_os("FORGE_DB").is_none() {
-            std::env::set_var("FORGE_DB", dir.path().join("forge-test.db"));
-        }
+        static STORE: std::sync::OnceLock<Option<tempfile::TempDir>> = std::sync::OnceLock::new();
+        STORE.get_or_init(|| {
+            let (path, keep) = match std::env::var_os("FORGE_DB") {
+                // An explicitly configured store (CI pins one per job) still starts empty, so it
+                // needs the same one-shot migration before the tests race for it.
+                Some(configured) => (std::path::PathBuf::from(configured), None),
+                None => {
+                    let dir = tempfile::tempdir().expect("temp dir for the test store");
+                    let path = dir.path().join("forge-test.db");
+                    std::env::set_var("FORGE_DB", &path);
+                    (path, Some(dir))
+                }
+            };
+            forge_store::Store::open(&path).expect("migrate the test store");
+            keep
+        });
     }
 
     async fn test_driver_state() -> DriverState {
