@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use std::io::IsTerminal;
-#[cfg(not(test))]
 use std::path::Path;
 
 use crate::*;
