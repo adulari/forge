@@ -265,6 +265,40 @@ jobs:
                 # happens for them. Only a genuinely queued or running workflow suppresses it.
                 live_runs=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$head&per_page=100" \
                   --jq '[.workflow_runs[] | select(.status != "completed")] | length')
+
+                # A REQUIRED CONTEXT CAN BE PRESENT AND STILL NEVER SETTLE, WHICH THIS JOB CANNOT
+                # CURRENTLY RESCUE. The dispatch below keys on `contexts == 0` — a MISSING context.
+                # A context that exists but hangs forever is not missing, so it slips through and the
+                # PR waits indefinitely with nothing red.
+                #
+                # Measured 2026-08-11 on #1028: the `mobile checks` aggregate declares
+                # `timeout-minutes: 5` and sat `in_progress` for 23 minutes. GitHub enforces a job
+                # timeout via the runner reporting back, so a runner that disappears mid-job leaves
+                # the record live forever. It took a hand-run `gh workflow run` to clear.
+                #
+                # DETECTION ONLY, DELIBERATELY — this warns and does not dispatch. The discriminator
+                # is `run completed AND job not completed`, which cannot match a healthy job (a live
+                # job's run is live too). But these orphans appeared during an active GitHub incident
+                # ("Incident with GraphQL API Requests", 2026-08-11 14:50Z), and a false positive
+                # here spends a full set of heavy jobs on archlinux-1 — the exact waste the guard
+                # above exists to prevent. Warning first makes the failure visible the moment it
+                # happens instead of requiring archaeology, at zero risk to the bottleneck. Turning
+                # this into a dispatch is a deliberate follow-up, to be validated against a healthy
+                # API and against a genuinely long-running `test`/`release-build` job first.
+                #
+                # An elapsed-time rule would NOT be a safe substitute: `test` and `release-build`
+                # declare `timeout-minutes: 90` and legitimately run for tens of minutes, so any
+                # threshold short enough to catch a dead 5-minute aggregate would re-dispatch healthy
+                # heavy jobs.
+                for stuck in $(gh api "repos/$GH_REPO/actions/runs?head_sha=$head&per_page=100" \
+                  --jq '.workflow_runs[] | select(.status == "completed") | .id' 2>/dev/null); do
+                  orphans=$(gh api "repos/$GH_REPO/actions/runs/$stuck/jobs" \
+                    --jq '[.jobs[] | select(.status != "completed") | .name] | join(", ")' 2>/dev/null || echo "")
+                  if [ -n "$orphans" ]; then
+                    echo "::warning title=Orphaned check job::#$pr run $stuck completed while job(s) [$orphans] are still in_progress on $head. A required context in that state never settles and will block this PR indefinitely — re-dispatch that workflow at the branch. See docs/ci/reading-ci-state.md trap 5."
+                  fi
+                done
+
                 if [ "$live_runs" -gt 0 ]; then
                   echo "#$pr: $live_runs run(s) already queued or in progress on $head — not dispatching a duplicate"
                   continue
