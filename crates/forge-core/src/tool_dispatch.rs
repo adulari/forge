@@ -18,6 +18,7 @@ impl Session {
             || name == USE_SKILL_TOOL
             || name == REMEMBER_TOOL
             || name == fleet::MESSAGE_SESSION_TOOL
+            || name == heartbeat::MANAGE_HEARTBEATS_TOOL
         {
             return false;
         }
@@ -210,6 +211,11 @@ impl Session {
         // never called, unless this session is forge-serve-hosted.
         if call.name == fleet::MESSAGE_SESSION_TOOL {
             return self.message_session(msg_id, call).await;
+        }
+        // Agent-created heartbeats are core-owned (they persist to the store and are scoped away
+        // from the user's own `/heartbeat`, which never goes through tool dispatch at all).
+        if call.name == heartbeat::MANAGE_HEARTBEATS_TOOL {
+            return self.manage_heartbeats(msg_id, call);
         }
         // External MCP tools (meta-tools + exposed server tools) are owned by the manager, not the
         // built-in registry. Route them here, still through the permission broker (mcp-client.md).
