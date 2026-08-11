@@ -180,6 +180,14 @@ impl Session {
         if call.name == subagent::SEND_TO_AGENT_TOOL {
             return self.send_to_agent(msg_id, call).await;
         }
+        // Retained async subagents (RFC retained-async-subagents) — status + cancellation for
+        // detached children, also core-owned (they need the store + the in-process abort registry).
+        if call.name == subagent::LIST_SUBAGENTS_TOOL {
+            return self.list_subagents(msg_id, call);
+        }
+        if call.name == subagent::CANCEL_SUBAGENT_TOOL {
+            return self.cancel_subagent(msg_id, call);
+        }
         // Workflow scripts are core-owned for the same reason (docs/rfcs/forge-workflow.md).
         if call.name == workflow::RUN_WORKFLOW_TOOL {
             return self.run_workflow(msg_id, call).await;
