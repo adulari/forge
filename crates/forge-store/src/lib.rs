@@ -18,6 +18,7 @@ mod fork_store;
 mod handoff;
 mod handoff_types;
 mod harness_store;
+mod heartbeat_store;
 mod lattice_store;
 mod live_session_store;
 mod memory;
@@ -56,7 +57,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 28;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1669,6 +1670,25 @@ pub struct QueueTask {
     pub summary: Option<String>,
     pub cost_usd: Option<f64>,
     pub gate: Option<String>,
+}
+
+/// One `session_heartbeat` row: a recurring prompt that re-enters a LIVE session, as opposed to
+/// `forge schedule`'s OS-timer-spawned fresh `forge run` processes (docs/features/
+/// session-heartbeats.md). `owner` is `"user"` (at most one per session, created by
+/// `/heartbeat every`) or `"agent"` (model-created via `manage_heartbeats`, addressed by
+/// `label`, up to a small cap per session). `status` is `"active"` or `"paused"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionHeartbeat {
+    pub id: String,
+    pub session_id: String,
+    pub owner: String,
+    pub label: Option<String>,
+    pub prompt: String,
+    pub interval_secs: i64,
+    pub status: String,
+    pub next_due_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 /// One recorded run of a saved workflow (`/workflow run <name>`). `status` lifecycle:
