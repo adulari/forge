@@ -99,13 +99,26 @@ jobs:
     steps:
       - name: Check affected jobs passed
         run: |
-          for result in \
-            "${{ needs.changes.result }}" \
-            "${{ needs.audit.result }}" \
-            "${{ needs.deny.result }}"; do
+          # Name the job AND its state — see the note in ci.yml. `cancelled` is the common case
+          # (58% of heavy/release jobs), so a message that conflates it with a real failure sends
+          # readers hunting for a bug that is not there. The gate is unchanged: anything that is
+          # not success|skipped still exits 1.
+          for entry in \
+            "changes=${{ needs.changes.result }}" \
+            "audit=${{ needs.audit.result }}" \
+            "deny=${{ needs.deny.result }}"; do
+            name="${entry%%=*}"
+            result="${entry#*=}"
             case "$result" in
               success|skipped) ;;
-              *) echo "An affected security job failed or was cancelled"; exit 1 ;;
+              cancelled)
+                echo "::error title=Security job cancelled, not failed::$name was CANCELLED — superseded by a newer run for this branch, not a failure. Re-run it."
+                exit 1
+                ;;
+              *)
+                echo "::error title=Security job $result::$name: $result"
+                exit 1
+                ;;
             esac
           done
           echo "All affected security jobs passed"

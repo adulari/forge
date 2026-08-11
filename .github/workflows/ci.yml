@@ -169,16 +169,35 @@ jobs:
     steps:
       - name: Check all jobs passed
         run: |
-          for result in \
-            "${{ needs.changes.result }}" \
-            "${{ needs.anywhere-policy.result }}" \
-            "${{ needs.fmt.result }}" \
-            "${{ needs.clippy.result }}" \
-            "${{ needs.test.result }}" \
-            "${{ needs.release-build.result }}"; do
+          # Name the job AND its state. The old message said only "a required CI job failed or was
+          # cancelled", which cannot tell a real failure from churn — and `cancelled` is the common
+          # case here, not the rare one: 58% of heavy/release jobs end cancelled, because all three
+          # workflows use ref-keyed `cancel-in-progress` and every merge to main updates every open
+          # PR's branch. Dependabot #924 sat TWO WEEKS looking broken when `test` and `clippy` had
+          # both passed and only `release-build` was cancelled; nobody re-ran it because the PR
+          # looked failed.
+          #
+          # The gate is deliberately unchanged: anything that is not success|skipped still exits 1.
+          # Only the diagnosis improves.
+          for entry in \
+            "changes=${{ needs.changes.result }}" \
+            "anywhere-policy=${{ needs.anywhere-policy.result }}" \
+            "fmt=${{ needs.fmt.result }}" \
+            "clippy=${{ needs.clippy.result }}" \
+            "test=${{ needs.test.result }}" \
+            "release-build=${{ needs.release-build.result }}"; do
+            name="${entry%%=*}"
+            result="${entry#*=}"
             case "$result" in
               success|skipped) ;;
-              *) echo "A required CI job failed or was cancelled"; exit 1 ;;
+              cancelled)
+                echo "::error title=CI job cancelled, not failed::$name was CANCELLED — superseded by a newer run for this branch, not a test failure. Re-run it; nothing here says the code is broken."
+                exit 1
+                ;;
+              *)
+                echo "::error title=CI job $result::$name: $result"
+                exit 1
+                ;;
             esac
           done
           echo "All affected CI jobs passed"
