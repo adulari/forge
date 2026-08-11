@@ -106,9 +106,80 @@ A merge to `main` makes every open PR out of date, and each one re-queues its he
 order of 45 jobs for a normal open-PR set. So "my PR has been queued for hours" is usually the
 expected behaviour of the queue, not a fault to investigate.
 
+## Trap 5 — a job can outlive its own timeout, and then it never resolves
+
+A required check that never concludes blocks a PR exactly like a failure, but reads as "still
+running" in every view. It is worth knowing this can be a dead job rather than a slow one.
+
+Measured 2026-08-11 on #1028. The `mobile checks` aggregate declares `timeout-minutes: 5`, and:
+
+    job  93817487082   name=mobile checks   status=in_progress   started=14:42:30
+                       runner_name=archlinux-2   completed_at=null
+
+    ...still in_progress 23 minutes later, on a 5-minute timeout.
+
+Two things make it identifiable:
+
+- **The parent run had already finished.** `actions/runs/<id>` reported `completed/success` while
+  one of its own jobs was still `in_progress`. A run cannot legitimately complete with a live job.
+- **The named runner was idle.** `actions/runners` reported `archlinux-2  busy=false` while GitHub
+  still believed a job was executing on it.
+
+The timeout does not save you here: enforcement depends on the runner reporting back, so a runner
+that goes away mid-job leaves the record hanging indefinitely. Waiting is not a fix — nothing is
+coming.
+
+**How to spot it,** across recent runs:
+
+```sh
+gh api repos/<owner>/<repo>/actions/runs/<run_id>/jobs \
+  --jq '.jobs[] | select(.status != "completed") | "\(.name) started=\(.started_at) runner=\(.runner_name)"'
+```
+
+Any job listed there whose **run** is already `completed` is orphaned.
+
+**The fix is a fresh context, not a re-run of the dead one.** Dispatch the workflow at the branch;
+branch protection reads the most recent check run of that name on the SHA, so a new one supersedes
+the stuck record:
+
+```sh
+gh workflow run mobile-typecheck.yml --ref <branch>
+```
+
+## Trap 6 — during a GitHub incident, REST and GraphQL disagree, and `gh` mostly speaks GraphQL
+
+`gh pr view --json statusCheckRollup,mergeStateStatus` and `gh pr checks` read the **GraphQL** API.
+When GitHub is degraded, that is frequently the degraded component, so the authoritative source in
+[The one rule](#the-one-rule) can itself be stale.
+
+On 2026-08-11 the status page reported *"Incident with GraphQL API Requests"* while REST
+(`actions/runs`, `commits/<sha>/check-runs`, `pulls/<n>`) kept answering normally.
+
+Before diagnosing anything strange — a PR blocked with no failing check, states that contradict
+each other, jobs that will not settle — check whether the platform is having a bad day:
+
+```sh
+curl -s https://www.githubstatus.com/api/v2/summary.json | jq '.status.description, .incidents[].name'
+```
+
+Then re-read the same facts over REST and see whether the two agree:
+
+```sh
+gh api repos/<owner>/<repo>/pulls/<n> --jq '{mergeable, mergeable_state}'
+gh api repos/<owner>/<repo>/commits/<sha>/check-runs --jq '.check_runs[] | "\(.name)=\(.status)/\(.conclusion)"'
+```
+
+This cuts both ways, so do not use an incident to explain away a real defect: when the two sources
+were compared on #1028 above, REST **confirmed** the stuck `mobile checks` job rather than
+contradicting it. An incident makes readings suspect, not wrong.
+
 ## Quick triage order
 
-1. `gh pr checks <n>` — is an **aggregate** actually failing? If not, the PR is fine; it is waiting.
-2. If an aggregate is red, list its run's jobs. Any genuine `failure`, or only `cancelled`?
-3. If a job did fail, confirm its run's `event` is `pull_request` before treating it as real.
-4. Only then read the log.
+1. Is GitHub itself degraded? If the picture is incoherent, check the status page before anything
+   else, and re-read the facts over REST (Trap 6).
+2. `gh pr checks <n>` — is an **aggregate** actually failing? If not, the PR is fine; it is waiting.
+3. If an aggregate is red, list its run's jobs. Any genuine `failure`, or only `cancelled`?
+4. If a job did fail, confirm its run's `event` is `pull_request` before treating it as real.
+5. If an aggregate is neither red nor green but never settles, check whether its job outlived its
+   timeout while its run completed (Trap 5) — that one needs a dispatch, not patience.
+6. Only then read the log.
