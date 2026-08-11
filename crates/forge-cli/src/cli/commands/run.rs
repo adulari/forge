@@ -115,6 +115,10 @@ mod refine_cmd;
 pub(crate) use dispatch::*;
 mod driver;
 pub(crate) use driver::*;
+mod btw;
+pub(crate) use btw::*;
+mod export;
+pub(crate) use export::*;
 
 /// Ingest an external bridge-stat snapshot into the session's shared quota store.
 pub(crate) fn seed_subscription_stats(session: &Session, bstats: &bridge_stats::BridgeStats) {
@@ -1787,6 +1791,18 @@ pub(crate) async fn run_chat_tui(
                                     global,
                                 ));
                             }
+                            DispatchOutcome::RunBtw { question } => {
+                                turn_gen += 1;
+                                turn_handle = Some(spawn_btw(
+                                    question,
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                ));
+                            }
                             DispatchOutcome::RunSavedWorkflow { name, args } => {
                                 turn_gen += 1;
                                 turn_handle = Some(spawn_saved_workflow(
@@ -2740,6 +2756,18 @@ pub(crate) async fn run_chat_tui(
                             &mut busy_since,
                         ));
                     }
+                    DispatchOutcome::RunBtw { question } => {
+                        turn_gen += 1;
+                        turn_handle = Some(spawn_btw(
+                            question,
+                            &session,
+                            &done_tx,
+                            turn_gen,
+                            &mut app,
+                            &mut busy,
+                            &mut busy_since,
+                        ));
+                    }
                     DispatchOutcome::Quit => {
                         abort_turn_before_quit(
                             &mut turn_handle,
@@ -2905,6 +2933,18 @@ pub(crate) async fn run_chat_tui(
                                         &mut busy_since,
                                         instructions,
                                         global,
+                                    ));
+                                }
+                                DispatchOutcome::RunBtw { question } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_btw(
+                                        question,
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
                                     ));
                                 }
                                 DispatchOutcome::RunSavedWorkflow { name, args } => {
@@ -3346,6 +3386,18 @@ pub(crate) async fn run_chat_tui(
                                         &mut busy_since,
                                         instructions,
                                         global,
+                                    ));
+                                }
+                                DispatchOutcome::RunBtw { question } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_btw(
+                                        question,
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
                                     ));
                                 }
                                 DispatchOutcome::RunSavedWorkflow { name, args } => {

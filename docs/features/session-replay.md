@@ -3,7 +3,8 @@
 > Status: **done** — `forge replay <id>` (transcript) + `forge replay <a> <b>` (diff),
 > read-only over the persisted record, plus `forge replay <id> --rerun` (true model
 > re-execution: re-issue the recorded prompts on the current model/mesh and diff vs. the
-> original).
+> original), plus `forge replay <id> --html <path>` / the TUI's `/export [path]` (one
+> self-contained HTML file of the transcript).
 
 ## Why
 
@@ -56,6 +57,23 @@ turn does — every message (`role`, `content`, `model`, tool calls, timestamp) 
   structured JSON object: `{ session_id, summary, turns }`, with each turn carrying seq,
   role, created_at, content, model, token counts, cost_usd, and tool_calls. Suitable for
   external auditing, piping to `jq`, or feeding into analysis scripts.
+
+## Shipped (follow-up 3)
+
+- **`forge replay <id> --html <path>`** — `render_html(id, entries)` in `replay.rs` renders the
+  transcript to ONE self-contained HTML file: a metadata header (session id, started/ended,
+  distinct models, total cost, total tokens — from the same `summarize()` the text/JSON renderers
+  use) then a card per turn (role, model, cost, content, tool calls), monospace, inline CSS only,
+  no external assets, dark-friendly (`prefers-color-scheme`). Every dynamic value is HTML-escaped
+  — message and tool-call content is untrusted text, not markup. `--html` is single-id only, like
+  `--json`.
+- **`/export [path]`** — the TUI slash-command counterpart, exporting the CURRENT session with the
+  same `render_html`. `path` defaults to `forge-session-<id8>.html` in the current directory.
+  Read-only over the persisted record (like `/replay`), so it can run while a turn is in progress.
+  Wired in `crates/forge-cli/src/cli/commands/run/export.rs` (a new file — `run/dispatch.rs` is at
+  its CI file-size ratchet ceiling, so the dispatch arm just forwards to `export_cmd`).
+- This closes the gap named in `docs/architecture/prime-agent-comparison.md` (prime-agent's
+  `/export` HTML / `/share` gist vs. Forge's `forge replay` TUI).
 
 ## Re-execution (`--rerun`)
 

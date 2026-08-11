@@ -3,6 +3,8 @@
 //! navigates; the render loop in the binary interprets the resulting [`CommandAction`] (it owns
 //! the `Session`, which this crate must not depend on).
 
+mod btw_args;
+
 /// One command's metadata, shown in the palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Command {
@@ -33,6 +35,16 @@ pub const COMMANDS: &[Command] = &[
         desc:
             "show a session transcript inline (/replay <id>) or diff two sessions (/replay <a> <b>)",
         usage: "/replay <id> [<id2>]",
+    },
+    Command {
+        name: "btw",
+        desc: "ask a side question that never joins this session's transcript (alias /side)",
+        usage: "/btw <question>",
+    },
+    Command {
+        name: "export",
+        desc: "export this session's transcript as one self-contained HTML file",
+        usage: "/export [path]",
     },
     Command {
         name: "resume",
@@ -308,6 +320,13 @@ pub enum CommandAction {
     Loop(String),
     /// Show a session transcript inline, or diff two sessions (`/replay <id> [<id2>]`).
     Replay(String, Option<String>),
+    /// A side question that never joins this session's transcript or history — answered as a
+    /// distinct side-note card, not a turn (`/btw <question>`, alias `/side`). Each call is
+    /// independent (docs/features/side-questions.md).
+    Btw(String),
+    /// Export this session's transcript as one self-contained HTML file (`/export [path]`).
+    /// `None` uses the default `forge-session-<id8>.html` in the current directory.
+    Export(Option<String>),
     /// Open the usage overlay showing API spend + token breakdown (`/usage`).
     Usage,
     /// Open the mesh routing inspector; optional prompt to trace (`/mesh [task]`).
@@ -616,6 +635,8 @@ pub fn parse_command(line: &str) -> CommandAction {
                 .filter(|s| !s.is_empty());
             CommandAction::Replay(id_a, id_b)
         }
+        "btw" | "side" => CommandAction::Btw(btw_args::parse_btw_arg(&arg)),
+        "export" => CommandAction::Export((!arg.is_empty()).then(|| arg.trim().to_string())),
         "effort" => CommandAction::SetEffort((!arg.is_empty()).then_some(arg)),
         "remember" => CommandAction::Remember(arg.to_string()),
         "memories" => CommandAction::Memories,
@@ -759,7 +780,7 @@ pub fn command_category(name: &str) -> &'static str {
     match name {
         "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
         "sessions" | "resume" | "replay" | "undo" | "checkpoint" | "checkpoints" | "compact"
-        | "uncompact" | "refine" | "clear" => "Session",
+        | "uncompact" | "refine" | "clear" | "btw" | "export" => "Session",
         "model" | "models" | "mode" | "effort" | "thinking" | "mesh" | "usage" => "Model & usage",
         "assay" | "lattice" | "pr" => "Review & ship",
         "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" => "Integrations",
@@ -1249,6 +1270,22 @@ mod tests {
         assert_eq!(parse_command("/approve"), CommandAction::Execute);
         assert_eq!(parse_command("/go"), CommandAction::Execute);
         assert_eq!(parse_command("/voice"), CommandAction::Voice);
+        assert_eq!(
+            parse_command("/btw is this bug worth a ticket?"),
+            CommandAction::Btw("is this bug worth a ticket?".into())
+        );
+        assert_eq!(parse_command("/btw"), CommandAction::Btw(String::new()));
+        assert_eq!(parse_command("/btw   "), CommandAction::Btw(String::new()));
+        // /side is an alias for /btw — same action, same parsing.
+        assert_eq!(
+            parse_command("/side what does EAGAIN mean?"),
+            CommandAction::Btw("what does EAGAIN mean?".into())
+        );
+        assert_eq!(parse_command("/export"), CommandAction::Export(None));
+        assert_eq!(
+            parse_command("/export out/session.html"),
+            CommandAction::Export(Some("out/session.html".into()))
+        );
         assert_eq!(parse_command("/record"), CommandAction::Voice);
     }
 

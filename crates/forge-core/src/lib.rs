@@ -28,6 +28,7 @@ use forge_types::{Presenter, PresenterEvent};
 
 pub mod assay;
 mod auxiliary_policy;
+mod btw_policy;
 pub mod capsule;
 mod compaction_policy;
 mod completeness;
@@ -8068,6 +8069,85 @@ mod tests {
         assert!(session.transcript[0].content.contains("summarized"));
         // The most recent message is preserved verbatim at the tail.
         assert_eq!(session.transcript.last().unwrap().content, "message 11");
+    }
+
+    #[tokio::test]
+    async fn ask_btw_writes_nothing_to_the_message_table() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = fresh_session(Arc::clone(&store), Config::default());
+        let id = session.session_id().to_string();
+
+        let before = store.load_all_messages(&id).unwrap().len();
+        assert_eq!(before, 0, "fresh session starts with no persisted rows");
+
+        session.ask_btw("what is 2+2?").await;
+
+        let after = store.load_all_messages(&id).unwrap().len();
+        assert_eq!(
+            after, 0,
+            "/btw must not write ANY row (active or soft-deleted) to the message table"
+        );
+        // The transcript used for the NEXT real turn's context must also be untouched.
+        assert!(session.transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_btw_emits_a_btw_answer_event_not_a_transcript_message() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            Config::default(),
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.ask_btw("  what is forge?  ").await;
+
+        let captured = events.lock().unwrap();
+        let answer = captured.iter().find_map(|e| match e {
+            PresenterEvent::BtwAnswer {
+                question, answer, ..
+            } => Some((question.clone(), answer.clone())),
+            _ => None,
+        });
+        let (question, answer) = answer.expect("a BtwAnswer event was emitted");
+        assert_eq!(question, "what is forge?", "the question is trimmed");
+        assert!(!answer.is_empty());
+        assert!(session.transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_btw_on_blank_question_warns_and_makes_no_call() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            Config::default(),
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.ask_btw("   ").await;
+
+        let captured = events.lock().unwrap();
+        assert!(matches!(
+            captured.last(),
+            Some(PresenterEvent::Warning(msg)) if msg.contains("usage: /btw")
+        ));
+        assert!(!captured
+            .iter()
+            .any(|e| matches!(e, PresenterEvent::BtwAnswer { .. })));
     }
 
     #[tokio::test]
