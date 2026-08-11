@@ -205,6 +205,7 @@ impl Session {
             project,
             last_context_pack: context_pack::ContextPack::default(),
             last_turn_contract: turn_contract::TurnContract::default(),
+            turns_since_refine: 0,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
