@@ -203,6 +203,22 @@ fn print_top_level_error(e: &anyhow::Error) {
 /// One-line next-step hint for a failed command. Provider/config/auth failures get the `forge
 /// doctor` pointer; anything else gets a generic detail hint.
 fn error_next_step(e: &anyhow::Error) -> &'static str {
+    // A store written by a NEWER build is the one failure that has repeatedly taken this machine
+    // down — most recently 632 consecutive restarts with Anywhere dark throughout — and the generic
+    // hint below is useless for it: `forge doctor` and `RUST_LOG=debug` do not tell you the remedy
+    // is a newer binary. Five recoveries have instead gone through someone being told, out of band,
+    // to hand-write `PRAGMA user_version`. Say the supported remedy in the output instead.
+    //
+    // Matched by downcast, not by substring on the message, so rewording the Display text cannot
+    // silently drop this back to the generic branch. Deliberately does NOT suggest rewriting
+    // user_version: that tells SQLite the file is older than it is, and is only safe when every
+    // migration in between was additive — a judgement this hint cannot make for the user.
+    if e.chain().any(|c| {
+        c.downcast_ref::<forge_store::StoreError>()
+            .is_some_and(|s| matches!(s, forge_store::StoreError::SchemaTooNew { .. }))
+    }) {
+        return "this store was written by a newer Forge — install a build at least that new (`forge update`); `forge doctor` reports the store path and both schema versions";
+    }
     let text = e
         .chain()
         .map(|c| c.to_string().to_lowercase())
@@ -222,5 +238,59 @@ fn error_next_step(e: &anyhow::Error) -> &'static str {
         "run `forge doctor` to check your provider keys + config"
     } else {
         "run `forge doctor` for a health check, or re-run with RUST_LOG=debug for detail"
+    }
+}
+
+#[cfg(test)]
+mod error_hint_tests {
+    use super::{error_next_step, exit_code_for};
+
+    fn schema_too_new() -> anyhow::Error {
+        anyhow::Error::new(forge_store::StoreError::SchemaTooNew {
+            found: 26,
+            supported: 25,
+        })
+    }
+
+    /// The failure that produced 632 restarts must name its actual remedy. Before this, it fell
+    /// through to the generic `RUST_LOG=debug` hint, which points nowhere useful.
+    #[test]
+    fn a_store_from_a_newer_build_points_at_upgrading_the_binary() {
+        let hint = error_next_step(&schema_too_new());
+        assert!(hint.contains("forge update"), "got: {hint}");
+        assert!(!hint.contains("RUST_LOG"), "got the generic hint: {hint}");
+    }
+
+    /// It must survive being wrapped, because that is how it actually arrives — the store error
+    /// reaches the top level as a cause under `opening session store`, not as the head of the chain.
+    #[test]
+    fn the_hint_survives_a_wrapped_cause_chain() {
+        let wrapped = schema_too_new().context("opening session store");
+        assert!(error_next_step(&wrapped).contains("forge update"));
+        assert_eq!(
+            exit_code_for(&wrapped),
+            78,
+            "must stay EX_CONFIG when wrapped"
+        );
+    }
+
+    /// Never suggest rewriting `user_version`: it is only safe when every migration in between was
+    /// additive, which this hint cannot determine. Pinned so nobody adds it as a convenience.
+    #[test]
+    fn the_hint_does_not_suggest_hand_writing_the_pragma() {
+        let hint = error_next_step(&schema_too_new());
+        assert!(!hint.contains("PRAGMA"), "got: {hint}");
+        assert!(!hint.contains("user_version"), "got: {hint}");
+    }
+
+    /// The pre-existing branches must be untouched by the early return.
+    #[test]
+    fn other_errors_keep_their_existing_hints() {
+        let provider = anyhow::anyhow!("no usable model for this request");
+        assert!(error_next_step(&provider).contains("provider keys"));
+
+        let other = anyhow::anyhow!("something unrelated broke");
+        assert!(error_next_step(&other).contains("RUST_LOG=debug"));
+        assert_eq!(exit_code_for(&other), 1);
     }
 }
