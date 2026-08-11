@@ -7,13 +7,15 @@ we know, and the planned fix.
 
 Headings ending in `(fixed)` are kept as history. Currently open:
 
-- **Store poisoning by dev builds — LIVE RIGHT NOW** — anything built from a working tree opens the
-  real store and migrates it to that branch's schema; the installed release binary then refuses it
-  and `forge serve` cannot start. Four occurrences, and the store is *still* stranded (schema 25 vs
-  an installed binary supporting 23) with the daemon at **25,218 restarts** and Anywhere dark.
-  Per-route fixes in #985/#994, the class fix in #995, permanent-failure exit in #996 — none of
-  them released yet.
-- **No deadman alarm for the daemon** — those 25,218 restarts produced nothing but repeated journal
+- **Store poisoning by dev builds — the outage is LIVE, the code fix is not** — anything built from
+  a working tree opened the real store and migrated it to that branch's schema; the installed
+  release binary then refuses it and `forge serve` cannot start. The store sits at **schema 26**
+  against an installed binary supporting **23**, with the daemon at **34,353 restarts** and
+  Anywhere dark (measured 2026-08-11 14:15). Every fix has now **merged** — per-route #985/#994,
+  the class fix #995, test isolation #965, permanent-failure exit #996 — but **none is released**,
+  so the machine still runs a binary that has none of them. Ending this needs a release, not more
+  code.
+- **No deadman alarm for the daemon** — those 34,353 restarts produced nothing but repeated journal
   lines: no push, no notification, no statusline signal. The obvious sender reads its subscriber
   list *from the store*, so it is silent in exactly the case it exists for.
 - **Version-notice labelling** — `OperationalNotice` renders the updater's *available* version
@@ -41,27 +43,49 @@ directly at `target/debug/forge` (#994).
 drop-in sets `StartLimitIntervalSec=0` so transient network failures retry forever, and nothing
 distinguished a permanent failure from a transient one.
 
-**This is not past tense.** As of 2026-08-10 the store is still stranded at schema 25 while the
-installed binary (2.12.2) supports 23, and `forge-serve` is at **NRestarts=25218** — days of
+**This is not past tense.** Measured 2026-08-11 14:15: the store is at schema **26** while the
+installed binary (2.12.2) supports **23**, and `forge-serve` is at **NRestarts=34353** — days of
 continuous failure with Anywhere dark throughout. The 2026-08-07 recovery (a hand-written
-`PRAGMA user_version = 23`) did not hold.
+`PRAGMA user_version = 23`) did not hold. Prefer re-measuring over trusting the number above; it
+climbs by roughly 6 per minute:
 
-**What the version number tells you, and what it does not.** The store reads 25 while the tree and
-`forge-dev.db` both read 26. A build from the tree today carries 26 and would have taken the store
-to 26, so the last thing to migrate it was a build from the window when the tree was still at 25
-(before #980) — this is one stranded store, not an active leak. Do not read recency off the file's
-mtime: the crash loop opens it every ten seconds, so it is always freshly touched.
+```
+sqlite3 ~/.local/share/forge/forge.db 'PRAGMA user_version;'
+systemctl --user show forge-serve.service -p NRestarts -p SubState
+```
 
-**Fixes:** #985 and #994 close the two known routes. #995 closes the class — a `debug_assertions`
-build resolves to `forge-dev.db`, so only installed releases touch the real store (explicit
-`FORGE_DB` still overrides). #996 makes a permanent failure exit 78 (`EX_CONFIG`) with
+**The store moved after the previous analysis, which that analysis said it would not.** An earlier
+version of this section read 25 and concluded "this is one stranded store, not an active leak,"
+reasoning that a build from the tree carried 26 and would have taken the store to 26. The store now
+reads **26** — so something at schema 26 did open it, and the inference was wrong. Worth stating
+plainly, because the same reasoning would understate a live leak again.
+
+What the current numbers do and do not tell you: the store and `forge-dev.db` both read 26 while
+`main` is at **27**, so whatever last migrated the real store predates the 27 bump (#973). That is
+consistent with the class now being closed — #995 sends `debug_assertions` builds to `forge-dev.db`,
+and that file existing at 26 is the mechanism working — but it is not proof, and it will only be
+proof once an installed release carries the fix. Do not read recency off the file's mtime: the crash
+loop opens it every ten seconds, so it is always freshly touched.
+
+**Fixes — all merged to `main`, none released.** #985 and #994 close the two known routes. #995
+closes the class from the build side — a `debug_assertions` build resolves to `forge-dev.db`, so
+only installed releases touch the real store (explicit `FORGE_DB` still overrides) — and #965
+closes it from the test side, giving unit tests a per-test store instead of falling through to the
+default path. #996 makes a permanent failure exit 78 (`EX_CONFIG`) with
 `RestartPreventExitStatus=78` in the generated unit, so the service stops and shows as `failed`
 rather than looping — note that applies on the next `forge service install`.
 
 **Still open:** nothing reports the outage to the user (see the deadman-alarm entry); recovering a
 poisoned store still needs a manual PRAGMA rather than a supported command; and **none of the fixes
-above have been released** — the newest release is v2.12.1 (2026-07-30) and main is ~50 commits
-ahead, so an installed Forge has none of them.
+above have been released** — the newest release is v2.12.1 (2026-07-30) and `main` is 50 commits
+ahead, so an installed Forge has none of them. Note the installed binary *reports* 2.12.2: the
+`[2.12.2]` changelog section was written but never tagged, so the version string cannot be used to
+tell what is installed (see the version-notice entry). #1014 at least makes the failure self-explanatory:
+the error now names the remedy (install a build at least as new as the store) instead of suggesting
+`forge doctor` and `RUST_LOG=debug`, neither of which leads anywhere.
+
+**The single action that ends this is a release.** Every code fix is on `main`; the machine is
+broken because it runs a binary from before them. No further code change shortens that path.
 
 **The upgrade does not carry the whole of #996.** Its systemd half (`RestartPreventExitStatus=78`)
 lives in the unit that `forge service install` renders, and installing a new version never rewrites
