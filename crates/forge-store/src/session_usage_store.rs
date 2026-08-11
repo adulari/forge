@@ -452,18 +452,33 @@ impl Store {
 
     /// Record token usage/cost for a message and bump the session's running total.
     /// Batched in one explicit transaction so the INSERT + UPDATE land in a single WAL commit.
-    pub fn record_usage(&self, session_id: &str, message_id: &str, usage: &Usage) -> Result<()> {
+    ///
+    /// `model` is the routed id (`provider::model`, e.g. `codex-oauth::gpt-5.6-luna`). It is stored
+    /// alongside the derived provider namespace so a usage row describes itself. Historical rows
+    /// predate this and hold NULL, which is why the read side still derives the provider from the
+    /// linked `message.model` rather than trusting this column — see `usage_query`.
+    pub fn record_usage(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        usage: &Usage,
+        model: Option<&str>,
+    ) -> Result<()> {
         let id = forge_types::new_id();
+        let model = model.map(str::trim).filter(|m| !m.is_empty());
+        let provider = model.and_then(|m| m.split_once("::")).map(|(ns, _)| ns);
         with_busy_retry(|| {
             let mut conn = self.lock()?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute(
                 "INSERT INTO usage
-                 (id, message_id, input_tokens, cached_input_tokens, output_tokens, cost_usd)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (id, message_id, provider, model, input_tokens, cached_input_tokens, output_tokens, cost_usd)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 (
                     &id,
                     message_id,
+                    provider,
+                    model,
                     usage.input_tokens as i64,
                     usage.cached_input_tokens as i64,
                     usage.output_tokens as i64,
