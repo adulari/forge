@@ -102,7 +102,31 @@ guessed at.
 | `max_entry_chars` | `2000` | Max characters per injected harness entry; longer entries are truncated. |
 
 `/refine status` is deliberately unfiltered by `harness.enabled` — it shows what's stored even while
-injection/refinement is switched off.
+injection/refinement is switched off. Because "stored" and "in effect" are therefore not the same
+thing, the listing labels every entry with which it is:
+
+```
+harness: injecting 12 of 15 entries (cap 12, 2000 chars each)
+  session:01J...
+    a1b2c3d4  prompt   Prefer explicit over clever  [injected]  (refinement)
+  global
+    9f8e7d6c  skill    Rust review checklist        [injected, content truncated]  (refinement)
+    4b5a6978  prompt   An older lesson              [NOT INJECTED — beyond the entry cap]  (refinement)
+```
+
+Three states are worth knowing about, because each one silently changes what the model sees:
+
+- **beyond the entry cap** — injection takes only the first `max_context_entries` of the scope
+  chain, so entries past it are stored and never sent. They keep occupying the list, so without the
+  label an entry that stopped having any effect still reads as active.
+- **content truncated** — the entry is injected, but clamped to `max_entry_chars`, so the model sees
+  a prefix of what is stored.
+- **harness off** — with `harness.enabled = false` nothing is injected at all, though everything
+  stays stored and the history remains browsable.
+
+Scope precedence decides which entries survive the cap: the chain is ordered session → project →
+global, and the cap applies to the front of that list, so session-scoped entries are the last to be
+dropped.
 
 ## 8. Design
 
