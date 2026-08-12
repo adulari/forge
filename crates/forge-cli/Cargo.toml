@@ -103,5 +103,7 @@ forge-voice = { workspace = true, features = ["microphone"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Simulates a store migrated by a newer build, for the doctor schema-drift check.
+rusqlite = { workspace = true }
 # In-memory secret_store for tests (resolver=2: does not leak into production builds).
 forge-config = { workspace = true, features = ["test-secrets"] }
