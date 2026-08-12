@@ -2293,6 +2293,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "shell-words",
  "similar 3.1.1",
  "syntect",
  "tokio",
