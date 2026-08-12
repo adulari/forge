@@ -24,6 +24,9 @@ tokio.workspace = true
 pulldown-cmark.workspace = true
 syntect.workspace = true
 similar.workspace = true
+# Quote-aware tokenizing for `/loop`/`/goal --gate "<cmd with spaces>"` (already a workspace dep,
+# used by forge-core's shell-command permission parsing).
+shell-words.workspace = true
 
 [dev-dependencies]
 # In-memory secret_store for tests (resolver=2: does not leak into production builds).
