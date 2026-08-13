@@ -89,7 +89,13 @@ pub(crate) fn needs_onboarding(has_any_key: bool, any_bridge: bool, config_exist
 /// before the chat starts. Best-effort and non-fatal — a failure just means the mesh won't have the
 /// local model this session.
 pub(crate) fn maybe_autostart_local() {
-    let cfg = forge_config::load().unwrap_or_default();
+    let cfg = match super::load_config() {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            eprintln!("⚠ local runtime disabled: {error:#}");
+            return;
+        }
+    };
     if !cfg.local.autostart || !local::ollama_installed() {
         return;
     }
@@ -198,7 +204,13 @@ pub(crate) async fn local_menu() -> Result<()> {
 /// Artificial Analysis benchmark scores for ranking local models (cache-first; `None` if disabled
 /// or unavailable). Seeds the coverage check with the static catalog's tags.
 pub(crate) async fn local_bench_scores() -> Option<forge_mesh::BenchmarkScores> {
-    let cfg = forge_config::load().unwrap_or_default();
+    let cfg = match super::load_config() {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            eprintln!("⚠ local benchmark ranking disabled: {error:#}");
+            return None;
+        }
+    };
     let ids: Vec<String> = local::CATALOG
         .iter()
         .map(|m| format!("ollama::{}", m.ollama_tag))
@@ -367,7 +379,7 @@ pub(crate) fn local_start(key: Option<&str>) -> Result<()> {
     if !local::ollama_installed() {
         anyhow::bail!("Ollama is not installed. Run `forge local install` first.");
     }
-    let cfg = forge_config::load().unwrap_or_default();
+    let cfg = super::load_config()?;
     // Choose the model: raw tag as-is; catalog key → its tag; else configured tag; else recommended.
     let tag: String = match key {
         Some(n) if n.contains(':') => n.to_string(),
@@ -404,7 +416,13 @@ pub(crate) fn local_start(key: Option<&str>) -> Result<()> {
 
 /// Print local-runtime status: install, serving, models, and the autostart config.
 pub(crate) fn local_status() {
-    let cfg = forge_config::load().unwrap_or_default();
+    let cfg = match super::load_config() {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            eprintln!("⚠ cannot load local runtime configuration: {error:#}");
+            return;
+        }
+    };
     match local::ollama_version() {
         Some(v) => println!("Ollama: installed ({v})"),
         None => {
@@ -458,7 +476,7 @@ pub(crate) fn init() -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("`forge init` is interactive — run it in a terminal");
     }
-    let cfg = forge_config::load().unwrap_or_default();
+    let cfg = super::load_config()?;
     let outcome =
         forge_tui::init_wizard::run(wizard_input(cfg.permission_mode, cfg.mesh.credit_mode))
             .context("running the setup wizard")?;
