@@ -23,3 +23,12 @@ pub(crate) mod skill;
 mod tests;
 pub(crate) mod tour;
 pub(crate) mod voice;
+
+use anyhow::{Context, Result};
+
+/// Load the effective CLI configuration without turning a present parse failure into defaults.
+/// Commands should use this boundary so users see the source path and underlying error instead of
+/// unknowingly running with different provider, routing, or local-runtime settings.
+pub(crate) fn load_config() -> Result<forge_config::Config> {
+    forge_config::load().context("loading Forge configuration")
+}
