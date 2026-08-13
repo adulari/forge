@@ -224,7 +224,8 @@ impl Store {
             let rows = stmt.query_map([repo_root], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?;
-            rows.filter_map(|r| r.ok())
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
                 .filter(|(_, rel)| !keep.contains(rel))
                 .map(|(id, _)| id)
                 .collect()

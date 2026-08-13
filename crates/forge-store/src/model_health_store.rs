@@ -138,9 +138,11 @@ impl Store {
     pub fn all_model_contexts(&self) -> Result<std::collections::HashMap<String, u32>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT model, window FROM model_context")?;
-        let map = stmt
+        let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-            .filter_map(|r| r.ok())
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let map = rows
+            .into_iter()
             .map(|(model, w)| (model, w.max(0) as u32))
             .collect();
         Ok(map)

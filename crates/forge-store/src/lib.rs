@@ -4178,6 +4178,26 @@ mod tests {
     }
 
     #[test]
+    fn all_model_contexts_reports_row_decode_errors() {
+        let store = Store::open_in_memory().unwrap();
+        // SQLite's dynamic typing lets a damaged/imported database contain text in this INTEGER
+        // column. The reader must report that corruption instead of silently omitting the model.
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO model_context (model, window, updated_at) VALUES (?1, ?2, 0)",
+                ("broken", "not-a-number"),
+            )
+            .unwrap();
+
+        let error = store
+            .all_model_contexts()
+            .expect_err("a malformed row must not disappear from the report");
+        assert!(error.to_string().contains("Invalid column type"));
+    }
+
+    #[test]
     fn model_context_round_trips_and_upserts() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.model_context("openrouter::x:free").unwrap(), None);
