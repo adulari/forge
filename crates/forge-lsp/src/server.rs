@@ -154,7 +154,7 @@ impl LspServer {
                 ));
             }
             match tokio::time::timeout(remaining, read_msg(&mut self.stdout)).await {
-                Ok(Some(msg)) => {
+                Ok(Ok(Some(msg))) => {
                     if msg.get("id").and_then(|v| v.as_u64()) == Some(id) {
                         if let Some(error) = msg.get("error") {
                             let message = error
@@ -169,10 +169,16 @@ impl LspServer {
                         break;
                     }
                 }
-                Ok(None) => {
+                Ok(Ok(None)) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "lsp: server closed stdout during initialize",
+                    ))
+                }
+                Ok(Err(error)) => {
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("lsp: failed to read initialize response: {error}"),
                     ))
                 }
                 Err(_) => {
@@ -237,11 +243,17 @@ impl LspServer {
                 break;
             }
             let msg = match tokio::time::timeout(remaining, read_msg(&mut self.stdout)).await {
-                Ok(Some(m)) => m,
-                Ok(None) => {
+                Ok(Ok(Some(m))) => m,
+                Ok(Ok(None)) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "lsp: server closed stdout while collecting diagnostics",
+                    ))
+                }
+                Ok(Err(error)) => {
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("lsp: failed to read diagnostics message: {error}"),
                     ))
                 }
                 Err(_) => break,
