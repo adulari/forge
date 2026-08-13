@@ -134,7 +134,7 @@ impl Session {
         provider: Arc<dyn Provider>,
         router: Arc<dyn Router>,
         tools: ToolRegistry,
-        presenter: Box<dyn Presenter>,
+        mut presenter: Box<dyn Presenter>,
         config: Config,
         workspace: WorkspaceContext,
         transcript: Vec<Message>,
@@ -158,7 +158,11 @@ impl Session {
         } else {
             read_project_agents_md(workspace.root())
         };
-        let project = crate::project_context::compute(workspace.root());
+        let (project, project_diagnostic) =
+            crate::project_context::compute_with_diagnostic(workspace.root());
+        if let Some(diagnostic) = project_diagnostic {
+            presenter.emit(PresenterEvent::Warning(diagnostic));
+        }
         let mut s = Self {
             id,
             store,
