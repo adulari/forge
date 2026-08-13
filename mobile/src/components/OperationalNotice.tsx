@@ -52,7 +52,7 @@ export function OperationalNotice() {
       <Banner
         compact
         tone="neutral"
-        message={`Forge desktop ${update.availableVersion} is ready to install.`}
+        message={`Available desktop update: Forge ${update.availableVersion} · Installed app: ${appVersion}`}
         actionLabel="View"
         onAction={() => router.push("/diagnostics")}
       />
