@@ -843,6 +843,13 @@ fn bridge_mcp_env(
     env
 }
 
+/// Create the per-turn bridge event sink before starting the CLI. The MCP child opens this path
+/// to report task and attachment events; if creation fails, continuing without a sink makes the
+/// turn look successful while silently losing those file outputs.
+async fn create_bridge_sink(path: std::path::PathBuf) -> std::io::Result<std::path::PathBuf> {
+    tokio::fs::File::create(&path).await.map(|_| path)
+}
+
 /// Build the CLI argv for a bridge turn. The prompt is NOT included here — it is streamed to the
 /// child's stdin by [`CliProvider::complete`] instead of passed as an argument, because a turn's
 /// flattened transcript (system preamble + injected Lattice context + history) easily exceeds the
@@ -1578,13 +1585,18 @@ impl CliProvider {
         // and any spawned-subagent lifecycle back to us — without it those events have nowhere to go
         // and the sticky task / subagent panels never update during a bridge chat. (Previously this
         // was gated to harness mode, so interactive bridge turns showed no live task list at all.)
-        let sink_path: Option<std::path::PathBuf> = {
+        let sink_path = {
             static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let p = std::env::temp_dir()
                 .join(format!("forge-subagents-{}-{n}.jsonl", std::process::id()));
             // Create it empty so the tailer can open it immediately.
-            tokio::fs::File::create(&p).await.ok().map(|_| p)
+            create_bridge_sink(p.clone()).await.map_err(|e| {
+                ProviderError::Request(format!(
+                    "failed to create bridge event sink `{}`: {e}",
+                    p.display()
+                ))
+            })?
         };
 
         // The env `forge mcp-serve` needs to round-trip a bridge turn's activity (sink) and snapshot
@@ -1592,7 +1604,7 @@ impl CliProvider {
         // passed EXPLICITLY by the parent (no process-global `set_var`) and applied to the child's
         // own `Command` env here; a host that curates its MCP servers' env (codex) strips inherited
         // vars, so they're forwarded explicitly into the MCP config (see `build_args`).
-        let mcp_env = bridge_mcp_env(sink_path.as_deref(), checkpoint);
+        let mcp_env = bridge_mcp_env(Some(sink_path.as_path()), checkpoint);
 
         let args = build_args(
             self.kind,
@@ -1615,9 +1627,7 @@ impl CliProvider {
         // claude inherits this process env for its MCP child, so the sink env also works via the
         // process; codex does not, hence the explicit `mcp_env` injection above. Setting it here too
         // is harmless and keeps the claude path robust if the JSON `env` is ever dropped.
-        if let Some(p) = &sink_path {
-            cmd.env(SUBAGENT_SINK_ENV, p);
-        }
+        cmd.env(SUBAGENT_SINK_ENV, &sink_path);
         apply_claude_bridge_home(self.kind, &mut cmd);
         put_in_own_process_group(&mut cmd);
 
@@ -1669,13 +1679,7 @@ impl CliProvider {
         // Tail the sink concurrently so task / subagent events surface live. They arrive while the
         // CLI is silent (mid-tool, or waiting on a spawn_agents result), so they must be drained live.
         let (sub_tx, mut sub_rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
-        let tailer = match &sink_path {
-            Some(p) => Some(tokio::spawn(tail_subagent_sink(p.clone(), sub_tx))),
-            None => {
-                drop(sub_tx); // no sink → close the channel so its select arm is disabled
-                None
-            }
-        };
+        let tailer = Some(tokio::spawn(tail_subagent_sink(sink_path.clone(), sub_tx)));
 
         let mut content = String::new();
         let mut final_text: Option<String> = None;
@@ -1780,9 +1784,7 @@ impl CliProvider {
         if let Some(t) = tailer {
             t.abort();
         }
-        if let Some(p) = &sink_path {
-            let _ = std::fs::remove_file(p);
-        }
+        let _ = std::fs::remove_file(&sink_path);
 
         // If this was a RESUMED turn, optimistically forget the session now; a successful turn
         // re-records it just below. So any failure path (stall / read error / in-band error / bad
@@ -2506,16 +2508,16 @@ impl CliProvider {
         checkpoint: Option<&CheckpointContext>,
     ) -> std::io::Result<LiveSession> {
         let forge_exe = self.forge_executable();
-        let sink_path: Option<std::path::PathBuf> = {
+        let sink_path = {
             static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let p = std::env::temp_dir().join(format!(
                 "forge-subagents-{}-live{n}.jsonl",
                 std::process::id()
             ));
-            tokio::fs::File::create(&p).await.ok().map(|_| p)
+            create_bridge_sink(p).await?
         };
-        let mcp_env = bridge_mcp_env(sink_path.as_deref(), checkpoint);
+        let mcp_env = bridge_mcp_env(Some(sink_path.as_path()), checkpoint);
         // Pin this live process to the spawning turn's seq so a later turn forces a respawn (keeps
         // bridge-edit `/undo` granularity correct). Prefer the explicit context; fall back to the
         // inherited env for the legacy base path.
@@ -2537,9 +2539,7 @@ impl CliProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        if let Some(p) = &sink_path {
-            cmd.env(SUBAGENT_SINK_ENV, p);
-        }
+        cmd.env(SUBAGENT_SINK_ENV, &sink_path);
         apply_claude_bridge_home(self.kind, &mut cmd);
         put_in_own_process_group(&mut cmd);
 
@@ -2552,13 +2552,7 @@ impl CliProvider {
         let lines = BufReader::new(stdout).lines();
 
         let (sub_tx, sub_rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
-        let tailer = match &sink_path {
-            Some(p) => Some(tokio::spawn(tail_subagent_sink(p.clone(), sub_tx))),
-            None => {
-                drop(sub_tx); // no sink → close the channel so its select arm is disabled
-                None
-            }
-        };
+        let tailer = Some(tokio::spawn(tail_subagent_sink(sink_path.clone(), sub_tx)));
 
         Ok(LiveSession {
             child,
@@ -2569,7 +2563,7 @@ impl CliProvider {
             model: bare.to_string(),
             sent: 0,
             checkpoint_seq,
-            sink_path,
+            sink_path: Some(sink_path),
             sub_rx,
             tailer,
             turn_in_flight: false,
@@ -2948,6 +2942,26 @@ impl Drop for GroupKillGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bridge_sink_creation_reports_unwritable_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let parent = temp.path().join("not-a-directory");
+        std::fs::File::create(&parent).expect("parent fixture");
+        let path = parent.join("events.jsonl");
+
+        let error = create_bridge_sink(path)
+            .await
+            .expect_err("creation must fail");
+
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::NotADirectory | std::io::ErrorKind::PermissionDenied
+            ),
+            "unexpected error kind: {error}"
+        );
+    }
 
     /// Spawn a `sh` (its own process group, `kill_on_drop`) that backgrounds a grandchild `sleep`
     /// and writes the grandchild's pid to `pidfile`, mirroring a bridge CLI that spawned a hung
