@@ -120,6 +120,16 @@ fn filtered_settings_json(path: &Path) -> Option<Vec<u8>> {
     serde_json::to_vec_pretty(&value).ok()
 }
 
+#[cfg(any(windows, test))]
+fn is_sensitive_bridge_entry(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    name.contains("credential") || name.contains("secret") || name.contains("token")
+}
+
 #[cfg(unix)]
 fn symlink_through(real_path: &Path, dest_path: &Path) -> anyhow::Result<()> {
     std::os::unix::fs::symlink(real_path, dest_path)?;
@@ -139,10 +149,50 @@ fn symlink_through(real_path: &Path, dest_path: &Path) -> anyhow::Result<()> {
         std::os::windows::fs::symlink_file(real_path, dest_path)
     };
     if let Err(e) = result {
-        tracing::warn!(
-            "claude bridge home: failed to mirror {} on Windows (needs Developer Mode or admin): {e}",
-            real_path.display()
-        );
+        if is_sensitive_bridge_entry(real_path) {
+            tracing::warn!(
+                path = %real_path.display(),
+                error = %e,
+                "claude bridge home: skipped sensitive entry because Windows symlinks are unavailable"
+            );
+        } else if let Err(copy_error) = copy_non_secret_entry(real_path, dest_path) {
+            tracing::warn!(
+                path = %real_path.display(),
+                symlink_error = %e,
+                copy_error = %copy_error,
+                "claude bridge home: could not mirror non-secret entry on Windows"
+            );
+        } else {
+            tracing::warn!(
+                path = %real_path.display(),
+                error = %e,
+                "claude bridge home: symlink unavailable; copied non-secret entry for continuity"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_non_secret_entry(real_path: &Path, dest_path: &Path) -> anyhow::Result<()> {
+    if is_sensitive_bridge_entry(real_path) {
+        return Ok(());
+    }
+    if real_path.is_dir() {
+        std::fs::create_dir_all(dest_path)?;
+        for entry in std::fs::read_dir(real_path)? {
+            let entry = entry?;
+            let source = entry.path();
+            if is_sensitive_bridge_entry(&source) {
+                continue;
+            }
+            copy_non_secret_entry(&source, &dest_path.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(real_path, dest_path)?;
     }
     Ok(())
 }
@@ -219,6 +269,14 @@ mod tests {
         let isolated = base.path().join("isolated-missing");
         prepare_claude_bridge_home(&missing_real, &isolated).unwrap();
         assert!(!isolated.exists(), "nothing to mirror -> nothing built");
+    }
+
+    #[test]
+    fn bridge_copy_fallback_classifies_secret_entries_conservatively() {
+        assert!(is_sensitive_bridge_entry(Path::new(".credentials.json")));
+        assert!(is_sensitive_bridge_entry(Path::new("oauth-token.json")));
+        assert!(!is_sensitive_bridge_entry(Path::new("projects")));
+        assert!(!is_sensitive_bridge_entry(Path::new("history.jsonl")));
     }
 
     #[test]
