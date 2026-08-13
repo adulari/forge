@@ -81,7 +81,13 @@ impl LspServer {
                 let mut buf = [0u8; 1024];
                 loop {
                     match pipe.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
+                        Ok(0) => break,
+                        Err(error) => {
+                            if let Ok(mut sink) = sink.lock() {
+                                append_stderr_read_error(&mut sink, &error);
+                            }
+                            break;
+                        }
                         Ok(n) => {
                             let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
                             if let Ok(mut sink) = sink.lock() {
@@ -389,6 +395,11 @@ fn append_bounded(buf: &mut String, chunk: &str, cap: usize) {
     buf.drain(..cut);
 }
 
+fn append_stderr_read_error(buf: &mut String, error: &std::io::Error) {
+    let message = format!("\nstderr reader error: {error}");
+    append_bounded(buf, &message, STDERR_TAIL_BYTES);
+}
+
 fn sanitize_log_text(raw: &str) -> String {
     let mut output = String::new();
     let mut chars = raw.chars().peekable();
@@ -631,6 +642,19 @@ mod tests {
         append_bounded(&mut wide, "ééééé", 5);
         assert!(wide.chars().all(|c| c == 'é'), "tail was: {wide:?}");
         assert!(wide.len() <= 5);
+    }
+
+    #[test]
+    fn stderr_reader_errors_are_retained_in_the_bounded_tail() {
+        let mut buf = String::from("server output");
+        append_stderr_read_error(
+            &mut buf,
+            &std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe closed unexpectedly"),
+        );
+
+        let summary = summarize_stderr(&buf, STDERR_SUMMARY_CHARS);
+        assert!(summary.contains("stderr reader error"));
+        assert!(summary.contains("pipe closed unexpectedly"));
     }
 
     #[tokio::test]
