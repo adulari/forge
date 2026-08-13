@@ -63,6 +63,35 @@ impl Session {
         let parent_id = self.id.clone();
         let max_concurrency = self.config.mesh.subagents.max_concurrency;
 
+        // Detached admission (RFC retained-async-subagents): `detached: true` skips the whole
+        // blocking fan-out below — admit each child, hand back its id/name/model immediately, and
+        // let it run to completion independently. Its result reaches the parent later via
+        // `deliver_pending_detached_results` at the next turn boundary.
+        if subagent::parse_detached_flag(&call.args) {
+            let result = match subagent::spawn_detached(
+                &ctx,
+                &self.detached_registry,
+                &parent_id,
+                requests,
+                budget,
+            )
+            .await
+            {
+                Ok(handles) => subagent::format_admission(&handles),
+                Err(e) => format!("error: {e}"),
+            };
+            let ok = !result.starts_with("error:");
+            self.store.record_tool_call(
+                msg_id,
+                &call.name,
+                &args_json,
+                &result,
+                "allowed",
+                if ok { "ok" } else { "error" },
+            )?;
+            return Ok(result);
+        }
+
         // Drive the shared orchestrator, turning each child lifecycle into a presenter event
         // (running children animate live; completed ones fold into the scrollback box).
         let presenter = &mut self.presenter;

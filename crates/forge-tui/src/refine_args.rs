@@ -18,31 +18,6 @@ pub enum RefineAction {
     Rollback(String),
 }
 
-/// Extract a comma-separated lens list from `--flag <value>` in a raw arg string.
-/// `/assay --only dead-weight,unsafe` → `extract_flag(arg, "--only")` → `["dead-weight", "unsafe"]`
-pub(crate) fn extract_flag(arg: &str, flag: &str) -> Vec<String> {
-    let tokens: Vec<&str> = arg.split_whitespace().collect();
-    for (i, tok) in tokens.iter().enumerate() {
-        if *tok == flag {
-            if let Some(val) = tokens.get(i + 1) {
-                if !val.starts_with('-') {
-                    return val
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// Check whether a boolean flag (no value) is present in `arg`.
-pub(crate) fn has_flag(arg: &str, flag: &str) -> bool {
-    arg.split_whitespace().any(|t| t == flag)
-}
-
 /// `/refine [--global] [instructions]` | `/refine rollback <id>` | `/refine status`
 pub(crate) fn refine_action(arg: &str) -> CommandAction {
     let trimmed = arg.trim();

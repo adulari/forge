@@ -146,6 +146,14 @@ impl ServerHandler for ForgeMcp {
         if name == subagent::SEND_TO_AGENT_TOOL {
             return Ok(self.handle_send_to_agent(&args).await);
         }
+        // Retained async subagents (RFC retained-async-subagents) — status + cancellation for
+        // detached children, bridge parity with the direct path's Session methods.
+        if name == subagent::LIST_SUBAGENTS_TOOL {
+            return Ok(self.handle_list_subagents().await);
+        }
+        if name == subagent::CANCEL_SUBAGENT_TOOL {
+            return Ok(self.handle_cancel_subagent(&args).await);
+        }
 
         // Task tracking — persist the list to the parent session (id from ENV_SESSION) so the
         // parent's run_turn reloads it. Also report it to the out-of-band sink so the parent TUI's
@@ -608,6 +616,21 @@ impl ForgeMcp {
                 follow.description,
                 Arc::new(follow_schema),
             ));
+            // Retained async subagents: status + cancellation for detached children.
+            let list = subagent::list_subagents_spec();
+            let list_schema: JsonObject = list.schema.as_object().cloned().unwrap_or_default();
+            tools.push(Tool::new(
+                list.name,
+                list.description,
+                Arc::new(list_schema),
+            ));
+            let cancel = subagent::cancel_subagent_spec();
+            let cancel_schema: JsonObject = cancel.schema.as_object().cloned().unwrap_or_default();
+            tools.push(Tool::new(
+                cancel.name,
+                cancel.description,
+                Arc::new(cancel_schema),
+            ));
         }
         // Always advertise task tracking so a bridge model can maintain a visible todo list. The
         // description is bridge-specific: the direct path's spec encourages an update per status
@@ -744,6 +767,7 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
             parent_id,
             max_agents: config.mesh.subagents.max_agents,
             max_concurrency: config.mesh.subagents.max_concurrency,
+            detached_registry: subagent::DetachedRegistry::new(),
         })
     } else {
         None
