@@ -40,7 +40,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -753,6 +753,12 @@ pub struct EventLog {
     cap: usize,
 }
 
+fn lock_event_log(events: &Mutex<EventLog>) -> std::sync::MutexGuard<'_, EventLog> {
+    events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl EventLog {
     pub fn new(cap: usize) -> Self {
         Self {
@@ -1354,9 +1360,7 @@ impl RemoteControl {
     /// receiving exactly what it missed. `snap.revision` must already be bumped by the caller.
     pub fn broadcast(&self, snap: Snapshot) {
         let frame = Arc::new(SnapshotFrame::new(snap));
-        if let Ok(mut log) = self.events.lock() {
-            log.push(frame.snapshot.revision, frame.clone());
-        }
+        lock_event_log(&self.events).push(frame.snapshot.revision, frame.clone());
         let _ = self.snapshot_tx.send(frame);
     }
 }
@@ -1884,7 +1888,7 @@ pub(crate) async fn pump_ws(
     let replay = if since == 0 {
         None
     } else {
-        events.lock().ok().and_then(|log| log.replay_after(since))
+        Some(lock_event_log(&events).replay_after(since)).flatten()
     };
     let last_sent = match replay {
         Some(missed) => {
@@ -2452,6 +2456,24 @@ mod tests {
         assert_eq!(log.replay_after(10).expect("current is fillable").len(), 0);
         // The boundary: rev = front-1 still replays the entire retained log.
         assert_eq!(log.replay_after(0).expect("full log").len(), 10);
+    }
+
+    #[test]
+    fn poisoned_event_log_mutex_still_replays_history() {
+        let events = Arc::new(Mutex::new(EventLog::new(EVENT_LOG_CAP)));
+        lock_event_log(&events).push(1, Arc::new(SnapshotFrame::new(rev_snap(1))));
+        let poisoned = Arc::clone(&events);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison the replay lock");
+        })
+        .join();
+
+        let replay = lock_event_log(&events)
+            .replay_after(0)
+            .expect("poison recovery must preserve the event log");
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].snapshot.revision, 1);
     }
 
     #[test]
