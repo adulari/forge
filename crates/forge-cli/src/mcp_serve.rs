@@ -18,6 +18,8 @@
 //! - `FORGE_SUBAGENT_SINK` names a JSONL file we append child lifecycle to, which the parent
 //!   Forge process tails so bridge-spawned subagents are visible in the TUI (Phase 3c).
 
+use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -46,20 +48,23 @@ const MCP_SERVE_TOKEN_ENV: &str = "FORGE_MCP_SERVE_TOKEN";
 
 /// Append one JSON record to the out-of-band subagent sink the CLI bridge tails (if it gave us
 /// one via `FORGE_SUBAGENT_SINK`). Used to surface bridge-turn activity (subagents, task-list
-/// updates) in the parent Forge TUI live. Best-effort: no sink / write error is silently ignored.
-fn report_to_sink(record: serde_json::Value) {
-    let Ok(path) = std::env::var(forge_provider::SUBAGENT_SINK_ENV) else {
-        return;
-    };
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+/// updates) in the parent Forge TUI live. A configured sink is part of the bridge contract: if
+/// it cannot be appended or flushed, report the failure to the requesting MCP call instead of
+/// pretending that the parent session observed the event.
+fn append_sink_record(path: impl AsRef<Path>, record: &serde_json::Value) -> io::Result<()> {
+    let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{record}");
-        let _ = f.flush();
-    }
+        .open(path)?;
+    writeln!(f, "{record}")?;
+    f.flush()
+}
+
+fn report_to_sink(record: serde_json::Value) -> io::Result<()> {
+    let Ok(path) = std::env::var(forge_provider::SUBAGENT_SINK_ENV) else {
+        return Ok(());
+    };
+    append_sink_record(path, &record)
 }
 
 mod bridge_budget;
@@ -174,7 +179,12 @@ impl ServerHandler for ForgeMcp {
                 .iter()
                 .filter(|t| t.status == forge_types::TodoStatus::Done)
                 .count();
-            report_to_sink(serde_json::json!({ "k": "tasks", "tasks": tasks }));
+            if let Err(error) = report_to_sink(serde_json::json!({ "k": "tasks", "tasks": tasks }))
+            {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "error: bridge event sink write failed: {error}"
+                ))]));
+            }
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "task list updated: {} task(s) — {done} done",
                 tasks.len()
@@ -222,7 +232,13 @@ impl ServerHandler for ForgeMcp {
                         .add_memory(&scope, &kind_cat, &text, &session_id);
                 }
             }
-            report_to_sink(serde_json::json!({ "k": "memory", "kind": kind_cat, "text": text }));
+            if let Err(error) =
+                report_to_sink(serde_json::json!({ "k": "memory", "kind": kind_cat, "text": text }))
+            {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "error: bridge event sink write failed: {error}"
+                ))]));
+            }
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "memory saved: [{kind_cat}] {text}"
             ))]));
@@ -246,7 +262,11 @@ impl ServerHandler for ForgeMcp {
         if name == forge_core::PRESENT_PLAN_TOOL {
             let plan = forge_core::parse_plan(&args);
             let n = plan.steps.len();
-            report_to_sink(serde_json::json!({ "k": "plan", "plan": plan }));
+            if let Err(error) = report_to_sink(serde_json::json!({ "k": "plan", "plan": plan })) {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "error: bridge event sink write failed: {error}"
+                ))]));
+            }
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Plan ({n} step(s)) presented to the user for approval. STOP now — do NOT start \
                  implementing. If the user approves, you'll be switched to Auto-edit and asked to \
@@ -578,7 +598,13 @@ impl ForgeMcp {
                 false,
             ),
         };
-        report_to_sink(serde_json::json!({ "k": "heartbeat", "action": action, "text": text }));
+        if let Err(error) =
+            report_to_sink(serde_json::json!({ "k": "heartbeat", "action": action, "text": text }))
+        {
+            return CallToolResult::error(vec![ContentBlock::text(format!(
+                "error: bridge event sink write failed: {error}"
+            ))]);
+        }
         let content = vec![ContentBlock::text(text)];
         if ok {
             CallToolResult::success(content)
@@ -946,6 +972,17 @@ mod tests {
         assert!(parse_bridge_tasks(&serde_json::json!({"tasks": []}))
             .expect("an explicit empty list intentionally clears tasks")
             .is_empty());
+    }
+
+    #[test]
+    fn sink_append_surfaces_open_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = append_sink_record(dir.path(), &serde_json::json!({"k": "tasks"}))
+            .expect_err("a directory cannot be opened as the JSONL sink");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::IsADirectory | std::io::ErrorKind::PermissionDenied
+        ));
     }
 
     #[test]
