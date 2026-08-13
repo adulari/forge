@@ -11,7 +11,9 @@
 >
 > **Deferred (not in this PR):** `@path` file-path completion (should-have); command-body
 > `/skill` references producing guidance; namespaced subdir commands; argument *types*; the
-> plain (non-TUI) chat path does not yet expand `/name` (TUI is the supported surface).
+> plain long-running chat path still does not expand `/name`; one-shot `forge run "/name task"`
+> does expand commands and skills with the same catalog, `//` literal escape, argument errors, and
+> project-trust gate as the TUI dispatcher.
 >
 > **Import (later PR):** `forge import claude [--project]` copies `~/.claude/{commands,skills}`
 > into a Forge scope, validating each with these readers (malformed skipped + warned). Building
