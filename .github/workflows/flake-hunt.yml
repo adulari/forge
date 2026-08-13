@@ -68,6 +68,50 @@ jobs:
             2>&1 | tee flake-out/summary.txt
           echo "status=${PIPESTATUS[0]}" >>"$GITHUB_OUTPUT"
 
+      - name: Persist per-test trend and flag threshold breaches
+        if: always()
+        env:
+          RUNS: ${{ inputs.runs || '15' }}
+          HUNT_STATUS: ${{ steps.hunt.outputs.status || 'unknown' }}
+        run: |
+          set -euo pipefail
+          # Keep one bounded, machine-readable record per run. GitHub retains these artifacts for
+          # 90 days, so the artifact list is a rolling trend without committing generated state to
+          # the repository or making this advisory workflow mutate source branches.
+          tests='[]'
+          if [ -f flake-out/summary.txt ]; then
+            while IFS=$'\t' read -r count name; do
+              [ -n "${name:-}" ] || continue
+              tests=$(jq -c --arg name "$name" --argjson failures "$count" \
+                '. + [{test: $name, failures: $failures}]' <<<"$tests")
+            done < <(awk '
+              /^per-test failure counts:$/ { in_counts = 1; next }
+              in_counts && /^  [0-9]+ / { count = $1; $1 = ""; sub(/^ /, ""); print count "\t" $0; next }
+              in_counts && !/^  / { exit }
+            ' flake-out/summary.txt)
+          fi
+          trend=$(jq -c -n \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg status "$HUNT_STATUS" \
+            --argjson runs "$RUNS" \
+            --argjson tests "$tests" \
+            '{run_id: $run_id, attempt: $attempt, status: ($status|tonumber? // $status), runs: $runs,
+              tests: $tests,
+              threshold_breach: any($tests[]; (.failures * 100) >= ($runs * 20))}')
+          printf '%s\n' "$trend" > flake-out/trend.json
+
+          if [ "$(jq -r '.threshold_breach' <<<"$trend")" = true ]; then
+            echo "::warning::flake hunt threshold breached (a test failed in at least 20% of runs)"
+          fi
+          {
+            echo "### Flake-hunt trend"
+            echo '```json'
+            cat flake-out/trend.json
+            echo '```'
+            echo "The machine-readable record is retained for 90 days as a rolling per-test trend."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload the kept failing logs
         if: always() && steps.hunt.outputs.status != '0'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -75,6 +119,14 @@ jobs:
           name: flake-hunt-logs
           path: flake-out/
           retention-days: 30
+
+      - name: Upload the per-test trend record
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: flake-hunt-trend-${{ github.run_id }}
+          path: flake-out/trend.json
+          retention-days: 90
 
       - name: Report flaky tests on a single tracking issue
         if: always() && steps.hunt.outputs.status != '0'
