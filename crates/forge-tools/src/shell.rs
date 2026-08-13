@@ -682,17 +682,22 @@ fn maybe_install_sandbox(
     let writable = sandbox::effective_writable(&cwd_path, &extra);
 
     // Install the pre_exec closure. It runs after fork, before exec — in the child only.
-    // Landlock syscalls are async-signal-safe.
+    // Landlock syscalls are async-signal-safe. Once support was detected in the parent, a
+    // confinement failure must fail the child spawn rather than silently running unconfined.
     #[cfg(target_os = "linux")]
     {
         unsafe {
             // tokio::process::Command exposes pre_exec via std::os::unix::process::CommandExt
             // which is blanket-implemented — no explicit use needed.
             cmd.pre_exec(move || {
-                // Errors are swallowed: a sandbox failure must never prevent the command
-                // from running (best-effort confinement).
-                let _ = crate::sandbox::linux::apply_landlock(&writable);
-                Ok(())
+                crate::sandbox::linux::apply_landlock(&writable)
+                    .map(|_| ())
+                    .map_err(|error| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            format!("Landlock sandbox setup failed: {error}"),
+                        )
+                    })
             });
         }
     }
