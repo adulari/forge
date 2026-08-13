@@ -248,6 +248,14 @@ impl Session {
         Ok(out)
     }
 
+    /// This session's harness settings, for status views that need to explain *why* a stored
+    /// entry is or is not reaching the model. [`Self::harness_overview`] deliberately returns
+    /// everything stored, so a caller showing that list without these caps would present entries
+    /// as active when `enabled` is off or when they fall beyond `max_context_entries`.
+    pub fn harness_config(&self) -> &forge_config::HarnessConfig {
+        &self.config.harness
+    }
+
     /// The three scopes this session's harness context is drawn from, most-specific first:
     /// `session:<id>`, then `project:<workspace root>`, then `global`.
     fn harness_scope_chain(&self) -> [String; 3] {

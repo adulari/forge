@@ -21,6 +21,11 @@ pub(super) struct SubagentSupport {
     pub(super) parent_id: String,
     pub(super) max_agents: usize,
     pub(super) max_concurrency: usize,
+    /// In-memory abort handles for this process's currently-running detached children (retained
+    /// async subagents) — bridge-side counterpart of the direct path's `Session::detached_registry`.
+    /// Built once alongside `ctx` so it's shared across every `spawn_agents`/`cancel_subagent`
+    /// call this long-lived `forge mcp-serve` process handles.
+    pub(super) detached_registry: subagent::DetachedRegistry,
 }
 
 impl ForgeMcp {
@@ -139,6 +144,25 @@ impl ForgeMcp {
             min_context_tokens: None,
         };
 
+        // Detached admission (RFC retained-async-subagents), bridge parity with the direct path's
+        // `Session::spawn_agents`: admit immediately, return admission handles without waiting.
+        if subagent::parse_detached_flag(args) {
+            return match subagent::spawn_detached(
+                &s.ctx,
+                &s.detached_registry,
+                &s.parent_id,
+                requests,
+                budget,
+            )
+            .await
+            {
+                Ok(handles) => CallToolResult::success(vec![ContentBlock::text(
+                    subagent::format_admission(&handles),
+                )]),
+                Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("error: {e}"))]),
+            };
+        }
+
         // Report subagent lifecycle to the out-of-band sink (if the bridge gave us one) so the
         // parent Forge TUI shows these children natively (RFC subagent-orchestration Phase 3c).
         let mut sink = std::env::var(forge_provider::SUBAGENT_SINK_ENV)
@@ -199,5 +223,79 @@ impl ForgeMcp {
                 CallToolResult::error(vec![ContentBlock::text(format!("subagents failed: {e}"))])
             }
         }
+    }
+
+    /// Bridge-side `list_subagents`: report every detached child spawned this parent session.
+    pub(super) async fn handle_list_subagents(&self) -> CallToolResult {
+        let Some(s) = &self.subagents else {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "list_subagents is not available here",
+            )]);
+        };
+        let children = s
+            .ctx
+            .store
+            .list_detached_children(&s.parent_id)
+            .unwrap_or_default();
+        CallToolResult::success(vec![ContentBlock::text(subagent::format_subagent_list(
+            &children,
+        ))])
+    }
+
+    /// Bridge-side `cancel_subagent`: stop a still-running detached child, mirroring the direct
+    /// path's `Session::cancel_subagent` semantics (best-effort in-process abort + the durable
+    /// store transition; already-finished is reported, not an error).
+    pub(super) async fn handle_cancel_subagent(&self, args: &Value) -> CallToolResult {
+        let Some(s) = &self.subagents else {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "cancel_subagent is not available here",
+            )]);
+        };
+        let address = args
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if address.is_empty() {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "error: cancel_subagent needs `agent` (name or id prefix)",
+            )]);
+        }
+        let children = s
+            .ctx
+            .store
+            .list_detached_children(&s.parent_id)
+            .unwrap_or_default();
+        let Some(child) = subagent::resolve_detached_address(&children, &address) else {
+            let known: Vec<String> = children
+                .iter()
+                .map(|c| format!("{} ({})", c.name, &c.child_id[..c.child_id.len().min(8)]))
+                .collect();
+            return CallToolResult::error(vec![ContentBlock::text(format!(
+                "error: no detached agent matches '{address}'. Detached agents this session: [{}]",
+                known.join(", ")
+            ))]);
+        };
+        if child.status != forge_store::DetachedChildStatus::Running {
+            return CallToolResult::success(vec![ContentBlock::text(format!(
+                "'{}' ({}) is already {} — nothing to cancel",
+                child.name,
+                &child.child_id[..child.child_id.len().min(8)],
+                child.status.as_str()
+            ))]);
+        }
+        let child_id = child.child_id.clone();
+        let name = child.name.clone();
+        s.detached_registry.abort(&child_id);
+        if let Err(e) = s.ctx.store.cancel_detached_child(&child_id) {
+            return CallToolResult::error(vec![ContentBlock::text(format!(
+                "error: cancel_subagent failed: {e}"
+            ))]);
+        }
+        CallToolResult::success(vec![ContentBlock::text(format!(
+            "cancelled '{name}' ({})",
+            &child_id[..child_id.len().min(8)]
+        ))])
     }
 }

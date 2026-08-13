@@ -348,6 +348,29 @@ CREATE TABLE IF NOT EXISTS workflow_run (
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_run_lookup ON workflow_run(name, cwd, started_at DESC);
 
+-- Retained async subagents (docs/rfcs/retained-async-subagents.md): a `spawn_agents` call with
+-- `detached: true` is admitted immediately and runs to completion independently of the parent
+-- turn. One row per detached child, so the registry survives a daemon restart (unlike blocking
+-- subagents, whose lifecycle never outlives the parent turn). `child_id` doubles as the child's
+-- own `session.id`. `result_ref` is the final result, inline and bounded (<=16KB) — small enough
+-- that a message-id indirection buys nothing; the child's own session transcript still holds the
+-- full unbounded history. `delivered` = 1 once the result has been injected into the parent's
+-- transcript at a turn boundary, so a resumed parent doesn't re-deliver the same result twice.
+-- Local machine state only — deliberately not in PORTABLE_METADATA_TABLES (session ids don't
+-- travel). Also created in migration_0025 for pre-existing DBs.
+CREATE TABLE IF NOT EXISTS detached_child (
+    child_id       TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
+    parent_session TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+    name           TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'running',  -- running | done | failed | cancelled
+    result_ref     TEXT,                             -- bounded inline result text, set on finish
+    created_at     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    finished_at    INTEGER,
+    delivered      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_detached_child_parent ON detached_child(parent_session, status);
+
 -- Forge Anywhere local sync outbox. Payload snapshots remain local plaintext until the worker
 -- encrypts them; provider credentials and other excluded record classes never enter this table.
 -- `uploaded_at IS NULL` is the durable worker cursor.
