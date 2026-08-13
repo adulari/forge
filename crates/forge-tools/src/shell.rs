@@ -332,9 +332,14 @@ async fn run_command_inner(
             }
             Ok(Err(e)) => (format!("error: {e}"), None, false),
             Err(_) => {
-                terminate(&mut child, pgid).await;
+                let cleanup_errors = terminate(&mut child, pgid).await;
+                let cleanup_note = if cleanup_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!("; cleanup warnings: {}", cleanup_errors.join("; "))
+                };
                 (
-                    format!("timed out after {timeout_secs}s (killed)"),
+                    format!("timed out after {timeout_secs}s (killed){cleanup_note}"),
                     None,
                     true,
                 )
@@ -748,32 +753,61 @@ fn kill_process_group(pgid: Option<i32>) {
 /// (Unix); `taskkill /F /T` on Windows. The tree matters because `cmd /C`/`sh -c` spawn the real
 /// command as a child — killing only the shell would leave it running and hold the output pipes
 /// open, hanging the read until it exits on its own.
-async fn terminate(child: &mut Child, pgid: Option<i32>) {
+async fn terminate(child: &mut Child, pgid: Option<i32>) -> Vec<String> {
+    let mut errors = Vec::new();
     #[cfg(unix)]
     {
         if let Some(pg) = pgid {
-            unsafe { libc::kill(-pg, libc::SIGTERM) };
+            if let Err(error) = signal_process_group(pg, libc::SIGTERM) {
+                errors.push(format!("SIGTERM: {error}"));
+            }
             tokio::time::sleep(KILL_GRACE).await;
-            unsafe { libc::kill(-pg, libc::SIGKILL) };
+            if let Err(error) = signal_process_group(pg, libc::SIGKILL) {
+                errors.push(format!("SIGKILL: {error}"));
+            }
         }
-        let _ = child.wait().await;
+        if let Err(error) = child.wait().await {
+            errors.push(format!("wait: {error}"));
+        }
     }
     #[cfg(not(unix))]
     {
         let _ = pgid;
         if let Some(pid) = child.id() {
             // `/T` kills the tree (the command `cmd /C` spawned), `/F` forces it.
-            let _ = Command::new("taskkill")
+            match Command::new("taskkill")
                 .args(["/F", "/T", "/PID", &pid.to_string()])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
-                .await;
+                .await
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => errors.push(format!("taskkill exited with {status}")),
+                Err(error) => errors.push(format!("taskkill: {error}")),
+            }
         }
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+        if let Err(error) = child.start_kill() {
+            errors.push(format!("terminate: {error}"));
+        }
+        if let Err(error) = child.wait().await {
+            errors.push(format!("wait: {error}"));
+        }
     }
+    errors
+}
+
+#[cfg(unix)]
+fn signal_process_group(pgid: i32, signal: libc::c_int) -> Result<(), std::io::Error> {
+    // ESRCH means the group already exited, which is a successful cleanup outcome.
+    if unsafe { libc::kill(-pgid, signal) } == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -882,6 +916,37 @@ mod tests {
                 start.elapsed() < Duration::from_secs(10),
                 "must not wait for the full sleep"
             );
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn timeout_kills_background_descendant_with_the_process_group() {
+            let pid_file = std::env::temp_dir().join(format!(
+                "forge-shell-timeout-child-{}.pid",
+                forge_types::new_id()
+            ));
+            let command = format!("(sleep 30 & echo $! > '{}'); sleep 30", pid_file.display());
+            let out = run_command(&command, ".", 1, &no_sandbox()).await;
+            assert!(out.contains("timed out"), "timeout reported: {out}");
+
+            let pid: i32 = std::fs::read_to_string(&pid_file)
+                .expect("background child writes its pid before timeout")
+                .trim()
+                .parse()
+                .expect("pid is numeric");
+            let mut alive = true;
+            for _ in 0..20 {
+                if unsafe { libc::kill(pid, 0) } == -1 {
+                    alive = false;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if alive {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            let _ = std::fs::remove_file(pid_file);
+            assert!(!alive, "timeout must kill descendants, pid {pid} survived");
         }
 
         #[tokio::test]
