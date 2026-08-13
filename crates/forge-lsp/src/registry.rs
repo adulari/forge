@@ -404,6 +404,7 @@ fn arm_idle_timer(slot: &mut ServerEntry, entry: ServerSlot, generation: u64, de
     let task = tokio::spawn(async move {
         tokio::time::sleep(delay).await;
         let Some(entry) = weak.upgrade() else {
+            debug!("lsp: idle timer expired after entry was dropped");
             return;
         };
         let mut slot = entry.lock().await;
@@ -415,6 +416,8 @@ fn arm_idle_timer(slot: &mut ServerEntry, entry: ServerSlot, generation: u64, de
             slot.server = None;
             slot.permit = None;
             slot.idle_timer = None;
+        } else {
+            debug!("lsp: idle timer expired but server was used again");
         }
     });
     slot.idle_timer = Some(task.abort_handle());
