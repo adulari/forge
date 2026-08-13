@@ -29,7 +29,12 @@ pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
              are independently useful. Do not use for routine repository exploration, code \
              search, test discovery, or review within one bug, feature, or refactor; direct tools \
              share context and are faster. Up to {max_agents} agents per call. Each agent gets \
-             read-only tools and returns a concise result. Returns all results, labeled."
+             read-only tools and returns a concise result. Returns all results, labeled. \
+             Set `detached: true` to admit the agents WITHOUT waiting: the call returns \
+             immediately with each child's id/name/model, the children keep running in the \
+             background, and their results are delivered as a labeled message the next time you \
+             speak — use this for long-running work you don't need to block on. Check on a \
+             detached batch with `list_subagents`; stop one early with `cancel_subagent`."
         ),
         schema: serde_json::json!({
             "type": "object",
@@ -52,11 +57,74 @@ pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
                         },
                         "required": ["task"]
                     }
+                },
+                "detached": {
+                    "type": "boolean",
+                    "description": "admit these agents immediately and return without waiting for them to finish (default false = block until all finish)"
                 }
             },
             "required": ["agents"]
         }),
     }
+}
+
+/// Whether a `spawn_agents` call requested detached (fire-and-forget) admission. Applies to the
+/// WHOLE call — every agent in one `spawn_agents(detached: true, agents: [...])` call is admitted
+/// detached, not a per-agent choice.
+pub fn parse_detached_flag(args: &serde_json::Value) -> bool {
+    args.get("detached")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+pub const LIST_SUBAGENTS_TOOL: &str = "list_subagents";
+
+/// The `ToolSpec` for listing every agent spawned this session — including detached children
+/// still running in the background, with their live status.
+pub fn list_subagents_spec() -> ToolSpec {
+    ToolSpec {
+        name: LIST_SUBAGENTS_TOOL.to_string(),
+        description: "List the agents spawned this session via spawn_agents, including detached \
+             children still running in the background. Shows each child's id, name, model, and \
+             status (running/done/failed/cancelled) — use this to check on detached work before \
+             deciding whether to wait, follow up, or cancel it."
+            .to_string(),
+        schema: serde_json::json!({ "type": "object", "properties": {} }),
+    }
+}
+
+pub const CANCEL_SUBAGENT_TOOL: &str = "cancel_subagent";
+
+/// The `ToolSpec` for stopping a still-running detached child early.
+pub fn cancel_subagent_spec() -> ToolSpec {
+    ToolSpec {
+        name: CANCEL_SUBAGENT_TOOL.to_string(),
+        description: "Cancel a detached agent spawned earlier with spawn_agents(detached: true) \
+             that's still running. Address it by name or by the id prefix from its admission \
+             handle or from list_subagents. A no-op (reported, not an error) if it already \
+             finished."
+            .to_string(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "the child's agent name from spawn_agents, or its session-id prefix"
+                }
+            },
+            "required": ["agent"]
+        }),
+    }
+}
+
+/// What `spawn_agents(detached: true)` hands back immediately for one admitted child — enough for
+/// the parent model to address it later via `send_to_agent`/`cancel_subagent`/`list_subagents`,
+/// without waiting for it to run.
+#[derive(Debug, Clone)]
+pub struct AdmissionHandle {
+    pub child_id: String,
+    pub name: String,
+    pub model: String,
 }
 
 pub const SEND_TO_AGENT_TOOL: &str = "send_to_agent";
