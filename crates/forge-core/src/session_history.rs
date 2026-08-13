@@ -225,6 +225,7 @@ impl Session {
         // for B and drop A's watcher; watcher composition is rebuilt by the CLI owner.
         let had_lattice = self.lattice.is_some();
         self.lattice_watcher = None;
+        self.lattice_watcher_handle = None;
         self.tools.remove("lattice");
         self.lattice = had_lattice.then(|| {
             let lattice = Arc::new(Lattice::new(Arc::clone(&self.store), self.workspace.root()));

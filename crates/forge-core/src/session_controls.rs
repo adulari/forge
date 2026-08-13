@@ -234,10 +234,19 @@ impl Session {
     /// session's lifetime without ever blocking on its (possibly slow) setup.
     pub fn set_lattice_watcher(
         &mut self,
-        rx: Option<std::sync::mpsc::Receiver<forge_index::LatticeWatcher>>,
+        rx: Option<std::sync::mpsc::Receiver<Result<forge_index::LatticeWatcher, String>>>,
     ) {
         self.lattice_watch_enabled = rx.is_some();
         self.lattice_watcher = rx;
+    }
+
+    /// Attach the background initial-index result channel. The update itself is deliberately
+    /// detached from startup; this channel lets the next user turn report a failure visibly.
+    pub fn set_lattice_update(
+        &mut self,
+        rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    ) {
+        self.lattice_update = rx;
     }
 
     /// Recreate the background lattice watcher for the current workspace without blocking the
@@ -254,14 +263,52 @@ impl Session {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            if let Ok(watcher) =
-                forge_index::spawn_watcher(lattice, &root, std::time::Duration::from_millis(400))
-            {
-                let _ = tx.send(watcher);
-            }
+            let result =
+                forge_index::spawn_watcher(lattice, &root, std::time::Duration::from_millis(400));
+            let _ = tx.send(result);
         });
         self.lattice_watch_enabled = true;
         self.lattice_watcher = Some(rx);
+    }
+
+    /// Surface detached Lattice setup failures without making the startup path synchronous.
+    /// Successful watcher setup is retained here so dropping the session still stops its worker.
+    pub(crate) fn poll_lattice_background(&mut self) {
+        if let Some(rx) = self.lattice_update.take() {
+            match rx.try_recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => self.presenter.emit(forge_types::PresenterEvent::Warning(
+                    format!("Lattice auto-index unavailable: {error}; code retrieval may be stale"),
+                )),
+                Err(std::sync::mpsc::TryRecvError::Empty) => self.lattice_update = Some(rx),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.presenter.emit(
+                    forge_types::PresenterEvent::Warning(
+                        "Lattice auto-index stopped before reporting a result; code retrieval may be stale"
+                            .to_string(),
+                    ),
+                ),
+            }
+        }
+
+        if let Some(rx) = self.lattice_watcher.take() {
+            match rx.try_recv() {
+                Ok(Ok(watcher)) => self.lattice_watcher_handle = Some(watcher),
+                Ok(Err(error)) => {
+                    self.lattice_watch_enabled = false;
+                    self.presenter.emit(forge_types::PresenterEvent::Warning(format!(
+                        "Lattice file watching unavailable: {error}; run `forge lattice update` after edits"
+                    )));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => self.lattice_watcher = Some(rx),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.lattice_watch_enabled = false;
+                    self.presenter.emit(forge_types::PresenterEvent::Warning(
+                        "Lattice file watching stopped before setup completed; run `forge lattice update` after edits"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
     }
 
     /// Attach the LSP registry (composition root). No-op when `lsp.enabled = false`.
