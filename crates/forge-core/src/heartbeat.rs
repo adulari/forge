@@ -88,13 +88,15 @@ fn format_delivery(hb: &forge_store::SessionHeartbeat) -> String {
 /// for checking `!busy` before calling. A due tick is claimed (its `next_due_at` advanced) by the
 /// store as part of the same statement that returns it, so a crash between this call and actually
 /// enqueueing the prompt drops at most one tick rather than risking a double-delivery on restart.
-pub fn claim_due_heartbeat_prompts(store: &Store, session_id: &str) -> Vec<String> {
+/// Store failures are returned to the caller so an unavailable heartbeat table cannot be mistaken
+/// for an idle session with no recurring prompts due.
+pub fn claim_due_heartbeat_prompts(
+    store: &Store,
+    session_id: &str,
+) -> std::result::Result<Vec<String>, forge_store::StoreError> {
     store
         .claim_due_heartbeats(session_id, now_secs())
-        .unwrap_or_default()
-        .iter()
-        .map(format_delivery)
-        .collect()
+        .map(|heartbeats| heartbeats.iter().map(format_delivery).collect())
 }
 
 /// The `manage_heartbeats` virtual tool name (agent-created heartbeats).
@@ -351,6 +353,20 @@ mod tests {
         assert_eq!(format_heartbeat_interval(300), "5m");
         assert_eq!(format_heartbeat_interval(3600), "1h");
         assert_eq!(format_heartbeat_interval(90), "90s"); // not a whole minute
+    }
+
+    #[test]
+    fn claim_due_prompts_returns_claimed_prompt() {
+        let store = Store::open_in_memory().unwrap();
+        let session_id = store.create_session("/tmp", "Default").unwrap();
+        let now = now_secs();
+        store
+            .set_user_heartbeat("hb", &session_id, "check in", 30, now - 60)
+            .unwrap();
+
+        let prompts = claim_due_heartbeat_prompts(&store, &session_id).unwrap();
+
+        assert_eq!(prompts, vec!["[heartbeat] check in"]);
     }
 
     fn test_session() -> Session {

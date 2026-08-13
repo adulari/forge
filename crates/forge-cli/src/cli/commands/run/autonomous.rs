@@ -405,7 +405,8 @@ pub(crate) fn goal_stop_reason(
 /// a turn ends and on a coarse periodic tick so a heartbeat fires even while the session sits
 /// fully idle. Uses `try_lock`: on contention (a turn is starting elsewhere right now) this simply
 /// skips the check and retries on the next call rather than blocking the render loop. Returns
-/// `true` if a turn was spawned (the caller should mark its frame dirty).
+/// `Ok(true)` if a turn was spawned (the caller should mark its frame dirty), or the Store error
+/// when the heartbeat claim could not be read.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_deliver_due_heartbeats(
     session: &Arc<tokio::sync::Mutex<Session>>,
@@ -418,30 +419,54 @@ pub(crate) fn try_deliver_due_heartbeats(
     turn_handle: &mut Option<tokio::task::JoinHandle<()>>,
     busy: &mut bool,
     busy_since: &mut std::time::Instant,
-) -> bool {
+) -> std::result::Result<bool, forge_store::StoreError> {
     if *busy || turn_handle.is_some() {
-        return false;
+        return Ok(false);
     }
     let due = {
         let Ok(s) = session.try_lock() else {
-            return false;
+            return Ok(false);
         };
-        forge_core::heartbeat::claim_due_heartbeat_prompts(&s.store, s.id())
+        forge_core::heartbeat::claim_due_heartbeat_prompts(&s.store, s.id())?
     };
     if due.is_empty() {
-        return false;
+        return Ok(false);
     }
     queued_prompts.extend(due);
     app.set_queued(queued_prompts);
     let Some(next) = dequeue_prompt(queued_prompts, app, prompt_history) else {
-        return false;
+        return Ok(false);
     };
     *last_prompt = Some(next.clone());
     *turn_gen += 1;
     *turn_handle = Some(spawn_turn(
         &next, session, done_tx, *turn_gen, app, busy, busy_since,
     ));
-    true
+    Ok(true)
+}
+
+/// Apply the result of an idle heartbeat check to the UI. Store failures are shown once until a
+/// later successful check clears the latch; the periodic driver retries normally without filling
+/// the transcript with the same warning every few seconds.
+pub(crate) fn report_heartbeat_delivery(
+    result: std::result::Result<bool, forge_store::StoreError>,
+    app: &mut forge_tui::App,
+    last_error: &mut Option<String>,
+) -> bool {
+    match result {
+        Ok(spawned) => {
+            *last_error = None;
+            spawned
+        }
+        Err(error) => {
+            let message = error.to_string();
+            if last_error.as_deref() != Some(message.as_str()) {
+                app.note(&format!("⚠ heartbeat check failed: {message}"));
+                *last_error = Some(message);
+            }
+            false
+        }
+    }
 }
 
 /// Echo a prompt + spawn the turn task (shared by normal submit and the `//` literal escape).
