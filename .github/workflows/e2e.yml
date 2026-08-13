@@ -83,9 +83,41 @@ jobs:
               ;;
           esac
 
-      - name: doctor (diagnostics — never fails the job)
-        continue-on-error: true
-        run: cargo run --release --locked -q --bin forge -- doctor 2>&1 | tee doctor-${{ matrix.label }}.txt
+      - name: doctor (diagnostics)
+        run: |
+          set +e
+          cargo run --release --locked -q --bin forge -- doctor 2>&1 | tee doctor-${{ matrix.label }}.txt
+          doctor_rc=${PIPESTATUS[0]}
+          set -e
+
+          report="doctor-${{ matrix.label }}.txt"
+          {
+            echo "### forge doctor (${{ matrix.label }})"
+            echo "- command exit: ${doctor_rc}"
+            echo "- provider probe failures are informational here; the selected provider is gated by the real-turn step"
+            echo '```text'
+            sed -n '/^[[:space:]]*[✗⚠]/p; /^✗ No usable model provider/p' "$report" | head -100
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # `doctor` checks every configured provider. An unused provider timing out is useful
+          # evidence but must not hide a cross-platform host regression; the real-turn step
+          # separately gates the provider selected for this E2E run. All other hard failures,
+          # including a missing usable provider or a malformed/incomplete report, remain required.
+          hard_failures=$(awk '
+            /^(Config|Providers|Bridge liveness|Background daemon|Local LLM \(Ollama\)|Environment)$/ { section = $0 }
+            /^[[:space:]]*✗/ && section != "Providers" { print }
+            /^✗ No usable model provider/ { print }
+          ' "$report")
+          if ! grep -qE '[0-9]+ failure\(s\), [0-9]+ warning\(s\)\.' "$report"; then
+            echo "::error::forge doctor produced no complete diagnostic summary on ${{ matrix.label }}"
+            exit 1
+          fi
+          if [ -n "$hard_failures" ]; then
+            echo "::error::forge doctor found a hard diagnostic regression on ${{ matrix.label }}"
+            printf '%s\n' "$hard_failures"
+            exit 1
+          fi
 
       - name: real turn
         run: |
