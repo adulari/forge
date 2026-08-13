@@ -622,6 +622,28 @@ fn migration_0028(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #29: the retained-async-subagents registry (`detached_child`). One row per
+/// `spawn_agents(detached: true)` child, so admitted-but-not-yet-finished children survive a
+/// daemon restart instead of vanishing with the in-memory task that was running them. Also
+/// created directly in the base schema (idempotent) — this step exists for pre-existing DBs
+/// whose `user_version` predates it, matching the dual pattern used for `workflow_run` etc.
+fn migration_0029(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS detached_child (
+            child_id       TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
+            parent_session TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+            name           TEXT NOT NULL,
+            model          TEXT NOT NULL,
+            status         TEXT NOT NULL DEFAULT 'running',
+            result_ref     TEXT,
+            created_at     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            finished_at    INTEGER,
+            delivered      INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE INDEX IF NOT EXISTS idx_detached_child_parent ON detached_child(parent_session, status)",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -653,6 +675,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0026,
     migration_0027,
     migration_0028,
+    migration_0029,
 ];
 
 /// Create the singleton rows the Anywhere sync state machine expects, if they are missing.
