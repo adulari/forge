@@ -473,16 +473,18 @@ pub fn scope_path(scope: ConfigScope) -> Result<PathBuf, ConfigError> {
 pub fn set_config_value(scope: ConfigScope, path: &str, raw: &str) -> Result<(), ConfigError> {
     let leaves = config_leaves();
     let existing = leaves.iter().find(|l| l.path == path);
-    let coerced = coerce_value(raw, existing.map(|l| &l.value))?;
+    let coerced = coerce_value(raw, existing.map(|l| &l.value)).map_err(|error| match error {
+        ConfigError::Write(message) => {
+            ConfigError::Write(format!("invalid value for {path}: {message}"))
+        }
+        other => other,
+    })?;
 
     let file = scope_path(scope)?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ConfigError::Write(e.to_string()))?;
     }
-    let mut root: toml::Table = std::fs::read_to_string(&file)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default();
+    let mut root = read_edit_table(&file)?;
 
     match coerced {
         Some(v) => set_dotted(&mut root, path, v),
@@ -505,10 +507,7 @@ pub fn set_config_value(scope: ConfigScope, path: &str, raw: &str) -> Result<(),
 /// command to erase the setting from every layer. No-op if absent. The remaining file is validated.
 pub fn reset_config_value(scope: ConfigScope, path: &str) -> Result<(), ConfigError> {
     let file = scope_path(scope)?;
-    let Some(text) = std::fs::read_to_string(&file).ok() else {
-        return Ok(()); // nothing written → already default
-    };
-    let mut root: toml::Table = text.parse().unwrap_or_default();
+    let mut root = read_edit_table(&file)?;
     remove_dotted(&mut root, path);
     let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
     Figment::from(Serialized::defaults(Config::default()))
@@ -517,6 +516,22 @@ pub fn reset_config_value(scope: ConfigScope, path: &str) -> Result<(), ConfigEr
         .map_err(|e| ConfigError::Write(format!("invalid config after reset of {path}: {e}")))?;
     std::fs::write(&file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(())
+}
+
+fn read_edit_table(path: &std::path::Path) -> Result<toml::Table, ConfigError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(toml::Table::new()),
+        Err(error) => {
+            return Err(ConfigError::Write(format!(
+                "cannot read config {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    text.parse().map_err(|error| {
+        ConfigError::Write(format!("cannot parse config {}: {error}", path.display()))
+    })
 }
 
 /// Coerce raw input to a TOML value matching the existing leaf's type. `None` = clear (empty input
@@ -674,5 +689,29 @@ pub(crate) mod test_support {
 
     pub(crate) fn remove_dotted(root: &mut toml::Table, path: &str) {
         super::remove_dotted(root, path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_edit_file_starts_with_an_empty_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = read_edit_table(&dir.path().join("missing.toml")).unwrap();
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn malformed_edit_file_is_reported_without_falling_back_to_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[mesh\n").unwrap();
+
+        let error = read_edit_table(&path).expect_err("malformed TOML must be actionable");
+        let message = error.to_string();
+        assert!(message.contains("cannot parse config"));
+        assert!(message.contains("config.toml"));
     }
 }
