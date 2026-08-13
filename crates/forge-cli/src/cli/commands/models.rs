@@ -72,8 +72,43 @@ pub(crate) use codex_quota::refresh_codex_quota;
 
 mod discovery;
 pub(crate) use discovery::{
-    discover_catalog, invalidate_catalog_cache, load_cached_catalog, save_catalog,
+    discover_catalog, discover_catalog_with_status, invalidate_catalog_cache, load_cached_catalog,
+    save_catalog, DiscoveryStatusKind, ProviderDiscoveryStatus,
 };
+
+fn print_discovery_statuses(statuses: &[ProviderDiscoveryStatus]) {
+    if statuses.is_empty() {
+        return;
+    }
+    println!("provider discovery:");
+    for status in statuses {
+        println!("{}", discovery_status_line(status));
+    }
+    println!();
+}
+
+fn discovery_status_line(status: &ProviderDiscoveryStatus) -> String {
+    match status.kind {
+        DiscoveryStatusKind::Discovered => {
+            format!("  ✓ {:<18} {} model(s)", status.provider, status.models)
+        }
+        DiscoveryStatusKind::Unsupported => format!(
+            "  · {:<18} skipped ({})",
+            status.provider,
+            status.detail.as_deref().unwrap_or("not listable")
+        ),
+        DiscoveryStatusKind::Failed => format!(
+            "  ⚠ {:<18} discovery failed: {}",
+            status.provider,
+            status.detail.as_deref().unwrap_or("unknown error")
+        ),
+        DiscoveryStatusKind::TimedOut => format!(
+            "  ⚠ {:<18} discovery timed out ({})",
+            status.provider,
+            status.detail.as_deref().unwrap_or("budget exceeded")
+        ),
+    }
+}
 
 pub(crate) fn build_provider_and_router(
     config: &forge_config::Config,
@@ -151,7 +186,8 @@ pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<
     }
     forge_config::inject_provider_keys();
     let config = forge_config::load().unwrap_or_default();
-    let cat = discover_catalog(&config).await;
+    let (cat, statuses) = discover_catalog_with_status(&config).await;
+    print_discovery_statuses(&statuses);
     if cat.is_empty() {
         println!(
             "no models discovered — set a provider key (`forge auth <provider>`) or run ollama"
@@ -694,5 +730,31 @@ mod bridge_harness_tests {
             rows.iter().map(|row| row.tier).collect::<Vec<_>>(),
             vec![TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex]
         );
+    }
+}
+
+#[cfg(test)]
+mod discovery_status_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_status_line_explains_failure_classes_and_fallbacks() {
+        let failed = ProviderDiscoveryStatus {
+            provider: "openai".into(),
+            kind: DiscoveryStatusKind::Failed,
+            models: 0,
+            detail: Some("unauthorized".into()),
+        };
+        assert!(discovery_status_line(&failed).contains("discovery failed: unauthorized"));
+
+        let timed_out = ProviderDiscoveryStatus {
+            provider: "nim".into(),
+            kind: DiscoveryStatusKind::TimedOut,
+            models: 2,
+            detail: Some("using configured seed models after 8s".into()),
+        };
+        let line = discovery_status_line(&timed_out);
+        assert!(line.contains("timed out"));
+        assert!(line.contains("using configured seed models"));
     }
 }
