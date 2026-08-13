@@ -377,7 +377,7 @@ pub(crate) async fn run_chat_tui(
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
 
     // Load config once — shared between update check, session build, and TUI config below.
-    let tui_config = forge_config::load().unwrap_or_default();
+    let tui_config = super::load_config()?;
     // Fire the update check in the background so it never blocks TUI startup.
     // The notification arrives as a Warning in the TUI instead of blocking on a 3s HTTP call.
     update_check::maybe_notify_background(&tui_config, tx.clone());
