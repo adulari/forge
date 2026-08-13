@@ -5,6 +5,32 @@ use super::*;
 pub(crate) struct LoopState {
     pub(crate) gen: u64,
     pub(crate) iter: usize,
+    /// User-defined quality gates (`/loop --gate "<cmd>"`) that must all pass before the run is
+    /// allowed to finish — empty when none were given (docs/features/autonomous-gates.md).
+    pub(crate) gates: Vec<GateState>,
+    pub(crate) gate_cfg: GateConfig,
+    /// Token/wall-clock ceiling (`/loop --max-tokens`/`--max-minutes`) — unbounded when unset.
+    pub(crate) budget: AutonomyBudget,
+}
+
+impl LoopState {
+    pub(crate) fn new(
+        gen: u64,
+        gate_cmds: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    ) -> Self {
+        Self {
+            gen,
+            iter: 1,
+            gates: gate_cmds
+                .into_iter()
+                .map(|cmd| GateState::new(GateSpec { cmd }))
+                .collect(),
+            gate_cfg: GateConfig::default(),
+            budget: AutonomyBudget::new(max_tokens, max_minutes),
+        }
+    }
 }
 
 /// Iteration cap so a loop that never signals completion can't run forever.

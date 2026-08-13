@@ -35,8 +35,8 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | `interrupt` | Ctrl-C | Stop current turn (idle: quit) |
 | `command_palette` | / | Open slash-command palette |
 | `skip_model` | Ctrl-K | Mid-turn: abort so you can retry on another model |
-| `tier_up` | Ctrl-↑ | Escalate tier (placeholder note for now) |
-| `tier_down` | Ctrl-↓ | De-escalate tier (placeholder note for now) |
+| `tier_up` | Ctrl-↑ | Pin the next turn to the next higher mesh tier (mid-turn: abort and retry) |
+| `tier_down` | Ctrl-↓ | Pin the next turn to the next lower mesh tier (mid-turn: abort and retry) |
 | `toggle_reasoning` | Ctrl-R | Show/hide reasoning blocks inline |
 | `undo` | Ctrl-Z | Undo last file write (`/undo`) |
 | `compact` | Ctrl-L | Compact/summarize conversation (`/compact`) |
@@ -74,7 +74,10 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 
 - A configured plain-character bind with no modifiers will fire while typing — keep action binds
   modified (Ctrl/Alt) or use named keys.
-- `tier_up`/`tier_down` currently emit a placeholder note; the routing-tier pin is future work.
+- `tier_up`/`tier_down` pin an in-session routing tier. The first press moves from the currently
+  displayed tier; repeated presses clamp at `trivial`/`complex`. While a turn is running, the
+  active prompt is aborted and retried at the selected tier. The pin persists until another tier
+  action or `/reload`, and an explicit per-turn model/tier hint still wins over it.
 - Because `resolve_action` runs first, Ctrl-K maps to `skip_model` (not the old kill-line-forward)
   and Ctrl-R to `toggle_reasoning` by default; remap them if you want the editing shortcut back.
 
