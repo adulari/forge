@@ -107,6 +107,33 @@ fn load_manifest(root: &Path, session: &str, seq: i64) -> Option<Manifest> {
     serde_json::from_str(&raw).ok()
 }
 
+/// Load a manifest for a user-visible restore operation. A missing manifest means the turn did
+/// not snapshot any files, but a manifest that exists and cannot be read or decoded is evidence
+/// of damaged checkpoint state and must not be mistaken for a clean turn.
+fn load_manifest_for_restore(
+    root: &Path,
+    session: &str,
+    seq: i64,
+) -> std::io::Result<Option<Manifest>> {
+    let path = manifest_path(root, session, seq);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!("cannot read snapshot manifest {}: {error}", path.display()),
+            ));
+        }
+    };
+    serde_json::from_str(&raw).map(Some).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cannot parse snapshot manifest {}: {error}", path.display()),
+        )
+    })
+}
+
 /// One file touched by this turn, as needed by the auto-review gate.
 pub(crate) struct TurnFile {
     /// Absolute path of the file as it stands now (post-edit).
@@ -213,7 +240,7 @@ pub fn record_post_write(root: &Path, session: &str, seq: i64, path: &Path) -> s
 /// `created` → file deleted. Files whose current bytes differ from what Forge wrote get a warning
 /// (the user changed them by hand) but are still restored. Empty report if the turn has no snapshot.
 pub fn restore_turn(root: &Path, session: &str, seq: i64) -> std::io::Result<RestoreReport> {
-    let Some(manifest) = load_manifest(root, session, seq) else {
+    let Some(manifest) = load_manifest_for_restore(root, session, seq)? else {
         return Ok(RestoreReport::default());
     };
     let dir = turn_dir(root, session, seq);
@@ -375,5 +402,19 @@ mod tests {
         let root = root();
         let report = restore_turn(&root, "s", 99).unwrap();
         assert!(report.is_empty());
+    }
+
+    #[test]
+    fn restoring_a_corrupt_manifest_reports_checkpoint_damage() {
+        let root = root();
+        let manifest = manifest_path(&root, "s", 7);
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, "{ definitely not json").unwrap();
+
+        let error = restore_turn(&root, "s", 7).expect_err("corrupt snapshots must not look empty");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("snapshot manifest"));
+        assert!(error.to_string().contains("7/manifest.json"));
+        std::fs::remove_dir_all(&root).ok();
     }
 }
