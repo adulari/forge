@@ -205,9 +205,16 @@ impl Session {
         let (result, ok) = match action {
             "create" => self.create_agent_heartbeat(&call.args),
             "list" => {
-                let all = self.store.list_heartbeats(&self.id).unwrap_or_default();
-                let agent_only: Vec<_> = all.into_iter().filter(|h| h.owner == "agent").collect();
-                (format_heartbeat_list(&agent_only), true)
+                match self.store.list_heartbeats(&self.id) {
+                    Ok(all) => {
+                        let agent_only: Vec<_> = all
+                            .into_iter()
+                            .filter(|h| h.owner == "agent")
+                            .collect();
+                        (format_heartbeat_list(&agent_only), true)
+                    }
+                    Err(error) => (format!("error: failed to list heartbeats: {error}"), false),
+                }
             }
             "pause" | "resume" => match label {
                 None => ("error: `label` is required".to_string(), false),
@@ -265,7 +272,10 @@ impl Session {
             Err(e) => return (format!("error: {e}"), false),
         };
 
-        let existing = self.store.list_heartbeats(&self.id).unwrap_or_default();
+        let existing = match self.store.list_heartbeats(&self.id) {
+            Ok(existing) => existing,
+            Err(error) => return (format!("error: failed to list heartbeats: {error}"), false),
+        };
         let agent_count = existing.iter().filter(|h| h.owner == "agent").count();
         if agent_count >= MAX_AGENT_HEARTBEATS_PER_SESSION {
             return (
@@ -303,7 +313,10 @@ impl Session {
     }
 
     fn set_agent_heartbeat_status(&mut self, label: &str, resume: bool) -> (String, bool) {
-        let existing = self.store.list_heartbeats(&self.id).unwrap_or_default();
+        let existing = match self.store.list_heartbeats(&self.id) {
+            Ok(existing) => existing,
+            Err(error) => return (format!("error: failed to list heartbeats: {error}"), false),
+        };
         let Some(hb) = existing
             .iter()
             .find(|h| h.owner == "agent" && h.label.as_deref() == Some(label))
