@@ -565,7 +565,10 @@ pub(crate) async fn serve_cmd(
     rotate_token: bool,
     mock: bool,
 ) -> Result<()> {
-    let config = forge_config::load().unwrap_or_default();
+    // A present but malformed config must stop startup with its parse context. Falling back to
+    // defaults here silently changes the daemon's port, project roots, and feature switches while
+    // leaving the service looking healthy to watchdogs and clients.
+    let config = forge_config::load().context("loading Forge configuration")?;
     let port = port.unwrap_or_else(|| config.remote.serve_port());
     let token = daemon_token(rotate_token)?;
     if rotate_token {
