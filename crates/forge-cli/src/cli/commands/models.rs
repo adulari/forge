@@ -150,7 +150,7 @@ pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<
         return Ok(());
     }
     forge_config::inject_provider_keys();
-    let config = forge_config::load().unwrap_or_default();
+    let config = super::load_config()?;
     let cat = discover_catalog(&config).await;
     if cat.is_empty() {
         println!(
@@ -251,7 +251,7 @@ pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<
 /// `forge benchmarks [--refresh]` — show measured model scores + catalog coverage (ADR-0011).
 pub(crate) async fn benchmarks_cmd(refresh: bool) -> Result<()> {
     forge_config::inject_provider_keys();
-    let config = forge_config::load().unwrap_or_default();
+    let config = super::load_config()?;
     if !config.mesh.benchmark_ranking {
         println!("benchmark ranking is disabled (`mesh.benchmark_ranking = false`).");
         return Ok(());
@@ -407,7 +407,7 @@ fn print_mesh_smoke(rows: &[MeshSmokeRow], json: bool) {
 
 pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Result<()> {
     forge_config::inject_provider_keys();
-    let config = forge_config::load().unwrap_or_default();
+    let config = super::load_config()?;
     let cat = discover_catalog(&config).await;
     if cat.is_empty() {
         println!(
