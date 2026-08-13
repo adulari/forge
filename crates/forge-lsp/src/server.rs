@@ -90,14 +90,7 @@ impl LspServer {
                 let mut buf = [0u8; 1024];
                 loop {
                     match pipe.read(&mut buf).await {
-                        Ok(0) => {
-                            debug!("lsp: stderr reader reached EOF");
-                            break;
-                        }
-                        Err(error) => {
-                            warn!("lsp: stderr reader failed: {error}");
-                            break;
-                        }
+                        Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
                             if let Ok(mut sink) = sink.lock() {
