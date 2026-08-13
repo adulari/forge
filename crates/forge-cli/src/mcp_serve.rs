@@ -277,72 +277,8 @@ impl ServerHandler for ForgeMcp {
         // tools are invoked via `mcp_call`, so this covers the whole external surface. Hooks fire
         // here too (PreToolUse block + arg-rewrite, PostToolUse observe) so the hook-based
         // permission/logging story applies to MCP traffic, not just built-in tools.
-        if let Some(m) = &self.mcp {
-            if m.knows_tool(&name) {
-                let side_effect = m.side_effect_of(&name);
-                let mut effective_args = args.clone();
-
-                // PreToolUse: block, or rewrite the args before the gate + dispatch.
-                if !self.config.hooks.is_empty() {
-                    let payload =
-                        serde_json::json!({ "tool": name, "args": effective_args }).to_string();
-                    let outcome = hooks::run_hooks(
-                        &self.config.hooks,
-                        forge_config::HookEvent::PreToolUse,
-                        &name,
-                        &payload,
-                    )
-                    .await;
-                    if let Some(reason) = outcome.blocked {
-                        return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                            "blocked by hook: {reason}"
-                        ))]));
-                    }
-                    if let Some(rewritten) = outcome.rewritten_args {
-                        effective_args = rewritten;
-                    }
-                }
-
-                let decision =
-                    permission::decide(self.mode, side_effect, &name, &effective_args, &self.rules);
-                if decision == PermissionDecision::Deny {
-                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                        "denied by Forge permission policy: {name}"
-                    ))]));
-                }
-                let out = m.call(&name, &effective_args).await;
-
-                // PostToolUse: observe; notes are prefixed onto the bridge model's result text.
-                let mut note_prefix = String::new();
-                if !self.config.hooks.is_empty() {
-                    let payload = serde_json::json!({
-                        "tool": name, "args": effective_args, "result": out.text, "ok": out.ok
-                    })
-                    .to_string();
-                    let outcome = hooks::run_hooks(
-                        &self.config.hooks,
-                        forge_config::HookEvent::PostToolUse,
-                        &name,
-                        &payload,
-                    )
-                    .await;
-                    for note in outcome.notes {
-                        note_prefix.push_str(&format!("[hook note] {note}\n"));
-                    }
-                }
-
-                let text = if note_prefix.is_empty() {
-                    out.text
-                } else {
-                    format!("{note_prefix}{}", out.text)
-                };
-                let content = vec![ContentBlock::text(text)];
-                return Ok(if out.ok {
-                    CallToolResult::success(content)
-                } else {
-                    CallToolResult::error(content)
-                });
-            }
+        if let Some(result) = self.dispatch_external_mcp(&name, &args).await {
+            return Ok(result);
         }
 
         let Some(tool) = self.registry.get(&name) else {
@@ -426,6 +362,84 @@ impl ServerHandler for ForgeMcp {
             CallToolResult::success(vec![ContentBlock::text(result_text)])
         } else {
             CallToolResult::error(vec![ContentBlock::text(result_text)])
+        })
+    }
+}
+
+impl ForgeMcp {
+    /// Dispatch one external MCP meta-tool through the same hook and permission path used by the
+    /// stdio bridge. Keeping this seam separate makes the bridge path testable with an in-process
+    /// MCP server without manufacturing a network `RequestContext`.
+    async fn dispatch_external_mcp(&self, name: &str, args: &Value) -> Option<CallToolResult> {
+        let m = self.mcp.as_ref()?;
+        if !m.knows_tool(name) {
+            return None;
+        }
+
+        let side_effect = m.side_effect_of(name);
+        let mut effective_args = args.clone();
+        let mut note_prefix = String::new();
+
+        // PreToolUse: block, or rewrite the args before the gate + dispatch.
+        if !self.config.hooks.is_empty() {
+            let payload = serde_json::json!({ "tool": name, "args": effective_args }).to_string();
+            let outcome = hooks::run_hooks(
+                &self.config.hooks,
+                forge_config::HookEvent::PreToolUse,
+                name,
+                &payload,
+            )
+            .await;
+            if let Some(reason) = outcome.blocked {
+                return Some(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "blocked by hook: {reason}"
+                ))]));
+            }
+            for note in outcome.notes {
+                note_prefix.push_str(&format!("[hook note] {note}\n"));
+            }
+            if let Some(rewritten) = outcome.rewritten_args {
+                effective_args = rewritten;
+            }
+        }
+
+        let decision =
+            permission::decide(self.mode, side_effect, name, &effective_args, &self.rules);
+        if decision == PermissionDecision::Deny {
+            return Some(CallToolResult::error(vec![ContentBlock::text(format!(
+                "denied by Forge permission policy: {name}"
+            ))]));
+        }
+        let out = m.call(name, &effective_args).await;
+
+        // PostToolUse: observe; notes are prefixed onto the bridge model's result text.
+        if !self.config.hooks.is_empty() {
+            let payload = serde_json::json!({
+                "tool": name, "args": effective_args, "result": out.text, "ok": out.ok
+            })
+            .to_string();
+            let outcome = hooks::run_hooks(
+                &self.config.hooks,
+                forge_config::HookEvent::PostToolUse,
+                name,
+                &payload,
+            )
+            .await;
+            for note in outcome.notes {
+                note_prefix.push_str(&format!("[hook note] {note}\n"));
+            }
+        }
+
+        let text = if note_prefix.is_empty() {
+            out.text
+        } else {
+            format!("{note_prefix}{}", out.text)
+        };
+        let content = vec![ContentBlock::text(text)];
+        Some(if out.ok {
+            CallToolResult::success(content)
+        } else {
+            CallToolResult::error(content)
         })
     }
 }
@@ -1030,6 +1044,116 @@ mod tests {
         assert!(
             names.contains(&"mcp_search_tools".to_string()),
             "mcp_search_tools must be advertised once external MCP is opted in"
+        );
+    }
+
+    fn hook(
+        event: forge_config::HookEvent,
+        matcher: &str,
+        command: &str,
+    ) -> forge_config::HookConfig {
+        forge_config::HookConfig {
+            event,
+            matcher: Some(matcher.to_string()),
+            command: command.to_string(),
+            timeout_secs: 10,
+            cc_compat: false,
+        }
+    }
+
+    fn result_text(result: &CallToolResult) -> String {
+        serde_json::to_string(&result.content).expect("MCP content is serializable")
+    }
+
+    #[tokio::test]
+    async fn bridge_mcp_harness_covers_rewrite_namespaced_match_and_post_note() {
+        // A real in-process MCP peer (no network or child process) exercises the complete bridge
+        // dispatch seam. The matcher is deliberately namespaced on the meta-tool: the server's
+        // `test__echo` name is nested in mcp_call's arguments and must still be rewritten.
+        let mgr = Arc::new(
+            forge_mcp::testsupport::manager_with_echo(&forge_config::McpConfig::default()).await,
+        );
+        let mut server = test_server_with_mcp(false, Some(mgr));
+        server.config.hooks = vec![
+            hook(
+                forge_config::HookEvent::PreToolUse,
+                "mcp_call",
+                "printf '%s' '{\"action\":\"rewrite\",\"args\":{\"name\":\"test__echo\",\"arguments\":{\"msg\":\"rewritten\"}}}'",
+            ),
+            hook(
+                forge_config::HookEvent::PostToolUse,
+                "mcp_call",
+                "printf '%s' 'observed external MCP call'",
+            ),
+        ];
+
+        let result = server
+            .dispatch_external_mcp(
+                "mcp_call",
+                &serde_json::json!({"name":"test__echo", "arguments":{"msg":"original"}}),
+            )
+            .await
+            .expect("mcp_call is advertised by the connected manager");
+        let text = result_text(&result);
+        assert!(
+            !result.is_error.unwrap_or(false),
+            "echo call failed: {text}"
+        );
+        assert!(
+            text.contains("echo: rewritten"),
+            "pre-hook rewrite was not applied: {text}"
+        );
+        assert!(
+            text.contains("observed external MCP call"),
+            "post-hook note missing: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_mcp_harness_blocks_and_bounds_wedged_hooks() {
+        let mgr = Arc::new(
+            forge_mcp::testsupport::manager_with_echo(&forge_config::McpConfig::default()).await,
+        );
+        let mut server = test_server_with_mcp(false, Some(mgr));
+        server.config.hooks = vec![hook(
+            forge_config::HookEvent::PreToolUse,
+            "mcp_call",
+            "echo policy-block >&2; exit 2",
+        )];
+        let blocked = server
+            .dispatch_external_mcp(
+                "mcp_call",
+                &serde_json::json!({"name":"test__echo", "arguments":{"msg":"x"}}),
+            )
+            .await
+            .unwrap();
+        assert!(blocked.is_error.unwrap_or(false));
+        assert!(result_text(&blocked).contains("policy-block"));
+
+        // `kill_on_drop` in run_one must return control at the configured deadline and still allow
+        // the external call to proceed after a wedged hook is killed.
+        server.config.hooks = vec![{
+            let mut h = hook(forge_config::HookEvent::PreToolUse, "mcp_call", "sleep 30");
+            h.timeout_secs = 1;
+            h
+        }];
+        let started = std::time::Instant::now();
+        let timed = server
+            .dispatch_external_mcp(
+                "mcp_call",
+                &serde_json::json!({"name":"test__echo", "arguments":{"msg":"alive"}}),
+            )
+            .await
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        let text = result_text(&timed);
+        assert!(
+            text.contains("timed out after 1s"),
+            "timeout note missing: {text}"
+        );
+        assert!(
+            text.contains("echo: alive"),
+            "call did not continue after timeout: {text}"
         );
     }
 
