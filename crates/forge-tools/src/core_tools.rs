@@ -673,14 +673,23 @@ impl Tool for ApplyPatchTool {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| ToolError::Failed(format!("spawning git apply: {e}")))?;
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(patch.as_bytes()).await;
+            stdin
+                .write_all(patch.as_bytes())
+                .await
+                .map_err(|e| ToolError::Failed(format!("writing patch to git apply: {e}")))?;
             if !patch.ends_with('\n') {
-                let _ = stdin.write_all(b"\n").await; // git apply wants a trailing newline
+                stdin.write_all(b"\n").await.map_err(|e| {
+                    ToolError::Failed(format!("writing patch terminator to git apply: {e}"))
+                })?; // git apply wants a trailing newline
             }
-            let _ = stdin.shutdown().await;
+            stdin
+                .shutdown()
+                .await
+                .map_err(|e| ToolError::Failed(format!("closing patch input: {e}")))?;
         }
         let out = child
             .wait_with_output()
