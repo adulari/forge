@@ -1173,44 +1173,32 @@ async fn create_session(
             Ok(None) => {
                 return err_response(axum::http::StatusCode::NOT_FOUND, "session not found")
             }
-            Err(error) => {
-                return err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("loading resumed session workspace failed: {error}"),
-                )
-            }
+            Err(error) => return resume_store_error("loading resumed session workspace", &error),
         };
         let title = match state.store.session_title(session_id) {
             Ok(title) => title.unwrap_or_default(),
-            Err(error) => {
-                return err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("loading resumed session title failed: {error}"),
-                )
-            }
+            Err(error) => return resume_store_error("loading resumed session title", &error),
         };
         let worktree = match state.store.session_worktree(session_id) {
             Ok(worktree) => worktree,
-            Err(error) => {
-                return err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("loading resumed session worktree failed: {error}"),
-                )
-            }
+            Err(error) => return resume_store_error("loading resumed session worktree", &error),
         };
         let pinned_model = match state.store.session_pinned_model(session_id) {
             Ok(pinned_model) => pinned_model,
-            Err(error) => {
-                return err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("loading resumed session model pin failed: {error}"),
-                )
-            }
+            Err(error) => return resume_store_error("loading resumed session model pin", &error),
         };
         Some((cwd, title, worktree, pinned_model))
     } else {
         None
     };
+    if let Some(worktree) = resume_metadata
+        .as_ref()
+        .and_then(|(_, _, worktree, _)| worktree.as_deref())
+    {
+        if let Err((status, message)) = validate_resume_worktree(Path::new(worktree)) {
+            return err_response(status, &message);
+        }
+    }
     let cwd = resume_metadata
         .as_ref()
         .map(|(cwd, _, _, _)| cwd.clone())
@@ -3002,6 +2990,54 @@ pub(crate) fn err_response(status: axum::http::StatusCode, msg: &str) -> Respons
         .into_response()
 }
 
+fn resume_store_error(operation: &str, error: &forge_store::StoreError) -> Response {
+    let detail = error.to_string();
+    let lower = detail.to_ascii_lowercase();
+    let status = if matches!(error, forge_store::StoreError::SchemaTooNew { .. }) {
+        axum::http::StatusCode::CONFLICT
+    } else if lower.contains("not a database")
+        || lower.contains("malformed")
+        || lower.contains("corrupt")
+    {
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    let message = if matches!(error, forge_store::StoreError::SchemaTooNew { .. }) {
+        format!("cannot resume: the Forge store is newer than this build while {operation} ({detail}); upgrade Forge")
+    } else if status == axum::http::StatusCode::INTERNAL_SERVER_ERROR {
+        format!("cannot resume: the Forge store appears corrupt while {operation} ({detail})")
+    } else {
+        format!("cannot resume: the Forge store is unavailable while {operation} ({detail})")
+    };
+    err_response(status, &message)
+}
+
+fn validate_resume_worktree(path: &Path) -> Result<(), (axum::http::StatusCode, String)> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err((
+            axum::http::StatusCode::CONFLICT,
+            format!("cannot resume: recorded worktree is not a directory: {}", path.display()),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err((
+            axum::http::StatusCode::GONE,
+            format!(
+                "cannot resume: recorded worktree is missing: {}; restore or discard the worktree first",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err((
+            axum::http::StatusCode::FORBIDDEN,
+            format!("cannot resume: recorded worktree is inaccessible: {} ({error})", path.display()),
+        )),
+        Err(error) => Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            format!("cannot resume: could not inspect recorded worktree: {} ({error})", path.display()),
+        )),
+    }
+}
+
 /// Parse `CreateSessionReq::temper` — case-insensitive, the same names/aliases
 /// [`forge_types::PermissionMode::from_label`] accepts for the `/mode` picker. On failure,
 /// returns the `400` body text listing every valid name (never silently defaults).
@@ -3019,6 +3055,44 @@ fn parse_temper(raw: &str) -> Result<forge_types::PermissionMode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_worktree_validation_distinguishes_missing_file_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone-worktree");
+        let error = validate_resume_worktree(&missing).unwrap_err();
+        assert_eq!(error.0, axum::http::StatusCode::GONE);
+        assert!(error.1.contains("recorded worktree is missing"));
+
+        let file = dir.path().join("not-a-worktree");
+        std::fs::write(&file, b"placeholder").unwrap();
+        let error = validate_resume_worktree(&file).unwrap_err();
+        assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
+        assert!(error.1.contains("not a directory"));
+
+        assert!(validate_resume_worktree(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn resume_store_error_names_schema_and_corruption_recovery() {
+        let schema = resume_store_error(
+            "loading resumed session workspace",
+            &forge_store::StoreError::SchemaTooNew {
+                found: 99,
+                supported: 1,
+            },
+        );
+        assert_eq!(schema.status(), axum::http::StatusCode::CONFLICT);
+
+        let corrupt = resume_store_error(
+            "loading resumed session title",
+            &forge_store::StoreError::InvalidValue("database malformed".into()),
+        );
+        assert_eq!(
+            corrupt.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 
     #[tokio::test]
     async fn identity_route_is_token_scoped_and_returns_stable_system_hostname() {
