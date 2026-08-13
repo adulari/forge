@@ -3401,14 +3401,20 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && self.edits_this_turn > 0
             && (needs_detected_lint || needs_detected_test)
         {
-            if let Some((lint, test)) = Self::detect_project_commands(self.workspace.root()) {
-                let detected = Self::fill_detected_autofix_commands(&mut af, lint, test);
-                if !detected.is_empty() {
-                    self.presenter.emit(PresenterEvent::Warning(format!(
-                        "autofix: auto-detected project command(s): {}",
-                        detected.join("; ")
-                    )));
+            match Self::detect_project_commands(self.workspace.root()) {
+                Ok(Some((lint, test))) => {
+                    let detected = Self::fill_detected_autofix_commands(&mut af, lint, test);
+                    if !detected.is_empty() {
+                        self.presenter.emit(PresenterEvent::Warning(format!(
+                            "autofix: auto-detected project command(s): {}",
+                            detected.join("; ")
+                        )));
+                    }
                 }
+                Ok(None) => {}
+                Err(error) => self.presenter.emit(PresenterEvent::Warning(format!(
+                    "autofix: could not inspect project checks: {error}"
+                ))),
             }
         }
 
@@ -13422,12 +13428,25 @@ mod tests {
         )
         .unwrap();
 
-        let (lint, test) = Session::detect_project_commands(dir.path()).unwrap();
+        let (lint, test) = Session::detect_project_commands(dir.path())
+            .unwrap()
+            .unwrap();
         assert!(
             lint.is_empty(),
             "missing lint/typecheck/check must stay empty"
         );
         assert_eq!(test.as_deref(), Some("npm test 2>&1"));
+    }
+
+    #[test]
+    fn npm_autofix_detection_reports_malformed_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{\"scripts\":").unwrap();
+
+        let error = Session::detect_project_commands(dir.path())
+            .expect_err("malformed package metadata must not look like no project");
+        assert!(error.contains("cannot parse"));
+        assert!(error.contains("package.json"));
     }
 
     #[cfg(unix)]

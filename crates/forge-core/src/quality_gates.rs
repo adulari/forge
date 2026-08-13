@@ -198,18 +198,22 @@ impl Session {
 
     pub(crate) fn detect_project_commands(
         root: &std::path::Path,
-    ) -> Option<(String, Option<String>)> {
+    ) -> Result<Option<(String, Option<String>)>, String> {
         if root.join("Cargo.toml").exists() {
-            return Some((
+            return Ok(Some((
                 "cargo check --all-targets 2>&1".to_string(),
                 Some("cargo test --workspace 2>&1".to_string()),
-            ));
+            )));
         }
         if root.join("package.json").exists() {
-            let package = std::fs::read_to_string(root.join("package.json"))
-                .ok()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())?;
-            let scripts = package.get("scripts").and_then(|value| value.as_object())?;
+            let package_path = root.join("package.json");
+            let text = std::fs::read_to_string(&package_path)
+                .map_err(|error| format!("cannot read {}: {error}", package_path.display()))?;
+            let package = serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|error| format!("cannot parse {}: {error}", package_path.display()))?;
+            let Some(scripts) = package.get("scripts").and_then(|value| value.as_object()) else {
+                return Ok(None);
+            };
             let lint = ["lint", "typecheck", "check"]
                 .into_iter()
                 .find(|name| scripts.contains_key(*name))
@@ -217,18 +221,21 @@ impl Session {
             let test = scripts
                 .contains_key("test")
                 .then(|| "npm test 2>&1".to_string());
-            return Some((lint, test));
+            return Ok(Some((lint, test)));
         }
         if root.join("pyproject.toml").exists() || root.join("requirements.txt").exists() {
-            return Some(("python -m pytest --tb=short -q 2>&1".to_string(), None));
+            return Ok(Some((
+                "python -m pytest --tb=short -q 2>&1".to_string(),
+                None,
+            )));
         }
         if root.join("go.mod").exists() {
-            return Some((
+            return Ok(Some((
                 "go build ./... 2>&1".to_string(),
                 Some("go test ./... 2>&1".to_string()),
-            ));
+            )));
         }
-        None
+        Ok(None)
     }
 
     pub(crate) async fn run_autofix_stage(
