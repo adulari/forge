@@ -105,6 +105,16 @@ fn parse_bridge_tasks(args: &Value) -> Result<Vec<forge_types::TodoItem>, &'stat
     }
 }
 
+fn persist_bridge_memory(
+    store: &Store,
+    scope: &str,
+    kind: &str,
+    text: &str,
+    session_id: &str,
+) -> std::result::Result<(), forge_store::StoreError> {
+    store.add_memory(scope, kind, text, session_id).map(|_| ())
+}
+
 impl ServerHandler for ForgeMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
@@ -206,21 +216,24 @@ impl ServerHandler for ForgeMcp {
                 .unwrap_or_else(|_| "global".to_string());
             let session_id = std::env::var(forge_core::snapshot::ENV_SESSION)
                 .unwrap_or_else(|_| "bridge".to_string());
-            match forge_core::embed_one(&self.config.lattice.embeddings, &text).await {
-                Some(emb) => {
-                    let _ = self.tasks_store.add_memory_with_embedding(
-                        &scope,
-                        &kind_cat,
-                        &text,
-                        &session_id,
-                        &emb,
-                    );
-                }
+            let persist = match forge_core::embed_one(&self.config.lattice.embeddings, &text).await
+            {
+                Some(emb) => self.tasks_store.add_memory_with_embedding(
+                    &scope,
+                    &kind_cat,
+                    &text,
+                    &session_id,
+                    &emb,
+                ),
                 None => {
-                    let _ = self
-                        .tasks_store
-                        .add_memory(&scope, &kind_cat, &text, &session_id);
+                    persist_bridge_memory(&self.tasks_store, &scope, &kind_cat, &text, &session_id)
+                        .map(|_| String::new())
                 }
+            };
+            if let Err(error) = persist {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "error: failed to save memory: {error}"
+                ))]));
             }
             report_to_sink(serde_json::json!({ "k": "memory", "kind": kind_cat, "text": text }));
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
@@ -946,6 +959,13 @@ mod tests {
         assert!(parse_bridge_tasks(&serde_json::json!({"tasks": []}))
             .expect("an explicit empty list intentionally clears tasks")
             .is_empty());
+    }
+
+    #[test]
+    fn bridge_memory_persistence_reports_store_failures() {
+        let store = Store::open_in_memory().unwrap();
+        let error = persist_bridge_memory(&store, "global", "fact", "", "bridge").unwrap_err();
+        assert!(matches!(error, forge_store::StoreError::Pool(_)));
     }
 
     #[test]
