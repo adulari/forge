@@ -166,9 +166,19 @@ impl ServerHandler for ForgeMcp {
                 }
             };
             if let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) {
-                let existing = self.tasks_store.tasks(&session_id).unwrap_or_default();
+                let existing = match self.tasks_store.tasks(&session_id) {
+                    Ok(tasks) => tasks,
+                    Err(error) => {
+                        tracing::warn!(%session_id, %error, "bridge task history could not be restored");
+                        Vec::new()
+                    }
+                };
                 tasks = forge_core::merge_task_update(&existing, tasks);
-                let _ = self.tasks_store.set_tasks(&session_id, &tasks);
+                if let Err(error) = self.tasks_store.set_tasks(&session_id, &tasks) {
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                        "error: could not persist tasks: {error}"
+                    ))]));
+                }
             }
             let done = tasks
                 .iter()

@@ -3428,6 +3428,24 @@ mod tests {
     }
 
     #[test]
+    fn malformed_session_tasks_are_reported_instead_of_becoming_empty() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO session_tasks (session_id, tasks_json, updated_at) VALUES (?1, ?2, 0)",
+                rusqlite::params![&sid, "not-json"],
+            )
+            .unwrap();
+        let error = store
+            .tasks(&sid)
+            .expect_err("corrupt task JSON must be visible");
+        assert!(matches!(error, StoreError::Json(message) if message.contains("session tasks")));
+    }
+
+    #[test]
     fn session_tasks_carry_an_assignee_and_load_rows_written_without_one() {
         use forge_types::{TodoItem, TodoStatus};
         let store = Store::open_in_memory().unwrap();
