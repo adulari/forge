@@ -114,6 +114,16 @@ pub(crate) fn confine(path_str: &str) -> Result<PathBuf, ToolError> {
     }
 }
 
+/// Read the previous text for a write preview. A missing path is a legitimate create, but any
+/// other read failure must suppress the preview rather than masquerading as an empty file.
+async fn read_preview_source(path: &str) -> Result<Option<String>, std::io::Error> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Hard ceiling on any local file this crate will load whole into memory via `read_to_string`,
 /// checked via a metadata pre-check BEFORE the read. Unlike `cap_read`/`cap_bytes` (which only
 /// truncate what's RETURNED to the model, after the full file is already buffered), this stops
@@ -370,7 +380,10 @@ impl Tool for WriteFileTool {
         let path = str_arg(args, "path").ok()?;
         let content = str_arg(args, "content").ok()?;
         confine(path).ok()?;
-        let old = tokio::fs::read_to_string(path).await.ok();
+        let old = match read_preview_source(path).await {
+            Ok(old) => old,
+            Err(_) => return None,
+        };
         let kind = if old.is_some() {
             DiffKind::Modified
         } else {
@@ -442,7 +455,10 @@ impl Tool for AppendFileTool {
         let path = str_arg(args, "path").ok()?;
         let addition = str_arg(args, "content").ok()?;
         confine(path).ok()?;
-        let old = tokio::fs::read_to_string(path).await.ok();
+        let old = match read_preview_source(path).await {
+            Ok(old) => old,
+            Err(_) => return None,
+        };
         let mut new = old.clone().unwrap_or_default();
         new.push_str(addition);
         Some(FileDiff {
