@@ -4667,6 +4667,32 @@ mod tests {
     }
 
     #[test]
+    fn fork_rejects_malformed_tool_call_metadata() {
+        let store = Store::open_in_memory().unwrap();
+        let source = store.create_session("/repo", "default").unwrap();
+        let message = store
+            .add_message(&source, 0, Role::Assistant, "answer", Some("model"))
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE message SET tool_calls_json = ?1 WHERE id = ?2",
+                ("{not-json", &message),
+            )
+            .unwrap();
+
+        let error = store
+            .fork_session(&source, 1)
+            .expect_err("fork must not rewrite malformed metadata");
+
+        assert!(
+            matches!(error, StoreError::Json(ref message) if message.contains("malformed tool-call metadata")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
     fn queue_task_roundtrips_claim_finish_and_remove() {
         let store = Store::open_in_memory().unwrap();
         assert!(store.list_queue_tasks(None).unwrap().is_empty());
