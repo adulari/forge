@@ -2,6 +2,31 @@
 
 use super::*;
 
+/// Decode persisted tool calls without making a damaged carrier row disappear. The surrounding
+/// transcript remains readable, but the warning gives operators a concrete signal that replay or
+/// resumed model context is incomplete instead of treating corruption as an empty call list.
+fn parse_tool_calls_with_diagnostic(
+    session_id: &str,
+    seq: Option<i64>,
+    raw: Option<String>,
+) -> Vec<ToolCall> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    match serde_json::from_str(&raw) {
+        Ok(calls) => calls,
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                seq = ?seq,
+                error = %error,
+                "store: malformed tool_calls_json; preserving message without tool calls"
+            );
+            Vec::new()
+        }
+    }
+}
+
 impl Store {
     /// All *active* messages of a session, in turn order (by seq). Soft-deleted rows (those a
     /// `/undo` rewound past) are excluded — they remain in the table for audit/redo. If a
@@ -25,9 +50,7 @@ impl Store {
         let rows = stmt.query_map([session_id], |row| {
             let role: String = row.get(0)?;
             let tool_calls_json: Option<String> = row.get(3)?;
-            let tool_calls = tool_calls_json
-                .and_then(|j| serde_json::from_str(&j).ok())
-                .unwrap_or_default();
+            let tool_calls = parse_tool_calls_with_diagnostic(session_id, None, tool_calls_json);
             let visibility: String = row.get(5)?;
             Ok(StoredMessage {
                 role: Role::parse(&role).unwrap_or(Role::User),
@@ -73,9 +96,7 @@ impl Store {
         let rows = stmt.query_map([session_id], |row| {
             let role: String = row.get(0)?;
             let tool_calls_json: Option<String> = row.get(3)?;
-            let tool_calls = tool_calls_json
-                .and_then(|j| serde_json::from_str(&j).ok())
-                .unwrap_or_default();
+            let tool_calls = parse_tool_calls_with_diagnostic(session_id, None, tool_calls_json);
             let visibility: String = row.get(5)?;
             Ok(StoredMessage {
                 role: Role::parse(&role).unwrap_or(Role::User),
@@ -384,11 +405,11 @@ impl Store {
         let rows = stmt.query_map([session_id], |row| {
             let role: String = row.get(1)?;
             let tool_calls_json: Option<String> = row.get(5)?;
-            let tool_calls = tool_calls_json
-                .and_then(|j| serde_json::from_str(&j).ok())
-                .unwrap_or_default();
+            let seq: i64 = row.get(0)?;
+            let tool_calls =
+                parse_tool_calls_with_diagnostic(session_id, Some(seq), tool_calls_json);
             Ok(ReplayEntry {
-                seq: row.get(0)?,
+                seq,
                 role: Role::parse(&role).unwrap_or(Role::User),
                 content: row.get(2)?,
                 model: row.get(3)?,
@@ -401,5 +422,17 @@ impl Store {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tool_calls_with_diagnostic;
+
+    #[test]
+    fn malformed_tool_calls_keep_the_transcript_row_readable() {
+        let calls =
+            parse_tool_calls_with_diagnostic("session-1", Some(7), Some("not-json".to_string()));
+        assert!(calls.is_empty());
     }
 }
