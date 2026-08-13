@@ -15,7 +15,7 @@ if bash "$check" crates/forge-index/src/lib.rs >/dev/null 2>&1; then
 fi
 
 if bash "$check" crates/forge-cli/src/lib.rs >/dev/null 2>&1; then
-  echo "an unrelated source change must not require docs" >&2
+  echo "unrelated source path passed freshness check"
 else
   # The unrelated path is not paired; a failure here would mean the matcher widened accidentally.
   echo "unrelated source path was incorrectly treated as stale" >&2
