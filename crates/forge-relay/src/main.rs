@@ -394,7 +394,21 @@ async fn send_push(
     match result {
         Ok(resp) => {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = match resp.text().await {
+                Ok(body) => body,
+                Err(error) => {
+                    // A response status without a readable body is not a successful relay
+                    // result: APNs may have closed the stream before its error payload arrived.
+                    // Do not turn that transport failure into an empty 2xx response, or callers
+                    // will record a push as delivered and have no signal to retry it.
+                    tracing::error!("upstream APNs response body could not be read: {error}");
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        "upstream APNs response could not be read",
+                    )
+                        .into_response();
+                }
+            };
             (
                 StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
                 body,
@@ -869,6 +883,40 @@ mod tests {
             .expect("captured request has a body");
         let body: serde_json::Value = serde_json::from_str(body).expect("valid JSON body");
         assert_eq!(body, generic_alert_payload());
+    }
+
+    #[tokio::test]
+    async fn truncated_upstream_response_is_reported_as_a_gateway_failure() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 64\r\nconnection: close\r\n\r\npartial",
+                )
+                .await
+                .unwrap();
+            // Closing before the declared content length makes reqwest surface a body error.
+        });
+
+        let state = test_state_with_options(
+            &["dev.adulari.forge"],
+            None,
+            1_000_000,
+            false,
+            Some(format!("http://{addr}")),
+        );
+        let app = relay_app(state);
+        let resp = app.oneshot(valid_header_route_request()).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body_text(resp).await,
+            "upstream APNs response could not be read"
+        );
     }
 
     #[tokio::test]
