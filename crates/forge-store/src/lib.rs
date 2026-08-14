@@ -4178,6 +4178,28 @@ mod tests {
     }
 
     #[test]
+    fn all_model_contexts_reports_malformed_rows() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO model_context (model, window) VALUES ('broken', X'FF')",
+                [],
+            )
+            .unwrap();
+
+        let error = store
+            .all_model_contexts()
+            .expect_err("malformed context row must not be filtered");
+
+        assert!(
+            matches!(error, StoreError::InvalidValue(ref message) if message.contains("failed to decode model context row")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
     fn model_context_round_trips_and_upserts() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.model_context("openrouter::x:free").unwrap(), None);
