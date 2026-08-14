@@ -8,11 +8,38 @@
 
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::Value;
+use std::fmt::Display;
 
 use forge_core::subagent::{self, AgentCtx};
 use forge_mesh::BudgetState;
 
 use super::ForgeMcp;
+
+fn load_budget(
+    store: &forge_store::Store,
+    config: &forge_config::Config,
+) -> Result<BudgetState, String> {
+    Ok(BudgetState {
+        spent_today_usd: store
+            .spend_today_usd()
+            .map_err(|error| format!("reading daily spend from the audit store: {error}"))?,
+        daily_cap_usd: config.mesh.daily_budget_usd,
+        spent_week_usd: store
+            .spend_this_week_usd()
+            .map_err(|error| format!("reading weekly spend from the audit store: {error}"))?,
+        weekly_cap_usd: config.mesh.weekly_budget_usd,
+        spent_month_usd: store
+            .spend_this_month_usd()
+            .map_err(|error| format!("reading monthly spend from the audit store: {error}"))?,
+        monthly_cap_usd: config.mesh.monthly_cap_usd,
+        warn_fraction: config.mesh.warn_threshold,
+        min_context_tokens: None,
+    })
+}
+
+fn budget_error_message(error: impl Display) -> String {
+    format!("error: subagent budget unavailable; refusing to route: {error}")
+}
 
 /// Everything a `spawn_agents` call needs, built once if subagents are enabled here. `ctx`
 /// already carries the loaded agent types, the nesting depth, and `max_depth`.
@@ -78,15 +105,13 @@ impl ForgeMcp {
             task: message.clone(),
         };
         let resolved = subagent::resolve(&request, &s.ctx.agents);
-        let budget = BudgetState {
-            spent_today_usd: s.ctx.store.spend_today_usd().unwrap_or(0.0),
-            daily_cap_usd: self.config.mesh.daily_budget_usd,
-            spent_week_usd: s.ctx.store.spend_this_week_usd().unwrap_or(0.0),
-            weekly_cap_usd: self.config.mesh.weekly_budget_usd,
-            spent_month_usd: s.ctx.store.spend_this_month_usd().unwrap_or(0.0),
-            monthly_cap_usd: self.config.mesh.monthly_cap_usd,
-            warn_fraction: self.config.mesh.warn_threshold,
-            min_context_tokens: None,
+        let budget = match load_budget(&s.ctx.store, &self.config) {
+            Ok(budget) => budget,
+            Err(error) => {
+                return CallToolResult::error(vec![ContentBlock::text(budget_error_message(
+                    error,
+                ))]);
+            }
         };
         let decision = subagent::route_child(&s.ctx, &resolved, budget).await;
         let mut on_delta = |_: forge_provider::StreamEvent| {};
@@ -133,15 +158,13 @@ impl ForgeMcp {
             }
         };
 
-        let budget = BudgetState {
-            spent_today_usd: s.ctx.store.spend_today_usd().unwrap_or(0.0),
-            daily_cap_usd: self.config.mesh.daily_budget_usd,
-            spent_week_usd: s.ctx.store.spend_this_week_usd().unwrap_or(0.0),
-            weekly_cap_usd: self.config.mesh.weekly_budget_usd,
-            spent_month_usd: s.ctx.store.spend_this_month_usd().unwrap_or(0.0),
-            monthly_cap_usd: self.config.mesh.monthly_cap_usd,
-            warn_fraction: self.config.mesh.warn_threshold,
-            min_context_tokens: None,
+        let budget = match load_budget(&s.ctx.store, &self.config) {
+            Ok(budget) => budget,
+            Err(error) => {
+                return CallToolResult::error(vec![ContentBlock::text(budget_error_message(
+                    error,
+                ))]);
+            }
         };
 
         // Detached admission (RFC retained-async-subagents), bridge parity with the direct path's
@@ -297,5 +320,18 @@ impl ForgeMcp {
             "cancelled '{name}' ({})",
             &child_id[..child_id.len().min(8)]
         ))])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::budget_error_message;
+
+    #[test]
+    fn budget_failures_refuse_routing_with_actionable_text() {
+        assert_eq!(
+            budget_error_message("daily spend query failed"),
+            "error: subagent budget unavailable; refusing to route: daily spend query failed"
+        );
     }
 }
