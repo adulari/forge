@@ -240,10 +240,37 @@ fn resolve_on_path(bin: &str) -> Option<std::path::PathBuf> {
 /// forge-provider's `build_reqwest_client`; forge-mcp can't depend on forge-provider, and a plain
 /// `reqwest::Client::new()`/`builder()` trusts the OS store and **panics** where there is none.
 pub(crate) fn bundled_client_builder() -> reqwest::ClientBuilder {
-    let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
-        .iter()
-        .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok());
+    let (certs, invalid) =
+        parse_bundled_certs(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter(), |der| {
+            reqwest::Certificate::from_der(der)
+        });
+    if invalid > 0 {
+        tracing::warn!(
+            invalid,
+            "mcp: skipped invalid bundled TLS root certificate(s)"
+        );
+    }
     reqwest::Client::builder().tls_certs_only(certs)
+}
+
+fn parse_bundled_certs<I, B, E, F>(certs: I, parse: F) -> (Vec<reqwest::Certificate>, usize)
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+    F: Fn(&[u8]) -> Result<reqwest::Certificate, E>,
+{
+    let mut invalid = 0;
+    let parsed = certs
+        .into_iter()
+        .filter_map(|der| match parse(der.as_ref()) {
+            Ok(cert) => Some(cert),
+            Err(_) => {
+                invalid += 1;
+                None
+            }
+        })
+        .collect();
+    (parsed, invalid)
 }
 
 /// A reqwest client carrying the server's static custom headers as defaults (the bearer token
@@ -289,6 +316,14 @@ mod tests {
         // build_http_client routes through bundled_client_builder, so it too builds on a CA-less host.
         let headers = std::collections::HashMap::from([("X-Test".to_string(), "1".to_string())]);
         assert!(build_http_client(&headers).is_ok());
+    }
+
+    #[test]
+    fn malformed_bundled_certificate_is_counted_instead_of_silently_disappearing() {
+        let (certs, invalid) =
+            parse_bundled_certs([Vec::<u8>::new()], |_| Err::<reqwest::Certificate, _>(()));
+        assert!(certs.is_empty());
+        assert_eq!(invalid, 1);
     }
 
     #[test]
