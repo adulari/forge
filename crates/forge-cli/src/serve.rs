@@ -366,7 +366,9 @@ fn attention_became_required(was_waiting: bool, is_waiting: bool) -> bool {
 /// resurrect — [`SessionRegistry::insert`] calls this unconditionally). A no-op when the target
 /// still has no live handle: the row stays pending and is drained the next time this runs for it.
 /// Best-effort throughout — an individual send failure leaves that one row pending for the next
-/// call rather than losing it, and never fails the caller.
+/// call rather than losing it, and never fails the caller. A successful input send whose durable
+/// acknowledgement fails is also left pending, but emits a warning so operators can distinguish
+/// a retryable persistence problem from a quiet successful delivery.
 pub(crate) async fn deliver_pending_fleet_messages(
     store: &forge_store::Store,
     registry: &SessionRegistry,
@@ -392,7 +394,20 @@ pub(crate) async fn deliver_pending_fleet_messages(
             }
         };
         if handle.input_tx.send(input).await.is_ok() {
-            let _ = store.mark_fleet_message_delivered(&msg.id, chrono::Utc::now().timestamp());
+            match store.mark_fleet_message_delivered(&msg.id, chrono::Utc::now().timestamp()) {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    message_id = %msg.id,
+                    target_session_id = %target_id,
+                    "fleet message was sent but its durable delivery marker was missing; it will be retried"
+                ),
+                Err(error) => tracing::warn!(
+                    message_id = %msg.id,
+                    target_session_id = %target_id,
+                    %error,
+                    "fleet message was sent but its durable delivery marker could not be written; it will be retried"
+                ),
+            }
         }
     }
 }
