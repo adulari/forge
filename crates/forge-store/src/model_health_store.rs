@@ -138,13 +138,16 @@ impl Store {
     pub fn all_model_contexts(&self) -> Result<std::collections::HashMap<String, u32>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT model, window FROM model_context")?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let map = rows
-            .into_iter()
-            .map(|(model, w)| (model, w.max(0) as u32))
-            .collect();
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (model, window) = row.map_err(|error| {
+                StoreError::InvalidValue(format!(
+                    "failed to decode model context row while loading routing windows: {error}"
+                ))
+            })?;
+            map.insert(model, window.max(0) as u32);
+        }
         Ok(map)
     }
 

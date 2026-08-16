@@ -4178,23 +4178,25 @@ mod tests {
     }
 
     #[test]
-    fn all_model_contexts_reports_row_decode_errors() {
+    fn all_model_contexts_reports_malformed_rows() {
         let store = Store::open_in_memory().unwrap();
-        // SQLite's dynamic typing lets a damaged/imported database contain text in this INTEGER
-        // column. The reader must report that corruption instead of silently omitting the model.
         store
             .lock()
             .unwrap()
             .execute(
-                "INSERT INTO model_context (model, window, updated_at) VALUES (?1, ?2, 0)",
-                ("broken", "not-a-number"),
+                "INSERT INTO model_context (model, window) VALUES ('broken', X'FF')",
+                [],
             )
             .unwrap();
 
         let error = store
             .all_model_contexts()
-            .expect_err("a malformed row must not disappear from the report");
-        assert!(error.to_string().contains("Invalid column type"));
+            .expect_err("malformed context row must not be filtered");
+
+        assert!(
+            matches!(error, StoreError::InvalidValue(ref message) if message.contains("failed to decode model context row")),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]
