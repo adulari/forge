@@ -2,6 +2,7 @@
 //! land here the same way `crate::apns::ApnsConfig::from_env` reads them in `forge-cli`).
 
 use std::net::IpAddr;
+use std::{fmt::Display, str::FromStr};
 
 /// Default allowlisted topics if `FORGE_RELAY_ALLOWED_TOPICS` is unset — the one app this relay
 /// exists for today, plus its Live Activity variant (see `crates/forge-cli/src/apns.rs`'s
@@ -71,22 +72,25 @@ impl RelayConfig {
             .map_err(|e| anyhow::anyhow!("invalid FORGE_RELAY_BIND_ADDR: {e}"))?;
         let generic_alerts = env_bool("FORGE_RELAY_GENERIC_ALERTS", false)?;
         let trust_proxy_headers = env_bool("FORGE_RELAY_TRUST_PROXY_HEADERS", false)?;
-        let port = std::env::var("PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(8787);
-        let rate_limit_per_window = std::env::var("FORGE_RELAY_RATE_LIMIT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30);
-        let rate_window_secs = std::env::var("FORGE_RELAY_RATE_WINDOW_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(60);
-        let daily_send_cap = std::env::var("FORGE_RELAY_DAILY_SEND_CAP")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50_000);
+        let port = env_parse("PORT", 8787, |value: u16| value != 0, "a non-zero port")?;
+        let rate_limit_per_window = env_parse(
+            "FORGE_RELAY_RATE_LIMIT",
+            30,
+            |value: u32| value != 0,
+            "a positive request count",
+        )?;
+        let rate_window_secs = env_parse(
+            "FORGE_RELAY_RATE_WINDOW_SECS",
+            60,
+            |value: u64| value != 0,
+            "a positive number of seconds",
+        )?;
+        let daily_send_cap = env_parse(
+            "FORGE_RELAY_DAILY_SEND_CAP",
+            50_000,
+            |value: u64| value != 0,
+            "a positive request count",
+        )?;
 
         Ok(Self {
             team_id,
@@ -116,6 +120,30 @@ fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
     }
 }
 
+fn env_parse<T, F>(name: &str, default: T, valid: F, expected: &str) -> anyhow::Result<T>
+where
+    T: Copy + FromStr,
+    T::Err: Display,
+    F: FnOnce(T) -> bool,
+{
+    match std::env::var(name) {
+        Ok(raw) => {
+            let value = raw
+                .trim()
+                .parse::<T>()
+                .map_err(|error| anyhow::anyhow!("{name} must be {expected}: {error}"))?;
+            if !valid(value) {
+                return Err(anyhow::anyhow!("{name} must be {expected}"));
+            }
+            Ok(value)
+        }
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(anyhow::anyhow!("{name} must be valid UTF-8"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +164,39 @@ mod tests {
         std::env::remove_var(name);
         assert!(!env_bool(name, false).unwrap());
         assert!(env_bool(name, true).unwrap());
+    }
+
+    #[test]
+    fn numeric_config_parser_rejects_typos_and_zero_values() {
+        let name = "FORGE_RELAY_TEST_NUMBER";
+        std::env::set_var(name, "17");
+        assert_eq!(
+            env_parse(name, 3_u16, |value| value != 0, "a non-zero value").unwrap(),
+            17
+        );
+
+        std::env::set_var(name, " 19 ");
+        assert_eq!(
+            env_parse(name, 3_u16, |value| value != 0, "a non-zero value").unwrap(),
+            19
+        );
+
+        std::env::set_var(name, "not-a-number");
+        let error = env_parse(name, 3_u16, |value| value != 0, "a non-zero value")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(name));
+
+        std::env::set_var(name, "0");
+        let error = env_parse(name, 3_u16, |value| value != 0, "a non-zero value")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("non-zero"));
+
+        std::env::remove_var(name);
+        assert_eq!(
+            env_parse(name, 3_u16, |value| value != 0, "a non-zero value").unwrap(),
+            3
+        );
     }
 }
