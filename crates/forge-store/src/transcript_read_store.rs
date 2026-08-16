@@ -2,6 +2,32 @@
 
 use super::*;
 
+/// A row's persisted `tool_calls_json`, or an empty list WITH a diagnostic when the JSON is
+/// damaged. The surrounding message stays readable either way — losing one row's call list must
+/// not make a whole transcript unloadable — but corruption is reported instead of silently
+/// presenting the turn as call-free.
+fn parse_tool_calls_with_diagnostic(
+    session_id: &str,
+    seq: Option<i64>,
+    raw: Option<&str>,
+) -> Vec<ToolCall> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    match serde_json::from_str(raw) {
+        Ok(calls) => calls,
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                seq = ?seq,
+                %error,
+                "store: malformed persisted tool_calls_json; showing the message without its calls"
+            );
+            Vec::new()
+        }
+    }
+}
+
 fn parse_role_with_diagnostic(session_id: &str, seq: Option<i64>, raw: &str) -> Role {
     match Role::parse(raw) {
         Some(role) => role,
@@ -40,9 +66,8 @@ impl Store {
         let rows = stmt.query_map([session_id], |row| {
             let role: String = row.get(0)?;
             let tool_calls_json: Option<String> = row.get(3)?;
-            let tool_calls = tool_calls_json
-                .and_then(|j| serde_json::from_str(&j).ok())
-                .unwrap_or_default();
+            let tool_calls =
+                parse_tool_calls_with_diagnostic(session_id, None, tool_calls_json.as_deref());
             let visibility: String = row.get(5)?;
             Ok(StoredMessage {
                 role: parse_role_with_diagnostic(session_id, None, &role),
@@ -88,9 +113,8 @@ impl Store {
         let rows = stmt.query_map([session_id], |row| {
             let role: String = row.get(0)?;
             let tool_calls_json: Option<String> = row.get(3)?;
-            let tool_calls = tool_calls_json
-                .and_then(|j| serde_json::from_str(&j).ok())
-                .unwrap_or_default();
+            let tool_calls =
+                parse_tool_calls_with_diagnostic(session_id, None, tool_calls_json.as_deref());
             let visibility: String = row.get(5)?;
             Ok(StoredMessage {
                 role: parse_role_with_diagnostic(session_id, None, &role),
@@ -401,9 +425,8 @@ impl Store {
             let role: String = row.get(1)?;
             let tool_calls_json: Option<String> = row.get(5)?;
             let seq: i64 = row.get(0)?;
-            let tool_calls = tool_calls_json
-                .and_then(|j| serde_json::from_str(&j).ok())
-                .unwrap_or_default();
+            let tool_calls =
+                parse_tool_calls_with_diagnostic(session_id, Some(seq), tool_calls_json.as_deref());
             Ok(ReplayEntry {
                 seq,
                 role: parse_role_with_diagnostic(session_id, Some(seq), &role),
@@ -423,7 +446,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_role_with_diagnostic;
+    use super::{parse_role_with_diagnostic, parse_tool_calls_with_diagnostic, Role, Store};
 
     #[test]
     fn unknown_role_keeps_the_transcript_row_readable_as_user() {
@@ -431,5 +454,46 @@ mod tests {
             parse_role_with_diagnostic("session-1", Some(8), "future-role"),
             forge_types::Role::User
         );
+    }
+
+    #[test]
+    fn malformed_tool_calls_json_keeps_the_row_readable_with_no_calls() {
+        assert!(
+            parse_tool_calls_with_diagnostic("session-1", Some(3), Some("{not json")).is_empty()
+        );
+        assert!(parse_tool_calls_with_diagnostic("session-1", None, None).is_empty());
+    }
+
+    /// A damaged `tool_calls_json` row must not make the transcript unloadable — resume and
+    /// replay still return every message, with the broken row's call list empty (and a warning
+    /// emitted, which this can't observe).
+    #[test]
+    fn corrupt_tool_calls_row_survives_resume_and_replay() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/tmp", "default").unwrap();
+        store
+            .add_message(&session, 0, Role::Assistant, "did a thing", None)
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE message SET tool_calls_json = '{not json' WHERE session_id = ?1",
+                [&session],
+            )
+            .unwrap();
+
+        let msgs = store.load_messages(&session).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "did a thing");
+        assert!(msgs[0].tool_calls.is_empty());
+
+        let all = store.load_all_messages(&session).unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].tool_calls.is_empty());
+
+        let replay = store.load_replay(&session).unwrap();
+        assert_eq!(replay.len(), 1);
+        assert!(replay[0].tool_calls.is_empty());
     }
 }
