@@ -59,6 +59,22 @@ jobs:
       - if: matrix.label != 'archlinux'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
 
+      # The release binary uses the production store path unless FORGE_DB is explicit. Keep every
+      # diagnostic and real-turn invocation on the runner's disposable workspace; the Arch runner
+      # is persistent and must never migrate a store left by another job or installed Forge build.
+      - name: Configure disposable Forge store
+        run: echo "FORGE_DB=$RUNNER_TEMP/forge-e2e.db" >> "$GITHUB_ENV"
+
+      - name: Assert disposable Forge store
+        run: |
+          case "$FORGE_DB" in
+            *forge-e2e.db) ;;
+            *)
+              echo "::error::E2E Forge processes must use runner.temp/forge-e2e.db (got $FORGE_DB)"
+              exit 1
+              ;;
+          esac
+
       - name: Build forge
         run: cargo build --release --locked --bin forge
 
