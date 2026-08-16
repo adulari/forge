@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::fmt::Display;
 use std::sync::Arc;
 
 use forge_config::ClassifierKind;
@@ -185,7 +186,7 @@ pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<
         return Ok(());
     }
     forge_config::inject_provider_keys();
-    let config = forge_config::load().unwrap_or_default();
+    let config = super::load_config()?;
     let (cat, statuses) = discover_catalog_with_status(&config).await;
     print_discovery_statuses(&statuses);
     if cat.is_empty() {
@@ -287,7 +288,7 @@ pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<
 /// `forge benchmarks [--refresh]` — show measured model scores + catalog coverage (ADR-0011).
 pub(crate) async fn benchmarks_cmd(refresh: bool) -> Result<()> {
     forge_config::inject_provider_keys();
-    let config = forge_config::load().unwrap_or_default();
+    let config = super::load_config()?;
     if !config.mesh.benchmark_ranking {
         println!("benchmark ranking is disabled (`mesh.benchmark_ranking = false`).");
         return Ok(());
@@ -441,9 +442,43 @@ fn print_mesh_smoke(rows: &[MeshSmokeRow], json: bool) {
     }
 }
 
+fn mesh_budget_error_json(error: impl Display) -> String {
+    serde_json::json!({
+        "kind": "mesh-readiness",
+        "ready": false,
+        "error": {
+            "type": "store",
+            "message": format!("mesh budget unavailable: {error}"),
+        },
+    })
+    .to_string()
+}
+
+fn load_mesh_budget(
+    store: &Store,
+    config: &forge_config::Config,
+) -> Result<forge_mesh::BudgetState> {
+    Ok(forge_mesh::BudgetState {
+        spent_today_usd: store
+            .spend_today_usd()
+            .context("reading daily spend from the audit store")?,
+        daily_cap_usd: config.mesh.daily_budget_usd,
+        spent_week_usd: store
+            .spend_this_week_usd()
+            .context("reading weekly spend from the audit store")?,
+        weekly_cap_usd: config.mesh.weekly_budget_usd,
+        spent_month_usd: store
+            .spend_this_month_usd()
+            .context("reading monthly spend from the audit store")?,
+        monthly_cap_usd: config.mesh.monthly_cap_usd,
+        warn_fraction: config.mesh.warn_threshold,
+        min_context_tokens: None,
+    })
+}
+
 pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Result<()> {
     forge_config::inject_provider_keys();
-    let config = forge_config::load().unwrap_or_default();
+    let config = super::load_config()?;
     let cat = discover_catalog(&config).await;
     if cat.is_empty() {
         println!(
@@ -473,37 +508,40 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
     let readiness = forge_core::readiness::ProviderReadiness::snapshot(&config, &store);
     let quota = readiness.quota;
     let health = readiness.health;
-    let budget = forge_mesh::BudgetState {
-        spent_today_usd: store.spend_today_usd().unwrap_or(0.0),
-        daily_cap_usd: config.mesh.daily_budget_usd,
-        spent_week_usd: store.spend_this_week_usd().unwrap_or(0.0),
-        weekly_cap_usd: config.mesh.weekly_budget_usd,
-        spent_month_usd: store.spend_this_month_usd().unwrap_or(0.0),
-        monthly_cap_usd: config.mesh.monthly_cap_usd,
-        warn_fraction: config.mesh.warn_threshold,
-        min_context_tokens: None,
-    };
-    let router = HeuristicRouter::new(config.clone()).with_catalog(cat.clone());
 
-    if smoke {
-        if !prompt.trim().is_empty() {
-            anyhow::bail!("`forge mesh --smoke` does not take a prompt");
-        }
-        let rows = mesh_smoke_rows(&router, budget, &health, &quota).await;
-        print_mesh_smoke(&rows, json);
-        if rows.iter().all(|row| row.viable) {
-            return Ok(());
-        }
-        anyhow::bail!("mesh readiness check failed");
-    }
-
-    if prompt.trim().is_empty() {
+    if prompt.trim().is_empty() && !smoke {
         if json {
             println!("{}", mesh_overview_json(&cat, &config, &quota));
         } else {
             mesh_overview(&cat, &config, &quota);
         }
         return Ok(());
+    }
+
+    if smoke && !prompt.trim().is_empty() {
+        anyhow::bail!("`forge mesh --smoke` does not take a prompt");
+    }
+
+    let budget = match load_mesh_budget(&store, &config) {
+        Ok(budget) => budget,
+        Err(error) => {
+            let error = error.context("refusing to route without reliable spend data");
+            if json {
+                println!("{}", mesh_budget_error_json(&error));
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
+    let router = HeuristicRouter::new(config.clone()).with_catalog(cat.clone());
+
+    if smoke {
+        let rows = mesh_smoke_rows(&router, budget, &health, &quota).await;
+        print_mesh_smoke(&rows, json);
+        if rows.iter().all(|row| row.viable) {
+            return Ok(());
+        }
+        anyhow::bail!("mesh readiness check failed");
     }
     let project = std::env::current_dir()
         .map(|cwd| forge_core::project_context::compute(&cwd))
@@ -697,6 +735,19 @@ mod bridge_harness_tests {
         assert_eq!(
             classifier_candidates(&forge_config::Config::default(), true),
             ["groq::llama-3.3-70b-versatile"]
+        );
+    }
+
+    #[test]
+    fn mesh_budget_error_json_is_machine_readable_and_not_ready() {
+        let value: serde_json::Value =
+            serde_json::from_str(&mesh_budget_error_json("audit store is unavailable")).unwrap();
+        assert_eq!(value["kind"], "mesh-readiness");
+        assert_eq!(value["ready"], false);
+        assert_eq!(value["error"]["type"], "store");
+        assert_eq!(
+            value["error"]["message"],
+            "mesh budget unavailable: audit store is unavailable"
         );
     }
 
