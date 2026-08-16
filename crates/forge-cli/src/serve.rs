@@ -1183,14 +1183,18 @@ async fn create_session(
                 "resume cannot create a new worktree; it restores the session's recorded workspace",
             );
         }
+        // Store read failures below are classified `session_store_unreadable`: the session may be
+        // fine, but the store itself could not answer — the remedy is repairing store access, not
+        // restoring a workspace or choosing another session.
         let cwd = match state.store.session_cwd(session_id) {
             Ok(Some(cwd)) => cwd,
             Ok(None) => {
                 return err_response(axum::http::StatusCode::NOT_FOUND, "session not found")
             }
             Err(error) => {
-                return err_response(
+                return err_response_coded(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_store_unreadable",
                     &format!("loading resumed session workspace failed: {error}"),
                 )
             }
@@ -1198,8 +1202,9 @@ async fn create_session(
         let title = match state.store.session_title(session_id) {
             Ok(title) => title.unwrap_or_default(),
             Err(error) => {
-                return err_response(
+                return err_response_coded(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_store_unreadable",
                     &format!("loading resumed session title failed: {error}"),
                 )
             }
@@ -1207,8 +1212,9 @@ async fn create_session(
         let worktree = match state.store.session_worktree(session_id) {
             Ok(worktree) => worktree,
             Err(error) => {
-                return err_response(
+                return err_response_coded(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_store_unreadable",
                     &format!("loading resumed session worktree failed: {error}"),
                 )
             }
@@ -1216,8 +1222,9 @@ async fn create_session(
         let pinned_model = match state.store.session_pinned_model(session_id) {
             Ok(pinned_model) => pinned_model,
             Err(error) => {
-                return err_response(
+                return err_response_coded(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_store_unreadable",
                     &format!("loading resumed session model pin failed: {error}"),
                 )
             }
@@ -1236,12 +1243,28 @@ async fn create_session(
                 .map(str::to_string)
         })
         .unwrap_or_else(|| state.default_cwd.clone());
+    // On resume the cwd is the session's RECORDED workspace, not caller input — a failure here
+    // means the durable path was deleted or made unreadable since the session last ran, which is
+    // a different remedy (restore the directory / fix permissions / pick another session) than a
+    // mistyped `cwd` in the request. Distinguish them with stable codes and 410 Gone.
+    let resuming = resume_metadata.is_some();
     let cwd_path = std::path::Path::new(&cwd);
     if !cwd_path.is_dir() {
-        return err_response(
-            axum::http::StatusCode::BAD_REQUEST,
-            &format!("cwd is not a directory: {cwd}"),
-        );
+        return if resuming {
+            err_response_coded(
+                axum::http::StatusCode::GONE,
+                "resume_workspace_missing",
+                &format!(
+                    "the session's recorded workspace no longer exists: {cwd} — restore the \
+                     directory or start a new session in another workspace"
+                ),
+            )
+        } else {
+            err_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                &format!("cwd is not a directory: {cwd}"),
+            )
+        };
     }
 
     let cwd = match std::fs::canonicalize(&cwd) {
@@ -1253,10 +1276,21 @@ async fn create_session(
             )
         }
         Err(error) => {
-            return err_response(
-                axum::http::StatusCode::BAD_REQUEST,
-                &format!("cwd is unavailable: {error}"),
-            )
+            return if resuming {
+                err_response_coded(
+                    axum::http::StatusCode::GONE,
+                    "resume_workspace_inaccessible",
+                    &format!(
+                        "the session's recorded workspace cannot be opened: {cwd}: {error} — \
+                         check the directory's permissions"
+                    ),
+                )
+            } else {
+                err_response(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    &format!("cwd is unavailable: {error}"),
+                )
+            }
         }
     };
 
@@ -1326,6 +1360,24 @@ async fn create_session(
             }));
         }
     }
+    // A resumed session's recorded worktree must still exist before a driver is pointed at it —
+    // otherwise the failure surfaces later as a generic spawn error. Checked after the live-driver
+    // short-circuit (an already-running session answers regardless), and the record is left
+    // untouched: restoring the directory is the user's call.
+    if resuming {
+        if let Some(recorded) = worktree.as_deref() {
+            if !std::path::Path::new(recorded).is_dir() {
+                return err_response_coded(
+                    axum::http::StatusCode::GONE,
+                    "resume_worktree_missing",
+                    &format!(
+                        "the session's recorded worktree no longer exists: {recorded} — restore \
+                         that directory to resume this session"
+                    ),
+                );
+            }
+        }
+    }
     // A pin is a standing "use exactly this model" instruction, so it has to survive being
     // resumed. Without the fallback the resumed driver starts unpinned and the mesh answers by
     // classification instead — a session pinned to one model comes back on another. An explicit
@@ -1366,7 +1418,14 @@ async fn create_session(
             // past-sessions browser) should stop being hidden once it's live again, the same
             // way the archive button hid it.
             if is_resume {
-                let _ = state.store.unarchive_session(&handle.session_id);
+                if let Err(error) = state.store.unarchive_session(&handle.session_id) {
+                    tracing::warn!(
+                        session_id = handle.session_id,
+                        %error,
+                        "serve: resumed session could not be un-archived; it stays hidden in \
+                         the past-sessions browser"
+                    );
+                }
             }
             // Record the pin so the next resume can restore it. Written after the driver exists
             // because the session row is created as part of spawning it. Failing to persist the
@@ -3013,6 +3072,25 @@ pub(crate) fn err_response(status: axum::http::StatusCode, msg: &str) -> Respons
             (axum::http::header::CACHE_CONTROL, "no-store"),
         ],
         serde_json::json!({ "error": msg }).to_string(),
+    )
+        .into_response()
+}
+
+/// [`err_response`] with a stable machine-readable `code` alongside the human message, for
+/// failures a client can meaningfully branch on (e.g. resume: restore the worktree vs repair the
+/// store vs pick another session). Additive — clients reading only `error` see no change.
+pub(crate) fn err_response_coded(
+    status: axum::http::StatusCode,
+    code: &str,
+    msg: &str,
+) -> Response {
+    (
+        status,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::json!({ "error": msg, "code": code }).to_string(),
     )
         .into_response()
 }
@@ -6249,6 +6327,80 @@ mod tests {
         let t = daemon_token_at(&path, false).unwrap();
         assert_eq!(t.len(), 32, "corrupted token is replaced, not trusted");
         assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Resume failures are classified with stable `code`s: a deleted recorded workspace and a
+    /// deleted recorded worktree are different remedies (restore that directory / pick another
+    /// session) than a mistyped request `cwd`, and neither path deletes or rewrites the
+    /// session's recorded data.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resume_classifies_missing_workspace_and_worktree() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir =
+            std::env::temp_dir().join(format!("forge-serve-resume-cls-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("resume-cls.db"));
+        let store = Arc::new(crate::open_store().unwrap());
+
+        // A session whose recorded workspace has since been deleted.
+        let gone_ws = dir.join("gone-workspace");
+        std::fs::create_dir_all(&gone_ws).unwrap();
+        let ws_id = store
+            .create_session(gone_ws.to_str().unwrap(), "default")
+            .unwrap();
+        std::fs::remove_dir_all(&gone_ws).unwrap();
+
+        // A session whose workspace exists but whose recorded worktree is gone.
+        let live_ws = dir.join("live-workspace");
+        std::fs::create_dir_all(&live_ws).unwrap();
+        let wt_sess = store
+            .create_session(live_ws.to_str().unwrap(), "default")
+            .unwrap();
+        store
+            .set_session_worktree(&wt_sess, dir.join("gone-worktree").to_str().unwrap())
+            .unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+        let resume = |id: &str| {
+            axum::http::Request::post("/tok/api/sessions")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "resume": id }).to_string(),
+                ))
+                .unwrap()
+        };
+
+        let resp = router.clone().oneshot(resume(&ws_id)).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::GONE);
+        assert_eq!(json_body(resp).await["code"], "resume_workspace_missing");
+
+        let resp = router.clone().oneshot(resume(&wt_sess)).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::GONE);
+        assert_eq!(json_body(resp).await["code"], "resume_worktree_missing");
+
+        // Nothing was deleted or rewritten: both records still name the missing paths.
+        assert_eq!(
+            store.session_cwd(&ws_id).unwrap().unwrap(),
+            gone_ws.to_str().unwrap()
+        );
+        assert!(store.session_worktree(&wt_sess).unwrap().is_some());
+
+        std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
