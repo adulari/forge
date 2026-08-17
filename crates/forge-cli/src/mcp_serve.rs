@@ -105,6 +105,19 @@ fn parse_bridge_tasks(args: &Value) -> Result<Vec<forge_types::TodoItem>, &'stat
     }
 }
 
+/// Merge and persist a bridge task update for its parent session. Keep the read and write in one
+/// fallible seam so an unavailable or invalid Store cannot be reported as a successful update.
+fn persist_bridge_tasks(
+    store: &Store,
+    session_id: &str,
+    tasks: Vec<forge_types::TodoItem>,
+) -> std::result::Result<Vec<forge_types::TodoItem>, forge_store::StoreError> {
+    let existing = store.tasks(session_id)?;
+    let tasks = forge_core::merge_task_update(&existing, tasks);
+    store.set_tasks(session_id, &tasks)?;
+    Ok(tasks)
+}
+
 impl ServerHandler for ForgeMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
@@ -166,19 +179,14 @@ impl ServerHandler for ForgeMcp {
                 }
             };
             if let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) {
-                let existing = match self.tasks_store.tasks(&session_id) {
+                tasks = match persist_bridge_tasks(&self.tasks_store, &session_id, tasks) {
                     Ok(tasks) => tasks,
                     Err(error) => {
-                        tracing::warn!(%session_id, %error, "bridge task history could not be restored");
-                        Vec::new()
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                            "error: failed to persist task list for session '{session_id}': {error}"
+                        ))]));
                     }
                 };
-                tasks = forge_core::merge_task_update(&existing, tasks);
-                if let Err(error) = self.tasks_store.set_tasks(&session_id, &tasks) {
-                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                        "error: could not persist tasks: {error}"
-                    ))]));
-                }
             }
             let done = tasks
                 .iter()
@@ -956,6 +964,20 @@ mod tests {
         assert!(parse_bridge_tasks(&serde_json::json!({"tasks": []}))
             .expect("an explicit empty list intentionally clears tasks")
             .is_empty());
+    }
+
+    #[test]
+    fn bridge_task_persistence_reports_store_failures() {
+        let store = Store::open_in_memory().unwrap();
+        let tasks = vec![forge_types::TodoItem {
+            title: "persist this plan".into(),
+            status: forge_types::TodoStatus::Pending,
+            assignee: None,
+        }];
+
+        let error = persist_bridge_tasks(&store, "missing-session", tasks).unwrap_err();
+
+        assert!(matches!(error, forge_store::StoreError::Sqlite(_)));
     }
 
     #[test]
