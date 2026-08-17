@@ -814,6 +814,8 @@ pub(crate) async fn run_chat_tui(
     // connected browser (~60 frames/s of JSON for nothing).
     let mut last_remote_snap: Option<remote::Snapshot> = None;
     let mut remote_revision: u64 = 0;
+    // Runtime failure from the loopback remote server, shown once after its URL was published.
+    let mut remote_server_error_seen: Option<String> = None;
     // One long-lived clipboard for mouse-selection copies (see `copy_selection`). Created once so
     // arboard keeps the X11/Wayland selection alive and never logs a "dropped" warning to the TUI.
     let mut clipboard: Option<arboard::Clipboard> = arboard::Clipboard::new().ok();
@@ -4399,6 +4401,18 @@ pub(crate) async fn run_chat_tui(
         // remote control is on, also fold them into the transcript ring buffer so the phone's
         // snapshot mirrors the conversation tail, then broadcast the snapshot.
         if remote.is_some() {
+            if let Some(error) = remote
+                .as_ref()
+                .and_then(remote::RemoteControl::server_error)
+            {
+                if remote_server_error_seen.as_deref() != Some(error.as_str()) {
+                    app.note(&format!(
+                        "⚠ remote control unavailable: server stopped: {error}"
+                    ));
+                    remote_server_error_seen = Some(error);
+                    dirty = true;
+                }
+            }
             let flushed = app.drain_flush_remote();
             if !flushed.is_empty() {
                 tui.insert_lines(flushed);
