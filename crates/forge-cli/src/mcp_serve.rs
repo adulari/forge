@@ -115,6 +115,19 @@ fn persist_bridge_memory(
     store.add_memory(scope, kind, text, session_id).map(|_| ())
 }
 
+/// Merge and persist a bridge task update for its parent session. Keep the read and write in one
+/// fallible seam so an unavailable or invalid Store cannot be reported as a successful update.
+fn persist_bridge_tasks(
+    store: &Store,
+    session_id: &str,
+    tasks: Vec<forge_types::TodoItem>,
+) -> std::result::Result<Vec<forge_types::TodoItem>, forge_store::StoreError> {
+    let existing = store.tasks(session_id)?;
+    let tasks = forge_core::merge_task_update(&existing, tasks);
+    store.set_tasks(session_id, &tasks)?;
+    Ok(tasks)
+}
+
 impl ServerHandler for ForgeMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
@@ -176,9 +189,14 @@ impl ServerHandler for ForgeMcp {
                 }
             };
             if let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) {
-                let existing = self.tasks_store.tasks(&session_id).unwrap_or_default();
-                tasks = forge_core::merge_task_update(&existing, tasks);
-                let _ = self.tasks_store.set_tasks(&session_id, &tasks);
+                tasks = match persist_bridge_tasks(&self.tasks_store, &session_id, tasks) {
+                    Ok(tasks) => tasks,
+                    Err(error) => {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                            "error: failed to persist task list for session '{session_id}': {error}"
+                        ))]));
+                    }
+                };
             }
             let done = tasks
                 .iter()
@@ -966,6 +984,20 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let error = persist_bridge_memory(&store, "global", "fact", "", "bridge").unwrap_err();
         assert!(matches!(error, forge_store::StoreError::Pool(_)));
+    }
+
+    #[test]
+    fn bridge_task_persistence_reports_store_failures() {
+        let store = Store::open_in_memory().unwrap();
+        let tasks = vec![forge_types::TodoItem {
+            title: "persist this plan".into(),
+            status: forge_types::TodoStatus::Pending,
+            assignee: None,
+        }];
+
+        let error = persist_bridge_tasks(&store, "missing-session", tasks).unwrap_err();
+
+        assert!(matches!(error, forge_store::StoreError::Sqlite(_)));
     }
 
     #[test]
