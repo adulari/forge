@@ -1343,6 +1343,8 @@ pub struct RemoteControl {
     /// fingerprint were fixed at return time and can't be corrected in place, so this is checked
     /// separately wherever the exposure is reported (e.g. the remote-page header).
     tls_failed: Arc<AtomicBool>,
+    /// Set when the loopback/HTTP server exits with a runtime error after its URL was published.
+    server_error: Arc<Mutex<Option<String>>>,
 }
 
 impl RemoteControl {
@@ -1352,6 +1354,16 @@ impl RemoteControl {
     /// unavailable. Always `false` for `Local`/`Anywhere` (no TLS is attempted).
     pub fn tls_failed(&self) -> bool {
         self.tls_failed.load(Ordering::Relaxed)
+    }
+
+    /// Runtime error from the server task, if it exited after startup. A URL is not useful once
+    /// its listener has failed, so the render loop surfaces this to the user instead of leaving a
+    /// dead remote-control link in the transcript.
+    pub fn server_error(&self) -> Option<String> {
+        self.server_error
+            .lock()
+            .ok()
+            .and_then(|error| error.clone())
     }
 
     /// Publish a frame to every connected browser AND record it in the replay log. The render
@@ -1586,6 +1598,7 @@ pub fn start(
             _server: server,
             _tunnel: None,
             tls_failed,
+            server_error: Arc::new(Mutex::new(None)),
             tunnel: None,
         });
     }
@@ -1598,8 +1611,14 @@ pub fn start(
     let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
     let url = format!("http://{host}:{}/{}", addr.port(), token);
 
+    let server_error = Arc::new(Mutex::new(None));
+    let server_error_task = server_error.clone();
     let server = tokio::spawn(async move {
-        axum::serve(tokio_listener, app).await.ok(); // best-effort: errors here mean the user turned it off / the port dropped
+        if let Err(error) = axum::serve(tokio_listener, app).await {
+            if let Ok(mut slot) = server_error_task.lock() {
+                *slot = Some(error.to_string());
+            }
+        }
     });
 
     Ok(RemoteControl {
@@ -1616,6 +1635,7 @@ pub fn start(
         _tunnel: None,
         tunnel: None,
         tls_failed: Arc::new(AtomicBool::new(false)),
+        server_error,
     })
 }
 
