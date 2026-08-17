@@ -2,6 +2,21 @@
 
 use super::*;
 
+fn parse_role_with_diagnostic(session_id: &str, seq: Option<i64>, raw: &str) -> Role {
+    match Role::parse(raw) {
+        Some(role) => role,
+        None => {
+            tracing::warn!(
+                session_id,
+                seq = ?seq,
+                role = raw,
+                "store: unknown persisted message role; replaying as user"
+            );
+            Role::User
+        }
+    }
+}
+
 impl Store {
     /// All *active* messages of a session, in turn order (by seq). Soft-deleted rows (those a
     /// `/undo` rewound past) are excluded — they remain in the table for audit/redo. If a
@@ -30,7 +45,7 @@ impl Store {
                 .unwrap_or_default();
             let visibility: String = row.get(5)?;
             Ok(StoredMessage {
-                role: Role::parse(&role).unwrap_or(Role::User),
+                role: parse_role_with_diagnostic(session_id, None, &role),
                 content: row.get(1)?,
                 model: row.get(2)?,
                 tool_calls,
@@ -78,7 +93,7 @@ impl Store {
                 .unwrap_or_default();
             let visibility: String = row.get(5)?;
             Ok(StoredMessage {
-                role: Role::parse(&role).unwrap_or(Role::User),
+                role: parse_role_with_diagnostic(session_id, None, &role),
                 content: row.get(1)?,
                 model: row.get(2)?,
                 tool_calls,
@@ -175,15 +190,16 @@ impl Store {
                 i64::from(include_tools)
             ],
             |row| {
+                let seq: i64 = row.get(0)?;
                 let role: String = row.get(1)?;
                 let visibility: String = row.get(5)?;
                 let tool_call_id: Option<String> = row.get(6)?;
                 let carrier_json: Option<String> = row.get(7)?;
                 let own_calls_json: Option<String> = row.get(8)?;
-                let role = Role::parse(&role).unwrap_or(Role::User);
+                let role = parse_role_with_diagnostic(session_id, Some(seq), &role);
                 Ok((
                     HistoryRow {
-                        seq: row.get(0)?,
+                        seq,
                         role,
                         content: row.get(2)?,
                         model: row.get(3)?,
@@ -384,12 +400,13 @@ impl Store {
         let rows = stmt.query_map([session_id], |row| {
             let role: String = row.get(1)?;
             let tool_calls_json: Option<String> = row.get(5)?;
+            let seq: i64 = row.get(0)?;
             let tool_calls = tool_calls_json
                 .and_then(|j| serde_json::from_str(&j).ok())
                 .unwrap_or_default();
             Ok(ReplayEntry {
-                seq: row.get(0)?,
-                role: Role::parse(&role).unwrap_or(Role::User),
+                seq,
+                role: parse_role_with_diagnostic(session_id, Some(seq), &role),
                 content: row.get(2)?,
                 model: row.get(3)?,
                 created_at: row.get(4)?,
@@ -401,5 +418,18 @@ impl Store {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_role_with_diagnostic;
+
+    #[test]
+    fn unknown_role_keeps_the_transcript_row_readable_as_user() {
+        assert_eq!(
+            parse_role_with_diagnostic("session-1", Some(8), "future-role"),
+            forge_types::Role::User
+        );
     }
 }
