@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use forge_config::LspConfig;
 
 use crate::server::LspServer;
-use crate::types::Diagnostic;
+use crate::types::{Diagnostic, DiagnosticSeverity};
 
 /// First cooldown after a language server fails to start or hand shake.
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
@@ -141,8 +141,10 @@ impl LspRegistry {
             .filter(|limit| *limit > 0)
     }
 
-    /// Diagnostics for one file, or an empty vec if the language is unconfigured, the server binary
-    /// isn't on PATH, or it doesn't answer within `timeout`. Never errors — best-effort by design.
+    /// Diagnostics for one file. Configuration that does not apply to the file remains an empty
+    /// result, while an analyzer outage is returned as a synthetic informational diagnostic. The
+    /// latter keeps callers' existing `Vec<Diagnostic>` API but prevents a broken analyzer from
+    /// looking identical to a clean file.
     pub async fn diagnostics_for(&self, abs_path: &Path, timeout: Duration) -> Vec<Diagnostic> {
         let Some(lang) = lang_from_ext(abs_path) else {
             return vec![];
@@ -154,14 +156,20 @@ impl LspRegistry {
             return vec![];
         };
         if which(&cmd).is_none() {
-            return vec![];
+            return Self::unavailable_diagnostic(
+                abs_path,
+                format!("language server `{cmd}` is not available on PATH"),
+            );
         }
 
         let text = match std::fs::read_to_string(abs_path) {
             Ok(t) => t,
             Err(e) => {
                 warn!("lsp: cannot read {}: {e}", abs_path.display());
-                return vec![];
+                return Self::unavailable_diagnostic(
+                    abs_path,
+                    format!("cannot read source file: {e}"),
+                );
             }
         };
 
@@ -201,7 +209,10 @@ impl LspRegistry {
                     servers.remove(&evict);
                 } else {
                     // All analyzers are busy. Diagnostics are best-effort; never overcommit.
-                    return vec![];
+                    return Self::unavailable_diagnostic(
+                        abs_path,
+                        "all language-server slots are busy",
+                    );
                 }
             }
             servers
@@ -218,11 +229,17 @@ impl LspRegistry {
             let now = Instant::now();
             if slot.cooling_down(now) {
                 debug!("lsp: {lang} ({cmd}) is in failure cooldown — skipping diagnostics");
-                return vec![];
+                return Self::unavailable_diagnostic(
+                    abs_path,
+                    format!("{lang} language server is recovering from a previous failure"),
+                );
             }
             let Some(permit) = global_permits().clone().try_acquire_owned().ok() else {
                 debug!("lsp: global analyzer cap is full; deferring diagnostics");
-                return vec![];
+                return Self::unavailable_diagnostic(
+                    abs_path,
+                    "the language-server capacity is full",
+                );
             };
             slot.permit = Some(permit);
             match LspServer::spawn_with_memory_limit(
@@ -255,7 +272,10 @@ impl LspRegistry {
                             stderr_clause(&cause),
                             backoff.as_secs()
                         );
-                        return vec![];
+                        return Self::unavailable_diagnostic(
+                            abs_path,
+                            format!("{lang} language server initialization failed: {e}"),
+                        );
                     }
                 },
                 Err(e) => {
@@ -265,13 +285,19 @@ impl LspRegistry {
                         "lsp: spawn failed for {lang} ({cmd}): {e} — retrying in {}s",
                         backoff.as_secs()
                     );
-                    return vec![];
+                    return Self::unavailable_diagnostic(
+                        abs_path,
+                        format!("could not start {lang} language server: {e}"),
+                    );
                 }
             }
         }
         let Some(server) = slot.server.as_mut() else {
             warn!("lsp: server unavailable for {lang} after spawn");
-            return vec![];
+            return Self::unavailable_diagnostic(
+                abs_path,
+                format!("{lang} language server is unavailable"),
+            );
         };
 
         let document_version = match server.sync_document(&uri, lang, &text).await {
@@ -283,7 +309,10 @@ impl LspRegistry {
                     "lsp: document sync failed for {lang} ({cmd}): {e} — retrying in {}s",
                     backoff.as_secs()
                 );
-                return vec![];
+                return Self::unavailable_diagnostic(
+                    abs_path,
+                    format!("{lang} language server could not sync the document: {e}"),
+                );
             }
         };
         let diagnostic_timeout = if cold_start && rust_resource_profile {
@@ -308,12 +337,31 @@ impl LspRegistry {
                     "lsp: diagnostics failed for {lang} ({cmd}): {error} — retrying in {}s",
                     backoff.as_secs()
                 );
-                return vec![];
+                return Self::unavailable_diagnostic(
+                    abs_path,
+                    format!("{lang} language server failed while collecting diagnostics: {error}"),
+                );
             }
         };
         let idle_generation = slot.touch();
         arm_idle_timer(&mut slot, entry.clone(), idle_generation, idle_ttl);
         diagnostics
+    }
+
+    /// Keep analyzer failures visible to callers that intentionally use the historical
+    /// `Vec<Diagnostic>` API. This is an informational hint, never a source-code error.
+    fn unavailable_diagnostic(path: &Path, reason: impl Into<String>) -> Vec<Diagnostic> {
+        vec![Diagnostic {
+            severity: DiagnosticSeverity::Information,
+            message: format!(
+                "LSP diagnostics unavailable for {}: {}",
+                path.display(),
+                reason.into()
+            ),
+            line: 0,
+            character: 0,
+            code: Some("forge-lsp-unavailable".to_string()),
+        }]
     }
 
     /// Forget every pending failure cooldown, as if it had elapsed.
@@ -908,12 +956,22 @@ mod tests {
         });
         let timeout = Duration::from_millis(500);
 
-        assert!(reg.diagnostics_for(&file, timeout).await.is_empty());
+        let unavailable = reg.diagnostics_for(&file, timeout).await;
+        assert_eq!(
+            unavailable[0].code.as_deref(),
+            Some("forge-lsp-unavailable")
+        );
+        assert!(unavailable[0].message.contains("initialization failed"));
         wait_for_starts(&attempts, 1).await;
         assert_eq!(starts_recorded(&attempts), 1);
 
-        // Still inside the cooldown: no second process, no second warning.
-        assert!(reg.diagnostics_for(&file, timeout).await.is_empty());
+        // Still inside the cooldown: no second process, but keep the stale-analysis signal.
+        let unavailable = reg.diagnostics_for(&file, timeout).await;
+        assert_eq!(
+            unavailable[0].code.as_deref(),
+            Some("forge-lsp-unavailable")
+        );
+        assert!(unavailable[0].message.contains("recovering"));
         assert_eq!(
             starts_recorded(&attempts),
             1,
@@ -1138,7 +1196,7 @@ mod tests {
 
     #[serial_test::serial]
     #[tokio::test]
-    async fn diagnostics_for_returns_empty_when_binary_not_found() {
+    async fn diagnostics_for_reports_when_binary_not_found() {
         let mut servers = std::collections::HashMap::new();
         servers.insert(
             "rust".to_string(),
@@ -1159,6 +1217,8 @@ mod tests {
         let f = tmp.path().join("main.rs");
         fs::write(&f, "fn main() {}").unwrap();
         let diags = reg.diagnostics_for(&f, Duration::from_millis(100)).await;
-        assert!(diags.is_empty());
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code.as_deref(), Some("forge-lsp-unavailable"));
+        assert!(diags[0].message.contains("not available on PATH"));
     }
 }
