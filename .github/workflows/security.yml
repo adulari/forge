@@ -14,7 +14,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: security-${{ github.ref }}
+  # Branch-keyed so a dispatched run and a pull_request run for the same branch share one group.
+  # See the note in ci.yml for the measurement behind this.
+  group: security-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
