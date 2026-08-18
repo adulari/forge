@@ -148,7 +148,13 @@ impl Session {
         let pricing = Pricing::from_config_with_fetched(&config, fetched_prices);
         let rules = config.permission_rules();
         // Rehydrate the task list (empty for a fresh session; restored on resume).
-        let tasks = store.tasks(&id).unwrap_or_default();
+        let tasks = match store.tasks(&id) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::warn!(session_id = %id, %error, "session task history could not be restored");
+                Vec::new()
+            }
+        };
         // Resumed sessions already have AGENTS.md in the stored transcript; don't re-inject.
         let project_prompt_injected = !transcript.is_empty();
         let checkpoint_root = workspace.root().join(".forge/checkpoints");
