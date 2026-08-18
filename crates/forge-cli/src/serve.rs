@@ -118,7 +118,8 @@ pub(crate) fn daemon_token_at(path: &std::path::Path, rotate: bool) -> Result<St
         rand::random::<u64>()
     );
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating token directory {}", parent.display()))?;
     }
     std::fs::write(path, &token).with_context(|| format!("writing {}", path.display()))?;
     #[cfg(unix)]
@@ -6276,5 +6277,17 @@ mod tests {
         assert_eq!(t.len(), 32, "corrupted token is replaced, not trusted");
         assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn daemon_token_reports_unwritable_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("not-a-directory");
+        std::fs::write(&parent, b"occupied").unwrap();
+        let error = daemon_token_at(&parent.join("serve-token"), false)
+            .expect_err("token creation must fail when its parent is a file");
+        let message = error.to_string();
+        assert!(message.contains("creating token directory"), "{message}");
+        assert!(message.contains("not-a-directory"), "{message}");
     }
 }
