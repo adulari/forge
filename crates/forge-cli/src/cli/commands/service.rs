@@ -138,7 +138,35 @@ fn status_cmd(port: Option<u16>) -> Result<()> {
     if !status.detail.is_empty() {
         println!("detail:    {}", status.detail);
     }
+    if let Some(failure) = status_failure(&status, port, port_up) {
+        anyhow::bail!("{failure}");
+    }
     Ok(())
+}
+
+/// Return the machine-readable failure for `forge service status` after its human-readable
+/// report has been printed. Keeping the report and the exit status separate lets people inspect a
+/// stopped service interactively while allowing a watchdog to detect the same outage reliably.
+fn status_failure(status: &ServiceStatus, port: u16, port_up: bool) -> Option<String> {
+    if !status.installed {
+        return Some("forge-serve is not installed".to_string());
+    }
+    if !status.running {
+        return Some(format!(
+            "forge-serve is installed but not running ({})",
+            if status.detail.is_empty() {
+                "unknown state"
+            } else {
+                status.detail.as_str()
+            }
+        ));
+    }
+    if !port_up {
+        return Some(format!(
+            "forge-serve is active but port {port} is not responding"
+        ));
+    }
+    None
 }
 
 fn control_cmd(action: ServiceControl) -> Result<()> {
@@ -664,5 +692,39 @@ mod tests {
         // ephemeral port this is reliably free in practice for this fast a re-check window.
         // Use an unlikely-to-be-bound low port instead of relying on immediate release.
         assert!(!probe_port(1));
+    }
+
+    #[test]
+    fn status_failure_distinguishes_missing_stopped_and_unresponsive_service() {
+        let missing = ServiceStatus {
+            installed: false,
+            running: false,
+            detail: "inactive".into(),
+        };
+        assert_eq!(
+            status_failure(&missing, 7420, false).as_deref(),
+            Some("forge-serve is not installed")
+        );
+
+        let stopped = ServiceStatus {
+            installed: true,
+            running: false,
+            detail: "failed".into(),
+        };
+        assert_eq!(
+            status_failure(&stopped, 7420, false).as_deref(),
+            Some("forge-serve is installed but not running (failed)")
+        );
+
+        let unresponsive = ServiceStatus {
+            installed: true,
+            running: true,
+            detail: "active".into(),
+        };
+        assert_eq!(
+            status_failure(&unresponsive, 7420, false).as_deref(),
+            Some("forge-serve is active but port 7420 is not responding")
+        );
+        assert!(status_failure(&unresponsive, 7420, true).is_none());
     }
 }
