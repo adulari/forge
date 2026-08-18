@@ -5368,6 +5368,100 @@ mod tests {
             "turn-done must NOT push while a client is connected"
         );
 
+        // A prompt that arrives later must not be answerable with a replay of the first prompt's
+        // Allow. This is the end-to-end boundary the unit-level seq comparison cannot cover: the
+        // real driver has rotated its pending decision and the HTTP notification path must keep
+        // the newer write behind its own sequence.
+        handle
+            .input_tx
+            .send(remote::RemoteInput::Prompt {
+                text: "mock:write again".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let second_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let second_pending = loop {
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
+            if s.permission_prompt.is_some() {
+                break s;
+            }
+            assert!(
+                std::time::Instant::now() < second_deadline,
+                "second permission prompt never appeared; snapshot: {s:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        };
+        assert_ne!(
+            second_pending.prompt_seq, pending.prompt_seq,
+            "each pending decision needs a fresh replay-protection sequence"
+        );
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/answer",
+                format!(
+                    r#"{{"session":"{}","seq":{},"allow":true}}"#,
+                    handle.session_id, pending.prompt_seq
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::CONFLICT,
+            "replaying the first Allow cannot authorize a later prompt"
+        );
+        assert!(
+            handle
+                .snapshot_rx
+                .borrow()
+                .snapshot
+                .permission_prompt
+                .is_some(),
+            "the second prompt survives a replayed Allow"
+        );
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/answer",
+                format!(
+                    r#"{{"session":"{}","seq":{},"allow":true}}"#,
+                    handle.session_id, second_pending.prompt_seq
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let second_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
+            if !s.busy && s.permission_prompt.is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < second_deadline,
+                "second prompt never resolved; snapshot: {s:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/answer",
+                format!(
+                    r#"{{"session":"{}","seq":{},"allow":true}}"#,
+                    handle.session_id, second_pending.prompt_seq
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::CONFLICT,
+            "replaying an already-consumed Allow cannot authorize anything"
+        );
+
         // (5) Client gone → the next completed turn pushes "done".
         handle
             .ws_clients
