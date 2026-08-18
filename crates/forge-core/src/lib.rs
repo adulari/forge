@@ -1438,12 +1438,13 @@ pub struct Session {
     /// retrieval then injects nothing and the turn runs exactly as before (additive guarantee).
     /// `Arc` so the model-facing `lattice` tool shares the same index.
     lattice: Option<Arc<Lattice>>,
-    /// Background file watcher that keeps the index fresh on external edits. Held as the receiving
-    /// end of a channel: the watcher is built off-thread (so a slow filesystem can't gate startup)
-    /// and delivered here, where it lives in the channel buffer for the session's lifetime (this
-    /// Receiver dropped → channel + watcher drop → watching stops). Per-session ownership so repeated
-    /// `build_session` calls (bench, replay) don't leak watcher threads.
-    lattice_watcher: Option<std::sync::mpsc::Receiver<forge_index::LatticeWatcher>>,
+    /// Background file watcher setup result. The watcher is built off-thread (so a slow filesystem
+    /// can't gate startup); once ready, the handle moves into `lattice_watcher_handle`.
+    lattice_watcher: Option<std::sync::mpsc::Receiver<Result<forge_index::LatticeWatcher, String>>>,
+    lattice_watcher_handle: Option<forge_index::LatticeWatcher>,
+    /// Result of the non-blocking initial index update. A failure is surfaced at the next turn
+    /// boundary instead of silently leaving retrieval on a stale or empty index.
+    lattice_update: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     /// Whether a workspace transition must recreate the lattice watcher.
     lattice_watch_enabled: bool,
     /// LSP registry for live diagnostics after writes. `None` when lsp.enabled = false.
@@ -2282,6 +2283,7 @@ impl Session {
         guidance: &[String],
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
+        self.poll_lattice_background();
         // A TUI/serve driver can remain alive while retention prunes its previously empty parent
         // row. Every subsequent persistence write references this id, so restore that minimal
         // parent before routing, command guidance, or the prompt can touch the transcript.
@@ -8898,6 +8900,52 @@ mod tests {
                 .any(|e| matches!(e, PresenterEvent::Done { .. })),
             "notify_error must still end the turn with a Done marker so busy clears: {captured:?}"
         );
+    }
+
+    #[test]
+    fn lattice_background_failures_are_reported_at_the_next_turn_boundary() {
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let config = Config::default();
+        let mut session = Session::start(
+            Arc::new(Store::open_in_memory().unwrap()),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        let (update_tx, update_rx) = std::sync::mpsc::channel();
+        session.set_lattice_update(Some(update_rx));
+        update_tx
+            .send(Err("permission denied".to_string()))
+            .unwrap();
+
+        let (watch_tx, watch_rx) = std::sync::mpsc::channel();
+        session.set_lattice_watcher(Some(watch_rx));
+        watch_tx
+            .send(Err("inotify limit reached".to_string()))
+            .unwrap();
+
+        session.poll_lattice_background();
+        let warnings: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                PresenterEvent::Warning(message) => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(warnings.iter().any(|message| {
+            message.contains("auto-index unavailable") && message.contains("permission denied")
+        }));
+        assert!(warnings.iter().any(|message| {
+            message.contains("file watching unavailable") && message.contains("inotify limit")
+        }));
     }
 
     #[tokio::test]
