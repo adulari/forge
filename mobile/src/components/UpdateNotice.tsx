@@ -72,11 +72,13 @@ export function UpdateNotice() {
   if (!notice) return null;
 
   const release = changelog.data?.[0];
-  const heading = notice.kind === "app" ? `Forge ${notice.appVersion}` : "Forge updated";
+  const heading = notice.kind === "app"
+    ? `Installed Forge app: ${notice.appVersion}`
+    : "Installed Forge update";
   const subtitle =
     notice.kind === "app"
-      ? "A new build is installed."
-      : "The app updated itself in the background.";
+      ? "This is the version now running on this device."
+      : "The app updated itself in the background; this build is now running.";
 
   return (
     <Sheet visible onClose={() => setNotice(null)} accessibilityLabel="What's new">
