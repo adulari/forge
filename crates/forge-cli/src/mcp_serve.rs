@@ -347,15 +347,24 @@ impl ServerHandler for ForgeMcp {
             .flatten()
             .map(std::path::PathBuf::from);
         if let Some(path) = &write_path {
-            let _ = forge_core::snapshot::snapshot_from_env_before_write(path);
+            if let Err(error) = forge_core::snapshot::snapshot_from_env_before_write(path) {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "error: could not checkpoint '{path:?}' before write: {error}"
+                ))]));
+            }
         }
 
         let (out, ok) = match tool.run(&args).await {
             Ok(out) => {
                 if let Some(path) = &write_path {
-                    let _ = forge_core::snapshot::record_from_env_after_write(path);
+                    if let Err(error) = forge_core::snapshot::record_from_env_after_write(path) {
+                        (format!("error: write succeeded but checkpoint recording failed for '{path:?}': {error}"), false)
+                    } else {
+                        (cap_bridge_result(&name, out), true)
+                    }
+                } else {
+                    (cap_bridge_result(&name, out), true)
                 }
-                (cap_bridge_result(&name, out), true)
             }
             Err(e) => (format!("error: {e}"), false),
         };
