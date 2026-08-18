@@ -5116,7 +5116,9 @@ mod tests {
             ),
         );
         tokio::spawn(async move {
-            axum::serve(push_listener, push_service).await.ok();
+            if let Err(error) = axum::serve(push_listener, push_service).await {
+                panic!("push test listener terminated unexpectedly: {error}");
+            }
         });
 
         // The "browser": a fixed receiver keypair + auth secret we can decrypt with.
