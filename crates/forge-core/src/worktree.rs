@@ -3,8 +3,9 @@
 //! Each write-capable child agent gets its own worktree branched from HEAD so concurrent edits
 //! cannot corrupt the shared working tree. After the child finishes, `merge_worktree_back` applies
 //! its changes to the main tree via a 3-way patch. The [`WorktreeGuard`] RAII type removes both
-//! the worktree directory and the tracking branch on drop (best-effort; errors are swallowed so a
-//! panicking child never blocks the orchestrator).
+//! the worktree directory and the tracking branch on drop. Cleanup remains best-effort so a
+//! panicking child never blocks the orchestrator, but failures are logged with enough context to
+//! diagnose stale worktrees and branches.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -83,18 +84,31 @@ impl WorktreeGuard {
 
 impl Drop for WorktreeGuard {
     fn drop(&mut self) {
-        // Best-effort: swallow all errors so a panicking task never hangs.
         let path_str = self.path.to_string_lossy().to_string();
-        let _ = run_git(
+        if let Err(error) = run_git(
             &self.repo_root,
             &["worktree", "remove", "--force", &path_str],
             "worktree remove",
-        );
-        let _ = run_git(
+        ) {
+            tracing::warn!(
+                path = %self.path.display(),
+                branch = %self.branch,
+                error = %error,
+                "failed to remove subagent worktree during cleanup"
+            );
+        }
+        if let Err(error) = run_git(
             &self.repo_root,
             &["branch", "-D", &self.branch],
             "branch -D",
-        );
+        ) {
+            tracing::warn!(
+                path = %self.path.display(),
+                branch = %self.branch,
+                error = %error,
+                "failed to remove subagent branch during cleanup"
+            );
+        }
     }
 }
 
