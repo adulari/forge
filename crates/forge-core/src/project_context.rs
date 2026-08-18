@@ -17,23 +17,42 @@ pub use forge_types::ProjectContext;
 
 const SELF_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const SELF_NAME: &str = env!("CARGO_PKG_NAME");
+type CargoIdentity = (Option<String>, Option<String>);
 
 /// Compute the [`ProjectContext`] for `cwd`. Cheap, local file reads only (a Cargo.toml at or
 /// above `cwd`, plus its workspace root if fields are inherited) — call once per session and
 /// cache the result rather than recomputing every turn.
 pub fn compute(cwd: &Path) -> ProjectContext {
+    compute_with_diagnostic(cwd).0
+}
+
+/// Compute project context and retain a user-facing explanation when a project manifest exists but
+/// cannot be read or parsed. A missing manifest remains a normal non-project result.
+pub fn compute_with_diagnostic(cwd: &Path) -> (ProjectContext, Option<String>) {
     let root = find_root(cwd);
-    let Some((name, repository)) = read_cargo_identity(&root) else {
-        return ProjectContext::default();
+    let (name, repository) = match read_cargo_identity(&root) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => return (ProjectContext::default(), None),
+        Err(error) => {
+            return (
+                ProjectContext::default(),
+                Some(format!(
+                    "project context unavailable: {error} (using generic routing context)"
+                )),
+            )
+        }
     };
     let is_self_hosting = repository
         .as_deref()
         .is_some_and(|r| repos_match(r, SELF_REPOSITORY))
         || name.as_deref().is_some_and(|n| n == SELF_NAME);
-    ProjectContext {
-        project_name: name,
-        is_self_hosting,
-    }
+    (
+        ProjectContext {
+            project_name: name,
+            is_self_hosting,
+        },
+        None,
+    )
 }
 
 /// The nearest ancestor of `cwd` (inclusive) containing a recognized project marker, or `cwd`
@@ -52,9 +71,15 @@ fn find_root(cwd: &Path) -> PathBuf {
 /// subdirectory, is a real, common case (it's exactly how this binary's own repo is normally
 /// operated from). That still counts as a real project identity, just sourced from
 /// `[workspace.package]` directly instead of a `[package]` table.
-fn read_cargo_identity(root: &Path) -> Option<(Option<String>, Option<String>)> {
-    let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-    let doc: toml::Value = toml::from_str(&text).ok()?;
+fn read_cargo_identity(root: &Path) -> Result<Option<CargoIdentity>, String> {
+    let path = root.join("Cargo.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    let doc: toml::Value = toml::from_str(&text)
+        .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
 
     let Some(pkg) = doc.get("package") else {
         let repository = doc
@@ -63,7 +88,7 @@ fn read_cargo_identity(root: &Path) -> Option<(Option<String>, Option<String>)> 
             .and_then(|p| p.get("repository"))
             .and_then(|v| v.as_str())
             .map(String::from);
-        return repository.map(|r| (None, Some(r)));
+        return Ok(repository.map(|r| (None, Some(r))));
     };
 
     let name = pkg.get("name").and_then(|v| v.as_str()).map(String::from);
@@ -76,7 +101,7 @@ fn read_cargo_identity(root: &Path) -> Option<(Option<String>, Option<String>)> 
         }
         _ => None,
     };
-    Some((name, repository))
+    Ok(Some((name, repository)))
 }
 
 /// Walk up from `dir` looking for a `Cargo.toml` with a `[workspace.package] repository`.
@@ -169,6 +194,19 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let ctx = compute(&tmp);
         assert_eq!(ctx, ProjectContext::default());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn malformed_cargo_toml_returns_a_diagnostic_and_neutral_context() {
+        let tmp = std::env::temp_dir().join(format!("pc-test-malformed-{}", std::process::id()));
+        write(&tmp, "Cargo.toml", "[package\n");
+
+        let (ctx, diagnostic) = compute_with_diagnostic(&tmp);
+        assert_eq!(ctx, ProjectContext::default());
+        let diagnostic = diagnostic.expect("malformed manifests need an actionable diagnostic");
+        assert!(diagnostic.contains("project context unavailable"));
+        assert!(diagnostic.contains("Cargo.toml"));
         std::fs::remove_dir_all(&tmp).ok();
     }
 
