@@ -46,20 +46,32 @@ const MCP_SERVE_TOKEN_ENV: &str = "FORGE_MCP_SERVE_TOKEN";
 
 /// Append one JSON record to the out-of-band subagent sink the CLI bridge tails (if it gave us
 /// one via `FORGE_SUBAGENT_SINK`). Used to surface bridge-turn activity (subagents, task-list
-/// updates) in the parent Forge TUI live. Best-effort: no sink / write error is silently ignored.
+/// updates) in the parent Forge TUI live. Best-effort for the CALL (a sink failure must not fail
+/// the tool call it decorates), but never silent: an open/write/flush failure is reported as a
+/// diagnostic so a full or read-only disk doesn't quietly blind the parent TUI.
 fn report_to_sink(record: serde_json::Value) {
     let Ok(path) = std::env::var(forge_provider::SUBAGENT_SINK_ENV) else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    if let Err(error) = append_sink_record(&path, &record) {
+        tracing::warn!(
+            path,
+            %error,
+            "mcp-serve: failed to append bridge activity to the subagent sink; \
+             the parent session will not see this event"
+        );
+    }
+}
+
+/// One JSONL append to the sink at `path`, every I/O failure propagated.
+fn append_sink_record(path: &str, record: &serde_json::Value) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{record}");
-        let _ = f.flush();
-    }
+        .open(path)?;
+    writeln!(f, "{record}")?;
+    f.flush()
 }
 
 mod bridge_budget;
@@ -1346,5 +1358,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authed.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn sink_append_reports_io_failures_instead_of_swallowing_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir").join("sink.jsonl");
+        let record = serde_json::json!({"k": "tasks"});
+        assert!(append_sink_record(missing.to_str().unwrap(), &record).is_err());
+
+        let sink = dir.path().join("sink.jsonl");
+        append_sink_record(sink.to_str().unwrap(), &record).unwrap();
+        append_sink_record(sink.to_str().unwrap(), &record).unwrap();
+        let written = std::fs::read_to_string(&sink).unwrap();
+        assert_eq!(written.lines().count(), 2);
+        let expected = record.to_string();
+        assert!(written.lines().all(|l| l == expected));
     }
 }
