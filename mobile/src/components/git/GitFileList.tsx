@@ -25,8 +25,9 @@ export interface GitFileListProps {
   status: GitStatusResponse;
   selected: GitSelection | null;
   onSelect: (selection: GitSelection) => void;
-  onStage: (paths: string[]) => void;
-  onUnstage: (paths: string[]) => void;
+  /** `null` over Anywhere, where the host refuses index mutations — rows render without actions. */
+  onStage: ((paths: string[]) => void) | null;
+  onUnstage: ((paths: string[]) => void) | null;
   /** An index mutation is in flight — row actions stay visible but stop accepting presses. */
   busy: boolean;
 }
@@ -72,7 +73,8 @@ function FileRow({
   charBudget: number;
   busy: boolean;
   onSelect: () => void;
-  onToggleIndex: () => void;
+  /** `null` in read-only mode — the stage/unstage affordance is omitted rather than disabled. */
+  onToggleIndex: (() => void) | null;
 }) {
   const tokens = useTokens();
   const [hovered, setHovered] = useState(false);
@@ -122,20 +124,22 @@ function FileRow({
           </>
         )}
       </Pressable>
-      <Pressable
-        onPress={busy ? undefined : onToggleIndex}
-        disabled={busy}
-        accessibilityRole="button"
-        accessibilityLabel={`${staged ? "unstage" : "stage"} ${row.path}`}
-        hitSlop={6}
-        style={styles.rowAction}
-      >
-        {staged ? (
-          <Minus size={13} strokeWidth={1.75} color={busy ? tokens.ink4 : tokens.ink3} />
-        ) : (
-          <Plus size={13} strokeWidth={1.75} color={busy ? tokens.ink4 : tokens.ink3} />
-        )}
-      </Pressable>
+      {onToggleIndex ? (
+        <Pressable
+          onPress={busy ? undefined : onToggleIndex}
+          disabled={busy}
+          accessibilityRole="button"
+          accessibilityLabel={`${staged ? "unstage" : "stage"} ${row.path}`}
+          hitSlop={6}
+          style={styles.rowAction}
+        >
+          {staged ? (
+            <Minus size={13} strokeWidth={1.75} color={busy ? tokens.ink4 : tokens.ink3} />
+          ) : (
+            <Plus size={13} strokeWidth={1.75} color={busy ? tokens.ink4 : tokens.ink3} />
+          )}
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -160,8 +164,9 @@ function Group({
   charBudget: number;
   busy: boolean;
   onSelect: (selection: GitSelection) => void;
-  onGroupAction: (paths: string[]) => void;
-  onRowAction: (path: string) => void;
+  /** `null` in read-only mode (Anywhere): the group/row index buttons are not rendered at all. */
+  onGroupAction: ((paths: string[]) => void) | null;
+  onRowAction: ((path: string) => void) | null;
 }) {
   const tokens = useTokens();
   if (rows.length === 0) return null;
@@ -174,15 +179,17 @@ function Group({
         <Text style={[typeScale.section, styles.groupLabel, { color: tokens.ink3 }]} numberOfLines={1}>
           {title} · {rows.length}
         </Text>
-        <Pressable
-          onPress={busy ? undefined : () => onGroupAction(rows.map((row) => row.path))}
-          disabled={busy}
-          accessibilityRole="button"
-          accessibilityLabel={`${actionLabel} all ${rows.length} ${title.toLowerCase()} files`}
-          hitSlop={6}
-        >
-          <Text style={[typeScale.monoMeta, { color: busy ? tokens.ink4 : tokens.ink3 }]}>{actionLabel} all</Text>
-        </Pressable>
+        {onGroupAction ? (
+          <Pressable
+            onPress={busy ? undefined : () => onGroupAction(rows.map((row) => row.path))}
+            disabled={busy}
+            accessibilityRole="button"
+            accessibilityLabel={`${actionLabel} all ${rows.length} ${title.toLowerCase()} files`}
+            hitSlop={6}
+          >
+            <Text style={[typeScale.monoMeta, { color: busy ? tokens.ink4 : tokens.ink3 }]}>{actionLabel} all</Text>
+          </Pressable>
+        ) : null}
       </View>
       {rows.map((row) => (
         <FileRow
@@ -193,7 +200,7 @@ function Group({
           charBudget={charBudget}
           busy={busy}
           onSelect={() => onSelect({ path: row.path, staged })}
-          onToggleIndex={() => onRowAction(row.path)}
+          onToggleIndex={onRowAction ? () => onRowAction(row.path) : null}
         />
       ))}
     </View>
@@ -224,7 +231,7 @@ export function GitFileList({ status, selected, onSelect, onStage, onUnstage, bu
         busy={busy}
         onSelect={onSelect}
         onGroupAction={onUnstage}
-        onRowAction={(path) => onUnstage([path])}
+        onRowAction={onUnstage ? (path) => onUnstage([path]) : null}
       />
       <Group
         title="UNSTAGED"
@@ -236,7 +243,7 @@ export function GitFileList({ status, selected, onSelect, onStage, onUnstage, bu
         busy={busy}
         onSelect={onSelect}
         onGroupAction={onStage}
-        onRowAction={(path) => onStage([path])}
+        onRowAction={onStage ? (path) => onStage([path]) : null}
       />
       <Group
         title="UNTRACKED"
@@ -248,7 +255,7 @@ export function GitFileList({ status, selected, onSelect, onStage, onUnstage, bu
         busy={busy}
         onSelect={onSelect}
         onGroupAction={onStage}
-        onRowAction={(path) => onStage([path])}
+        onRowAction={onStage ? (path) => onStage([path]) : null}
       />
       {status.truncated > 0 ? (
         <Text style={[typeScale.monoMeta, styles.truncated, { color: tokens.ink4 }]}>
