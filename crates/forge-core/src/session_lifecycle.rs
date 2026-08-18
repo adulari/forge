@@ -193,6 +193,7 @@ impl Session {
             mcp: None,
             lattice: None,
             lattice_watcher: None,
+            lattice_watcher_handle: None,
             lattice_watch_enabled: false,
             lsp: None,
             skills: None,

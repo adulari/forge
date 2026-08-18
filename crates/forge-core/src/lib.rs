@@ -1444,6 +1444,9 @@ pub struct Session {
     /// Receiver dropped → channel + watcher drop → watching stops). Per-session ownership so repeated
     /// `build_session` calls (bench, replay) don't leak watcher threads.
     lattice_watcher: Option<std::sync::mpsc::Receiver<forge_index::LatticeWatcher>>,
+    /// Once setup completes, hold the watcher here so backend errors can be surfaced at the next
+    /// user-turn boundary instead of remaining stranded in the delivery channel.
+    lattice_watcher_handle: Option<forge_index::LatticeWatcher>,
     /// Whether a workspace transition must recreate the lattice watcher.
     lattice_watch_enabled: bool,
     /// LSP registry for live diagnostics after writes. `None` when lsp.enabled = false.
@@ -2282,6 +2285,7 @@ impl Session {
         guidance: &[String],
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
+        self.poll_lattice_watcher();
         // A TUI/serve driver can remain alive while retention prunes its previously empty parent
         // row. Every subsequent persistence write references this id, so restore that minimal
         // parent before routing, command guidance, or the prompt can touch the transcript.
