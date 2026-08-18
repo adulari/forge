@@ -63,6 +63,8 @@ jobs:
         run: bash scripts/ci/test-mobile-android-workflow.sh
       - name: Test runner resource budgets
         run: bash scripts/ci/test-runner-resource-budget.sh
+      - name: Test CI store isolation
+        run: bash scripts/ci/test-ci-store-isolation.sh
       - name: Test persistent runner cache bounds
         run: bash scripts/ci/test-trim-runner-cache.sh
       - name: Test crates.io publication order
@@ -133,8 +135,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      # FORGE_DB is not optional here, for the same reason AGENTS.md makes it mandatory locally: a
+      # handful of tests open the DEFAULT store when it is unset, and this is a PERSISTENT
+      # self-hosted runner, so that store survives between jobs and is shared by every branch. A
+      # branch carrying a new migration therefore upgrades it, and every PR built from an older
+      # main then fails with `database schema version N is newer than this build supports` —
+      # cross-PR contamination that has nothing to do with the change under test. Observed on
+      # 2026-08-07: the runner store reached v26 while main was still v25, failing nine
+      # `run::driver` tests on an unrelated docs PR. A per-job path also keeps concurrent jobs from
+      # racing each other on one file.
       - run: cargo test --locked --all --all-features
+        env:
+          FORGE_DB: ${{ runner.temp }}/forge-ci-test.db
       - run: cargo test --locked --manifest-path vendor/genai-0.6.5/Cargo.toml
+        env:
+          FORGE_DB: ${{ runner.temp }}/forge-ci-vendor.db
       - name: Bound persistent build cache
         if: always()
         run: bash scripts/ci/trim-runner-cache.sh
