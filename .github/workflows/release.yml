@@ -152,7 +152,7 @@ jobs:
       # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.
       # The portable Linux legs instead use dedicated Docker volumes on the release runner.
       - if: ${{ !matrix.self_hosted }}
-        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
         with:
           key: ${{ matrix.target }}
 
