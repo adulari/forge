@@ -347,21 +347,30 @@ struct WavLevelTail {
 impl WavLevelTail {
     /// RMS of the frames appended since the previous call, or `None` when there are none yet.
     /// Assumes the mono s16 the backends are launched with (see [`linux_record_thread`]).
-    fn poll(&mut self, wav: &std::path::Path) -> Option<f32> {
+    fn poll(&mut self, wav: &std::path::Path) -> Result<Option<f32>> {
         use std::io::{Read, Seek, SeekFrom};
         // 32 KiB is one second of 16 kHz mono s16 — a poll that gets descheduled catches up on the
         // next one rather than falling permanently behind the recorder.
         let mut buf = [0u8; 32 * 1024];
         if self.file.is_none() {
-            self.file = std::fs::File::open(wav).ok();
+            match std::fs::File::open(wav) {
+                Ok(file) => self.file = Some(file),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
         }
-        let file = self.file.as_mut()?;
-        file.seek(SeekFrom::Start(self.pos)).ok()?;
-        let read = file.read(&mut buf).ok()?;
+        let file = self
+            .file
+            .as_mut()
+            .expect("WavLevelTail file is set after opening");
+        file.seek(SeekFrom::Start(self.pos))?;
+        let read = file.read(&mut buf)?;
         let fresh = if self.in_data {
             &buf[..read]
         } else {
-            let start = wav_data_offset(&buf[..read])?;
+            let Some(start) = wav_data_offset(&buf[..read]) else {
+                return Ok(None);
+            };
             self.in_data = true;
             self.pos = start as u64;
             &buf[start..read]
@@ -369,7 +378,7 @@ impl WavLevelTail {
         // An odd trailing byte is half a sample: leave it for the next poll to pair up.
         let whole = fresh.len() & !1;
         if whole == 0 {
-            return None;
+            return Ok(None);
         }
         self.pos += whole as u64;
         // Scale by 2^15 to match `decode`'s integer path, so the bars mean the same thing as the
@@ -378,7 +387,7 @@ impl WavLevelTail {
             .chunks_exact(2)
             .map(|s| f32::from(i16::from_le_bytes([s[0], s[1]])) / 32_768.0)
             .collect();
-        Some(rms(&samples))
+        Ok(Some(rms(&samples)))
     }
 }
 
@@ -390,14 +399,14 @@ fn wait_for_stop(
     cmd_rx: &std::sync::mpsc::Receiver<Cmd>,
     wav: &std::path::Path,
     level_tx: &watch::Sender<f32>,
-) -> Option<Cmd> {
+) -> Result<Option<Cmd>> {
     let mut tail = WavLevelTail::default();
     loop {
         match cmd_rx.recv_timeout(LEVEL_POLL_INTERVAL) {
-            Ok(cmd) => return Some(cmd),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            Ok(cmd) => return Ok(Some(cmd)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if let Some(level) = tail.poll(wav) {
+                if let Some(level) = tail.poll(wav)? {
                     let _ = level_tx.send(level);
                 }
             }
@@ -486,7 +495,14 @@ fn linux_record_thread(
         let mut child = spawn_retrying_while_busy(&mut command).map_err(|error| {
             VoiceError::Record(format!("starting {}: {error}", backend.program.display()))
         })?;
-        let keep = matches!(wait_for_stop(&cmd_rx, &wav, &level_tx), Some(Cmd::Stop));
+        let keep = match wait_for_stop(&cmd_rx, &wav, &level_tx) {
+            Ok(command) => matches!(command, Some(Cmd::Stop)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         // A very fast stop/cancel can arrive while the helper is still exec'ing. Give it a
         // bounded chance to open the output so SIGINT can finalize a valid WAV, while also
         // detecting permission/device failures that exit before recording starts.
@@ -876,14 +892,18 @@ mod tests {
         let wav = root.path().join("growing.wav");
         let mut tail = WavLevelTail::default();
         // Nothing to read yet: no file, then a header with no frames behind it.
-        assert_eq!(tail.poll(&wav), None);
+        assert_eq!(tail.poll(&wav).unwrap(), None);
         let mut file = std::fs::File::create(&wav).unwrap();
         file.write_all(b"RIFF\x00\x00\x00\x00WAVEfmt \x10\x00\x00\x00")
             .unwrap();
         file.write_all(&[0u8; 16]).unwrap();
         file.write_all(b"data\x00\x00\x00\x00").unwrap();
         file.flush().unwrap();
-        assert_eq!(tail.poll(&wav), None, "header alone carries no audio");
+        assert_eq!(
+            tail.poll(&wav).unwrap(),
+            None,
+            "header alone carries no audio"
+        );
 
         // Full-scale square wave → RMS 1.0; a second poll sees nothing new.
         for _ in 0..64 {
@@ -891,10 +911,10 @@ mod tests {
             file.write_all(&i16::MAX.to_le_bytes()).unwrap();
         }
         file.flush().unwrap();
-        let loud = tail.poll(&wav).expect("frames appended");
+        let loud = tail.poll(&wav).unwrap().expect("frames appended");
         assert!(loud > 0.9, "full-scale audio reads near 1.0, got {loud}");
         assert_eq!(
-            tail.poll(&wav),
+            tail.poll(&wav).unwrap(),
             None,
             "already-measured frames aren't reread"
         );
@@ -902,15 +922,19 @@ mod tests {
         // Silence afterwards must pull the meter back down, not average with the loud window.
         file.write_all(&[0u8; 256]).unwrap();
         file.flush().unwrap();
-        assert_eq!(tail.poll(&wav), Some(0.0));
+        assert_eq!(tail.poll(&wav).unwrap(), Some(0.0));
 
         // A frame split across two polls is carried, not counted as a half sample.
         file.write_all(&[0xff]).unwrap();
         file.flush().unwrap();
-        assert_eq!(tail.poll(&wav), None, "half a sample is not a frame");
+        assert_eq!(
+            tail.poll(&wav).unwrap(),
+            None,
+            "half a sample is not a frame"
+        );
         file.write_all(&[0x7f]).unwrap();
         file.flush().unwrap();
-        let split = tail.poll(&wav).expect("the split frame completes");
+        let split = tail.poll(&wav).unwrap().expect("the split frame completes");
         assert!(
             split > 0.9,
             "carried bytes form one full-scale sample: {split}"
