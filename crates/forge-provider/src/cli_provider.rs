@@ -1583,8 +1583,14 @@ impl CliProvider {
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let p = std::env::temp_dir()
                 .join(format!("forge-subagents-{}-{n}.jsonl", std::process::id()));
-            // Create it empty so the tailer can open it immediately.
-            tokio::fs::File::create(&p).await.ok().map(|_| p)
+            // Create it empty so the tailer can open it immediately. A failed sink would make
+            // bridge activity disappear, so fail this turn with the path-aware I/O error.
+            Some(create_sink_file_at(&p).await.map_err(|error| {
+                ProviderError::Request(format!(
+                    "creating bridge event sink {} failed: {error}",
+                    p.display()
+                ))
+            })?)
         };
 
         // The env `forge mcp-serve` needs to round-trip a bridge turn's activity (sink) and snapshot
@@ -2513,7 +2519,12 @@ impl CliProvider {
                 "forge-subagents-{}-live{n}.jsonl",
                 std::process::id()
             ));
-            tokio::fs::File::create(&p).await.ok().map(|_| p)
+            Some(create_sink_file_at(&p).await.map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("creating bridge event sink {} failed: {error}", p.display()),
+                )
+            })?)
         };
         let mcp_env = bridge_mcp_env(sink_path.as_deref(), checkpoint);
         // Pin this live process to the spawning turn's seq so a later turn forces a respawn (keeps
@@ -2822,6 +2833,11 @@ fn stderr_suffix(stderr: &str) -> String {
     format!(" — stderr: {tail}")
 }
 
+async fn create_sink_file_at(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    tokio::fs::File::create(path).await?;
+    Ok(path.to_path_buf())
+}
+
 async fn read_to_cap<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> String {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -2948,6 +2964,18 @@ impl Drop for GroupKillGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sink_creation_reports_path_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = create_sink_file_at(dir.path())
+            .await
+            .expect_err("a directory cannot be used as a sink file");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::IsADirectory | std::io::ErrorKind::PermissionDenied
+        ));
+    }
 
     /// Spawn a `sh` (its own process group, `kill_on_drop`) that backgrounds a grandchild `sleep`
     /// and writes the grandchild's pid to `pidfile`, mirroring a bridge CLI that spawned a hung

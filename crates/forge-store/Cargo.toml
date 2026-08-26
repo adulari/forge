@@ -16,6 +16,7 @@ rusqlite.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 r2d2 = "0.8.10"
