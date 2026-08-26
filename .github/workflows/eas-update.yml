@@ -54,9 +54,19 @@ jobs:
       - name: Require installed archive baseline
         env:
           BASELINE: ${{ vars.IOS_OTA_COMPATIBLE_BASE_SHA }}
-        run: >-
-          test -n "$BASELINE" ||
-          { echo 'Set IOS_OTA_COMPATIBLE_BASE_SHA to the source commit of the installed Xcode archive.'; exit 1; }
+        run: |
+          set -euo pipefail
+          if [ -z "$BASELINE" ]; then
+            message="OTA refused: IOS_OTA_COMPATIBLE_BASE_SHA is unset. Build and install an Xcode archive, then set the variable to that archive's exact source commit."
+            echo "::error title=OTA baseline missing::$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
+            echo "### OTA baseline"
+            echo "- installed archive source commit: \`$BASELINE\`"
+            echo "- runtime fingerprint variable: \`${{ vars.IOS_OTA_RUNTIME_VERSION || 'unset' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Guard OTA-safe diff
         id: guard
@@ -71,10 +81,21 @@ jobs:
       # workflow and does not make CLI/desktop artifacts depend on its conclusion.
       - name: Refuse incompatible OTA
         if: steps.guard.outputs.safe != 'true'
+        env:
+          BASELINE: ${{ vars.IOS_OTA_COMPATIBLE_BASE_SHA }}
+          RUNTIME: ${{ vars.IOS_OTA_RUNTIME_VERSION }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
-          message='Refused OTA publication: the installed-native-baseline..HEAD range includes native, dependency, or build configuration changes. Build and install a new Xcode Cloud archive, then refresh IOS_OTA_COMPATIBLE_BASE_SHA and IOS_OTA_RUNTIME_VERSION.'
+          message="Refused OTA publication: ${BASELINE}..${HEAD_SHA} includes native, dependency, or build configuration changes. Installed runtime fingerprint is ${RUNTIME:-unset}. Build and install a new Xcode Cloud archive, then set IOS_OTA_COMPATIBLE_BASE_SHA to that archive's exact source commit and IOS_OTA_RUNTIME_VERSION to its embedded fingerprint."
           echo "::error title=OTA not published — native build required::$message"
-          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### OTA not published — native build required"
+            echo "$message"
+            echo
+            echo "1. Build and install a new Xcode Cloud archive."
+            echo "2. Set \`IOS_OTA_COMPATIBLE_BASE_SHA\` to the archive source commit."
+            echo "3. Set \`IOS_OTA_RUNTIME_VERSION\` to the archive's embedded fingerprint."
+          } >> "$GITHUB_STEP_SUMMARY"
           exit 1
 
       - name: No OTA content to publish
