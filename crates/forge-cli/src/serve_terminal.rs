@@ -701,6 +701,19 @@ mod tests {
         .expect("terminal emitted expected output")
     }
 
+    async fn wait_for_exit(handle: &TerminalHandle) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if handle.status() == TerminalStatus::Exited {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("terminal child exited after registry close");
+    }
+
     #[test]
     fn sizes_are_clamped_to_sane_geometry() {
         assert_eq!(clamp_size(None, None), (80, 24));
@@ -792,6 +805,8 @@ mod tests {
         let (_, replay) = second.history.lock().await.snapshot();
         assert_eq!(replay, history);
         registry.close_session("session-a").await;
+        wait_for_exit(&first).await;
+        assert_eq!(registry.diagnostic_counts().await, (0, 0));
     }
 
     #[tokio::test]
