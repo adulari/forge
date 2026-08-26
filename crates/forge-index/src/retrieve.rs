@@ -29,11 +29,23 @@ pub struct RetrievedSnippet {
     pub is_body: bool,
 }
 
+/// A body candidate that could not be read from the current workspace snapshot.
+///
+/// The indexed symbol is still retained as a signature snippet, so a transient delete or
+/// permission change does not erase the match. Callers can use this to surface stale-index
+/// diagnostics instead of confusing an I/O failure with an ordinary retrieval miss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyReadFailure {
+    pub rel_path: String,
+    pub reason: String,
+}
+
 /// The result of [`Lattice::retrieve`] — what gets injected as a system message.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InjectedContext {
     pub nodes: Vec<NodeHit>,
     pub snippets: Vec<RetrievedSnippet>,
+    pub body_read_failures: Vec<BodyReadFailure>,
     pub est_tokens: usize,
 }
 
@@ -178,29 +190,45 @@ fn est_tokens(s: &str) -> usize {
     (s.len() / 4).max(1)
 }
 
+/// Read a symbol's source body by byte span, snapping to char boundaries and clamping to the file
+/// length so a stale/oversize span can never panic. Whole-file reads are cached per `rel_path` and
+/// charged against a shared byte budget, so one retrieval returning many symbols from the same file
+/// reads it once. `Err` carries WHY the body was unavailable; the caller falls back to the
+/// signature line and reports the reason rather than silently dropping it.
 fn read_body_cached(
     repo_root: &str,
     rel_path: &str,
     start: i64,
     end: i64,
-    cache: &mut HashMap<String, Option<String>>,
+    cache: &mut HashMap<String, Result<String, String>>,
     bytes_read: &mut usize,
-) -> Option<String> {
+) -> Result<String, String> {
+    if end <= start || start < 0 {
+        return Err("invalid source span".into());
+    }
     if !cache.contains_key(rel_path) {
         let path = Path::new(repo_root).join(rel_path);
-        let content = std::fs::metadata(&path)
-            .ok()
-            .filter(|meta| meta.len() <= (MAX_BODY_READ_BYTES.saturating_sub(*bytes_read)) as u64)
-            .and_then(|_| std::fs::read_to_string(&path).ok());
-        if let Some(ref text) = content {
+        let remaining = MAX_BODY_READ_BYTES.saturating_sub(*bytes_read);
+        let outcome = match std::fs::metadata(&path) {
+            // Budget exhaustion is reported, not silently treated as a missing body: a truncated
+            // retrieval that looks identical to a clean one is what this PR pair set out to fix.
+            Ok(meta) if meta.len() > remaining as u64 => Err(format!(
+                "skipped: {} bytes exceeds the {remaining} bytes left in the body-read budget",
+                meta.len()
+            )),
+            Ok(_) => std::fs::read_to_string(&path).map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Ok(text) = &outcome {
             *bytes_read = bytes_read.saturating_add(text.len());
         }
-        cache.insert(rel_path.to_string(), content);
+        cache.insert(rel_path.to_string(), outcome);
     }
-    let full = cache.get(rel_path).and_then(|content| content.as_deref())?;
-    if end <= start || start < 0 {
-        return None;
-    }
+    let full = cache
+        .get(rel_path)
+        .expect("cache entry inserted directly above")
+        .as_ref()
+        .map_err(String::clone)?;
     let mut s = (start as usize).min(full.len());
     let mut e = (end as usize).min(full.len());
     while s < full.len() && !full.is_char_boundary(s) {
@@ -209,7 +237,10 @@ fn read_body_cached(
     while e < full.len() && !full.is_char_boundary(e) {
         e += 1;
     }
-    (s < e).then(|| full[s..e].to_string())
+    if s >= e {
+        return Err("empty source span".into());
+    }
+    Ok(full[s..e].to_string())
 }
 
 /// Build a fenced body block: `path:line — kind name` header then the source in a code fence.
@@ -280,6 +311,7 @@ pub fn retrieve(
 
     let mut est = 0usize;
     let mut snippets = Vec::new();
+    let mut body_read_failures = Vec::new();
     let mut nodes = Vec::new();
     let mut bodies_left = bodies.map(|b| b.max_hits).unwrap_or(0);
     let mut sigs_left = MAX_SIG_SNIPPETS;
@@ -292,7 +324,7 @@ pub fn retrieve(
         let exact = idents.iter().any(|id| n.name.eq_ignore_ascii_case(id));
         if bodies_left > 0 && exact {
             if let Some(opts) = bodies {
-                if let Some(body) = read_body_cached(
+                match read_body_cached(
                     lat.repo_root(),
                     &n.rel_path,
                     n.span_start,
@@ -300,20 +332,26 @@ pub fn retrieve(
                     &mut body_cache,
                     &mut body_bytes_read,
                 ) {
-                    let block = body_block(&n, &body);
-                    let cost = est_tokens(&block);
-                    if cost <= opts.max_tokens && est + cost <= token_budget {
-                        est += cost;
-                        snippets.push(RetrievedSnippet {
-                            rel_path: n.rel_path.clone(),
-                            line: n.line,
-                            text: block,
-                            is_body: true,
-                        });
-                        nodes.push(n);
-                        bodies_left -= 1;
-                        continue;
+                    Ok(body) => {
+                        let block = body_block(&n, &body);
+                        let cost = est_tokens(&block);
+                        if cost <= opts.max_tokens && est + cost <= token_budget {
+                            est += cost;
+                            snippets.push(RetrievedSnippet {
+                                rel_path: n.rel_path.clone(),
+                                line: n.line,
+                                text: block,
+                                is_body: true,
+                            });
+                            nodes.push(n);
+                            bodies_left -= 1;
+                            continue;
+                        }
                     }
+                    Err(reason) => body_read_failures.push(BodyReadFailure {
+                        rel_path: n.rel_path.clone(),
+                        reason,
+                    }),
                 }
             }
         }
@@ -341,6 +379,7 @@ pub fn retrieve(
     Ok(InjectedContext {
         nodes,
         snippets,
+        body_read_failures,
         est_tokens: est,
     })
 }
@@ -474,7 +513,8 @@ mod tests {
 
         let oversized = dir.join("large.rs");
         std::fs::write(&oversized, vec![b'x'; MAX_BODY_READ_BYTES + 1]).unwrap();
-        assert!(read_body_cached(
+        // Skipping for budget must be REPORTED, not indistinguishable from a body-less symbol.
+        let reason = read_body_cached(
             dir.to_str().unwrap(),
             "large.rs",
             0,
@@ -482,7 +522,11 @@ mod tests {
             &mut cache,
             &mut bytes,
         )
-        .is_none());
+        .expect_err("an oversized file is skipped, and says so");
+        assert!(
+            reason.contains("body-read budget"),
+            "unexpected reason: {reason}"
+        );
         assert_eq!(
             bytes, after_first,
             "oversized files do not consume the read budget"

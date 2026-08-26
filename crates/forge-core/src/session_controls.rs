@@ -237,12 +237,14 @@ impl Session {
         rx: Option<std::sync::mpsc::Receiver<forge_index::LatticeWatcher>>,
     ) {
         self.lattice_watch_enabled = rx.is_some();
+        self.lattice_watcher_handle = None;
         self.lattice_watcher = rx;
     }
 
     /// Recreate the background lattice watcher for the current workspace without blocking the
     /// caller on filesystem watcher setup.
     pub fn install_lattice_watcher(&mut self) {
+        self.lattice_watcher_handle = None;
         let Some(lattice) = self.lattice.as_ref().map(Arc::clone) else {
             return;
         };
@@ -262,6 +264,27 @@ impl Session {
         });
         self.lattice_watch_enabled = true;
         self.lattice_watcher = Some(rx);
+    }
+
+    /// Adopt a watcher that finished asynchronous setup and surface any backend failures observed
+    /// since the previous user turn. The filesystem callback stays off the presenter thread; this
+    /// boundary is where the session can safely turn stale-index state into a visible warning.
+    pub(crate) fn poll_lattice_watcher(&mut self) {
+        if self.lattice_watcher_handle.is_none() {
+            if let Some(rx) = self.lattice_watcher.as_ref() {
+                if let Ok(watcher) = rx.try_recv() {
+                    self.lattice_watcher_handle = Some(watcher);
+                }
+            }
+        }
+        if let Some(watcher) = self.lattice_watcher_handle.as_ref() {
+            for error in watcher.take_errors() {
+                self.presenter
+                    .emit(forge_types::PresenterEvent::Warning(format!(
+                        "lattice watcher failed; code intelligence may be stale: {error}"
+                    )));
+            }
+        }
     }
 
     /// Attach the LSP registry (composition root). No-op when `lsp.enabled = false`.

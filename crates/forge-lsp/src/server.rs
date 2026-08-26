@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::rpc::{read_msg, write_msg};
 use crate::types::{Diagnostic, DiagnosticSeverity};
@@ -72,8 +72,17 @@ impl LspServer {
         let stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
         let stderr = Arc::new(Mutex::new(String::new()));
         let memory_guard = child.id().and_then(|pid| {
-            memory_limit_bytes
-                .map(|limit| tokio::spawn(monitor_process_tree_memory(pid, limit, stderr.clone())))
+            memory_limit_bytes.map(|limit| {
+                let stderr = stderr.clone();
+                tokio::spawn(async move {
+                    match monitor_process_tree_memory(pid, limit, stderr).await {
+                        Ok(()) => debug!("lsp: memory guard exited for process {pid}"),
+                        Err(error) => {
+                            warn!("lsp: memory guard failed for process {pid}: {error}")
+                        }
+                    }
+                })
+            })
         });
         let stderr_reader = child.stderr.take().map(|mut pipe| {
             let sink = stderr.clone();
@@ -81,7 +90,13 @@ impl LspServer {
                 let mut buf = [0u8; 1024];
                 loop {
                     match pipe.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
+                        Ok(0) => break,
+                        Err(error) => {
+                            if let Ok(mut sink) = sink.lock() {
+                                append_stderr_read_error(&mut sink, &error);
+                            }
+                            break;
+                        }
                         Ok(n) => {
                             let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
                             if let Ok(mut sink) = sink.lock() {
@@ -154,7 +169,7 @@ impl LspServer {
                 ));
             }
             match tokio::time::timeout(remaining, read_msg(&mut self.stdout)).await {
-                Ok(Some(msg)) => {
+                Ok(Ok(Some(msg))) => {
                     if msg.get("id").and_then(|v| v.as_u64()) == Some(id) {
                         if let Some(error) = msg.get("error") {
                             let message = error
@@ -169,10 +184,16 @@ impl LspServer {
                         break;
                     }
                 }
-                Ok(None) => {
+                Ok(Ok(None)) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "lsp: server closed stdout during initialize",
+                    ))
+                }
+                Ok(Err(error)) => {
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("lsp: failed to read initialize response: {error}"),
                     ))
                 }
                 Err(_) => {
@@ -237,11 +258,17 @@ impl LspServer {
                 break;
             }
             let msg = match tokio::time::timeout(remaining, read_msg(&mut self.stdout)).await {
-                Ok(Some(m)) => m,
-                Ok(None) => {
+                Ok(Ok(Some(m))) => m,
+                Ok(Ok(None)) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "lsp: server closed stdout while collecting diagnostics",
+                    ))
+                }
+                Ok(Err(error)) => {
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("lsp: failed to read diagnostics message: {error}"),
                     ))
                 }
                 Err(_) => break,
@@ -290,7 +317,11 @@ fn initialize_request(id: u64, root_uri: &str, initialization_options: Option<Va
     })
 }
 
-async fn monitor_process_tree_memory(root_pid: u32, limit_bytes: u64, stderr: Arc<Mutex<String>>) {
+async fn monitor_process_tree_memory(
+    root_pid: u32,
+    limit_bytes: u64,
+    stderr: Arc<Mutex<String>>,
+) -> Result<(), String> {
     let root = Pid::from_u32(root_pid);
     let mut system = System::new();
 
@@ -316,12 +347,13 @@ async fn monitor_process_tree_memory(root_pid: u32, limit_bytes: u64, stderr: Ar
         })
         .await;
 
-        let Ok((next_system, root_exists, members, resident_bytes)) = sample else {
-            return;
+        let (next_system, root_exists, members, resident_bytes) = match sample {
+            Ok(sample) => sample,
+            Err(error) => return Err(format!("sampling process tree: {error}")),
         };
         system = next_system;
         if !root_exists {
-            return;
+            return Ok(());
         }
 
         if resident_bytes > limit_bytes {
@@ -335,19 +367,27 @@ async fn monitor_process_tree_memory(root_pid: u32, limit_bytes: u64, stderr: Ar
             if let Ok(mut sink) = stderr.lock() {
                 append_bounded(&mut sink, &message, STDERR_TAIL_BYTES);
             }
-            let _ = tokio::task::spawn_blocking(move || {
+            let failed_kills = tokio::task::spawn_blocking(move || {
                 // Kill children before the server so cargo/rustc helpers cannot be orphaned.
+                let mut failed = 0;
                 for pid in members.iter().filter(|pid| **pid != root) {
                     if let Some(process) = system.process(*pid) {
-                        process.kill();
+                        failed += usize::from(!process.kill());
                     }
                 }
                 if let Some(process) = system.process(root) {
-                    process.kill();
+                    failed += usize::from(!process.kill());
                 }
+                failed
             })
-            .await;
-            return;
+            .await
+            .map_err(|error| format!("stopping process tree: {error}"))?;
+            if failed_kills > 0 {
+                return Err(format!(
+                    "stopping process tree: {failed_kills} process kill(s) failed"
+                ));
+            }
+            return Ok(());
         }
 
         tokio::time::sleep(RESOURCE_SAMPLE_INTERVAL).await;
@@ -387,6 +427,11 @@ fn append_bounded(buf: &mut String, chunk: &str, cap: usize) {
         cut += 1;
     }
     buf.drain(..cut);
+}
+
+fn append_stderr_read_error(buf: &mut String, error: &std::io::Error) {
+    let message = format!("\nstderr reader error: {error}");
+    append_bounded(buf, &message, STDERR_TAIL_BYTES);
 }
 
 fn sanitize_log_text(raw: &str) -> String {
@@ -631,6 +676,19 @@ mod tests {
         append_bounded(&mut wide, "ééééé", 5);
         assert!(wide.chars().all(|c| c == 'é'), "tail was: {wide:?}");
         assert!(wide.len() <= 5);
+    }
+
+    #[test]
+    fn stderr_reader_errors_are_retained_in_the_bounded_tail() {
+        let mut buf = String::from("server output");
+        append_stderr_read_error(
+            &mut buf,
+            &std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe closed unexpectedly"),
+        );
+
+        let summary = summarize_stderr(&buf, STDERR_SUMMARY_CHARS);
+        assert!(summary.contains("stderr reader error"));
+        assert!(summary.contains("pipe closed unexpectedly"));
     }
 
     #[tokio::test]
