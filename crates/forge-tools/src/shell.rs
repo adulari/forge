@@ -352,16 +352,8 @@ async fn run_command_inner(
     // Bound the reader joins: even after the group kill, a process that escaped the group could
     // still hold a pipe open. A short timeout guarantees a leaked pipe can never stall the turn;
     // we take whatever was captured so far. Mirrors the PTY path's reader-drain guard.
-    let (out_bytes, out_capped) = tokio::time::timeout(READER_DRAIN_TIMEOUT, out_task)
-        .await
-        .ok()
-        .and_then(std::result::Result::ok)
-        .unwrap_or_default();
-    let (err_bytes, err_capped) = tokio::time::timeout(READER_DRAIN_TIMEOUT, err_task)
-        .await
-        .ok()
-        .and_then(std::result::Result::ok)
-        .unwrap_or_default();
+    let (out_bytes, out_capped, out_error) = drain_reader(out_task).await;
+    let (err_bytes, err_capped, err_error) = drain_reader(err_task).await;
     let duration_ms = start.elapsed().as_millis();
 
     let body = render_streams(&out_bytes, &err_bytes);
@@ -371,12 +363,34 @@ async fn run_command_inner(
     if truncated || out_capped || err_capped {
         header.push_str(&format!("  ({total} bytes captured, output truncated)"));
     }
+    for (stream, error) in [("stdout", out_error), ("stderr", err_error)] {
+        if let Some(error) = error {
+            header.push_str(&format!("  ({stream} drain failed: {error})"));
+        }
+    }
     let result = if body.trim().is_empty() {
         header
     } else {
         format!("{header}\n\n{body}")
     };
     (result, exit_code)
+}
+
+async fn drain_reader(
+    task: tokio::task::JoinHandle<(Vec<u8>, bool)>,
+) -> (Vec<u8>, bool, Option<String>) {
+    match tokio::time::timeout(READER_DRAIN_TIMEOUT, task).await {
+        Ok(Ok((bytes, capped))) => (bytes, capped, None),
+        Ok(Err(error)) => (Vec::new(), false, Some(error.to_string())),
+        Err(_) => (
+            Vec::new(),
+            false,
+            Some(format!(
+                "timed out after {}ms",
+                READER_DRAIN_TIMEOUT.as_millis()
+            )),
+        ),
+    }
 }
 
 /// Execute `command` under a pseudo-terminal (PTY) so `isatty(stdout)` returns true in the child.
