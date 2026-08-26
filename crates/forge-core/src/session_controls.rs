@@ -237,6 +237,7 @@ impl Session {
         rx: Option<std::sync::mpsc::Receiver<Result<forge_index::LatticeWatcher, String>>>,
     ) {
         self.lattice_watch_enabled = rx.is_some();
+        self.lattice_watcher_handle = None;
         self.lattice_watcher = rx;
     }
 
@@ -252,6 +253,7 @@ impl Session {
     /// Recreate the background lattice watcher for the current workspace without blocking the
     /// caller on filesystem watcher setup.
     pub fn install_lattice_watcher(&mut self) {
+        self.lattice_watcher_handle = None;
         let Some(lattice) = self.lattice.as_ref().map(Arc::clone) else {
             return;
         };
@@ -271,8 +273,10 @@ impl Session {
         self.lattice_watcher = Some(rx);
     }
 
-    /// Surface detached Lattice setup failures without making the startup path synchronous.
-    /// Successful watcher setup is retained here so dropping the session still stops its worker.
+    /// Surface detached Lattice background failures at a turn boundary, without making the startup
+    /// path synchronous. Covers both ways code intelligence can go quietly stale: the initial index
+    /// update or the watcher never completing setup, and the watcher failing later at runtime.
+    /// A successfully started watcher is retained here so dropping the session still stops its worker.
     pub(crate) fn poll_lattice_background(&mut self) {
         if let Some(rx) = self.lattice_update.take() {
             match rx.try_recv() {
@@ -307,6 +311,18 @@ impl Session {
                             .to_string(),
                     ));
                 }
+            }
+        }
+
+        // Setup succeeding only means the watcher STARTED; it can still fail later. Draining at
+        // this turn boundary keeps the filesystem callback off the presenter thread while still
+        // turning a silently stale index into a visible warning.
+        if let Some(watcher) = self.lattice_watcher_handle.as_ref() {
+            for error in watcher.take_errors() {
+                self.presenter
+                    .emit(forge_types::PresenterEvent::Warning(format!(
+                        "lattice watcher failed; code intelligence may be stale: {error}"
+                    )));
             }
         }
     }

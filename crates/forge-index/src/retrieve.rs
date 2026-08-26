@@ -29,11 +29,23 @@ pub struct RetrievedSnippet {
     pub is_body: bool,
 }
 
+/// A body candidate that could not be read from the current workspace snapshot.
+///
+/// The indexed symbol is still retained as a signature snippet, so a transient delete or
+/// permission change does not erase the match. Callers can use this to surface stale-index
+/// diagnostics instead of confusing an I/O failure with an ordinary retrieval miss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyReadFailure {
+    pub rel_path: String,
+    pub reason: String,
+}
+
 /// The result of [`Lattice::retrieve`] — what gets injected as a system message.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InjectedContext {
     pub nodes: Vec<NodeHit>,
     pub snippets: Vec<RetrievedSnippet>,
+    pub body_read_failures: Vec<BodyReadFailure>,
     pub est_tokens: usize,
 }
 
@@ -178,11 +190,12 @@ fn est_tokens(s: &str) -> usize {
 /// Read a symbol's source body by byte span, snapping to char boundaries and clamping to the file
 /// length so a stale/oversize span can never panic. `None` on any read/range failure (caller then
 /// falls back to the signature line).
-fn read_body(repo_root: &str, rel_path: &str, start: i64, end: i64) -> Option<String> {
+fn read_body(repo_root: &str, rel_path: &str, start: i64, end: i64) -> Result<String, String> {
     if end <= start || start < 0 {
-        return None;
+        return Err("invalid source span".into());
     }
-    let full = std::fs::read_to_string(Path::new(repo_root).join(rel_path)).ok()?;
+    let full = std::fs::read_to_string(Path::new(repo_root).join(rel_path))
+        .map_err(|error| error.to_string())?;
     let mut s = (start as usize).min(full.len());
     let mut e = (end as usize).min(full.len());
     while s < full.len() && !full.is_char_boundary(s) {
@@ -192,9 +205,9 @@ fn read_body(repo_root: &str, rel_path: &str, start: i64, end: i64) -> Option<St
         e += 1;
     }
     if s >= e {
-        return None;
+        return Err("empty source span".into());
     }
-    Some(full[s..e].to_string())
+    Ok(full[s..e].to_string())
 }
 
 /// Build a fenced body block: `path:line — kind name` header then the source in a code fence.
@@ -265,6 +278,7 @@ pub fn retrieve(
 
     let mut est = 0usize;
     let mut snippets = Vec::new();
+    let mut body_read_failures = Vec::new();
     let mut nodes = Vec::new();
     let mut bodies_left = bodies.map(|b| b.max_hits).unwrap_or(0);
     let mut sigs_left = MAX_SIG_SNIPPETS;
@@ -275,23 +289,27 @@ pub fn retrieve(
         let exact = idents.iter().any(|id| n.name.eq_ignore_ascii_case(id));
         if bodies_left > 0 && exact {
             if let Some(opts) = bodies {
-                if let Some(body) =
-                    read_body(lat.repo_root(), &n.rel_path, n.span_start, n.span_end)
-                {
-                    let block = body_block(&n, &body);
-                    let cost = est_tokens(&block);
-                    if cost <= opts.max_tokens && est + cost <= token_budget {
-                        est += cost;
-                        snippets.push(RetrievedSnippet {
-                            rel_path: n.rel_path.clone(),
-                            line: n.line,
-                            text: block,
-                            is_body: true,
-                        });
-                        nodes.push(n);
-                        bodies_left -= 1;
-                        continue;
+                match read_body(lat.repo_root(), &n.rel_path, n.span_start, n.span_end) {
+                    Ok(body) => {
+                        let block = body_block(&n, &body);
+                        let cost = est_tokens(&block);
+                        if cost <= opts.max_tokens && est + cost <= token_budget {
+                            est += cost;
+                            snippets.push(RetrievedSnippet {
+                                rel_path: n.rel_path.clone(),
+                                line: n.line,
+                                text: block,
+                                is_body: true,
+                            });
+                            nodes.push(n);
+                            bodies_left -= 1;
+                            continue;
+                        }
                     }
+                    Err(reason) => body_read_failures.push(BodyReadFailure {
+                        rel_path: n.rel_path.clone(),
+                        reason,
+                    }),
                 }
             }
         }
@@ -319,6 +337,7 @@ pub fn retrieve(
     Ok(InjectedContext {
         nodes,
         snippets,
+        body_read_failures,
         est_tokens: est,
     })
 }

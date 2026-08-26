@@ -301,6 +301,9 @@ struct DriverState {
     /// Rate-limits the idle heartbeat check (see [`HEARTBEAT_CHECK_INTERVAL`]) — this loop ticks
     /// every ~30ms, far too often to query the store on every iteration.
     last_heartbeat_check: Instant,
+    /// Last heartbeat-store error already shown to the user, so a persistent failure does not
+    /// generate a new warning on every periodic check.
+    last_heartbeat_error: Option<String>,
 }
 
 /// How often the driver loop checks for a due session heartbeat while idle. Turn-end already
@@ -423,6 +426,7 @@ async fn drive_session(
         usage_load_rx: None,
         cwd: cwd.clone(),
         last_heartbeat_check: Instant::now(),
+        last_heartbeat_error: None,
     };
 
     let mut last_snap: Option<remote::Snapshot> = None;
@@ -702,17 +706,21 @@ impl DriverState {
 
     /// See [`try_deliver_due_heartbeats`] — the daemon-driver call site (turn-end + periodic tick).
     fn try_deliver_due_heartbeats(&mut self) -> bool {
-        try_deliver_due_heartbeats(
-            &self.session,
-            &mut self.queued_prompts,
+        report_heartbeat_delivery(
+            try_deliver_due_heartbeats(
+                &self.session,
+                &mut self.queued_prompts,
+                &mut self.app,
+                &mut self.prompt_history,
+                &mut self.last_prompt,
+                &self.done_tx,
+                &mut self.turn_gen,
+                &mut self.turn_handle,
+                &mut self.busy,
+                &mut self.busy_since,
+            ),
             &mut self.app,
-            &mut self.prompt_history,
-            &mut self.last_prompt,
-            &self.done_tx,
-            &mut self.turn_gen,
-            &mut self.turn_handle,
-            &mut self.busy,
-            &mut self.busy_since,
+            &mut self.last_heartbeat_error,
         )
     }
 
@@ -983,6 +991,7 @@ mod tests {
             usage_load_rx: None,
             cwd: String::new(),
             last_heartbeat_check: Instant::now(),
+            last_heartbeat_error: None,
         }
     }
 

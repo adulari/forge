@@ -459,7 +459,13 @@ impl Session {
                     //
                     // Tasks live in the store (the bridge's `update_tasks` runs in the separate
                     // `mcp-serve` process), so reload before judging completion.
-                    let persisted = self.store.tasks(&self.id).unwrap_or_default();
+                    let persisted = match self.store.tasks(&self.id) {
+                        Ok(tasks) => tasks,
+                        Err(error) => {
+                            tracing::warn!(session_id = %self.id, %error, "session task history could not be reloaded");
+                            Vec::new()
+                        }
+                    };
                     if !persisted.is_empty() {
                         self.tasks = persisted;
                     }
