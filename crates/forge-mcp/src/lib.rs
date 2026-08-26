@@ -1207,7 +1207,7 @@ fn truncate(s: &str) -> String {
 pub mod testsupport {
     use super::*;
     use rmcp::model::{
-        CallToolRequestParams, CallToolResult, ContentBlock, ListToolsResult,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
         PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     };
     use rmcp::service::RequestContext;
@@ -1233,24 +1233,25 @@ pub mod testsupport {
                 "properties": { "msg": { "type": "string" } }
             }))
             .unwrap();
-            Ok(ListToolsResult {
-                tools: vec![
-                    Tool::new(
-                        "echo",
-                        "Echo back the msg argument",
-                        Arc::new(schema.clone()),
-                    ),
-                    Tool::new("boom", "Always fails", Arc::new(schema)),
-                ],
-                next_cursor: None,
-                meta: None,
-            })
+            // rmcp 3 added spec-2026-07-28 fields (result_type, ttl_ms, cache_scope) to every
+            // paginated result. `with_all_items` is the constructor that fills them with the
+            // spec defaults, so this stays correct if more are added.
+            Ok(ListToolsResult::with_all_items(vec![
+                Tool::new(
+                    "echo",
+                    "Echo back the msg argument",
+                    Arc::new(schema.clone()),
+                ),
+                Tool::new("boom", "Always fails", Arc::new(schema)),
+            ]))
         }
         async fn call_tool(
             &self,
             req: CallToolRequestParams,
             _ctx: RequestContext<RoleServer>,
-        ) -> Result<CallToolResult, McpError> {
+        ) -> Result<CallToolResponse, McpError> {
+            // rmcp 3 lets a tool call also return "input required" or "task"; this mock always
+            // completes, and `CallToolResult: Into<CallToolResponse>` wraps it as Complete.
             match req.name.as_ref() {
                 "echo" => {
                     let msg = req
@@ -1259,14 +1260,16 @@ pub mod testsupport {
                         .and_then(|a| a.get("msg"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                        "echo: {msg}"
-                    ))]))
+                    Ok(
+                        CallToolResult::success(vec![ContentBlock::text(format!("echo: {msg}"))])
+                            .into(),
+                    )
                 }
-                "boom" => Ok(CallToolResult::error(vec![ContentBlock::text("kaboom")])),
+                "boom" => Ok(CallToolResult::error(vec![ContentBlock::text("kaboom")]).into()),
                 other => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "unknown tool {other}"
-                ))])),
+                ))])
+                .into()),
             }
         }
     }

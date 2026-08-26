@@ -34,8 +34,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::Result;
 use forge_types::{PermissionMode, SideEffect, TaskTier};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, JsonObject, ListToolsResult, LoggingLevel,
-    LoggingMessageNotificationParam, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
+    ListToolsResult, LoggingLevel, LoggingMessageNotificationParam, PaginatedRequestParams,
+    ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::io::stdio;
@@ -295,14 +296,27 @@ impl ServerHandler for ForgeAgentServer {
                 })),
             ),
         ];
-        Ok(ListToolsResult {
-            tools,
-            next_cursor: None,
-            meta: None,
-        })
+        // rmcp 3 added spec-2026-07-28 fields (result_type, ttl_ms, cache_scope) to every
+        // paginated result; `with_all_items` fills them with the spec defaults.
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        // rmcp 3 widened this return type so a server can also answer "input required"
+        // or "task". Every tool here completes within the one call, so the existing
+        // result is wrapped as `CallToolResponse::Complete` and behaviour is unchanged.
+        self.call_tool_complete(request, ctx).await.map(Into::into)
+    }
+}
+
+impl ForgeAgentServer {
+    /// The real tool dispatch. Split out from the `ServerHandler::call_tool` above so the
+    /// rmcp 3 response wrapping happens in exactly one place rather than at every return.
+    async fn call_tool_complete(
         &self,
         request: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
