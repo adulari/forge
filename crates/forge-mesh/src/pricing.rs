@@ -184,6 +184,19 @@ impl Pricing {
     pub fn estimated_cost(&self, model: &str) -> f64 {
         self.cost_for(model, NOMINAL_INPUT_TOKENS, NOMINAL_OUTPUT_TOKENS)
     }
+
+    /// Whether we hold a rate for `model` that is EXPLICITLY zero on both input and output.
+    ///
+    /// This is the difference between "we know it is free" and "we have no idea what it costs",
+    /// which [`cost_for`](Self::cost_for) flattens to the same `0.0`. Reading that flattened zero
+    /// as free is the billing bug [`crate::catalog::is_free`] guards against, so a caller judging
+    /// an unsuffixed gateway model must ask THIS instead: an absent rate answers `false`, exactly
+    /// as a conservative classifier should.
+    pub fn is_explicitly_free(&self, model: &str) -> bool {
+        self.rates.get(model).is_some_and(|rate| {
+            rate.input_per_1k <= f64::EPSILON && rate.output_per_1k <= f64::EPSILON
+        })
+    }
 }
 
 /// Nominal token mix used only to rank candidate models by relative cost.
@@ -247,6 +260,25 @@ pub fn context_limit(model: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_zero_is_distinguished_from_an_absent_rate() {
+        use std::collections::HashMap;
+        let mut rates = HashMap::new();
+        rates.insert(
+            "openrouter::stealth/ox-alpha".to_string(),
+            super::ModelRate {
+                input_per_1k: 0.0,
+                output_per_1k: 0.0,
+                cache_read_per_1k: None,
+            },
+        );
+        let pricing = super::Pricing::from_rates(rates);
+        assert!(pricing.is_explicitly_free("openrouter::stealth/ox-alpha"));
+        // Both cost $0 for routing, but only one is EVIDENCE of being free.
+        assert_eq!(pricing.estimated_cost("openrouter::never-heard-of-it"), 0.0);
+        assert!(!pricing.is_explicitly_free("openrouter::never-heard-of-it"));
+    }
+
     use super::*;
 
     #[test]

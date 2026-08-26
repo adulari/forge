@@ -193,7 +193,7 @@ pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<
         println!();
     }
 
-    let pricing = forge_mesh::pricing::Pricing::from_config(&config);
+    let pricing = discovery::pricing_with_fetched_rates(&config);
     let benched = forge_core::readiness::ProviderReadiness::snapshot(&config, &store).health;
     let s = cat.stats(&pricing);
     println!(

@@ -117,6 +117,29 @@ pub fn is_subscription(id: &str) -> bool {
 /// unpriced providers (local `ollama::`, free-tier `groq`/`cerebras`) are genuinely free.
 /// Documented in docs/features/mesh-routing.md.
 pub fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
+    is_free_with_price_evidence(id, cost, subscription, false)
+}
+
+/// [`is_free`] plus the one fact it cannot derive from `cost`: `explicitly_zero_priced` means the
+/// provider's own price list reports 0 for BOTH input and output (see
+/// [`crate::pricing::Pricing::is_explicitly_free`]), as opposed to us merely holding no rate.
+///
+/// That distinction is the entire point. The rule below refuses to read an unpriced OpenRouter
+/// model as free because OpenRouter fronts hundreds of metered models we have no rate for, and
+/// guessing "free" there once billed real money. An explicit `"prompt": "0", "completion": "0"`
+/// in OpenRouter's own `/models` response is the positive evidence that rule asks for, so it
+/// counts — while an ABSENT rate still does not. This is what lets a genuinely-free model whose id
+/// carries no `:free` suffix (a stealth or preview release) be routed to without reopening the
+/// billing hole.
+///
+/// Evidence is re-read from the provider on every discovery refresh rather than cached as a
+/// permanent verdict, so a model that starts charging under the same id reverts to paid.
+pub fn is_free_with_price_evidence(
+    id: &str,
+    cost: f64,
+    subscription: bool,
+    explicitly_zero_priced: bool,
+) -> bool {
     if subscription {
         return false;
     }
@@ -137,7 +160,7 @@ pub fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
         // Paid gateways: only their explicit free-suffixed variants are free. OpenRouter's is a
         // `:free` (colon) suffix; OpenCode Zen's is a `-free` (hyphen) suffix. Do NOT loosen the
         // OpenRouter rule — an OpenRouter id ending in `-free` (hyphen) is still paid.
-        "openrouter" => id.contains(":free"),
+        "openrouter" => id.contains(":free") || explicitly_zero_priced,
         "opencode" => id.ends_with("-free"),
         // Every other metered API provider (openai, xai, deepseek, anthropic, minimax, mimo, …) has
         // no standing free model tier — only temporary signup/trial credits — so an UNPRICED model
@@ -832,7 +855,8 @@ impl ModelInfo {
     fn classify(id: &str, pricing: &Pricing, bench: Option<&BenchmarkScores>) -> Self {
         let subscription = is_subscription(id);
         let cost = pricing.estimated_cost(id);
-        let free = is_free(id, cost, subscription);
+        let free =
+            is_free_with_price_evidence(id, cost, subscription, pricing.is_explicitly_free(id));
         Self {
             id: id.to_string(),
             provider: provider_of(id).to_string(),
@@ -2560,6 +2584,33 @@ mod tests {
     fn opencode_go_is_subscription_and_never_free() {
         assert!(is_subscription("opencode_go::deepseek-v4-flash"));
         assert!(!is_free("opencode_go::deepseek-v4-flash", 0.0, true));
+
+        // An OpenRouter model with NO `:free` suffix is free only with positive price evidence.
+        // Without it the old, conservative answer must survive — that is the billing guard.
+        let stealth = "openrouter::stealth/ox-alpha";
+        assert!(
+            !is_free(stealth, 0.0, false),
+            "an unpriced OpenRouter model stays paid — a flattened 0.0 is not evidence"
+        );
+        assert!(
+            is_free_with_price_evidence(stealth, 0.0, false, true),
+            "an explicit 0/0 price list entry IS evidence, so a suffix-less free model is routable"
+        );
+        // Evidence must not override a real price, nor promote a subscription model.
+        assert!(!is_free_with_price_evidence(
+            "openrouter::anthropic/claude-opus-4",
+            0.42,
+            false,
+            true
+        ));
+        assert!(!is_free_with_price_evidence(stealth, 0.0, true, true));
+        // Other gateways keep their own rules; evidence alone must not loosen them.
+        assert!(!is_free_with_price_evidence(
+            "opencode::deepseek-v4-flash",
+            0.0,
+            false,
+            true
+        ));
     }
 
     #[test]

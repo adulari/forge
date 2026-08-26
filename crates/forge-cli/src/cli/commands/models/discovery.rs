@@ -255,25 +255,50 @@ pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mes
     // Drop any model/provider the user disabled (`[mesh] disabled`), so the mesh never routes to
     // or fails over onto it (known-issues.md: disable a flaky model without deleting its key).
     models.retain(|m| !forge_config::is_model_disabled(m, &config.mesh.disabled));
+    // Fetch + persist real per-model context windows (OpenRouter exposes `context_length`) so the
+    // core can trim each turn to the routed model's window instead of overflowing it. Best-effort;
+    // the family heuristic covers everything else.
+    //
+    // Runs BEFORE the affordability filter because it also persists per-model PRICES, and that is
+    // the evidence the filter needs: a model the provider prices at exactly 0 is only
+    // distinguishable from one we simply hold no rate for once its rate is known. Filtering first
+    // dropped such models before their price was ever fetched, hiding them from discovery for good.
+    context_windows::fetch_and_persist(&models).await;
     // Pre-flight balance: for each provider that exposes a key-authenticated balance API, drop its
     // PAID models when the account is out of credit — so the mesh never tries (and 402s on) a model
     // it can't pay for (e.g. OpenRouter at $0 balance). Free variants + providers without a balance
     // API are untouched (fail open). Probes run concurrently across providers; each is short-timed.
-    drop_unaffordable_models(&mut models).await;
-    // Fetch + persist real per-model context windows (OpenRouter exposes `context_length`) so the
-    // core can trim each turn to the routed model's window instead of overflowing it. Best-effort;
-    // the family heuristic covers everything else.
-    context_windows::fetch_and_persist(&models).await;
+    let pricing = pricing_with_fetched_rates(config);
+    drop_unaffordable_models(&mut models, &pricing).await;
     // Attach measured benchmark scores (ADR-0011) so the mesh ranks on real performance. Cache-
     // first + incremental: only hits the API when a newly-discovered model has no rating yet.
     let bench = benchmarks::ensure(config, &models, false).await;
     forge_mesh::ModelCatalog::new(models).with_benchmarks(bench)
 }
 
+/// Build [`forge_mesh::pricing::Pricing`] with the per-model rates discovery has already fetched
+/// and persisted, not just the bundled/config ones.
+///
+/// Without the fetched rates every price we went and looked up is invisible, so a model the
+/// provider explicitly prices at 0 is indistinguishable from one we hold no rate for — and the
+/// conservative classifier correctly, but uselessly, calls it paid.
+pub(crate) fn pricing_with_fetched_rates(
+    config: &forge_config::Config,
+) -> forge_mesh::pricing::Pricing {
+    let fetched = crate::open_store()
+        .ok()
+        .and_then(|store| store.all_model_pricing().ok())
+        .unwrap_or_default();
+    forge_mesh::pricing::Pricing::from_config_with_fetched(config, fetched)
+}
+
 /// Remove a provider's metered models from `models` when its account balance is confirmed below
 /// [`balance::MIN_CREDIT_USD`]. Only providers exposing a key-authenticated balance API are probed
 /// (others return `None` → kept); genuinely-free variants (e.g. OpenRouter `:free`) are kept too.
-pub(crate) async fn drop_unaffordable_models(models: &mut Vec<String>) {
+pub(crate) async fn drop_unaffordable_models(
+    models: &mut Vec<String>,
+    pricing: &forge_mesh::pricing::Pricing,
+) {
     let mut providers: Vec<String> = models
         .iter()
         .map(|m| forge_config::provider_of(m).to_string())
@@ -297,7 +322,10 @@ pub(crate) async fn drop_unaffordable_models(models: &mut Vec<String>) {
 
     for (p, bal) in broke {
         let before = models.len();
-        models.retain(|m| forge_config::provider_of(m) != p || balance::is_free_model_id(m));
+        models.retain(|m| {
+            forge_config::provider_of(m) != p
+                || balance::is_free_model_id_with_pricing(m, pricing.is_explicitly_free(m))
+        });
         let dropped = before - models.len();
         if dropped > 0 {
             tracing::info!(

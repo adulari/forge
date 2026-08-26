@@ -90,9 +90,17 @@ fn as_number(v: &serde_json::Value) -> Option<f64> {
 /// filter). Mirrors forge-mesh's `is_free` rule for the gateways we balance-check: on OpenRouter
 /// only the `:free`-suffixed variants cost nothing; DeepSeek has no free tier, so every DeepSeek
 /// model is metered and dropped when the balance is zero.
-pub fn is_free_model_id(model_id: &str) -> bool {
+///
+/// `explicitly_zero_priced` carries the same price evidence forge-mesh's
+/// `is_free_with_price_evidence` uses: the provider's own list reports 0 for input AND output,
+/// not merely that we hold no rate. Pass `false` when no price is known — the conservative answer.
+///
+/// Both rules have to agree, or a genuinely-free model gets classified free for routing and then
+/// dropped here anyway as "unaffordable" the moment the account balance is low — which is exactly
+/// what hid `stealth/ox-alpha` from discovery.
+pub fn is_free_model_id_with_pricing(model_id: &str, explicitly_zero_priced: bool) -> bool {
     match forge_config::provider_of(model_id) {
-        "openrouter" => model_id.contains(":free"),
+        "openrouter" => model_id.contains(":free") || explicitly_zero_priced,
         _ => false,
     }
 }
@@ -103,11 +111,33 @@ mod tests {
 
     #[test]
     fn openrouter_free_variants_survive_filter() {
-        assert!(is_free_model_id("openrouter::meta-llama/llama-3.1-8b:free"));
-        assert!(!is_free_model_id("openrouter::sao10k/l3.1-euryale-70b"));
-        // DeepSeek has no free tier — nothing survives a zero-balance filter.
-        assert!(!is_free_model_id("deepseek::deepseek-chat"));
-        assert!(!is_free_model_id("anthropic::claude-opus-4-8"));
+        assert!(is_free_model_id_with_pricing(
+            "openrouter::meta-llama/llama-3.1-8b:free",
+            false
+        ));
+        assert!(!is_free_model_id_with_pricing(
+            "openrouter::sao10k/l3.1-euryale-70b",
+            false
+        ));
+        // A suffix-less model the provider prices at exactly 0 survives; without that evidence the
+        // same id must still be dropped, so a missing rate can never be read as free.
+        assert!(is_free_model_id_with_pricing(
+            "openrouter::stealth/ox-alpha",
+            true
+        ));
+        assert!(!is_free_model_id_with_pricing(
+            "openrouter::stealth/ox-alpha",
+            false
+        ));
+        // DeepSeek has no free tier — nothing survives a zero-balance filter, evidence or not.
+        assert!(!is_free_model_id_with_pricing(
+            "deepseek::deepseek-chat",
+            true
+        ));
+        assert!(!is_free_model_id_with_pricing(
+            "anthropic::claude-opus-4-8",
+            false
+        ));
     }
 
     #[test]
