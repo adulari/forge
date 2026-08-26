@@ -290,13 +290,16 @@ pub(crate) async fn build_session_with_self_mcp(
     if let Some(shell_tool) = sandboxed_shell_tool_in(&config, &workspace_root) {
         tools.register(Box::new(shell_tool));
     }
+    let mut lattice_update_rx = None;
     if let Some(lat) = &lattice {
         tools.register(Box::new(forge_tools::LatticeTool::new(Arc::clone(lat))));
         // Auto-index (and auto-embed when enabled) in the background so the graph is fresh without
         // a manual `forge lattice update` — "automatic under the hood". Incremental + non-blocking;
-        // the watcher keeps it fresh thereafter. Errors are swallowed (best-effort, additive).
+        // the result is delivered to the next turn so failures are visible without gating startup.
         let lat_bg = Arc::clone(lat);
         let embeddings = config.lattice.embeddings.clone();
+        let (update_tx, update_rx) = std::sync::mpsc::channel();
+        lattice_update_rx = Some(update_rx);
         tokio::spawn(async move {
             // `Lattice::update()` is fully synchronous and CPU-bound (walks the repo, tree-sitter
             // parses every file, writes SQLite). Running it inside a plain async task occupies a
@@ -306,9 +309,17 @@ pub(crate) async fn build_session_with_self_mcp(
             // pool so worker threads stay free. (`spawn_blocking` JoinError on panic → treat as
             // "not updated" rather than propagating.)
             let lat_update = Arc::clone(&lat_bg);
-            let updated = tokio::task::spawn_blocking(move || lat_update.update().is_ok())
-                .await
-                .unwrap_or(false);
+            let result = tokio::task::spawn_blocking(move || {
+                lat_update
+                    .update()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|error| format!("background index task failed: {error}"))
+            .and_then(|result| result);
+            let updated = result.is_ok();
+            let _ = update_tx.send(result);
             if updated {
                 if let Some((embedder, _)) = forge_provider::select_embedder(&embeddings) {
                     let _ = lat_bg.embed_pending(embedder.as_ref(), 64).await;
@@ -335,6 +346,9 @@ pub(crate) async fn build_session_with_self_mcp(
         )
         .context("starting session")?,
     };
+    if let Some(update_rx) = lattice_update_rx {
+        session.set_lattice_update(Some(update_rx));
+    }
     session.set_catalog(catalog);
     // Seed the effort pin from config if set (`mesh.default_effort`).
     if let Some(ref s) = config_default_effort {
@@ -366,17 +380,17 @@ pub(crate) async fn build_session_with_self_mcp(
                     // uses polling so auto-reindex still works there. The session holds the receiver,
                     // so the watcher is owned per-session and dropped when the session ends (no leak
                     // across repeated build_session calls — bench/replay); the thread exits after the
-                    // send. A setup error is non-fatal and intentionally silent (no caveat).
+                    // send. Setup errors are reported at the next turn boundary without delaying
+                    // startup.
                     let lat2 = Arc::clone(lat);
                     let (tx, rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
-                        if let Ok(watcher) = forge_index::spawn_watcher(
+                        let result = forge_index::spawn_watcher(
                             lat2,
                             &root,
                             std::time::Duration::from_millis(400),
-                        ) {
-                            let _ = tx.send(watcher);
-                        }
+                        );
+                        let _ = tx.send(result);
                     });
                     session.set_lattice_watcher(Some(rx));
                 }

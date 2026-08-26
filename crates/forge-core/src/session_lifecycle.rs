@@ -194,6 +194,7 @@ impl Session {
             lattice: None,
             lattice_watcher: None,
             lattice_watcher_handle: None,
+            lattice_update: None,
             lattice_watch_enabled: false,
             lsp: None,
             skills: None,
