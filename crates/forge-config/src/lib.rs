@@ -20,8 +20,9 @@ pub mod provider_oauth;
 pub mod secret_store;
 pub use agents::{load_agents, AgentDef};
 pub use mcp::{
-    discover_import_sources, import_mcp_json, load_mcp_toml, write_mcp_toml, ImportSource,
-    McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport, ParsedServers,
+    discover_import_sources, import_mcp_json, load_mcp_toml, load_mcp_toml_with_diagnostic,
+    write_mcp_toml, ImportSource, McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport,
+    ParsedServers,
 };
 pub use oauth::{
     add_oauth_account, authorize_url, clear_oauth_tokens, list_oauth_accounts, load_oauth_tokens,

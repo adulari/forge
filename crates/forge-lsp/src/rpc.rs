@@ -22,32 +22,59 @@ pub async fn write_msg<W: tokio::io::AsyncWrite + Unpin>(
 
 pub(crate) async fn read_msg_inner<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
-) -> Option<Value> {
+) -> std::io::Result<Option<Value>> {
     let mut content_length: Option<usize> = None;
+    let mut saw_header = false;
     loop {
         let mut line = String::new();
         match reader.read_line(&mut line).await {
-            Ok(0) | Err(_) => return None,
+            Ok(0) if !saw_header => return Ok(None),
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "lsp: truncated message headers",
+                ))
+            }
+            Err(error) => return Err(error),
             _ => {}
         }
+        saw_header = true;
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             break;
         }
         if let Some(val) = trimmed.strip_prefix("Content-Length: ") {
-            content_length = val.trim().parse().ok();
+            content_length = Some(val.trim().parse().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("lsp: invalid Content-Length header: {val:?}"),
+                )
+            })?);
         }
     }
-    let len = content_length?;
+    let len = content_length.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "lsp: message is missing a Content-Length header",
+        )
+    })?;
     if len > MAX_CONTENT_LENGTH {
-        return None;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("lsp: Content-Length {len} exceeds the {MAX_CONTENT_LENGTH}-byte limit"),
+        ));
     }
     let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf).await.ok()?;
-    serde_json::from_slice(&buf).ok()
+    reader.read_exact(&mut buf).await?;
+    serde_json::from_slice(&buf).map(Some).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("lsp: invalid JSON message body: {error}"),
+        )
+    })
 }
 
-pub async fn read_msg(reader: &mut BufReader<ChildStdout>) -> Option<Value> {
+pub async fn read_msg(reader: &mut BufReader<ChildStdout>) -> std::io::Result<Option<Value>> {
     read_msg_inner(reader).await
 }
 
@@ -57,7 +84,7 @@ mod tests {
     use tokio::io::{duplex, AsyncWriteExt, BufReader};
 
     /// Frame `bytes` through a closed in-memory stream and return what `read_msg_inner` makes of it.
-    async fn parse_bytes(bytes: &[u8]) -> Option<Value> {
+    async fn parse_bytes(bytes: &[u8]) -> std::io::Result<Option<Value>> {
         let (mut writer, reader) = duplex(64 * 1024);
         writer.write_all(bytes).await.unwrap();
         drop(writer);
@@ -77,7 +104,10 @@ mod tests {
         write_msg(&mut writer, &msg).await.unwrap();
         drop(writer);
         let mut buf_reader = BufReader::new(reader);
-        let result = read_msg_inner(&mut buf_reader).await.expect("should parse");
+        let result = read_msg_inner(&mut buf_reader)
+            .await
+            .expect("should read")
+            .expect("should parse");
         assert_eq!(result["method"], "test");
         assert_eq!(result["id"], 1);
     }
@@ -96,46 +126,54 @@ mod tests {
 
     #[tokio::test]
     async fn eof_yields_none() {
-        assert!(parse_bytes(b"").await.is_none());
+        assert!(parse_bytes(b"").await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn headers_without_content_length_yield_none() {
-        // A complete header block (blank line) but no Content-Length => nothing to read.
-        assert!(parse_bytes(b"Content-Type: application/json\r\n\r\n")
+    async fn headers_without_content_length_return_error() {
+        // A complete header block (blank line) but no Content-Length is a protocol error.
+        let error = parse_bytes(b"Content-Type: application/json\r\n\r\n")
             .await
-            .is_none());
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("missing a Content-Length"));
     }
 
     #[tokio::test]
-    async fn invalid_content_length_yields_none() {
-        assert!(parse_bytes(b"Content-Length: not-a-number\r\n\r\n{}")
+    async fn invalid_content_length_returns_error() {
+        let error = parse_bytes(b"Content-Length: not-a-number\r\n\r\n{}")
             .await
-            .is_none());
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("invalid Content-Length"));
     }
 
     #[tokio::test]
-    async fn oversized_content_length_yields_none() {
+    async fn oversized_content_length_returns_error() {
         // A bogus/corrupt header claiming far more than MAX_CONTENT_LENGTH must be rejected
         // before allocating, not passed to `vec![0u8; len]`.
         let header = format!("Content-Length: {}\r\n\r\n", MAX_CONTENT_LENGTH + 1);
-        assert!(parse_bytes(header.as_bytes()).await.is_none());
+        let error = parse_bytes(header.as_bytes()).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]
-    async fn partial_body_yields_none() {
-        // Declares 100 bytes but only 2 follow => read_exact fails, must not panic.
-        assert!(parse_bytes(b"Content-Length: 100\r\n\r\n{}")
+    async fn partial_body_returns_unexpected_eof() {
+        // Declares 100 bytes but only 2 follow => preserve the read_exact failure.
+        let error = parse_bytes(b"Content-Length: 100\r\n\r\n{}")
             .await
-            .is_none());
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     #[tokio::test]
-    async fn garbage_body_yields_none() {
+    async fn garbage_body_returns_invalid_data() {
         // 13-byte body that isn't valid JSON.
-        assert!(parse_bytes(b"Content-Length: 13\r\n\r\nnot-json-here")
+        let error = parse_bytes(b"Content-Length: 13\r\n\r\nnot-json-here")
             .await
-            .is_none());
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("invalid JSON message body"));
     }
 
     #[tokio::test]
@@ -147,7 +185,10 @@ mod tests {
         )
         .into_bytes();
         bytes.extend_from_slice(body);
-        let v = parse_bytes(&bytes).await.expect("should parse");
+        let v = parse_bytes(&bytes)
+            .await
+            .expect("should read")
+            .expect("should parse");
         assert_eq!(v["id"], 7);
     }
 
@@ -158,7 +199,10 @@ mod tests {
         let mut bytes = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
         bytes.extend_from_slice(body);
         bytes.extend_from_slice(b"Content-Length: 8\r\n\r\n{\"id\":2}");
-        let v = parse_bytes(&bytes).await.expect("should parse first");
+        let v = parse_bytes(&bytes)
+            .await
+            .expect("should read")
+            .expect("should parse first");
         assert_eq!(v["id"], 1);
     }
 
@@ -170,7 +214,10 @@ mod tests {
         write_msg(&mut writer, &msg).await.unwrap();
         drop(writer);
         let mut reader = BufReader::new(reader);
-        let v = read_msg_inner(&mut reader).await.expect("should parse");
+        let v = read_msg_inner(&mut reader)
+            .await
+            .expect("should read")
+            .expect("should parse");
         assert_eq!(v["msg"], "café 你好");
     }
 }
