@@ -12,14 +12,17 @@ pub mod answer;
 pub use answer::resolve_answer;
 pub mod app;
 mod app_remote;
+mod arg_parse;
 mod commands;
 pub mod config_editor;
 mod driver;
+mod heartbeat_args;
 mod help;
 pub mod init_wizard;
 mod keybind_configurator;
 pub mod keybinds;
 mod overlays;
+mod refine_args;
 mod render;
 pub mod select;
 mod surface;
@@ -39,8 +42,8 @@ pub use app_remote::{
 };
 pub use commands::{
     arg_values, at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken,
-    Command, CommandAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow, RemoteMode,
-    SlashToken, StatuslineAction, WorkflowAction, COMMANDS,
+    Command, CommandAction, HeartbeatAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow,
+    RefineAction, RemoteMode, SlashToken, StatuslineAction, WorkflowAction, COMMANDS,
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg};
@@ -291,6 +294,11 @@ impl Presenter for HeadlessPresenter {
                 if let Some(cmd) = fix {
                     println!("    fix: {cmd}");
                 }
+            }
+            PresenterEvent::BtwAnswer {
+                question, answer, ..
+            } => {
+                println!("  ◈ btw: {question}\n{answer}");
             }
             PresenterEvent::Recap { text } => {
                 println!("  ※ recap  {text}");

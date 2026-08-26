@@ -24,11 +24,11 @@ use forge_types::Message;
 use crate::oauth_responses::{
     build_responses_request, error_message,
     execute_responses_request as shared_execute_responses_request, now_unix, should_hop_account,
-    REFRESH_SKEW_SECS,
+    watch_visible_output, REFRESH_SKEW_SECS,
 };
 use crate::{
     bundled_http_client, CompletionOptions, EventSink, ModelResponse, Provider, ProviderError,
-    StreamEvent, ToolSpec,
+    ToolSpec,
 };
 
 /// The `xai-oauth::` model-id namespace [`crate::DispatchProvider`] routes on.
@@ -184,7 +184,14 @@ pub enum EntitlementStatus {
 /// call the API. NEVER retries on its own — a 403 here is a server-side entitlement decision,
 /// not a transient failure (see the module doc's "known gotcha").
 pub async fn probe_entitlement(access_token: &str) -> anyhow::Result<EntitlementStatus> {
-    let http = bundled_http_client();
+    probe_entitlement_with(&bundled_http_client(), &responses_url(), access_token).await
+}
+
+async fn probe_entitlement_with(
+    http: &reqwest::Client,
+    endpoint: &str,
+    access_token: &str,
+) -> anyhow::Result<EntitlementStatus> {
     let body = serde_json::json!({
         "model": "grok-4-fast",
         "input": [{"role": "user", "content": "Reply with OK."}],
@@ -192,13 +199,13 @@ pub async fn probe_entitlement(access_token: &str) -> anyhow::Result<Entitlement
         "stream": false,
     });
     let resp = http
-        .post(responses_url())
+        .post(endpoint)
         .bearer_auth(access_token)
         .json(&body)
         .send()
         .await?;
     let status = resp.status().as_u16();
-    let text = resp.text().await.unwrap_or_default();
+    let text = body_or_diagnostic(resp.text().await.map_err(|error| error.to_string()));
     Ok(match status {
         200..=299 => EntitlementStatus::Entitled,
         403 => EntitlementStatus::NotEntitled(error_message(&text)),
@@ -206,6 +213,21 @@ pub async fn probe_entitlement(access_token: &str) -> anyhow::Result<Entitlement
         429 => EntitlementStatus::RateLimited,
         other => EntitlementStatus::Other(other, error_message(&text)),
     })
+}
+
+fn body_or_diagnostic(body: Result<String, String>) -> String {
+    match body {
+        Ok(body) => body,
+        Err(error) => {
+            let diagnostic = format!("response body unavailable: {error}");
+            if diagnostic.chars().count() <= 200 {
+                diagnostic
+            } else {
+                let cut: String = diagnostic.chars().take(197).collect();
+                format!("{cut}…")
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -537,24 +559,6 @@ fn seed_models() -> Vec<String> {
         .collect()
 }
 
-/// Wrap `inner` so the caller can tell whether anything user-visible was already streamed by the
-/// time a request fails — the condition that decides whether the next-account hop is still safe.
-/// A hop taken after the first delta would replay the reply from the beginning into the same
-/// sink, so once `streamed` is set the caller must surface the error instead of retrying. Mirrors
-/// `codex_oauth`'s `watch_visible_output` (kept as a local copy since that one is private to its
-/// own module). Only Text/Reasoning count: `ProviderActivity` is a private heartbeat.
-fn watch_visible_output<'a>(
-    inner: &'a mut EventSink<'_>,
-    streamed: &'a mut bool,
-) -> Box<EventSink<'a>> {
-    Box::new(move |event: StreamEvent| {
-        if matches!(event, StreamEvent::Text(_) | StreamEvent::Reasoning(_)) {
-            *streamed = true;
-        }
-        inner(event);
-    })
-}
-
 /// One HTTP+SSE completion against the Responses endpoint with a fixed bearer token.
 async fn execute_responses_request(
     http: &reqwest::Client,
@@ -738,6 +742,15 @@ mod tests {
         assert!(e.is_permanent());
         assert!(matches!(e, ProviderError::Auth(_)));
         assert!(e.to_string().contains("forge auth xai"));
+    }
+
+    #[test]
+    fn entitlement_probe_preserves_body_read_failure_diagnostic() {
+        let body = body_or_diagnostic(Err("invalid UTF-8 from response".to_string()));
+        assert_eq!(
+            body,
+            "response body unavailable: invalid UTF-8 from response"
+        );
     }
 
     #[test]

@@ -462,7 +462,7 @@ impl DriverState {
                 self.duel_state = Some((report, guards));
             }
         }
-        if let Some(ls) = self.loop_state.take() {
+        if let Some(mut ls) = self.loop_state.take() {
             if ls.gen == g {
                 let last = {
                     self.session
@@ -471,18 +471,37 @@ impl DriverState {
                         .last_assistant_text()
                         .map(str::to_string)
                 };
-                match loop_stop_reason(last.as_deref(), ls.iter) {
-                    Some(reason) => self.app.note(reason),
-                    None => {
+                let tokens_this_turn = self.app.turn_in + self.app.turn_out;
+                let cwd = std::path::Path::new(&self.cwd);
+                match next_loop_decision(&mut ls, last.as_deref(), tokens_this_turn, cwd).await {
+                    LoopDecision::Stop(reason) => self.app.note(&reason),
+                    LoopDecision::GateFailed { prompt } => {
+                        self.last_prompt = Some(prompt.clone());
+                        self.turn_gen += 1;
+                        ls.iter += 1;
+                        ls.gen = self.turn_gen;
+                        self.loop_state = Some(ls);
+                        self.turn_handle = Some(spawn_turn_with(
+                            prompt,
+                            vec![LOOP_GUIDANCE.to_string()],
+                            None,
+                            &self.session,
+                            &self.done_tx,
+                            self.turn_gen,
+                            &mut self.app,
+                            &mut self.busy,
+                            &mut self.busy_since,
+                        ));
+                    }
+                    LoopDecision::Retry => {
                         let prompt = self
                             .take_next_queued_prompt()
                             .unwrap_or_else(|| "Continue toward completion.".to_string());
                         self.last_prompt = Some(prompt.clone());
                         self.turn_gen += 1;
-                        self.loop_state = Some(LoopState {
-                            gen: self.turn_gen,
-                            iter: ls.iter + 1,
-                        });
+                        ls.iter += 1;
+                        ls.gen = self.turn_gen;
+                        self.loop_state = Some(ls);
                         self.turn_handle = Some(spawn_turn_with(
                             prompt,
                             vec![LOOP_GUIDANCE.to_string()],
@@ -500,7 +519,7 @@ impl DriverState {
                 self.loop_state = Some(ls);
             }
         }
-        if let Some(gs) = self.goal_state.take() {
+        if let Some(mut gs) = self.goal_state.take() {
             if gs.gen == g {
                 let (done, total) = {
                     let s = self.session.lock().await;
@@ -521,24 +540,43 @@ impl DriverState {
                         .map(str::to_string)
                 };
                 let said_complete = is_goal_complete_marker(last.as_deref());
-                let progressed = done > gs.prev_done;
-                let no_progress = if progressed { 0 } else { gs.no_progress + 1 };
-                match goal_stop_reason(said_complete, done, total, gs.iter, no_progress) {
-                    Some(reason) if is_goal_complete_reason(reason) => {}
-                    Some(reason) => self.app.note(reason),
-                    None => {
+                let tokens_this_turn = self.app.turn_in + self.app.turn_out;
+                let cwd = std::path::Path::new(&self.cwd);
+                match next_goal_decision(&mut gs, said_complete, done, total, tokens_this_turn, cwd)
+                    .await
+                {
+                    GoalDecision::Stop(reason) => {
+                        if !is_goal_complete_reason(&reason) {
+                            self.app.note(&reason);
+                        }
+                    }
+                    GoalDecision::GateFailed { prompt } => {
+                        self.last_prompt = Some(prompt.clone());
+                        self.turn_gen += 1;
+                        gs.iter += 1;
+                        gs.gen = self.turn_gen;
+                        self.goal_state = Some(gs);
+                        self.turn_handle = Some(spawn_turn_with(
+                            prompt,
+                            vec![GOAL_GUIDANCE.to_string()],
+                            Some(forge_types::TaskTier::Complex),
+                            &self.session,
+                            &self.done_tx,
+                            self.turn_gen,
+                            &mut self.app,
+                            &mut self.busy,
+                            &mut self.busy_since,
+                        ));
+                    }
+                    GoalDecision::Retry => {
                         let prompt = self
                             .take_next_queued_prompt()
                             .unwrap_or_else(|| GOAL_CONTINUE_PROMPT.to_string());
                         self.last_prompt = Some(prompt.clone());
                         self.turn_gen += 1;
-                        self.goal_state = Some(GoalState {
-                            gen: self.turn_gen,
-                            iter: gs.iter + 1,
-                            prev_done: done,
-                            no_progress,
-                            goal: gs.goal,
-                        });
+                        gs.iter += 1;
+                        gs.gen = self.turn_gen;
+                        self.goal_state = Some(gs);
                         self.turn_handle = Some(spawn_turn_with(
                             prompt,
                             vec![GOAL_GUIDANCE.to_string()],
@@ -560,6 +598,11 @@ impl DriverState {
             if let Some(next) = self.take_next_queued_prompt() {
                 self.start_turn(&next);
             }
+        }
+        // A due heartbeat only gets to run when nothing else claimed the next turn above — a
+        // typed-while-busy prompt / active /loop or /goal always wins.
+        if self.turn_handle.is_none() {
+            self.try_deliver_due_heartbeats();
         }
         if self.turn_handle.is_none() && self.turn_gen > self.last_auto_compact_gen {
             if let Some(lim) = self.app.context_limit {

@@ -123,6 +123,15 @@ pub enum PresenterEvent {
         diagnosis: String,
         fix: Option<String>,
     },
+    /// A `/btw` (alias `/side`) side-question answer — rendered as a distinct side-note card,
+    /// never as an assistant message. It never joined `self.transcript` and was never persisted
+    /// to the message store (docs/features/side-questions.md).
+    BtwAnswer {
+        question: String,
+        answer: String,
+        model: String,
+        cost_usd: Option<f64>,
+    },
     Done {
         final_text: String,
         stop_reason: StopReason,

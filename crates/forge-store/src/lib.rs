@@ -12,11 +12,14 @@ use sha2::{Digest, Sha256};
 mod assay_store;
 mod automation_store;
 mod checkpoint_store;
+mod detached_child_store;
 mod duel_store;
 mod fleet_message_store;
 mod fork_store;
 mod handoff;
 mod handoff_types;
+mod harness_store;
+mod heartbeat_store;
 mod lattice_store;
 mod live_session_store;
 mod memory;
@@ -45,16 +48,18 @@ mod task_store;
 mod transcript_read_store;
 mod usage_store;
 
+pub use detached_child_store::{DetachedChild, DetachedChildStatus};
 pub use handoff_types::{
     HandoffCheckpoint, HandoffImportProvenance, HandoffMessage, HandoffSessionExport,
     HandoffSessionImport, ImportedSessionMetadata,
 };
+pub use harness_store::{AppliedHarnessEdit, HarnessEdit, HarnessEntry, HarnessRefinement};
 pub use memory::Memory;
 
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 29;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1669,6 +1674,25 @@ pub struct QueueTask {
     pub gate: Option<String>,
 }
 
+/// One `session_heartbeat` row: a recurring prompt that re-enters a LIVE session, as opposed to
+/// `forge schedule`'s OS-timer-spawned fresh `forge run` processes (docs/features/
+/// session-heartbeats.md). `owner` is `"user"` (at most one per session, created by
+/// `/heartbeat every`) or `"agent"` (model-created via `manage_heartbeats`, addressed by
+/// `label`, up to a small cap per session). `status` is `"active"` or `"paused"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionHeartbeat {
+    pub id: String,
+    pub session_id: String,
+    pub owner: String,
+    pub label: Option<String>,
+    pub prompt: String,
+    pub interval_secs: i64,
+    pub status: String,
+    pub next_due_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 /// One recorded run of a saved workflow (`/workflow run <name>`). `status` lifecycle:
 /// `running` → `ok` / `failed` (the script returned) / `interrupted` (the turn was aborted, or the
 /// process died mid-run — see [`Store::list_workflow_runs`]). `phases`/`agents`/`cost_usd` are the
@@ -1717,6 +1741,73 @@ pub struct FleetMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_usage_row_records_the_model_that_produced_it() {
+        // `usage.provider` and `usage.model` were never written, so every row read back NULL and
+        // grouping on the column collapsed the whole page into one bucket. The read side works
+        // around it by deriving the provider from `message.model`; this keeps new rows honest so
+        // the columns stop being a trap for the next query that trusts them.
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/tmp/usage", "Default").unwrap();
+        let message = store
+            .add_message(
+                &session,
+                0,
+                forge_types::Role::Assistant,
+                "hi",
+                Some("codex-oauth::gpt-5.6-luna"),
+            )
+            .unwrap();
+        store
+            .record_usage(
+                &session,
+                &message,
+                &Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+                Some("codex-oauth::gpt-5.6-luna"),
+            )
+            .unwrap();
+
+        let (provider, model): (Option<String>, Option<String>) = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT provider, model FROM usage WHERE message_id = ?1",
+                [&message],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(provider.as_deref(), Some("codex-oauth"));
+        assert_eq!(model.as_deref(), Some("codex-oauth::gpt-5.6-luna"));
+    }
+
+    #[test]
+    fn usage_without_a_routed_model_stays_null_rather_than_inventing_one() {
+        // A side call with no routed model must not be attributed to a guess.
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/tmp/usage-none", "Default").unwrap();
+        let message = store
+            .add_message(&session, 0, forge_types::Role::User, "q", None)
+            .unwrap();
+        store
+            .record_usage(&session, &message, &Usage::default(), Some("   "))
+            .unwrap();
+
+        let provider: Option<String> = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT provider FROM usage WHERE message_id = ?1",
+                [&message],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(provider.is_none(), "blank model must not become a provider");
+    }
 
     #[test]
     fn daemon_live_fleet_survives_a_restart_but_excludes_finished_sessions() {
@@ -1921,6 +2012,7 @@ mod tests {
                     cached_input_tokens: 7,
                     cost_usd: 0.02,
                 },
+                None,
             )
             .unwrap();
         store
@@ -1945,6 +2037,7 @@ mod tests {
                     cached_input_tokens: 0,
                     cost_usd: cost,
                 },
+                None,
             )
             .unwrap();
     }
@@ -2044,6 +2137,7 @@ mod tests {
                     cached_input_tokens: 0,
                     cost_usd: 0.03,
                 },
+                None,
             )
             .unwrap();
 
@@ -2872,7 +2966,9 @@ mod tests {
                 Some("codex-oauth::gpt-5.6-terra"),
             )
             .unwrap();
-        store.record_usage(&sid, &m0, &usage(100, 10, 60)).unwrap();
+        store
+            .record_usage(&sid, &m0, &usage(100, 10, 60), None)
+            .unwrap();
         let m1 = store
             .add_message(
                 &sid,
@@ -2882,11 +2978,15 @@ mod tests {
                 Some("codex-oauth::gpt-5.6-terra"),
             )
             .unwrap();
-        store.record_usage(&sid, &m1, &usage(50, 5, 25)).unwrap();
+        store
+            .record_usage(&sid, &m1, &usage(50, 5, 25), None)
+            .unwrap();
         let m2 = store
             .add_message(&sid, 2, Role::Assistant, "c", Some("nvidia::z-ai/glm-5.2"))
             .unwrap();
-        store.record_usage(&sid, &m2, &usage(30, 3, 15)).unwrap();
+        store
+            .record_usage(&sid, &m2, &usage(30, 3, 15), None)
+            .unwrap();
         store
             .record_side_call_usage(&sid, "compact", &usage(20, 2, 10))
             .unwrap();
@@ -3246,6 +3346,7 @@ mod tests {
                     output_tokens: 5,
                     ..Default::default()
                 },
+                None,
             )
             .unwrap();
         let m2 = store
@@ -3260,6 +3361,7 @@ mod tests {
                     output_tokens: 10,
                     ..Default::default()
                 },
+                None,
             )
             .unwrap();
         assert_eq!(store.session_step_count(&sid).unwrap(), 2);
@@ -3323,6 +3425,24 @@ mod tests {
         }];
         store.set_tasks(&sid, &next).unwrap();
         assert_eq!(store.tasks(&sid).unwrap(), next, "replaced, not appended");
+    }
+
+    #[test]
+    fn malformed_session_tasks_are_reported_instead_of_becoming_empty() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO session_tasks (session_id, tasks_json, updated_at) VALUES (?1, ?2, 0)",
+                rusqlite::params![&sid, "not-json"],
+            )
+            .unwrap();
+        let error = store
+            .tasks(&sid)
+            .expect_err("corrupt task JSON must be visible");
+        assert!(matches!(error, StoreError::Json(message) if message.contains("session tasks")));
     }
 
     #[test]
@@ -4076,6 +4196,28 @@ mod tests {
     }
 
     #[test]
+    fn all_model_contexts_reports_malformed_rows() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO model_context (model, window) VALUES ('broken', X'FF')",
+                [],
+            )
+            .unwrap();
+
+        let error = store
+            .all_model_contexts()
+            .expect_err("malformed context row must not be filtered");
+
+        assert!(
+            matches!(error, StoreError::InvalidValue(ref message) if message.contains("failed to decode model context row")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
     fn model_context_round_trips_and_upserts() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.model_context("openrouter::x:free").unwrap(), None);
@@ -4562,6 +4704,32 @@ mod tests {
         assert_eq!(node.forked_from.as_deref(), Some(src.as_str()));
         assert_eq!(node.forked_at_seq, Some(2));
         assert_eq!(store.load_messages(&src).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn fork_rejects_malformed_tool_call_metadata() {
+        let store = Store::open_in_memory().unwrap();
+        let source = store.create_session("/repo", "default").unwrap();
+        let message = store
+            .add_message(&source, 0, Role::Assistant, "answer", Some("model"))
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE message SET tool_calls_json = ?1 WHERE id = ?2",
+                ("{not-json", &message),
+            )
+            .unwrap();
+
+        let error = store
+            .fork_session(&source, 1)
+            .expect_err("fork must not rewrite malformed metadata");
+
+        assert!(
+            matches!(error, StoreError::Json(ref message) if message.contains("malformed tool-call metadata")),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]

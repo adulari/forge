@@ -18,6 +18,7 @@ impl Session {
             || name == USE_SKILL_TOOL
             || name == REMEMBER_TOOL
             || name == fleet::MESSAGE_SESSION_TOOL
+            || name == heartbeat::MANAGE_HEARTBEATS_TOOL
         {
             return false;
         }
@@ -179,6 +180,14 @@ impl Session {
         if call.name == subagent::SEND_TO_AGENT_TOOL {
             return self.send_to_agent(msg_id, call).await;
         }
+        // Retained async subagents (RFC retained-async-subagents) — status + cancellation for
+        // detached children, also core-owned (they need the store + the in-process abort registry).
+        if call.name == subagent::LIST_SUBAGENTS_TOOL {
+            return self.list_subagents(msg_id, call);
+        }
+        if call.name == subagent::CANCEL_SUBAGENT_TOOL {
+            return self.cancel_subagent(msg_id, call);
+        }
         // Workflow scripts are core-owned for the same reason (docs/rfcs/forge-workflow.md).
         if call.name == workflow::RUN_WORKFLOW_TOOL {
             return self.run_workflow(msg_id, call).await;
@@ -210,6 +219,11 @@ impl Session {
         // never called, unless this session is forge-serve-hosted.
         if call.name == fleet::MESSAGE_SESSION_TOOL {
             return self.message_session(msg_id, call).await;
+        }
+        // Agent-created heartbeats are core-owned (they persist to the store and are scoped away
+        // from the user's own `/heartbeat`, which never goes through tool dispatch at all).
+        if call.name == heartbeat::MANAGE_HEARTBEATS_TOOL {
+            return self.manage_heartbeats(msg_id, call);
         }
         // External MCP tools (meta-tools + exposed server tools) are owned by the manager, not the
         // built-in registry. Route them here, still through the permission broker (mcp-client.md).

@@ -1,20 +1,52 @@
 //! End-to-end smoke of the CLI-bridge tool server (`forge mcp-serve`) — the surface a bridged
 //! claude/codex actually talks to. Spawns the real binary and speaks newline-delimited JSON-RPC
 //! (MCP stdio) to prove the bridge advertises `use_skill` and returns a skill's methodology, i.e.
-//! that "codex/claude can find + load Forge's skills." `#[ignore]`: spawns a process + does timed
-//! stdio I/O, so it's run on demand, not in CI.
+//! that "codex/claude can find + load Forge's skills." The stdio test is deterministic and runs in
+//! the normal CI suite; the HTTP test remains ignored because it exercises a separate transport.
 //!
-//! Run: `cargo test -p forge-agent --test mcp_serve_e2e -- --ignored --nocapture`
+//! Run the HTTP-only probe with: `cargo test -p forge-agent --test mcp_serve_e2e -- --ignored --nocapture`
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
+
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Read stdout away from the test thread so a broken server cannot leave `read_line` blocking
+/// past the test's deadline. JSON-RPC notifications and responses share one ordered channel.
+fn json_reader(stdout: impl std::io::Read + Send + 'static) -> Receiver<serde_json::Value> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                if tx.send(value).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
 
 /// Send a JSON-RPC line and (for requests with an id) read until the matching response.
 fn rpc(
     stdin: &mut impl Write,
-    reader: &mut impl BufRead,
+    reader: &Receiver<serde_json::Value>,
     msg: &str,
     want_id: Option<i64>,
 ) -> Option<serde_json::Value> {
@@ -23,60 +55,55 @@ fn rpc(
     stdin.flush().unwrap();
     let want_id = want_id?;
     let start = Instant::now();
-    let mut line = String::new();
     while start.elapsed() < Duration::from_secs(10) {
-        line.clear();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if v.get("id").and_then(|i| i.as_i64()) == Some(want_id) {
-                return Some(v);
+        match reader.recv_timeout(Duration::from_millis(100)) {
+            Ok(value) if value.get("id").and_then(|i| i.as_i64()) == Some(want_id) => {
+                return Some(value);
             }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
     None
 }
 
 #[test]
-#[ignore = "spawns forge mcp-serve + timed stdio; run locally with --ignored"]
 fn bridge_advertises_and_serves_use_skill() {
     // Seed a project skill in a throwaway cwd so the served catalog has a known entry.
-    let dir = std::env::temp_dir().join(format!("forge-mcpserve-{}", std::process::id()));
-    std::fs::create_dir_all(dir.join(".forge/skills/e2eskill")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".forge/skills/e2eskill")).unwrap();
     std::fs::write(
-        dir.join(".forge/skills/e2eskill/SKILL.md"),
+        dir.path().join(".forge/skills/e2eskill/SKILL.md"),
         "---\nname: e2eskill\ndescription: bridge e2e skill\n---\nBRIDGE_SKILL_MARKER: do it.",
     )
     .unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_forge"))
-        .arg("mcp-serve")
-        .current_dir(&dir)
-        // Isolate the store from the developer's real per-user DB (see open_store).
-        .env("FORGE_DB", dir.join("forge.db"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn forge mcp-serve");
-    let mut stdin = child.stdin.take().unwrap();
-    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut child = ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_forge"))
+            .arg("mcp-serve")
+            .current_dir(dir.path())
+            // Isolate the store from the developer's real per-user DB (see open_store).
+            .env("FORGE_DB", dir.path().join("forge.db"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn forge mcp-serve"),
+    );
+    let mut stdin = child.0.stdin.take().unwrap();
+    let reader = json_reader(child.0.stdout.take().unwrap());
 
     let init = rpc(
         &mut stdin,
-        &mut reader,
+        &reader,
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
         Some(1),
     );
     assert!(init.is_some(), "server answered initialize");
     rpc(
         &mut stdin,
-        &mut reader,
+        &reader,
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
         None,
     );
@@ -84,7 +111,7 @@ fn bridge_advertises_and_serves_use_skill() {
     // use_skill must be advertised to the bridged model.
     let tools = rpc(
         &mut stdin,
-        &mut reader,
+        &reader,
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         Some(2),
     )
@@ -103,7 +130,7 @@ fn bridge_advertises_and_serves_use_skill() {
     // Calling it returns the seeded skill's methodology.
     let call = rpc(
         &mut stdin,
-        &mut reader,
+        &reader,
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"use_skill","arguments":{"name":"e2eskill"}}}"#,
         Some(3),
     )
@@ -113,10 +140,6 @@ fn bridge_advertises_and_serves_use_skill() {
         text.contains("BRIDGE_SKILL_MARKER"),
         "use_skill returned the methodology: {text}"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Send a raw HTTP/1.1 request over a fresh connection and return the response's status line.

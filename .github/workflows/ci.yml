@@ -55,6 +55,14 @@ jobs:
         run: python3 scripts/ci/test_architecture_size.py
       - name: Enforce architecture size guard
         run: python3 scripts/ci/architecture_size.py
+      - name: Test migration version guard
+        run: bash scripts/ci/test-migration-version-guard.sh
+      # Needs the mainline's CURRENT schema version, not the merge base: a branch that collides
+      # looks correct against its own base (that is how five PRs all claimed migration 25).
+      - name: Enforce migration version guard
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          MAIN_REF=FETCH_HEAD bash scripts/ci/migration-version-guard.sh
       - name: Test EAS OTA safety classifier
         run: bash scripts/ci/test-eas-ota-safety.sh
       - name: Test Android EAS build contract
@@ -63,6 +71,14 @@ jobs:
         run: bash scripts/ci/test-runner-resource-budget.sh
       - name: Test persistent runner cache bounds
         run: bash scripts/ci/test-trim-runner-cache.sh
+      - name: Test standing docs freshness guard
+        run: bash scripts/ci/test-docs-freshness.sh
+      - name: Enforce standing docs freshness
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci/check-docs-freshness.sh
       - name: Test crates.io publication order
         run: bash scripts/ci/test-crates-release-order.sh
       # Static contract between the release workflows and the published one-line installers: the
@@ -167,16 +183,35 @@ jobs:
     steps:
       - name: Check all jobs passed
         run: |
-          for result in \
-            "${{ needs.changes.result }}" \
-            "${{ needs.anywhere-policy.result }}" \
-            "${{ needs.fmt.result }}" \
-            "${{ needs.clippy.result }}" \
-            "${{ needs.test.result }}" \
-            "${{ needs.release-build.result }}"; do
+          # Name the job AND its state. The old message said only "a required CI job failed or was
+          # cancelled", which cannot tell a real failure from churn — and `cancelled` is the common
+          # case here, not the rare one: 58% of heavy/release jobs end cancelled, because all three
+          # workflows use ref-keyed `cancel-in-progress` and every merge to main updates every open
+          # PR's branch. Dependabot #924 sat TWO WEEKS looking broken when `test` and `clippy` had
+          # both passed and only `release-build` was cancelled; nobody re-ran it because the PR
+          # looked failed.
+          #
+          # The gate is deliberately unchanged: anything that is not success|skipped still exits 1.
+          # Only the diagnosis improves.
+          for entry in \
+            "changes=${{ needs.changes.result }}" \
+            "anywhere-policy=${{ needs.anywhere-policy.result }}" \
+            "fmt=${{ needs.fmt.result }}" \
+            "clippy=${{ needs.clippy.result }}" \
+            "test=${{ needs.test.result }}" \
+            "release-build=${{ needs.release-build.result }}"; do
+            name="${entry%%=*}"
+            result="${entry#*=}"
             case "$result" in
               success|skipped) ;;
-              *) echo "A required CI job failed or was cancelled"; exit 1 ;;
+              cancelled)
+                echo "::error title=CI job cancelled, not failed::$name was CANCELLED — superseded by a newer run for this branch, not a test failure. Re-run it; nothing here says the code is broken."
+                exit 1
+                ;;
+              *)
+                echo "::error title=CI job $result::$name: $result"
+                exit 1
+                ;;
             esac
           done
           echo "All affected CI jobs passed"

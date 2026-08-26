@@ -20,8 +20,9 @@ pub mod provider_oauth;
 pub mod secret_store;
 pub use agents::{load_agents, AgentDef};
 pub use mcp::{
-    discover_import_sources, import_mcp_json, load_mcp_toml, write_mcp_toml, ImportSource,
-    McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport, ParsedServers,
+    discover_import_sources, import_mcp_json, load_mcp_toml, load_mcp_toml_with_diagnostic,
+    write_mcp_toml, ImportSource, McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport,
+    ParsedServers,
 };
 pub use oauth::{
     add_oauth_account, authorize_url, clear_oauth_tokens, list_oauth_accounts, load_oauth_tokens,
@@ -148,6 +149,10 @@ pub struct Config {
     /// `{data_dir}/models/whisper/`.
     #[serde(default)]
     pub voice: VoiceConfig,
+    /// Continual Harness (`/refine`, port of prime-agent's `/refine`): the agent proposes durable
+    /// edits to its own prompts/skills/subagents, persisted via forge-store's harness tables.
+    #[serde(default)]
+    pub harness: HarnessConfig,
 }
 
 /// `[remote]` config block — the phone/browser remote-control server (`remote-control.md`).
@@ -1131,6 +1136,64 @@ fn default_assay_min_diff_bytes() -> usize {
 
 fn default_assay_max_cost_usd() -> f64 {
     0.50
+}
+
+/// Continual Harness (`/refine`, port of prime-agent's `/refine`): the agent proposes durable
+/// edits to its own prompts/skills/subagents, persisted via forge-store's `harness_entry` /
+/// `harness_refinement` tables. `enabled` gates both context injection and the ability to apply
+/// edits; `auto_refine` separately gates whether a refinement pass ever runs unprompted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub auto_refine: AutoRefineMode,
+    /// Turn interval for `auto_refine = "turns"`.
+    #[serde(default = "default_harness_auto_refine_turns")]
+    pub auto_refine_turns: u32,
+    /// Max harness entries injected into a turn's context.
+    #[serde(default = "default_harness_max_context_entries")]
+    pub max_context_entries: u32,
+    /// Max characters per injected harness entry; longer entries are truncated.
+    #[serde(default = "default_harness_max_entry_chars")]
+    pub max_entry_chars: u32,
+}
+
+impl Default for HarnessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_refine: AutoRefineMode::default(),
+            auto_refine_turns: default_harness_auto_refine_turns(),
+            max_context_entries: default_harness_max_context_entries(),
+            max_entry_chars: default_harness_max_entry_chars(),
+        }
+    }
+}
+
+/// When a refinement pass auto-triggers, if ever (ADR: Continual Harness).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoRefineMode {
+    /// Refinement only runs when explicitly requested (`/refine`).
+    #[default]
+    Off,
+    /// Auto-trigger a refinement pass after every `/compact`.
+    Compact,
+    /// Auto-trigger a refinement pass every `auto_refine_turns` turns.
+    Turns,
+}
+
+fn default_harness_auto_refine_turns() -> u32 {
+    20
+}
+
+fn default_harness_max_context_entries() -> u32 {
+    12
+}
+
+fn default_harness_max_entry_chars() -> u32 {
+    2000
 }
 
 /// Settings for the slash-command + skill system.
@@ -2291,6 +2354,7 @@ impl Default for Config {
             remote: RemoteConfig::default(),
             anywhere: AnywhereConfig::default(),
             voice: VoiceConfig::default(),
+            harness: HarnessConfig::default(),
         }
     }
 }

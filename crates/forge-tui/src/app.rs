@@ -1199,6 +1199,21 @@ impl App {
                     self.last_width.get(),
                 ));
             }
+            PresenterEvent::BtwAnswer {
+                question,
+                answer,
+                model,
+                cost_usd,
+            } => {
+                self.set_turn_activity(TurnPhase::Finalizing, "side question answered");
+                self.flush.extend(btw_answer_lines(
+                    &question,
+                    &answer,
+                    &model,
+                    cost_usd,
+                    self.last_width.get(),
+                ));
+            }
             PresenterEvent::Cost {
                 session_total_usd,
                 session_in,
@@ -3103,6 +3118,40 @@ fn shell_diagnosis_lines(
             Style::default().fg(TOOLCYAN),
         )));
     }
+    lines
+}
+
+/// A `/btw` side-question answer, rendered as a distinct card — never as an assistant bubble,
+/// since it was never part of the conversation (docs/features/side-questions.md).
+fn btw_answer_lines(
+    question: &str,
+    answer: &str,
+    model: &str,
+    cost_usd: Option<f64>,
+    width: u16,
+) -> Vec<TextLine<'static>> {
+    let meta = match cost_usd {
+        Some(c) if c > 0.0 => format!("{model} · ${c:.4}"),
+        _ => model.to_string(),
+    };
+    let mut lines = vec![TextLine::from(vec![
+        Span::styled("  ◈ btw ", Style::default().fg(ACCENT).bold()),
+        Span::styled(
+            truncate(question, width_cap(width, 16, 72)),
+            Style::default().fg(TEXT),
+        ),
+    ])];
+    for line in answer.lines() {
+        lines.push(TextLine::from(Span::styled(
+            format!("    {line}"),
+            Style::default().fg(TEXT),
+        )));
+    }
+    lines.push(TextLine::from(Span::styled(
+        format!("    ({meta}, not part of this session's history)"),
+        Style::default().fg(DIM),
+    )));
+    lines.push(TextLine::default());
     lines
 }
 

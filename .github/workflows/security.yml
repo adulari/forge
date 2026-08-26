@@ -58,6 +58,39 @@ jobs:
         run: |
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
           cargo audit --version 2>/dev/null | grep -q '0.22.2' || cargo install --locked cargo-audit --version 0.22.2
+      # THE RUNNER'S ADVISORY-DB CLONE CAN DESYNC FROM UPSTREAM AND BLOCK EVERY AUDIT.
+      #
+      # Measured on #1018 (2026-08-10): the fetch succeeded and the parse did not.
+      #
+      #     Fetching advisory database from `https://github.com/RustSec/advisory-db.git`
+      #     error: error loading advisory database: parse error: duplicate advisory ID: RUSTSEC-2026-0244
+      #
+      # Upstream is clean — it holds exactly one file for that ID, `crates/gettext-rs/`. The
+      # duplicate exists only in the persistent clone under `$CARGO_HOME/advisory-db`: when an
+      # advisory is MOVED between crate directories upstream, `cargo audit`'s fetch leaves the file
+      # at its old path too, and two files with one ID make the whole database unparseable. Every
+      # audit then fails for a reason that has nothing to do with the PR, on a required check.
+      #
+      # `reset --hard` alone does NOT fix it: the stale copy is untracked at its old path, so it
+      # survives a reset. `clean -fdx` is the part that removes it.
+      #
+      # Never fatal: if the repair cannot run, the audit below still runs and reports whatever it
+      # finds, exactly as before. A missing clone is also fine — cargo audit clones it fresh.
+      - name: Repair the runner's advisory-db clone if it desynced from upstream
+        continue-on-error: true
+        run: |
+          db="${CARGO_HOME:-$HOME/.cargo}/advisory-db"
+          if [ ! -d "$db/.git" ]; then
+            echo "no advisory-db clone yet — cargo audit will fetch a fresh one"
+            exit 0
+          fi
+          git -C "$db" fetch --prune --quiet origin
+          git -C "$db" remote set-head origin -a >/dev/null 2>&1 || true
+          head_ref=$(git -C "$db" symbolic-ref --quiet --short refs/remotes/origin/HEAD || echo "origin/main")
+          git -C "$db" reset --hard --quiet "$head_ref"
+          removed=$(git -C "$db" clean -fdxn | wc -l)
+          git -C "$db" clean -fdxq
+          echo "advisory-db reset to $head_ref; removed $removed stale path(s)"
       # Fail on any vulnerability OR any unmaintained/unsound/yanked warning (--deny warnings),
       # EXCEPT the documented advisories below (kept in sync with deny.toml
       # [advisories].ignore). Real vulnerabilities are fixed via lockfile/dependency bumps and
@@ -90,7 +123,12 @@ jobs:
       # surface matches what we validate locally — the action puts `arguments` BEFORE the
       # subcommand, which broke `cargo deny check all` ("unrecognized subcommand 'all'").
       - run: cargo deny check
-      - run: cargo deny --manifest-path vendor/genai-0.6.5/Cargo.toml check
+      # The vendored genai graph is a strict subset of the workspace one, and both are linted with
+      # the same deny.toml. Ignores that legitimately apply to the workspace (e.g. the bincode
+      # advisory, which only the workspace pulls in) therefore match nothing here, and cargo-deny
+      # treats an unused ignore as an error. Allow only that lint, so a real advisory still fails:
+      # the alternative is a second deny.toml that would silently drift from this one.
+      - run: cargo deny --manifest-path vendor/genai-0.6.5/Cargo.toml check --allow advisory-not-detected
 
   security:
     name: security checks

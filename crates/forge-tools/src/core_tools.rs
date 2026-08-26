@@ -114,6 +114,16 @@ pub(crate) fn confine(path_str: &str) -> Result<PathBuf, ToolError> {
     }
 }
 
+/// Read the previous text for a write preview. A missing path is a legitimate create, but any
+/// other read failure must suppress the preview rather than masquerading as an empty file.
+async fn read_preview_source(path: &str) -> Result<Option<String>, std::io::Error> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Hard ceiling on any local file this crate will load whole into memory via `read_to_string`,
 /// checked via a metadata pre-check BEFORE the read. Unlike `cap_read`/`cap_bytes` (which only
 /// truncate what's RETURNED to the model, after the full file is already buffered), this stops
@@ -370,7 +380,10 @@ impl Tool for WriteFileTool {
         let path = str_arg(args, "path").ok()?;
         let content = str_arg(args, "content").ok()?;
         confine(path).ok()?;
-        let old = tokio::fs::read_to_string(path).await.ok();
+        let old = match read_preview_source(path).await {
+            Ok(old) => old,
+            Err(_) => return None,
+        };
         let kind = if old.is_some() {
             DiffKind::Modified
         } else {
@@ -442,7 +455,10 @@ impl Tool for AppendFileTool {
         let path = str_arg(args, "path").ok()?;
         let addition = str_arg(args, "content").ok()?;
         confine(path).ok()?;
-        let old = tokio::fs::read_to_string(path).await.ok();
+        let old = match read_preview_source(path).await {
+            Ok(old) => old,
+            Err(_) => return None,
+        };
         let mut new = old.clone().unwrap_or_default();
         new.push_str(addition);
         Some(FileDiff {
@@ -657,14 +673,23 @@ impl Tool for ApplyPatchTool {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| ToolError::Failed(format!("spawning git apply: {e}")))?;
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(patch.as_bytes()).await;
+            stdin
+                .write_all(patch.as_bytes())
+                .await
+                .map_err(|e| ToolError::Failed(format!("writing patch to git apply: {e}")))?;
             if !patch.ends_with('\n') {
-                let _ = stdin.write_all(b"\n").await; // git apply wants a trailing newline
+                stdin.write_all(b"\n").await.map_err(|e| {
+                    ToolError::Failed(format!("writing patch terminator to git apply: {e}"))
+                })?; // git apply wants a trailing newline
             }
-            let _ = stdin.shutdown().await;
+            stdin
+                .shutdown()
+                .await
+                .map_err(|e| ToolError::Failed(format!("closing patch input: {e}")))?;
         }
         let out = child
             .wait_with_output()
@@ -1141,6 +1166,35 @@ mod tests {
 
     // ---- workspace confinement ----
 
+    /// A `..` traversal carrying enough segments to climb past the filesystem root from wherever
+    /// this checkout lives, so it lands on an absolute `/<target>` regardless of depth.
+    ///
+    /// A hardcoded count was location-dependent: from a checkout inside the system temp dir (CI
+    /// scratch directories and `mktemp -d` clones do this), six `..` collapsed to `<tmp>/etc/passwd`
+    /// — still inside a root `confine` allows deliberately. The assertion then failed while
+    /// `confine` was behaving correctly, reporting what looks like a sandbox escape. Deriving the
+    /// count from the actual depth removes the cliff rather than moving it.
+    fn escaping_traversal(target: &str) -> String {
+        let depth = std::env::current_dir()
+            .map(|cwd| cwd.components().count())
+            .unwrap_or(32);
+        "../".repeat(depth + 1) + target
+    }
+
+    #[test]
+    fn escaping_traversal_leaves_every_allowed_root() {
+        let escaped = resolve_target(Path::new(&escaping_traversal("etc/passwd")));
+        assert_eq!(
+            escaped,
+            Path::new("/etc/passwd"),
+            "the traversal must reach the filesystem root, or the escape tests prove nothing"
+        );
+        assert!(
+            !workspace_roots().iter().any(|r| escaped.starts_with(r)),
+            "the escape target must sit outside every allowed root, including the temp dir"
+        );
+    }
+
     #[test]
     fn confine_allows_in_workspace_and_temp_but_rejects_escapes() {
         // A relative path inside the workspace (the crate dir during tests) is allowed.
@@ -1159,7 +1213,7 @@ mod tests {
             );
         }
         // `..` traversal out of the workspace is refused (lexically collapsed before the check).
-        assert!(confine("../../../../../../etc/passwd").is_err());
+        assert!(confine(&escaping_traversal("etc/passwd")).is_err());
     }
 
     #[tokio::test]
@@ -1179,7 +1233,7 @@ mod tests {
         // Even with a real file existing, a `..`-escaping target must be refused before any fs op.
         let err = EditFileTool
             .run(&json!({
-                "path": "../../../../../../etc/hosts",
+                "path": escaping_traversal("etc/hosts"),
                 "old": "x",
                 "new": "y"
             }))

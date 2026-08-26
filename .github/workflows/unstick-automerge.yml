@@ -79,6 +79,26 @@ jobs:
     # below bounds the work; this bounds the blast radius if an individual API call wedges.
     timeout-minutes: 20
     steps:
+      # THE `push` TRIGGER FIRES TOO EARLY TO BE USEFUL, AND THAT COSTS ~AN HOUR PER MERGE.
+      #
+      # A merge to main fires this workflow within seconds — measured at **3s** after #1009
+      # (merged 00:18:04, sweep 00:18:07) and **6s** after #1011 (01:42:03 / 01:42:09). GitHub has
+      # not yet recomputed the other open PRs' mergeable state by then, so the sweep sees nothing
+      # BEHIND, updates nothing, and exits successfully having done no work.
+      #
+      # The open set then waits for the next `schedule`, which in practice runs closer to hourly
+      # than the declared */30 (observed firings 56 minutes apart, with several slots missed
+      # entirely — GitHub delays or drops scheduled workflows under load). Both merges tonight left
+      # eight PRs sitting BEHIND for 12+ minutes with a push sweep already run and wasted.
+      #
+      # Pausing briefly on this trigger alone is enough for the states to settle. 60s is a
+      # heuristic, not a measured floor — the `schedule` and `workflow_run` triggers remain the
+      # backstops if it is ever too short, exactly as they are today. The wait costs a
+      # GitHub-hosted runner a minute and never touches the self-hosted bottleneck.
+      - name: Let GitHub settle mergeable state after a merge to main
+        if: github.event_name == 'push'
+        run: sleep 60
+
       # THE STALL THIS WORKFLOW CAUSED ITSELF.
       #
       # `gh pr update-branch` below writes a merge commit authored by `github-actions[bot]`, and this
@@ -163,12 +183,41 @@ jobs:
           # a PR still looks merely "queued" to a human.
           CHECKS_MISSING_AFTER_SECONDS=600
 
+          # How long to wait, after updating a branch, for GitHub to register the runs it creates
+          # for the new head — before concluding it created none and dispatching replacements.
+          # Polled rather than slept in one block: the registration delay is variable, so a single
+          # fixed wait is either too short (and manufactures duplicate heavy jobs) or a tax paid on
+          # every update. 6 × 10s triples the old 20s ceiling while making the common case cheaper.
+          POST_UPDATE_SETTLE_ATTEMPTS=6
+          POST_UPDATE_SETTLE_INTERVAL_SECONDS=10
+
           for pr in $numbers; do
-            # One view per PR, not two: the per-PR call exists to let mergeStateStatus settle, which
-            # a single query does just as well as two while halving the API round-trips.
-            read -r state branch armed_at < <(gh pr view "$pr" \
-              --json mergeStateStatus,headRefName,autoMergeRequest \
-              --jq '"\(.mergeStateStatus) \(.headRefName) \(.autoMergeRequest.enabledAt // "")"')
+            # The per-PR call exists because mergeStateStatus is computed on demand. It used to say
+            # one view settles it "just as well as two" — MEASURED FALSE. On the first sweep after
+            # #1020 merged, ten of twelve PRs came back `UNKNOWN` on that single view and were
+            # skipped by the `!= "BEHIND"` branch below, so the sweep re-armed exactly one of them.
+            # The whole set then waited for later triggers, which is the stall this workflow exists
+            # to prevent.
+            #
+            # A query STARTS GitHub's computation; it does not wait for it. So ask again. The first
+            # view is the trigger, a later one collects the answer. Bounded at 4 retries x 5s per
+            # PR — in practice the first PR's wait warms the rest, and the job's 20-minute timeout
+            # absorbs the worst case comfortably (observed sweeps take 2-3 minutes).
+            view_pr() {
+              read -r state branch armed_at < <(gh pr view "$1" \
+                --json mergeStateStatus,headRefName,autoMergeRequest \
+                --jq '"\(.mergeStateStatus) \(.headRefName) \(.autoMergeRequest.enabledAt // "")"')
+            }
+            view_pr "$pr"
+            unknown_retries=0
+            while [ "$state" = "UNKNOWN" ] && [ "$unknown_retries" -lt 4 ]; do
+              sleep 5
+              unknown_retries=$(( unknown_retries + 1 ))
+              view_pr "$pr"
+            done
+            if [ "$state" = "UNKNOWN" ]; then
+              echo "#$pr: mergeStateStatus still UNKNOWN after $unknown_retries retries — leaving for the next sweep"
+            fi
             if [ -n "$armed_at" ] && [ "$state" != "CLEAN" ] && [ "$state" != "HAS_HOOKS" ]; then
               armed_for=$(( $(date -u +%s) - $(date -u -d "$armed_at" +%s) ))
               if [ "$armed_for" -gt "$STALE_AFTER_SECONDS" ]; then
@@ -198,6 +247,100 @@ jobs:
                   --jq '[.check_runs[] | select(.name == "CI" or .name == "mobile checks" or .name == "security checks")] | length')
                 pushed_at=$(gh api "repos/$GH_REPO/commits/$head" --jq '.commit.committer.date')
                 head_age=$(( $(date -u +%s) - $(date -u -d "$pushed_at" +%s) ))
+                # THE CONTEXT COUNT ABOVE IS NOT ENOUGH ON ITS OWN: it looks for the AGGREGATE names
+                # (`CI`, `mobile checks`, `security checks`), and those check runs do not exist until
+                # the gating job that fans out to them has finished. A `pull_request` run sitting in
+                # the queue therefore looks exactly like "GitHub created no run at all", and this
+                # branch dispatches a second, redundant copy of all three workflows.
+                #
+                # That is not hypothetical. Measured 2026-08-10: 12 of 49 queued runs — 24% of the
+                # whole queue — were duplicate pairs on the SAME head SHA, one `pull_request` and one
+                # `workflow_dispatch`, across 8 PRs. Every heavy job in those 12 runs competes for
+                # archlinux-1, which is the only runner carrying the `heavy` and `release` labels, so
+                # the waste lands squarely on the one serialized resource.
+                #
+                # So also ask whether any run for this SHA is still live. Runs parked at
+                # `action_required` — the bot-merge-commit case this guard exists for — report
+                # `status=completed`, so they are correctly NOT counted here and dispatch still
+                # happens for them. Only a genuinely queued or running workflow suppresses it.
+                live_runs=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$head&per_page=100" \
+                  --jq '[.workflow_runs[] | select(.status != "completed")] | length')
+
+                # A REQUIRED CONTEXT CAN BE PRESENT AND STILL NEVER SETTLE, WHICH THIS JOB CANNOT
+                # CURRENTLY RESCUE. The dispatch below keys on `contexts == 0` — a MISSING context.
+                # A context that exists but hangs forever is not missing, so it slips through and the
+                # PR waits indefinitely with nothing red.
+                #
+                # Measured 2026-08-11 on #1028: the `mobile checks` aggregate declares
+                # `timeout-minutes: 5` and sat `in_progress` for 23 minutes. GitHub enforces a job
+                # timeout via the runner reporting back, so a runner that disappears mid-job leaves
+                # the record live forever. It took a hand-run `gh workflow run` to clear.
+                #
+                # DETECTION ONLY, DELIBERATELY — this warns and does not dispatch. The discriminator
+                # is `run completed AND job not completed`, which cannot match a healthy job (a live
+                # job's run is live too). But these orphans appeared during an active GitHub incident
+                # ("Incident with GraphQL API Requests", 2026-08-11 14:50Z), and a false positive
+                # here spends a full set of heavy jobs on archlinux-1 — the exact waste the guard
+                # above exists to prevent. Warning first makes the failure visible the moment it
+                # happens instead of requiring archaeology, at zero risk to the bottleneck. Turning
+                # this into a dispatch is a deliberate follow-up, to be validated against a healthy
+                # API and against a genuinely long-running `test`/`release-build` job first.
+                #
+                # An elapsed-time rule would NOT be a safe substitute: `test` and `release-build`
+                # declare `timeout-minutes: 90` and legitimately run for tens of minutes, so any
+                # threshold short enough to catch a dead 5-minute aggregate would re-dispatch healthy
+                # heavy jobs.
+                # NOW HEALS, NOT ONLY WARNS. The warn-only version shipped in #1030 with the dispatch
+                # deliberately off, because its candidates were minutes old and indistinguishable
+                # from transient API lag during that day's GitHub incident. They were then observed
+                # again: every one had passed its own declared timeout while its run stayed
+                # completed, and none recovered on its own. Detection has been 3 for 3 on genuine
+                # orphans with no false positive, so the remaining question is only how to keep it
+                # that way.
+                #
+                # PERSISTENCE IS THE GUARD. Requiring the run to have been finished for
+                # CHECKS_MISSING_AFTER_SECONDS before acting means momentary run/job disagreement —
+                # the plausible failure of a degraded API — has to survive ten minutes to be
+                # actioned, which lag does not.
+                #
+                # It dispatches ONLY the workflow that owns the orphaned job, via that run's own
+                # `.path`, rather than all three. Re-running a dead `mobile checks` must not
+                # manufacture a redundant CI run on archlinux-1.
+                for stuck in $(gh api "repos/$GH_REPO/actions/runs?head_sha=$head&per_page=100" \
+                  --jq '.workflow_runs[] | select(.status == "completed") | .id' 2>/dev/null); do
+                  orphans=$(gh api "repos/$GH_REPO/actions/runs/$stuck/jobs" \
+                    --jq '[.jobs[] | select(.status != "completed") | .name] | join(", ")' 2>/dev/null || echo "")
+                  [ -z "$orphans" ] && continue
+
+                  run_path=$(gh api "repos/$GH_REPO/actions/runs/$stuck" --jq '.path' 2>/dev/null || echo "")
+                  run_ended=$(gh api "repos/$GH_REPO/actions/runs/$stuck" --jq '.updated_at' 2>/dev/null || echo "")
+                  stuck_age=0
+                  if [ -n "$run_ended" ]; then
+                    stuck_age=$(( $(date -u +%s) - $(date -u -d "$run_ended" +%s) ))
+                  fi
+
+                  echo "::warning title=Orphaned check job::#$pr run $stuck completed while job(s) [$orphans] are still in_progress on $head. A required context in that state never settles and will block this PR indefinitely. See docs/ci/reading-ci-state.md trap 5."
+
+                  if [ -z "$run_path" ] || [ "$stuck_age" -le "$CHECKS_MISSING_AFTER_SECONDS" ]; then
+                    echo "#$pr: orphan on $stuck not yet ${CHECKS_MISSING_AFTER_SECONDS}s old (or workflow path unknown) — leaving it one more cycle to settle"
+                    continue
+                  fi
+                  if [ "$dispatches_done" -ge "$MAX_DISPATCHES_PER_RUN" ]; then
+                    echo "#$pr: orphan on $stuck needs a re-dispatch — deferred to the next run (this run already dispatched for $MAX_DISPATCHES_PER_RUN PRs)"
+                    continue
+                  fi
+                  if gh workflow run "$run_path" --ref "$branch"; then
+                    dispatches_done=$(( dispatches_done + 1 ))
+                    echo "#$pr: re-dispatched $run_path to replace the orphaned job(s) [$orphans]"
+                  else
+                    echo "::warning title=Check dispatch failed::could not re-dispatch $run_path for #$pr ($branch)"
+                  fi
+                done
+
+                if [ "$live_runs" -gt 0 ]; then
+                  echo "#$pr: $live_runs run(s) already queued or in progress on $head — not dispatching a duplicate"
+                  continue
+                fi
                 if [ "$contexts" -eq 0 ] && [ "$head_age" -gt "$CHECKS_MISSING_AFTER_SECONDS" ]; then
                   if [ "$dispatches_done" -ge "$MAX_DISPATCHES_PER_RUN" ]; then
                     echo "#$pr: no required context on $head — deferred to the next run (this run already dispatched for $MAX_DISPATCHES_PER_RUN PRs)"
@@ -229,13 +372,64 @@ jobs:
               continue
             fi
 
-            # The update above was pushed with GITHUB_TOKEN, so GitHub creates no `pull_request`
-            # runs for the new head SHA. Without these dispatches the required `CI` context would
-            # never appear on it and the PR would stall again, one state later.
-            for workflow in ci.yml security.yml mobile-typecheck.yml; do
-              gh workflow run "$workflow" --ref "$branch" \
-                || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
-            done
+            # The update above is pushed with GITHUB_TOKEN, which is SUPPOSED to create no
+            # `pull_request` runs for the new head SHA — hence these dispatches, without which the
+            # required `CI` context would never appear and the PR would stall one state later.
+            #
+            # THAT PREMISE DOES NOT ALWAYS HOLD, and when it does not this loop manufactures a
+            # duplicate every single time it updates a branch. Measured 2026-08-10, right after a
+            # merge to main made every open PR BEHIND: six branches each ended up with a
+            # `workflow_dispatch` CI run AND a `pull_request` CI run on the same head SHA, the
+            # dispatch created ~3 seconds BEFORE the pull_request run —
+            #     17:38:06 workflow_dispatch  fix/usage-model-attribution 6c6117aa
+            #     17:38:09 pull_request       fix/usage-model-attribution 6c6117aa
+            # Every duplicate costs a full set of heavy jobs on archlinux-1, the only runner
+            # carrying the `heavy`/`release` labels, which is already the sole bottleneck.
+            #
+            # So look before dispatching, on the NEW head SHA.
+            #
+            # A FIXED WAIT IS THE WRONG SHAPE FOR THIS, and 20 seconds was measured to be too short.
+            # On 2026-08-11 #1026 was updated and GitHub created its `pull_request` runs at 14:19:20;
+            # this loop dispatched three duplicates at 14:19:36-40, sixteen seconds later. The
+            # duplicates were still queued on archlinux-1 twenty minutes after the PR had merged —
+            # heavy jobs burnt on a dead branch while fourteen other PRs waited behind them.
+            #
+            # The delay before GitHub registers a run is variable, so any single sleep is either a
+            # guess that is too short (duplicates) or a tax paid on every branch update. Poll
+            # instead: give it up to POST_UPDATE_SETTLE_ATTEMPTS chances, stop the moment a run
+            # appears. The common case now costs one interval rather than a flat 20s, and the slow
+            # case gets three times the old budget before concluding nothing is coming.
+            #
+            # Fails OPEN: if the head SHA or every run query is unavailable, dispatch exactly as
+            # before. And if GitHub is slower than the whole poll, the missing-context branch earlier
+            # in this job still dispatches once the head is older than CHECKS_MISSING_AFTER_SECONDS,
+            # so a genuinely run-less head is still rescued — one cycle later rather than never.
+            new_head=$(gh pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
+            live_after_update=0
+            if [ -n "$new_head" ]; then
+              settle_attempt=0
+              while [ "$settle_attempt" -lt "$POST_UPDATE_SETTLE_ATTEMPTS" ]; do
+                sleep "$POST_UPDATE_SETTLE_INTERVAL_SECONDS"
+                settle_attempt=$(( settle_attempt + 1 ))
+                live_after_update=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$new_head&per_page=100" \
+                  --jq '[.workflow_runs[] | select(.status != "completed")] | length' 2>/dev/null || echo 0)
+                if [ "$live_after_update" -gt 0 ]; then
+                  echo "#$pr: GitHub's runs for $new_head appeared after ${settle_attempt} poll(s)"
+                  break
+                fi
+              done
+            fi
+            if [ "$live_after_update" -gt 0 ]; then
+              echo "#$pr: branch updated; GitHub created $live_after_update run(s) for $new_head — not dispatching duplicates"
+            else
+              for workflow in ci.yml security.yml mobile-typecheck.yml; do
+                gh workflow run "$workflow" --ref "$branch" \
+                  || echo "::warning title=Check dispatch failed::could not dispatch $workflow for #$pr ($branch)"
+              done
+            fi
             updates_done=$(( updates_done + 1 ))
-            echo "#$pr: branch updated and required checks re-dispatched"
+            # Deliberately not claiming "re-dispatched" here any more: the branch above decides
+            # whether that happened, and a log line asserting it unconditionally is how the
+            # duplicate dispatching stayed invisible in the first place.
+            echo "#$pr: branch updated"
           done

@@ -119,7 +119,17 @@ impl Session {
                 self.emit_context_gauge(model);
             }
             if !self.transcript_fits(model) {
-                let _ = self.compact(true).await;
+                let (before, after) = self.compact(true).await.unwrap_or_default();
+                // Continual Harness auto-refine gate (`harness.auto_refine = "compact"`,
+                // refinement.rs): only when this call actually folded something — `compact`
+                // no-ops (before == after) when there isn't enough older history yet, and firing
+                // a refinement pass off a no-op compaction would have nothing new to learn from.
+                if before != after
+                    && self.config.harness.enabled
+                    && self.config.harness.auto_refine == forge_config::AutoRefineMode::Compact
+                {
+                    let _ = self.refine(None, false, "auto_compact").await;
+                }
             }
             // Refresh the gauge NOW so it reflects the reduced context immediately, instead of
             // showing the old (over-window) size until the turn's first model call returns.

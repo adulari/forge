@@ -224,10 +224,18 @@ impl Store {
             let rows = stmt.query_map([repo_root], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?;
-            rows.filter_map(|r| r.ok())
-                .filter(|(_, rel)| !keep.contains(rel))
-                .map(|(id, _)| id)
-                .collect()
+            let mut stale = Vec::new();
+            for row in rows {
+                let (id, rel) = row.map_err(|error| {
+                    StoreError::InvalidValue(format!(
+                        "failed to decode lattice file row while pruning `{repo_root}`: {error}"
+                    ))
+                })?;
+                if !keep.contains(&rel) {
+                    stale.push(id);
+                }
+            }
+            stale
         };
         for id in &stale {
             tx.execute("DELETE FROM lattice_file WHERE id = ?1", (id,))?;
@@ -366,10 +374,8 @@ impl Store {
         let rows = stmt.query_map([repo_root], |r| {
             let id: String = r.get(0)?;
             let blob: Vec<u8> = r.get(1)?;
-            let vec = blob
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
+            let (chunks, _rest) = blob.as_chunks::<4>();
+            let vec = chunks.iter().copied().map(f32::from_le_bytes).collect();
             Ok((id, vec))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -480,5 +486,34 @@ impl Store {
             })?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_lattice_files_reports_malformed_rows() {
+        let store = Store::open_in_memory().expect("in-memory store");
+        store
+            .lock()
+            .expect("connection")
+            .execute(
+                "INSERT INTO lattice_file
+                    (id, repo_root, rel_path, lang, content_hash, parse_status)
+                 VALUES (X'FF', 'repo', 'src/lib.rs', 'rust', 'hash', 'ok')",
+                [],
+            )
+            .expect("malformed fixture");
+
+        let error = store
+            .prune_lattice_files_except("repo", &std::collections::HashSet::new())
+            .expect_err("malformed row must not be silently filtered");
+
+        assert!(
+            matches!(error, StoreError::InvalidValue(ref message) if message.contains("failed to decode lattice file row")),
+            "unexpected error: {error:?}"
+        );
     }
 }

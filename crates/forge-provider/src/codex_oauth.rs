@@ -16,11 +16,12 @@ use forge_types::{Message, QuotaHint, Usage};
 use crate::codex_websocket;
 use crate::oauth_responses::{
     build_responses_request, classify_responses_status, error_message,
-    execute_responses_request as shared_execute, now_unix, should_hop_account, REFRESH_SKEW_SECS,
+    execute_responses_request as shared_execute, now_unix, should_hop_account,
+    watch_visible_output, REFRESH_SKEW_SECS,
 };
 use crate::{
     bundled_http_client, CompletionOptions, EventSink, ModelResponse, Provider, ProviderError,
-    StreamEvent, ToolSpec,
+    ToolSpec,
 };
 
 /// The `codex-oauth::` model-id namespace [`crate::DispatchProvider`] routes on.
@@ -905,30 +906,6 @@ fn apply_codex_body_overrides(body: &mut serde_json::Value, opts: &CompletionOpt
     }
 }
 
-/// Wrap `inner` so the caller can tell whether anything user-visible was already streamed by the
-/// time a request fails — the condition that decides whether the next-account hop is still safe.
-///
-/// `execute` streams straight into the caller's sink and forge-core forwards every
-/// `StreamEvent::Text`/`Reasoning` on to the presenter as it arrives, so a hop taken after the first
-/// delta re-renders the reply from the beginning: the user reads the truncated first attempt with the
-/// complete second attempt appended, while the persisted transcript keeps only the second. Live
-/// output and saved history then disagree and neither half is identifiable as the real one. Once
-/// anything has been shown the retry is no longer ours to take — surface the error and let
-/// forge-core's failover own it. Mirrors `genai_provider`'s `can_reconnect` guard.
-///
-/// Only Text/Reasoning count: `ProviderActivity` is a private heartbeat and renders nothing.
-fn watch_visible_output<'a>(
-    inner: &'a mut EventSink<'_>,
-    streamed: &'a mut bool,
-) -> Box<EventSink<'a>> {
-    Box::new(move |event: StreamEvent| {
-        if matches!(event, StreamEvent::Text(_) | StreamEvent::Reasoning(_)) {
-            *streamed = true;
-        }
-        inner(event);
-    })
-}
-
 fn should_retry_incremental_websocket(error: &ProviderError, streamed: bool) -> bool {
     !streamed && matches!(error, ProviderError::Unavailable(_))
 }
@@ -1124,6 +1101,7 @@ impl Provider for CodexOauthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StreamEvent;
     use forge_types::Role;
     use futures::{SinkExt, StreamExt};
 

@@ -28,7 +28,7 @@ mod watch;
 pub use embed::{parse_ollama_embeddings, Embedder, OllamaEmbedder};
 pub use extract::{extract, lang_for_path, supported_languages, Def, Parsed, Ref};
 pub use map::build_map;
-pub use retrieve::{BodyOpts, InjectedContext, RetrievedSnippet};
+pub use retrieve::{BodyOpts, BodyReadFailure, InjectedContext, RetrievedSnippet};
 pub use root::{
     has_project_marker, indexed_roots, is_home_or_system_root, is_toolchain_dir, prune_root,
     stale_roots, RootRefusal, MAX_FILES_MARKED_ROOT, MAX_FILES_UNMARKED_ROOT,
@@ -65,11 +65,18 @@ pub struct Lattice {
 pub struct UpdateStats {
     pub files_indexed: usize,
     pub files_skipped: usize,
+    /// Supported source files skipped before reading because their size would make parsing
+    /// unbounded for an interactive index update.
+    pub files_too_large: usize,
     pub symbols: usize,
     /// Files removed from the index this run because they vanished from the walk (deleted, or now
     /// under a skipped/nested-git/vendored dir). Their symbols/edges/refs are cascade-deleted.
     pub files_pruned: usize,
 }
+
+/// Hard per-file budget for the synchronous parser. A generated or accidentally vendored
+/// multi-megabyte source file should not make the first interactive index/search look hung.
+pub const MAX_INDEX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A symbol returned from a query.
 #[derive(Debug, Clone, PartialEq)]
@@ -308,6 +315,23 @@ impl Lattice {
 
     fn index_file(&self, path: &Path, stats: &mut UpdateStats) -> Result<(), LatticeError> {
         let rel = self.rel_path(path);
+        if path
+            .metadata()
+            .map(|metadata| metadata.len() > MAX_INDEX_FILE_BYTES)
+            .unwrap_or(false)
+        {
+            // Remove an older row as well: retaining symbols for a file that is now outside the
+            // parser budget is more misleading than reporting it as skipped.
+            let _ = self.store.delete_lattice_file(&self.repo_root, &rel);
+            stats.files_skipped += 1;
+            stats.files_too_large += 1;
+            tracing::warn!(
+                file = %path.display(),
+                max_bytes = MAX_INDEX_FILE_BYTES,
+                "lattice: skipping source file above parser budget"
+            );
+            return Ok(());
+        }
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(_) => {
@@ -782,6 +806,25 @@ mod tests {
     }
 
     #[test]
+    fn skips_a_source_file_above_the_parser_budget_before_reading_it() {
+        let t = Tmp::new();
+        let large = t.root.join("src/generated.rs");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_INDEX_FILE_BYTES + 1)
+            .unwrap();
+        t.write("src/keep.rs", "pub fn responsive_symbol() {}\n");
+        let lat = lattice(&t.root);
+
+        let stats = lat.update().unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(stats.files_too_large, 1);
+        assert_eq!(stats.files_skipped, 1);
+        assert_eq!(lat.query("responsive_symbol", 10).unwrap().len(), 1);
+        assert!(lat.query("generated", 10).unwrap().is_empty());
+    }
+
+    #[test]
     fn update_prunes_files_that_vanished_from_the_walk() {
         let t = Tmp::new();
         t.write("src/keep.rs", "pub fn kept_symbol() {}\n");
@@ -1041,6 +1084,31 @@ mod tests {
             .snippets
             .iter()
             .any(|s| s.text.contains("parse_tokens")));
+    }
+
+    #[test]
+    fn retrieve_reports_body_read_failure_and_keeps_signature() {
+        let t = Tmp::new();
+        t.write("src/lib.rs", "pub fn parse_tokens() {}\n");
+        let lat = lattice(&t.root);
+        lat.update().unwrap();
+        std::fs::remove_file(t.root.join("src/lib.rs")).unwrap();
+
+        let ctx = lat
+            .retrieve(
+                "parse_tokens",
+                500,
+                Some(retrieve::BodyOpts {
+                    max_tokens: 200,
+                    max_hits: 1,
+                }),
+            )
+            .unwrap();
+        assert_eq!(ctx.body_read_failures.len(), 1);
+        assert_eq!(ctx.body_read_failures[0].rel_path, "src/lib.rs");
+        assert!(!ctx.body_read_failures[0].reason.is_empty());
+        assert_eq!(ctx.snippets.len(), 1, "signature remains available");
+        assert!(!ctx.snippets[0].is_body);
     }
 
     #[test]

@@ -2,6 +2,9 @@
 //!
 //! This module owns generation-bound completion and interruption behavior.
 
+use std::path::Path;
+use std::time::{Duration, Instant};
+
 use super::*;
 
 /// Context-fill fraction above which a turn-end auto-compact fires (context-compaction.md).
@@ -15,15 +18,174 @@ pub(crate) const LOOP_GUIDANCE: &str = "You are running in an autonomous loop. M
 task each turn. When — and ONLY when — the task is fully complete, end your final message with \
 the token LOOP_COMPLETE on its own line. While work remains, keep going and do NOT emit that token.";
 
+/// The genuine-completion reason from [`loop_stop_reason`] (the model emitted the sentinel), as
+/// opposed to a safety-cap stop (iteration ceiling). Only a genuine completion is gated on quality
+/// gates — a runaway-loop cap should stop the run outright, not get stuck retrying gates.
+pub(crate) const LOOP_COMPLETE_REASON: &str = "◆ loop complete";
+
 /// Decide whether a loop should stop after a turn. Returns `Some(reason)` to stop (shown to the
 /// user), or `None` to run another iteration. Pure so it's unit-testable.
 pub(crate) fn loop_stop_reason(last_assistant: Option<&str>, iter: usize) -> Option<&'static str> {
     if last_assistant.is_some_and(|t| t.contains(LOOP_DONE_SENTINEL)) {
-        Some("◆ loop complete")
+        Some(LOOP_COMPLETE_REASON)
     } else if iter >= LOOP_MAX_ITERS {
         Some("◆ loop stopped — hit the iteration cap")
     } else {
         None
+    }
+}
+
+/// True when `reason` is [`loop_stop_reason`]'s genuine-completion reason (as opposed to a
+/// safety-cap stop).
+pub(crate) fn is_loop_complete_reason(reason: &str) -> bool {
+    reason == LOOP_COMPLETE_REASON
+}
+
+/// Wall-clock + accumulated-token ceiling for one `/loop` or `/goal` run (prime-agent budgets,
+/// docs/features/autonomous-gates.md). Checked between iterations; reaching either stops the run
+/// with a clear "not success" reason. `None` means unbounded (the default — fully backward
+/// compatible with bare `/loop`/`/goal`).
+pub(crate) struct AutonomyBudget {
+    pub(crate) max_tokens: Option<u64>,
+    pub(crate) max_elapsed: Option<Duration>,
+    pub(crate) tokens_used: u64,
+    pub(crate) started_at: Instant,
+}
+
+impl AutonomyBudget {
+    pub(crate) fn new(max_tokens: Option<u64>, max_minutes: Option<u64>) -> Self {
+        Self {
+            max_tokens,
+            max_elapsed: max_minutes.map(|m| Duration::from_secs(m.saturating_mul(60))),
+            tokens_used: 0,
+            started_at: Instant::now(),
+        }
+    }
+}
+
+/// Which ceiling a budget check tripped — shared by the loop/goal-flavored wrappers below so the
+/// exceeded-check itself stays written once.
+enum BudgetExceeded {
+    Tokens,
+    Wall,
+}
+
+fn budget_exceeded(
+    tokens_used: u64,
+    max_tokens: Option<u64>,
+    elapsed: Duration,
+    max_elapsed: Option<Duration>,
+) -> Option<BudgetExceeded> {
+    if max_tokens.is_some_and(|max| tokens_used >= max) {
+        Some(BudgetExceeded::Tokens)
+    } else if max_elapsed.is_some_and(|max| elapsed >= max) {
+        Some(BudgetExceeded::Wall)
+    } else {
+        None
+    }
+}
+
+/// Pure budget check for `/loop`. Returns `Some(reason)` once either ceiling has been reached.
+pub(crate) fn loop_budget_stop_reason(
+    tokens_used: u64,
+    max_tokens: Option<u64>,
+    elapsed: Duration,
+    max_elapsed: Option<Duration>,
+) -> Option<&'static str> {
+    match budget_exceeded(tokens_used, max_tokens, elapsed, max_elapsed)? {
+        BudgetExceeded::Tokens => Some("◆ loop stopped — token budget exhausted"),
+        BudgetExceeded::Wall => Some("◆ loop stopped — time budget exhausted"),
+    }
+}
+
+/// Pure budget check for `/goal`. Mirrors [`loop_budget_stop_reason`] with goal-flavored text.
+pub(crate) fn goal_budget_stop_reason(
+    tokens_used: u64,
+    max_tokens: Option<u64>,
+    elapsed: Duration,
+    max_elapsed: Option<Duration>,
+) -> Option<&'static str> {
+    match budget_exceeded(tokens_used, max_tokens, elapsed, max_elapsed)? {
+        BudgetExceeded::Tokens => Some("🎯 goal stopped — token budget exhausted"),
+        BudgetExceeded::Wall => Some("🎯 goal stopped — time budget exhausted"),
+    }
+}
+
+fn gate_failure_prompt(cmd: &str, bounded_output: &str) -> String {
+    format!("Quality gate `{cmd}` failed:\n{bounded_output}")
+}
+
+/// Like [`gate_failure_prompt`] but keeps the goal text in view — a `/goal` re-drive turn only
+/// ever sees [`GOAL_CONTINUE_PROMPT`] otherwise, so a gate-failure detour must restate what it's
+/// working toward.
+fn goal_gate_failure_prompt(goal: &str, cmd: &str, bounded_output: &str) -> String {
+    format!(
+        "Goal: {goal}\n\n{}",
+        gate_failure_prompt(cmd, bounded_output)
+    )
+}
+
+/// What to do with a `/loop` turn that just finished, folding in gates + budgets on top of the
+/// existing sentinel/iteration-cap policy ([`loop_stop_reason`]).
+pub(crate) enum LoopDecision {
+    /// Stop the run; `String` is the reason shown to the user (never implies success unless it's
+    /// [`is_loop_complete_reason`]).
+    Stop(String),
+    /// A quality gate failed within its retry budget — re-drive with the bounded gate output as
+    /// the next prompt instead of stopping.
+    GateFailed { prompt: String },
+    /// Neither stopped nor gated — run another normal iteration.
+    Retry,
+}
+
+/// Decide the next action for a finished `/loop` turn: sentinel/iteration-cap policy first, then
+/// (only on genuine completion) quality gates, then budgets. Mutates `state` in place — attempts,
+/// fingerprints, and accumulated token usage all persist across iterations of the same run.
+pub(crate) async fn next_loop_decision(
+    state: &mut LoopState,
+    last_assistant: Option<&str>,
+    tokens_this_turn: u64,
+    cwd: &Path,
+) -> LoopDecision {
+    state.budget.tokens_used = state.budget.tokens_used.saturating_add(tokens_this_turn);
+    match loop_stop_reason(last_assistant, state.iter) {
+        Some(reason) if is_loop_complete_reason(reason) => {
+            let fingerprint = workspace_fingerprint(cwd).await;
+            match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint).await {
+                GateOutcome::AllPassed => LoopDecision::Stop(reason.to_string()),
+                GateOutcome::Failed {
+                    gate_index,
+                    bounded_output,
+                } => match loop_budget_stop_reason(
+                    state.budget.tokens_used,
+                    state.budget.max_tokens,
+                    state.budget.started_at.elapsed(),
+                    state.budget.max_elapsed,
+                ) {
+                    Some(reason) => LoopDecision::Stop(reason.to_string()),
+                    None => LoopDecision::GateFailed {
+                        prompt: gate_failure_prompt(
+                            &state.gates[gate_index].spec.cmd,
+                            &bounded_output,
+                        ),
+                    },
+                },
+                GateOutcome::Exhausted { gate_index } => LoopDecision::Stop(format!(
+                    "◆ loop stopped — quality gate exhausted: {}",
+                    state.gates[gate_index].spec.cmd
+                )),
+            }
+        }
+        Some(reason) => LoopDecision::Stop(reason.to_string()),
+        None => match loop_budget_stop_reason(
+            state.budget.tokens_used,
+            state.budget.max_tokens,
+            state.budget.started_at.elapsed(),
+            state.budget.max_elapsed,
+        ) {
+            Some(reason) => LoopDecision::Stop(reason.to_string()),
+            None => LoopDecision::Retry,
+        },
     }
 }
 
@@ -36,6 +198,36 @@ pub(crate) struct GoalState {
     pub(crate) prev_done: usize,
     pub(crate) no_progress: usize,
     pub(crate) goal: String,
+    /// User-defined quality gates (`/goal --gate "<cmd>"`) that must all pass before the run is
+    /// allowed to finish — empty when none were given (docs/features/autonomous-gates.md).
+    pub(crate) gates: Vec<GateState>,
+    pub(crate) gate_cfg: GateConfig,
+    /// Token/wall-clock ceiling (`/goal --max-tokens`/`--max-minutes`) — unbounded when unset.
+    pub(crate) budget: AutonomyBudget,
+}
+
+impl GoalState {
+    pub(crate) fn new(
+        gen: u64,
+        goal: String,
+        gate_cmds: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    ) -> Self {
+        Self {
+            gen,
+            iter: 1,
+            prev_done: 0,
+            no_progress: 0,
+            goal,
+            gates: gate_cmds
+                .into_iter()
+                .map(|cmd| GateState::new(GateSpec { cmd }))
+                .collect(),
+            gate_cfg: GateConfig::default(),
+            budget: AutonomyBudget::new(max_tokens, max_minutes),
+        }
+    }
 }
 
 /// Absolute iteration ceiling so a goal that never signals completion can't run forever.
@@ -67,6 +259,79 @@ pub(crate) const GOAL_COMPLETE_REASON: &str = "🎯 goal complete";
 
 pub(crate) fn is_goal_complete_reason(reason: &str) -> bool {
     reason == GOAL_COMPLETE_REASON || reason == "🎯 goal complete — all tasks done"
+}
+
+/// What to do with a `/goal` turn that just finished. Mirrors [`LoopDecision`]; see
+/// [`next_goal_decision`].
+pub(crate) enum GoalDecision {
+    /// Stop the run; `String` is the reason shown to the user. A genuine completion
+    /// ([`is_goal_complete_reason`]) is intentionally left unnoted by the caller (the model's own
+    /// final message already says so) — every other reason must be surfaced.
+    Stop(String),
+    /// A quality gate failed within its retry budget — re-drive with the bounded gate output as
+    /// the next prompt instead of stopping.
+    GateFailed { prompt: String },
+    /// Neither stopped nor gated — run another normal iteration.
+    Retry,
+}
+
+/// Decide the next action for a finished `/goal` turn: task-plan/stall policy first
+/// ([`goal_stop_reason`]), then (only on genuine completion) quality gates, then budgets. Mutates
+/// `state` in place — `prev_done`/`no_progress` advance exactly as the old reconstruct-a-new-
+/// `GoalState`-each-iteration code did; gate attempts/fingerprints and accumulated token usage
+/// persist across the whole run.
+pub(crate) async fn next_goal_decision(
+    state: &mut GoalState,
+    said_complete: bool,
+    done: usize,
+    total: usize,
+    tokens_this_turn: u64,
+    cwd: &Path,
+) -> GoalDecision {
+    state.budget.tokens_used = state.budget.tokens_used.saturating_add(tokens_this_turn);
+    let progressed = done > state.prev_done;
+    state.no_progress = if progressed { 0 } else { state.no_progress + 1 };
+    state.prev_done = done;
+    match goal_stop_reason(said_complete, done, total, state.iter, state.no_progress) {
+        Some(reason) if is_goal_complete_reason(reason) => {
+            let fingerprint = workspace_fingerprint(cwd).await;
+            match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint).await {
+                GateOutcome::AllPassed => GoalDecision::Stop(reason.to_string()),
+                GateOutcome::Failed {
+                    gate_index,
+                    bounded_output,
+                } => match goal_budget_stop_reason(
+                    state.budget.tokens_used,
+                    state.budget.max_tokens,
+                    state.budget.started_at.elapsed(),
+                    state.budget.max_elapsed,
+                ) {
+                    Some(reason) => GoalDecision::Stop(reason.to_string()),
+                    None => GoalDecision::GateFailed {
+                        prompt: goal_gate_failure_prompt(
+                            &state.goal,
+                            &state.gates[gate_index].spec.cmd,
+                            &bounded_output,
+                        ),
+                    },
+                },
+                GateOutcome::Exhausted { gate_index } => GoalDecision::Stop(format!(
+                    "🎯 goal stopped — quality gate exhausted: {}",
+                    state.gates[gate_index].spec.cmd
+                )),
+            }
+        }
+        Some(reason) => GoalDecision::Stop(reason.to_string()),
+        None => match goal_budget_stop_reason(
+            state.budget.tokens_used,
+            state.budget.max_tokens,
+            state.budget.started_at.elapsed(),
+            state.budget.max_elapsed,
+        ) {
+            Some(reason) => GoalDecision::Stop(reason.to_string()),
+            None => GoalDecision::Retry,
+        },
+    }
 }
 
 /// Remove the oldest prompt submitted while a turn was active, refresh the visible queue, and
@@ -130,6 +395,77 @@ pub(crate) fn goal_stop_reason(
         Some("🎯 goal stalled — no task progress, stopping")
     } else {
         None
+    }
+}
+
+/// Check for due session heartbeats and, if the session is idle with no turn already running,
+/// deliver the claimed tick(s) as ordinary queued turns — the same FIFO a typed-while-busy prompt
+/// goes through, never injected mid-turn (docs/features/session-heartbeats.md). Shared by the
+/// interactive TUI loop and the daemon-hosted driver loop (`DriverState`), called both right after
+/// a turn ends and on a coarse periodic tick so a heartbeat fires even while the session sits
+/// fully idle. Uses `try_lock`: on contention (a turn is starting elsewhere right now) this simply
+/// skips the check and retries on the next call rather than blocking the render loop. Returns
+/// `Ok(true)` if a turn was spawned (the caller should mark its frame dirty), or the Store error
+/// when the heartbeat claim could not be read.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_deliver_due_heartbeats(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    queued_prompts: &mut Vec<String>,
+    app: &mut forge_tui::App,
+    prompt_history: &mut Vec<String>,
+    last_prompt: &mut Option<String>,
+    done_tx: &std::sync::mpsc::Sender<u64>,
+    turn_gen: &mut u64,
+    turn_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    busy: &mut bool,
+    busy_since: &mut std::time::Instant,
+) -> std::result::Result<bool, forge_store::StoreError> {
+    if *busy || turn_handle.is_some() {
+        return Ok(false);
+    }
+    let due = {
+        let Ok(s) = session.try_lock() else {
+            return Ok(false);
+        };
+        forge_core::heartbeat::claim_due_heartbeat_prompts(&s.store, s.id())?
+    };
+    if due.is_empty() {
+        return Ok(false);
+    }
+    queued_prompts.extend(due);
+    app.set_queued(queued_prompts);
+    let Some(next) = dequeue_prompt(queued_prompts, app, prompt_history) else {
+        return Ok(false);
+    };
+    *last_prompt = Some(next.clone());
+    *turn_gen += 1;
+    *turn_handle = Some(spawn_turn(
+        &next, session, done_tx, *turn_gen, app, busy, busy_since,
+    ));
+    Ok(true)
+}
+
+/// Apply the result of an idle heartbeat check to the UI. Store failures are shown once until a
+/// later successful check clears the latch; the periodic driver retries normally without filling
+/// the transcript with the same warning every few seconds.
+pub(crate) fn report_heartbeat_delivery(
+    result: std::result::Result<bool, forge_store::StoreError>,
+    app: &mut forge_tui::App,
+    last_error: &mut Option<String>,
+) -> bool {
+    match result {
+        Ok(spawned) => {
+            *last_error = None;
+            spawned
+        }
+        Err(error) => {
+            let message = error.to_string();
+            if last_error.as_deref() != Some(message.as_str()) {
+                app.note(&format!("⚠ heartbeat check failed: {message}"));
+                *last_error = Some(message);
+            }
+            false
+        }
     }
 }
 
@@ -217,6 +553,35 @@ pub(crate) fn spawn_compact(
         let mut sess = s.lock().await;
         if let Err(e) = sess.compact(false).await {
             sess.notify_error(&format!("compact failed: {e}"));
+        }
+    })
+}
+
+/// Spawn `/refine` as a background task (it makes a cheap model call): the spinner ticks while the
+/// Continual Harness proposes + applies its edits, exactly like `/compact`. Success is reported by
+/// `Session::refine` itself via its own `PresenterEvent::Warning` (mirrors `compact`'s convention).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_refine(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    done_tx: &std::sync::mpsc::Sender<u64>,
+    gen: u64,
+    app: &mut forge_tui::App,
+    busy: &mut bool,
+    busy_since: &mut std::time::Instant,
+    instructions: Option<String>,
+    global: bool,
+) -> tokio::task::JoinHandle<()> {
+    app.done = false;
+    app.tick = 0;
+    *busy = true;
+    *busy_since = std::time::Instant::now();
+    let s = session.clone();
+    let dt = done_tx.clone();
+    tokio::spawn(async move {
+        let _done = DoneGuard(dt, gen);
+        let mut sess = s.lock().await;
+        if let Err(e) = sess.refine(instructions.as_deref(), global, "manual").await {
+            sess.notify_error(&format!("refine failed: {e}"));
         }
     })
 }

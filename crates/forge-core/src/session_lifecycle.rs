@@ -59,6 +59,14 @@ impl Session {
         if !store.session_exists(session_id)? {
             return Err(CoreError::SessionNotFound(session_id.to_string()));
         }
+        // Retained async subagents (RFC retained-async-subagents): a row still `running` belonged
+        // to a task in whatever process last admitted it. This resume is a FRESH process (the
+        // common case is a daemon restart or `forge run --resume`), so that task is gone and will
+        // never call `finish_detached_child` — reconcile it to `failed` now, once, before this
+        // session's `detached_registry` (empty — no live tasks) is trusted as authoritative. Must
+        // NOT be called again on every turn: a legitimately still-running detached child in THIS
+        // process would otherwise be swept out from under itself.
+        let _ = store.reconcile_running_detached_children(session_id);
         let stored = store.load_messages(session_id)?;
         // The next seq is MAX(seq)+1 from the DB, NOT the loaded count — after compaction
         // `load_messages` returns only the active tail (+ summary), so its length is far below the
@@ -126,7 +134,7 @@ impl Session {
         provider: Arc<dyn Provider>,
         router: Arc<dyn Router>,
         tools: ToolRegistry,
-        presenter: Box<dyn Presenter>,
+        mut presenter: Box<dyn Presenter>,
         config: Config,
         workspace: WorkspaceContext,
         transcript: Vec<Message>,
@@ -140,7 +148,13 @@ impl Session {
         let pricing = Pricing::from_config_with_fetched(&config, fetched_prices);
         let rules = config.permission_rules();
         // Rehydrate the task list (empty for a fresh session; restored on resume).
-        let tasks = store.tasks(&id).unwrap_or_default();
+        let tasks = match store.tasks(&id) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::warn!(session_id = %id, %error, "session task history could not be restored");
+                Vec::new()
+            }
+        };
         // Resumed sessions already have AGENTS.md in the stored transcript; don't re-inject.
         let project_prompt_injected = !transcript.is_empty();
         let checkpoint_root = workspace.root().join(".forge/checkpoints");
@@ -150,7 +164,11 @@ impl Session {
         } else {
             read_project_agents_md(workspace.root())
         };
-        let project = crate::project_context::compute(workspace.root());
+        let (project, project_diagnostic) =
+            crate::project_context::compute_with_diagnostic(workspace.root());
+        if let Some(diagnostic) = project_diagnostic {
+            presenter.emit(PresenterEvent::Warning(diagnostic));
+        }
         let mut s = Self {
             id,
             store,
@@ -175,6 +193,7 @@ impl Session {
             mcp: None,
             lattice: None,
             lattice_watcher: None,
+            lattice_watcher_handle: None,
             lattice_watch_enabled: false,
             lsp: None,
             skills: None,
@@ -205,6 +224,8 @@ impl Session {
             project,
             last_context_pack: context_pack::ContextPack::default(),
             last_turn_contract: turn_contract::TurnContract::default(),
+            detached_registry: crate::subagent::DetachedRegistry::new(),
+            turns_since_refine: 0,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });

@@ -118,7 +118,8 @@ pub(crate) fn daemon_token_at(path: &std::path::Path, rotate: bool) -> Result<St
         rand::random::<u64>()
     );
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating token directory {}", parent.display()))?;
     }
     std::fs::write(path, &token).with_context(|| format!("writing {}", path.display()))?;
     #[cfg(unix)]
@@ -231,10 +232,21 @@ pub(crate) fn read_state() -> Result<Option<ServeState>> {
 /// that only checks file existence. The pid-liveness check on the reader side (Tauri's
 /// `detect_forge_serve`) is the belt to this suspenders — this just avoids leaving stale
 /// advisory data behind after a clean exit.
-fn remove_state() {
-    if let Some(dir) = forge_config::config_dir() {
-        let _ = std::fs::remove_file(dir.join(STATE_FILE));
+fn remove_state_at(path: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("removing daemon state {}", path.display()))
+        }
     }
+}
+
+fn remove_state() -> Result<()> {
+    let Some(dir) = forge_config::config_dir() else {
+        return Ok(());
+    };
+    remove_state_at(&dir.join(STATE_FILE))
 }
 
 /// The daemon's session registry: id → running driver handle. Mirrors `mcp_serve`'s
@@ -355,7 +367,9 @@ fn attention_became_required(was_waiting: bool, is_waiting: bool) -> bool {
 /// resurrect — [`SessionRegistry::insert`] calls this unconditionally). A no-op when the target
 /// still has no live handle: the row stays pending and is drained the next time this runs for it.
 /// Best-effort throughout — an individual send failure leaves that one row pending for the next
-/// call rather than losing it, and never fails the caller.
+/// call rather than losing it, and never fails the caller. A successful input send whose durable
+/// acknowledgement fails is also left pending, but emits a warning so operators can distinguish
+/// a retryable persistence problem from a quiet successful delivery.
 pub(crate) async fn deliver_pending_fleet_messages(
     store: &forge_store::Store,
     registry: &SessionRegistry,
@@ -381,7 +395,20 @@ pub(crate) async fn deliver_pending_fleet_messages(
             }
         };
         if handle.input_tx.send(input).await.is_ok() {
-            let _ = store.mark_fleet_message_delivered(&msg.id, chrono::Utc::now().timestamp());
+            match store.mark_fleet_message_delivered(&msg.id, chrono::Utc::now().timestamp()) {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    message_id = %msg.id,
+                    target_session_id = %target_id,
+                    "fleet message was sent but its durable delivery marker was missing; it will be retried"
+                ),
+                Err(error) => tracing::warn!(
+                    message_id = %msg.id,
+                    target_session_id = %target_id,
+                    %error,
+                    "fleet message was sent but its durable delivery marker could not be written; it will be retried"
+                ),
+            }
         }
     }
 }
@@ -565,7 +592,10 @@ pub(crate) async fn serve_cmd(
     rotate_token: bool,
     mock: bool,
 ) -> Result<()> {
-    let config = forge_config::load().unwrap_or_default();
+    // A present but malformed config must stop startup with its parse context. Falling back to
+    // defaults here silently changes the daemon's port, project roots, and feature switches while
+    // leaving the service looking healthy to watchdogs and clients.
+    let config = forge_config::load().context("loading Forge configuration")?;
     let port = port.unwrap_or_else(|| config.remote.serve_port());
     let token = daemon_token(rotate_token)?;
     if rotate_token {
@@ -765,7 +795,7 @@ pub(crate) async fn serve_cmd(
             for handle in handles {
                 handle.join(ARCHIVE_JOIN_TIMEOUT).await;
             }
-            remove_state();
+            remove_state()?;
             Ok(())
         }
     };
@@ -3475,6 +3505,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn remove_state_reports_cleanup_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let error = remove_state_at(dir.path()).expect_err("directory cannot be removed as a file");
+
+        assert!(
+            error.to_string().contains("removing daemon state"),
+            "unexpected error: {error:?}"
+        );
+    }
+
     /// The daemon's core promises, end to end over REAL driver tasks (offline mock provider,
     /// isolated FORGE_DB): registry create/list/archive; two sessions driven CONCURRENTLY over
     /// separate handles with zero cross-talk; sessions keep running with zero clients attached
@@ -5074,7 +5116,9 @@ mod tests {
             ),
         );
         tokio::spawn(async move {
-            axum::serve(push_listener, push_service).await.ok();
+            if let Err(error) = axum::serve(push_listener, push_service).await {
+                panic!("push test listener terminated unexpectedly: {error}");
+            }
         });
 
         // The "browser": a fixed receiver keypair + auth secret we can decrypt with.
@@ -5351,6 +5395,100 @@ mod tests {
         assert!(
             cap_rx.try_recv().is_err(),
             "turn-done must NOT push while a client is connected"
+        );
+
+        // A prompt that arrives later must not be answerable with a replay of the first prompt's
+        // Allow. This is the end-to-end boundary the unit-level seq comparison cannot cover: the
+        // real driver has rotated its pending decision and the HTTP notification path must keep
+        // the newer write behind its own sequence.
+        handle
+            .input_tx
+            .send(remote::RemoteInput::Prompt {
+                text: "mock:write again".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let second_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let second_pending = loop {
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
+            if s.permission_prompt.is_some() {
+                break s;
+            }
+            assert!(
+                std::time::Instant::now() < second_deadline,
+                "second permission prompt never appeared; snapshot: {s:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        };
+        assert_ne!(
+            second_pending.prompt_seq, pending.prompt_seq,
+            "each pending decision needs a fresh replay-protection sequence"
+        );
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/answer",
+                format!(
+                    r#"{{"session":"{}","seq":{},"allow":true}}"#,
+                    handle.session_id, pending.prompt_seq
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::CONFLICT,
+            "replaying the first Allow cannot authorize a later prompt"
+        );
+        assert!(
+            handle
+                .snapshot_rx
+                .borrow()
+                .snapshot
+                .permission_prompt
+                .is_some(),
+            "the second prompt survives a replayed Allow"
+        );
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/answer",
+                format!(
+                    r#"{{"session":"{}","seq":{},"allow":true}}"#,
+                    handle.session_id, second_pending.prompt_seq
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let second_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
+            if !s.busy && s.permission_prompt.is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < second_deadline,
+                "second prompt never resolved; snapshot: {s:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/answer",
+                format!(
+                    r#"{{"session":"{}","seq":{},"allow":true}}"#,
+                    handle.session_id, second_pending.prompt_seq
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::CONFLICT,
+            "replaying an already-consumed Allow cannot authorize anything"
         );
 
         // (5) Client gone → the next completed turn pushes "done".
@@ -6235,5 +6373,17 @@ mod tests {
         assert_eq!(t.len(), 32, "corrupted token is replaced, not trusted");
         assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn daemon_token_reports_unwritable_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("not-a-directory");
+        std::fs::write(&parent, b"occupied").unwrap();
+        let error = daemon_token_at(&parent.join("serve-token"), false)
+            .expect_err("token creation must fail when its parent is a file");
+        let message = error.to_string();
+        assert!(message.contains("creating token directory"), "{message}");
+        assert!(message.contains("not-a-directory"), "{message}");
     }
 }

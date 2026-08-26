@@ -28,14 +28,17 @@ use forge_types::{Presenter, PresenterEvent};
 
 pub mod assay;
 mod auxiliary_policy;
+mod btw_policy;
 pub mod capsule;
 mod compaction_policy;
 mod completeness;
 pub(crate) mod completion;
 pub mod context_pack;
 pub(crate) mod context_pipeline;
+mod detached_subagents;
 pub mod duel;
 pub mod fleet;
+pub mod heartbeat;
 pub mod hooks;
 pub mod llm_router;
 mod model_loop;
@@ -48,6 +51,7 @@ pub mod permission;
 pub mod project_context;
 mod quality_gates;
 pub mod readiness;
+mod refinement;
 mod replay;
 mod routing_policy;
 mod session_controls;
@@ -1440,6 +1444,9 @@ pub struct Session {
     /// Receiver dropped → channel + watcher drop → watching stops). Per-session ownership so repeated
     /// `build_session` calls (bench, replay) don't leak watcher threads.
     lattice_watcher: Option<std::sync::mpsc::Receiver<forge_index::LatticeWatcher>>,
+    /// Once setup completes, hold the watcher here so backend errors can be surfaced at the next
+    /// user-turn boundary instead of remaining stranded in the delivery channel.
+    lattice_watcher_handle: Option<forge_index::LatticeWatcher>,
     /// Whether a workspace transition must recreate the lattice watcher.
     lattice_watch_enabled: bool,
     /// LSP registry for live diagnostics after writes. `None` when lsp.enabled = false.
@@ -1545,6 +1552,15 @@ pub struct Session {
     last_context_pack: context_pack::ContextPack,
     /// The explicit completion expectation active during the latest turn.
     last_turn_contract: turn_contract::TurnContract,
+    /// In-memory abort handles for this session's currently-running detached children (retained
+    /// async subagents), so `cancel_subagent` can stop a live task in THIS process. The durable
+    /// half (status/result) lives in the `detached_child` store table and survives a restart;
+    /// this registry does not — it's rebuilt empty on every fresh `Session`, which is correct: a
+    /// new process has no live tasks to abort, only rows to reconcile (see `Session::resume`).
+    detached_registry: subagent::DetachedRegistry,
+    /// Completed turns since the last Continual Harness refinement (refinement.rs). Drives
+    /// `harness.auto_refine = "turns"`; reset whenever [`Session::refine`] runs, manual or auto.
+    turns_since_refine: u32,
 }
 
 /// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
@@ -2006,6 +2022,11 @@ impl Session {
             // spawn_agents — a fresh session simply has no children yet and the tool says so.
             specs.push(subagent::send_to_agent_spec());
             specs.push(workflow::run_workflow_spec());
+            // Retained async subagents (RFC retained-async-subagents): status + cancellation for
+            // `spawn_agents(detached: true)` children. Advertised alongside spawn_agents — same
+            // gate, same "empty until first use" story as send_to_agent above.
+            specs.push(subagent::list_subagents_spec());
+            specs.push(subagent::cancel_subagent_spec());
         }
         if self
             .task_scope
@@ -2030,6 +2051,14 @@ impl Session {
             .is_none_or(|scope| scope.permits_tool(REMEMBER_TOOL))
         {
             specs.push(remember_spec());
+        }
+        // Agent-created recurring re-entry prompts — distinct from the user's own `/heartbeat`.
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(heartbeat::MANAGE_HEARTBEATS_TOOL))
+        {
+            specs.push(heartbeat::manage_heartbeats_spec());
         }
         // The plan-presentation tool — offered ONLY in planning mode, so the model proposes a plan
         // (rendered as an interactive card) instead of editing. Gating it to Plan mode also makes
@@ -2256,12 +2285,19 @@ impl Session {
         guidance: &[String],
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
+        self.poll_lattice_watcher();
         // A TUI/serve driver can remain alive while retention prunes its previously empty parent
         // row. Every subsequent persistence write references this id, so restore that minimal
         // parent before routing, command guidance, or the prompt can touch the transcript.
         let mode = format!("{:?}", self.mode);
         self.store
             .ensure_session(&self.id, &self.workspace.display(), &mode)?;
+        // Retained async subagents (RFC retained-async-subagents, ADR-0004): deliver any detached
+        // child that finished since the last turn as a labeled turn in THIS turn's context, before
+        // routing/the prompt — so the model sees it as part of what it's responding to. Delivery
+        // goes through the ordinary session queue (a persisted message + transcript push), not a
+        // new presenter surface.
+        self.deliver_pending_detached_results()?;
         // A completed turn's bulky tool logs remain available in the store/replay and in the
         // working tree they inspected, but repeatedly resending them on every later model step
         // makes long sessions grow quadratically. Reclaim them at every user-turn boundary instead
@@ -2495,6 +2531,28 @@ impl Session {
                             "💭 recalled {} memories from past sessions",
                             mems.len()
                         )));
+                    }
+                }
+            }
+
+            // Continual Harness context injection (refinement.rs): surface the learned
+            // prompt/skill/subagent entries this agent has proposed about itself in past
+            // sessions, right alongside auto-memory recall above — same one-shot-per-session
+            // placement, same "durable context from earlier work" spirit, but scoped to how
+            // Forge itself should operate rather than facts about the project.
+            if self.config.harness.enabled {
+                if let Ok(overview) = self.harness_overview() {
+                    if let Some(block) = context_pipeline::harness_context_block(
+                        &overview,
+                        self.config.harness.max_context_entries,
+                        self.config.harness.max_entry_chars,
+                    ) {
+                        self.inject_context(
+                            &mut context_pack,
+                            context_pack::ContextSource::Harness,
+                            "learned harness context (Continual Harness)",
+                            &block,
+                        )?;
                     }
                 }
             }
@@ -3347,14 +3405,20 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && self.edits_this_turn > 0
             && (needs_detected_lint || needs_detected_test)
         {
-            if let Some((lint, test)) = Self::detect_project_commands(self.workspace.root()) {
-                let detected = Self::fill_detected_autofix_commands(&mut af, lint, test);
-                if !detected.is_empty() {
-                    self.presenter.emit(PresenterEvent::Warning(format!(
-                        "autofix: auto-detected project command(s): {}",
-                        detected.join("; ")
-                    )));
+            match Self::detect_project_commands(self.workspace.root()) {
+                Ok(Some((lint, test))) => {
+                    let detected = Self::fill_detected_autofix_commands(&mut af, lint, test);
+                    if !detected.is_empty() {
+                        self.presenter.emit(PresenterEvent::Warning(format!(
+                            "autofix: auto-detected project command(s): {}",
+                            detected.join("; ")
+                        )));
+                    }
                 }
+                Ok(None) => {}
+                Err(error) => self.presenter.emit(PresenterEvent::Warning(format!(
+                    "autofix: could not inspect project checks: {error}"
+                ))),
             }
         }
 
@@ -3556,6 +3620,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.generate_recap(prompt, &final_text, &recap_tasks_before)
             .await;
         self.generate_suggestion(prompt, &final_text).await;
+        // Continual Harness auto-refine gate (`harness.auto_refine = "turns"`, refinement.rs).
+        // Runs inline (unlike recap/suggestion) rather than detaching onto the presenter's sink:
+        // it mutates durable harness state and its own presenter note should land in order with
+        // the turn it concluded, not race a later turn's output.
+        self.auto_refine_after_turns().await;
         // One-shot/headless mode must await memory persistence before the process exits. In the
         // interactive TUI, dropping a Tokio JoinHandle detaches (does not cancel) the capture, so
         // the completed answer and input become usable immediately while persistence finishes.
@@ -8037,6 +8106,85 @@ mod tests {
         assert!(session.transcript[0].content.contains("summarized"));
         // The most recent message is preserved verbatim at the tail.
         assert_eq!(session.transcript.last().unwrap().content, "message 11");
+    }
+
+    #[tokio::test]
+    async fn ask_btw_writes_nothing_to_the_message_table() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = fresh_session(Arc::clone(&store), Config::default());
+        let id = session.session_id().to_string();
+
+        let before = store.load_all_messages(&id).unwrap().len();
+        assert_eq!(before, 0, "fresh session starts with no persisted rows");
+
+        session.ask_btw("what is 2+2?").await;
+
+        let after = store.load_all_messages(&id).unwrap().len();
+        assert_eq!(
+            after, 0,
+            "/btw must not write ANY row (active or soft-deleted) to the message table"
+        );
+        // The transcript used for the NEXT real turn's context must also be untouched.
+        assert!(session.transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_btw_emits_a_btw_answer_event_not_a_transcript_message() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            Config::default(),
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.ask_btw("  what is forge?  ").await;
+
+        let captured = events.lock().unwrap();
+        let answer = captured.iter().find_map(|e| match e {
+            PresenterEvent::BtwAnswer {
+                question, answer, ..
+            } => Some((question.clone(), answer.clone())),
+            _ => None,
+        });
+        let (question, answer) = answer.expect("a BtwAnswer event was emitted");
+        assert_eq!(question, "what is forge?", "the question is trimmed");
+        assert!(!answer.is_empty());
+        assert!(session.transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_btw_on_blank_question_warns_and_makes_no_call() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            Config::default(),
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.ask_btw("   ").await;
+
+        let captured = events.lock().unwrap();
+        assert!(matches!(
+            captured.last(),
+            Some(PresenterEvent::Warning(msg)) if msg.contains("usage: /btw")
+        ));
+        assert!(!captured
+            .iter()
+            .any(|e| matches!(e, PresenterEvent::BtwAnswer { .. })));
     }
 
     #[tokio::test]
@@ -13284,12 +13432,25 @@ mod tests {
         )
         .unwrap();
 
-        let (lint, test) = Session::detect_project_commands(dir.path()).unwrap();
+        let (lint, test) = Session::detect_project_commands(dir.path())
+            .unwrap()
+            .unwrap();
         assert!(
             lint.is_empty(),
             "missing lint/typecheck/check must stay empty"
         );
         assert_eq!(test.as_deref(), Some("npm test 2>&1"));
+    }
+
+    #[test]
+    fn npm_autofix_detection_reports_malformed_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{\"scripts\":").unwrap();
+
+        let error = Session::detect_project_commands(dir.path())
+            .expect_err("malformed package metadata must not look like no project");
+        assert!(error.contains("cannot parse"));
+        assert!(error.contains("package.json"));
     }
 
     #[cfg(unix)]
