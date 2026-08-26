@@ -146,7 +146,7 @@ impl Session {
             // Deliver any queued system hints (e.g. the doom-loop "change approach" nudge) — the
             // serial path does this per call; without it here the nudge sits undelivered and the
             // model is halted next step "after a nudge" it never actually saw.
-            let hints: Vec<String> = self.pending_hints.drain(..).collect();
+            let hints: Vec<String> = std::mem::take(&mut self.pending_hints);
             for hint in hints {
                 let hseq = self.next_seq();
                 let _ = self
@@ -209,7 +209,7 @@ impl Session {
                 self.transcript.push(Message::tool_result(&call.id, result));
                 // Drain any system hints queued by side-call diagnostics (e.g. shell error
                 // interceptor) so the model sees them after the failing tool result.
-                let hints: Vec<String> = self.pending_hints.drain(..).collect();
+                let hints: Vec<String> = std::mem::take(&mut self.pending_hints);
                 for hint in hints {
                     let hseq = self.next_seq();
                     let _ = self
