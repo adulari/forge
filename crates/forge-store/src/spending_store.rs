@@ -40,7 +40,7 @@ impl Store {
                 r.get::<_, i64>(3)? as u64,
             ))
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Spend in the last 5 hours (rolling, not calendar-day-aligned).
@@ -106,7 +106,7 @@ impl Store {
                 r.get::<_, i64>(3)? as u64,
             ))
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Per-model spend + token counts for the current ISO week.
@@ -131,7 +131,7 @@ impl Store {
                 r.get::<_, i64>(3)? as u64,
             ))
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Per-model spend + token counts for the current calendar month.
@@ -156,6 +156,6 @@ impl Store {
                 r.get::<_, i64>(3)? as u64,
             ))
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
