@@ -85,6 +85,14 @@ otherwise publish the combined current bundle to the old binary. Manual and rele
 dispatches use the same baseline and cannot bypass it. An incompatible range fails the OTA workflow
 instead of returning a green skipped run, so the reconciler cannot confuse refusal with publication.
 
+When the native guard refuses, open the failed workflow's **Summary**. It records the exact
+`IOS_OTA_COMPATIBLE_BASE_SHA` and `IOS_OTA_RUNTIME_VERSION` values that were in force, the `BASE..HEAD`
+range that contained the native drift, and the three recovery steps: build and install a new Xcode
+Cloud archive, set the baseline variable to that archive's source commit, and set the runtime variable
+to the fingerprint embedded in that archive. The six-hour reconciler repeats those values in its own
+summary when it dispatches a repair or cannot find a trustworthy publication, so a phone that is
+behind `main` has a durable next action instead of a silent failed dispatch.
+
 When the guard passes, it publishes to the `production` channel with:
 
 ```

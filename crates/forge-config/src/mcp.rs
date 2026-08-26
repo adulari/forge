@@ -592,13 +592,46 @@ fn servers_from_codex_toml(text: &str) -> ParsedServers {
     out
 }
 
-/// Read an existing `.forge/mcp.toml` into an [`McpConfig`], or the default if it's absent or
-/// malformed. Used when merging newly-imported servers into a file that may already exist.
+/// Read an existing `.forge/mcp.toml` into an [`McpConfig`], warning when a present file cannot be
+/// read or parsed. A missing file is the normal empty configuration. Used when merging newly-
+/// imported servers into a file that may already exist.
 pub fn load_mcp_toml(path: &Path) -> McpConfig {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| toml::from_str(&t).ok())
-        .unwrap_or_default()
+    let (config, diagnostic) = load_mcp_toml_with_diagnostic(path);
+    if let Some(diagnostic) = diagnostic {
+        tracing::warn!("{diagnostic}");
+    }
+    config
+}
+
+/// Read MCP TOML while retaining a redacted, path-aware diagnostic for present files that fail.
+/// Callers that need to surface configuration health can use this instead of the compatibility
+/// wrapper [`load_mcp_toml`].
+pub fn load_mcp_toml_with_diagnostic(path: &Path) -> (McpConfig, Option<String>) {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (McpConfig::default(), None)
+        }
+        Err(error) => {
+            return (
+                McpConfig::default(),
+                Some(format!(
+                    "MCP config unavailable at {}: {error}",
+                    path.display()
+                )),
+            )
+        }
+    };
+    match toml::from_str(&text) {
+        Ok(config) => (config, None),
+        Err(error) => (
+            McpConfig::default(),
+            Some(format!(
+                "MCP config at {} is malformed: {error}",
+                path.display()
+            )),
+        ),
+    }
 }
 
 /// Serialize an [`McpConfig`] to a `.forge/mcp.toml` file (creating parent dirs). Secrets are
@@ -620,6 +653,20 @@ mod tests {
         let c = McpConfig::default();
         assert!(c.server_allowed("anything"));
         assert!(c.tool_allowed("gitlab__list_merge_requests"));
+    }
+
+    #[test]
+    fn malformed_mcp_toml_returns_a_diagnostic_without_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.toml");
+        std::fs::write(&path, "[servers\n").unwrap();
+
+        let (config, diagnostic) = load_mcp_toml_with_diagnostic(&path);
+        assert!(config.servers.is_empty());
+        let diagnostic = diagnostic.expect("malformed MCP config must be visible");
+        assert!(diagnostic.contains("MCP config"));
+        assert!(diagnostic.contains("malformed"));
+        assert!(diagnostic.contains("mcp.toml"));
     }
 
     #[test]
