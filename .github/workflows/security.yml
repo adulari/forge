@@ -121,7 +121,12 @@ jobs:
       # surface matches what we validate locally — the action puts `arguments` BEFORE the
       # subcommand, which broke `cargo deny check all` ("unrecognized subcommand 'all'").
       - run: cargo deny check
-      - run: cargo deny --manifest-path vendor/genai-0.6.5/Cargo.toml check
+      # The vendored genai graph is a strict subset of the workspace one, and both are linted with
+      # the same deny.toml. Ignores that legitimately apply to the workspace (e.g. the bincode
+      # advisory, which only the workspace pulls in) therefore match nothing here, and cargo-deny
+      # treats an unused ignore as an error. Allow only that lint, so a real advisory still fails:
+      # the alternative is a second deny.toml that would silently drift from this one.
+      - run: cargo deny --manifest-path vendor/genai-0.6.5/Cargo.toml check --allow advisory-not-detected
 
   security:
     name: security checks
