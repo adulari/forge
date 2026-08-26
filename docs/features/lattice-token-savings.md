@@ -18,6 +18,23 @@ for it are removed) so an interactive update cannot spend an unbounded amount of
 inside a parser. `forge lattice update` reports how many files were skipped for this reason; the
 existing root file-count ceiling and ignored/generated-directory rules remain in force.
 
+## Retrieval body-read budget and per-file cache
+
+The parser budget above bounds *indexing*. Retrieval has its own bound, because injecting bodies
+means reading source at turn time.
+
+Assembling one retrieval reads at most **4 MiB of source** (`MAX_BODY_READ_BYTES` in
+`crates/forge-index/src/retrieve.rs`), and whole-file reads are **cached by relative path** for the
+duration of that retrieval. A query that returns many symbols from the same file therefore reads it
+once instead of once per hit — the common case, since related symbols cluster in one file.
+
+A file is checked against the *remaining* budget via its metadata before being read, so a single
+pathological file cannot consume a turn. When a body is unavailable — budget exhausted, file
+missing, unreadable, or the span invalid — the reason is returned rather than discarded, and the
+caller falls back to the symbol's signature line while reporting why. That distinction is the point:
+a truncated retrieval that looks identical to a clean one is precisely the failure this pairs with
+(see "Lattice retrieval silently drops indexed symbols when source reads fail").
+
 ---
 
 ## 1. Problem
