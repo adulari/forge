@@ -25,6 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      # Per-job store, same reason as ci.yml's test job: these runners are persistent, so an unset
+      # FORGE_DB lets the tests that open the default store share one file across every branch, and
+      # a branch carrying a new migration then breaks unrelated PRs built from an older main.
       - name: Run ignored CLI and TUI end-to-end tests
         run: cargo test --locked -p forge-agent --test tui_e2e --test mcp_serve_e2e -- --ignored
+        env:
+          FORGE_DB: ${{ runner.temp }}/forge-ci-tui-e2e.db
 
