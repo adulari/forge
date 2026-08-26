@@ -11,6 +11,22 @@ use forge_mesh::ModelCatalog;
 use super::CATALOG_CACHE_MAX_AGE_SECS;
 use crate::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DiscoveryStatusKind {
+    Discovered,
+    Failed,
+    TimedOut,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderDiscoveryStatus {
+    pub provider: String,
+    pub kind: DiscoveryStatusKind,
+    pub models: usize,
+    pub detail: Option<String>,
+}
+
 /// Path to the on-disk catalog cache (`~/.local/share/forge/catalog.json`).
 fn catalog_cache_path() -> Option<std::path::PathBuf> {
     forge_config::data_dir().map(|d| d.join("catalog.json"))
@@ -69,7 +85,10 @@ pub(crate) fn invalidate_catalog_cache() {
 
 /// Construct the model backend + router from config. Shared by interactive sessions and the
 /// `mcp-serve` subagent path (RFC subagent-orchestration Phase 3), so both route identically.
-async fn discover_provider_models(p: &str, budget: std::time::Duration) -> Vec<String> {
+async fn discover_provider_models(
+    p: &str,
+    budget: std::time::Duration,
+) -> (Vec<String>, ProviderDiscoveryStatus) {
     let keyed = p != "ollama";
     // Some keyed providers are completion-only — they answer turns fine (via the custom
     // service-target resolver) but have no model-LISTING API, so auto-discovery can't enumerate
@@ -80,35 +99,88 @@ async fn discover_provider_models(p: &str, budget: std::time::Duration) -> Vec<S
             "'{p}' has no model-listing API — it's completion-only; pin a `{p}::<model>` id \
              (or add it under [mesh.models]) to route it. (Not a key/network problem.)"
         );
-        return Vec::new();
+        return (
+            Vec::new(),
+            ProviderDiscoveryStatus {
+                provider: p.to_string(),
+                kind: DiscoveryStatusKind::Unsupported,
+                models: 0,
+                detail: Some("completion-only; configure a model explicitly".into()),
+            },
+        );
     }
     match tokio::time::timeout(budget, forge_provider::list_models(p)).await {
-        Ok(Ok(list)) => list,
+        Ok(Ok(list)) => {
+            let count = list.len();
+            (
+                list,
+                ProviderDiscoveryStatus {
+                    provider: p.to_string(),
+                    kind: DiscoveryStatusKind::Discovered,
+                    models: count,
+                    detail: None,
+                },
+            )
+        }
         Ok(Err(e)) if keyed => {
             tracing::warn!(
                 "model discovery FAILED for keyed provider '{p}': {e} — its models won't be routable this session (check the key / network)"
             );
-            Vec::new()
+            (
+                Vec::new(),
+                ProviderDiscoveryStatus {
+                    provider: p.to_string(),
+                    kind: DiscoveryStatusKind::Failed,
+                    models: 0,
+                    detail: Some(e.to_string()),
+                },
+            )
         }
         Ok(Err(e)) => {
             tracing::debug!("model discovery skipped {p}: {e}");
-            Vec::new()
+            (
+                Vec::new(),
+                ProviderDiscoveryStatus {
+                    provider: p.to_string(),
+                    kind: DiscoveryStatusKind::Failed,
+                    models: 0,
+                    detail: Some(e.to_string()),
+                },
+            )
         }
         Err(_) if keyed => {
             tracing::warn!(
                 "model discovery TIMED OUT for keyed provider '{p}' after {}s — its models won't be routable this session",
                 budget.as_secs()
             );
-            Vec::new()
+            (
+                Vec::new(),
+                ProviderDiscoveryStatus {
+                    provider: p.to_string(),
+                    kind: DiscoveryStatusKind::TimedOut,
+                    models: 0,
+                    detail: Some(format!("after {}s", budget.as_secs())),
+                },
+            )
         }
         Err(_) => {
             tracing::debug!("model discovery timed out for {p}");
-            Vec::new()
+            (
+                Vec::new(),
+                ProviderDiscoveryStatus {
+                    provider: p.to_string(),
+                    kind: DiscoveryStatusKind::TimedOut,
+                    models: 0,
+                    detail: Some(format!("after {}s", budget.as_secs())),
+                },
+            )
         }
     }
 }
 
-pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mesh::ModelCatalog {
+pub(crate) async fn discover_catalog_with_status(
+    config: &forge_config::Config,
+) -> (forge_mesh::ModelCatalog, Vec<ProviderDiscoveryStatus>) {
     use std::time::Duration;
     let mut models = Vec::new();
     // Keyless local first, then every key-holding provider.
@@ -126,8 +198,10 @@ pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mes
     let probes = providers.iter().map(|p| {
         discover_provider_models(p, Duration::from_secs(if p != "ollama" { 8 } else { 4 }))
     });
-    for list in futures::future::join_all(probes).await {
+    let mut statuses = Vec::new();
+    for (list, status) in futures::future::join_all(probes).await {
         models.extend(list);
+        statuses.push(status);
     }
     // Custom OpenAI-compatible providers (NVIDIA NIM, SambaNova, Mistral, Cerebras, …) have no genai
     // SDK adapter, so the genai probe above skips them — but they DO expose an OpenAI `/v1/models`
@@ -151,20 +225,66 @@ pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mes
         )
         .await
         {
-            Ok(Ok(list)) if !list.is_empty() => list,
+            Ok(Ok(list)) if !list.is_empty() => {
+                let count = list.len();
+                (
+                    list,
+                    ProviderDiscoveryStatus {
+                        provider: cp.namespace.to_string(),
+                        kind: DiscoveryStatusKind::Discovered,
+                        models: count,
+                        detail: None,
+                    },
+                )
+            }
             Ok(Err(e)) => {
                 tracing::debug!(
                     "{} live model list failed: {e} — using seed ids",
                     cp.namespace
                 );
-                seeds()
+                let list = seeds();
+                (
+                    list.clone(),
+                    ProviderDiscoveryStatus {
+                        provider: cp.namespace.to_string(),
+                        kind: DiscoveryStatusKind::Failed,
+                        models: list.len(),
+                        detail: Some(format!("using configured seed models: {e}")),
+                    },
+                )
             }
-            _ => seeds(),
+            Err(_) => {
+                let list = seeds();
+                (
+                    list.clone(),
+                    ProviderDiscoveryStatus {
+                        provider: cp.namespace.to_string(),
+                        kind: DiscoveryStatusKind::TimedOut,
+                        models: list.len(),
+                        detail: Some("using configured seed models after 8s".into()),
+                    },
+                )
+            }
+            Ok(Ok(_)) => {
+                let list = seeds();
+                (
+                    list.clone(),
+                    ProviderDiscoveryStatus {
+                        provider: cp.namespace.to_string(),
+                        kind: DiscoveryStatusKind::Failed,
+                        models: list.len(),
+                        detail: Some(
+                            "live endpoint returned no models; using configured seed models".into(),
+                        ),
+                    },
+                )
+            }
         }
     }))
     .await;
-    for list in custom_lists {
+    for (list, status) in custom_lists {
         models.extend(list);
+        statuses.push(status);
     }
     // Azure OpenAI: deployments are configured (`[providers.azure]`), not enumerable via an API in our
     // flow, so seed each `azure::<deployment>` when a key is present. Routing reaches them through the
@@ -267,7 +387,14 @@ pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mes
     // Attach measured benchmark scores (ADR-0011) so the mesh ranks on real performance. Cache-
     // first + incremental: only hits the API when a newly-discovered model has no rating yet.
     let bench = benchmarks::ensure(config, &models, false).await;
-    forge_mesh::ModelCatalog::new(models).with_benchmarks(bench)
+    (
+        forge_mesh::ModelCatalog::new(models).with_benchmarks(bench),
+        statuses,
+    )
+}
+
+pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mesh::ModelCatalog {
+    discover_catalog_with_status(config).await.0
 }
 
 /// Remove a provider's metered models from `models` when its account balance is confirmed below
