@@ -4,6 +4,23 @@
 
 use super::*;
 
+fn report_auxiliary_persistence_failure(
+    session_id: &str,
+    purpose: &str,
+    error: &dyn std::fmt::Display,
+    emit: impl FnOnce(String),
+) {
+    tracing::warn!(
+        session_id,
+        purpose,
+        error = %error,
+        "failed to persist auxiliary call result"
+    );
+    emit(format!(
+        "auxiliary {purpose} result was not persisted: {error}"
+    ));
+}
+
 impl Session {
     const RECAP_SYSTEM: &'static str = "You are a one-line summarizer for a coding assistant. \
 Given the user's request and the assistant's response, write a SINGLE sentence (≤12 words, \
@@ -70,6 +87,7 @@ prompt text, nothing else.";
         let user_snippet: String = prompt.chars().take(500).collect();
         let assistant_snippet: String = final_text.chars().take(1200).collect();
         let workspace = self.workspace.clone();
+        let mut warning_sink = self.presenter.recap_sink();
         Some(tokio::spawn(async move {
             let decision = router
                 .route_hinted(
@@ -106,7 +124,13 @@ prompt text, nothing else.";
             else {
                 return;
             };
-            let _ = store.record_side_call_usage(&id, "memory", &r.usage);
+            if let Err(error) = store.record_side_call_usage(&id, "memory", &r.usage) {
+                report_auxiliary_persistence_failure(&id, "memory usage", &error, |warning| {
+                    if let Some(sink) = warning_sink.as_mut() {
+                        sink.emit(PresenterEvent::Warning(warning));
+                    }
+                });
+            }
             let scope = memory_scope_at(workspace.root());
             // Collect lines into owned Strings before the per-line await to avoid holding
             // a borrow across the embed_one await point.
@@ -125,11 +149,34 @@ prompt text, nothing else.";
                 if text.len() >= 4 {
                     match embed_one(&config.lattice.embeddings, text).await {
                         Some(emb) => {
-                            let _ =
-                                store.add_memory_with_embedding(&scope, kind_cat, text, &id, &emb);
+                            if let Err(error) =
+                                store.add_memory_with_embedding(&scope, kind_cat, text, &id, &emb)
+                            {
+                                report_auxiliary_persistence_failure(
+                                    &id,
+                                    "memory",
+                                    &error,
+                                    |warning| {
+                                        if let Some(sink) = warning_sink.as_mut() {
+                                            sink.emit(PresenterEvent::Warning(warning));
+                                        }
+                                    },
+                                );
+                            }
                         }
                         None => {
-                            let _ = store.add_memory(&scope, kind_cat, text, &id);
+                            if let Err(error) = store.add_memory(&scope, kind_cat, text, &id) {
+                                report_auxiliary_persistence_failure(
+                                    &id,
+                                    "memory",
+                                    &error,
+                                    |warning| {
+                                        if let Some(sink) = warning_sink.as_mut() {
+                                            sink.emit(PresenterEvent::Warning(warning));
+                                        }
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -214,7 +261,14 @@ prompt text, nothing else.";
                         .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                         .await
                     {
-                        let _ = store.record_side_call_usage(&id, "recap", &r.usage);
+                        if let Err(error) = store.record_side_call_usage(&id, "recap", &r.usage) {
+                            report_auxiliary_persistence_failure(
+                                &id,
+                                "recap usage",
+                                &error,
+                                |warning| sink.emit(PresenterEvent::Warning(warning)),
+                            );
+                        }
                         if let Some(text) = recap_line(&r.content) {
                             sink.emit(PresenterEvent::Recap { text });
                         }
@@ -228,7 +282,14 @@ prompt text, nothing else.";
                     .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                     .await
                 {
-                    let _ = store.record_side_call_usage(&id, "recap", &r.usage);
+                    if let Err(error) = store.record_side_call_usage(&id, "recap", &r.usage) {
+                        report_auxiliary_persistence_failure(
+                            &id,
+                            "recap usage",
+                            &error,
+                            |warning| self.presenter.emit(PresenterEvent::Warning(warning)),
+                        );
+                    }
                     if let Some(text) = recap_line(&r.content) {
                         self.presenter.emit(PresenterEvent::Recap { text });
                     }
@@ -309,7 +370,14 @@ prompt text, nothing else.";
                         .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                         .await
                     {
-                        let _ = store.record_side_call_usage(&id, "suggest", &r.usage);
+                        if let Err(error) = store.record_side_call_usage(&id, "suggest", &r.usage) {
+                            report_auxiliary_persistence_failure(
+                                &id,
+                                "suggestion usage",
+                                &error,
+                                |warning| sink.emit(PresenterEvent::Warning(warning)),
+                            );
+                        }
                         if let Some(text) = sanitize_suggestion(&r.content, &prev_prompt) {
                             sink.emit(PresenterEvent::SuggestionReady { text });
                         }
@@ -323,7 +391,14 @@ prompt text, nothing else.";
                     .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                     .await
                 {
-                    let _ = store.record_side_call_usage(&id, "suggest", &r.usage);
+                    if let Err(error) = store.record_side_call_usage(&id, "suggest", &r.usage) {
+                        report_auxiliary_persistence_failure(
+                            &id,
+                            "suggestion usage",
+                            &error,
+                            |warning| self.presenter.emit(PresenterEvent::Warning(warning)),
+                        );
+                    }
                     if let Some(text) = sanitize_suggestion(&r.content, &prev_prompt) {
                         self.presenter
                             .emit(PresenterEvent::SuggestionReady { text });
@@ -417,9 +492,17 @@ prompt text, nothing else.";
         )
         .await;
         if let Ok(Ok(r)) = response {
-            let _ = self
-                .store
-                .record_side_call_usage(&self.id, "shell/diagnose", &r.usage);
+            if let Err(error) =
+                self.store
+                    .record_side_call_usage(&self.id, "shell/diagnose", &r.usage)
+            {
+                report_auxiliary_persistence_failure(
+                    &self.id,
+                    "shell diagnosis usage",
+                    &error,
+                    |warning| self.presenter.emit(PresenterEvent::Warning(warning)),
+                );
+            }
             // Parse structured response: cause on line 1, optional "FIX: <cmd>" on line 2.
             let mut cause = String::new();
             let mut fix: Option<String> = None;

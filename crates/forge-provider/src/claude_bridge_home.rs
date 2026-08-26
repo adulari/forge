@@ -89,10 +89,17 @@ pub fn prepare_claude_bridge_home(real_home: &Path, isolated_dir: &Path) -> anyh
             .is_some_and(|n| FILTERED_SETTINGS_FILES.contains(&n));
 
         if is_filtered_settings {
-            // Missing/malformed settings file: skip silently rather than failing the whole
-            // operation — a bridge run should degrade to "no settings", not error out.
-            if let Some(filtered) = filtered_settings_json(&real_path) {
-                std::fs::write(&dest_path, filtered)?;
+            // Hook isolation remains the safety invariant, so a malformed settings file must not
+            // abort the bridge-home build. Do report the file-level cause: silently dropping a
+            // user's settings makes bridge behavior appear random and is hard to diagnose.
+            match filtered_settings_json(&real_path) {
+                Ok(Some(filtered)) => std::fs::write(&dest_path, filtered)?,
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    path = %real_path.display(),
+                    error = %error,
+                    "claude bridge: skipped malformed settings file"
+                ),
             }
             continue;
         }
@@ -107,17 +114,21 @@ pub fn prepare_claude_bridge_home(real_home: &Path, isolated_dir: &Path) -> anyh
     Ok(())
 }
 
-/// Parse `path` as JSON and strip [`STRIPPED_KEYS`]; `None` if the file is missing or not valid
-/// JSON (caller skips it silently rather than failing the whole mirror build).
-fn filtered_settings_json(path: &Path) -> Option<Vec<u8>> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut value: serde_json::Value = serde_json::from_str(&text).ok()?;
+/// Parse `path` as JSON and strip [`STRIPPED_KEYS`]. Missing files are a race-safe no-op; read,
+/// parse, and serialization failures are returned so the caller can report the exact file.
+fn filtered_settings_json(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut value: serde_json::Value = serde_json::from_str(&text)?;
     if let Some(obj) = value.as_object_mut() {
         for key in STRIPPED_KEYS {
             obj.remove(*key);
         }
     }
-    serde_json::to_vec_pretty(&value).ok()
+    Ok(Some(serde_json::to_vec_pretty(&value)?))
 }
 
 #[cfg(any(windows, test))]
@@ -277,6 +288,16 @@ mod tests {
         assert!(is_sensitive_bridge_entry(Path::new("oauth-token.json")));
         assert!(!is_sensitive_bridge_entry(Path::new("projects")));
         assert!(!is_sensitive_bridge_entry(Path::new("history.jsonl")));
+    }
+
+    #[test]
+    fn malformed_settings_return_a_diagnostic_without_a_filtered_copy() {
+        let real = tempfile::tempdir().unwrap();
+        let settings = real.path().join("settings.json");
+        std::fs::write(&settings, "{ definitely not json").unwrap();
+
+        let error = filtered_settings_json(&settings).expect_err("malformed JSON is reported");
+        assert!(!error.to_string().is_empty());
     }
 
     #[test]
