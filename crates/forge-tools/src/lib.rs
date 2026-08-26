@@ -410,6 +410,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_and_append_previews_do_not_fake_create_on_read_failure() {
+        let dir = std::env::temp_dir().join(format!("forge-preview-dir-{}", forge_types::new_id()));
+        std::fs::create_dir(&dir).unwrap();
+        let args = serde_json::json!({ "path": dir, "content": "would fail" });
+
+        assert!(
+            WriteFileTool.preview(&args).await.is_none(),
+            "a directory is not a missing file and must not preview as a create"
+        );
+        assert!(
+            AppendFileTool.preview(&args).await.is_none(),
+            "an unreadable append target must not preview as a create"
+        );
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn read_only_tool_has_no_preview() {
         assert!(ReadFileTool
             .preview(&serde_json::json!({"path":"x"}))

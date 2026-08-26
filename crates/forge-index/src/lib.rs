@@ -28,7 +28,7 @@ mod watch;
 pub use embed::{parse_ollama_embeddings, Embedder, OllamaEmbedder};
 pub use extract::{extract, lang_for_path, supported_languages, Def, Parsed, Ref};
 pub use map::build_map;
-pub use retrieve::{BodyOpts, InjectedContext, RetrievedSnippet};
+pub use retrieve::{BodyOpts, BodyReadFailure, InjectedContext, RetrievedSnippet};
 pub use root::{
     has_project_marker, indexed_roots, is_home_or_system_root, is_toolchain_dir, prune_root,
     stale_roots, RootRefusal, MAX_FILES_MARKED_ROOT, MAX_FILES_UNMARKED_ROOT,
@@ -1041,6 +1041,31 @@ mod tests {
             .snippets
             .iter()
             .any(|s| s.text.contains("parse_tokens")));
+    }
+
+    #[test]
+    fn retrieve_reports_body_read_failure_and_keeps_signature() {
+        let t = Tmp::new();
+        t.write("src/lib.rs", "pub fn parse_tokens() {}\n");
+        let lat = lattice(&t.root);
+        lat.update().unwrap();
+        std::fs::remove_file(t.root.join("src/lib.rs")).unwrap();
+
+        let ctx = lat
+            .retrieve(
+                "parse_tokens",
+                500,
+                Some(retrieve::BodyOpts {
+                    max_tokens: 200,
+                    max_hits: 1,
+                }),
+            )
+            .unwrap();
+        assert_eq!(ctx.body_read_failures.len(), 1);
+        assert_eq!(ctx.body_read_failures[0].rel_path, "src/lib.rs");
+        assert!(!ctx.body_read_failures[0].reason.is_empty());
+        assert_eq!(ctx.snippets.len(), 1, "signature remains available");
+        assert!(!ctx.snippets[0].is_body);
     }
 
     #[test]

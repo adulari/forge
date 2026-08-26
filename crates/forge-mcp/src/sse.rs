@@ -28,6 +28,8 @@ pub enum SseError {
     Url(String),
     #[error("sse endpoint never arrived")]
     NoEndpoint,
+    #[error("sse stream failed: {0}")]
+    Stream(String),
     #[error("serialize: {0}")]
     Serialize(String),
 }
@@ -36,6 +38,13 @@ pub enum SseError {
 struct SseFrame {
     event: Option<String>,
     data: String,
+}
+
+#[derive(Clone, Debug)]
+enum ReaderState {
+    Waiting,
+    Ready(reqwest::Url),
+    Failed(String),
 }
 
 /// Parse a single SSE event block (the text between two blank-line boundaries). Multiple `data:`
@@ -76,13 +85,21 @@ fn take_event(buf: &mut String) -> Option<String> {
 async fn run_reader(
     resp: reqwest::Response,
     base: reqwest::Url,
-    endpoint_tx: watch::Sender<Option<reqwest::Url>>,
+    state_tx: watch::Sender<ReaderState>,
     msg_tx: mpsc::UnboundedSender<RxJsonRpcMessage<RoleClient>>,
 ) {
     let mut buf = String::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let Ok(bytes) = chunk else { break };
+        let bytes = match chunk {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let message = format!("reading event stream: {error}");
+                tracing::warn!("sse: {message}");
+                let _ = state_tx.send(ReaderState::Failed(message));
+                return;
+            }
+        };
         // Append lossily and strip CR so framing/field parsing only reasons about `\n`. SSE
         // payloads are UTF-8; a chunk may split a multibyte char, but `from_utf8_lossy` keeps the
         // stream moving and the next chunk completes it.
@@ -91,11 +108,17 @@ async fn run_reader(
         while let Some(raw) = take_event(&mut buf) {
             let frame = parse_sse_frame(&raw);
             match frame.event.as_deref() {
-                Some("endpoint") => {
-                    if let Ok(url) = base.join(frame.data.trim()) {
-                        let _ = endpoint_tx.send(Some(url));
+                Some("endpoint") => match base.join(frame.data.trim()) {
+                    Ok(url) => {
+                        let _ = state_tx.send(ReaderState::Ready(url));
                     }
-                }
+                    Err(error) => {
+                        let message = format!("resolving endpoint: {error}");
+                        tracing::warn!("sse: {message}");
+                        let _ = state_tx.send(ReaderState::Failed(message));
+                        return;
+                    }
+                },
                 // Default event type is "message"; a missing event name is also a message.
                 _ => {
                     if frame.data.is_empty() {
@@ -104,7 +127,7 @@ async fn run_reader(
                     match serde_json::from_str::<RxJsonRpcMessage<RoleClient>>(&frame.data) {
                         Ok(msg) => {
                             if msg_tx.send(msg).is_err() {
-                                break;
+                                return;
                             }
                         }
                         Err(e) => tracing::warn!("sse: dropping unparseable message: {e}"),
@@ -113,6 +136,9 @@ async fn run_reader(
             }
         }
     }
+    let message = "event stream closed".to_string();
+    tracing::warn!("sse: {message}");
+    let _ = state_tx.send(ReaderState::Failed(message));
 }
 
 /// A connected SSE client transport: a `GET` event-stream for server→client messages plus a
@@ -120,7 +146,7 @@ async fn run_reader(
 /// plugs straight into `handler.serve(transport)` like the stdio / streamable-HTTP transports.
 pub struct SseClientTransport {
     http: reqwest::Client,
-    endpoint_rx: watch::Receiver<Option<reqwest::Url>>,
+    state_rx: watch::Receiver<ReaderState>,
     msg_rx: mpsc::UnboundedReceiver<RxJsonRpcMessage<RoleClient>>,
     bearer: Option<String>,
     reader: tokio::task::JoinHandle<()>,
@@ -141,12 +167,12 @@ impl SseClientTransport {
         }
         let resp = req.send().await?.error_for_status()?;
 
-        let (endpoint_tx, endpoint_rx) = watch::channel(None);
+        let (state_tx, state_rx) = watch::channel(ReaderState::Waiting);
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-        let reader = tokio::spawn(run_reader(resp, base, endpoint_tx, msg_tx));
+        let reader = tokio::spawn(run_reader(resp, base, state_tx, msg_tx));
         Ok(Self {
             http: client,
-            endpoint_rx,
+            state_rx,
             msg_rx,
             bearer,
             reader,
@@ -173,17 +199,20 @@ impl Transport<RoleClient> for SseClientTransport {
         item: TxJsonRpcMessage<RoleClient>,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
         let http = self.http.clone();
-        let mut endpoint_rx = self.endpoint_rx.clone();
+        let mut state_rx = self.state_rx.clone();
         let bearer = self.bearer.clone();
         async move {
             // Block until the server's `endpoint` event arrives, then POST there. The borrow is
             // dropped at the end of each statement, so nothing non-`Send` is held across the await.
             let url = loop {
-                let current = endpoint_rx.borrow().clone();
-                if let Some(u) = current {
-                    break u;
+                match &*state_rx.borrow() {
+                    ReaderState::Ready(url) => break url.clone(),
+                    ReaderState::Failed(error) => {
+                        return Err(SseError::Stream(error.clone()));
+                    }
+                    ReaderState::Waiting => {}
                 }
-                if endpoint_rx.changed().await.is_err() {
+                if state_rx.changed().await.is_err() {
                     return Err(SseError::NoEndpoint);
                 }
             };
@@ -202,7 +231,27 @@ impl Transport<RoleClient> for SseClientTransport {
     }
 
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
-        self.msg_rx.recv().await
+        loop {
+            tokio::select! {
+                message = self.msg_rx.recv() => {
+                    if message.is_none() {
+                        if let ReaderState::Failed(error) = &*self.state_rx.borrow() {
+                            tracing::warn!("sse: {error}");
+                        }
+                    }
+                    return message;
+                }
+                changed = self.state_rx.changed() => {
+                    if changed.is_err() {
+                        return None;
+                    }
+                    if let ReaderState::Failed(error) = &*self.state_rx.borrow() {
+                        tracing::warn!("sse: {error}");
+                        return None;
+                    }
+                }
+            }
+        }
     }
 
     async fn close(&mut self) -> Result<(), Self::Error> {
@@ -214,6 +263,39 @@ impl Transport<RoleClient> for SseClientTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stream_close_is_exposed_as_reader_failure() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let response =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\n\r\n";
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut transport = SseClientTransport::connect(
+            reqwest::Client::new(),
+            &format!("http://{addr}/events"),
+            None,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            transport.state_rx.changed(),
+        )
+        .await
+        .expect("reader should report stream closure")
+        .expect("state watcher should remain connected");
+        assert!(matches!(
+            &*transport.state_rx.borrow(),
+            ReaderState::Failed(message) if message.contains("event stream closed")
+        ));
+    }
 
     #[test]
     fn parses_endpoint_frame() {

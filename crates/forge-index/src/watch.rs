@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -29,14 +29,25 @@ pub struct LatticeWatcher {
     // signal. `Option` so `Drop` can `take()` it before joining the worker.
     inner: Option<WatcherInner>,
     worker: Option<JoinHandle<()>>,
+    errors: Arc<Mutex<Vec<String>>>,
 }
 
 impl LatticeWatcher {
-    fn new(inner: WatcherInner, worker: JoinHandle<()>) -> Self {
+    fn new(inner: WatcherInner, worker: JoinHandle<()>, errors: Arc<Mutex<Vec<String>>>) -> Self {
         Self {
             inner: Some(inner),
             worker: Some(worker),
+            errors,
         }
+    }
+
+    /// Drain backend errors observed since the last poll. A watcher remains alive after an error,
+    /// but callers must surface this state so a dead backend cannot look like a healthy index.
+    pub fn take_errors(&self) -> Vec<String> {
+        self.errors
+            .lock()
+            .map(|mut errors| std::mem::take(&mut *errors))
+            .unwrap_or_default()
     }
 }
 
@@ -113,6 +124,7 @@ fn build_watcher(
     coalesce: Duration,
 ) -> Result<LatticeWatcher, String> {
     let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+    let errors = Arc::new(Mutex::new(Vec::new()));
     let worker = std::thread::Builder::new()
         .name("forge-lattice-reindex".into())
         .spawn(move || {
@@ -127,8 +139,12 @@ fn build_watcher(
     // The handler runs ON the notify/debouncer thread, so it must stay cheap: just forward each
     // supported changed path to the worker. A send only fails once the worker has exited (channel
     // closed); that can't normally happen while the debouncer is alive, so it's ignored.
+    let handler_errors = Arc::clone(&errors);
     let handler = move |res: DebounceEventResult| {
-        let Ok(events) = res else { return };
+        let Ok(events) = res else {
+            record_watcher_error(&handler_errors, "notify backend returned an error");
+            return;
+        };
         for ev in events {
             if should_reindex(&ev.path) {
                 let _ = tx.send(ev.path);
@@ -161,7 +177,14 @@ fn build_watcher(
             .map_err(|e| e.to_string())?;
         WatcherInner::Native(debouncer)
     };
-    Ok(LatticeWatcher::new(inner, worker))
+    Ok(LatticeWatcher::new(inner, worker, errors))
+}
+
+fn record_watcher_error(errors: &Arc<Mutex<Vec<String>>>, detail: &str) {
+    tracing::error!(error = detail, "lattice watcher backend failed");
+    if let Ok(mut recorded) = errors.lock() {
+        recorded.push(detail.to_string());
+    }
 }
 
 /// Drain reindex requests off `rx` and apply `reindex` to each changed path, OFF the watcher thread.
