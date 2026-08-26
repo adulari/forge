@@ -64,7 +64,7 @@
     "crates/forge-core/src/subagent.rs": 1100,
     "crates/forge-index/src/lib.rs": 1030,
     "crates/forge-mcp/src/lib.rs": 1291,
-    "crates/forge-mesh/src/catalog.rs": 1308,
+    "crates/forge-mesh/src/catalog.rs": 1332,
     "crates/forge-mesh/src/lib.rs": 2214,
     "crates/forge-provider/src/cli_provider.rs": 3381,
     "crates/forge-provider/src/codex_oauth.rs": 1125,
