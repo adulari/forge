@@ -10,6 +10,14 @@
 > Lattice (and a similar margin vs the previous signature-only default at reps=8), on a
 > repo-question benchmark — with the model answering in ~2 steps instead of ~4.5.
 
+## Parser budget and large generated files
+
+The indexer applies a hard **8 MiB per-source-file parser budget** before reading a file. A
+generated or accidentally vendored source blob above that limit is skipped (and any stale symbols
+for it are removed) so an interactive update cannot spend an unbounded amount of time and memory
+inside a parser. `forge lattice update` reports how many files were skipped for this reason; the
+existing root file-count ceiling and ignored/generated-directory rules remain in force.
+
 ---
 
 ## 1. Problem
