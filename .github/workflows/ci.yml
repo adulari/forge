@@ -65,6 +65,14 @@ jobs:
         run: bash scripts/ci/test-runner-resource-budget.sh
       - name: Test persistent runner cache bounds
         run: bash scripts/ci/test-trim-runner-cache.sh
+      - name: Test standing docs freshness guard
+        run: bash scripts/ci/test-docs-freshness.sh
+      - name: Enforce standing docs freshness
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci/check-docs-freshness.sh
       - name: Test crates.io publication order
         run: bash scripts/ci/test-crates-release-order.sh
       # Static contract between the release workflows and the published one-line installers: the
