@@ -220,7 +220,12 @@ impl Session {
         } else {
             read_project_agents_md(self.workspace.root())
         };
-        self.project = crate::project_context::compute(self.workspace.root());
+        let (project, project_diagnostic) =
+            crate::project_context::compute_with_diagnostic(self.workspace.root());
+        self.project = project;
+        if let Some(diagnostic) = project_diagnostic {
+            self.presenter.emit(PresenterEvent::Warning(diagnostic));
+        }
         // Lattice instances and their tool capture a root at construction. Recreate the index
         // for B and drop A's watcher; watcher composition is rebuilt by the CLI owner.
         let had_lattice = self.lattice.is_some();
@@ -287,7 +292,13 @@ impl Session {
             .collect();
         self.transition_workspace(workspace)?;
         self.id = session_id.to_string();
-        self.tasks = self.store.tasks(session_id).unwrap_or_default();
+        self.tasks = match self.store.tasks(session_id) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                tracing::warn!(session_id, %error, "session task history could not be restored");
+                Vec::new()
+            }
+        };
         self.project_prompt_injected = true;
         self.presenter.emit(PresenterEvent::SessionStarted {
             id: session_id.to_string(),

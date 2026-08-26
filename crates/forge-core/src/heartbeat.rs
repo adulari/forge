@@ -88,13 +88,15 @@ fn format_delivery(hb: &forge_store::SessionHeartbeat) -> String {
 /// for checking `!busy` before calling. A due tick is claimed (its `next_due_at` advanced) by the
 /// store as part of the same statement that returns it, so a crash between this call and actually
 /// enqueueing the prompt drops at most one tick rather than risking a double-delivery on restart.
-pub fn claim_due_heartbeat_prompts(store: &Store, session_id: &str) -> Vec<String> {
+/// Store failures are returned to the caller so an unavailable heartbeat table cannot be mistaken
+/// for an idle session with no recurring prompts due.
+pub fn claim_due_heartbeat_prompts(
+    store: &Store,
+    session_id: &str,
+) -> std::result::Result<Vec<String>, forge_store::StoreError> {
     store
         .claim_due_heartbeats(session_id, now_secs())
-        .unwrap_or_default()
-        .iter()
-        .map(format_delivery)
-        .collect()
+        .map(|heartbeats| heartbeats.iter().map(format_delivery).collect())
 }
 
 /// The `manage_heartbeats` virtual tool name (agent-created heartbeats).
@@ -205,9 +207,16 @@ impl Session {
         let (result, ok) = match action {
             "create" => self.create_agent_heartbeat(&call.args),
             "list" => {
-                let all = self.store.list_heartbeats(&self.id).unwrap_or_default();
-                let agent_only: Vec<_> = all.into_iter().filter(|h| h.owner == "agent").collect();
-                (format_heartbeat_list(&agent_only), true)
+                match self.store.list_heartbeats(&self.id) {
+                    Ok(all) => {
+                        let agent_only: Vec<_> = all
+                            .into_iter()
+                            .filter(|h| h.owner == "agent")
+                            .collect();
+                        (format_heartbeat_list(&agent_only), true)
+                    }
+                    Err(error) => (format!("error: failed to list heartbeats: {error}"), false),
+                }
             }
             "pause" | "resume" => match label {
                 None => ("error: `label` is required".to_string(), false),
@@ -265,7 +274,10 @@ impl Session {
             Err(e) => return (format!("error: {e}"), false),
         };
 
-        let existing = self.store.list_heartbeats(&self.id).unwrap_or_default();
+        let existing = match self.store.list_heartbeats(&self.id) {
+            Ok(existing) => existing,
+            Err(error) => return (format!("error: failed to list heartbeats: {error}"), false),
+        };
         let agent_count = existing.iter().filter(|h| h.owner == "agent").count();
         if agent_count >= MAX_AGENT_HEARTBEATS_PER_SESSION {
             return (
@@ -303,7 +315,10 @@ impl Session {
     }
 
     fn set_agent_heartbeat_status(&mut self, label: &str, resume: bool) -> (String, bool) {
-        let existing = self.store.list_heartbeats(&self.id).unwrap_or_default();
+        let existing = match self.store.list_heartbeats(&self.id) {
+            Ok(existing) => existing,
+            Err(error) => return (format!("error: failed to list heartbeats: {error}"), false),
+        };
         let Some(hb) = existing
             .iter()
             .find(|h| h.owner == "agent" && h.label.as_deref() == Some(label))
@@ -351,6 +366,20 @@ mod tests {
         assert_eq!(format_heartbeat_interval(300), "5m");
         assert_eq!(format_heartbeat_interval(3600), "1h");
         assert_eq!(format_heartbeat_interval(90), "90s"); // not a whole minute
+    }
+
+    #[test]
+    fn claim_due_prompts_returns_claimed_prompt() {
+        let store = Store::open_in_memory().unwrap();
+        let session_id = store.create_session("/tmp", "Default").unwrap();
+        let now = now_secs();
+        store
+            .set_user_heartbeat("hb", &session_id, "check in", 30, now - 60)
+            .unwrap();
+
+        let prompts = claim_due_heartbeat_prompts(&store, &session_id).unwrap();
+
+        assert_eq!(prompts, vec!["[heartbeat] check in"]);
     }
 
     fn test_session() -> Session {
