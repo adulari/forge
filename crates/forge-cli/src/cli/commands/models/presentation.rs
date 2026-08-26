@@ -30,7 +30,7 @@ pub(crate) fn mesh_overview(
     config: &forge_config::Config,
     quota: &forge_types::SubscriptionQuota,
 ) {
-    let pricing = forge_mesh::pricing::Pricing::from_config(config);
+    let pricing = super::discovery::pricing_with_fetched_rates(config);
     println!(
         "subscription quota (conservation {}):",
         if config.mesh.subscription_conserve {
@@ -89,7 +89,7 @@ pub(crate) fn mesh_overview_json(
     config: &forge_config::Config,
     quota: &forge_types::SubscriptionQuota,
 ) -> String {
-    let pricing = forge_mesh::pricing::Pricing::from_config(config);
+    let pricing = super::discovery::pricing_with_fetched_rates(config);
     let mut providers: Vec<&str> = cat
         .models()
         .iter()
