@@ -1828,7 +1828,17 @@ impl CliProvider {
             )));
         }
 
-        let status = child.wait().await.ok();
+        let status = match child.wait().await {
+            Ok(status) => Some(status),
+            Err(error) => {
+                let stderr_text = err_task.await.unwrap_or_default();
+                return Err(child_wait_failure(
+                    &self.binary,
+                    &error.to_string(),
+                    &stderr_text,
+                ));
+            }
+        };
         let stderr_text = err_task.await.unwrap_or_default();
 
         // Toolless-bridge detection (wave 7): in harness mode Forge serves its write tools to the
@@ -2833,6 +2843,13 @@ fn stderr_suffix(stderr: &str) -> String {
     format!(" — stderr: {tail}")
 }
 
+fn child_wait_failure(binary: &str, error: &str, stderr: &str) -> ProviderError {
+    ProviderError::Request(format!(
+        "waiting for `{binary}` failed: {error}{}",
+        stderr_suffix(stderr)
+    ))
+}
+
 async fn create_sink_file_at(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     tokio::fs::File::create(path).await?;
     Ok(path.to_path_buf())
@@ -2964,6 +2981,14 @@ impl Drop for GroupKillGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_wait_failure_is_reported_with_stderr_context() {
+        let error = child_wait_failure("claude", "wait: broken pipe", "bridge crashed");
+        assert!(matches!(error, ProviderError::Request(message) if
+            message.contains("waiting for `claude` failed: wait: broken pipe")
+                && message.contains("bridge crashed")));
+    }
 
     #[tokio::test]
     async fn sink_creation_reports_path_failures() {
