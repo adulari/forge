@@ -49,8 +49,12 @@ pub(crate) async fn lattice_cmd(op: LatticeOp) -> Result<()> {
             let lat = forge_index::Lattice::new(store, &root).allow_oversize(force);
             let stats = lat.update().map_err(|e| anyhow::anyhow!("{e}"))?;
             println!(
-                "⌬ lattice updated — {} file(s) indexed, {} skipped, {} symbol(s)",
-                stats.files_indexed, stats.files_skipped, stats.symbols
+                "⌬ lattice updated — {} file(s) indexed, {} skipped ({} above the {} MiB parser budget), {} symbol(s)",
+                stats.files_indexed,
+                stats.files_skipped,
+                stats.files_too_large,
+                forge_index::MAX_INDEX_FILE_BYTES / (1024 * 1024),
+                stats.symbols
             );
         }
         LatticeOp::Roots => {

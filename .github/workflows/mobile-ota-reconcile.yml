@@ -43,8 +43,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          BASELINE: ${{ vars.IOS_OTA_COMPATIBLE_BASE_SHA }}
+          RUNTIME: ${{ vars.IOS_OTA_RUNTIME_VERSION }}
         run: |
           set -euo pipefail
+
+          baseline="${BASELINE:-unset}"
+          runtime="${RUNTIME:-unset}"
 
           # The newest commit on main that an OTA could carry. `eas-ota-safety.sh` defines the
           # OTA-safe set as mobile/src/** and mobile/assets/**; anything else needs a native build
@@ -71,7 +76,9 @@ jobs:
           done
 
           if [ -z "$published" ]; then
-            echo "::error title=Cannot reconcile OTA state::No successful eas-update run on main has a commit still reachable from main, so there is no trustworthy base to classify an unpublished range against. Publish once by hand (RELEASING.md §6)."
+            message="Cannot reconcile OTA state: no successful eas-update run on main has a commit still reachable from main. Installed archive baseline is ${baseline}; runtime fingerprint is ${runtime}. Publish once by hand (RELEASING.md §6), then rerun reconciliation."
+            echo "::error title=Cannot reconcile OTA state::$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
@@ -83,7 +90,7 @@ jobs:
           # eas-update independently classifies the complete installed-native-baseline..HEAD range,
           # so this dispatch cannot narrow the safety window to the last successful run. It only
           # replaces the push event that went missing.
-          message="main has mobile changes at $(git rev-parse --short "$target") that no successful eas-update run covers; the newest publication is $(git rev-parse --short "$published"). Dispatching eas-update over that range."
+          message="main has mobile changes at $(git rev-parse --short "$target") that no successful eas-update run covers; the newest publication is $(git rev-parse --short "$published"). Installed archive baseline is ${baseline}; runtime fingerprint is ${runtime}. Dispatching eas-update over that range."
           echo "::warning title=OTA behind main — dispatching::$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           gh workflow run eas-update.yml --ref main
