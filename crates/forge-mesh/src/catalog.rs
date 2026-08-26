@@ -2587,7 +2587,10 @@ mod tests {
 
         // An OpenRouter model with NO `:free` suffix is free only with positive price evidence.
         // Without it the old, conservative answer must survive — that is the billing guard.
-        let stealth = "openrouter::stealth/ox-alpha";
+        // A real zero-priced OpenRouter id that carries no `:free` suffix. (The first such model
+        // this rule was written against, `stealth/ox-alpha`, was delisted when its stealth period
+        // ended — the class outlives any one member, which is the point of keying on price.)
+        let stealth = "openrouter::openrouter/free";
         assert!(
             !is_free(stealth, 0.0, false),
             "an unpriced OpenRouter model stays paid — a flattened 0.0 is not evidence"
