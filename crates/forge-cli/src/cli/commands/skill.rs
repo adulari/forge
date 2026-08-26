@@ -470,7 +470,7 @@ pub(crate) async fn skill_from_session(
     }
 
     // --- Discover models ---
-    let config = forge_config::load().unwrap_or_default();
+    let config = super::load_config()?;
     let pricing = std::sync::Arc::new(forge_mesh::pricing::Pricing::from_config(&config));
     let store = std::sync::Arc::new(open_store()?);
     let cat = discover_catalog(&config).await;

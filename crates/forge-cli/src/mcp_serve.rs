@@ -46,20 +46,32 @@ const MCP_SERVE_TOKEN_ENV: &str = "FORGE_MCP_SERVE_TOKEN";
 
 /// Append one JSON record to the out-of-band subagent sink the CLI bridge tails (if it gave us
 /// one via `FORGE_SUBAGENT_SINK`). Used to surface bridge-turn activity (subagents, task-list
-/// updates) in the parent Forge TUI live. Best-effort: no sink / write error is silently ignored.
+/// updates) in the parent Forge TUI live. Best-effort for the CALL (a sink failure must not fail
+/// the tool call it decorates), but never silent: an open/write/flush failure is reported as a
+/// diagnostic so a full or read-only disk doesn't quietly blind the parent TUI.
 fn report_to_sink(record: serde_json::Value) {
     let Ok(path) = std::env::var(forge_provider::SUBAGENT_SINK_ENV) else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    if let Err(error) = append_sink_record(&path, &record) {
+        tracing::warn!(
+            path,
+            %error,
+            "mcp-serve: failed to append bridge activity to the subagent sink; \
+             the parent session will not see this event"
+        );
+    }
+}
+
+/// One JSONL append to the sink at `path`, every I/O failure propagated.
+fn append_sink_record(path: &str, record: &serde_json::Value) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{record}");
-        let _ = f.flush();
-    }
+        .open(path)?;
+    writeln!(f, "{record}")?;
+    f.flush()
 }
 
 mod bridge_budget;
@@ -103,6 +115,29 @@ fn parse_bridge_tasks(args: &Value) -> Result<Vec<forge_types::TodoItem>, &'stat
     } else {
         Ok(tasks)
     }
+}
+
+fn persist_bridge_memory(
+    store: &Store,
+    scope: &str,
+    kind: &str,
+    text: &str,
+    session_id: &str,
+) -> std::result::Result<(), forge_store::StoreError> {
+    store.add_memory(scope, kind, text, session_id).map(|_| ())
+}
+
+/// Merge and persist a bridge task update for its parent session. Keep the read and write in one
+/// fallible seam so an unavailable or invalid Store cannot be reported as a successful update.
+fn persist_bridge_tasks(
+    store: &Store,
+    session_id: &str,
+    tasks: Vec<forge_types::TodoItem>,
+) -> std::result::Result<Vec<forge_types::TodoItem>, forge_store::StoreError> {
+    let existing = store.tasks(session_id)?;
+    let tasks = forge_core::merge_task_update(&existing, tasks);
+    store.set_tasks(session_id, &tasks)?;
+    Ok(tasks)
 }
 
 impl ServerHandler for ForgeMcp {
@@ -166,9 +201,14 @@ impl ServerHandler for ForgeMcp {
                 }
             };
             if let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) {
-                let existing = self.tasks_store.tasks(&session_id).unwrap_or_default();
-                tasks = forge_core::merge_task_update(&existing, tasks);
-                let _ = self.tasks_store.set_tasks(&session_id, &tasks);
+                tasks = match persist_bridge_tasks(&self.tasks_store, &session_id, tasks) {
+                    Ok(tasks) => tasks,
+                    Err(error) => {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                            "error: failed to persist task list for session '{session_id}': {error}"
+                        ))]));
+                    }
+                };
             }
             let done = tasks
                 .iter()
@@ -206,21 +246,24 @@ impl ServerHandler for ForgeMcp {
                 .unwrap_or_else(|_| "global".to_string());
             let session_id = std::env::var(forge_core::snapshot::ENV_SESSION)
                 .unwrap_or_else(|_| "bridge".to_string());
-            match forge_core::embed_one(&self.config.lattice.embeddings, &text).await {
-                Some(emb) => {
-                    let _ = self.tasks_store.add_memory_with_embedding(
-                        &scope,
-                        &kind_cat,
-                        &text,
-                        &session_id,
-                        &emb,
-                    );
-                }
+            let persist = match forge_core::embed_one(&self.config.lattice.embeddings, &text).await
+            {
+                Some(emb) => self.tasks_store.add_memory_with_embedding(
+                    &scope,
+                    &kind_cat,
+                    &text,
+                    &session_id,
+                    &emb,
+                ),
                 None => {
-                    let _ = self
-                        .tasks_store
-                        .add_memory(&scope, &kind_cat, &text, &session_id);
+                    persist_bridge_memory(&self.tasks_store, &scope, &kind_cat, &text, &session_id)
+                        .map(|_| String::new())
                 }
+            };
+            if let Err(error) = persist {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "error: failed to save memory: {error}"
+                ))]));
             }
             report_to_sink(serde_json::json!({ "k": "memory", "kind": kind_cat, "text": text }));
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
@@ -285,72 +328,8 @@ impl ServerHandler for ForgeMcp {
         // tools are invoked via `mcp_call`, so this covers the whole external surface. Hooks fire
         // here too (PreToolUse block + arg-rewrite, PostToolUse observe) so the hook-based
         // permission/logging story applies to MCP traffic, not just built-in tools.
-        if let Some(m) = &self.mcp {
-            if m.knows_tool(&name) {
-                let side_effect = m.side_effect_of(&name);
-                let mut effective_args = args.clone();
-
-                // PreToolUse: block, or rewrite the args before the gate + dispatch.
-                if !self.config.hooks.is_empty() {
-                    let payload =
-                        serde_json::json!({ "tool": name, "args": effective_args }).to_string();
-                    let outcome = hooks::run_hooks(
-                        &self.config.hooks,
-                        forge_config::HookEvent::PreToolUse,
-                        &name,
-                        &payload,
-                    )
-                    .await;
-                    if let Some(reason) = outcome.blocked {
-                        return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                            "blocked by hook: {reason}"
-                        ))]));
-                    }
-                    if let Some(rewritten) = outcome.rewritten_args {
-                        effective_args = rewritten;
-                    }
-                }
-
-                let decision =
-                    permission::decide(self.mode, side_effect, &name, &effective_args, &self.rules);
-                if decision == PermissionDecision::Deny {
-                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                        "denied by Forge permission policy: {name}"
-                    ))]));
-                }
-                let out = m.call(&name, &effective_args).await;
-
-                // PostToolUse: observe; notes are prefixed onto the bridge model's result text.
-                let mut note_prefix = String::new();
-                if !self.config.hooks.is_empty() {
-                    let payload = serde_json::json!({
-                        "tool": name, "args": effective_args, "result": out.text, "ok": out.ok
-                    })
-                    .to_string();
-                    let outcome = hooks::run_hooks(
-                        &self.config.hooks,
-                        forge_config::HookEvent::PostToolUse,
-                        &name,
-                        &payload,
-                    )
-                    .await;
-                    for note in outcome.notes {
-                        note_prefix.push_str(&format!("[hook note] {note}\n"));
-                    }
-                }
-
-                let text = if note_prefix.is_empty() {
-                    out.text
-                } else {
-                    format!("{note_prefix}{}", out.text)
-                };
-                let content = vec![ContentBlock::text(text)];
-                return Ok(if out.ok {
-                    CallToolResult::success(content)
-                } else {
-                    CallToolResult::error(content)
-                });
-            }
+        if let Some(result) = self.dispatch_external_mcp(&name, &args).await {
+            return Ok(result);
         }
 
         let Some(tool) = self.registry.get(&name) else {
@@ -393,15 +372,24 @@ impl ServerHandler for ForgeMcp {
             .flatten()
             .map(std::path::PathBuf::from);
         if let Some(path) = &write_path {
-            let _ = forge_core::snapshot::snapshot_from_env_before_write(path);
+            if let Err(error) = forge_core::snapshot::snapshot_from_env_before_write(path) {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "error: could not checkpoint '{path:?}' before write: {error}"
+                ))]));
+            }
         }
 
         let (out, ok) = match tool.run(&args).await {
             Ok(out) => {
                 if let Some(path) = &write_path {
-                    let _ = forge_core::snapshot::record_from_env_after_write(path);
+                    if let Err(error) = forge_core::snapshot::record_from_env_after_write(path) {
+                        (format!("error: write succeeded but checkpoint recording failed for '{path:?}': {error}"), false)
+                    } else {
+                        (cap_bridge_result(&name, out), true)
+                    }
+                } else {
+                    (cap_bridge_result(&name, out), true)
                 }
-                (cap_bridge_result(&name, out), true)
             }
             Err(e) => (format!("error: {e}"), false),
         };
@@ -434,6 +422,84 @@ impl ServerHandler for ForgeMcp {
             CallToolResult::success(vec![ContentBlock::text(result_text)])
         } else {
             CallToolResult::error(vec![ContentBlock::text(result_text)])
+        })
+    }
+}
+
+impl ForgeMcp {
+    /// Dispatch one external MCP meta-tool through the same hook and permission path used by the
+    /// stdio bridge. Keeping this seam separate makes the bridge path testable with an in-process
+    /// MCP server without manufacturing a network `RequestContext`.
+    async fn dispatch_external_mcp(&self, name: &str, args: &Value) -> Option<CallToolResult> {
+        let m = self.mcp.as_ref()?;
+        if !m.knows_tool(name) {
+            return None;
+        }
+
+        let side_effect = m.side_effect_of(name);
+        let mut effective_args = args.clone();
+        let mut note_prefix = String::new();
+
+        // PreToolUse: block, or rewrite the args before the gate + dispatch.
+        if !self.config.hooks.is_empty() {
+            let payload = serde_json::json!({ "tool": name, "args": effective_args }).to_string();
+            let outcome = hooks::run_hooks(
+                &self.config.hooks,
+                forge_config::HookEvent::PreToolUse,
+                name,
+                &payload,
+            )
+            .await;
+            if let Some(reason) = outcome.blocked {
+                return Some(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "blocked by hook: {reason}"
+                ))]));
+            }
+            for note in outcome.notes {
+                note_prefix.push_str(&format!("[hook note] {note}\n"));
+            }
+            if let Some(rewritten) = outcome.rewritten_args {
+                effective_args = rewritten;
+            }
+        }
+
+        let decision =
+            permission::decide(self.mode, side_effect, name, &effective_args, &self.rules);
+        if decision == PermissionDecision::Deny {
+            return Some(CallToolResult::error(vec![ContentBlock::text(format!(
+                "denied by Forge permission policy: {name}"
+            ))]));
+        }
+        let out = m.call(name, &effective_args).await;
+
+        // PostToolUse: observe; notes are prefixed onto the bridge model's result text.
+        if !self.config.hooks.is_empty() {
+            let payload = serde_json::json!({
+                "tool": name, "args": effective_args, "result": out.text, "ok": out.ok
+            })
+            .to_string();
+            let outcome = hooks::run_hooks(
+                &self.config.hooks,
+                forge_config::HookEvent::PostToolUse,
+                name,
+                &payload,
+            )
+            .await;
+            for note in outcome.notes {
+                note_prefix.push_str(&format!("[hook note] {note}\n"));
+            }
+        }
+
+        let text = if note_prefix.is_empty() {
+            out.text
+        } else {
+            format!("{note_prefix}{}", out.text)
+        };
+        let content = vec![ContentBlock::text(text)];
+        Some(if out.ok {
+            CallToolResult::success(content)
+        } else {
+            CallToolResult::error(content)
         })
     }
 }
@@ -935,6 +1001,27 @@ mod tests {
     }
 
     #[test]
+    fn bridge_memory_persistence_reports_store_failures() {
+        let store = Store::open_in_memory().unwrap();
+        let error = persist_bridge_memory(&store, "global", "fact", "", "bridge").unwrap_err();
+        assert!(matches!(error, forge_store::StoreError::Pool(_)));
+    }
+
+    #[test]
+    fn bridge_task_persistence_reports_store_failures() {
+        let store = Store::open_in_memory().unwrap();
+        let tasks = vec![forge_types::TodoItem {
+            title: "persist this plan".into(),
+            status: forge_types::TodoStatus::Pending,
+            assignee: None,
+        }];
+
+        let error = persist_bridge_tasks(&store, "missing-session", tasks).unwrap_err();
+
+        assert!(matches!(error, forge_store::StoreError::Sqlite(_)));
+    }
+
+    #[test]
     fn full_mode_exposes_writable_tools_while_ask_stays_gated() {
         let full = test_server_with_mode(PermissionMode::Bypass);
         let names: Vec<String> = full
@@ -1054,6 +1141,116 @@ mod tests {
         assert!(
             names.contains(&"mcp_search_tools".to_string()),
             "mcp_search_tools must be advertised once external MCP is opted in"
+        );
+    }
+
+    fn hook(
+        event: forge_config::HookEvent,
+        matcher: &str,
+        command: &str,
+    ) -> forge_config::HookConfig {
+        forge_config::HookConfig {
+            event,
+            matcher: Some(matcher.to_string()),
+            command: command.to_string(),
+            timeout_secs: 10,
+            cc_compat: false,
+        }
+    }
+
+    fn result_text(result: &CallToolResult) -> String {
+        serde_json::to_string(&result.content).expect("MCP content is serializable")
+    }
+
+    #[tokio::test]
+    async fn bridge_mcp_harness_covers_rewrite_namespaced_match_and_post_note() {
+        // A real in-process MCP peer (no network or child process) exercises the complete bridge
+        // dispatch seam. The matcher is deliberately namespaced on the meta-tool: the server's
+        // `test__echo` name is nested in mcp_call's arguments and must still be rewritten.
+        let mgr = Arc::new(
+            forge_mcp::testsupport::manager_with_echo(&forge_config::McpConfig::default()).await,
+        );
+        let mut server = test_server_with_mcp(false, Some(mgr));
+        server.config.hooks = vec![
+            hook(
+                forge_config::HookEvent::PreToolUse,
+                "mcp_call",
+                "printf '%s' '{\"action\":\"rewrite\",\"args\":{\"name\":\"test__echo\",\"arguments\":{\"msg\":\"rewritten\"}}}'",
+            ),
+            hook(
+                forge_config::HookEvent::PostToolUse,
+                "mcp_call",
+                "printf '%s' 'observed external MCP call'",
+            ),
+        ];
+
+        let result = server
+            .dispatch_external_mcp(
+                "mcp_call",
+                &serde_json::json!({"name":"test__echo", "arguments":{"msg":"original"}}),
+            )
+            .await
+            .expect("mcp_call is advertised by the connected manager");
+        let text = result_text(&result);
+        assert!(
+            !result.is_error.unwrap_or(false),
+            "echo call failed: {text}"
+        );
+        assert!(
+            text.contains("echo: rewritten"),
+            "pre-hook rewrite was not applied: {text}"
+        );
+        assert!(
+            text.contains("observed external MCP call"),
+            "post-hook note missing: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_mcp_harness_blocks_and_bounds_wedged_hooks() {
+        let mgr = Arc::new(
+            forge_mcp::testsupport::manager_with_echo(&forge_config::McpConfig::default()).await,
+        );
+        let mut server = test_server_with_mcp(false, Some(mgr));
+        server.config.hooks = vec![hook(
+            forge_config::HookEvent::PreToolUse,
+            "mcp_call",
+            "echo policy-block >&2; exit 2",
+        )];
+        let blocked = server
+            .dispatch_external_mcp(
+                "mcp_call",
+                &serde_json::json!({"name":"test__echo", "arguments":{"msg":"x"}}),
+            )
+            .await
+            .unwrap();
+        assert!(blocked.is_error.unwrap_or(false));
+        assert!(result_text(&blocked).contains("policy-block"));
+
+        // `kill_on_drop` in run_one must return control at the configured deadline and still allow
+        // the external call to proceed after a wedged hook is killed.
+        server.config.hooks = vec![{
+            let mut h = hook(forge_config::HookEvent::PreToolUse, "mcp_call", "sleep 30");
+            h.timeout_secs = 1;
+            h
+        }];
+        let started = std::time::Instant::now();
+        let timed = server
+            .dispatch_external_mcp(
+                "mcp_call",
+                &serde_json::json!({"name":"test__echo", "arguments":{"msg":"alive"}}),
+            )
+            .await
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        let text = result_text(&timed);
+        assert!(
+            text.contains("timed out after 1s"),
+            "timeout note missing: {text}"
+        );
+        assert!(
+            text.contains("echo: alive"),
+            "call did not continue after timeout: {text}"
         );
     }
 
@@ -1181,5 +1378,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authed.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn sink_append_reports_io_failures_instead_of_swallowing_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir").join("sink.jsonl");
+        let record = serde_json::json!({"k": "tasks"});
+        assert!(append_sink_record(missing.to_str().unwrap(), &record).is_err());
+
+        let sink = dir.path().join("sink.jsonl");
+        append_sink_record(sink.to_str().unwrap(), &record).unwrap();
+        append_sink_record(sink.to_str().unwrap(), &record).unwrap();
+        let written = std::fs::read_to_string(&sink).unwrap();
+        assert_eq!(written.lines().count(), 2);
+        let expected = record.to_string();
+        assert!(written.lines().all(|l| l == expected));
     }
 }

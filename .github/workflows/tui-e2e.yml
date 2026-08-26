@@ -1,0 +1,30 @@
+name: TUI and bridge E2E
+
+# These tests spawn real Forge processes through a PTY or MCP transport. They are intentionally
+# report-only while the runner behaviour is measured in the real queue; promote this workflow to a
+# required check only after it has stayed green across several scheduled runs and merges.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '31 5 * * 2' # Tuesday 05:31 UTC, away from the weekly full-suite flake hunt
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tui-e2e
+  cancel-in-progress: false
+
+jobs:
+  ignored-e2e:
+    name: ignored CLI and TUI E2E
+    # Do not use the heavy/release labels: these are short process-level tests and should use one
+    # of the other self-hosted Linux runners rather than joining the workspace compile backlog.
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - name: Run ignored CLI and TUI end-to-end tests
+        run: cargo test --locked -p forge-agent --test tui_e2e --test mcp_serve_e2e -- --ignored
+

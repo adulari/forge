@@ -12,6 +12,7 @@ pub mod answer;
 pub use answer::resolve_answer;
 pub mod app;
 mod app_remote;
+mod arg_parse;
 mod commands;
 pub mod config_editor;
 mod driver;

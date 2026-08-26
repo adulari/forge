@@ -355,9 +355,8 @@ fn f32_to_le_bytes(v: &[f32]) -> Vec<u8> {
 /// chunk are dropped (the column is always written by `f32_to_le_bytes`, so this is just a
 /// safety net for hand-edited rows).
 fn le_bytes_to_f32(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+    let (chunks, _rest) = b.as_chunks::<4>();
+    chunks.iter().copied().map(f32::from_le_bytes).collect()
 }
 
 /// Cosine similarity in `[-1.0, 1.0]`. Returns `-1.0` when lengths differ or either vector has

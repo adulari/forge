@@ -19,7 +19,7 @@ async fn transcribe_cmd(
     language: Option<String>,
     model: Option<String>,
 ) -> Result<()> {
-    let config = forge_config::load().unwrap_or_default();
+    let config = super::load_config()?;
     let kind = resolve_model_kind(model, &config)?;
     let models_dir = crate::voice::models_dir()?;
 
@@ -55,7 +55,7 @@ async fn transcribe_cmd(
 }
 
 async fn setup_cmd(model: Option<String>) -> Result<()> {
-    let config = forge_config::load().unwrap_or_default();
+    let config = super::load_config()?;
     let kind = resolve_model_kind(model, &config)?;
     let models_dir = crate::voice::models_dir()?;
     let path = forge_voice::ensure_model(kind, &models_dir, download_progress)

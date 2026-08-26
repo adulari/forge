@@ -22,7 +22,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 p256 = { version = "0.14", features = ["ecdh", "pem", "pkcs8"] }
-base64 = "0.22"
+base64 = "0.23"
 governor = "0.7"
 sha2 = "0.11"
 

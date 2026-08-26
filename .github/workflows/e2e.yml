@@ -57,7 +57,23 @@ jobs:
       # The self-hosted Arch leg skips it: target/ already persists on that box's local disk
       # between runs, so a network cache round-trip would be pure overhead on top of that.
       - if: matrix.label != 'archlinux'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3
+
+      # The release binary uses the production store path unless FORGE_DB is explicit. Keep every
+      # diagnostic and real-turn invocation on the runner's disposable workspace; the Arch runner
+      # is persistent and must never migrate a store left by another job or installed Forge build.
+      - name: Configure disposable Forge store
+        run: echo "FORGE_DB=$RUNNER_TEMP/forge-e2e.db" >> "$GITHUB_ENV"
+
+      - name: Assert disposable Forge store
+        run: |
+          case "$FORGE_DB" in
+            *forge-e2e.db) ;;
+            *)
+              echo "::error::E2E Forge processes must use runner.temp/forge-e2e.db (got $FORGE_DB)"
+              exit 1
+              ;;
+          esac
 
       - name: Build forge
         run: cargo build --release --locked --bin forge
@@ -83,9 +99,41 @@ jobs:
               ;;
           esac
 
-      - name: doctor (diagnostics — never fails the job)
-        continue-on-error: true
-        run: cargo run --release --locked -q --bin forge -- doctor 2>&1 | tee doctor-${{ matrix.label }}.txt
+      - name: doctor (diagnostics)
+        run: |
+          set +e
+          cargo run --release --locked -q --bin forge -- doctor 2>&1 | tee doctor-${{ matrix.label }}.txt
+          doctor_rc=${PIPESTATUS[0]}
+          set -e
+
+          report="doctor-${{ matrix.label }}.txt"
+          {
+            echo "### forge doctor (${{ matrix.label }})"
+            echo "- command exit: ${doctor_rc}"
+            echo "- provider probe failures are informational here; the selected provider is gated by the real-turn step"
+            echo '```text'
+            sed -n '/^[[:space:]]*[✗⚠]/p; /^✗ No usable model provider/p' "$report" | head -100
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # `doctor` checks every configured provider. An unused provider timing out is useful
+          # evidence but must not hide a cross-platform host regression; the real-turn step
+          # separately gates the provider selected for this E2E run. All other hard failures,
+          # including a missing usable provider or a malformed/incomplete report, remain required.
+          hard_failures=$(awk '
+            /^(Config|Providers|Bridge liveness|Background daemon|Local LLM \(Ollama\)|Environment)$/ { section = $0 }
+            /^[[:space:]]*✗/ && section != "Providers" { print }
+            /^✗ No usable model provider/ { print }
+          ' "$report")
+          if ! grep -qE '[0-9]+ failure\(s\), [0-9]+ warning\(s\)\.' "$report"; then
+            echo "::error::forge doctor produced no complete diagnostic summary on ${{ matrix.label }}"
+            exit 1
+          fi
+          if [ -n "$hard_failures" ]; then
+            echo "::error::forge doctor found a hard diagnostic regression on ${{ matrix.label }}"
+            printf '%s\n' "$hard_failures"
+            exit 1
+          fi
 
       - name: real turn
         run: |

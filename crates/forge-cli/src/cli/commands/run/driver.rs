@@ -301,6 +301,9 @@ struct DriverState {
     /// Rate-limits the idle heartbeat check (see [`HEARTBEAT_CHECK_INTERVAL`]) — this loop ticks
     /// every ~30ms, far too often to query the store on every iteration.
     last_heartbeat_check: Instant,
+    /// Last heartbeat-store error already shown to the user, so a persistent failure does not
+    /// generate a new warning on every periodic check.
+    last_heartbeat_error: Option<String>,
 }
 
 /// How often the driver loop checks for a due session heartbeat while idle. Turn-end already
@@ -423,6 +426,7 @@ async fn drive_session(
         usage_load_rx: None,
         cwd: cwd.clone(),
         last_heartbeat_check: Instant::now(),
+        last_heartbeat_error: None,
     };
 
     let mut last_snap: Option<remote::Snapshot> = None;
@@ -702,17 +706,21 @@ impl DriverState {
 
     /// See [`try_deliver_due_heartbeats`] — the daemon-driver call site (turn-end + periodic tick).
     fn try_deliver_due_heartbeats(&mut self) -> bool {
-        try_deliver_due_heartbeats(
-            &self.session,
-            &mut self.queued_prompts,
+        report_heartbeat_delivery(
+            try_deliver_due_heartbeats(
+                &self.session,
+                &mut self.queued_prompts,
+                &mut self.app,
+                &mut self.prompt_history,
+                &mut self.last_prompt,
+                &self.done_tx,
+                &mut self.turn_gen,
+                &mut self.turn_handle,
+                &mut self.busy,
+                &mut self.busy_since,
+            ),
             &mut self.app,
-            &mut self.prompt_history,
-            &mut self.last_prompt,
-            &self.done_tx,
-            &mut self.turn_gen,
-            &mut self.turn_handle,
-            &mut self.busy,
-            &mut self.busy_since,
+            &mut self.last_heartbeat_error,
         )
     }
 
@@ -809,12 +817,19 @@ impl DriverState {
                     Arc::clone(&self.pending_duel),
                 ));
             }
-            DispatchOutcome::StartLoop { prompt } => {
+            DispatchOutcome::StartLoop {
+                prompt,
+                gates,
+                max_tokens,
+                max_minutes,
+            } => {
                 self.turn_gen += 1;
-                self.loop_state = Some(LoopState {
-                    gen: self.turn_gen,
-                    iter: 1,
-                });
+                self.loop_state = Some(LoopState::new(
+                    self.turn_gen,
+                    gates,
+                    max_tokens,
+                    max_minutes,
+                ));
                 self.app.note("↻ loop started — Stop to interrupt");
                 self.turn_handle = Some(spawn_turn_with(
                     prompt,
@@ -828,15 +843,21 @@ impl DriverState {
                     &mut self.busy_since,
                 ));
             }
-            DispatchOutcome::StartGoal { prompt, goal } => {
+            DispatchOutcome::StartGoal {
+                prompt,
+                goal,
+                gates,
+                max_tokens,
+                max_minutes,
+            } => {
                 self.turn_gen += 1;
-                self.goal_state = Some(GoalState {
-                    gen: self.turn_gen,
-                    iter: 1,
-                    prev_done: 0,
-                    no_progress: 0,
+                self.goal_state = Some(GoalState::new(
+                    self.turn_gen,
                     goal,
-                });
+                    gates,
+                    max_tokens,
+                    max_minutes,
+                ));
                 self.app
                     .note("🎯 goal running autonomously — Stop to interrupt");
                 self.turn_handle = Some(spawn_turn_with(
@@ -970,6 +991,7 @@ mod tests {
             usage_load_rx: None,
             cwd: String::new(),
             last_heartbeat_check: Instant::now(),
+            last_heartbeat_error: None,
         }
     }
 
@@ -1164,7 +1186,7 @@ mod tests {
     async fn queued_reprompt_steers_the_next_loop_iteration() {
         let mut state = test_driver_state().await;
         state.busy = true;
-        state.loop_state = Some(LoopState { gen: 10, iter: 1 });
+        state.loop_state = Some(LoopState::new(10, Vec::new(), None, None));
         state.queued_prompts = vec!["apply the correction".into(), "then verify".into()];
 
         state.on_turn_done(10).await;
@@ -1174,7 +1196,11 @@ mod tests {
         assert_eq!(state.prompt_history, vec!["apply the correction"]);
         assert!(matches!(
             state.loop_state,
-            Some(LoopState { gen: 11, iter: 2 })
+            Some(LoopState {
+                gen: 11,
+                iter: 2,
+                ..
+            })
         ));
         assert!(state.busy);
         state.turn_handle.take().unwrap().abort();
@@ -1184,13 +1210,13 @@ mod tests {
     async fn queued_reprompt_steers_the_next_goal_iteration() {
         let mut state = test_driver_state().await;
         state.busy = true;
-        state.goal_state = Some(GoalState {
-            gen: 10,
-            iter: 1,
-            prev_done: 0,
-            no_progress: 0,
-            goal: "finish the goal".into(),
-        });
+        state.goal_state = Some(GoalState::new(
+            10,
+            "finish the goal".into(),
+            Vec::new(),
+            None,
+            None,
+        ));
         state.queued_prompts = vec!["prioritize the regression".into()];
 
         state.on_turn_done(10).await;

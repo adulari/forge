@@ -59,7 +59,14 @@ impl Store {
                 ))?;
                 let tool_calls = tcj
                     .as_deref()
-                    .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                    .map(|json| {
+                        serde_json::from_str::<serde_json::Value>(json).map_err(|error| {
+                            StoreError::Json(format!(
+                                "fork message seq {seq} has malformed tool-call metadata: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?
                     .unwrap_or_else(|| serde_json::json!([]));
                 let payload = sync_json(serde_json::json!({
                     "id": message_id,
