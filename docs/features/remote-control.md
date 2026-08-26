@@ -594,7 +594,15 @@ Activity token shape. Before delivery the daemon removes malformed legacy rows. 
 specific subscription after Apple's `410 Unregistered` response or a reason-qualified
 `400 BadDeviceToken`/`DeviceTokenNotForTopic`, while preserving it for unrelated 400 responses.
 
-## 2g. Run as a background service — `forge service`
+## 2g. Remote terminal lifecycle
+
+Terminal PTYs are owned by the daemon's `(session, terminal)` registry rather than by a single
+WebSocket. Disconnecting a browser therefore detaches a client without killing the shell, while
+an explicit terminal close or session shutdown sends a bounded kill command, marks the terminal
+exited, and removes it from the registry. Reconnects reuse the same handle and replay its bounded
+history; a close never leaves an orphaned child behind.
+
+## 2h. Run as a background service — `forge service`
 
 `forge serve` is a foreground process by default: close the terminal (or log out), and the
 daemon dies with it. `forge service` installs it as an opt-in, always-on user-level OS service

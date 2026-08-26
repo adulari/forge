@@ -191,17 +191,33 @@ impl ForgeMcp {
         let mut sink = std::env::var(forge_provider::SUBAGENT_SINK_ENV)
             .ok()
             .and_then(|p| {
-                std::fs::OpenOptions::new()
+                match std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(p)
-                    .ok()
+                    .open(&p)
+                {
+                    Ok(f) => Some((f, p)),
+                    Err(error) => {
+                        tracing::warn!(
+                            path = p,
+                            %error,
+                            "mcp-serve: cannot open the subagent sink; the parent session \
+                             will not see this spawn's lifecycle"
+                        );
+                        None
+                    }
+                }
             });
         let mut write = move |v: serde_json::Value| {
-            if let Some(f) = sink.as_mut() {
+            if let Some((f, path)) = sink.as_mut() {
                 use std::io::Write;
-                let _ = writeln!(f, "{v}");
-                let _ = f.flush();
+                if let Err(error) = writeln!(f, "{v}").and_then(|()| f.flush()) {
+                    tracing::warn!(
+                        path = path.as_str(),
+                        %error,
+                        "mcp-serve: failed to append a subagent lifecycle event to the sink"
+                    );
+                }
             }
         };
         let mut on_event = |ev: subagent::Lifecycle| match ev {
