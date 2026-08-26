@@ -372,13 +372,21 @@ async fn send_push(
     let upstream_base_url = apns::host(environment);
     let url = format!("{upstream_base_url}/3/device/{device_token}");
     let outbound_payload = outbound_payload(&payload, push_type, state.generic_alerts);
+    let bearer_token = match state.auth.bearer_token(now) {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::error!("APNs authorization token cache unavailable: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "APNs authorization token unavailable",
+            )
+                .into_response();
+        }
+    };
     let result = state
         .client
         .post(&url)
-        .header(
-            "authorization",
-            format!("bearer {}", state.auth.bearer_token(now)),
-        )
+        .header("authorization", format!("bearer {bearer_token}"))
         .header("apns-topic", &topic)
         .header("apns-push-type", push_type)
         .header(

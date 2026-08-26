@@ -3428,6 +3428,24 @@ mod tests {
     }
 
     #[test]
+    fn malformed_session_tasks_are_reported_instead_of_becoming_empty() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO session_tasks (session_id, tasks_json, updated_at) VALUES (?1, ?2, 0)",
+                rusqlite::params![&sid, "not-json"],
+            )
+            .unwrap();
+        let error = store
+            .tasks(&sid)
+            .expect_err("corrupt task JSON must be visible");
+        assert!(matches!(error, StoreError::Json(message) if message.contains("session tasks")));
+    }
+
+    #[test]
     fn session_tasks_carry_an_assignee_and_load_rows_written_without_one() {
         use forge_types::{TodoItem, TodoStatus};
         let store = Store::open_in_memory().unwrap();
@@ -4686,6 +4704,32 @@ mod tests {
         assert_eq!(node.forked_from.as_deref(), Some(src.as_str()));
         assert_eq!(node.forked_at_seq, Some(2));
         assert_eq!(store.load_messages(&src).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn fork_rejects_malformed_tool_call_metadata() {
+        let store = Store::open_in_memory().unwrap();
+        let source = store.create_session("/repo", "default").unwrap();
+        let message = store
+            .add_message(&source, 0, Role::Assistant, "answer", Some("model"))
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE message SET tool_calls_json = ?1 WHERE id = ?2",
+                ("{not-json", &message),
+            )
+            .unwrap();
+
+        let error = store
+            .fork_session(&source, 1)
+            .expect_err("fork must not rewrite malformed metadata");
+
+        assert!(
+            matches!(error, StoreError::Json(ref message) if message.contains("malformed tool-call metadata")),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]
