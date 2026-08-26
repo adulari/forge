@@ -1233,9 +1233,7 @@ pub mod testsupport {
                 "properties": { "msg": { "type": "string" } }
             }))
             .unwrap();
-            // rmcp 3 added spec-2026-07-28 fields (result_type, ttl_ms, cache_scope) to every
-            // paginated result. `with_all_items` is the constructor that fills them with the
-            // spec defaults, so this stays correct if more are added.
+            // `with_all_items` fills rmcp 3's new paginated-result fields with spec defaults.
             Ok(ListToolsResult::with_all_items(vec![
                 Tool::new(
                     "echo",
@@ -1250,8 +1248,7 @@ pub mod testsupport {
             req: CallToolRequestParams,
             _ctx: RequestContext<RoleServer>,
         ) -> Result<CallToolResponse, McpError> {
-            // rmcp 3 lets a tool call also return "input required" or "task"; this mock always
-            // completes, and `CallToolResult: Into<CallToolResponse>` wraps it as Complete.
+            // This mock always completes; `.into()` wraps it as CallToolResponse::Complete.
             match req.name.as_ref() {
                 "echo" => {
                     let msg = req
