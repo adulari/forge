@@ -65,11 +65,18 @@ pub struct Lattice {
 pub struct UpdateStats {
     pub files_indexed: usize,
     pub files_skipped: usize,
+    /// Supported source files skipped before reading because their size would make parsing
+    /// unbounded for an interactive index update.
+    pub files_too_large: usize,
     pub symbols: usize,
     /// Files removed from the index this run because they vanished from the walk (deleted, or now
     /// under a skipped/nested-git/vendored dir). Their symbols/edges/refs are cascade-deleted.
     pub files_pruned: usize,
 }
+
+/// Hard per-file budget for the synchronous parser. A generated or accidentally vendored
+/// multi-megabyte source file should not make the first interactive index/search look hung.
+pub const MAX_INDEX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A symbol returned from a query.
 #[derive(Debug, Clone, PartialEq)]
@@ -308,6 +315,23 @@ impl Lattice {
 
     fn index_file(&self, path: &Path, stats: &mut UpdateStats) -> Result<(), LatticeError> {
         let rel = self.rel_path(path);
+        if path
+            .metadata()
+            .map(|metadata| metadata.len() > MAX_INDEX_FILE_BYTES)
+            .unwrap_or(false)
+        {
+            // Remove an older row as well: retaining symbols for a file that is now outside the
+            // parser budget is more misleading than reporting it as skipped.
+            let _ = self.store.delete_lattice_file(&self.repo_root, &rel);
+            stats.files_skipped += 1;
+            stats.files_too_large += 1;
+            tracing::warn!(
+                file = %path.display(),
+                max_bytes = MAX_INDEX_FILE_BYTES,
+                "lattice: skipping source file above parser budget"
+            );
+            return Ok(());
+        }
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(_) => {
@@ -779,6 +803,25 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].rel_path, "src/lib.rs");
         assert!(lat.query("should_not_index", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn skips_a_source_file_above_the_parser_budget_before_reading_it() {
+        let t = Tmp::new();
+        let large = t.root.join("src/generated.rs");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_INDEX_FILE_BYTES + 1)
+            .unwrap();
+        t.write("src/keep.rs", "pub fn responsive_symbol() {}\n");
+        let lat = lattice(&t.root);
+
+        let stats = lat.update().unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(stats.files_too_large, 1);
+        assert_eq!(stats.files_skipped, 1);
+        assert_eq!(lat.query("responsive_symbol", 10).unwrap().len(), 1);
+        assert!(lat.query("generated", 10).unwrap().is_empty());
     }
 
     #[test]

@@ -7,7 +7,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: mobile-typecheck-${{ github.ref }}
+  # Branch-keyed so a dispatched run and a pull_request run for the same branch share one group.
+  # See the note in ci.yml for the measurement behind this.
+  group: mobile-typecheck-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
@@ -63,7 +65,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Audit shipped npm dependencies
-        run: npm audit --omit=dev --audit-level=high
+        run: bash ../scripts/ci/npm-audit-gate.sh
+      - name: Test npm audit gate blocks and waives correctly
+        working-directory: .
+        run: bash scripts/ci/test-npm-audit-gate.sh
 
       - name: Check app
         run: npm run check
