@@ -5,7 +5,7 @@
 //! lever — the model reads the function from context instead of spending a whole-file `read_file`);
 //! the rest are signature lines. Cheap, deterministic, degrades to "nothing" on an empty index.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::{Lattice, LatticeError, NodeHit};
@@ -78,6 +78,9 @@ impl InjectedContext {
 /// Max signature lines injected per turn. Beyond a handful, extra fuzzy matches are noise that the
 /// model re-reads on every step without benefit. Bodies (exact hits) are not counted here.
 const MAX_SIG_SNIPPETS: usize = 8;
+/// Upper bound on source bytes read while assembling one retrieval. A body hit must never make a
+/// turn pay for repeatedly loading a pathological file; files are cached by relative path.
+const MAX_BODY_READ_BYTES: usize = 4 * 1024 * 1024;
 
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "this", "that", "with", "from", "into", "add", "use", "new", "get", "set",
@@ -188,14 +191,44 @@ fn est_tokens(s: &str) -> usize {
 }
 
 /// Read a symbol's source body by byte span, snapping to char boundaries and clamping to the file
-/// length so a stale/oversize span can never panic. `None` on any read/range failure (caller then
-/// falls back to the signature line).
-fn read_body(repo_root: &str, rel_path: &str, start: i64, end: i64) -> Result<String, String> {
+/// length so a stale/oversize span can never panic. Whole-file reads are cached per `rel_path` and
+/// charged against a shared byte budget, so one retrieval returning many symbols from the same file
+/// reads it once. `Err` carries WHY the body was unavailable; the caller falls back to the
+/// signature line and reports the reason rather than silently dropping it.
+fn read_body_cached(
+    repo_root: &str,
+    rel_path: &str,
+    start: i64,
+    end: i64,
+    cache: &mut HashMap<String, Result<String, String>>,
+    bytes_read: &mut usize,
+) -> Result<String, String> {
     if end <= start || start < 0 {
         return Err("invalid source span".into());
     }
-    let full = std::fs::read_to_string(Path::new(repo_root).join(rel_path))
-        .map_err(|error| error.to_string())?;
+    if !cache.contains_key(rel_path) {
+        let path = Path::new(repo_root).join(rel_path);
+        let remaining = MAX_BODY_READ_BYTES.saturating_sub(*bytes_read);
+        let outcome = match std::fs::metadata(&path) {
+            // Budget exhaustion is reported, not silently treated as a missing body: a truncated
+            // retrieval that looks identical to a clean one is what this PR pair set out to fix.
+            Ok(meta) if meta.len() > remaining as u64 => Err(format!(
+                "skipped: {} bytes exceeds the {remaining} bytes left in the body-read budget",
+                meta.len()
+            )),
+            Ok(_) => std::fs::read_to_string(&path).map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Ok(text) = &outcome {
+            *bytes_read = bytes_read.saturating_add(text.len());
+        }
+        cache.insert(rel_path.to_string(), outcome);
+    }
+    let full = cache
+        .get(rel_path)
+        .expect("cache entry inserted directly above")
+        .as_ref()
+        .map_err(String::clone)?;
     let mut s = (start as usize).min(full.len());
     let mut e = (end as usize).min(full.len());
     while s < full.len() && !full.is_char_boundary(s) {
@@ -282,6 +315,8 @@ pub fn retrieve(
     let mut nodes = Vec::new();
     let mut bodies_left = bodies.map(|b| b.max_hits).unwrap_or(0);
     let mut sigs_left = MAX_SIG_SNIPPETS;
+    let mut body_cache = HashMap::new();
+    let mut body_bytes_read = 0usize;
     for n in candidates {
         // A body is only worth its (per-step) cost for a *confident* hit — a symbol whose name
         // exactly matches a queried identifier. Injecting a fuzzy match's body (e.g. `ForgeMcp` for
@@ -289,7 +324,14 @@ pub fn retrieve(
         let exact = idents.iter().any(|id| n.name.eq_ignore_ascii_case(id));
         if bodies_left > 0 && exact {
             if let Some(opts) = bodies {
-                match read_body(lat.repo_root(), &n.rel_path, n.span_start, n.span_end) {
+                match read_body_cached(
+                    lat.repo_root(),
+                    &n.rel_path,
+                    n.span_start,
+                    n.span_end,
+                    &mut body_cache,
+                    &mut body_bytes_read,
+                ) {
                     Ok(body) => {
                         let block = body_block(&n, &body);
                         let cost = est_tokens(&block);
@@ -435,5 +477,60 @@ mod tests {
         let b = body_block(&n, "fn foo() {}\n");
         assert!(b.starts_with("src/a.rs:10 — function foo"));
         assert!(b.contains("```rs\nfn foo() {}\n```"));
+    }
+
+    #[test]
+    fn cached_body_reads_each_file_once_and_respects_byte_budget() {
+        let dir = std::env::temp_dir().join(format!("forge-retrieve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("source.rs");
+        std::fs::write(&path, "fn one() {}\nfn two() {}\n").unwrap();
+        let mut cache = HashMap::new();
+        let mut bytes = 0;
+        let first = read_body_cached(
+            dir.to_str().unwrap(),
+            "source.rs",
+            0,
+            11,
+            &mut cache,
+            &mut bytes,
+        )
+        .unwrap();
+        let after_first = bytes;
+        let second = read_body_cached(
+            dir.to_str().unwrap(),
+            "source.rs",
+            12,
+            24,
+            &mut cache,
+            &mut bytes,
+        )
+        .unwrap();
+        assert_eq!(first, "fn one() {}");
+        assert_eq!(second, "fn two() {}\n");
+        assert_eq!(bytes, after_first, "cache avoids rereading the same file");
+
+        let oversized = dir.join("large.rs");
+        std::fs::write(&oversized, vec![b'x'; MAX_BODY_READ_BYTES + 1]).unwrap();
+        // Skipping for budget must be REPORTED, not indistinguishable from a body-less symbol.
+        let reason = read_body_cached(
+            dir.to_str().unwrap(),
+            "large.rs",
+            0,
+            10,
+            &mut cache,
+            &mut bytes,
+        )
+        .expect_err("an oversized file is skipped, and says so");
+        assert!(
+            reason.contains("body-read budget"),
+            "unexpected reason: {reason}"
+        );
+        assert_eq!(
+            bytes, after_first,
+            "oversized files do not consume the read budget"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
