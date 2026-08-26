@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 use forge_types::{new_id, Message, Role, ToolCall, Usage};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::{EventSink, ModelResponse, Provider, ProviderError, StreamEvent, ToolSpec};
 
@@ -114,8 +114,19 @@ impl Provider for MockProvider {
         // A file-writing turn (exercises write paths end-to-end: diff preview, worktree commits,
         // `forge queue run --mock` result branches).
         let wants_write = lu.contains("mock:write") || lu.contains("create a file");
+        // A second, distinct write trigger lets end-to-end approval tests rotate the pending
+        // prompt sequence after the first write. Keeping a separate path avoids the fixture's
+        // normal "one write per conversation" guard from short-circuiting the second turn.
+        let wants_second_write = lu.contains("mock:write again");
         let used_write = messages.iter().any(|m| {
             m.role == Role::Assistant && m.tool_calls.iter().any(|c| c.name == "write_file")
+        });
+        let used_second_write = messages.iter().any(|m| {
+            m.role == Role::Assistant
+                && m.tool_calls.iter().any(|c| {
+                    c.name == "write_file"
+                        && c.args.get("path").and_then(Value::as_str) == Some("mock-note-again.txt")
+                })
         });
 
         // Planning turn → render the plan card, then stop for approval.
@@ -177,7 +188,7 @@ impl Provider for MockProvider {
 
         // File-writing turn → one write_file round-trip then a final answer.
         if wants_write {
-            if used_write {
+            if (wants_second_write && used_second_write) || (!wants_second_write && used_write) {
                 let content = "Done — the file is written.";
                 stream_words(content, on_event).await;
                 return Ok(resp(content, vec![], 42, 18));
@@ -190,7 +201,11 @@ impl Provider for MockProvider {
                     id: new_id(),
                     name: "write_file".to_string(),
                     args: json!({
-                        "path": "mock-note.txt",
+                        "path": if wants_second_write {
+                            "mock-note-again.txt"
+                        } else {
+                            "mock-note.txt"
+                        },
                         "content": "deterministic mock output\n",
                     }),
                 }],

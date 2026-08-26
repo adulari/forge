@@ -46,7 +46,7 @@ pub(crate) async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
     };
 
     forge_config::inject_provider_keys();
-    let config = forge_config::load().unwrap_or_default();
+    let config = super::load_config()?;
     if let Err(e) = config.mcp.validate() {
         anyhow::bail!("{e}");
     }

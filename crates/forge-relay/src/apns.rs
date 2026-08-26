@@ -59,11 +59,14 @@ impl ApnsAuth {
         }
     }
 
-    pub(crate) fn bearer_token(&self, now_unix: u64) -> String {
-        let mut cached = self.cached.lock().unwrap();
+    pub(crate) fn bearer_token(&self, now_unix: u64) -> anyhow::Result<String> {
+        let mut cached = self
+            .cached
+            .lock()
+            .map_err(|_| anyhow::anyhow!("APNs token cache mutex poisoned"))?;
         if let Some((tok, minted_at)) = cached.as_ref() {
             if now_unix.saturating_sub(*minted_at) < AUTH_TOKEN_TTL_SECS {
-                return tok.clone();
+                return Ok(tok.clone());
             }
         }
         let header = b64url(format!(r#"{{"alg":"ES256","kid":"{}"}}"#, self.key_id).as_bytes());
@@ -76,7 +79,7 @@ impl ApnsAuth {
         let sig: Signature = self.signing_key.sign(signing_input.as_bytes());
         let token = format!("{signing_input}.{}", b64url(&sig.to_bytes()));
         *cached = Some((token.clone(), now_unix));
-        token
+        Ok(token)
     }
 }
 
@@ -103,7 +106,7 @@ mod tests {
     fn bearer_token_is_verifiable_with_the_public_key() {
         let scalar = [9u8; 32];
         let auth = ApnsAuth::from_scalar(&scalar, "TEAM123456", "KEY7890AB");
-        let token = auth.bearer_token(1_700_000_000);
+        let token = auth.bearer_token(1_700_000_000).unwrap();
 
         let mut parts = token.split('.');
         let (h, c, s) = (
@@ -132,11 +135,25 @@ mod tests {
     #[test]
     fn bearer_token_is_cached_and_reminted_after_ttl() {
         let auth = ApnsAuth::from_scalar(&[3u8; 32], "TEAM", "KEY");
-        let first = auth.bearer_token(1_000_000);
-        let same = auth.bearer_token(1_000_000 + AUTH_TOKEN_TTL_SECS - 1);
+        let first = auth.bearer_token(1_000_000).unwrap();
+        let same = auth
+            .bearer_token(1_000_000 + AUTH_TOKEN_TTL_SECS - 1)
+            .unwrap();
         assert_eq!(first, same, "reused while within the TTL");
-        let fresh = auth.bearer_token(1_000_000 + AUTH_TOKEN_TTL_SECS);
+        let fresh = auth.bearer_token(1_000_000 + AUTH_TOKEN_TTL_SECS).unwrap();
         assert_ne!(first, fresh, "re-minted once the cached token goes stale");
+    }
+
+    #[test]
+    fn poisoned_token_cache_returns_an_error_instead_of_panicking() {
+        let auth = ApnsAuth::from_scalar(&[5u8; 32], "TEAM", "KEY");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = auth.cached.lock().unwrap();
+            panic!("poison test");
+        }));
+
+        let error = auth.bearer_token(1_000_000).unwrap_err().to_string();
+        assert_eq!(error, "APNs token cache mutex poisoned");
     }
 
     #[test]

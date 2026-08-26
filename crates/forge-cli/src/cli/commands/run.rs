@@ -377,7 +377,7 @@ pub(crate) async fn run_chat_tui(
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
 
     // Load config once — shared between update check, session build, and TUI config below.
-    let tui_config = forge_config::load().unwrap_or_default();
+    let tui_config = super::load_config()?;
     // Fire the update check in the background so it never blocks TUI startup.
     // The notification arrives as a Warning in the TUI instead of blocking on a 3s HTTP call.
     update_check::maybe_notify_background(&tui_config, tx.clone());
@@ -787,6 +787,9 @@ pub(crate) async fn run_chat_tui(
     // Rate-limits the idle session-heartbeat check — the render loop iterates far more often than
     // this needs to be re-checked (turn-end already checks it immediately).
     let mut last_heartbeat_check = std::time::Instant::now();
+    // Last heartbeat-store error already shown to the user; a persistent failure should not
+    // append the same warning on every periodic check.
+    let mut last_heartbeat_error: Option<String> = None;
     // Identity of the currently pending permission/question prompt, bumped every time a new one
     // is installed. Broadcast as `Snapshot::prompt_seq`; remote Allow/Answer must echo it back,
     // and a mismatch is ignored — a stale tap can never approve a prompt it never saw.
@@ -811,6 +814,8 @@ pub(crate) async fn run_chat_tui(
     // connected browser (~60 frames/s of JSON for nothing).
     let mut last_remote_snap: Option<remote::Snapshot> = None;
     let mut remote_revision: u64 = 0;
+    // Runtime failure from the loopback remote server, shown once after its URL was published.
+    let mut remote_server_error_seen: Option<String> = None;
     // One long-lived clipboard for mouse-selection copies (see `copy_selection`). Created once so
     // arboard keeps the X11/Wayland selection alive and never logs a "dropped" warning to the TUI.
     let mut clipboard: Option<arboard::Clipboard> = arboard::Clipboard::new().ok();
@@ -903,17 +908,21 @@ pub(crate) async fn run_chat_tui(
         // check catches a heartbeat coming due while the session just sits idle.
         if last_heartbeat_check.elapsed() >= std::time::Duration::from_secs(5) {
             last_heartbeat_check = std::time::Instant::now();
-            if try_deliver_due_heartbeats(
-                &session,
-                &mut queued_prompts,
+            if report_heartbeat_delivery(
+                try_deliver_due_heartbeats(
+                    &session,
+                    &mut queued_prompts,
+                    &mut app,
+                    &mut prompt_history,
+                    &mut last_prompt,
+                    &done_tx,
+                    &mut turn_gen,
+                    &mut turn_handle,
+                    &mut busy,
+                    &mut busy_since,
+                ),
                 &mut app,
-                &mut prompt_history,
-                &mut last_prompt,
-                &done_tx,
-                &mut turn_gen,
-                &mut turn_handle,
-                &mut busy,
-                &mut busy_since,
+                &mut last_heartbeat_error,
             ) {
                 dirty = true;
             }
@@ -4009,17 +4018,21 @@ pub(crate) async fn run_chat_tui(
                 // A due heartbeat only gets to run when nothing else claimed the next turn above
                 // — a typed-while-busy prompt / active /loop or /goal always wins.
                 if turn_handle.is_none() {
-                    try_deliver_due_heartbeats(
-                        &session,
-                        &mut queued_prompts,
+                    report_heartbeat_delivery(
+                        try_deliver_due_heartbeats(
+                            &session,
+                            &mut queued_prompts,
+                            &mut app,
+                            &mut prompt_history,
+                            &mut last_prompt,
+                            &done_tx,
+                            &mut turn_gen,
+                            &mut turn_handle,
+                            &mut busy,
+                            &mut busy_since,
+                        ),
                         &mut app,
-                        &mut prompt_history,
-                        &mut last_prompt,
-                        &done_tx,
-                        &mut turn_gen,
-                        &mut turn_handle,
-                        &mut busy,
-                        &mut busy_since,
+                        &mut last_heartbeat_error,
                     );
                 }
                 // Auto-compact: when no new turn was spawned (not a loop iteration) and the
@@ -4388,6 +4401,18 @@ pub(crate) async fn run_chat_tui(
         // remote control is on, also fold them into the transcript ring buffer so the phone's
         // snapshot mirrors the conversation tail, then broadcast the snapshot.
         if remote.is_some() {
+            if let Some(error) = remote
+                .as_ref()
+                .and_then(remote::RemoteControl::server_error)
+            {
+                if remote_server_error_seen.as_deref() != Some(error.as_str()) {
+                    app.note(&format!(
+                        "⚠ remote control unavailable: server stopped: {error}"
+                    ));
+                    remote_server_error_seen = Some(error);
+                    dirty = true;
+                }
+            }
             let flushed = app.drain_flush_remote();
             if !flushed.is_empty() {
                 tui.insert_lines(flushed);

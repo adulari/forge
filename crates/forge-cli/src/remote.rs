@@ -40,7 +40,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -753,6 +753,12 @@ pub struct EventLog {
     cap: usize,
 }
 
+fn lock_event_log(events: &Mutex<EventLog>) -> std::sync::MutexGuard<'_, EventLog> {
+    events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl EventLog {
     pub fn new(cap: usize) -> Self {
         Self {
@@ -1337,6 +1343,8 @@ pub struct RemoteControl {
     /// fingerprint were fixed at return time and can't be corrected in place, so this is checked
     /// separately wherever the exposure is reported (e.g. the remote-page header).
     tls_failed: Arc<AtomicBool>,
+    /// Set when the loopback/HTTP server exits with a runtime error after its URL was published.
+    server_error: Arc<Mutex<Option<String>>>,
 }
 
 impl RemoteControl {
@@ -1348,15 +1356,23 @@ impl RemoteControl {
         self.tls_failed.load(Ordering::Relaxed)
     }
 
+    /// Runtime error from the server task, if it exited after startup. A URL is not useful once
+    /// its listener has failed, so the render loop surfaces this to the user instead of leaving a
+    /// dead remote-control link in the transcript.
+    pub fn server_error(&self) -> Option<String> {
+        self.server_error
+            .lock()
+            .ok()
+            .and_then(|error| error.clone())
+    }
+
     /// Publish a frame to every connected browser AND record it in the replay log. The render
     /// loop must use this (never `snapshot_tx.send` directly): a frame that skipped the log
     /// would be unreplayable, so a reconnecting client would resync (full rebuild) instead of
     /// receiving exactly what it missed. `snap.revision` must already be bumped by the caller.
     pub fn broadcast(&self, snap: Snapshot) {
         let frame = Arc::new(SnapshotFrame::new(snap));
-        if let Ok(mut log) = self.events.lock() {
-            log.push(frame.snapshot.revision, frame.clone());
-        }
+        lock_event_log(&self.events).push(frame.snapshot.revision, frame.clone());
         let _ = self.snapshot_tx.send(frame);
     }
 }
@@ -1582,6 +1598,7 @@ pub fn start(
             _server: server,
             _tunnel: None,
             tls_failed,
+            server_error: Arc::new(Mutex::new(None)),
             tunnel: None,
         });
     }
@@ -1594,8 +1611,14 @@ pub fn start(
     let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
     let url = format!("http://{host}:{}/{}", addr.port(), token);
 
+    let server_error = Arc::new(Mutex::new(None));
+    let server_error_task = server_error.clone();
     let server = tokio::spawn(async move {
-        axum::serve(tokio_listener, app).await.ok(); // best-effort: errors here mean the user turned it off / the port dropped
+        if let Err(error) = axum::serve(tokio_listener, app).await {
+            if let Ok(mut slot) = server_error_task.lock() {
+                *slot = Some(error.to_string());
+            }
+        }
     });
 
     Ok(RemoteControl {
@@ -1612,6 +1635,7 @@ pub fn start(
         _tunnel: None,
         tunnel: None,
         tls_failed: Arc::new(AtomicBool::new(false)),
+        server_error,
     })
 }
 
@@ -1884,7 +1908,7 @@ pub(crate) async fn pump_ws(
     let replay = if since == 0 {
         None
     } else {
-        events.lock().ok().and_then(|log| log.replay_after(since))
+        Some(lock_event_log(&events).replay_after(since)).flatten()
     };
     let last_sent = match replay {
         Some(missed) => {
@@ -2452,6 +2476,24 @@ mod tests {
         assert_eq!(log.replay_after(10).expect("current is fillable").len(), 0);
         // The boundary: rev = front-1 still replays the entire retained log.
         assert_eq!(log.replay_after(0).expect("full log").len(), 10);
+    }
+
+    #[test]
+    fn poisoned_event_log_mutex_still_replays_history() {
+        let events = Arc::new(Mutex::new(EventLog::new(EVENT_LOG_CAP)));
+        lock_event_log(&events).push(1, Arc::new(SnapshotFrame::new(rev_snap(1))));
+        let poisoned = Arc::clone(&events);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison the replay lock");
+        })
+        .join();
+
+        let replay = lock_event_log(&events)
+            .replay_after(0)
+            .expect("poison recovery must preserve the event log");
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].snapshot.revision, 1);
     }
 
     #[test]
