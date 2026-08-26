@@ -185,7 +185,7 @@ during the initial fixture phase rather than in a JavaScript long task. Idle mea
 180 ms at ~349 ms. All three recorded zero long tasks. This is evidence of a compositor/paint/
 raster or startup-resource stall, not a median-frame problem.
 
-## AppImage XWayland packaging defect (fixed)
+## AppImage XWayland packaging defect (fixed 2026-08-27)
 
 **Finding (verified):** the locally-built release binary mapped as native Wayland (`xwayland=false`),
 while the packaged AppImage child mapped through XWayland (`xwayland=true`) on the same session and
@@ -193,13 +193,33 @@ output. These are different rendering and input stacks; their performance figure
 combined or compared. Native-binary figures describe GTK/WebKitGTK Wayland; AppImage figures
 currently describe XWayland.
 
-**Investigation:** the AppImage's packaged AppRun/AppDir path does not preserve the native Wayland
-launch environment. The AppImage child is `Forge-desktop`/XWayland while the direct binary is
-`forge-desktop`/Wayland. The packaging path needs explicit Wayland backend handling and dependency
-review (AppRun environment, `GDK_BACKEND`, and bundled GTK/WebKit libraries) before shipping.
+**Cause (found 2026-08-27):** not the AppRun environment or the bundled libraries. `linuxdeploy-plugin-gtk`
+generates `AppDir/apprun-hooks/linuxdeploy-plugin-gtk.sh` containing a hard-coded
 
-**Status:** release-blocking packaging defect; no AppImage number is comparable to the native
-binary until the packaged child is verified `xwayland=false`.
+    export GDK_BACKEND=x11 # Crash with Wayland backend on Wayland - We tested it without it
+                           # and ended up with this: https://github.com/tauri-apps/tauri/issues/8541
+
+so the AppImage was pinned to XWayland by the bundler, deliberately, to dodge a crash.
+
+**The crash is real, and it is not the Wayland backend.** Verified against the shipped v2.12.1
+AppImage on a Hyprland/wlroots session:
+
+| launch | result |
+| --- | --- |
+| as shipped (`GDK_BACKEND=x11`) | runs, XWayland |
+| `GDK_BACKEND=wayland` alone | `Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display`, exit 1 |
+| `GDK_BACKEND=wayland` + `WEBKIT_DISABLE_DMABUF_RENDERER=1` | runs; `hyprctl clients` reports `class=forge-desktop xwayland=False` |
+
+It is WebKitGTK's dmabuf renderer that fails, which is the same cause already documented for the
+direct binary — so the upstream x11 pin treats a symptom.
+
+**Fix:** `scripts/ci/appimage-wayland-backend.sh` rewrites that generated hook at package time to
+prefer the session's backend and disable the dmabuf renderer, both still overridable by the user.
+It refuses to run if upstream's hook no longer matches, so a template change stops the build rather
+than silently shipping XWayland again; `scripts/ci/test-appimage-wayland-backend.sh` covers that.
+
+**Status:** fixed. The packaged child is verified `xwayland=false`, so AppImage and native-binary
+figures are now measured on the same stack and can be compared.
 
 actions the user expects to be auto-approved.
 

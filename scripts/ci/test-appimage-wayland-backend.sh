@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Guards scripts/ci/appimage-wayland-backend.sh, which is what stops the AppImage shipping with
+# GDK_BACKEND pinned to x11. It runs at package time inside the desktop release workflow, where a
+# silent no-op would ship an XWayland build again without anyone noticing.
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+fixer="$script_dir/appimage-wayland-backend.sh"
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+
+make_hook() {
+  mkdir -p "$1/apprun-hooks"
+  cat > "$1/apprun-hooks/linuxdeploy-plugin-gtk.sh" <<'HOOK'
+#! /usr/bin/env bash
+export GTK_THEME="$APPIMAGE_GTK_THEME"
+export GDK_BACKEND=x11 # Crash with Wayland backend on Wayland - We tested it without it and ended up with this: https://github.com/tauri-apps/tauri/issues/8541
+export XDG_DATA_DIRS="$APPDIR/usr/share:/usr/share:$XDG_DATA_DIRS"
+HOOK
+}
+
+# 1. The x11 pin is replaced, both values stay overridable, and the rest of the hook survives.
+appdir="$work/ok"
+make_hook "$appdir"
+bash "$fixer" "$appdir" >/dev/null
+hook="$appdir/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+grep -q '^export GDK_BACKEND="${GDK_BACKEND:-wayland}"$' "$hook" \
+  || { echo 'expected the Wayland-preferring GDK_BACKEND export' >&2; exit 1; }
+grep -q '^export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"$' "$hook" \
+  || { echo 'expected the dmabuf renderer to be disabled' >&2; exit 1; }
+grep -q '^export GDK_BACKEND=x11' "$hook" \
+  && { echo 'the x11 pin survived the patch' >&2; exit 1; }
+grep -q 'XDG_DATA_DIRS' "$hook" \
+  || { echo 'unrelated hook lines must be preserved' >&2; exit 1; }
+
+# 2. A hook without the expected pin must fail loudly. If linuxdeploy changes its template, the
+#    build has to stop rather than quietly ship XWayland again.
+appdir="$work/changed"
+mkdir -p "$appdir/apprun-hooks"
+printf '#! /usr/bin/env bash\nexport GTK_THEME=x\n' > "$appdir/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+if bash "$fixer" "$appdir" >/dev/null 2>&1; then
+  echo 'a changed upstream hook must be rejected, not silently accepted' >&2
+  exit 1
+fi
+
+# 3. A missing hook is an error too.
+appdir="$work/missing"
+mkdir -p "$appdir"
+if bash "$fixer" "$appdir" >/dev/null 2>&1; then
+  echo 'a missing GTK hook must be rejected' >&2
+  exit 1
+fi
+
+echo 'appimage wayland backend fix is enforced'
