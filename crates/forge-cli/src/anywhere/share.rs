@@ -339,7 +339,6 @@ fn public_url(
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
     use ed25519_dalek::VerifyingKey;
 
     use super::*;

@@ -374,10 +374,8 @@ impl Store {
         let rows = stmt.query_map([repo_root], |r| {
             let id: String = r.get(0)?;
             let blob: Vec<u8> = r.get(1)?;
-            let vec = blob
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
+            let (chunks, _rest) = blob.as_chunks::<4>();
+            let vec = chunks.iter().copied().map(f32::from_le_bytes).collect();
             Ok((id, vec))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
