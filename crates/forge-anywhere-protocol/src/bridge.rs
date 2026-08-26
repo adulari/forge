@@ -43,6 +43,14 @@ pub enum RouteId {
     PushSubscribe,
     PushUnsubscribe,
     ListTerminals,
+    // Read-only git review. The daemon has served `/api/git/*` and the client has had a full review
+    // dock since #895, but with no route id in between, so reviewing a diff from the phone — the
+    // moment Anywhere exists for — has never worked. Only the three reading routes are bridged:
+    // `switch`, `stage`, `unstage` and `commit` mutate the working tree from a remote device and
+    // need their own decision, not an enum entry added in passing.
+    GitStatus,
+    GitBranches,
+    GitDiff,
     WebSocket,
     TerminalWebSocket,
 }

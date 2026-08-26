@@ -35,7 +35,13 @@ export type BridgeRoute =
   | "push_key"
   | "push_subscribe"
   | "push_unsubscribe"
-  | "list_terminals";
+  | "list_terminals"
+  // Read-only git review. The mutating git endpoints (switch/stage/unstage/commit) are
+  // deliberately absent: the host refuses them over the bridge, so listing them here would only
+  // produce a request that comes back denied.
+  | "git_status"
+  | "git_branches"
+  | "git_diff";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -218,6 +224,9 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/push/subscribe": { POST: "push_subscribe" },
     "/api/push/unsubscribe": { POST: "push_unsubscribe" },
     "/api/terminals": { GET: "list_terminals" },
+    "/api/git/status": { GET: "git_status" },
+    "/api/git/branches": { GET: "git_branches" },
+    "/api/git/diff": { GET: "git_diff" },
   };
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };

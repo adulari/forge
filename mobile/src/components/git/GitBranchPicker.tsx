@@ -25,12 +25,15 @@ export interface GitBranchPickerProps {
   sessionId: string;
   branch: string;
   baseBranch: string | null;
+  /** Over Anywhere the host refuses branch switches, so the picker renders as a label. */
+  readOnly?: boolean;
 }
 
 export function GitBranchPicker({
   sessionId,
   branch,
   baseBranch,
+  readOnly = false,
 }: GitBranchPickerProps): React.JSX.Element {
   const tokens = useTokens();
   const branches = useGitBranches(sessionId);
@@ -82,9 +85,14 @@ export function GitBranchPicker({
   return (
     <>
       <Pressable
-        onPress={() => setVisible(true)}
-        accessibilityRole="button"
-        accessibilityLabel={`Open branches and worktrees, current branch ${activeBranch || "detached HEAD"}`}
+        onPress={readOnly ? undefined : () => setVisible(true)}
+        disabled={readOnly}
+        accessibilityRole={readOnly ? "text" : "button"}
+        accessibilityLabel={
+          readOnly
+            ? `Current branch ${activeBranch || "detached HEAD"} — switching needs a direct connection`
+            : `Open branches and worktrees, current branch ${activeBranch || "detached HEAD"}`
+        }
         style={({ pressed }) => [
           styles.trigger,
           {
