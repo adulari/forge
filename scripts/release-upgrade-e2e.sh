@@ -137,6 +137,7 @@ forge_env() {
     HOME="$HOME_DIR" \
     XDG_CONFIG_HOME="$HOME_DIR/.config" \
     XDG_DATA_HOME="$HOME_DIR/.local/share" \
+    FORGE_DB="$DATA/forge.db" \
     FORGE_NO_UPDATE_CHECK=1 \
     FORGE_TELEMETRY_FORCE=1 \
     FORGE_POSTHOG_KEY=release-upgrade-e2e \
@@ -164,6 +165,7 @@ start_daemon() {
       HOME="$HOME_DIR" \
       XDG_CONFIG_HOME="$HOME_DIR/.config" \
       XDG_DATA_HOME="$HOME_DIR/.local/share" \
+      FORGE_DB="$DATA/forge.db" \
       FORGE_NO_UPDATE_CHECK=1 \
       FORGE_TELEMETRY_FORCE=1 \
       FORGE_POSTHOG_KEY=release-upgrade-e2e \
@@ -299,6 +301,19 @@ cp -a -- "$DATA" "$PRE_UPGRADE_DATA"
 
 install -m 0755 "$CANDIDATE" "$BIN/forge"
 [[ "$(forge_env "$BIN/forge" --version | awk '{print $NF}')" == "$CANDIDATE_VERSION" ]]
+# Exercise the installed release binary's diagnostics against the explicitly disposable store.
+# Doctor may report missing optional providers in this credential-free HOME, so its report is the
+# assertion rather than its hard-failure count. `service status` must still fail when no service is
+# installed; that non-zero status is the machine-detectable signal this release smoke protects.
+DOCTOR_RC=0
+forge_env "$BIN/forge" doctor > "$ROOT/candidate-doctor.log" 2>&1 || DOCTOR_RC=$?
+[[ -s "$ROOT/candidate-doctor.log" ]]
+grep -q "Session store" "$ROOT/candidate-doctor.log"
+grep -q "forge doctor" "$ROOT/candidate-doctor.log"
+SERVICE_RC=0
+forge_env "$BIN/forge" service status --port "$PORT" > "$ROOT/candidate-service-status.log" 2>&1 || SERVICE_RC=$?
+[[ "$SERVICE_RC" -ne 0 ]]
+grep -Eq "not installed|not running|not responding" "$ROOT/candidate-service-status.log"
 (
   cd "$PROJECT"
   forge_env "$BIN/forge" run UPGRADE_NEW_MARKER --mock --mode bypass --resume "$CLI_SESSION"
