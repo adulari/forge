@@ -1207,7 +1207,7 @@ fn truncate(s: &str) -> String {
 pub mod testsupport {
     use super::*;
     use rmcp::model::{
-        CallToolRequestParams, CallToolResult, ContentBlock, ListToolsResult,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
         PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     };
     use rmcp::service::RequestContext;
@@ -1233,24 +1233,22 @@ pub mod testsupport {
                 "properties": { "msg": { "type": "string" } }
             }))
             .unwrap();
-            Ok(ListToolsResult {
-                tools: vec![
-                    Tool::new(
-                        "echo",
-                        "Echo back the msg argument",
-                        Arc::new(schema.clone()),
-                    ),
-                    Tool::new("boom", "Always fails", Arc::new(schema)),
-                ],
-                next_cursor: None,
-                meta: None,
-            })
+            // `with_all_items` fills rmcp 3's new paginated-result fields with spec defaults.
+            Ok(ListToolsResult::with_all_items(vec![
+                Tool::new(
+                    "echo",
+                    "Echo back the msg argument",
+                    Arc::new(schema.clone()),
+                ),
+                Tool::new("boom", "Always fails", Arc::new(schema)),
+            ]))
         }
         async fn call_tool(
             &self,
             req: CallToolRequestParams,
             _ctx: RequestContext<RoleServer>,
-        ) -> Result<CallToolResult, McpError> {
+        ) -> Result<CallToolResponse, McpError> {
+            // This mock always completes; `.into()` wraps it as CallToolResponse::Complete.
             match req.name.as_ref() {
                 "echo" => {
                     let msg = req
@@ -1259,14 +1257,16 @@ pub mod testsupport {
                         .and_then(|a| a.get("msg"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                        "echo: {msg}"
-                    ))]))
+                    Ok(
+                        CallToolResult::success(vec![ContentBlock::text(format!("echo: {msg}"))])
+                            .into(),
+                    )
                 }
-                "boom" => Ok(CallToolResult::error(vec![ContentBlock::text("kaboom")])),
+                "boom" => Ok(CallToolResult::error(vec![ContentBlock::text("kaboom")]).into()),
                 other => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "unknown tool {other}"
-                ))])),
+                ))])
+                .into()),
             }
         }
     }

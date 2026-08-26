@@ -30,8 +30,8 @@ use forge_store::Store;
 use forge_tools::ToolRegistry;
 use forge_types::{PermissionDecision, PermissionMode, PermissionRule};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, JsonObject, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::io::stdio;
@@ -157,14 +157,27 @@ impl ServerHandler for ForgeMcp {
         _request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult {
-            tools: self.tool_list(),
-            next_cursor: None,
-            meta: None,
-        })
+        // rmcp 3 added spec-2026-07-28 fields (result_type, ttl_ms, cache_scope) to every
+        // paginated result; `with_all_items` fills them with the spec defaults.
+        Ok(ListToolsResult::with_all_items(self.tool_list()))
     }
 
     async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        // rmcp 3 widened this return type so a server can also answer "input required"
+        // or "task". Every tool here completes within the one call, so the existing
+        // result is wrapped as `CallToolResponse::Complete` and behaviour is unchanged.
+        self.call_tool_complete(request, _ctx).await.map(Into::into)
+    }
+}
+
+impl ForgeMcp {
+    /// The real tool dispatch. Split out from the `ServerHandler::call_tool` above so the
+    /// rmcp 3 response wrapping happens in exactly one place rather than at every return.
+    async fn call_tool_complete(
         &self,
         request: CallToolRequestParams,
         _ctx: RequestContext<RoleServer>,
