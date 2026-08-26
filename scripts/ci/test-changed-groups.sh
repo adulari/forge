@@ -74,4 +74,33 @@ for group in rust_fmt rust release_build anywhere_policy mobile_app mobile_tauri
   expect manual "$group" true
 done
 
+# The post-merge run on main (a `push`) scopes itself to that merge's own diff, so landing a
+# docs-only change must not spend the heavy runner on the whole matrix.
+repo="$scratch/push-repo"
+git init -q "$repo"
+git -C "$repo" -c user.email=ci@example.com -c user.name=CI commit -q --allow-empty -m base
+base_sha=$(git -C "$repo" rev-parse HEAD)
+mkdir -p "$repo/docs"
+echo hello > "$repo/docs/README.md"
+git -C "$repo" add docs/README.md
+git -C "$repo" -c user.email=ci@example.com -c user.name=CI commit -q -m docs
+head_sha=$(git -C "$repo" rev-parse HEAD)
+
+(
+  cd "$repo"
+  GITHUB_OUTPUT="$scratch/push" EVENT_NAME=push BASE_SHA="$base_sha" HEAD_SHA="$head_sha" \
+    "$classifier" >/dev/null
+)
+for group in rust_fmt rust release_build anywhere_policy mobile_app mobile_tauri cargo_audit cargo_deny; do
+  expect push "$group" false
+done
+
+# A push with no diffable predecessor (branch creation / unresolvable force-push) must fail safe by
+# running everything rather than silently checking nothing.
+GITHUB_OUTPUT="$scratch/push-zero" EVENT_NAME=push \
+  BASE_SHA=0000000000000000000000000000000000000000 HEAD_SHA="$head_sha" "$classifier" >/dev/null
+for group in rust_fmt rust release_build anywhere_policy mobile_app mobile_tauri cargo_audit cargo_deny; do
+  expect push-zero "$group" true
+done
+
 echo "Changed-file CI group classification passed"

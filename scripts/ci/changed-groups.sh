@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Classify a pull request's changed files into the smallest useful CI groups.
-# Scheduled and manually dispatched workflows intentionally run every group.
+# Classify a pull request's (or a merge commit's) changed files into the smallest
+# useful CI groups. Scheduled and manually dispatched workflows intentionally run
+# every group.
+#
+# `push` is classified the same way as `pull_request` when both SHAs are supplied:
+# the post-merge run on main only needs to re-check what that merge actually
+# touched. A push whose base SHA is absent or the all-zero sentinel (a branch's
+# first push, or a force-push GitHub cannot give a predecessor for) has no usable
+# range, so it falls back to running everything.
 #
 # For local verification, pass paths as arguments instead of providing a git
 # range. GitHub Actions writes the resulting booleans to GITHUB_OUTPUT.
@@ -100,15 +107,28 @@ classify() {
 
 event_name=${EVENT_NAME:-${GITHUB_EVENT_NAME:-}}
 
+# The all-zero SHA is what GitHub sends for `github.event.before` when there is no
+# predecessor commit to diff against.
+zero_sha=0000000000000000000000000000000000000000
+diffable=false
+case "$event_name" in
+  pull_request) diffable=true ;;
+  push)
+    if [[ -n "${BASE_SHA:-}" && "${BASE_SHA:-}" != "$zero_sha" ]]; then
+      diffable=true
+    fi
+    ;;
+esac
+
 if (($#)); then
   for path in "$@"; do
     classify "$path"
   done
-elif [[ "$event_name" != pull_request ]]; then
+elif [[ "$diffable" != true ]]; then
   enable_all
 else
-  base_sha=${BASE_SHA:?BASE_SHA is required for pull_request classification}
-  head_sha=${HEAD_SHA:?HEAD_SHA is required for pull_request classification}
+  base_sha=${BASE_SHA:?BASE_SHA is required for $event_name classification}
+  head_sha=${HEAD_SHA:?HEAD_SHA is required for $event_name classification}
   while IFS= read -r -d '' path; do
     classify "$path"
   # Deletions matter too: removing a source, manifest, or lockfile must run the
