@@ -69,7 +69,8 @@ classify canary scripts/ci/check-anywhere-plaintext-canary.sh
 expect canary anywhere_policy true
 expect canary rust false
 
-GITHUB_OUTPUT="$scratch/manual" EVENT_NAME=workflow_dispatch "$classifier" >/dev/null
+# Dispatching the default branch is the explicit full-verification path.
+GITHUB_OUTPUT="$scratch/manual" EVENT_NAME=workflow_dispatch GITHUB_REF_NAME=main "$classifier" >/dev/null
 for group in rust_fmt rust release_build anywhere_policy mobile_app mobile_tauri cargo_audit cargo_deny; do
   expect manual "$group" true
 done
