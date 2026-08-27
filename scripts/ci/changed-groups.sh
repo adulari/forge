@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Classify a pull request's (or a merge commit's) changed files into the smallest
-# useful CI groups. Scheduled and manually dispatched workflows intentionally run
-# every group.
+# useful CI groups. Scheduled workflows intentionally run every group. Manual dispatches on a
+# feature branch are classified against main so recovery/release runs do not consume the heavy
+# runner for unrelated jobs; if that comparison is unavailable, they fail closed to every group.
 #
 # `push` is classified the same way as `pull_request` when both SHAs are supplied:
 # the post-merge run on main only needs to re-check what that merge actually
@@ -113,6 +114,15 @@ zero_sha=0000000000000000000000000000000000000000
 diffable=false
 case "$event_name" in
   pull_request) diffable=true ;;
+  workflow_dispatch)
+    # A manual run on main is the explicit full verification path. A branch dispatch gets the
+    # smallest safe matrix from its merge-base with main; the fallback below remains all groups.
+    if [[ "${GITHUB_REF_NAME:-}" != main ]]; then
+      HEAD_SHA=${HEAD_SHA:-${GITHUB_SHA:-HEAD}}
+      BASE_SHA=${BASE_SHA:-$(git merge-base origin/main "$HEAD_SHA" 2>/dev/null || true)}
+      [[ -n "$BASE_SHA" ]] && diffable=true
+    fi
+    ;;
   push)
     if [[ -n "${BASE_SHA:-}" && "${BASE_SHA:-}" != "$zero_sha" ]]; then
       diffable=true
@@ -129,11 +139,18 @@ elif [[ "$diffable" != true ]]; then
 else
   base_sha=${BASE_SHA:?BASE_SHA is required for $event_name classification}
   head_sha=${HEAD_SHA:?HEAD_SHA is required for $event_name classification}
+  found=0
   while IFS= read -r -d '' path; do
+    found=1
     classify "$path"
   # Deletions matter too: removing a source, manifest, or lockfile must run the
   # same checks as adding or editing it.
-  done < <(git diff --name-only -z "$base_sha" "$head_sha")
+  done < <(git diff --name-only -z "$base_sha" "$head_sha" 2>/dev/null || true)
+  # A dispatch with no usable/changed range must never silently skip every check. Keep pull-request
+  # behavior unchanged: an empty PR diff is a valid no-op and leaves all conditional jobs skipped.
+  if [[ "$event_name" == workflow_dispatch && "$found" == 0 ]]; then
+    enable_all
+  fi
 fi
 
 output_file=${GITHUB_OUTPUT:-/dev/stdout}
