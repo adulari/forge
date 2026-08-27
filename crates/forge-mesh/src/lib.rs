@@ -1008,9 +1008,16 @@ pub trait Router: Send + Sync {
     /// that can't apply a pin set must not be silently restricted); [`HeuristicRouter`] and
     /// [`LlmRouter`] route through [`HeuristicRouter::decide_with_pin`].
     #[allow(clippy::too_many_arguments)]
+    /// Route restricted to a user pin. The default used to delegate to [`Router::route`] and DROP
+    /// the pin — so any implementor that forgot to override this silently ignored pins and ran
+    /// full classification, which is exactly how a pinned session ended up routed to an unrelated
+    /// model on every turn. The default now honours the pin instead: a pin needs no classification,
+    /// the model is already chosen. Implementors with a catalog (see [`HeuristicRouter`]) still
+    /// override this to rank within a multi-model set; the default is the safe floor, not a
+    /// replacement for that.
     async fn route_with_pin_set(
         &self,
-        _pin: &[String],
+        pin: &[String],
         prompt: &str,
         has_images: bool,
         budget: BudgetState,
@@ -1019,8 +1026,21 @@ pub trait Router: Send + Sync {
         effort: Option<EffortLevel>,
         project: &ProjectContext,
     ) -> RoutingDecision {
-        self.route(prompt, has_images, budget, health, quota, effort, project)
-            .await
+        let Some(model) = pin.first().cloned() else {
+            return self
+                .route(prompt, has_images, budget, health, quota, effort, project)
+                .await;
+        };
+        RoutingDecision {
+            // Classification is skipped entirely, so report the tier the caller would otherwise
+            // have paid a model call to learn nothing from.
+            tier: TaskTier::Standard,
+            model,
+            rationale: "pinned — classification skipped".to_string(),
+            // A single pin is strict: no chain. A set may fail over WITHIN itself, never outside.
+            fallbacks: pin.iter().skip(1).cloned().collect(),
+            pinned: true,
+        }
     }
 
     /// Route through the mesh IGNORING any pin this router holds — used when subagent pin
@@ -2450,6 +2470,73 @@ impl Router for HeuristicRouter {
 
 #[cfg(test)]
 mod tests {
+
+    /// A Router that implements ONLY `route` — the shape `LlmRouter` had, and the shape any new
+    /// implementor starts with. The trait default must honour the pin for it, because the previous
+    /// default dropped the pin and ran full classification: a pinned session then routed to an
+    /// unrelated model on every turn.
+    struct RouteOnlyRouter;
+    #[async_trait::async_trait]
+    impl Router for RouteOnlyRouter {
+        async fn route(
+            &self,
+            _prompt: &str,
+            _has_images: bool,
+            _budget: BudgetState,
+            _health: &ModelHealth,
+            _quota: &SubscriptionQuota,
+            _effort: Option<EffortLevel>,
+            _project: &ProjectContext,
+        ) -> RoutingDecision {
+            RoutingDecision {
+                tier: TaskTier::Trivial,
+                model: "mesh::would-have-classified".into(),
+                rationale: "classified".into(),
+                fallbacks: vec!["mesh::second".into()],
+                pinned: false,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_route_with_pin_set_honours_the_pin_instead_of_classifying() {
+        let d = RouteOnlyRouter
+            .route_with_pin_set(
+                &["local::pinned".to_string()],
+                "anything",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(
+            d.model, "local::pinned",
+            "the default must not classify past a pin"
+        );
+        assert!(d.pinned);
+        assert!(d.fallbacks.is_empty(), "a single pin is strict: no chain");
+    }
+
+    #[tokio::test]
+    async fn the_default_route_with_pin_set_confines_a_set_to_its_members() {
+        let d = RouteOnlyRouter
+            .route_with_pin_set(
+                &["local::a".to_string(), "local::b".to_string()],
+                "anything",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(d.model, "local::a");
+        assert_eq!(d.fallbacks, vec!["local::b".to_string()]);
+    }
     use super::*;
 
     #[test]
