@@ -54,6 +54,7 @@
     "crates/forge-cli/src/cli/commands/run/dispatch.rs": 1318,
     "crates/forge-cli/src/cli/commands/run/driver.rs": 1661,
     "crates/forge-cli/src/cli/commands/schedule.rs": 1138,
+    "crates/forge-cli/src/doctor.rs": 841,
     "crates/forge-cli/src/mcp_serve.rs": 1033,
     "crates/forge-cli/src/remote.rs": 2322,
     "crates/forge-cli/src/serve.rs": 3627,

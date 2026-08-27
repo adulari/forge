@@ -79,7 +79,12 @@ pub async fn run() -> anyhow::Result<usize> {
     if !bridge_live.is_empty() {
         sections.push(("Bridge liveness", bridge_live));
     }
-    sections.push(("Background daemon", daemon_checks()));
+    let mut daemon_v = daemon_checks();
+    // Live: prove the daemon can still answer its API, not merely hold a socket open.
+    if let Some(fleet) = daemon_fleet_check().await {
+        daemon_v.push(fleet);
+    }
+    sections.push(("Background daemon", daemon_v));
     sections.push(("Local LLM (Ollama)", ollama_checks()));
     sections.push(("Session store", store_checks()));
     sections.push(("Environment", environment_checks()));
@@ -615,6 +620,100 @@ fn daemon_state_check(state: &str) -> Check {
 /// LIVE: for each KEYED provider, can we actually list its models within a timeout? A keyed
 /// provider whose discovery times out silently drops out of routing and the mesh falls back to a
 /// keyless default (the "groq for everything" churn) — a key-PRESENCE check can't see this.
+/// Ask the running daemon for its session list.
+///
+/// The port probe beside this one proves a listener accepted a TCP connection, which is not the
+/// same as the daemon working: a daemon whose store cannot be reopened still answers on its
+/// already-bound socket. That exact case took Anywhere dark for days while every other view — the
+/// service state word, the port probe — reported healthy, so this asks the API a question only a
+/// working daemon can answer.
+///
+/// Returns nothing when no daemon is recorded or its pid is gone; a stale `serve-state.json` is
+/// already the port probe's business, and reporting it twice would be noise.
+async fn daemon_fleet_check() -> Option<Check> {
+    const FLEET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let state = crate::serve::read_state().ok().flatten()?;
+    if !state.process_is_alive() {
+        return None;
+    }
+
+    // `lan` exposure serves a SELF-SIGNED cert (see `ServeState::exposure`), which no ordinary
+    // HTTP client will trust — probing it reports a TLS failure that says nothing about whether
+    // the daemon works. Verified: against a healthy `lan` daemon this produced a hard failure
+    // reading "the daemon is listening but /api/sessions failed". Skipping is honest; disabling
+    // certificate verification to get a green tick would not be.
+    if state.exposure == "lan" {
+        return Some(check(
+            Status::Info,
+            "daemon fleet",
+            "not probed — this daemon serves LAN mode's self-signed certificate",
+            Some("`forge serve` on loopback (`local`) or via Anywhere to make this checkable"),
+        ));
+    }
+
+    let url = format!("{}/api/sessions", state.base_url.trim_end_matches('/'));
+    let request = async {
+        reqwest::Client::new()
+            .get(&url)
+            .bearer_auth(&state.token)
+            .send()
+            .await
+    };
+
+    Some(match tokio::time::timeout(FLEET_TIMEOUT, request).await {
+        Ok(Ok(response)) if response.status().is_success() => {
+            // The count is the useful part: a daemon that answers but knows about nothing is a
+            // different problem from one that cannot answer at all.
+            // `GET /api/sessions` answers with a bare array of session rows (`json_response(&rows)`
+            // in serve.rs), not an object wrapping them — counting a `sessions` key here would
+            // silently always miss.
+            let sessions = response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| body.as_array().map(|rows| rows.len()));
+            match sessions {
+                Some(n) => check(
+                    Status::Ok,
+                    "daemon fleet",
+                    format!("API answered — {n} session(s)"),
+                    None,
+                ),
+                None => check(
+                    Status::Ok,
+                    "daemon fleet",
+                    "API answered",
+                    None,
+                ),
+            }
+        }
+        Ok(Ok(response)) => check(
+            Status::Fail,
+            "daemon fleet",
+            format!(
+                "the daemon is listening but /api/sessions returned {}",
+                response.status()
+            ),
+            Some(
+                "the listener can outlive the thing behind it — check `forge doctor`'s session                  store line and the daemon's log, then `forge service restart`",
+            ),
+        ),
+        Ok(Err(error)) => check(
+            Status::Fail,
+            "daemon fleet",
+            format!("the daemon is listening but /api/sessions failed: {}", short(&error.to_string())),
+            Some("`forge service restart`; if it persists, read the daemon log for the real cause"),
+        ),
+        Err(_) => check(
+            Status::Fail,
+            "daemon fleet",
+            format!("/api/sessions did not answer within {}s", FLEET_TIMEOUT.as_secs()),
+            Some("the daemon is accepting connections but not serving — `forge service restart`"),
+        ),
+    })
+}
+
 async fn provider_reachability_checks() -> Vec<Check> {
     const REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
     // Probe every keyed provider CONCURRENTLY — each is an independent network call, so a sequential
