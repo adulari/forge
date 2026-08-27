@@ -257,6 +257,13 @@ pub(super) fn is_capability_failure(text: &str) -> bool {
         // hit this: a session routed to antigravity-preview died with a hard turn failure.
         "multiturn chat is not enabled",
         "multi-turn chat is not enabled",
+        // OpenRouter gates some models to approved integrations: "<model> is only available on
+        // agentic harnesses. Try plugging it into a coding agent or productivity app listed on
+        // https://openrouter.ai/...". It arrives as a 401/403, so without this it classified as
+        // Auth and killed the turn outright instead of excluding the model and failing over —
+        // there is no key that fixes it, and no retry that succeeds.
+        "only available on agentic harnesses",
+        "available on agentic harnesses",
     ];
     if MARKERS.iter().any(|m| l.contains(m)) {
         return true;

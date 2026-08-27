@@ -2204,6 +2204,33 @@ mod tests {
         assert!(e.is_permanent());
     }
 
+    /// OpenRouter gates some models to approved integrations. It arrives as an auth-shaped error,
+    /// so before this it classified as `Auth` and killed the turn — but no key fixes it and no
+    /// retry succeeds. It must EXCLUDE the model and fail over, like any other incapability.
+    #[test]
+    fn contract_openrouter_agentic_harness_gate_is_a_capability_failure() {
+        let e = classify_text(
+            "thinkingmachines/inkling-small:free is only available on agentic harnesses. \
+             Try plugging it into a coding agent or productivity app listed on https://openrouter.ai",
+            "auth err".into(),
+        );
+        assert!(matches!(e, ProviderError::Capability(_)), "got {e:?}");
+        assert!(e.is_permanent());
+    }
+
+    /// Regression guard, NOT a fix: OpenRouter's billing wall already classified correctly via the
+    /// existing "payment required" marker. Pinned because the reported turn failure quoted this
+    /// exact string, and the real defect was downstream (nothing to fail over to), not here.
+    #[test]
+    fn contract_openrouter_billing_wall_is_a_capability_failure() {
+        let e = classify_text(
+            "Payment required to access this resource. Visit your billing tab.",
+            "402".into(),
+        );
+        assert!(matches!(e, ProviderError::Capability(_)), "got {e:?}");
+        assert!(e.is_permanent());
+    }
+
     #[test]
     fn contract_webstream_cause_with_embedded_json_is_classified_structurally() {
         // The streaming `cause` often embeds the JSON body after a prefix — extract + classify it.

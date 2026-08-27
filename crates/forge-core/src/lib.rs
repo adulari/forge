@@ -12454,6 +12454,66 @@ mod tests {
         }
     }
 
+    /// A single strict pin routes with an EMPTY fallback chain, and an empty chain is an exhausted
+    /// chain — so the first transient failure fell into last-resort and dispatched an unrelated
+    /// model. Reported live: a session pinned to a local Qwen showed `moonshotai/kimi-k3` in the
+    /// statusline. A pin must never be escaped; the turn fails with the provider's real error.
+    #[test]
+    fn last_resort_never_escapes_a_single_strict_pin() {
+        let (store, mut session) = fixed_session(
+            Arc::new(PanicProvider),
+            Arc::new(FixedRouter {
+                model: "m".into(),
+                fallbacks: vec![],
+            }),
+        );
+        store
+            .bench_for(
+                "ollama::llama3.2",
+                std::time::Duration::from_secs(60),
+                "rate-limited",
+            )
+            .unwrap();
+        // Unpinned: last-resort may rescue the turn — the existing behaviour, unchanged.
+        assert_eq!(
+            session.last_resort_model("other::x", false).as_deref(),
+            Some("ollama::llama3.2"),
+        );
+        // Pinned to one model: nothing else may be dispatched, even though a candidate exists.
+        session.pin_model(Some("ollama::qwen3.8-27b".into()));
+        assert_eq!(
+            session.last_resort_model("ollama::qwen3.8-27b", false),
+            None,
+            "a strict single pin must never be escaped by the last-resort path"
+        );
+    }
+
+    /// A pin SET confines failover to its members everywhere else; last-resort must not be the
+    /// hole in that fence — it may pick a member, never an outsider.
+    #[test]
+    fn last_resort_stays_inside_a_pin_set() {
+        let (store, mut session) = fixed_session(
+            Arc::new(PanicProvider),
+            Arc::new(FixedRouter {
+                model: "m".into(),
+                fallbacks: vec![],
+            }),
+        );
+        store
+            .bench_for(
+                "ollama::llama3.2",
+                std::time::Duration::from_secs(60),
+                "rate-limited",
+            )
+            .unwrap();
+        session.pin_model(Some("ollama::qwen3.8-27b,other::outsider".into()));
+        assert_eq!(
+            session.last_resort_model("ollama::qwen3.8-27b", false),
+            None,
+            "ollama::llama3.2 is outside the pinned set and must not be dispatched"
+        );
+    }
+
     #[test]
     fn last_resort_skips_a_keyless_provider_even_when_it_recovers_soonest() {
         // The "groq for everything" churn: groq (no key) gets benched and, recovering soonest,
