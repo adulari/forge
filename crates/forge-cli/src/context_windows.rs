@@ -130,7 +130,7 @@ pub async fn fetch_and_persist(models: &[String]) {
             // fell through to the basename index below and inherited OpenRouter's cloud
             // `qwen/qwen3.8-27b` window of 1,000,000 — while the server was actually started with
             // `-c 16384`. Forge then believed it had 61x the context it really had. Ask the server.
-            let served_window = llama_cpp_served_window(&cp.endpoint).await;
+            let served_window = llama_cpp_served_window(cp.endpoint).await;
             if let Some(w) = served_window {
                 if let Some(data) = body["data"].as_array() {
                     for m in data {
