@@ -18,6 +18,7 @@ pub(crate) mod schedule;
 pub(crate) mod self_mcp;
 pub(crate) mod send;
 pub(crate) mod service;
+pub(crate) mod service_alert;
 pub(crate) mod skill;
 #[cfg(test)]
 mod tests;

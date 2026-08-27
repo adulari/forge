@@ -29,6 +29,7 @@ pub(crate) fn service_cmd(cmd: ServiceCmd) -> Result<()> {
         ServiceCmd::Start => control_cmd(ServiceControl::Start),
         ServiceCmd::Stop => control_cmd(ServiceControl::Stop),
         ServiceCmd::Restart => control_cmd(ServiceControl::Restart),
+        ServiceCmd::Alert => super::service_alert::alert_cmd(),
     }
 }
 
@@ -220,7 +221,7 @@ fn launchd_agents_dir() -> Result<std::path::PathBuf> {
     Ok(home.join("Library/LaunchAgents"))
 }
 
-const SYSTEMD_UNIT_NAME: &str = "forge-serve.service";
+pub(crate) const SYSTEMD_UNIT_NAME: &str = "forge-serve.service";
 const LAUNCHD_LABEL: &str = "dev.forge.serve";
 const SCHTASKS_NAME: &str = "ForgeServe";
 
@@ -327,10 +328,15 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
          # makes it `failed`, which is at least visible. Transient failures still retry forever,\n\
          # which is what the network-resilience drop-in wants.\nRestartPreventExitStatus=78\n\
          # An agent-owned compiler or language server may be the kernel's OOM victim. Keep the\n\
-         # daemon and its recoverable session metadata alive in that case.\nOOMPolicy=continue\n\n\
+         # daemon and its recoverable session metadata alive in that case.\nOOMPolicy=continue\n\
+         # Stopping is not the same as telling anyone: the observed outages sat in `failed` for\n\
+         # days and were found only because someone went looking. systemd delivers this, so the\n\
+         # alarm does not share fate with the daemon it watches.\n\
+         OnFailure={}\n\n\
          [Install]\nWantedBy=default.target\n",
         env!("CARGO_PKG_VERSION"),
-        exposure.flag()
+        exposure.flag(),
+        super::service_alert::ALERT_UNIT_NAME
     )
 }
 
@@ -345,6 +351,13 @@ fn install_systemd(forge_exe: &str, exposure: Exposure, port: u16) -> Result<Ins
         render_systemd_service(forge_exe, exposure, port),
     )
     .context("writing the systemd user unit")?;
+
+    // Written before the reload so the OnFailure= target exists the moment the unit is enabled.
+    std::fs::write(
+        dir.join(super::service_alert::ALERT_UNIT_NAME),
+        super::service_alert::render_systemd_alert_unit(forge_exe),
+    )
+    .context("writing the systemd failure-notification unit")?;
 
     run_checked("systemctl", &["--user", "daemon-reload"], hint)?;
     run_checked(
@@ -372,6 +385,7 @@ fn uninstall_systemd() -> Result<()> {
         hint,
     );
     let _ = std::fs::remove_file(dir.join(SYSTEMD_UNIT_NAME));
+    let _ = std::fs::remove_file(dir.join(super::service_alert::ALERT_UNIT_NAME));
     let _ = run_checked("systemctl", &["--user", "daemon-reload"], hint);
     Ok(())
 }
