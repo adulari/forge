@@ -6,13 +6,14 @@
 //! libraries and config files remain reachable. On any other platform — and on Linux kernels
 //! that predate Landlock — the implementation is a transparent no-op.
 //!
-//! The result of attempting to apply the sandbox is [`ApplyResult`]:
+//! The result type for applying the sandbox is [`ApplyResult`]. On Linux, ruleset construction
+//! happens in the parent and only the prepared ruleset is applied in the child:
 //! - `Applied` — the ruleset is active in the calling process/thread.
 //! - `Unsupported` — Landlock is not available on this kernel; caller should warn once and
 //!   proceed unconfined.
 //!
-//! This module is intentionally free of async code: it is called from `pre_exec` (post-fork,
-//! pre-exec) where only async-signal-safe operations are permitted.
+//! This module is intentionally free of async code. The child-side application runs from
+//! `pre_exec` (post-fork, pre-exec), where only async-signal-safe operations are permitted.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +23,7 @@ pub struct SandboxPolicy {
     /// Whether the sandbox is enabled at all. When `false`, the shell tool installs no
     /// `pre_exec` sandbox hook on any platform.
     pub enabled: bool,
-    /// Extra writable paths beyond the cwd + temp dir pair that [`effective_writable`] always adds.
+    /// Extra writable paths beyond the cwd + temp dir pair that `effective_writable` always adds.
     pub writable: Vec<PathBuf>,
     /// Base directory for a scoped, writable `CARGO_TARGET_DIR` injected into cargo/rust build
     /// commands. `None` disables the behaviour (the default). When `Some`, the shell tool points
@@ -34,7 +35,7 @@ pub struct SandboxPolicy {
     pub cargo_target_base: Option<PathBuf>,
 }
 
-/// Outcome of applying the Landlock ruleset (see [`linux::apply_landlock`]).
+/// Outcome of applying the Landlock ruleset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyResult {
     /// Landlock ruleset is active; the process is confined.
@@ -65,10 +66,8 @@ pub(crate) mod linux {
 
     use landlock::{
         Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
-        RulesetCreatedAttr, ABI,
+        RulesetCreated, RulesetCreatedAttr, ABI,
     };
-
-    use super::ApplyResult;
 
     /// Probe whether this kernel supports Landlock without installing any ruleset.
     /// Returns `true` if at least Landlock ABI v1 is available.
@@ -79,11 +78,21 @@ pub(crate) mod linux {
             .is_ok()
     }
 
-    /// Apply the Landlock ruleset in the **current process/thread**.
+    /// Build the Landlock ruleset in the **parent**, before fork.
     ///
-    /// This is designed to be called from inside a `pre_exec` closure (after fork, before exec).
-    /// Landlock syscalls are async-signal-safe.
-    pub fn apply_landlock(writable: &[impl AsRef<Path>]) -> Result<ApplyResult, String> {
+    /// Everything that allocates lives here: creating the ruleset, opening each path, and
+    /// formatting errors. The child then only has to call
+    /// [`RulesetCreated::restrict_self`], which is a `prctl` plus one `landlock_restrict_self`
+    /// syscall over an already-open fd.
+    ///
+    /// This split matters because only async-signal-safe calls are legal between `fork` and
+    /// `exec`, and Forge spawns shells from a tokio runtime — a multithreaded parent. Allocating
+    /// in the child risks deadlocking in `malloc` if another thread held its lock at fork, which
+    /// would hang the shell command with no output and no error.
+    ///
+    /// The returned ruleset owns a CLOEXEC fd: it survives fork and is closed by `exec`, so the
+    /// child can restrict itself with it and nothing leaks into the executed program.
+    pub fn prepare_landlock(writable: &[impl AsRef<Path>]) -> Result<RulesetCreated, String> {
         // Read-only access we grant on the whole filesystem so binaries/libs/configs resolve.
         let read_exec: landlock::BitFlags<AccessFs> =
             AccessFs::Execute | AccessFs::ReadFile | AccessFs::ReadDir;
@@ -118,8 +127,32 @@ pub(crate) mod linux {
             }
         }
 
-        ruleset.restrict_self().map_err(|e| e.to_string())?;
-        Ok(ApplyResult::Applied)
+        Ok(ruleset)
+    }
+
+    /// Take the prepared ruleset and apply it, or fail closed if it has already been used.
+    ///
+    /// `pre_exec` takes an `FnMut`, but `restrict_self` consumes the ruleset, so the closure moves
+    /// it out of an `Option`. If the same `Command` is spawned twice the second child finds `None`
+    /// — and must refuse to start rather than run unconfined, which is the whole point of the
+    /// sandbox. Kept here rather than inline in the closure so that branch is testable.
+    pub fn restrict_once(prepared: &mut Option<RulesetCreated>) -> std::io::Result<()> {
+        match prepared.take() {
+            Some(ruleset) => restrict_current_thread(ruleset),
+            None => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        }
+    }
+
+    /// Apply a ruleset prepared by [`prepare_landlock`] to the calling thread.
+    ///
+    /// Called from `pre_exec`, so it must not allocate: the error carries only an
+    /// [`std::io::ErrorKind`], which `io::Error` stores inline. The parent adds the human-readable
+    /// context when the spawn fails, where allocating is safe.
+    pub fn restrict_current_thread(ruleset: RulesetCreated) -> std::io::Result<()> {
+        ruleset
+            .restrict_self()
+            .map(|_| ())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::PermissionDenied))
     }
 }
 
@@ -143,6 +176,23 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// A ruleset is consumed by its first use, so a second spawn of the same `Command` finds
+    /// `None`. That case must refuse rather than fall back to running unconfined — silently
+    /// dropping the sandbox is exactly the failure the fail-closed policy exists to prevent.
+    ///
+    /// Only the exhausted branch is exercised: calling `restrict_once` with a live ruleset would
+    /// apply Landlock to the test runner itself, confining every test that follows it in this
+    /// process. The applied path is covered by `sandbox_blocks_write_outside_and_allows_inside`,
+    /// which spawns a real child.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exhausted_ruleset_refuses_rather_than_running_unconfined() {
+        let mut exhausted: Option<landlock::RulesetCreated> = None;
+        let error = linux::restrict_once(&mut exhausted)
+            .expect_err("an exhausted ruleset must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
 
     #[test]
     fn effective_writable_resolves_relative() {
@@ -185,13 +235,14 @@ mod tests {
             let w = writable.clone();
             let mut cmd = std::process::Command::new("sh");
             cmd.arg("-c").arg("echo x > /etc/forge-sandbox-probe-test");
+            // Prepared in the parent, applied in the child — the same split the real spawn path
+            // uses, so this test exercises it rather than an easier variant.
+            let mut prepared = Some(linux::prepare_landlock(&w).expect("prepare ruleset"));
             unsafe {
                 use std::os::unix::process::CommandExt;
-                cmd.pre_exec(move || {
-                    // Ignore errors: if apply fails the command runs unconfined; the test
-                    // will detect that via the expected exit code pattern.
-                    let _ = linux::apply_landlock(&w);
-                    Ok(())
+                cmd.pre_exec(move || match prepared.take() {
+                    Some(ruleset) => linux::restrict_current_thread(ruleset),
+                    None => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
                 });
             }
             let status = cmd.status().expect("spawn");
@@ -207,11 +258,12 @@ mod tests {
             let inside = probe_inside.to_string_lossy().into_owned();
             let mut cmd = std::process::Command::new("sh");
             cmd.arg("-c").arg(format!("echo hi > {inside}"));
+            let mut prepared = Some(linux::prepare_landlock(&w).expect("prepare ruleset"));
             unsafe {
                 use std::os::unix::process::CommandExt;
-                cmd.pre_exec(move || {
-                    let _ = linux::apply_landlock(&w);
-                    Ok(())
+                cmd.pre_exec(move || match prepared.take() {
+                    Some(ruleset) => linux::restrict_current_thread(ruleset),
+                    None => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
                 });
             }
             let status = cmd.status().expect("spawn");
