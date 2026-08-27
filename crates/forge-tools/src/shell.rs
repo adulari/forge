@@ -700,24 +700,39 @@ fn maybe_install_sandbox(
     }
     let writable = sandbox::effective_writable(&cwd_path, &extra);
 
-    // Install the pre_exec closure. It runs after fork, before exec — in the child only.
-    // Landlock syscalls are async-signal-safe. Once support was detected in the parent, a
-    // confinement failure must fail the child spawn rather than silently running unconfined.
+    // Build the ruleset HERE, in the parent, before fork. Only async-signal-safe calls are legal
+    // between fork and exec, and this parent is multithreaded (tokio), so allocating in the child
+    // risks deadlocking in `malloc` if another thread held its lock at fork — a silent hang with
+    // no output rather than an error. Everything that allocates therefore happens now.
     #[cfg(target_os = "linux")]
     {
+        let prepared = match crate::sandbox::linux::prepare_landlock(&writable) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // Support was detected, so failing to build the ruleset must fail the spawn
+                // rather than silently running unconfined. Reported here, where formatting is
+                // safe, and surfaced as the command's failure.
+                tracing::error!(
+                    error = %error,
+                    "landlock ruleset could not be prepared; refusing to spawn unconfined"
+                );
+                unsafe {
+                    cmd.pre_exec(move || {
+                        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                    });
+                }
+                return;
+            }
+        };
+
+        // `restrict_self` consumes the ruleset, but `pre_exec` takes an FnMut, so it moves out of
+        // an Option. A second call (the command being spawned twice) finds None and fails closed
+        // rather than running unconfined.
+        let mut prepared = Some(prepared);
         unsafe {
             // tokio::process::Command exposes pre_exec via std::os::unix::process::CommandExt
             // which is blanket-implemented — no explicit use needed.
-            cmd.pre_exec(move || {
-                crate::sandbox::linux::apply_landlock(&writable)
-                    .map(|_| ())
-                    .map_err(|error| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            format!("Landlock sandbox setup failed: {error}"),
-                        )
-                    })
-            });
+            cmd.pre_exec(move || crate::sandbox::linux::restrict_once(&mut prepared));
         }
     }
     #[cfg(not(target_os = "linux"))]
