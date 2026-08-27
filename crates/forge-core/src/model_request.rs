@@ -227,7 +227,7 @@ pub(super) async fn request_provider_response(
             // arm below where it used to sit DEAD: an over-window input is a non-retryable
             // `Request` error (is_retryable() == false), so that guard never admitted it and
             // the turn failed hard instead of recovering. Overflow IS recoverable: lower the
-            // usable window and retry the SAME healthy model so `transcript_with_preamble`
+            // usable window and retry the SAME healthy model so `transcript_with_preamble_and_tools`
             // trims the sent view harder. Non-destructive (the stored transcript is untouched)
             // and convergent even when our o200k estimate diverges from the model's own
             // tokenizer — each retry multiplies the cap down. Bounded by `compact_retries`.

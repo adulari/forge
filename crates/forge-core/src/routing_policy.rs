@@ -152,7 +152,7 @@ impl Session {
     pub(crate) fn effective_context_window(&self, model: &str) -> u32 {
         let window = self.base_context_window(model);
         // A context-overflow self-heal (see `overflow_window_cap`) lowers the usable window for the
-        // rest of the turn so `transcript_with_preamble` trims the sent view below the model's real
+        // rest of the turn so `transcript_with_preamble_and_tools` trims the sent view below the model's real
         // limit — needed when our o200k estimate diverges from the model's own tokenizer.
         match &self.overflow_window_cap {
             Some((capped_model, cap)) if capped_model == model => window.min(*cap),
@@ -206,13 +206,9 @@ impl Session {
     }
 
     /// The request body for a main-loop call: the base harness preamble (system prompt + env)
-    /// followed by the window-fitted transcript. The preamble's token cost is subtracted from the
-    /// trim budget so the prepended prompt can't push the request over the model's window.
-    pub(crate) fn transcript_with_preamble(&self, model: &str) -> Vec<Message> {
-        self.transcript_with_preamble_and_tools(model, &[])
-    }
-
-    /// As [`Self::transcript_with_preamble`], but also charges the TOOL SCHEMAS against the window.
+    /// followed by the window-fitted transcript, with the TOOL SCHEMAS charged against the window.
+    /// The preamble's token cost is subtracted from the trim budget so the prepended prompt can't
+    /// push the request over the model's window.
     ///
     /// Tool definitions are sent on every request and are far from free — Forge ships a large tool
     /// set, and its JSON schemas run to thousands of tokens. They were never subtracted from the

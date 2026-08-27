@@ -1302,9 +1302,7 @@ fn should_retry_same_model_transient(model: &str, error: &forge_provider::Provid
 // `message_tokens`, `fit_messages`, and `prune_tool_results` moved to [`context_pipeline`] — the
 // one seam between the transcript and a provider request (imported below for existing call sites).
 #[cfg(test)]
-use context_pipeline::{
-    fit_messages, prune_tool_results, tool_spec_tokens, PRUNE_MARKER, PRUNE_TOOL_RESULT_MAX,
-};
+use context_pipeline::{fit_messages, prune_tool_results, PRUNE_MARKER, PRUNE_TOOL_RESULT_MAX};
 use context_pipeline::{message_tokens, prune_and_inject, to_llm};
 
 /// Output of one execution of the shared model↔tool loop ([`Session::run_model_loop`]).
@@ -4805,7 +4803,7 @@ mod tests {
             fallbacks: vec![],
         });
         let (_store, session) = fixed_session(provider, router);
-        let msgs = session.transcript_with_preamble("m");
+        let msgs = session.transcript_with_preamble_and_tools("m", &[]);
         assert_eq!(msgs[0].role, Role::System);
         assert!(
             msgs[0].content.contains("You are Forge"),
