@@ -76,7 +76,7 @@ import {
   pairingSafetyCode,
   parsePairingChallenge,
   PairingPollRateLimitError,
-  type RejectedPairing,
+  describeRejectedPairings,
   pollPairing,
   preparePairingApproval,
   submitPairingApproval,
@@ -1764,8 +1764,3 @@ function approvalFailureDetail(reason: unknown): string {
   return "";
 }
 
-function describeRejectedPairings(rejected: RejectedPairing[]): string {
-  const detail = rejected.map((entry) => `${entry.pairingId} ${entry.reason}`).join("; ");
-  const count = rejected.length === 1 ? "1 device request" : `${rejected.length} device requests`;
-  return `${count} could not be shown: ${detail}. Approve from the terminal with \`forge anywhere approvals\`.`;
-}
