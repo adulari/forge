@@ -3,24 +3,36 @@
 use crate::doctor::{check, short, Check, Status};
 
 pub(crate) async fn daemon_fleet_check(port: u16) -> Check {
-    let token = match crate::serve::daemon_token(false) {
-        Ok(token) => token,
-        Err(error) => {
-            return check(
-                Status::Fail,
-                "daemon fleet",
-                format!(
-                    "port {port} responds, but its token is unavailable: {}",
-                    short(&error.to_string())
-                ),
-                Some(
-                    "start `forge serve` once to create the daemon token, then run `forge doctor` again",
-                ),
-            )
-        }
+    // Prefer the live discovery record so LAN daemons are probed over HTTPS with their current
+    // token. A stale/missing record is expected after a crash, so fall back to the persisted token
+    // and the local HTTP endpoint used by `forge serve --local`.
+    let state = crate::serve::read_state()
+        .ok()
+        .flatten()
+        .filter(|state| state.port == port && state.process_is_alive());
+    let token = match state.as_ref().map(|state| state.token.clone()) {
+        Some(token) => token,
+        None => match crate::serve::daemon_token(false) {
+            Ok(token) => token,
+            Err(error) => {
+                return check(
+                    Status::Fail,
+                    "daemon fleet",
+                    format!(
+                        "port {port} responds, but its token is unavailable: {}",
+                        short(&error.to_string())
+                    ),
+                    Some(
+                        "start `forge serve` once to create the daemon token, then run `forge doctor` again",
+                    ),
+                )
+            }
+        },
     };
+    let tls = state.as_ref().is_some_and(|state| state.exposure == "lan");
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
+        .danger_accept_invalid_certs(tls)
         .build()
     {
         Ok(client) => client,
@@ -36,7 +48,8 @@ pub(crate) async fn daemon_fleet_check(port: u16) -> Check {
             )
         }
     };
-    let url = format!("http://127.0.0.1:{port}/{token}/api/sessions");
+    let scheme = if tls { "https" } else { "http" };
+    let url = format!("{scheme}://127.0.0.1:{port}/{token}/api/sessions");
     let response = match client.get(&url).send().await {
         Ok(response) => response,
         Err(error) => {
