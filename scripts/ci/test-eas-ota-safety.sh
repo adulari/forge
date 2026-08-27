@@ -60,6 +60,9 @@ unsafe_paths=(
   mobile/metro.config.js
   mobile/babel.config.js
   mobile/unknown-build-config.js
+  mobile/parity.json
+  mobile/public.ts
+  mobile/publicity.ts
 )
 for index in "${!unsafe_paths[@]}"; do
   output="unsafe_$index"
@@ -77,6 +80,11 @@ neutral_paths=(
   mobile/src-tauri/src/lib.rs
   mobile/redesign/mockup.png
   mobile/README.md
+  mobile/.gitignore
+  mobile/parity/inventory.json
+  mobile/public/favicon.ico
+  mobile/public/manifest.webmanifest
+  mobile/public/fonts/Geist-Regular.ttf
 )
 for index in "${!neutral_paths[@]}"; do
   output="neutral_$index"
