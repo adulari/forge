@@ -6,13 +6,14 @@
 //! libraries and config files remain reachable. On any other platform — and on Linux kernels
 //! that predate Landlock — the implementation is a transparent no-op.
 //!
-//! The result of attempting to apply the sandbox is [`ApplyResult`]:
+//! The result type for applying the sandbox is [`ApplyResult`]. On Linux, ruleset construction
+//! happens in the parent and only the prepared ruleset is applied in the child:
 //! - `Applied` — the ruleset is active in the calling process/thread.
 //! - `Unsupported` — Landlock is not available on this kernel; caller should warn once and
 //!   proceed unconfined.
 //!
-//! This module is intentionally free of async code: it is called from `pre_exec` (post-fork,
-//! pre-exec) where only async-signal-safe operations are permitted.
+//! This module is intentionally free of async code. The child-side application runs from
+//! `pre_exec` (post-fork, pre-exec), where only async-signal-safe operations are permitted.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +23,7 @@ pub struct SandboxPolicy {
     /// Whether the sandbox is enabled at all. When `false`, the shell tool installs no
     /// `pre_exec` sandbox hook on any platform.
     pub enabled: bool,
-    /// Extra writable paths beyond the cwd + temp dir pair that [`effective_writable`] always adds.
+    /// Extra writable paths beyond the cwd + temp dir pair that `effective_writable` always adds.
     pub writable: Vec<PathBuf>,
     /// Base directory for a scoped, writable `CARGO_TARGET_DIR` injected into cargo/rust build
     /// commands. `None` disables the behaviour (the default). When `Some`, the shell tool points
@@ -34,7 +35,7 @@ pub struct SandboxPolicy {
     pub cargo_target_base: Option<PathBuf>,
 }
 
-/// Outcome of applying the Landlock ruleset (see [`linux::apply_landlock`]).
+/// Outcome of applying the Landlock ruleset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyResult {
     /// Landlock ruleset is active; the process is confined.
