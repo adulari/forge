@@ -176,7 +176,41 @@ pub(crate) fn build_provider_and_router(
 /// `ollama` failing just means it isn't running: debug.
 /// `forge models [--probe]`: discover the usable models + show the mesh's capability-ranked pick
 /// per tier. With `--probe`, also ping each model and persist health (the user-driven rescan).
-pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<()> {
+pub(crate) async fn models(
+    probe: bool,
+    probe_all: bool,
+    clear: bool,
+    disable: Option<String>,
+    enable: Option<String>,
+) -> Result<()> {
+    if let Some(entry) = disable.as_deref().or(enable.as_deref()) {
+        // Both at once is a contradiction rather than a precedence question, so refuse instead of
+        // silently honouring one.
+        if disable.is_some() && enable.is_some() {
+            anyhow::bail!("--disable and --enable are mutually exclusive");
+        }
+        let disabled = disable.is_some();
+        let changed =
+            forge_config::set_model_disabled(forge_config::ConfigScope::User, entry, disabled)
+                .context("updating mesh.disabled")?;
+        let state = if disabled { "disabled" } else { "enabled" };
+        if changed {
+            let effect = if disabled {
+                "the mesh will stop routing to it from the next discovery"
+            } else {
+                "the mesh can route to it again from the next discovery"
+            };
+            println!("{entry} {state} — {effect}");
+            if disabled {
+                println!(
+                    "the credential is untouched; re-enable with `forge models --enable {entry}`"
+                );
+            }
+        } else {
+            println!("{entry} was already {state}; nothing to change");
+        }
+        return Ok(());
+    }
     if clear {
         let store = open_store()?;
         let n = store

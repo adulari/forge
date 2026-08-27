@@ -561,6 +561,15 @@ pub(crate) enum Command {
         /// Clear all stale model benches (forget every rate-limited/unavailable mark) and exit.
         #[arg(long)]
         clear: bool,
+        /// Exclude a model or a whole provider from discovery and routing, then exit. Takes a full
+        /// model id (`openrouter::z-ai/glm-5.3`) or a bare provider name (`openrouter`). Writes
+        /// `[mesh] disabled` in your user config; the credential is left untouched, so this is the
+        /// remedy for a stale key causing failover noise. Reverse it with `--enable`.
+        #[arg(long, value_name = "MODEL_OR_PROVIDER")]
+        disable: Option<String>,
+        /// Remove an entry added by `--disable`, letting the mesh route to it again, then exit.
+        #[arg(long, value_name = "MODEL_OR_PROVIDER")]
+        enable: Option<String>,
     },
     /// Explain how the mesh routes — classification, scored candidates, quota pressure, the
     /// conservation roll, and the final pick. With a PROMPT, explains that prompt; without one,
