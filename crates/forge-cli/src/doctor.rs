@@ -13,7 +13,7 @@ use crate::local;
 
 /// One diagnostic line's outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Status {
+pub(crate) enum Status {
     Ok,
     Warn,
     Fail,
@@ -31,12 +31,12 @@ impl Status {
     }
 }
 
-struct Check {
-    status: Status,
-    label: String,
-    detail: String,
+pub(crate) struct Check {
+    pub(crate) status: Status,
+    pub(crate) label: String,
+    pub(crate) detail: String,
     /// An actionable next step, shown when not `Ok`.
-    fix: Option<String>,
+    pub(crate) fix: Option<String>,
 }
 
 impl Check {
@@ -55,7 +55,12 @@ impl Check {
     }
 }
 
-fn check(status: Status, label: &str, detail: impl Into<String>, fix: Option<&str>) -> Check {
+pub(crate) fn check(
+    status: Status,
+    label: &str,
+    detail: impl Into<String>,
+    fix: Option<&str>,
+) -> Check {
     Check {
         status,
         label: label.to_string(),
@@ -79,7 +84,8 @@ pub async fn run() -> anyhow::Result<usize> {
     if !bridge_live.is_empty() {
         sections.push(("Bridge liveness", bridge_live));
     }
-    sections.push(("Background daemon", daemon_checks()));
+    sections.push(("Background daemon", daemon_checks().await));
+    sections.push(("Forge Anywhere", crate::doctor_health::anywhere_checks()));
     sections.push(("Local LLM (Ollama)", ollama_checks()));
     sections.push(("Session store", store_checks()));
     sections.push(("Environment", environment_checks()));
@@ -424,7 +430,7 @@ fn is_wsl() -> bool {
 }
 
 /// Truncate a provider/error string to one tidy line for the report.
-fn short(s: &str) -> String {
+pub(crate) fn short(s: &str) -> String {
     let line = s.lines().next().unwrap_or("").trim();
     if line.chars().count() > 90 {
         format!("{}…", line.chars().take(89).collect::<String>())
@@ -442,7 +448,7 @@ fn short(s: &str) -> String {
 /// Not installed is `Info`, not a failure: the daemon is opt-in and plenty of people never run it.
 /// What matters is an installed daemon that is NOT serving, and the state word distinguishes the
 /// cases that need different fixes (`failed` vs a restart loop vs simply stopped).
-fn daemon_checks() -> Vec<Check> {
+async fn daemon_checks() -> Vec<Check> {
     let status = match crate::cli::commands::service::query_service_status() {
         Ok(s) => s,
         // A missing/unavailable service manager is not a Forge fault — report and move on.
@@ -491,6 +497,13 @@ fn daemon_checks() -> Vec<Check> {
             None,
         ),
     });
+
+    // A listening socket alone does not prove the daemon can serve its fleet.  Exercise the
+    // authenticated discovery endpoint as a cheap end-to-end check; this catches stale listeners
+    // and routers that are alive while their backing store is unusable.
+    if status.running && responding {
+        out.push(crate::doctor_health::daemon_fleet_check(port).await);
+    }
 
     #[cfg(target_os = "linux")]
     if let Some(unit) = crate::cli::commands::service::installed_unit_text() {
