@@ -1594,9 +1594,10 @@ pub struct MeshConfig {
     /// (gpt-5.6 ~1.05M) compact early to cut subscription usage — later compaction burns more.
     /// Does NOT change the displayed window.
     /// Default 217_600 = 80% of 272K: OpenAI rolled gpt-5.6 (Sol) back 372K->272K on 2026-07-13 as
-    /// a main source of high usage burn.
-    // TODO(2026-07): raise this cap (toward 80% of 372K ~= 297_600) once OpenAI restores the 372K
-    // window — they said they're bringing it back over the next few days.
+    /// a main source of high usage burn. OpenRouter reports the API context window, not the
+    /// subscription-side effective window, so it cannot justify raising this ceiling. Revisit
+    /// only after an observed subscription change or an OpenAI statement confirms the effective
+    /// window has been restored; keeping the cap conservative avoids unexpected usage burn.
     #[serde(default = "default_compact_cap_tokens")]
     pub compact_cap_tokens: u64,
     /// Longest rate-limit reset (seconds) Forge will WAIT OUT in-turn to retry the best model rather
