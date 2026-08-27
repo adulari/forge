@@ -101,6 +101,10 @@ jobs:
       # an installer asks for, and Latest moves only after the public bytes verify (#837).
       - name: Test desktop release publication contract
         run: bash scripts/ci/test-desktop-release-publication.sh
+      - name: Test desktop version guard
+        run: bash scripts/ci/test-desktop-version-guard.sh
+      - name: Enforce desktop version parity
+        run: bash scripts/ci/desktop-version-guard.sh
 
   anywhere-policy:
     name: anywhere plaintext-canary harness
