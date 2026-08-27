@@ -63,6 +63,7 @@ mod bridge_stats;
 mod cli;
 mod context_windows;
 mod doctor;
+mod doctor_health;
 mod image_input;
 pub(crate) mod live_observer;
 mod local;
