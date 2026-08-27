@@ -54,8 +54,10 @@ it). There is no static token to copy for a pure-OAuth server at all.
 - **OAuth for stdio servers** — stdio servers authenticate via their own spawned process/env; no
   change.
 - **Acting as an OAuth *authorization server*** — Forge is only a client.
-- **Device Authorization Grant (RFC 8628)** — deferred; the loopback redirect flow covers desktop.
-  A device-code fallback for headless hosts is noted as future work.
+- ~~**Device Authorization Grant (RFC 8628)**~~ — **shipped since this RFC was written.**
+  `forge mcp login --device` performs the full flow: it requires the server to advertise a
+  `device_authorization_endpoint`, registers a device client dynamically when needed, displays the
+  user code and verification URI, and polls the token endpoint. See "Alternative 4" below.
 - **Implicit / password grants** — never; deprecated and insecure.
 - **Sharing tokens with the CLI-bridge sub-process** beyond what already flows (the bridge connects
   its own `McpManager` in `mcp-serve`; it reuses the same keyring entries, so it benefits for free).
@@ -312,6 +314,18 @@ is the RFC 8252 recommendation for desktop and needs no server opt-in beyond a r
 `http://127.0.0.1` redirect. Device grant is the right **headless** fallback — deferred to future
 work, not v1.
 
+**Status: no longer deferred — implemented.** `forge mcp login --device` ("Force RFC 8628 device
+authorization when advertised") runs the flow in `crates/forge-cli/src/cli/commands/mcp/login.rs`:
+it fails with an explicit message when the authorization server advertises no
+`device_authorization_endpoint`, reuses or dynamically registers a device client via
+`forge_mcp::oauth::register_device_client`, prints the user code plus `verification_uri` (and
+`verification_uri_complete` when offered), then polls through the shared
+`oauth_flow::request_device_code` / `poll_device_token` path. That path implements the RFC's
+polling semantics — `authorization_pending`, `slow_down`, `expired_token`, honouring the server's
+`interval` — and is covered by mocked-authorization-server tests in
+`crates/forge-config/src/provider_oauth.rs`. The v1 reasoning above is preserved as the record of
+why loopback shipped first.
+
 ---
 
 ## Risks and mitigations
@@ -323,7 +337,7 @@ work, not v1.
 | Refresh token revoked/expired | Medium | Low | Connect-path detects refresh failure → `needs login` status with the exact command; no crash |
 | Server lacks dynamic registration AND user sets no `client_id` | Medium | Medium | Detect missing `registration_endpoint`; error tells the user to register an app and set `client_id` |
 | Metadata discovery variations (8414 vs OIDC path, non-spec servers) | Medium | Medium | Try RFC 8414 then OIDC `openid-configuration`; allow explicit `issuer`/endpoint overrides in config |
-| Browser-open fails (SSH/headless) | Medium | Low | Always print the URL; future: device-grant fallback |
+| Browser-open fails (SSH/headless) | Medium | Low | Always print the URL; `forge mcp login --device` (RFC 8628) for headless hosts — shipped |
 | Tokens leak to disk/logs | Low | High | Keyring-only (ADR-0007); never log token values; redact in errors; `mcp.toml` holds only non-secret hints |
 | Clock skew → premature/late refresh | Low | Low | Refresh 60s early; treat a post-init 401 as "refresh once then re-login" |
 
@@ -373,7 +387,8 @@ interactive `login`.
    ~30 lines and helps non-OAuth dynamic-token setups, but widens scope.
 2. Should `forge mcp import` auto-detect an OAuth server (probe for a 401 + `resource_metadata`) and
    scaffold `[oauth]` instead of copying a static token — in this RFC's scope or a follow-up?
-3. Bundle the RFC 8628 device-grant headless fallback now, or defer until a headless user needs it?
+3. ~~Bundle the RFC 8628 device-grant headless fallback now, or defer until a headless user needs it?~~
+   **Resolved: shipped.** See Alternative 4.
 4. Persist discovered endpoints (token/auth) in the keyring blob (proposed) vs. re-discovering each
    connect? Persisting is faster + works offline-ish but can go stale if the server rotates
    endpoints; re-discovery is robust but adds latency. Proposed: persist, re-discover on failure.
@@ -398,6 +413,6 @@ interactive `login`.
 - RFC 8252 — OAuth 2.0 for Native Apps (loopback redirect)
 - RFC 7636 — PKCE
 - RFC 7591 — OAuth 2.0 Dynamic Client Registration
-- RFC 8628 — Device Authorization Grant (deferred fallback)
+- RFC 8628 — Device Authorization Grant (headless fallback; implemented, `forge mcp login --device`)
 - Code: `crates/forge-config/src/mcp.rs` (`McpAuth`, `resolve_token`), `crates/forge-mcp/src/transport.rs` (`serve`), `docs/features/mcp-client.md`, ADR-0007 (secrets), ADR-0009 (`SideEffect::External`)
 - `docs/known-issues.md` — helm OAuth token expiry (the motivating bug)
