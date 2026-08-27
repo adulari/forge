@@ -303,6 +303,29 @@ impl Router for LlmRouter {
         .await
     }
 
+    /// A pin needs no classification: the model is already chosen. Without this override the
+    /// trait default silently dropped the pin and ran full mesh classification, so a pinned
+    /// session routed to an unrelated model on EVERY turn and was only rescued downstream by the
+    /// session's clamp — which then warned, correctly, on every message. Delegate to the heuristic
+    /// router's pin-aware path instead, and skip the classifier call entirely.
+    async fn route_with_pin_set(
+        &self,
+        pin: &[String],
+        prompt: &str,
+        has_images: bool,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+    ) -> RoutingDecision {
+        self.fallback
+            .route_with_pin_set(
+                pin, prompt, has_images, budget, health, quota, effort, project,
+            )
+            .await
+    }
+
     async fn route_hinted(
         &self,
         prompt: &str,

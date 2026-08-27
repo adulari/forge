@@ -125,10 +125,30 @@ pub async fn fetch_and_persist(models: &[String]) {
                 ctx_registry.insert(id.clone(), *w);
             }
 
+            // A LOCALLY HOSTED server knows its own window exactly, and that beats any name
+            // match: llama.cpp's /v1/models carries no context field, so `llamacpp::qwen3.8-27b`
+            // fell through to the basename index below and inherited OpenRouter's cloud
+            // `qwen/qwen3.8-27b` window of 1,000,000 — while the server was actually started with
+            // `-c 16384`. Forge then believed it had 61x the context it really had. Ask the server.
+            let served_window = llama_cpp_served_window(&cp.endpoint).await;
+            if let Some(w) = served_window {
+                if let Some(data) = body["data"].as_array() {
+                    for m in data {
+                        if let Some(id) = m["id"].as_str() {
+                            let forge_id = format!("{ns}::{id}");
+                            let _ = store.set_model_context(&forge_id, w);
+                            ctx_registry.insert(forge_id, w);
+                        }
+                    }
+                }
+            }
+
             // For models the native endpoint listed but gave no context for, fall back to OR
             // basename index. E.g. NVIDIA NIM returns `meta/llama-3.1-405b-instruct` without a
             // context_length field; basename `llama-3.1-405b-instruct` matches OR's 131072.
-            if !or_basename_index.is_empty() {
+            // Skipped entirely when the server told us its real window above — a guess must never
+            // overwrite a measurement.
+            if !or_basename_index.is_empty() && served_window.is_none() {
                 if let Some(data) = body["data"].as_array() {
                     for m in data {
                         if let Some(id) = m["id"].as_str() {
@@ -232,6 +252,31 @@ use parsers::{
     openrouter_native_cross_map, openrouter_pricing, openrouter_windows,
 };
 
+/// A llama.cpp server's ACTUAL context window, from its `/props` endpoint (`n_ctx`).
+///
+/// This is the only authoritative source for a locally hosted model: the window is whatever
+/// `-c` the server was launched with, and no catalog, name match or model card can know it.
+/// Returns `None` for endpoints that are not llama.cpp (the request 404s or the field is absent),
+/// leaving the existing fallbacks untouched.
+async fn llama_cpp_served_window(endpoint: &str) -> Option<u32> {
+    // Endpoints are stored with a trailing slash and an OpenAI-style `/v1/` suffix
+    // (`http://127.0.0.1:8099/v1/`); `/props` lives at the server root, beside it.
+    let root = endpoint.trim_end_matches('/');
+    let root = root.strip_suffix("/v1").unwrap_or(root);
+    let body = get_json(&format!("{root}/props"), None).await?;
+    props_window(&body)
+}
+
+/// The parsing half of [`llama_cpp_served_window`], split out so it is testable without a server.
+fn props_window(body: &serde_json::Value) -> Option<u32> {
+    let n_ctx = body
+        .get("n_ctx")
+        .or_else(|| body.pointer("/default_generation_settings/n_ctx"))?
+        .as_u64()?;
+    // 0 means "unset" on some builds; a window we cannot trust is worse than no window at all.
+    u32::try_from(n_ctx).ok().filter(|w| *w > 0)
+}
+
 async fn get_json(url: &str, bearer: Option<&str>) -> Option<serde_json::Value> {
     let mut req = forge_provider::bundled_http_client()
         .get(url)
@@ -266,6 +311,31 @@ async fn get_json_with_headers(url: &str, headers: &[(&str, &str)]) -> Option<se
 
 #[cfg(test)]
 mod tests {
+    /// A locally hosted server knows its own window; a name match cannot. `llamacpp::qwen3.8-27b`
+    /// inherited OpenRouter's cloud `qwen/qwen3.8-27b` window of 1,000,000 while the server was
+    /// running with `-c 16384` — so Forge packed contexts 61x larger than the server could hold.
+    #[test]
+    fn a_llama_cpp_props_body_yields_the_served_window_not_a_catalog_guess() {
+        let body = serde_json::json!({"n_ctx": 16384, "total_slots": 4});
+        assert_eq!(props_window(&body), Some(16_384));
+    }
+
+    /// Older builds nest it under the generation settings instead.
+    #[test]
+    fn a_nested_props_body_is_read_too() {
+        let body = serde_json::json!({"default_generation_settings": {"n_ctx": 8192}});
+        assert_eq!(props_window(&body), Some(8_192));
+    }
+
+    /// Not a llama.cpp server, or a build that reports nothing usable: leave the existing
+    /// fallbacks alone rather than persisting a window we cannot trust.
+    #[test]
+    fn an_unusable_props_body_yields_nothing() {
+        assert_eq!(props_window(&serde_json::json!({})), None);
+        assert_eq!(props_window(&serde_json::json!({"n_ctx": 0})), None);
+        assert_eq!(props_window(&serde_json::json!({"n_ctx": "many"})), None);
+    }
+
     use super::*;
     use serde_json::json;
 
