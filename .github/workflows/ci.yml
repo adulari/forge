@@ -69,6 +69,8 @@ jobs:
         run: bash scripts/ci/test-mobile-android-workflow.sh
       - name: Test runner resource budgets
         run: bash scripts/ci/test-runner-resource-budget.sh
+      - name: Test stale CI run cancellation safeguards
+        run: bash scripts/ci/test-unstick-stale-run-cancellation.sh
       - name: Test persistent runner cache bounds
         run: bash scripts/ci/test-trim-runner-cache.sh
       - name: Test standing docs freshness guard
