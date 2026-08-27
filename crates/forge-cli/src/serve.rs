@@ -94,6 +94,23 @@ pub(crate) fn daemon_token(rotate: bool) -> Result<String> {
     daemon_token_at(&dir.join(TOKEN_FILE), rotate)
 }
 
+/// Read the persisted daemon token without creating or replacing it.
+///
+/// Diagnostics must not rotate authentication credentials as a side effect of probing a live
+/// daemon. `daemon_token(false)` repairs a missing or malformed file, which is correct when
+/// starting the service but surprising (and disruptive to existing clients) from `forge doctor`.
+pub(crate) fn read_daemon_token() -> Result<String> {
+    let dir = forge_config::config_dir().context("no config directory on this platform")?;
+    let path = dir.join(TOKEN_FILE);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading daemon token {}", path.display()))?;
+    let token = text.trim();
+    if !(16..=64).contains(&token.len()) || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("daemon token is malformed");
+    }
+    Ok(token.to_string())
+}
+
 /// [`daemon_token`] against an explicit path (unit-testable without touching the real config).
 pub(crate) fn daemon_token_at(path: &std::path::Path, rotate: bool) -> Result<String> {
     if !rotate {

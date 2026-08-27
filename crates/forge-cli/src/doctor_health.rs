@@ -12,7 +12,7 @@ pub(crate) async fn daemon_fleet_check(port: u16) -> Check {
         .filter(|state| state.port == port && state.process_is_alive());
     let token = match state.as_ref().map(|state| state.token.clone()) {
         Some(token) => token,
-        None => match crate::serve::daemon_token(false) {
+        None => match crate::serve::read_daemon_token() {
             Ok(token) => token,
             Err(error) => {
                 return check(
