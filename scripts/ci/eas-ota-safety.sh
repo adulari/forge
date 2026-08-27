@@ -15,6 +15,15 @@ classify_path() {
     mobile/src-tauri/*|mobile/redesign/*|mobile/*.md)
       # Neutral mobile helpers and documentation do not enter the iOS runtime.
       ;;
+    mobile/.gitignore|mobile/parity/*|mobile/public/*)
+      # Named exceptions to the fail-closed default below, each verified not to reach iOS:
+      #   .gitignore   — VCS metadata; never bundled, never changes the runtime fingerprint.
+      #   parity/*     — surface-parity tracking data, read by humans and scripts, not by the app.
+      #   public/*     — Expo's web-only static directory, copied into web exports; `eas update`
+      #                  publishes `--platform ios`, so nothing here can reach the device.
+      # Without these, a favicon edit reports as a native change and hides the real reason an OTA
+      # was refused. Anything else under mobile/ still falls through to unsafe.
+      ;;
     mobile/*)
       unsafe+=("$path")
       ;;
