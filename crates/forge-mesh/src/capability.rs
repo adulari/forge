@@ -166,10 +166,42 @@ pub(crate) fn tool_reliability_penalty(id: &str) -> f64 {
 /// unnamed but high-scoring models are correctly included. Falls back to the name heuristic when
 /// no score exists for the model.
 pub fn is_frontier_b(id: &str, bench: Option<&BenchmarkScores>) -> bool {
+    // A LOCALLY HOSTED model never reaches the frontier class on an inherited score.
+    //
+    // Benchmark rows are matched by model name, so `llamacpp::qwen3.8-27b` inherits the score of
+    // the full-precision cloud Qwen3.8-27B — while the thing actually answering is a 3-bit quant
+    // on a laptop. Quantisation, sampling and the served context are invisible in the model id, so
+    // nothing corrects the inherited number, and the mesh would rank a laptop quant beside real
+    // frontier models for Complex work.
+    //
+    // Loopback is the signal, NOT "is a custom provider": the custom registry also holds genuinely
+    // frontier cloud endpoints (cerebras, nvidia, together, fireworks), and demoting those would be
+    // the opposite error. Only the capability CLASS is denied — `capability_score_b` still uses the
+    // measured score, so a local model stays usable and ranked; it just cannot claim the top tier
+    // on borrowed data.
+    if is_loopback_hosted(id) {
+        return false;
+    }
     match bench.and_then(|b| b.score_for(id)) {
         Some(s) => s.intelligence >= FRONTIER_BENCH_THRESHOLD,
         None => quality_class(id) == 3,
     }
+}
+
+/// Whether `id`'s provider is a custom OpenAI-compatible endpoint served from this machine.
+fn is_loopback_hosted(id: &str) -> bool {
+    let ns = forge_config::provider_of(id);
+    if ns.is_empty() {
+        return false;
+    }
+    forge_config::custom_providers().any(|p| p.namespace == ns && endpoint_is_loopback(p.endpoint))
+}
+
+/// Whether a base URL points at this machine. Pure, so it is testable on a CI box that has no
+/// locally-registered provider — the registry lookup above depends on the user's own config.
+fn endpoint_is_loopback(endpoint: &str) -> bool {
+    let e = endpoint.to_ascii_lowercase();
+    e.contains("//127.0.0.1") || e.contains("//localhost") || e.contains("//[::1]")
 }
 
 /// Whether a model id reads as frontier-class (top quality prior) — used to count "frontier"
@@ -344,6 +376,48 @@ pub(crate) fn capability_score_b(
 
 #[cfg(test)]
 mod tests {
+    /// Deterministic everywhere: the endpoint predicate, independent of what this machine has
+    /// registered. The registry-dependent case can only be exercised where a local provider exists.
+    #[test]
+    fn loopback_endpoints_are_recognised_and_remote_ones_are_not() {
+        for local in [
+            "http://127.0.0.1:8099/v1/",
+            "http://localhost:1234/v1/",
+            "http://[::1]:8080/v1/",
+            "HTTP://LOCALHOST:5000/V1/",
+        ] {
+            assert!(endpoint_is_loopback(local), "{local} is local");
+        }
+        for remote in [
+            "https://api.cerebras.ai/v1/",
+            "https://integrate.api.nvidia.com/v1/",
+            "https://api.together.xyz/v1/",
+        ] {
+            assert!(!endpoint_is_loopback(remote), "{remote} is remote");
+        }
+    }
+
+    /// The custom registry also holds genuinely frontier CLOUD endpoints, so the guard must key on
+    /// loopback rather than on "is a custom provider" — demoting cerebras or nvidia would be the
+    /// opposite error to the one being fixed.
+    #[test]
+    fn remote_custom_providers_are_not_treated_as_local() {
+        for p in forge_config::custom_providers() {
+            if endpoint_is_loopback(p.endpoint) {
+                continue;
+            }
+            let id = format!("{}::some-frontier-model", p.namespace);
+            assert!(!is_loopback_hosted(&id), "{} is remote", p.namespace);
+        }
+    }
+
+    /// An unprefixed id has no provider to look up and must not trip the guard.
+    #[test]
+    fn an_unprefixed_id_is_not_loopback_hosted() {
+        assert!(!is_loopback_hosted("qwen3.8-27b"));
+        assert!(!is_loopback_hosted(""));
+    }
+
     use super::*;
 
     #[test]
