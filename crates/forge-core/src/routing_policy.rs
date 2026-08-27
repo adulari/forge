@@ -102,6 +102,18 @@ impl Session {
         if already_used {
             return None;
         }
+        // A pin is a contract, and last-resort is the one path that used to break it. A SINGLE
+        // strict pin deliberately routes with an EMPTY fallback chain (forge-mesh clears it unless
+        // `mesh.pin_failover`), and an empty chain is an exhausted chain — so the first transient
+        // failure on the pinned model landed here and silently dispatched an unrelated model. That
+        // is exactly the switch-away strict pinning exists to prevent. Fail the turn with the
+        // provider's real error instead; the caller surfaces it.
+        let pin = self.effective_pin();
+        if let Some(p) = &pin {
+            if p.len() == 1 && !self.config.mesh.pin_failover {
+                return None;
+            }
+        }
         // Soonest-recovering transiently-benched model, but NEVER one whose provider has no key —
         // otherwise a keyless built-in default (e.g. groq) that got benched becomes the last-resort
         // pick, dispatches, hits a no-auth "Resolver error", and re-benches forever (the "groq for
@@ -112,6 +124,9 @@ impl Session {
             m != just_failed
                 && !forge_config::is_model_disabled(m, &self.config.mesh.disabled)
                 && forge_config::has_api_key(forge_config::provider_of(m))
+                // A pin SET confines failover to its members everywhere else; last-resort must not
+                // be the hole in that fence either.
+                && pin.as_ref().is_none_or(|p| p.iter().any(|x| x == m))
         })
     }
 
