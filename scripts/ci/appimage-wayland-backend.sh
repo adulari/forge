@@ -54,7 +54,12 @@ replacement = (
     'if [[ -n ${WAYLAND_DISPLAY:-} && -z ${GDK_BACKEND:-} ]]; then\n'
     '  export GDK_BACKEND=wayland\n'
     'fi\n'
-    'export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"'
+    '# Only the Wayland backend hits the dmabuf crash, and X11 ships with the renderer enabled\n'
+    '# today, so keyed on the backend actually in use rather than on whether we defaulted it —\n'
+    '# a caller who sets GDK_BACKEND=wayland themselves still needs the workaround.\n'
+    'if [[ ${GDK_BACKEND:-} == wayland ]]; then\n'
+    '  export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"\n'
+    'fi'
 )
 lines = text.splitlines()
 for index, line in enumerate(lines):

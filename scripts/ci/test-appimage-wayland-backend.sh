@@ -29,7 +29,7 @@ grep -q '^if \[\[ -n \${WAYLAND_DISPLAY:-} && -z \${GDK_BACKEND:-} \]\]; then$' 
   || { echo 'expected a Wayland-session guard around the GDK_BACKEND default' >&2; exit 1; }
 grep -q '^  export GDK_BACKEND=wayland$' "$hook" \
   || { echo 'expected the Wayland-preferring GDK_BACKEND export' >&2; exit 1; }
-grep -q '^export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"$' "$hook" \
+grep -q '^  export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"$' "$hook" \
   || { echo 'expected the dmabuf renderer to be disabled' >&2; exit 1; }
 grep -q '^export GDK_BACKEND=x11' "$hook" \
   && { echo 'the x11 pin survived the patch' >&2; exit 1; }
@@ -50,6 +50,26 @@ if env -u GDK_BACKEND WAYLAND_DISPLAY=wayland-0 bash -c 'source "$1"; [[ $GDK_BA
   :
 else
   echo 'Wayland sessions must receive the native backend default' >&2
+  exit 1
+fi
+
+# 1d. The dmabuf workaround exists for the Wayland crash (Gdk Error 71) only. X11 ships today with
+# the renderer enabled, so an X11 host must not silently lose it.
+if env -u WAYLAND_DISPLAY -u GDK_BACKEND -u WEBKIT_DISABLE_DMABUF_RENDERER \
+    bash -c 'source "$1"; [[ -z ${WEBKIT_DISABLE_DMABUF_RENDERER:-} ]]' _ "$hook"; then
+  :
+else
+  echo 'an X11-only host must keep the dmabuf renderer enabled' >&2
+  exit 1
+fi
+
+# 1e. A caller who selects Wayland explicitly still needs the workaround, even though the hook did
+# not choose the backend for them.
+if env -u WEBKIT_DISABLE_DMABUF_RENDERER GDK_BACKEND=wayland \
+    bash -c 'source "$1"; [[ ${WEBKIT_DISABLE_DMABUF_RENDERER:-} == 1 ]]' _ "$hook"; then
+  :
+else
+  echo 'an explicit Wayland backend must still disable the dmabuf renderer' >&2
   exit 1
 fi
 
