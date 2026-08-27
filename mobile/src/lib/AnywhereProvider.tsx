@@ -76,6 +76,7 @@ import {
   pairingSafetyCode,
   parsePairingChallenge,
   PairingPollRateLimitError,
+  type RejectedPairing,
   pollPairing,
   preparePairingApproval,
   submitPairingApproval,
@@ -1359,9 +1360,12 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     try {
       const token = await accessToken();
       const serviceUrl = credentialsRef.current?.serviceUrl ?? SERVICE_URL;
-      setPendingApprovalDetails(await listPairings(serviceUrl, token));
+      const inbox = await listPairings(serviceUrl, token);
+      setPendingApprovalDetails(inbox.pairings);
       approvalRetryAtMs.current = 0;
-      setApprovalError(null);
+      // A request the service returned but this device could not display is the exact case that
+      // used to render as an empty inbox. Name it instead, so it can be acted on from the phone.
+      setApprovalError(inbox.rejected.length ? describeRejectedPairings(inbox.rejected) : null);
     } catch (reason) {
       if (isAnywhereSessionInvalid(reason)) {
         await requireReauthentication();
@@ -1372,7 +1376,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         setApprovalError("Approval inbox is busy. Forge will retry automatically.");
         return;
       }
-      setApprovalError("Approval inbox is temporarily unavailable. Your pending request is still safe.");
+      setApprovalError(`Approval inbox is temporarily unavailable${approvalFailureDetail(reason)}. Your pending request is still safe.`);
     }
   }, [accessToken, requireReauthentication]);
 
@@ -1750,4 +1754,18 @@ async function deviceRevocationCommitted(
   );
   return response.epoch === pending.epoch
     && response.recovery_wrap_envelope === pending.request.recovery_wrap_envelope;
+}
+
+
+/** Status and code only — never the response body, which may echo request material. */
+function approvalFailureDetail(reason: unknown): string {
+  if (reason instanceof AnywhereApiError) return ` (HTTP ${reason.status}${reason.code ? `, ${reason.code}` : ""})`;
+  if (reason instanceof Error && reason.message) return ` (${reason.message})`;
+  return "";
+}
+
+function describeRejectedPairings(rejected: RejectedPairing[]): string {
+  const detail = rejected.map((entry) => `${entry.pairingId} ${entry.reason}`).join("; ");
+  const count = rejected.length === 1 ? "1 device request" : `${rejected.length} device requests`;
+  return `${count} could not be shown: ${detail}. Approve from the terminal with \`forge anywhere approvals\`.`;
 }

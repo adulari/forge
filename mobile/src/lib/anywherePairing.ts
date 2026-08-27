@@ -9,6 +9,9 @@ export interface PairingChallenge { version: 1; pairing_id: string; exchange_pub
 export interface PairingCapability { supported: boolean; message: string }
 export interface PairingDetails { version: 1; pairing_id: string; device_id: string; device_name: string; signing_public_key: string; exchange_public_key: string; expires_at_ms: number }
 export interface PairingInbox { version: 1; pairings: PairingDetails[] }
+/** What the inbox actually contained: entries fit to show, and why the rest were not. */
+export interface PairingInboxResult { pairings: PairingDetails[]; rejected: RejectedPairing[] }
+export interface RejectedPairing { pairingId: string; reason: string }
 export interface PairingApproval { version: 1; epoch: number; device_wrap_envelope: string }
 export interface PairingCreateRequest { version: 1; device_name: string; signing_public_key: string; exchange_public_key: string }
 export interface PairingCreateResponse { version: 1; pairing_id: string; pairing_token: string; expires_at_ms: number; challenge: string }
@@ -126,20 +129,40 @@ function retryAfterMilliseconds(value: string | null): number {
   return Number.isFinite(date) ? Math.max(1_000, date - Date.now()) : 60_000;
 }
 
-export async function listPairings(serviceUrl: string, token: string): Promise<PairingDetails[]> {
+export async function listPairings(serviceUrl: string, token: string): Promise<PairingInboxResult> {
   const inbox = await anywhereRequest<PairingInbox>(serviceUrl, "/v1/pairings", { cache: "no-store" }, token);
   if (inbox.version !== 1 || !Array.isArray(inbox.pairings)) {
     throw new Error("Forge Anywhere returned an invalid approval inbox");
   }
   const now = Date.now();
-  return inbox.pairings.filter((details) => {
+  const pairings: PairingDetails[] = [];
+  const rejected: RejectedPairing[] = [];
+  for (const details of inbox.pairings) {
+    // A dropped entry used to be indistinguishable from an empty inbox, which is why the
+    // reported symptom ("nothing listed, plus an error") could not be diagnosed from the phone.
     try {
-      validatePairingDetails(details, challengeFromDetails(details, serviceUrl));
-      return details.expires_at_ms > now;
-    } catch {
-      return false;
+      validatePairingEntry(details);
+    } catch (reason) {
+      rejected.push({ pairingId: rejectedPairingLabel(details), reason: reasonText(reason) });
+      continue;
     }
-  });
+    if (details.expires_at_ms <= now) {
+      rejected.push({ pairingId: rejectedPairingLabel(details), reason: "already expired" });
+      continue;
+    }
+    pairings.push(details);
+  }
+  return { pairings, rejected };
+}
+
+/** Enough of the id to correlate with `forge anywhere approvals`, never the whole opaque value. */
+function rejectedPairingLabel(details: Partial<PairingDetails> | null | undefined): string {
+  const id = typeof details?.pairing_id === "string" ? details.pairing_id : "";
+  return id ? `${id.slice(0, 8)}…` : "unidentified request";
+}
+
+function reasonText(reason: unknown): string {
+  return reason instanceof Error && reason.message ? reason.message : "unrecognised entry";
 }
 
 export async function denyPairing(serviceUrl: string, token: string, pairingId: string): Promise<void> {
@@ -234,13 +257,29 @@ export async function submitPairingApproval(serviceUrl: string, token: string, p
   }, token);
 }
 
+/**
+ * Checks an entry against itself only. The inbox has no scanned challenge to compare against —
+ * it previously built one *from the same entry*, so three of the six checks compared fields to
+ * themselves and could never fail, under a message promising a match that was never tested.
+ */
+function validatePairingEntry(details: PairingDetails): void {
+  if (details?.version !== 1) throw new Error("unsupported pairing version");
+  if (!/^[0-9a-f]{32}$/.test(details.device_id ?? "")) throw new Error("malformed device id");
+  if (!Number.isFinite(details.expires_at_ms)) throw new Error("malformed expiry");
+  if (keyByteLength(details.exchange_public_key) !== 32) throw new Error("malformed exchange key");
+  if (keyByteLength(details.signing_public_key) !== 32) throw new Error("malformed signing key");
+}
+
+function keyByteLength(value: string): number {
+  try { return fromBase64Url(value).length; } catch { return -1; }
+}
+
+/** The scanned-QR path, where a real challenge exists and the comparison means something. */
 function validatePairingDetails(details: PairingDetails, challenge: PairingChallenge): void {
-  if (details.version !== 1 || details.pairing_id !== challenge.pairing_id
-    || !/^[0-9a-f]{32}$/.test(details.device_id)
+  validatePairingEntry(details);
+  if (details.pairing_id !== challenge.pairing_id
     || details.exchange_public_key !== challenge.exchange_public_key
-    || details.expires_at_ms !== challenge.expires_at_ms
-    || fromBase64Url(details.exchange_public_key).length !== 32
-    || fromBase64Url(details.signing_public_key).length !== 32) {
+    || details.expires_at_ms !== challenge.expires_at_ms) {
     throw new Error("Pairing details do not match the scanned challenge");
   }
 }
