@@ -51,7 +51,9 @@ replacement = (
     '# Patched by scripts/ci/appimage-wayland-backend.sh: prefer the session\'s own backend and\n'
     '# disable WebKitGTK\'s dmabuf renderer, which is what actually crashed under Wayland\n'
     '# (Gdk Error 71), rather than pinning every user to XWayland.\n'
-    'export GDK_BACKEND="${GDK_BACKEND:-wayland}"\n'
+    'if [[ -n ${WAYLAND_DISPLAY:-} && -z ${GDK_BACKEND:-} ]]; then\n'
+    '  export GDK_BACKEND=wayland\n'
+    'fi\n'
     'export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"'
 )
 lines = text.splitlines()

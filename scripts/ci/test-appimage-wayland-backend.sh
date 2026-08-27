@@ -25,7 +25,9 @@ appdir="$work/ok"
 make_hook "$appdir"
 bash "$fixer" "$appdir" >/dev/null
 hook="$appdir/apprun-hooks/linuxdeploy-plugin-gtk.sh"
-grep -q '^export GDK_BACKEND="${GDK_BACKEND:-wayland}"$' "$hook" \
+grep -q '^if \[\[ -n \${WAYLAND_DISPLAY:-} && -z \${GDK_BACKEND:-} \]\]; then$' "$hook" \
+  || { echo 'expected a Wayland-session guard around the GDK_BACKEND default' >&2; exit 1; }
+grep -q '^  export GDK_BACKEND=wayland$' "$hook" \
   || { echo 'expected the Wayland-preferring GDK_BACKEND export' >&2; exit 1; }
 grep -q '^export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"$' "$hook" \
   || { echo 'expected the dmabuf renderer to be disabled' >&2; exit 1; }
@@ -33,6 +35,23 @@ grep -q '^export GDK_BACKEND=x11' "$hook" \
   && { echo 'the x11 pin survived the patch' >&2; exit 1; }
 grep -q 'XDG_DATA_DIRS' "$hook" \
   || { echo 'unrelated hook lines must be preserved' >&2; exit 1; }
+
+# 1b. The default must not break X11-only hosts. With no Wayland display and no explicit backend,
+# the hook leaves GDK_BACKEND unset so GTK can select X11 normally.
+if env -u WAYLAND_DISPLAY -u GDK_BACKEND bash -c 'source "$1"; [[ -z ${GDK_BACKEND:-} ]]' _ "$hook"; then
+  :
+else
+  echo 'X11-only environments must not be forced onto the Wayland backend' >&2
+  exit 1
+fi
+
+# 1c. A Wayland session receives the native backend default when the caller has not overridden it.
+if env -u GDK_BACKEND WAYLAND_DISPLAY=wayland-0 bash -c 'source "$1"; [[ $GDK_BACKEND == wayland ]]' _ "$hook"; then
+  :
+else
+  echo 'Wayland sessions must receive the native backend default' >&2
+  exit 1
+fi
 
 # 2. A hook without the expected pin must fail loudly. If linuxdeploy changes its template, the
 #    build has to stop rather than quietly ship XWayland again.
