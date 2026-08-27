@@ -2416,6 +2416,28 @@ impl Session {
                     .await
             }
         };
+        // BACKSTOP: a pin is a contract, and it was being honoured per-call-site rather than in one
+        // place — so any routing path that forgot it (the architect plan phase builds its failover
+        // chain from an unpinned Complex-tier route; last-resort filtered on keys but not the pin)
+        // could dispatch a model the user never asked for. Reported live twice: a session pinned to
+        // a local model answered from `gpt-5.6-luna`, and another died on an OpenRouter model it was
+        // never pinned to. Clamp the decision here, after every routing path has produced it, so
+        // escaping the pin is structurally impossible rather than a property each site must
+        // remember. Fallbacks are confined to the pin set for the same reason.
+        let mut decision = decision;
+        if let Some(pin) = self.effective_pin() {
+            if !pin.iter().any(|m| m == &decision.model) {
+                let forced = pin[0].clone();
+                self.presenter.emit(PresenterEvent::Warning(format!(
+                    "routing tried {} while pinned to {forced} — honouring the pin",
+                    decision.model
+                )));
+                decision.model = forced;
+                decision.pinned = true;
+            }
+            decision.fallbacks.retain(|m| pin.iter().any(|p| p == m));
+        }
+        let decision = decision;
         let routed_model = decision.model.clone();
         let reuse_response_chain = should_reuse_response_chain(
             prompt,
@@ -9927,6 +9949,59 @@ mod tests {
         assert_eq!(
             answer, "provb::1",
             "429 on prova::1 must skip same-provider prova::2 and use provb::1"
+        );
+    }
+
+    /// A Router that does NOT override `route_with_pin_set` — so it inherits the trait default,
+    /// which delegates to `route()` and drops the pin on the floor. That is not a contrived shape:
+    /// it is what every routing path that forgets the pin looks like from the session's side.
+    struct PinIgnoringRouter {
+        model: String,
+        fallbacks: Vec<String>,
+    }
+    #[async_trait::async_trait]
+    impl Router for PinIgnoringRouter {
+        async fn route(
+            &self,
+            _prompt: &str,
+            _has_images: bool,
+            _budget: BudgetState,
+            _health: &forge_types::ModelHealth,
+            _quota: &forge_types::SubscriptionQuota,
+            _effort: Option<forge_types::EffortLevel>,
+            _project: &forge_types::ProjectContext,
+        ) -> forge_mesh::RoutingDecision {
+            forge_mesh::RoutingDecision {
+                tier: forge_types::TaskTier::Trivial,
+                model: self.model.clone(),
+                rationale: "ignores the pin".into(),
+                fallbacks: self.fallbacks.clone(),
+                pinned: false,
+            }
+        }
+    }
+
+    /// A pin must survive EVERY routing path, not just the ones that remembered to check it.
+    /// Reported live: a session pinned to a local model answered from `gpt-5.6-luna`, and another
+    /// died on an OpenRouter model it was never pinned to. `EchoProvider` echoes the model it was
+    /// actually called with, so the answer IS the dispatched model.
+    #[tokio::test]
+    async fn a_session_pin_is_honoured_even_when_routing_returns_another_model() {
+        let provider = Arc::new(EchoProvider {
+            bad: Default::default(),
+            err: rate_limited,
+        });
+        // The router ignores the pin entirely — exactly the shape of a path that forgot it.
+        let router = Arc::new(PinIgnoringRouter {
+            model: "other::unpinned".into(),
+            fallbacks: vec!["third::also-not-pinned".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.pin_model(Some("ollama::pinned".into()));
+        let answer = session.run_turn("hi").await.unwrap();
+        assert_eq!(
+            answer, "ollama::pinned",
+            "a pinned session must dispatch the pin, whatever routing returned"
         );
     }
 
