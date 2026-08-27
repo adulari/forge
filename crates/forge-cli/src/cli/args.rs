@@ -1202,6 +1202,9 @@ pub(crate) enum ServiceCmd {
     Stop,
     /// Restart the installed service.
     Restart,
+    /// Emit the daemon-failure notification. Invoked by the unit's `OnFailure=`, not by hand.
+    #[command(hide = true)]
+    Alert,
 }
 
 #[derive(Subcommand)]
