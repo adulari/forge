@@ -94,15 +94,7 @@ fn should_reuse_response_chain(
 
 fn completion_prefix_tokens(messages: &[Message], tools: &[ToolSpec]) -> u64 {
     let message_tokens = messages.iter().map(message_tokens).sum::<usize>();
-    let tool_tokens = tools
-        .iter()
-        .map(|spec| {
-            tokens::count_text(&spec.name)
-                + tokens::count_text(&spec.description)
-                + tokens::count_text(&spec.schema.to_string())
-                + 8
-        })
-        .sum::<usize>();
+    let tool_tokens = context_pipeline::tool_spec_tokens(tools);
     message_tokens.saturating_add(tool_tokens) as u64
 }
 
@@ -1310,7 +1302,9 @@ fn should_retry_same_model_transient(model: &str, error: &forge_provider::Provid
 // `message_tokens`, `fit_messages`, and `prune_tool_results` moved to [`context_pipeline`] — the
 // one seam between the transcript and a provider request (imported below for existing call sites).
 #[cfg(test)]
-use context_pipeline::{fit_messages, prune_tool_results, PRUNE_MARKER, PRUNE_TOOL_RESULT_MAX};
+use context_pipeline::{
+    fit_messages, prune_tool_results, tool_spec_tokens, PRUNE_MARKER, PRUNE_TOOL_RESULT_MAX,
+};
 use context_pipeline::{message_tokens, prune_and_inject, to_llm};
 
 /// Output of one execution of the shared model↔tool loop ([`Session::run_model_loop`]).
@@ -15090,6 +15084,40 @@ mod tests {
         session.pin_model(Some("openai::gpt-4o".to_string()));
         assert_eq!(session.resolve_planner_model(), "openai::gpt-4o");
         assert_eq!(session.resolve_editor_model(), "openai::gpt-4o");
+    }
+
+    /// Tool schemas ship on EVERY request and run to thousands of tokens, but the trimmer only
+    /// subtracted the reply reservation and the system preamble — so it packed the transcript into
+    /// a window the schemas had already eaten. Invisible against a 200k cloud model; fatal against
+    /// a local one. Measured: 32,953 tokens sent to a 32,768-token llama.cpp server, the turn
+    /// killed by "request exceeds the available context size" AFTER the trimmer believed it fit.
+    #[test]
+    fn tool_schemas_are_charged_against_the_context_window() {
+        let specs = vec![ToolSpec {
+            name: "read_file".into(),
+            description: "Read a file from disk and return its contents".into(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "absolute path"}},
+                "required": ["path"]
+            }),
+        }];
+        let charged = context_pipeline::tool_spec_tokens(&specs);
+        assert!(
+            charged > 0,
+            "a real tool spec must cost tokens, got {charged}"
+        );
+        assert_eq!(
+            context_pipeline::tool_spec_tokens(&[]),
+            0,
+            "no tools must cost nothing"
+        );
+        // The same formula the provider-prefix accounting already used, so the two cannot drift.
+        assert_eq!(
+            completion_prefix_tokens(&[], &specs) as usize,
+            charged,
+            "prefix accounting and the trimmer must charge tools identically"
+        );
     }
 
     #[test]

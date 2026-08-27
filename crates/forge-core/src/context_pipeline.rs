@@ -281,6 +281,22 @@ fn elide_tool_result(message: &Message, token_budget: usize) -> Message {
 
 /// Real token cost of one message: its content (BPE-counted, cached) + the chat framing overhead +
 /// any tool-call name/arguments it carries (which the model also pays for).
+/// Tokens the TOOL SCHEMAS occupy in a request. Every provider serialises name, description and
+/// the JSON Schema of each tool on every call, so they consume the same window the transcript does
+/// — and a trimmer that ignores them will confidently overflow a small context.
+pub(crate) fn tool_spec_tokens(specs: &[forge_provider::ToolSpec]) -> usize {
+    specs
+        .iter()
+        .map(|s| {
+            tokens::count_text(&s.name)
+                + tokens::count_text(&s.description)
+                + tokens::count_text(&s.schema.to_string())
+                // Per-tool framing the provider adds around each definition.
+                + 8
+        })
+        .sum()
+}
+
 pub(crate) fn message_tokens(m: &Message) -> usize {
     let mut n = tokens::count_message(&m.content);
     for tc in &m.tool_calls {

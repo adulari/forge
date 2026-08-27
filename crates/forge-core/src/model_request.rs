@@ -49,7 +49,7 @@ pub(super) async fn request_provider_response(
         // long conversation can't overflow it — which otherwise fails the turn as
         // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
         // smaller-window model still fits. The immutable borrow ends before the block below.
-        let sent = session.transcript_with_preamble(active_model);
+        let sent = session.transcript_with_preamble_and_tools(active_model, specs);
         // Auto-routed completions reserve a model before dispatch so independent sessions
         // can distribute across the fallback chain. Explicit pins deliberately bypass this
         // scheduler: their existing pin outage/failover policy remains authoritative.
