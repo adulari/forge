@@ -502,6 +502,86 @@ pub fn set_config_value(scope: ConfigScope, path: &str, raw: &str) -> Result<(),
     Ok(())
 }
 
+/// Add or remove one entry in `[mesh] disabled`, the list the mesh uses to exclude a model or a
+/// whole provider from discovery and routing.
+///
+/// A list needs its own entry point: `set_config_value` coerces a raw string to the leaf's scalar
+/// type, so it cannot append to or subtract from an array. Everything else matches that function —
+/// the rest of the file is preserved, and the result is validated by re-extracting `Config` before
+/// anything is written.
+///
+/// `entry` is a full model id (`openrouter::z-ai/glm-5.3`) or a bare provider (`openrouter`), the
+/// same two forms [`crate::is_model_disabled`] matches. Adding an entry already present, or
+/// removing one that is absent, is a no-op rather than an error: the caller asked for a state, and
+/// that state already holds.
+///
+/// Returns whether the file changed, so a caller can tell the user which of those happened.
+pub fn set_model_disabled(
+    scope: ConfigScope,
+    entry: &str,
+    disabled: bool,
+) -> Result<bool, ConfigError> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return Err(ConfigError::Write(
+            "a model id or provider name is required".into(),
+        ));
+    }
+
+    set_model_disabled_at(&scope_path(scope)?, entry, disabled)
+}
+
+/// The body of [`set_model_disabled`], addressed by file rather than by scope so it is testable
+/// without changing the process's working directory — `ConfigScope::Project` resolves to a
+/// relative path, and a chdir would race every other test in the binary.
+fn set_model_disabled_at(
+    file: &std::path::Path,
+    entry: &str,
+    disabled: bool,
+) -> Result<bool, ConfigError> {
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ConfigError::Write(e.to_string()))?;
+    }
+    let mut root = read_edit_table(file)?;
+
+    let mut entries: Vec<String> = root
+        .get("mesh")
+        .and_then(|mesh| mesh.get("disabled"))
+        .and_then(|value| value.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let present = entries.iter().any(|e| e.trim() == entry);
+    match (disabled, present) {
+        (true, true) | (false, false) => return Ok(false),
+        (true, false) => entries.push(entry.to_string()),
+        (false, true) => entries.retain(|e| e.trim() != entry),
+    }
+
+    set_dotted(
+        &mut root,
+        "mesh.disabled",
+        toml::Value::Array(entries.into_iter().map(toml::Value::String).collect()),
+    );
+
+    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
+    Figment::from(Serialized::defaults(Config::default()))
+        .merge(Toml::string(&body))
+        .extract::<Config>()
+        .map_err(|e| {
+            ConfigError::Write(format!("invalid config after editing mesh.disabled: {e}"))
+        })?;
+
+    std::fs::write(file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    Ok(true)
+}
+
 /// Reset a setting in the selected scope by removing it from that scope's `config.toml`. A value
 /// in a higher-precedence scope can therefore remain effective; this is a scoped reset, not a
 /// command to erase the setting from every layer. No-op if absent. The remaining file is validated.
@@ -701,6 +781,99 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let table = read_edit_table(&dir.path().join("missing.toml")).unwrap();
         assert!(table.is_empty());
+    }
+
+    fn disabled_entries(path: &std::path::Path) -> Vec<String> {
+        read_edit_table(path)
+            .unwrap()
+            .get("mesh")
+            .and_then(|m| m.get("disabled"))
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn disabling_appends_and_enabling_removes_without_disturbing_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[mesh]\ndefault_effort = \"high\"\n").unwrap();
+
+        assert!(set_model_disabled_at(&path, "openrouter", true).unwrap());
+        assert_eq!(disabled_entries(&path), vec!["openrouter".to_string()]);
+
+        assert!(set_model_disabled_at(&path, "openrouter::z-ai/glm-5.3", true).unwrap());
+        assert_eq!(
+            disabled_entries(&path),
+            vec![
+                "openrouter".to_string(),
+                "openrouter::z-ai/glm-5.3".to_string()
+            ]
+        );
+
+        assert!(set_model_disabled_at(&path, "openrouter", false).unwrap());
+        assert_eq!(
+            disabled_entries(&path),
+            vec!["openrouter::z-ai/glm-5.3".to_string()]
+        );
+
+        // The edit must not eat unrelated keys in the same table.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("default_effort"),
+            "other mesh keys survive: {text}"
+        );
+    }
+
+    /// Both directions are idempotent: the caller asked for a state, and when that state already
+    /// holds there is nothing to do and nothing to report as an error.
+    #[test]
+    fn repeating_a_disable_or_an_enable_reports_no_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        assert!(set_model_disabled_at(&path, "groq", true).unwrap());
+        assert!(!set_model_disabled_at(&path, "groq", true).unwrap());
+
+        assert!(set_model_disabled_at(&path, "groq", false).unwrap());
+        assert!(!set_model_disabled_at(&path, "groq", false).unwrap());
+        assert!(disabled_entries(&path).is_empty());
+    }
+
+    /// The written list has to be readable back as a real `Config`, or the CLI would happily write
+    /// a file that Forge then refuses to load.
+    #[test]
+    fn a_written_entry_round_trips_through_config_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        set_model_disabled_at(&path, "openrouter::z-ai/glm-5.3", true).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let config: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string(&body))
+            .extract()
+            .expect("the file we just wrote must still be a valid Config");
+
+        assert!(crate::is_model_disabled(
+            "openrouter::z-ai/glm-5.3",
+            &config.mesh.disabled
+        ));
+        assert!(!crate::is_model_disabled(
+            "openrouter::other/model",
+            &config.mesh.disabled
+        ));
+    }
+
+    #[test]
+    fn an_empty_entry_is_rejected_rather_than_written() {
+        let error = set_model_disabled(ConfigScope::Project, "   ", true)
+            .expect_err("a blank entry must be refused");
+        assert!(error.to_string().contains("required"), "{error}");
     }
 
     #[test]

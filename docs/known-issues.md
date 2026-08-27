@@ -253,6 +253,10 @@ to a junk value so auth fails and the mesh benches/avoids it.
   was stored).
 - `[mesh] disabled = ["openai", "gemini::antigravity-preview-05-2026"]` excludes a provider
   or exact model id from discovery and routing.
+- `forge models --disable <model-or-provider>` / `--enable` edits that list without hand-editing
+  config. It takes the same two forms the config key does — a full model id or a bare provider —
+  and leaves the credential alone, which is the remedy when a stale key is causing failover noise
+  but you do not want to delete it.
 - `forge models --clear` wipes stale model benches.
 
 **Status:** shipped + tested.

@@ -156,7 +156,13 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             BenchCmd::Report { metrics, evals } => bench::report(&metrics, &evals),
         },
         Command::Commands => commands_cmd(),
-        Command::Models { probe, all, clear } => models(probe, all, clear).await,
+        Command::Models {
+            probe,
+            all,
+            clear,
+            disable,
+            enable,
+        } => models(probe, all, clear, disable, enable).await,
         Command::Mesh {
             prompt,
             json,
