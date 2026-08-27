@@ -618,16 +618,37 @@ fn normalize_namespace(prefix: &str) -> &str {
     }
 }
 
+/// Move every system message to the front, preserving their relative order.
+///
+/// Forge injects system content mid-transcript — lattice symbols, command guidance, standing
+/// instructions — and hosted APIs accept that. A strict chat template does not: Qwen3.8's raises
+///
+///   Jinja Exception: System message must be at the beginning.
+///
+/// which llama.cpp surfaces as `Unable to generate parser for this template`, failing EVERY
+/// tool-bearing turn on an otherwise healthy local model. The content is identical either way —
+/// system guidance is not positional — so hoisting costs nothing and makes Forge's transcript
+/// legal for templates that enforce the rule.
+fn hoist_system_messages(messages: &[Message]) -> Vec<&Message> {
+    let mut ordered: Vec<&Message> = messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::System))
+        .collect();
+    ordered.extend(messages.iter().filter(|m| !matches!(m.role, Role::System)));
+    ordered
+}
+
 fn to_genai_messages(messages: &[Message]) -> Vec<ChatMessage> {
     // Providers replay the whole transcript on every call, and several enforce a hard cap
     // (e.g. "At most 1 image(s) may be provided in one prompt") on the total images in a
     // request. Images are only useful on the turn that introduced them, so only the most
     // recent image-bearing user turn keeps its images; earlier ones fall back to text-only.
+    let messages = hoist_system_messages(messages);
     let last_image_turn = messages
         .iter()
         .rposition(|m| matches!(m.role, Role::User) && !m.images.is_empty());
     let mut out = Vec::with_capacity(messages.len());
-    for (i, m) in messages.iter().enumerate() {
+    for (i, m) in messages.iter().copied().enumerate() {
         match m.role {
             Role::System => out.push(ChatMessage::system(m.content.clone())),
             Role::User if m.images.is_empty() || Some(i) != last_image_turn => {
@@ -1257,6 +1278,50 @@ fn is_phantom_truncation(saw_end: bool, has_tool_calls: bool, usage: &Usage) -> 
 
 #[cfg(test)]
 mod tests {
+    /// Qwen3.8's chat template raises "System message must be at the beginning", which llama.cpp
+    /// reports as `Unable to generate parser for this template` — failing EVERY tool-bearing turn.
+    /// Forge injects system content mid-transcript (lattice symbols, command guidance), so the
+    /// conversion must hoist it rather than rely on providers being lenient.
+    #[test]
+    fn system_messages_are_hoisted_to_the_front_in_order() {
+        let msgs = vec![
+            Message::system("first system"),
+            Message::user("hello"),
+            Message::system("injected later"),
+            Message::user("second turn"),
+        ];
+        let hoisted = hoist_system_messages(&msgs);
+        let roles: Vec<_> = hoisted.iter().map(|m| format!("{:?}", m.role)).collect();
+        assert_eq!(
+            roles,
+            vec!["System", "System", "User", "User"],
+            "got {roles:?}"
+        );
+        assert_eq!(hoisted[0].content, "first system");
+        assert_eq!(
+            hoisted[1].content, "injected later",
+            "system order must be preserved"
+        );
+        assert_eq!(
+            hoisted[2].content, "hello",
+            "non-system order must be preserved"
+        );
+        assert_eq!(hoisted[3].content, "second turn");
+    }
+
+    /// A transcript that is already legal must come through untouched.
+    #[test]
+    fn a_transcript_without_stray_system_messages_is_unchanged() {
+        let msgs = vec![
+            Message::system("only system"),
+            Message::user("a"),
+            Message::user("b"),
+        ];
+        let hoisted = hoist_system_messages(&msgs);
+        let got: Vec<&str> = hoisted.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(got, vec!["only system", "a", "b"]);
+    }
+
     use super::*;
     use serde_json::json;
 
