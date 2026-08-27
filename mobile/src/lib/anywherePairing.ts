@@ -146,10 +146,12 @@ export async function listPairings(serviceUrl: string, token: string): Promise<P
       rejected.push({ pairingId: rejectedPairingLabel(details), reason: reasonText(reason) });
       continue;
     }
-    if (details.expires_at_ms <= now) {
-      rejected.push({ pairingId: rejectedPairingLabel(details), reason: "already expired" });
-      continue;
-    }
+    // Expiry is ordinary lifecycle, NOT a defect, and the service already filters
+    // `expires_at > now`. So the only way one arrives here is a device clock running ahead of
+    // the service — and reporting that as a failure turns a healthy pending request into an
+    // alarming banner on the one screen this path exists to make trustworthy. Skip it quietly;
+    // `rejected` stays reserved for entries this device genuinely could not render.
+    if (details.expires_at_ms <= now) continue;
     pairings.push(details);
   }
   return { pairings, rejected };
@@ -163,6 +165,25 @@ function rejectedPairingLabel(details: Partial<PairingDetails> | null | undefine
 
 function reasonText(reason: unknown): string {
   return reason instanceof Error && reason.message ? reason.message : "unrecognised entry";
+}
+
+/** Named so the cap is visible rather than buried as a literal. */
+const REJECTED_PAIRINGS_SHOWN = 3;
+
+/**
+ * One line naming what the inbox could not display. Lives here, not in the provider, so it is
+ * testable without pulling in React Native.
+ */
+export function describeRejectedPairings(rejected: RejectedPairing[]): string {
+  // The banner sits above a fixed-height list; joining an unbounded number of reasons pushes the
+  // rest of the screen away. Three is enough to recognise a pattern, and the count still states
+  // how many there really are.
+  const shown = rejected.slice(0, REJECTED_PAIRINGS_SHOWN);
+  const remainder = rejected.length - shown.length;
+  const detail = shown.map((entry) => `${entry.pairingId} ${entry.reason}`).join("; ")
+    + (remainder > 0 ? `; and ${remainder} more` : "");
+  const count = rejected.length === 1 ? "1 device request" : `${rejected.length} device requests`;
+  return `${count} could not be shown: ${detail}. Approve from the terminal with \`forge anywhere approvals\`.`;
 }
 
 export async function denyPairing(serviceUrl: string, token: string, pairingId: string): Promise<void> {
