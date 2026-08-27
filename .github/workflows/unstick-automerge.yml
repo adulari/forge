@@ -139,56 +139,6 @@ jobs:
             fi
           done
 
-      # A branch update makes the old head permanently irrelevant: GitHub's required-context
-      # rollup only considers the PR's current head SHA, but the old run still occupies a runner.
-      # Cancel only internal pull-request/workflow-dispatch runs whose SHA is no longer the head of
-      # any open PR (or main). Fork runs and tag/release events are deliberately left for their own
-      # lifecycle; a false positive here would strand an external contributor or a release.
-      - name: Cancel runs for superseded internal PR heads
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          scratch=$(mktemp -d)
-          trap 'rm -rf -- "$scratch"' EXIT
-
-          {
-            gh api "repos/$GH_REPO/branches/main" --jq '.commit.sha'
-            gh pr list --state open --limit 100 --json headRefOid --jq '.[].headRefOid'
-          } | sort -u > "$scratch/live-heads"
-
-          : > "$scratch/runs"
-          for status in queued in_progress; do
-            gh api --paginate "repos/$GH_REPO/actions/runs?status=$status&per_page=100" \
-              --jq '.workflow_runs[] | [.id, .head_sha, .event, .head_repository.full_name, .head_branch] | @tsv' \
-              >> "$scratch/runs"
-          done
-
-          MAX_CANCELLATIONS_PER_RUN=50
-          cancelled=0
-          while IFS=$'\t' read -r run_id head_sha event head_repo head_branch; do
-            [ "$head_repo" = "$GH_REPO" ] || continue
-            case "$event" in
-              pull_request|workflow_dispatch) ;;
-              *) continue ;;
-            esac
-            if grep -Fxq "$head_sha" "$scratch/live-heads"; then
-              continue
-            fi
-            if [ "$cancelled" -ge "$MAX_CANCELLATIONS_PER_RUN" ]; then
-              echo "::warning title=Stale run sweep bounded::deferred additional superseded runs to the next sweep"
-              break
-            fi
-            if gh api -X POST "repos/$GH_REPO/actions/runs/$run_id/cancel" >/dev/null; then
-              cancelled=$((cancelled + 1))
-              echo "cancelled run $run_id ($event $head_branch $head_sha) — no open PR references this head"
-            else
-              echo "::warning title=Could not cancel stale run::run $run_id ($event $head_branch) was not cancelled"
-            fi
-          done < "$scratch/runs"
-          echo "superseded internal runs cancelled: $cancelled"
-
       - name: Update every stalled auto-merge PR and re-arm its checks
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
