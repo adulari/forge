@@ -22,6 +22,12 @@ use std::path::Path;
 /// Settings files that may carry a `"hooks"` key.
 const FILTERED_SETTINGS_FILES: &[&str] = &["settings.json", "settings.local.json"];
 
+/// Entries safe and useful to copy when Windows cannot create a symlink. Keep this deliberately
+/// narrow: unknown files in a user's Claude home may contain credentials, session material, or
+/// unrelated application state and must fail closed rather than being copied by default.
+#[cfg(any(windows, test))]
+const WINDOWS_COPY_ALLOWLIST: &[&str] = &["projects", "history.jsonl"];
+
 /// Top-level JSON keys stripped from a filtered settings file. `hooks` is the primary target;
 /// `enabledPlugins`/`extraKnownMarketplaces` are defense-in-depth against a plugin registering its
 /// own hooks — plugins are a secondary concern here, hooks is the one that must never fire.
@@ -132,13 +138,15 @@ fn filtered_settings_json(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
 }
 
 #[cfg(any(windows, test))]
-fn is_sensitive_bridge_entry(path: &Path) -> bool {
+fn is_allowed_windows_copy(path: &Path) -> bool {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default()
-        .to_ascii_lowercase();
-    name.contains("credential") || name.contains("secret") || name.contains("token")
+        .to_string();
+    WINDOWS_COPY_ALLOWLIST
+        .iter()
+        .any(|allowed| name.eq_ignore_ascii_case(allowed))
 }
 
 #[cfg(unix)]
@@ -160,24 +168,24 @@ fn symlink_through(real_path: &Path, dest_path: &Path) -> anyhow::Result<()> {
         std::os::windows::fs::symlink_file(real_path, dest_path)
     };
     if let Err(e) = result {
-        if is_sensitive_bridge_entry(real_path) {
+        if !is_allowed_windows_copy(real_path) {
             tracing::warn!(
                 path = %real_path.display(),
                 error = %e,
-                "claude bridge home: skipped sensitive entry because Windows symlinks are unavailable"
+                "claude bridge home: skipped unallowlisted entry because Windows symlinks are unavailable"
             );
-        } else if let Err(copy_error) = copy_non_secret_entry(real_path, dest_path) {
+        } else if let Err(copy_error) = copy_allowlisted_entry(real_path, dest_path) {
             tracing::warn!(
                 path = %real_path.display(),
                 symlink_error = %e,
                 copy_error = %copy_error,
-                "claude bridge home: could not mirror non-secret entry on Windows"
+                "claude bridge home: could not mirror allowlisted entry on Windows"
             );
         } else {
             tracing::warn!(
                 path = %real_path.display(),
                 error = %e,
-                "claude bridge home: symlink unavailable; copied non-secret entry for continuity"
+                "claude bridge home: symlink unavailable; copied allowlisted entry for continuity"
             );
         }
     }
@@ -185,19 +193,13 @@ fn symlink_through(real_path: &Path, dest_path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
-fn copy_non_secret_entry(real_path: &Path, dest_path: &Path) -> anyhow::Result<()> {
-    if is_sensitive_bridge_entry(real_path) {
-        return Ok(());
-    }
+fn copy_allowlisted_entry(real_path: &Path, dest_path: &Path) -> anyhow::Result<()> {
     if real_path.is_dir() {
         std::fs::create_dir_all(dest_path)?;
         for entry in std::fs::read_dir(real_path)? {
             let entry = entry?;
             let source = entry.path();
-            if is_sensitive_bridge_entry(&source) {
-                continue;
-            }
-            copy_non_secret_entry(&source, &dest_path.join(entry.file_name()))?;
+            copy_allowlisted_entry(&source, &dest_path.join(entry.file_name()))?;
         }
     } else {
         if let Some(parent) = dest_path.parent() {
@@ -283,11 +285,12 @@ mod tests {
     }
 
     #[test]
-    fn bridge_copy_fallback_classifies_secret_entries_conservatively() {
-        assert!(is_sensitive_bridge_entry(Path::new(".credentials.json")));
-        assert!(is_sensitive_bridge_entry(Path::new("oauth-token.json")));
-        assert!(!is_sensitive_bridge_entry(Path::new("projects")));
-        assert!(!is_sensitive_bridge_entry(Path::new("history.jsonl")));
+    fn bridge_copy_fallback_allows_only_required_entries() {
+        assert!(is_allowed_windows_copy(Path::new("projects")));
+        assert!(is_allowed_windows_copy(Path::new("history.jsonl")));
+        assert!(!is_allowed_windows_copy(Path::new(".credentials.json")));
+        assert!(!is_allowed_windows_copy(Path::new("daemon")));
+        assert!(!is_allowed_windows_copy(Path::new("control.key")));
     }
 
     #[test]
