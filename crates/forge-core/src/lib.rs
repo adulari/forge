@@ -808,6 +808,30 @@ fn completion_claims_no_change(text: &str) -> bool {
     completion::claims_no_change(text)
 }
 
+/// Conservatively detect a final response that asserts file mutations already happened.
+fn completion_claims_file_change(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "i've created",
+        "i have created",
+        "i've added",
+        "i have added",
+        "i've updated",
+        "i have updated",
+        "i've modified",
+        "i have modified",
+        "created the file",
+        "added the file",
+        "updated the file",
+        "the file now contains",
+        "i've kept",
+        "i have kept",
+        "changes applied",
+    ]
+    .iter()
+    .any(|claim| lower.contains(claim))
+}
+
 /// A response that explicitly promises another agent action and then stops at an open-ended marker
 /// is not a final answer. Keep this deliberately narrow: headings such as `What changed:` are valid
 /// prose, while `Let me verify ...:` means the model yielded before doing what it just promised.
@@ -4202,6 +4226,9 @@ mod tests {
     use forge_tui::HeadlessPresenter;
     use forge_types::SideEffect;
     use std::sync::{Arc, Mutex};
+
+    #[path = "phantom_edit.rs"]
+    mod phantom_edit_tests;
 
     #[test]
     fn response_chain_reuse_is_scoped_to_dependent_same_model_continuations() {
