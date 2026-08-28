@@ -202,7 +202,7 @@ pub fn build_responses_request(
         body["max_output_tokens"] = serde_json::json!(max_output_tokens);
     }
     if let Some(temp) = opts.temperature {
-        body["temperature"] = serde_json::json!(temp);
+        body["temperature"] = serde_json::json!(crate::temperature_for_wire(temp));
     }
     if let Some(cache_key) = opts.prompt_cache_key.as_deref() {
         body["prompt_cache_key"] = serde_json::json!(cache_key);

@@ -343,9 +343,9 @@ enum FailoverPolicy {
     /// retries: wait it out and retry the SAME model (fix 1's rate-limit backoff; the
     /// pinned-outage-resilience extension covers the outage case with its own budget).
     BackoffSameModel,
-    /// Pinned + a PERMANENT error (capability/auth), or a transient outage with
-    /// `mesh.pin_outage_wait_secs = 0` (outage backoff disabled): fail the turn with the REAL
-    /// error — an explicitly pinned model is never silently switched.
+    /// Pinned + a transient outage with `mesh.pin_outage_wait_secs = 0` (outage backoff
+    /// disabled): fail the turn with the REAL error — an explicitly pinned model is never
+    /// silently switched away from a fault it could recover from.
     FailTurn,
 }
 
@@ -355,14 +355,24 @@ enum FailoverPolicy {
 /// same-model transient retries (`MAX_TRANSIENT_RETRIES`, above) are exhausted, AND
 /// `mesh.pin_outage_wait_secs > 0` — the caller folds the config gate into this bool so `0`
 /// restores the old FailTurn behaviour without a separate branch here.
+///
+/// `unusable` is the one thing a pin cannot override: a PERMANENT credential/capability failure
+/// (`Auth`, `Capability`) means the pinned model cannot serve this turn at all, now or on retry.
+/// Live failure this fixes: a pinned `claude-fable-5` hit its subscription billing wall
+/// ("Payment required to access this resource") and the whole turn died with `model unsupported`
+/// instead of routing on — while the mesh held a dozen healthy models. Holding a pin that cannot
+/// be honoured buys nothing: the model is excluded by `record_model_failure` either way, so the
+/// only choice is between a dead turn and a working one on another model. Switching is announced,
+/// never silent.
 /// Documented in docs/features/mesh-routing.md.
 fn failover_policy(
     pinned: bool,
     pin_failover: bool,
     rate_limited: bool,
     transient_outage: bool,
+    unusable: bool,
 ) -> FailoverPolicy {
-    if !pinned || pin_failover {
+    if !pinned || pin_failover || unusable {
         FailoverPolicy::SwitchModels
     } else if rate_limited || transient_outage {
         FailoverPolicy::BackoffSameModel
@@ -10522,38 +10532,38 @@ mod tests {
     fn failover_chooser_forbids_cross_model_switching_for_pins() {
         // Table test on the single failover chooser (strict pin semantics, fix 2; extended by
         // pinned-outage-resilience §1 with `transient_outage`):
-        // (pinned, pin_failover escape hatch, rate_limited, transient_outage) → what the loop
-        // may do. The caller folds `mesh.pin_outage_wait_secs > 0` into `transient_outage`
-        // itself, so `transient_outage=false` also covers the "outage backoff disabled" case —
-        // no separate table row needed for that; it collapses to the same FailTurn as "permanent".
+        // (pinned, pin_failover escape hatch, rate_limited, transient_outage, unusable) → what
+        // the loop may do. The caller folds `mesh.pin_outage_wait_secs > 0` into
+        // `transient_outage` itself, so `transient_outage=false` also covers the "outage backoff
+        // disabled" case — no separate table row needed for that.
         use FailoverPolicy::*;
         let table = [
             // Unpinned turns: normal failover regardless of error kind or escape hatch.
-            (false, false, true, false, SwitchModels),
-            (false, false, false, false, SwitchModels),
-            (false, false, false, true, SwitchModels),
-            (false, true, true, false, SwitchModels),
-            (false, true, false, false, SwitchModels),
+            (false, false, true, false, false, SwitchModels),
+            (false, false, false, false, false, SwitchModels),
+            (false, false, false, true, false, SwitchModels),
+            (false, true, true, false, false, SwitchModels),
+            (false, true, false, false, false, SwitchModels),
             // Pinned + strict (default): rate limit OR transient outage → same-model backoff
             // (on their own separate budgets, enforced at the call site, not here); a permanent
             // error (neither flag set) → fail the turn with the real error. Never a silent switch.
-            (true, false, true, false, BackoffSameModel),
-            (true, false, false, true, BackoffSameModel),
-            (true, false, false, false, FailTurn),
-            // Pinned + permanent error (capability/auth): `is_permanent()` forces
-            // `transient_outage=false` at the call site regardless of `pin_outage_wait_secs`, so
-            // this is FailTurn even with outage backoff enabled.
-            (true, false, false, false, FailTurn),
+            (true, false, true, false, false, BackoffSameModel),
+            (true, false, false, true, false, BackoffSameModel),
+            (true, false, false, false, false, FailTurn),
+            // Pinned + PERMANENT error (capability/auth): the pin cannot be honoured at all, so
+            // the turn switches rather than dying. This is the billing-wall case — a pinned
+            // `claude-fable-5` answering "Payment required" used to kill the whole turn.
+            (true, false, false, false, true, SwitchModels),
             // Pinned + escape hatch: the old switch-away behaviour, end to end.
-            (true, true, true, false, SwitchModels),
-            (true, true, false, true, SwitchModels),
-            (true, true, false, false, SwitchModels),
+            (true, true, true, false, false, SwitchModels),
+            (true, true, false, true, false, SwitchModels),
+            (true, true, false, false, false, SwitchModels),
         ];
-        for (pinned, hatch, rl, outage, want) in table {
+        for (pinned, hatch, rl, outage, unusable, want) in table {
             assert_eq!(
-                failover_policy(pinned, hatch, rl, outage),
+                failover_policy(pinned, hatch, rl, outage, unusable),
                 want,
-                "pinned={pinned} pin_failover={hatch} rate_limited={rl} transient_outage={outage}"
+                "pinned={pinned} pin_failover={hatch} rate_limited={rl}                  transient_outage={outage} unusable={unusable}"
             );
         }
     }
@@ -10574,7 +10584,7 @@ mod tests {
                 FailoverPolicy::BackoffSameModel
             };
             assert_eq!(
-                failover_policy(true, false, rate_limited, transient_outage),
+                failover_policy(true, false, rate_limited, transient_outage, false),
                 want,
                 "pin_outage_wait_secs={wait_secs}"
             );
@@ -12891,10 +12901,14 @@ mod tests {
             fallbacks: vec!["good::model".into()],
         });
         let (store, mut session) = fixed_session(provider, router);
-        assert!(
-            session.run_turn("hi").await.is_err(),
-            "a strict pin must fail this turn"
-        );
+        // A dead credential is the one failure a strict pin may not hold against: every model on
+        // that provider fails identically, so the turn routes on rather than dying. The durable
+        // provider-wide exclusion below is what this test exists to protect, and it is recorded
+        // BEFORE the pin policy runs, so failing over does not weaken it.
+        session
+            .run_turn("hi")
+            .await
+            .expect("a dead credential routes on instead of failing the turn");
         let health = store.current_benched().unwrap();
         assert!(health.is_benched("agy-cli::gemini-3.1-pro"));
         assert!(health.is_benched("agy-cli::gemini-3.5-flash"));

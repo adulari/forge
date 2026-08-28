@@ -882,8 +882,10 @@ mod tests {
         assert_eq!(body["input"][0]["content"], "hi");
         assert_eq!(body["tools"][0]["name"], "read_file");
         assert_eq!(body["max_output_tokens"], 512);
-        // `opts.temperature` is f32; compare against the same f32→f64 widening `json!` performs.
-        assert_eq!(body["temperature"], serde_json::json!(0.2f32));
+        // The f32→f64 widening noise (`0.2f32 as f64` == 0.20000000298023224) is rounded off by
+        // `temperature_for_wire` before it reaches the body — b.ai rejects anything past two
+        // decimals outright, so the clean value is the contract, not the raw widening.
+        assert_eq!(body["temperature"].to_string(), "0.2");
         assert_eq!(body["prompt_cache_key"], "forge-session-123");
     }
 

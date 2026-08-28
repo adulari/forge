@@ -294,6 +294,12 @@ pub(super) async fn request_provider_response(
                     session.config.mesh.pin_failover,
                     e.is_rate_limited(),
                     transient_outage && session.config.mesh.pin_outage_wait_secs > 0,
+                    // A pin cannot make a dead ACCOUNT usable: an expired credential or a
+                    // billing wall fails identically on every retry and on every model of that
+                    // provider, so honouring the pin here only converts a recoverable turn into
+                    // a dead one. A genuine capability mismatch is NOT included — that one is
+                    // about the pinned model itself and must still surface.
+                    e.is_credential_failure(),
                 ) {
                     FailoverPolicy::SwitchModels => {} // fall through to wait/bench/chain
                     // Pinned rate-limit backoff (fix 1): a pin must pin. Retry the SAME
