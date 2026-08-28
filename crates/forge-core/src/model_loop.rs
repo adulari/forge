@@ -113,6 +113,10 @@ impl Session {
         // recovery pass missed — so nothing executed. Without this the narration is accepted as a
         // final answer and the turn "succeeds" having done nothing (the phantom-release bug).
         let mut toolcall_repair_nudges = 0usize;
+        // Bounds retries when a direct model claims it edited files without invoking any known
+        // mutating tool. Separate from tool-call-markup repair because ordinary prose has no markup.
+        let mut phantom_edit_nudges = 0usize;
+
         // `bridge_continue_nudges`: bounded RE-RUNS of a CLI bridge whose turn returned with tracked
         // tasks still unfinished. A bridge turn is otherwise terminal (it runs its own tool loop and
         // returns once), so a long multi-step plan stalls partway — the bridge does a few steps,
@@ -158,6 +162,7 @@ impl Session {
         // Counts INSPECTION tools (anything except `update_tasks`/`present_plan`) — the verification
         // gate requires the bridge to actually CHECK real state, not just re-assert "done".
         let inspect_ran = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mutations_ran = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let verification_ledger =
             std::sync::Arc::new(std::sync::Mutex::new(VerificationLedger::default()));
         let bridge_observations =
@@ -663,6 +668,32 @@ impl Session {
                                 verification_ledger.lock().unwrap().checkpoint();
                             continue;
                         }
+                    } else if mutations_ran.load(std::sync::atomic::Ordering::Relaxed) == 0
+                        && completion_claims_file_change(&resp.content)
+                    {
+                        const MAX_PHANTOM_EDIT_NUDGES: usize = 2;
+                        if phantom_edit_nudges < MAX_PHANTOM_EDIT_NUDGES {
+                            phantom_edit_nudges += 1;
+                            self.presenter.emit(PresenterEvent::Warning(format!(
+                                "model described file changes but no mutating tool ran — asking it to apply them ({phantom_edit_nudges}/{MAX_PHANTOM_EDIT_NUDGES})"
+                            )));
+                            let nudge =
+                                "Your last message described edits as already applied, but they \
+                                         never happened: you did not call a write or shell \
+                                         tool. Perform those edits now with the available \
+                                         tools, then verify the result before giving a \
+                                         final answer.";
+                            let nseq = self.next_seq();
+                            let _ =
+                                self.store
+                                    .add_message(&self.id, nseq, Role::System, nudge, None);
+                            self.transcript.push(Message::system(nudge));
+                            continue;
+                        }
+                        self.presenter.emit(PresenterEvent::Warning(
+                            "the turn did NOT apply the file changes it described — no mutating tool ran"
+                                .to_string(),
+                        ));
                     }
                 }
                 final_text = resp.content;
@@ -678,6 +709,7 @@ impl Session {
                     &resp.tool_calls,
                     &tools_ran,
                     &inspect_ran,
+                    &mutations_ran,
                     &verification_ledger,
                     &mut last_tool_sig,
                     &mut repeat_count,

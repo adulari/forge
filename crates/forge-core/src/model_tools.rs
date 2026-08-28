@@ -10,6 +10,7 @@ impl Session {
         calls: &[forge_types::ToolCall],
         tools_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
         inspect_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+        mutations_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
         verification_ledger: &std::sync::Arc<std::sync::Mutex<VerificationLedger>>,
         last_tool_sig: &mut Option<u64>,
         repeat_count: &mut usize,
@@ -112,6 +113,14 @@ impl Session {
             tools_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if !call.name.ends_with("update_tasks") && !call.name.ends_with("present_plan") {
                 inspect_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if self.tools.get(&call.name).is_some_and(|tool| {
+                matches!(
+                    tool.side_effect(),
+                    forge_types::SideEffect::Write | forge_types::SideEffect::Shell
+                )
+            }) {
+                mutations_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
