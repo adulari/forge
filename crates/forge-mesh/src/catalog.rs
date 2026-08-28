@@ -256,11 +256,41 @@ pub fn supports_vision(id: &str) -> bool {
         "pixtral",
         // Qwen's vision-language line: the explicit "-vl-" tag, and the Qwen3-VL family.
         "-vl-",
+        "qwen2.5-vl",
         "qwen3-vl",
         // xAI: every Grok model accepts image input.
         "grok",
     ];
     VISION_PATTERNS.iter().any(|p| m.contains(p))
+}
+
+/// Best-effort vision capability classification for callers that need to validate an explicit
+/// model pin. `Some(false)` is returned only for model families whose text-only status is known;
+/// `None` means the catalog has no reliable modality information and the provider should decide.
+/// This distinction matters for custom/OpenRouter models whose ids are not covered by the
+/// heuristic vision allowlist but may still accept images.
+pub fn vision_capability(id: &str) -> Option<bool> {
+    if supports_vision(id) {
+        return Some(true);
+    }
+    let m = id.to_lowercase();
+    const TEXT_ONLY_PATTERNS: &[&str] = &[
+        "gpt-3",
+        "gpt-4", // gpt-4o, gpt-4-turbo and gpt-4.1 return above as vision-capable.
+        "claude-2",
+        "claude-instant",
+        "llama-3.1",
+        "llama-3.3",
+        "llama3.2",
+        "deepseek-v3",
+        "qwen2.5-",
+        "mistral-large",
+        "davinci",
+    ];
+    TEXT_ONLY_PATTERNS
+        .iter()
+        .any(|pattern| m.contains(pattern))
+        .then_some(false)
 }
 
 /// A model's cost class for routing: `0` genuinely free (local/free-tier), `1` subscription
@@ -2281,6 +2311,14 @@ mod tests {
                 "{id} should NOT be recognized as vision-capable"
             );
         }
+    }
+
+    #[test]
+    fn vision_capability_distinguishes_unknown_models_from_known_text_only_families() {
+        assert_eq!(vision_capability("openai::gpt-4"), Some(false));
+        assert_eq!(vision_capability("openrouter::stealth/ox-alpha"), None);
+        assert_eq!(vision_capability("echoprobe::probe"), None);
+        assert_eq!(vision_capability("openai::gpt-4o"), Some(true));
     }
 
     // --- Fix 2: subscription burn-weight penalty in route_score ---------------------------

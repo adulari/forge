@@ -277,7 +277,11 @@ async fn chat_completions(
     }
 
     let prompt_cache_key = api_prompt_cache_key(&req);
-    let messages = to_forge_messages(&req.messages);
+    let messages = match to_forge_messages(&req.messages) {
+        Ok(messages) => messages,
+        Err(msg) => return openai_error(StatusCode::BAD_REQUEST, "invalid_request_error", &msg),
+    };
+    let has_images = messages.iter().any(|message| !message.images.is_empty());
     let tools = to_tool_specs(&req.tools);
     // Resolve the pin BEFORE any routing: an explicit `model` that this server can't route to is a
     // hard 404, never a silent mesh fallback.
@@ -305,7 +309,16 @@ async fn chat_completions(
         // the CHOICE of model, so `x_forge.routed_model` always equals the requested `model`. A
         // transient error (429/5xx) on the pinned model surfaces as an error with its real cause,
         // rather than silently degrading the caller to a different model they didn't ask for.
-        Some(p) => vec![p.clone()],
+        Some(p) => {
+            if has_images && forge_mesh::catalog::vision_capability(p) == Some(false) {
+                return openai_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "the selected model does not support image input",
+                );
+            }
+            vec![p.clone()]
+        }
         // Unpinned ("auto"): ask the mesh which model to use and its ordered failover chain.
         None => {
             let prompt = routing_prompt(&messages);
@@ -315,9 +328,7 @@ async fn chat_completions(
                 .router
                 .route_contextual(
                     &prompt,
-                    // This OpenAI-compatible surface doesn't parse `image_url` content parts yet
-                    // (`to_forge_messages` is text-only), so there's no image signal to pass.
-                    false,
+                    has_images,
                     BudgetState::default(),
                     &readiness.health,
                     &readiness.quota,
@@ -875,6 +886,65 @@ mod tests {
     }
 
     #[test]
+    fn image_parts_are_preserved_as_attachments() {
+        let incoming: IncomingMessage = serde_json::from_value(serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAEC"}},
+            ],
+        }))
+        .unwrap();
+
+        let messages = to_forge_messages(&[incoming]).unwrap();
+        assert_eq!(messages[0].content, "What is this?");
+        assert_eq!(
+            messages[0].images,
+            vec![forge_types::ImageAttachment {
+                media_type: "image/png".into(),
+                data_base64: "AAEC".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn image_parts_reject_remote_urls_and_invalid_base64() {
+        for url in [
+            "https://example.test/image.png",
+            "data:image/png;base64,not-base64!",
+            "data:image/png;base64,",
+        ] {
+            let incoming: IncomingMessage = serde_json::from_value(serde_json::json!({
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": url}}],
+            }))
+            .unwrap();
+            assert!(
+                to_forge_messages(&[incoming]).is_err(),
+                "URL should be rejected: {url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_image_parts_are_a_400() {
+        let router = api_router(mock_state());
+        let resp = router
+            .oneshot(post_chat(serde_json::json!({
+                "model": "auto",
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": "https://example.test/image.png"}}]
+                }]
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
+
+    #[test]
     fn routing_prompt_uses_last_user_task_and_current_tool_results_only() {
         let messages = vec![
             Message::system("comprehensive analyse review understand integrate audit ".repeat(500)),
@@ -941,6 +1011,34 @@ mod tests {
             ]
         }));
         assert_ne!(api_prompt_cache_key(&first), api_prompt_cache_key(&changed));
+
+        let image_a = parse(serde_json::json!({
+            "model": "openai::gpt-5",
+            "user": "account-42",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAEC"}
+                }]
+            }]
+        }));
+        let image_b = parse(serde_json::json!({
+            "model": "openai::gpt-5",
+            "user": "account-42",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,BAUG"}
+                }]
+            }]
+        }));
+        assert_ne!(
+            api_prompt_cache_key(&image_a),
+            api_prompt_cache_key(&image_b),
+            "different image payloads must not share a derived cache key"
+        );
     }
 
     #[test]
