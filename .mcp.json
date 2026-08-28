@@ -2,16 +2,7 @@
   "mcpServers": {
     "forge": {
       "type": "stdio",
-      "command": "/home/floris/Documents/Repositories/Personal/AI/forge/target/debug/forge",
-      "args": [
-        "mcp",
-        "agent",
-        "--cwd",
-        "/home/floris/Documents/Repositories/Personal/AI/forge"
-      ],
-      "env": {
-        "FORGE_DB": "/home/floris/.local/share/forge/forge-dev.db"
-      }
+      "command": "./scripts/forge-mcp-agent.sh"
     }
   }
 }

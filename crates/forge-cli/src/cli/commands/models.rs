@@ -23,18 +23,37 @@ pub(crate) fn build_dispatch_provider(config: &forge_config::Config) -> Dispatch
 /// across whichever free models discovery happened to return on this launch: that made identical
 /// input change tier when a different classifier answered first.
 fn classifier_candidates(config: &forge_config::Config, mock: bool) -> Vec<String> {
+    // Ordered backups. `groq::openai/gpt-oss-20b` and `groq::groq/compound-mini` were VERIFIED by
+    // making a real classify call on 2026-08-28 ("classified by groq::openai/gpt-oss-20b as
+    // trivial"), not by reading provider discovery. That distinction is the entire point of this
+    // list: groq's /models still advertises `llama-3.3-70b-versatile` and `llama-3.1-8b-instant`
+    // as free while both answer "does not exist or you do not have access to it", which is exactly
+    // how the previous single hardcoded default died silently. Do not add an id here without
+    // calling it first.
+    const FALLBACKS: &[&str] = &[
+        "groq::openai/gpt-oss-20b",
+        "groq::groq/compound-mini",
+        "groq::openai/gpt-oss-120b",
+        "cerebras::gpt-oss-120b",
+    ];
+
     config
         .mesh
         .classifier_model
         .as_deref()
+        .into_iter()
+        .chain(FALLBACKS.iter().copied())
         .map(str::trim)
         .filter(|model| {
             !model.is_empty()
                 && (mock || forge_config::has_api_key(forge_config::provider_of(model)))
         })
-        .map(str::to_string)
-        .into_iter()
-        .collect()
+        .fold(Vec::new(), |mut candidates, model| {
+            if !candidates.iter().any(|candidate| candidate == model) {
+                candidates.push(model.to_string());
+            }
+            candidates
+        })
 }
 
 /// Apply the local, privacy-preserving outcome ledger to a freshly discovered catalog.  The Mesh
@@ -765,10 +784,44 @@ mod bridge_harness_tests {
     use super::*;
 
     #[test]
-    fn default_classifier_uses_one_fixed_capable_model() {
+    fn classifier_uses_a_stable_fixed_order_independent_of_catalog_contents() {
+        let empty_catalog = ModelCatalog::new(Vec::new());
+        let noisy_catalog = ModelCatalog::new(vec![
+            "openrouter::random/free-model".into(),
+            "groq::unrelated-discovered-model".into(),
+        ]);
+        let expected = [
+            "groq::groq/compound-mini",
+            "groq::openai/gpt-oss-20b",
+            "groq::openai/gpt-oss-120b",
+            "cerebras::gpt-oss-120b",
+        ];
+
         assert_eq!(
             classifier_candidates(&forge_config::Config::default(), true),
-            ["groq::llama-3.3-70b-versatile"]
+            expected
+        );
+        assert_ne!(empty_catalog.models(), noisy_catalog.models());
+        assert_eq!(
+            classifier_candidates(&forge_config::Config::default(), true),
+            expected
+        );
+    }
+
+    #[test]
+    fn classifier_falls_back_after_a_dead_configured_model() {
+        let mut config = forge_config::Config::default();
+        config.mesh.classifier_model = Some("groq::permanently-dead".into());
+
+        assert_eq!(
+            classifier_candidates(&config, true),
+            [
+                "groq::permanently-dead",
+                "groq::openai/gpt-oss-20b",
+                "groq::groq/compound-mini",
+                "groq::openai/gpt-oss-120b",
+                "cerebras::gpt-oss-120b",
+            ]
         );
     }
 

@@ -2007,7 +2007,7 @@ fn default_prefer_subscription() -> bool {
 }
 
 fn default_classifier_model() -> Option<String> {
-    Some("groq::llama-3.3-70b-versatile".to_string())
+    Some("groq::groq/compound-mini".to_string())
 }
 
 /// How a CLI-bridge turn runs (RFC cli-bridge-full-harness).
@@ -4529,7 +4529,7 @@ deployments = ["gpt-4o"]
         let mesh = Config::default().mesh;
         assert_eq!(
             mesh.classifier_model.as_deref(),
-            Some("groq::llama-3.3-70b-versatile")
+            Some("groq::groq/compound-mini")
         );
         assert!(!mesh.classifier_activity_focused);
         assert!(setting_help("mesh.classifier_model")

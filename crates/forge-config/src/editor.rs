@@ -420,7 +420,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "mesh.weekly_budget_usd" => "Hard weekly spend cap (USD). Empty = unlimited.",
         "mesh.monthly_cap_usd" => "Hard monthly spend cap (USD). Empty = unlimited.",
         "mesh.classifier" => "Task-tier classifier: heuristic (instant, no call) or llm (a cheap model labels each turn).",
-        "mesh.classifier_model" => "Fixed model the llm classifier calls. Default: groq::llama-3.3-70b-versatile. Set an available capable model to override it.",
+        "mesh.classifier_model" => "First model the llm classifier calls. Default: groq::groq/compound-mini. Set an available capable model to override it; fixed backups are tried if it fails.",
         "mesh.classifier_activity_focused" => "Compatibility mode for unstructured prompts: classify only the final non-empty paragraph. Prefer API system/user roles or `forge run --system`.",
         "mesh.bridge_mcp_external" => "Connect external project MCP servers (dual-graph/helm/…) inside the CLI bridge. On by default; servers connect concurrently in the background with a timeout, so slow servers are skipped instead of stalling turns. Set false to disable. Forge core tools stay either way.",
         "mesh.prefer_subscription" => "Prefer $0 CLI-bridge subscriptions over a metered API model on a tie.",
