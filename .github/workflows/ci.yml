@@ -150,8 +150,7 @@ jobs:
       # that forgets to refresh the lock (e.g. `cargo update -p forge` — a no-op, the root crate is
       # forge-cli) otherwise blows up only at release time, where the build DOES use `--locked`
       # (cost us a failed v0.4.42 release). Catch the drift on every affected Rust PR.
-      - run: cargo clippy --locked --all-targets --all-features
-      - run: cargo clippy --locked --manifest-path vendor/genai-0.6.5/Cargo.toml --all-targets -- -D warnings
+      - run: bash scripts/ci/rust-checks.sh
       - name: Bound persistent build cache
         if: always()
         run: bash scripts/ci/trim-runner-cache.sh
