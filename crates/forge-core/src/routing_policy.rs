@@ -3,6 +3,7 @@
 //! This owner keeps related session invariants together behind the Session program.
 
 use super::*;
+use crate::context_pipeline::tool_spec_tokens;
 
 impl Session {
     /// One source of truth for the health and quota inputs of every mesh decision.
@@ -151,7 +152,7 @@ impl Session {
     pub(crate) fn effective_context_window(&self, model: &str) -> u32 {
         let window = self.base_context_window(model);
         // A context-overflow self-heal (see `overflow_window_cap`) lowers the usable window for the
-        // rest of the turn so `transcript_with_preamble` trims the sent view below the model's real
+        // rest of the turn so `transcript_with_preamble_and_tools` trims the sent view below the model's real
         // limit — needed when our o200k estimate diverges from the model's own tokenizer.
         match &self.overflow_window_cap {
             Some((capped_model, cap)) if capped_model == model => window.min(*cap),
@@ -205,16 +206,30 @@ impl Session {
     }
 
     /// The request body for a main-loop call: the base harness preamble (system prompt + env)
-    /// followed by the window-fitted transcript. The preamble's token cost is subtracted from the
-    /// trim budget so the prepended prompt can't push the request over the model's window.
-    pub(crate) fn transcript_with_preamble(&self, model: &str) -> Vec<Message> {
+    /// followed by the window-fitted transcript, with the TOOL SCHEMAS charged against the window.
+    /// The preamble's token cost is subtracted from the trim budget so the prepended prompt can't
+    /// push the request over the model's window.
+    ///
+    /// Tool definitions are sent on every request and are far from free — Forge ships a large tool
+    /// set, and its JSON schemas run to thousands of tokens. They were never subtracted from the
+    /// budget, so the trimmer packed the transcript to fill a window the schemas had already eaten
+    /// into. Harmless on a 200k cloud model; fatal on a local one: measured against a 32,768-token
+    /// llama.cpp server, Forge sent 32,953 tokens and the turn died with
+    /// "request exceeds the available context size" — after the trimmer believed it had fit.
+    pub(crate) fn transcript_with_preamble_and_tools(
+        &self,
+        model: &str,
+        specs: &[forge_provider::ToolSpec],
+    ) -> Vec<Message> {
         let preamble = self.system_preamble();
         let window = self.effective_context_window(model) as usize;
         let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as usize;
         let preamble_tokens: usize = preamble.iter().map(message_tokens).sum();
+        let tool_tokens = tool_spec_tokens(specs);
         let budget_tokens = window
             .saturating_sub(reserve)
             .saturating_sub(preamble_tokens)
+            .saturating_sub(tool_tokens)
             * 95
             / 100;
         let mut out = preamble;
