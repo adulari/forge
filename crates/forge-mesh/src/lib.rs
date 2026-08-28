@@ -1236,7 +1236,14 @@ impl HeuristicRouter {
             "ollama" => 4,
             _ => 5,
         });
-        capable_free.truncate(3);
+        // Deliberately NOT 3. The real bound on this loop is the 15s budget above — a candidate
+        // that answers does so in well under a second, and one that cannot answer fails fast
+        // ("model does not exist", "payment required") without spending it. A hard cap of 3 turned
+        // three dead ids into a permanent outage: groq sorts first here, its live model listing was
+        // failing on the key, so the curated SEED ids were used — and those named models the
+        // account could not reach. Every classify attempt burned its three tries on them and fell
+        // back to the heuristic, while healthy free models sat unused at position four onward.
+        capable_free.truncate(8);
         if !capable_free.is_empty() {
             return capable_free;
         }
@@ -2724,7 +2731,26 @@ mod tests {
             Some("groq::qwen/qwen3.6-27b"),
             "classifier must use the fast Groq candidate before slower free providers: {candidates:?}"
         );
-        assert!(candidates.len() <= 3);
+        // The cap exists so a dead or slow provider cannot eat the whole budget, but it must
+        // leave room to reach a HEALTHY model behind a few broken ones — three was too tight and
+        // turned three unreachable groq ids into a permanent heuristic fallback.
+        assert!(candidates.len() <= 8, "got {candidates:?}");
+    }
+
+    /// The outage this cap change fixes: the fastest-sorting provider's ids are unreachable, so
+    /// the classifier must still be offered the healthy free models sitting behind them.
+    #[test]
+    fn classifier_candidates_reach_past_a_full_slate_of_one_provider() {
+        let mut models: Vec<String> = (0..5).map(|i| format!("groq::dead-model-{i}")).collect();
+        models.push("cerebras::gpt-oss-120b".to_string());
+        models.push("ollama::llama3.2".to_string());
+        let candidates = HeuristicRouter::new(Config::default())
+            .with_catalog(ModelCatalog::new(models))
+            .classifier_candidates();
+        assert!(
+            candidates.iter().any(|m| !m.starts_with("groq::")),
+            "a non-groq free model must remain reachable: {candidates:?}"
+        );
     }
 
     #[test]
