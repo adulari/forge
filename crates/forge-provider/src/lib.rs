@@ -18,6 +18,7 @@ mod genai_provider;
 mod mock;
 mod oauth_responses;
 mod tool_recovery;
+pub mod wire_params;
 mod xai_oauth;
 
 pub use cli_provider::{
@@ -425,12 +426,6 @@ impl ProviderError {
     /// itself mid-session) — both auth-fail/incapability-fail identically every turn otherwise.
     pub fn is_permanent(&self) -> bool {
         matches!(self, Self::Capability(_) | Self::Auth(_))
-    }
-
-    /// Whether the credential itself is invalid or missing. Unlike a model capability failure,
-    /// every alias for this provider will fail until the user re-authenticates.
-    pub fn is_auth(&self) -> bool {
-        matches!(self, Self::Auth(_))
     }
 
     /// Whether this is a rate-limit / quota-exhaustion failure (HTTP 429, `RESOURCE_EXHAUSTED`).

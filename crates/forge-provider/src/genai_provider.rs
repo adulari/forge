@@ -905,7 +905,7 @@ impl Provider for GenAiProvider {
             if let Some(temp) = opts.temperature {
                 // Low temperature for deterministic edits/patches — but ONLY when reasoning isn't
                 // engaged: thinking models reject (or ignore) a custom temperature, so effort wins.
-                options = options.with_temperature(temp as f64);
+                options = options.with_temperature(crate::wire_params::temperature_for_wire(temp));
             }
         }
 
