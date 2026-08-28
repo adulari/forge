@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-08-28
+
 ### Added
 
 - **Continual Harness — `/refine`, a session that gets better at your project.** Forge can now
@@ -24,6 +26,11 @@ All notable changes to Forge are documented here. The format follows
   session export, so a transcript can be handed to someone who does not have Forge.
   See `docs/features/side-questions.md`.
 
+- **Long-running autonomy now has explicit controls.** `/goal` and `/loop` can enforce quality
+  gates and token or wall-clock budgets; asynchronous subagents retain admission handles so they
+  can be followed up without losing ownership; and session heartbeats can re-enter live work at a
+  bounded interval through `/heartbeat` or the `manage_heartbeats` tool.
+
 - **`forge doctor` now reports the two things that actually take this setup down.** It checks the
   background daemon — whether `forge serve` is running, failed, or restart-looping — and flags a
   systemd unit that predates the running binary, which is how a unit silently keeps missing the
@@ -35,6 +42,10 @@ All notable changes to Forge are documented here. The format follows
   device enrollment can also be approved without going through the inbox.
 
 - The desktop app connects on launch instead of asking first, and follows a daemon that moves.
+
+- Models and providers can be enabled or disabled from the CLI, provider discovery reports its
+  progress instead of failing opaquely, and Forge Anywhere can show a bounded read-only git diff
+  for review from a phone.
 
 - **Fleet messaging — `forge send` and the `message_session` tool.** Any two daemon-hosted
   sessions can now exchange messages, and a shell can message any of them: previously only a
@@ -61,10 +72,22 @@ All notable changes to Forge are documented here. The format follows
 
 ### Changed
 
+- Forge's shared workbench now spans desktop and mobile, with the session, fleet, diagnostics,
+  update, keyboard-shortcut, annotation, and review surfaces using the same interaction model.
+
 - The mobile native dependency set is aligned to Expo SDK 57's current compatible patch versions,
   including Expo 57.0.9 and React Native 0.86.2, before producing the next native archives.
 
 ### Fixed
+
+- Model selection now treats a pin as a hard constraint across resume, subagents, model sets,
+  inherited scores, and last-resort routing. Context accounting includes tool schemas and asks
+  local servers for their actual context window, while provider transcripts hoist system messages
+  and serialize wire parameters consistently.
+
+- Shell confinement now fails closed when Landlock setup cannot be completed, with the ruleset
+  prepared before forking. Background failures across Store, Lattice, LSP, MCP, provider bridges,
+  replay, voice, shell cleanup, and daemon services are surfaced instead of being silently ignored.
 
 - **A development build no longer migrates the store the installed Forge depends on.** This class of
   failure took the daemon down repeatedly: something built from a working tree opened
@@ -3358,7 +3381,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.12.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.0...HEAD
+[2.13.0]: https://github.com/Adulari/forge/compare/v2.12.1...v2.13.0
 [2.12.1]: https://github.com/Adulari/forge/compare/v2.12.0...v2.12.1
 [2.12.0]: https://github.com/Adulari/forge/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/Adulari/forge/compare/v2.10.2...v2.11.0
