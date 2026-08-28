@@ -34,10 +34,15 @@ grep -n "<old version>" Cargo.toml # empty
 
 ## 3. Changelog
 
-The release workflow derives the desktop bundle version from the workspace `Cargo.toml` with
-`cargo metadata`, verifies that it matches the release tag, and stamps `mobile/src-tauri/tauri.conf.json`
-just before bundling. Do not hand-edit the Tauri version for a release; a mismatch now fails the
-workflow before build.
+Bump `mobile/src-tauri/tauri.conf.json`'s `version` to `X.Y.Z` in the SAME commit as the workspace
+bump. `scripts/ci/desktop-version-guard.sh` compares that file against `[workspace.package] version`
+on **every PR**, not only at release time, so a workspace bump that leaves it behind fails CI
+immediately — this is not something `release.yml` fixes for you later. (An earlier version of this
+section said not to hand-edit it; that was wrong and cost a red CI run on the v2.13.0 PR.)
+
+At bundle time the release workflow independently derives the version from the workspace
+`Cargo.toml` with `cargo metadata`, verifies it matches the release tag, and re-stamps the same
+file. That is a belt-and-braces check on top of the committed value, not a substitute for it.
 
 
 Add a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md` with REAL entries (what changed and why,
