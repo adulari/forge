@@ -69,6 +69,13 @@ pub struct LlmRouter {
     candidates: Vec<String>,
     fallback: HeuristicRouter,
     cache: Mutex<VecDeque<(u64, TaskTier)>>,
+    /// Candidates that answered with a PERMANENT failure (the id does not exist on this account,
+    /// the credential is dead, the model is behind a billing wall). Without this the same dead ids
+    /// are retried on every turn, and because the candidate list is short they can consume the
+    /// whole classify budget forever — which is exactly how classification silently degraded to
+    /// "all LLM candidates unavailable" while healthy free models sat unused further down the
+    /// list. Process-local: permanent for this run, re-probed after a restart.
+    dead: Mutex<std::collections::HashSet<String>>,
 }
 
 impl LlmRouter {
@@ -82,7 +89,16 @@ impl LlmRouter {
             candidates,
             fallback,
             cache: Mutex::new(VecDeque::with_capacity(CACHE_CAPACITY)),
+            dead: Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    fn is_dead(&self, model: &str) -> bool {
+        self.dead.lock().unwrap().contains(model)
+    }
+
+    fn mark_dead(&self, model: &str) {
+        self.dead.lock().unwrap().insert(model.to_string());
     }
 }
 
@@ -219,9 +235,18 @@ impl LlmRouter {
         ];
         let started = Instant::now();
         let mut answered = None;
-        for model in self.candidates.iter().filter(|m| !health.is_benched(m)) {
+        // Why each candidate did not answer. "all LLM candidates unavailable" with no cause is
+        // unactionable, and it hid a real outage: every candidate was a model id that did not
+        // exist on the account.
+        let mut failures: Vec<String> = Vec::new();
+        for model in self
+            .candidates
+            .iter()
+            .filter(|m| !health.is_benched(m) && !self.is_dead(m))
+        {
             let remaining = CLASSIFY_TIMEOUT.saturating_sub(started.elapsed());
             if remaining.is_zero() {
+                failures.push("classify budget exhausted".to_string());
                 break;
             }
             let timeout = remaining.min(CANDIDATE_TIMEOUT);
@@ -240,11 +265,23 @@ impl LlmRouter {
                 ),
             )
             .await;
-            if let Ok(Ok(resp)) = result {
-                if let Some(tier) = parse_tier(&resp.content) {
-                    answered = Some((model.as_str(), tier));
-                    break;
+            match result {
+                Ok(Ok(resp)) => match parse_tier(&resp.content) {
+                    Some(tier) => {
+                        answered = Some((model.as_str(), tier));
+                        break;
+                    }
+                    // An unparseable reply is not a broken model: a reasoning model can spend the
+                    // whole reply thinking and return empty content. Move on, but don't condemn it.
+                    None => failures.push(format!("{model}: no tier in reply")),
+                },
+                Ok(Err(e)) => {
+                    if e.is_permanent() {
+                        self.mark_dead(model);
+                    }
+                    failures.push(format!("{model}: {}", e.reason()));
                 }
+                Err(_) => failures.push(format!("{model}: timed out")),
             }
         }
 
@@ -269,9 +306,14 @@ impl LlmRouter {
                 )
             }
             None => {
-                deterministic
-                    .rationale
-                    .push_str(" (llm classify unavailable → contextual heuristic)");
+                let why = if failures.is_empty() {
+                    "no candidate models".to_string()
+                } else {
+                    failures.join("; ")
+                };
+                deterministic.rationale.push_str(&format!(
+                    " (llm classify unavailable → contextual heuristic: {why})"
+                ));
                 deterministic
             }
         }
@@ -1007,5 +1049,67 @@ mod tests {
             .await;
         assert_eq!(d.tier, TaskTier::Trivial);
         assert!(d.rationale.contains("heuristic"), "{}", d.rationale); // AC-B2
+    }
+
+    struct DeadProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Provider for DeadProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut EventSink<'_>,
+        ) -> Result<ModelResponse, ProviderError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(ProviderError::Capability(
+                "The model `x` does not exist or you do not have access to it".into(),
+            ))
+        }
+    }
+
+    /// A permanently-dead candidate is probed ONCE, then dropped for the rest of the process, and
+    /// the fallback rationale names it. Live outage: groq's model listing was failing on the key,
+    /// so Forge used curated SEED ids naming models the account could not reach — and retried them
+    /// on every turn, burning the classify budget and silently degrading to the heuristic.
+    #[tokio::test]
+    async fn a_permanently_dead_candidate_is_probed_once_and_named() {
+        let provider = Arc::new(DeadProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = LlmRouter::new(
+            provider.clone(),
+            vec!["groq::dead".into()],
+            HeuristicRouter::new(forge_config::Config::default()),
+        );
+        for i in 0..3 {
+            let decision = router
+                .route(
+                    &format!("please classify this distinct request number {i}"),
+                    false,
+                    BudgetState::default(),
+                    &ModelHealth::default(),
+                    &SubscriptionQuota::default(),
+                    None,
+                    &ProjectContext::default(),
+                )
+                .await;
+            if i == 0 {
+                assert!(
+                    decision.rationale.contains("groq::dead"),
+                    "the failure must name the candidate and its cause: {}",
+                    decision.rationale
+                );
+            }
+        }
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a dead candidate must not be retried on every turn"
+        );
     }
 }
