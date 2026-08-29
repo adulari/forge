@@ -34,7 +34,8 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 |---|---|---|
 | `interrupt` | Ctrl-C | Stop current turn (idle: quit) |
 | `command_palette` | / | Open slash-command palette |
-| `skip_model` | Ctrl-K | Mid-turn: abort so you can retry on another model |
+| `skip_model` | Ctrl-Shift-K | Mid-turn: abort so you can retry on another model |
+| `command_center` | Ctrl-K | Open the command center |
 | `tier_up` | Ctrl-↑ | Pin the next turn to the next higher mesh tier (mid-turn: abort and retry) |
 | `tier_down` | Ctrl-↓ | Pin the next turn to the next lower mesh tier (mid-turn: abort and retry) |
 | `toggle_reasoning` | Ctrl-R | Show/hide reasoning blocks inline |
@@ -55,7 +56,7 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 ## 3. Implementation
 
 - **`forge-config`** — `KeyCombo`, `KeybindsConfig` (`BTreeMap<String, KeyCombo>`), a `Default`
-  with the 19 binds above, and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
+  with the binds above (the shipped default map has 22), and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
   preserving all other config keys). `Config` gains a `keybinds` field.
 - **`forge-tui/keybinds.rs`** — `matches(combo, key_event)` compares a combo against a crossterm
   `KeyEvent`; `resolve_action()` returns the `KeyKind` for the first matching configured action.
@@ -78,7 +79,7 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
   displayed tier; repeated presses clamp at `trivial`/`complex`. While a turn is running, the
   active prompt is aborted and retried at the selected tier. The pin persists until another tier
   action or `/reload`, and an explicit per-turn model/tier hint still wins over it.
-- Because `resolve_action` runs first, Ctrl-K maps to `skip_model` (not the old kill-line-forward)
+- Because `resolve_action` runs first, Ctrl-Shift-K maps to `skip_model` (not the old kill-line-forward); plain Ctrl-K is `command_center`
   and Ctrl-R to `toggle_reasoning` by default; remap them if you want the editing shortcut back.
 
 ## 5. Desktop/web app shortcuts

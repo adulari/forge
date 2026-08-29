@@ -334,10 +334,13 @@ allow    = "src/**"
 tool     = "read_file"
 deny     = ["**/.env", "**/*.pem", "**/id_rsa", "**/.ssh/**", "**/.aws/credentials"]
 
-# Opt-in regex form (compiled with a bounded engine; see ReDoS handling)
-[[permissions.rules]]
-tool     = "shell"
-deny_regex = '^sudo\b'
+# NOT SHIPPED. `deny_regex` is a design sketch, not a field `RuleConfig` accepts.
+# Writing it today is DANGEROUS: forge-config does not use deny_unknown_fields, so the
+# key is silently dropped and the rule parses with no action at all — you believe sudo
+# is denied and nothing is. Use the glob `deny` form above until this lands.
+# [[permissions.rules]]
+# tool       = "shell"
+# deny_regex = '^sudo\b'
 ```
 
 Each `[[permissions.rules]]` block has exactly one of `allow`/`ask`/`deny`

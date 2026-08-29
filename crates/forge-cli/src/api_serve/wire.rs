@@ -7,9 +7,10 @@
 //! on — bounded, and reduced to structure for machine-generated payloads, so one enormous pasted
 //! document cannot dominate routing.
 
+use base64::Engine as _;
 use forge_mesh::RoutingContext;
 use forge_provider::{ResponseFormat, ToolSpec};
-use forge_types::{Message, Role};
+use forge_types::{ImageAttachment, Message, Role};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
@@ -86,6 +87,25 @@ pub(super) fn api_prompt_cache_key(req: &ChatCompletionRequest) -> String {
         hash.update(b"\0");
         hash.update(content_text(&message.content).as_bytes());
         hash.update(b"\0");
+        // Image bytes are not included verbatim in the key, but their data-URL fingerprints are;
+        // otherwise two requests with identical text and different images could share a provider
+        // prompt cache entry and return a response for the wrong image.
+        if let Some(parts) = message.content.as_array() {
+            for part in parts {
+                if part.get("type").and_then(|v| v.as_str()) != Some("image_url") {
+                    continue;
+                }
+                hash.update(b"image_url\0");
+                if let Some(url) = part
+                    .get("image_url")
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                {
+                    hash.update(url.as_bytes());
+                }
+                hash.update(b"\0");
+            }
+        }
         if !standing {
             included_conversation_message = true;
         }
@@ -102,7 +122,7 @@ pub(super) fn api_prompt_cache_key(req: &ChatCompletionRequest) -> String {
 #[derive(Deserialize)]
 pub(super) struct IncomingMessage {
     pub(super) role: String,
-    /// String, or an array of content parts (vision/multi-part) — only text parts are used.
+    /// String, or an array of content parts (vision/multi-part).
     #[serde(default)]
     pub(super) content: serde_json::Value,
     #[serde(default)]
@@ -125,17 +145,25 @@ pub(super) fn content_text(content: &serde_json::Value) -> String {
 }
 
 /// Convert the incoming OpenAI messages into Forge's transcript type.
-pub(super) fn to_forge_messages(msgs: &[IncomingMessage]) -> Vec<Message> {
+pub(super) fn to_forge_messages(msgs: &[IncomingMessage]) -> Result<Vec<Message>, String> {
     msgs.iter()
         .map(|m| {
             let text = content_text(&m.content);
+            let images = image_attachments(&m.content)?;
             let role = match m.role.as_str() {
                 "system" | "developer" => Role::System,
                 "assistant" => Role::Assistant,
                 "tool" => Role::Tool,
                 _ => Role::User,
             };
-            let mut msg = Message::new(role, text);
+            if !images.is_empty() && role != Role::User {
+                return Err("image content parts are only supported on user messages".into());
+            }
+            let mut msg = if images.is_empty() {
+                Message::new(role, text)
+            } else {
+                Message::user_with_images(text, images)
+            };
             msg.tool_call_id = m.tool_call_id.clone();
             if role == Role::Assistant && !m.tool_calls.is_empty() {
                 msg.tool_calls = m
@@ -144,7 +172,51 @@ pub(super) fn to_forge_messages(msgs: &[IncomingMessage]) -> Vec<Message> {
                     .filter_map(parse_incoming_tool_call)
                     .collect();
             }
-            msg
+            Ok(msg)
+        })
+        .collect()
+}
+
+/// Decode OpenAI `image_url` parts into Forge's provider-neutral image attachment. Data URLs are
+/// self-contained and safe to forward; fetching arbitrary URLs from the daemon would turn an API
+/// request into an SSRF primitive, so non-data URLs are rejected explicitly instead of dropped.
+fn image_attachments(content: &serde_json::Value) -> Result<Vec<ImageAttachment>, String> {
+    let Some(parts) = content.as_array() else {
+        return Ok(Vec::new());
+    };
+    parts
+        .iter()
+        .filter(|part| part.get("type").and_then(|v| v.as_str()) == Some("image_url"))
+        .map(|part| {
+            let url = part
+                .get("image_url")
+                .and_then(|v| v.get("url"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "image_url content part is missing its url".to_string())?;
+            let payload = url
+                .strip_prefix("data:")
+                .ok_or_else(|| "remote image URLs are not supported; use a data URL".to_string())?;
+            let (header, encoded) = payload
+                .split_once(",")
+                .ok_or_else(|| "image data URL is missing its payload".to_string())?;
+            if encoded.is_empty() {
+                return Err("image data URL has an empty payload".into());
+            }
+            let (media_type, encoding) = header
+                .split_once(';')
+                .ok_or_else(|| "image data URL is missing its MIME type".to_string())?;
+            if !media_type.starts_with("image/") || encoding != "base64" {
+                return Err(
+                    "image data URL must use an image MIME type and base64 encoding".into(),
+                );
+            }
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| "image data URL contains invalid base64".to_string())?;
+            Ok(ImageAttachment {
+                media_type: media_type.to_string(),
+                data_base64: encoded.to_string(),
+            })
         })
         .collect()
 }

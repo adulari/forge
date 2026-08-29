@@ -32,7 +32,7 @@ effort scale:
 /effort                 # clear (provider default)
 ```
 
-- **Ctrl+R** opens the effort slider — white-hot is the fifth stop, rendered as the forge's own
+- **`/effort <level>`** or the **Alt+E** cycle selects it — white-hot is the fifth stop. (Ctrl+R toggles reasoning; the effort *slider* has a handler but no key currently produces it.), rendered as the forge's own
   heat ramp: ember → flame → gold → white-hot, with a blinding pulse on the handle.
 - The effort cycle keybind steps `low → medium → high → xhigh → white-hot → default`.
 - The statusline shows `⚒ WHITE-HOT` while pinned.

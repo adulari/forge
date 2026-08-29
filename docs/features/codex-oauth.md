@@ -31,7 +31,7 @@ prints the authorize URL; open it on a machine that can reach this host’s port
 Once signed in:
 
 ```
-forge --model codex-oauth::gpt-5.5
+forge run --model codex-oauth::gpt-5.5
 ```
 
 Other commands:

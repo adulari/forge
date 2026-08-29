@@ -87,7 +87,7 @@ Given a turn is running (busy)
 When the user presses SHIFT+TAB
 Then the temper does not change (no mid-turn switch); the keystroke is ignored
 
-Given `forge run --mode survey`
+Given `forge run --mode read-only`  <!-- the `survey` alias was never shipped -->
 Then it behaves exactly as `--mode plan` (read-only)
 ```
 
@@ -119,7 +119,7 @@ mechanism; no change to `permission::decide`.
 
 - [ ] All §4 acceptance criteria pass (unit + TUI render tests).
 - [ ] `PermissionMode::label()`/`cycle_next()` unit-tested incl. the Bypass exclusion + wrap.
-- [ ] `--mode survey|guarded|smith|unfettered` accepted (alias) and equal to canonical.
+- [ ] `--mode read-only|ask|auto-edit|full` (plus `plan`, `default`, `accept-edits`, `bypass`). The survey/guarded/smith/unfettered aliases are NOT accepted by clap and error out and equal to canonical.
 - [ ] Statusline shows the themed temper; SHIFT+TAB note appears in scrollback.
 - [ ] Switch persisted to the session row.
 - [ ] fmt + clippy `-D warnings` + full workspace green.

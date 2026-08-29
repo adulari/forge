@@ -14,7 +14,9 @@
 >
 > **Deferred:**
 > - Per-critic live TUI progress rows (U9 full — currently progress emitted as text lines)
-> - Budget pre-estimate scope-down (U8 — daily cap still applies, no pre-run estimate)
+> - ~~Budget pre-estimate scope-down~~ SHIPPED: `forge assay run --max-cost <USD>` aborts (exit 3)
+>   when the pre-run estimate exceeds it, `--yes` skips the guard, and `[assay] max_cost_usd`
+>   (default 0.50) caps the auto-review gate
 > - Fan-out fixing in Refine (currently one seeded turn, not per-finding parallel fixes)
 >
 > Original design below.
