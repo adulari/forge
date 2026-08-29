@@ -80,6 +80,41 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **The LLM task classifier was dead for every user on defaults.** `mesh.classifier_model` defaulted
+  to `groq::llama-3.3-70b-versatile`, an id that answers *"The model does not exist or you do not
+  have access to it"* — so classification failed on every turn and silently degraded to the
+  heuristic, reporting only "all LLM candidates unavailable" with no cause. The failure now names
+  the model and reason, a permanently-dead candidate is marked and skipped instead of being retried
+  every turn, and the single candidate became a fixed ordered fallback chain whose every entry was
+  verified with a real call rather than read from provider discovery. Provider `/models` listings
+  are not evidence a model is callable: groq still advertises two uncallable ids as free, and
+  cerebras advertises one that answers "Payment required".
+
+- **A daemon spawned by Forge could be left permanently broken by a deleted working directory.**
+  `ollama serve` and the Anywhere-managed `forge serve --local` were both spawned without a working
+  directory, so they inherited Forge's — often a worktree or temp dir that is later removed. Once it
+  was gone, every ollama model load failed with `cannot get current path`, while `forge doctor` still
+  reported the server healthy and `/api/tags` still answered; only inference was dead, so the mesh
+  quietly failed over to a worse model. Both now start from a directory that outlives Forge.
+
+- **The daemon deadman alarm never fired.** `OnFailure=` was rendered into the systemd `[Service]`
+  section, where systemd silently ignores it — no warning, no parse error. The alarm added for
+  unattended daemon failures had therefore never fired on any install while appearing correctly
+  configured. It is now emitted in `[Unit]`, and the regression test pins the section rather than
+  merely asserting the directive is present.
+
+- **The Windows bridge home copied files it should not.** When Windows cannot create a symlink the
+  bridge falls back to copying, and what was safe to copy was decided by a denylist matching
+  `credential`/`secret`/`token` in the filename — fail-open, so entries like `daemon` and
+  `control.key` were copied. It is now a two-entry allowlist that fails closed.
+
+- Images sent to the OpenAI-compatible `forge api` endpoint were silently dropped and the request
+  routed as if it had no image. Image content parts are now decoded and the vision signal reaches
+  routing; only `data:` URLs are accepted, since fetching a remote URL from the daemon would make any
+  request an SSRF primitive.
+
+- `chacha20` was pinned to a yanked release in both the workspace and vendored lockfiles.
+
 - Model selection now treats a pin as a hard constraint across resume, subagents, model sets,
   inherited scores, and last-resort routing. Context accounting includes tool schemas and asks
   local servers for their actual context window, while provider transcripts hoist system messages
