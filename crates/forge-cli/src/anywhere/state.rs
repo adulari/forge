@@ -7,6 +7,85 @@ pub(crate) const KEY_EPOCH_INITIAL: u32 = 1;
 pub(crate) const PAIRING_VERSION: u8 = 1;
 pub(crate) const PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 pub(crate) const PAIRING_POLL_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const LINK_STALE_AFTER: Duration = Duration::from_secs(90);
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct LinkState {
+    pub(crate) daemon_pid: u32,
+    pub(crate) connected: bool,
+    pub(crate) last_exchange_ms: u64,
+    pub(crate) updated_at_ms: u64,
+    #[serde(default)]
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkHealth {
+    Healthy { age: Duration },
+    Stale { age: Duration },
+    Disconnected,
+    Unknown,
+}
+
+impl LinkState {
+    pub(crate) fn health_at(&self, now_ms: u64, daemon_pid: Option<u32>) -> LinkHealth {
+        if daemon_pid != Some(self.daemon_pid) || !self.connected || self.last_exchange_ms == 0 {
+            return LinkHealth::Disconnected;
+        }
+        let age = Duration::from_millis(now_ms.saturating_sub(self.last_exchange_ms));
+        if age > LINK_STALE_AFTER {
+            LinkHealth::Stale { age }
+        } else {
+            LinkHealth::Healthy { age }
+        }
+    }
+}
+
+pub(crate) struct LinkStateStore {
+    path: PathBuf,
+}
+
+impl LinkStateStore {
+    pub(crate) fn platform() -> Result<Self> {
+        let path = forge_config::data_dir()
+            .context("no Forge platform data directory is available")?
+            .join("anywhere")
+            .join("link-state.json");
+        Ok(Self { path })
+    }
+
+    pub(crate) fn load(&self) -> Result<Option<LinkState>> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .context("parse Forge Anywhere link state")
+                .map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("read Forge Anywhere link state"),
+        }
+    }
+
+    pub(crate) fn save(&self, state: &LinkState) -> Result<()> {
+        let parent = self
+            .path
+            .parent()
+            .context("Anywhere link state path has no parent")?;
+        std::fs::create_dir_all(parent).context("create Forge Anywhere state directory")?;
+        set_owner_directory_permissions(parent)?;
+        let temp = parent.join(format!(
+            ".link-state-{}-{:016x}.tmp",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let bytes = serde_json::to_vec(state).context("serialize Forge Anywhere link state")?;
+        std::fs::write(&temp, bytes).context("write Forge Anywhere link state")?;
+        set_owner_file_permissions(&temp)?;
+        if let Err(error) = std::fs::rename(&temp, &self.path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error).context("install Forge Anywhere link state");
+        }
+        Ok(())
+    }
+}
 
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct LocalState {

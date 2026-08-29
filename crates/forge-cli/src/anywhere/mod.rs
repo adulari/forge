@@ -1350,6 +1350,10 @@ async fn status() -> Result<()> {
             ""
         }
     );
+    println!(
+        "Connector link: {}",
+        link_status_text(current_link_health()?)
+    );
     if !state.is_logged_in() {
         return Ok(());
     }
@@ -1427,15 +1431,13 @@ async fn doctor() -> Result<()> {
             "not activated"
         }
     );
+    let link_health = current_link_health()?;
     println!(
         "  connector: {}",
         if config.anywhere.enabled {
-            match crate::serve::read_state()? {
-                Some(serve) if serve.process_is_alive() => "configured; local daemon is running",
-                _ => "configured; local daemon is offline",
-            }
+            link_doctor_text(link_health)
         } else {
-            "not configured"
+            "not configured".to_string()
         }
     );
 
@@ -1459,6 +1461,8 @@ async fn doctor() -> Result<()> {
         "run `forge anywhere setup` to activate this host"
     } else if !config.anywhere.enabled {
         "run `forge anywhere enable`"
+    } else if !matches!(link_health, LinkHealth::Healthy { .. }) {
+        "restart `forge serve` if the connector does not reconnect shortly"
     } else if !service_ready {
         "keep using local/LAN Forge and retry when the service is available"
     } else {
@@ -1466,6 +1470,57 @@ async fn doctor() -> Result<()> {
     };
     println!("  next action: {next_action}");
     Ok(())
+}
+
+fn current_link_health() -> Result<LinkHealth> {
+    let daemon_pid = crate::serve::read_state()?
+        .filter(crate::serve::ServeState::process_is_alive)
+        .map(|state| state.pid);
+    Ok(LinkStateStore::platform()?
+        .load()?
+        .map_or(LinkHealth::Unknown, |state| {
+            state.health_at(now_ms(), daemon_pid)
+        }))
+}
+
+fn link_status_text(health: LinkHealth) -> String {
+    match health {
+        LinkHealth::Healthy { age } => {
+            format!("live · last relay exchange {} ago", human_duration(age))
+        }
+        LinkHealth::Stale { age } => {
+            format!(
+                "unhealthy · last relay exchange {} ago",
+                human_duration(age)
+            )
+        }
+        LinkHealth::Disconnected => "unhealthy · relay disconnected".to_string(),
+        LinkHealth::Unknown => "unhealthy · no relay exchange recorded".to_string(),
+    }
+}
+
+fn link_doctor_text(health: LinkHealth) -> String {
+    match health {
+        LinkHealth::Healthy { age } => {
+            format!("live; last relay exchange {} ago", human_duration(age))
+        }
+        LinkHealth::Stale { age } => {
+            format!("unhealthy; last relay exchange {} ago", human_duration(age))
+        }
+        LinkHealth::Disconnected => "unhealthy; relay disconnected".to_string(),
+        LinkHealth::Unknown => "unhealthy; no relay exchange recorded".to_string(),
+    }
+}
+
+fn human_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 60 * 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / (60 * 60))
+    }
 }
 
 fn service_health_url(service_url: &str) -> String {
@@ -2139,6 +2194,44 @@ fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_link_liveness_drives_status_and_doctor_health() {
+        let now = 1_000_000;
+        let state = LinkState {
+            daemon_pid: 42,
+            connected: true,
+            last_exchange_ms: now - 10_000,
+            updated_at_ms: now,
+            error: None,
+        };
+
+        let recent = state.health_at(now, Some(42));
+        assert!(matches!(recent, LinkHealth::Healthy { .. }));
+        assert!(link_status_text(recent).starts_with("live ·"));
+        assert!(link_doctor_text(recent).starts_with("live;"));
+
+        let stale_now = now + LINK_STALE_AFTER.as_millis() as u64 + 1;
+        let stale = state.health_at(stale_now, Some(42));
+        assert!(matches!(stale, LinkHealth::Stale { .. }));
+        assert!(link_status_text(stale).starts_with("unhealthy ·"));
+        assert!(link_doctor_text(stale).starts_with("unhealthy;"));
+    }
+
+    #[test]
+    fn relay_link_from_an_old_daemon_is_disconnected() {
+        let state = LinkState {
+            daemon_pid: 41,
+            connected: true,
+            last_exchange_ms: 900_000,
+            updated_at_ms: 900_000,
+            error: None,
+        };
+        assert_eq!(
+            state.health_at(1_000_000, Some(42)),
+            LinkHealth::Disconnected
+        );
+    }
 
     fn pairing_challenge(now: u64) -> PairingChallenge {
         PairingChallenge {
