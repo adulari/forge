@@ -193,13 +193,19 @@ jobs:
           plugin_root="$tauri_cache/linuxdeploy-plugin-appimage-root"
           plugin_download="$RUNNER_TEMP/linuxdeploy-plugin-appimage.AppImage"
           mkdir -p "$tauri_cache"
+          # Pinned to an immutable tagged release, not `continuous`. That rolling tag keeps one
+          # asset name and republishes its bytes: the upstream rebuild on 2026-08-01 changed the
+          # x86_64 plugin out from under the reviewed digest, and this step correctly failed
+          # closed — which is what took the linux-x86_64 leg of v2.13.0 down before it compiled
+          # anything. A versioned tag cannot be rewritten, so the digest cannot rot again.
           curl --fail --silent --show-error --location \
-            'https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage' \
+            'https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-appimage-x86_64.AppImage' \
             --output "$plugin_download"
           printf '%s  %s\n' \
-            '1da16a46fa5e058ae740e7c35ed0d36d86cb869ac9cc8a5fd9a1847d7978d99a' \
+            '992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3' \
             "$plugin_download" | sha256sum --check --status || {
             echo 'checksum mismatch for pinned linuxdeploy AppImage plugin' >&2
+            echo "expected 992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3, got $(sha256sum "$plugin_download" | cut -d' ' -f1)" >&2
             exit 1
           }
           mapfile -t squashfs_offsets < <(python3 - "$plugin_download" <<'PY'

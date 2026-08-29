@@ -242,6 +242,47 @@ the mode by design).
 
 **Status:** common case verified + regression-tested; only the by-design residual remains.
 
+## Desktop release blocked on three independent failures (found 2026-08-30)
+
+**Symptom:** every one of the five `app-desktop.yml` build legs for v2.13.0 failed (run
+33273514235), leaving the release staged as a draft with only its CLI half. Three distinct causes,
+not one:
+
+**1. Updater signing was off (3 legs).** `mobile/src-tauri/tauri.conf.json` had
+`bundle.createUpdaterArtifacts: false`, flipped from `true` inside the unrelated squash #954
+(`a2b8a29e`, 2026-08-04). In tauri-cli 2.11.4 that value alone decides whether anything is signed:
+`interface/rust.rs` builds `updater_settings` only when the flag is not `false`, and `bundle.rs`'s
+`sign_updaters` returns immediately when those settings are `None`. So no `.sig` was written on any
+platform, regardless of `TAURI_SIGNING_PRIVATE_KEY` — the linux leg bundled both artifacts
+successfully, logged `desktop updater signing enabled`, and then failed on
+`cp: cannot stat '...*.AppImage.sig'`. The last release predating the flip, v2.12.1 (2026-07-30),
+published a complete set of five signed platforms, so the regression sat dormant for four weeks and
+surfaced only at the next release.
+
+**2. Windows died before compiling anything (1 leg).** The same squash replaced the
+`beforeBuildCommand` `npx expo export -p web` with `node scripts/export-web-clean.mjs`, which spawned
+`npx.cmd` directly. Since the CVE-2024-27980 mitigation (Node ≥ 20.12.2) `spawn`/`spawnSync` refuse
+a `.bat`/`.cmd` target without `shell: true`, and `spawnSync` reports that as `EINVAL` in
+`result.error` with a **null** `status`. The script tested only `result.status !== 0` and exited
+`result.status ?? 1`, printing nothing: a silent 50 ms exit 1. The script now runs the resolved Expo
+CLI under `process.execPath`, avoiding the shim entirely, and reports spawn errors, signals and
+exit codes.
+
+**3. A rolling upstream pin rotted (1 leg).** The self-hosted Arch leg never reached the build:
+`checksum mismatch for pinned linuxdeploy AppImage plugin`. `app-desktop.yml` fetched the plugin
+from linuxdeploy's `continuous` release, a rolling tag that keeps one asset name and republishes
+its bytes; upstream rebuilt it on 2026-08-01, after the last good release. The reviewed digest
+therefore no longer matched and the step failed closed — correctly. Now pinned to the immutable
+tagged release `1-alpha-20250213-1`, whose assets cannot be rewritten.
+
+**Prevention:** `scripts/ci/desktop-updater-guard.sh` (with
+`scripts/ci/test-desktop-updater-guard.sh`) fails a PR that disables updater artifacts or selects
+the deprecated `"v1Compatible"` layout, alongside the existing desktop version guard.
+
+**Status:** all three fixed in the source tree. Signing itself is a bundler behaviour, so it is
+confirmed only by a real `app-desktop.yml` run producing `.sig` files; that run is a re-dispatch
+against the existing `v2.13.0` tag, which is not moved.
+
 ## No way to remove / disable a provider key or model
 
 **Symptom:** Once a provider key is set (env or keyring) there is no command to remove
