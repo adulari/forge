@@ -1075,6 +1075,12 @@ pub(crate) fn insert_sync_journal_row_with_base(
             | "agent"
             | "workflow"
             | "file"
+            // harness_store.rs journals under this kind for every /refine edit and rollback. It
+            // was missing here, so with Anywhere sync ENABLED the whitelist rejected the row, the
+            // `?` propagated, and the whole IMMEDIATE transaction rolled back — the Continual
+            // Harness was inoperable. Tests did not catch it because the sync-enabled gate returns
+            // early when sync is off, which is the default in tests.
+            | "harness_entry"
     ) {
         return Err(StoreError::InvalidValue(
             "record kind is not eligible for Anywhere sync".into(),

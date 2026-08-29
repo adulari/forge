@@ -108,7 +108,16 @@ impl Store {
             let conn = self.lock()?;
             let ids: Vec<String> = {
                 let mut stmt = conn.prepare(
+                    // `local_live` / `daemon_live` are as load-bearing here as `agent_active`.
+                    // insert_message does NOT bump `updated_at` (only record_usage and the mode /
+                    // view-snapshot writers do), so a session resumed in a terminal after a long
+                    // idle still carries its OLD updated_at. Without these two predicates, any
+                    // other Forge process calling create_session — which piggy-backs a prune —
+                    // could cascade-delete a session the user is actively typing into, taking its
+                    // whole transcript, usage and tool-call audit with it. ensure_session can
+                    // restore the bare parent row afterwards but NOT the history.
                     "SELECT id FROM session WHERE updated_at < ?1 AND agent_active = 0 \
+                     AND local_live = 0 AND daemon_live = 0 \
                      ORDER BY updated_at LIMIT ?2",
                 )?;
                 let v = stmt
