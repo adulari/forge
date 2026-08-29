@@ -65,11 +65,9 @@ import {
   type AnywhereCurrentDeviceWrap,
 } from "./anywhereEpochRefresh";
 import {
-  challengeFromDetails,
   cancelPairing,
   createEnrollmentRequest,
   createPairing,
-  denyPairing,
   listPairings,
   openApprovedPairing,
   pairingDetails,
@@ -83,6 +81,7 @@ import {
   type PairingChallenge,
   type PairingCreateResponse,
   type PairingDetails,
+  type ListedPairing,
 } from "./anywherePairing";
 import {
   beginPasskeyRegistration,
@@ -156,10 +155,8 @@ interface EnrollmentSnapshot {
 
 export interface AnywherePendingApproval {
   id: string;
-  deviceId: string;
   deviceName: string;
   expiresAtMs: number;
-  safetyCode: string;
 }
 
 export interface AnywhereClaimantApproval {
@@ -251,8 +248,6 @@ export interface AnywhereContextValue {
   /** Device-local snapshot of the account metadata this client holds. No server export exists. */
   exportAccountData(): string;
   approvePairing(challenge: string): Promise<void>;
-  approvePendingDevice(pairingId: string): Promise<void>;
-  denyPendingDevice(pairingId: string): Promise<void>;
   refreshPendingApprovals(force?: boolean): Promise<void>;
   prepareLocalHost(name: string): Promise<"approval" | "activated">;
   confirmLocalHost(): Promise<void>;
@@ -287,7 +282,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const [pending, setPending] = useState<PendingLogin | null>(null);
   const [recoverySetup, setRecoverySetup] = useState<RecoverySetup | null>(null);
   const [claimantPairing, setClaimantPairing] = useState<PendingClaimantPairing | null>(null);
-  const [pendingApprovalDetails, setPendingApprovalDetails] = useState<PairingDetails[]>([]);
+  const [pendingApprovalDetails, setPendingApprovalDetails] = useState<ListedPairing[]>([]);
   const [passkeys, setPasskeys] = useState<AnywherePasskey[]>([]);
   const [hostTransportPreferences, setHostTransportPreferences] = useState<HostTransportPreferences>({});
   const [pendingLocalHost, setPendingLocalHost] = useState<PendingLocalHost | null>(null);
@@ -1390,36 +1385,6 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(timer);
   }, [credentials?.deviceIdHex, phase, refreshPendingApprovals]);
 
-  const approvePendingDevice = useCallback(async (pairingId: string) => {
-    const details = pendingApprovalDetails.find((candidate) => candidate.pairing_id === pairingId);
-    const current = credentialsRef.current;
-    if (!details || !current) throw new Error("Device approval request is no longer pending");
-    const serviceUrl = current.serviceUrl ?? SERVICE_URL;
-    const challenge = challengeFromDetails(details, serviceUrl);
-    const token = await accessToken();
-    let approval: ReturnType<typeof preparePairingApproval> | null = null;
-    mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
-      const latest = credentialsRef.current;
-      if (!latest) throw new Error("Forge Anywhere is not signed in");
-      const sequence = BigInt(latest.nextSequence);
-      approval = preparePairingApproval(latest, challenge, details, sequence);
-      await persistCredentials({ ...latest, nextSequence: (sequence + 1n).toString() });
-    });
-    await mutationQueue.current;
-    if (!approval) throw new Error("Device approval could not be prepared");
-    await submitPairingApproval(serviceUrl, token, pairingId, approval);
-    setPendingApprovalDetails((currentDetails) => currentDetails.filter((candidate) => candidate.pairing_id !== pairingId));
-    await refresh();
-  }, [accessToken, pendingApprovalDetails, persistCredentials, refresh]);
-
-  const denyPendingDevice = useCallback(async (pairingId: string) => {
-    const current = credentialsRef.current;
-    if (!current) throw new Error("Forge Anywhere is not signed in");
-    const token = await accessToken();
-    await denyPairing(current.serviceUrl ?? SERVICE_URL, token, pairingId);
-    setPendingApprovalDetails((currentDetails) => currentDetails.filter((candidate) => candidate.pairing_id !== pairingId));
-  }, [accessToken]);
-
   const prepareLocalHost = useCallback(async (name: string): Promise<"approval" | "activated"> => {
     const normalized = name.trim();
     if (!normalized) throw new Error("Enter a name for this computer");
@@ -1627,18 +1592,14 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       safetyCode: pendingLocalHost.safetyCode,
     } : null,
     pendingApprovals: pendingApprovalDetails.map((details) => ({
-      id: details.pairing_id,
-      deviceId: details.device_id,
+      id: details.pairing_ref ?? `${details.device_name}:${details.expires_at_ms}`,
       deviceName: safeDeviceName(details.device_name),
       expiresAtMs: details.expires_at_ms,
-      safetyCode: credentials
-        ? pairingSafetyCode(challengeFromDetails(details, credentials.serviceUrl ?? SERVICE_URL), details.signing_public_key, credentials.accountIdHex)
-        : "",
     })),
     hostTransportPreferences,
     approvalError, error, pushStatus, remoteJobs,
     accessToken, startLogin, openLoginPage, confirmNewRecovery, recoverExisting, scheduleCleanReset, cancelCleanReset, registerPasskey: registerRecoveryPasskey, recoverWithPasskey, renamePasskey: renameRecoveryPasskey, revokePasskey: revokeRecoveryPasskey, useRecoveryInstead, restartSetup, refresh, checkout, openBillingPortal,
-    revokeDevice, revokeHost, renameHost, setHostDisabled, setHostTransportPreference, exportAccountData, selectHost, approvePairing, approvePendingDevice, denyPendingDevice, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
+    revokeDevice, revokeHost, renameHost, setHostDisabled, setHostTransportPreference, exportAccountData, selectHost, approvePairing, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
     enablePush, disablePush, logout,
   };
   const consumersReady = anywhereConsumersReady(phase, runtimeId, registeredRuntimeId);
