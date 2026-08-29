@@ -167,6 +167,85 @@ All notable changes to Forge are documented here. The format follows
   no longer publish a combined bundle under the old runtime fingerprint; push, release, recovery,
   and reconciliation dispatches all use the same non-bypassable baseline.
 
+
+### Fixed
+
+- **A first run with no credentials now says so.** Starting Forge without any provider configured
+  ended in "every routed/fallback model is rate-limited or down" — a sentence that was simply untrue
+  and sent new users to check quotas and status pages for a problem that was a missing login. The
+  verdict is now derived from what actually happened in the failover chain, so a chain that failed
+  for lack of credentials says exactly that and points at `forge setup`. The same change stops the
+  chain re-offering a model it already failed earlier in the same turn as its "last resort", and
+  stops ranking local Ollama models that are not actually pulled (#1175).
+
+- **Forge no longer refuses to write when the task is *about* not writing.** Whether a turn could
+  modify files was decided by substring-scanning the prompt for phrases like "read-only". Any
+  occurrence anywhere stripped every mutating tool for the whole turn, so a task whose *subject* was
+  restricted-write behaviour could not write — describing the behaviour was indistinguishable from
+  commanding it. It failed worst exactly when Forge was asked to work on its own permission
+  machinery, and it failed expensively: a full context window spent producing an analysis instead of
+  a patch, reported as a successful turn. Bare tokens must now open a segment to count as a
+  directive, while genuine imperatives still bind anywhere. The same change stops a parked CLI-bridge
+  child being reused across permission modes, where it would keep enforcing the temper it started in
+  (#1178).
+
+- **MCP server registration is no longer bridged over the Anywhere relay.** `POST /api/mcp` accepted
+  a caller-supplied stdio command with no validation of the command itself, and persisted it to
+  `.forge/mcp.toml` — persistent code execution reachable from outside the LAN, gated only by device
+  enrollment. Git over the same relay has always been deliberately read-only on the reasoning that a
+  commit is durable and attributable; registering an arbitrary command is strictly more powerful and
+  equally durable, so it is now refused the same way — structurally, with a regression test that
+  fails if the route is re-added. Configuring MCP servers from the machine itself is unchanged
+  (#1176).
+
+- **The Anywhere connector reconnects, and its health checks tell the truth.** A dead relay link
+  produced no reconnect attempt, no error and no log line — one "connector online" message at
+  startup and then fifteen hours of silence, while the phone showed an empty session list. Both
+  `forge anywhere status` and `forge anywhere doctor` reported "healthy" throughout, because they
+  measured registration state and a local process rather than the live link. Dead links are now
+  detected and reconnected with bounded backoff, both commands report time since the last successful
+  relay exchange, and connection state changes are logged (#1179).
+
+- **A CLI-bridge crash no longer benches your whole subscription.** A transient non-zero exit with
+  stderr was classified as an authentication failure because the advice text Forge appends ("is it
+  authenticated?") was being fed to the classifier as evidence. Auth failures are permanent, so one
+  segfault or network blip excluded claude-cli, codex-cli and agy-cli from routing for a full day,
+  silently degrading every later turn while the subscription was perfectly healthy. Classification
+  now uses the process's real stderr (#1169).
+
+- **The agy bridge works again.** Forge built agy's command line as `agy -p --dangerously-skip-permissions <prompt>`;
+  agy binds `-p` to the next token, so it took the flag as the prompt, dropped the real prompt and
+  exited 2. Every agy call had been failing, and it was reported as an authentication problem, so the
+  suggested fix — log in again — could never help. The prompt is now attached to the flag, a non-zero
+  exit is classified from real stderr rather than defaulting to auth, and the exact argv each bridge
+  constructs is now asserted by tests (#1177).
+
+- **Project-scope skills are gated on the model path too.** Skills that arrive with a cloned
+  repository are attacker-authored. The interactive `/skill` path already required project trust; the
+  model-facing path did not, so a bridged session would advertise and load them regardless (#1168).
+
+- **The mobile approval inbox shows pending device requests.** Every entry was rejected with
+  "unsupported pairing version". The listing endpoint deliberately returns only a device name, an
+  expiry and a safe reference — the raw pairing id and keys are withheld precisely so a stolen
+  account token cannot approve a device on its own — but the app validated entries as though they
+  were full pairing details, so no request could ever be displayed. The inbox now matches the real
+  contract, explains that approval needs the challenge shown on the waiting device, and names the
+  actual invalid field when validation does fail. Strict validation on the scanned-QR path, where
+  full details genuinely arrive, is unchanged (#1181).
+
+- **Sessions hosted by the daemon can be given a permission mode.** `POST /api/sessions` ignored any
+  mode and there was no endpoint to change one, so a headless session ran at whatever the config
+  resolved to — typically "ask before every write", with nobody present to answer. Creation now
+  accepts a mode, `POST /api/sessions/{id}/mode` changes it on a live session, and the mode appears
+  in session listings and snapshots so remote clients can see it. Remote protocol bumped to v10
+  (#1180).
+
+- **Lattice stops asserting stale code and failed parses as fact** (#1170), **the shell refuses to
+  run unconfined when a sandbox was requested but is unavailable** (#1171), **a runtime "always
+  allow" is scoped to the command actually approved** rather than matching everything (#1172), **a
+  failed heartbeat replacement no longer leaves a session with none** (#1173), and **live-event
+  appends retry through a writer stall instead of being dropped** (#1174).
+
 ## [2.12.2] - 2026-07-30
 
 ### Fixed
