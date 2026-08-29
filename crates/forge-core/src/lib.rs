@@ -190,16 +190,12 @@ pub enum CoreError {
     SessionNotFound(String),
     #[error("invalid session workspace: {0}")]
     Workspace(String),
-    /// Failover walked the whole routed/fallback chain (and the last-resort model) without finding
-    /// anything usable. Carries the LAST provider error: the generic "everything is rate-limited"
-    /// story is wrong (and actively misleading) when the real cause was an expired credential or a
-    /// permanent capability failure, and the provider's message is the actionable part —
-    /// e.g. "ChatGPT OAuth token rejected (401) — run `forge auth codex-oauth` to sign in again".
-    #[error(
-        "no healthy model available — every routed/fallback model is rate-limited or down; \
-             last error from {model} ({reason}): {last_error}"
-    )]
+    /// Failover walked the whole routed/fallback chain (and any last-resort model) without finding
+    /// anything usable. `verdict` is derived from every observed provider failure in the chain;
+    /// `last_error` preserves the final provider detail for diagnosis.
+    #[error("{verdict}\nLast error from {model} ({reason}): {last_error}")]
     NoHealthyModel {
+        verdict: String,
         model: String,
         reason: &'static str,
         last_error: String,
@@ -12580,13 +12576,18 @@ mod tests {
             .unwrap();
         // Unpinned: last-resort may rescue the turn — the existing behaviour, unchanged.
         assert_eq!(
-            session.last_resort_model("other::x", false).as_deref(),
+            session
+                .last_resort_model(&["other::x".to_string()].into_iter().collect(), false)
+                .as_deref(),
             Some("ollama::llama3.2"),
         );
         // Pinned to one model: nothing else may be dispatched, even though a candidate exists.
         session.pin_model(Some("ollama::qwen3.8-27b".into()));
         assert_eq!(
-            session.last_resort_model("ollama::qwen3.8-27b", false),
+            session.last_resort_model(
+                &["ollama::qwen3.8-27b".to_string()].into_iter().collect(),
+                false,
+            ),
             None,
             "a strict single pin must never be escaped by the last-resort path"
         );
@@ -12612,7 +12613,10 @@ mod tests {
             .unwrap();
         session.pin_model(Some("ollama::qwen3.8-27b,other::outsider".into()));
         assert_eq!(
-            session.last_resort_model("ollama::qwen3.8-27b", false),
+            session.last_resort_model(
+                &["ollama::qwen3.8-27b".to_string()].into_iter().collect(),
+                false,
+            ),
             None,
             "ollama::llama3.2 is outside the pinned set and must not be dispatched"
         );
@@ -12656,9 +12660,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            session.last_resort_model("other::x", false).as_deref(),
+            session
+                .last_resort_model(&["other::x".to_string()].into_iter().collect(), false)
+                .as_deref(),
             Some("ollama::llama3.2"),
             "last-resort must skip keyless groq and pick the usable ollama model"
+        );
+        assert_eq!(
+            session.last_resort_model(
+                &["other::x".to_string(), "ollama::llama3.2".to_string()]
+                    .into_iter()
+                    .collect(),
+                false,
+            ),
+            None,
+            "a model that already failed in this chain must never be re-offered"
         );
     }
 
@@ -12996,10 +13012,12 @@ mod tests {
         let shown = err.to_string();
         match err {
             CoreError::NoHealthyModel {
+                verdict,
                 model,
                 reason,
                 last_error,
             } => {
+                assert!(verdict.contains("credentials"));
                 assert_eq!(model, "bad::model");
                 assert_eq!(reason, "auth failed");
                 assert!(

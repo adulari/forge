@@ -1738,8 +1738,10 @@ impl CliProvider {
                             match item {
                                 Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                                 Parsed::Text(t) => {
-                                    content.push_str(&t);
-                                    on_event(StreamEvent::Text(t));
+                                    if !is_cli_auth_instruction(&t) {
+                                        content.push_str(&t);
+                                        on_event(StreamEvent::Text(t));
+                                    }
                                 }
                                 Parsed::ToolStarted { id, name, args } => {
                                     tool_names.insert(id, name.clone());
@@ -2020,6 +2022,11 @@ fn mentions_status_code(haystack: &str, code: &str) -> bool {
             .is_none_or(|c| !c.is_ascii_digit());
         before_ok && after_ok
     })
+}
+
+fn is_cli_auth_instruction(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower.contains("not logged in") && (lower.contains("/login") || lower.contains("log in"))
 }
 
 fn classify_in_band_error(binary: &str, e: &str) -> ProviderError {
@@ -2429,8 +2436,10 @@ impl LiveSession {
                 match item {
                     Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                     Parsed::Text(t) => {
-                        data.content.push_str(&t);
-                        on_event(StreamEvent::Text(t));
+                        if !is_cli_auth_instruction(&t) {
+                            data.content.push_str(&t);
+                            on_event(StreamEvent::Text(t));
+                        }
                     }
                     Parsed::ToolStarted { id, name, args } => {
                         data.tool_ran = true;
@@ -4734,6 +4743,15 @@ mod tests {
         assert!(matches!(
             classify_in_band_error("cli", "got 503 from upstream"),
             ProviderError::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn cli_specific_login_instruction_is_not_streamed_as_assistant_text() {
+        assert!(is_cli_auth_instruction("Not logged in · Please run /login"));
+        assert!(!is_cli_auth_instruction("Explain how /login works"));
+        assert!(!is_cli_auth_instruction(
+            "You are not logged in to the test fixture"
         ));
     }
 

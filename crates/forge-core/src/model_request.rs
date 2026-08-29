@@ -3,6 +3,72 @@
 use super::*;
 use crate::model_stream::handle_stream_event;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptFailure {
+    NoCredentials,
+    RateLimited,
+    Capability,
+    Network,
+    Down,
+}
+
+fn classify_attempt_failure(error: &forge_provider::ProviderError) -> AttemptFailure {
+    match error {
+        forge_provider::ProviderError::Auth(_) => AttemptFailure::NoCredentials,
+        forge_provider::ProviderError::RateLimited { .. } => AttemptFailure::RateLimited,
+        forge_provider::ProviderError::Capability(_)
+        | forge_provider::ProviderError::Request(_) => AttemptFailure::Capability,
+        forge_provider::ProviderError::Unavailable(message) => {
+            let message = message.to_ascii_lowercase();
+            if [
+                "connect",
+                "connection",
+                "network",
+                "dns",
+                "timed out",
+                "timeout",
+                "no data",
+            ]
+            .iter()
+            .any(|needle| message.contains(needle))
+            {
+                AttemptFailure::Network
+            } else {
+                AttemptFailure::Down
+            }
+        }
+    }
+}
+
+fn failure_verdict(failures: &[AttemptFailure]) -> String {
+    let count = |kind| failures.iter().filter(|failure| **failure == kind).count();
+    if !failures.is_empty() && count(AttemptFailure::NoCredentials) == failures.len() {
+        return "No usable model: none of your configured providers have credentials.\n\
+Run `forge setup` for guided setup, or `forge doctor` to see which providers need attention.\n\
+Set one of ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY, or log in to the Claude or Codex CLI."
+            .to_string();
+    }
+    if !failures.is_empty() && count(AttemptFailure::RateLimited) == failures.len() {
+        return "No usable model: every attempted model was rate-limited.".to_string();
+    }
+    let labels = [
+        (AttemptFailure::NoCredentials, "missing credentials"),
+        (AttemptFailure::RateLimited, "rate-limited"),
+        (AttemptFailure::Capability, "capability errors"),
+        (AttemptFailure::Network, "network errors"),
+        (AttemptFailure::Down, "provider unavailable"),
+    ];
+    let observed = labels
+        .into_iter()
+        .filter_map(|(kind, label)| {
+            let n = count(kind);
+            (n > 0).then(|| format!("{n} {label}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("No usable model: attempted providers failed for mixed reasons ({observed}).")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn request_provider_response(
     session: &mut Session,
@@ -42,6 +108,8 @@ pub(super) async fn request_provider_response(
     step: usize,
 ) -> Result<(u64, forge_provider::ModelResponse), CoreError> {
     let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
+    let mut attempted = std::collections::HashSet::new();
+    let mut failures = Vec::new();
     // Stream the reply, with transparent failover for this step's completion.
     let mut failover_hop = 0u32;
     let resp = loop {
@@ -252,6 +320,8 @@ pub(super) async fn request_provider_response(
                 // expired credential applies to all aliases and must not remain routable
                 // on the next mesh decision.
                 let auth_error = e.is_auth();
+                attempted.insert(active_model.clone());
+                failures.push(classify_attempt_failure(&e));
                 if auth_error {
                     session.record_model_failure(active_model, &e, default_cooldown);
                 }
@@ -533,7 +603,7 @@ pub(super) async fn request_provider_response(
                     // working when every model is briefly rate-limited but none is
                     // permanently incapable. Guarded by `last_resort_used` so a model that
                     // fails again can't loop.
-                    None => match session.last_resort_model(active_model, *last_resort_used) {
+                    None => match session.last_resort_model(&attempted, *last_resort_used) {
                         Some(m) => {
                             *last_resort_used = true;
                             session.presenter.emit(PresenterEvent::Routing {
@@ -558,6 +628,7 @@ pub(super) async fn request_provider_response(
                                 "{active_model} {reason} — model chain exhausted: {e}"
                             )));
                             return Err(CoreError::NoHealthyModel {
+                                verdict: failure_verdict(&failures),
                                 model: active_model.clone(),
                                 reason,
                                 last_error: e.to_string(),
@@ -570,4 +641,39 @@ pub(super) async fn request_provider_response(
         }
     };
     Ok((tools_before, resp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verdict_for_all_missing_credentials_is_actionable_and_mentions_no_rate_limit() {
+        let verdict =
+            failure_verdict(&[AttemptFailure::NoCredentials, AttemptFailure::NoCredentials]);
+        assert!(verdict.contains("none of your configured providers have credentials"));
+        assert!(verdict.contains("forge setup"));
+        assert!(!verdict.contains("rate-limit"));
+    }
+
+    #[test]
+    fn verdict_for_all_rate_limited_says_exactly_that() {
+        let verdict = failure_verdict(&[AttemptFailure::RateLimited, AttemptFailure::RateLimited]);
+        assert_eq!(
+            verdict,
+            "No usable model: every attempted model was rate-limited."
+        );
+    }
+
+    #[test]
+    fn verdict_for_mixed_chain_reports_each_observed_cause() {
+        let verdict = failure_verdict(&[
+            AttemptFailure::NoCredentials,
+            AttemptFailure::RateLimited,
+            AttemptFailure::Network,
+        ]);
+        assert!(verdict.contains("1 missing credentials"));
+        assert!(verdict.contains("1 rate-limited"));
+        assert!(verdict.contains("1 network errors"));
+    }
 }

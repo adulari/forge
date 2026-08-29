@@ -622,7 +622,7 @@ use the release archives above when you need Forge's glibc 2.31 portability floo
 
 ```bash
 # Guided setup: API keys + subscription plans + optional local LLM
-# (runs automatically on first launch; re-run anytime)
+# (offered automatically on first launch in an interactive terminal; re-run anytime)
 forge setup
 
 # Optional: run a local model that fits your machine (via Ollama)

@@ -360,8 +360,15 @@ pub(crate) async fn discover_catalog_with_status(
     // calls this out); without these seeds, a transient listing failure silently removed that
     // provider from an otherwise healthy auto-discovery mesh. Key/health/credit checks still gate
     // actual routing, and successfully discovered models retain their normal ranked preference.
+    let discovered_ollama: std::collections::HashSet<_> = models
+        .iter()
+        .filter(|model| model.starts_with("ollama::"))
+        .cloned()
+        .collect();
     for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
-        models.extend(config.candidates_for(tier));
+        models.extend(config.candidates_for(tier).into_iter().filter(|model| {
+            forge_config::provider_of(model) != "ollama" || discovered_ollama.contains(model)
+        }));
     }
     // Dedup while preserving discovery order (a provider could list the same id twice).
     let mut seen = std::collections::HashSet::new();
