@@ -751,15 +751,6 @@ pub fn ollama_installed_models() -> Vec<String> {
         .collect()
 }
 
-/// A working directory safe to hand a daemon that outlives this process: it must still exist an
-/// hour from now. The home directory qualifies; the temp ROOT is an acceptable fallback because it
-/// persists even though directories created inside it do not.
-fn stable_daemon_cwd() -> std::path::PathBuf {
-    forge_config::home_dir()
-        .filter(|home| home.is_dir())
-        .unwrap_or_else(std::env::temp_dir)
-}
-
 /// Start `ollama serve` detached, if it isn't already listening. Returns whether the server is up
 /// afterwards (waits briefly for the port to open).
 pub fn ollama_start_serve() -> bool {
@@ -767,21 +758,9 @@ pub fn ollama_start_serve() -> bool {
         return true;
     }
     use std::process::Stdio;
-    // `ollama serve` outlives this process, so it must NOT inherit our working directory. Forge
-    // frequently runs from a directory that is later removed — a worktree, a scratch dir, a test
-    // temp dir — and the daemon then holds a deleted cwd forever. Ollama resolves a path per model
-    // load, so every subsequent request dies with
-    //   llama-server process has terminated: error: cannot get current path: No such file or
-    //   directory
-    // long after the directory went away. Observed on a real machine: the daemon's cwd was
-    // `/tmp/.tmpK3dDVO (deleted)` and every local model call failed while `forge doctor` still
-    // reported ollama healthy and `/api/tags` still answered — only inference was dead.
-    // The home directory is the most stable thing available; fall back to the temp root (which
-    // itself persists, unlike a directory created inside it).
-    let stable_cwd = stable_daemon_cwd();
     if Command::new("ollama")
         .arg("serve")
-        .current_dir(&stable_cwd)
+        .current_dir(crate::daemon_cwd::stable_daemon_cwd())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -822,29 +801,6 @@ fn which(bin: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Regression: `ollama serve` used to inherit Forge's cwd. Forge often runs from a directory
-    /// that is later deleted (worktree, scratch dir, test temp dir), and the daemon outlives it —
-    /// after which every model load fails with "cannot get current path" while the port still
-    /// answers. The daemon's cwd must therefore be a directory that survives this process.
-    #[test]
-    fn daemon_cwd_is_a_directory_that_outlives_this_process() {
-        let cwd = stable_daemon_cwd();
-        assert!(
-            cwd.is_dir(),
-            "daemon cwd must exist at spawn time: {}",
-            cwd.display()
-        );
-
-        // It must not sit INSIDE the temp root, which is exactly the disposable-parent case that
-        // produced the bug. The temp root itself is an acceptable last-resort fallback.
-        let temp_root = std::env::temp_dir();
-        assert!(
-            cwd == temp_root || !cwd.starts_with(&temp_root),
-            "daemon cwd must not be a directory created inside the temp root: {}",
-            cwd.display()
-        );
-    }
 
     fn specs(ram: f64, gpu: Option<GpuInfo>, apple: bool) -> SystemSpecs {
         SystemSpecs {
