@@ -354,7 +354,13 @@ impl ForgeAgentServer {
                         }
                         if let Some(le) = crate::live_observer::to_live_event(&event) {
                             if let Ok(json) = serde_json::to_string(&le) {
-                                let _ = store.append_live_event(&sid, &json);
+                                // Dropping this silently makes the live feed go dark while the
+                                // session is still working — forge_status and the live views then
+                                // show an idle session that is not idle, with nothing anywhere
+                                // saying why. Best-effort is right; silent is not.
+                                if let Err(e) = store.append_live_event(&sid, &json) {
+                                    tracing::warn!(session = %sid, error = %e, "live event not persisted; the live feed for this session will be incomplete");
+                                }
                             }
                         }
                     }

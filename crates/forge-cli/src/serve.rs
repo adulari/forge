@@ -2114,7 +2114,7 @@ fn run_merge(repo_root: &std::path::Path, worktree: &str, branch: &str) -> Merge
     // `git apply --3way` writes conflict markers + a conflicted index otherwise. Safe because the
     // caller refused to start on a dirty base, so HEAD is the pre-merge state.
     let stderr = String::from_utf8_lossy(&apply.stderr).into_owned();
-    let _ = std::process::Command::new("git")
+    let restore = std::process::Command::new("git")
         .args([
             "-C",
             repo_root.to_str().unwrap_or("."),
@@ -2123,6 +2123,24 @@ fn run_merge(repo_root: &std::path::Path, worktree: &str, branch: &str) -> Merge
             "HEAD",
         ])
         .output();
+    // This reset is what makes a conflict non-destructive: without it the caller is handed back a
+    // tree carrying `git apply --3way`'s conflict markers and a conflicted index. Reporting a plain
+    // Conflicts outcome when the restore FAILED tells the user their base is untouched when it is
+    // not, so a failed restore has to be its own, louder outcome.
+    let restored = matches!(&restore, Ok(out) if out.status.success());
+    if !restored {
+        let why = match &restore {
+            Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            Err(e) => e.to_string(),
+        };
+        tracing::error!(repo = %repo_root.display(), error = %why, "merge: could not restore the base tree after a failed apply");
+        return MergeOutcome::Error(format!(
+            "apply failed AND the working tree could not be restored (conflict markers and a \
+             conflicted index may remain in {}): {why}. Original apply error: {}",
+            repo_root.display(),
+            stderr.trim()
+        ));
+    }
     let conflicts = parse_apply_conflicts(&stderr);
     if conflicts.is_empty() {
         MergeOutcome::Error(stderr.trim().to_string())
