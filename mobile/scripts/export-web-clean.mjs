@@ -9,6 +9,12 @@ for (const path of ["dist", ".expo", "node_modules/.cache/metro"]) {
 const result = spawnSync(process.platform === "win32" ? "npx.cmd" : "npx", ["expo", "export", "-p", "web"], {
   stdio: "inherit",
 });
+if (result.error) {
+  // A failed spawn leaves status null. Exiting on that alone produced a silent exit 1 with no
+  // diagnostics at all, which is what made the windows desktop leg unreadable: 50ms, no output.
+  console.error(`expo export could not be started: ${result.error.message}`);
+  process.exit(1);
+}
 if (result.status !== 0) process.exit(result.status ?? 1);
 if (!existsSync("dist")) throw new Error("Expo export did not create mobile/dist");
 
