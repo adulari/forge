@@ -58,6 +58,19 @@ pub(super) struct StreamOptions {
 /// the model/user plus the leading system messages and first conversation message — the portion
 /// that remains unchanged as a client resends a growing transcript. No prompt text leaks into the
 /// provider-visible key.
+/// Feed one field into the digest, length-prefixed.
+///
+/// The previous form joined fields with a `\0` separator, but the VALUES can contain `\0` too, so
+/// field boundaries were ambiguous and collisions were attacker-forgeable. Proven: a text-only
+/// message whose content is `"hi\0image_url\0data:image/png;base64,AAEC"` produced the same key as
+/// `"hi"` plus a real image part with that data URL. Since the image fingerprint exists precisely so
+/// two different images cannot share a provider prompt-cache entry, that defeated the mitigation.
+/// A length prefix makes the encoding unambiguous regardless of field content.
+fn field(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_le_bytes());
+    hash.update(bytes);
+}
+
 pub(super) fn api_prompt_cache_key(req: &ChatCompletionRequest) -> String {
     if let Some(explicit) = req
         .prompt_cache_key
@@ -83,10 +96,8 @@ pub(super) fn api_prompt_cache_key(req: &ChatCompletionRequest) -> String {
         if !standing && included_conversation_message {
             break;
         }
-        hash.update(message.role.as_bytes());
-        hash.update(b"\0");
-        hash.update(content_text(&message.content).as_bytes());
-        hash.update(b"\0");
+        field(&mut hash, message.role.as_bytes());
+        field(&mut hash, content_text(&message.content).as_bytes());
         // Image bytes are not included verbatim in the key, but their data-URL fingerprints are;
         // otherwise two requests with identical text and different images could share a provider
         // prompt cache entry and return a response for the wrong image.
@@ -95,15 +106,15 @@ pub(super) fn api_prompt_cache_key(req: &ChatCompletionRequest) -> String {
                 if part.get("type").and_then(|v| v.as_str()) != Some("image_url") {
                     continue;
                 }
-                hash.update(b"image_url\0");
-                if let Some(url) = part
-                    .get("image_url")
-                    .and_then(|v| v.get("url"))
-                    .and_then(|v| v.as_str())
-                {
-                    hash.update(url.as_bytes());
-                }
-                hash.update(b"\0");
+                field(&mut hash, b"image_url");
+                field(
+                    &mut hash,
+                    part.get("image_url")
+                        .and_then(|v| v.get("url"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .as_bytes(),
+                );
             }
         }
         if !standing {

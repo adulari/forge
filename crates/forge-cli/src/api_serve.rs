@@ -156,7 +156,15 @@ fn api_router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(list_models))
-        .route("/v1/chat/completions", post(chat_completions))
+        .route(
+            "/v1/chat/completions",
+            // Sized deliberately for image payloads. Without this, axum's implicit 2 MB default
+            // applied and rejected an ordinary photo with 413 BEFORE the handler ran, so the vision
+            // support this endpoint advertises did not work for real images. Base64 inflates by
+            // ~4/3, so 24 MB admits roughly an 18 MB image. It also makes the DoS bound intentional
+            // rather than inherited.
+            post(chat_completions).layer(axum::extract::DefaultBodyLimit::max(24 * 1024 * 1024)),
+        )
         .fallback(|| async { (StatusCode::NOT_FOUND, "Not Found").into_response() })
         .with_state(state)
 }
