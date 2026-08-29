@@ -58,6 +58,7 @@ import { StatusStrip } from "../../../components/session/StatusStrip";
 import { useAnywhere } from "../../../lib/anywhere/store";
 import { useAuth } from "../../../lib/auth";
 import { useDesktopMenuAction } from "../../../lib/desktopMenu";
+import { assessCompatibility } from "../../../lib/diagnostics";
 import { goBackOr } from "../../../lib/nav";
 import { useAppShortcut } from "../../../lib/shortcuts";
 import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
@@ -275,7 +276,16 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   useDesktopMenuAction("session:interrupt", interrupt);
 
   const closed = snapshot?.closed ?? false;
-  const protocolMismatch = snapshot != null && snapshot.protocol !== PROTOCOL_VERSION;
+  const compatibility = snapshot == null
+    ? null
+    : assessCompatibility(snapshot.protocol, undefined, PROTOCOL_VERSION, "");
+  const protocolWarning = compatibility?.status === "client-limited"
+    ? compatibility.detail
+    : compatibility?.status === "client-outdated"
+      ? `This app cannot safely interpret protocol v${snapshot?.protocol}. Update the app before continuing.`
+      : compatibility?.status === "daemon-outdated"
+        ? `Forge protocol v${snapshot?.protocol} lacks features required by this app. Update Forge before continuing.`
+        : null;
   const publicExposure = (snapshot?.exposure ?? "").startsWith("public");
   const reconnecting = connectionState === "reconnecting";
   // "Unreachable" is only honest when the daemon itself is gone. If the fleet list still
@@ -454,8 +464,8 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         />
         <ShareSheet visible={shareVisible} onClose={() => setShareVisible(false)} sessionId={sessionId} />
 
-        {protocolMismatch ? (
-          <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
+        {protocolWarning ? (
+          <Banner tone="warn" message={protocolWarning} />
         ) : null}
         {publicExposure ? (
           <Banner

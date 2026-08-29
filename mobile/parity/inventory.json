@@ -198,6 +198,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/OperationalNotice.tsx",
+    "platform": "web/native",
+    "reason": "declared platform behavior boundary; shared product rules must remain aligned",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/components/overlay/CommandPalette.tsx",
     "platform": "web/native",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",

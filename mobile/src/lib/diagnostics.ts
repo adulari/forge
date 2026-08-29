@@ -6,6 +6,7 @@ export type CompatibilityStatus =
   | "version-skew"
   | "daemon-outdated"
   | "client-outdated"
+  | "client-limited"
   | "unknown";
 
 export interface Compatibility {
@@ -13,6 +14,13 @@ export interface Compatibility {
   title: string;
   detail: string;
 }
+
+const ADDITIVE_CLIENT_GAPS: Record<string, { title: string; detail: string }> = {
+  "9:10": {
+    title: "Compatible with limited controls",
+    detail: "Permission mode controls require app protocol v10. The session remains usable and its state is trustworthy.",
+  },
+};
 
 export function assessCompatibility(
   daemonProtocol: number | undefined,
@@ -25,6 +33,14 @@ export function assessCompatibility(
       status: "unknown",
       title: "Compatibility unknown",
       detail: "This daemon is too old to report its protocol version.",
+    };
+  }
+  const additiveGap = ADDITIVE_CLIENT_GAPS[`${clientProtocol}:${daemonProtocol}`];
+  if (additiveGap) {
+    return {
+      status: "client-limited",
+      title: additiveGap.title,
+      detail: additiveGap.detail,
     };
   }
   if (daemonProtocol > clientProtocol) {

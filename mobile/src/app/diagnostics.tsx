@@ -178,6 +178,8 @@ export default function DiagnosticsScreen() {
                     tone="warn"
                     message={`${compatibility.detail} Update this Forge app before continuing.`}
                   />
+                ) : compatibility.status === "client-limited" ? (
+                  <Banner tone="warn" message={compatibility.detail} />
                 ) : null}
                 <ListRow
                   title={compatibility.title}
