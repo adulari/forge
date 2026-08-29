@@ -5,6 +5,7 @@ export type BridgeRoute =
   | "health"
   | "list_sessions"
   | "create_session"
+  | "set_session_mode"
   | "session_snapshot"
   | "session_history"
   | "session_input"
@@ -231,13 +232,14 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };
 
-  const session = path.match(/^\/api\/sessions\/([^/]+)\/(archive|fork|merge|discard)$/);
+  const session = path.match(/^\/api\/sessions\/([^/]+)\/(archive|fork|merge|discard|mode)$/);
   if (session) {
     const operation: Record<string, BridgeRoute> = {
       archive: "archive_session",
       fork: "fork_session",
       merge: "merge_session",
       discard: "discard_session",
+      mode: "set_session_mode",
     };
     const expectedMethod = "POST";
     if (method === expectedMethod) {

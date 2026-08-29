@@ -702,7 +702,10 @@ pub struct RemoteUrl {
 /// Every added field carries `#[serde(default)]` and every client treats it as
 /// optional, so a v8 host ↔ v9 client (missing fields) and a v9 host ↔ v8 client (unknown
 /// fields ignored) both degrade to exactly the v8 experience instead of breaking.
-pub const PROTOCOL_VERSION: u32 = 9;
+///
+/// v10: `Snapshot` gained `permission_mode`, the stable canonical key for the active permission
+/// posture. `temper` remains the human-facing label for older clients.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// How many broadcast snapshots the per-server [`EventLog`] retains for reconnect replay. One
 /// entry per *changed* frame covers minutes of activity; a client that was away longer gets a
@@ -1018,6 +1021,9 @@ pub struct Snapshot {
     pub done: bool,
     /// The active operating temper label (e.g. "Ask").
     pub temper: String,
+    /// The canonical permission-mode key (`default`, `accept-edits`, `bypass`, or `plan`) (v10).
+    #[serde(default)]
+    pub permission_mode: String,
     /// The session's current reasoning effort (`low` through `whitehot`).
     #[serde(default)]
     pub effort: String,
@@ -1105,6 +1111,7 @@ impl Default for Snapshot {
             busy: false,
             done: false,
             temper: String::new(),
+            permission_mode: String::new(),
             effort: String::new(),
             tier: None,
             model: "—".to_string(),
@@ -2964,7 +2971,7 @@ mod tests {
     #[test]
     fn every_remote_adapter_shares_the_golden_protocol_contract() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../protocol/remote-v9.json"))
+            serde_json::from_str(include_str!("../../../protocol/remote-v10.json"))
                 .expect("golden remote protocol fixture is valid JSON");
         assert_eq!(fixture["protocol"], PROTOCOL_VERSION);
 

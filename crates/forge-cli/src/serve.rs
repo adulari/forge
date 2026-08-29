@@ -16,9 +16,10 @@
 //! - `GET  /api/sessions`             running sessions (id, title, cwd, busy, cost, activity)
 //! - `GET  /api/sessions/past?limit=&before=`  persisted sessions NOT currently running — the
 //!   resurrection browser's data; `resume` one with `POST /api/sessions {resume:<id>}`
-//! - `POST /api/sessions`             create ({cwd, worktree, title?, model?, resume?, temper?})
-//!   — `temper` starts the session in a given permission mode (case-insensitive: `Read-only`,
-//!   `Ask`, `Auto-edit`, `Full`; unknown values are a `400`, never a silent default)
+//! - `POST /api/sessions`             create ({cwd, worktree, title?, model?, resume?, mode?})
+//!   — `mode` uses the same values as `forge run --mode`: `default`, `accept-edits`, `bypass`,
+//!   or `plan`; omitted leaves the configured default unchanged
+//! - `POST /api/sessions/{id}/mode`    change a live session's permission mode
 //! - `GET  /api/projects`             daemon default + recent project directories + browse roots
 //! - `GET  /api/projects/browse?path=` allowlisted server-side directory browser
 //! - `POST /api/sessions/{id}/archive` stop + hide a session (history kept; worktree kept)
@@ -555,6 +556,7 @@ struct SessionRow {
     context_tokens: u64,
     context_limit: Option<u32>,
     model: String,
+    permission_mode: Option<String>,
     created_at: i64,
     last_activity: i64,
     /// `true` for a terminal-local session this daemon merely observes via the store, never
@@ -592,6 +594,9 @@ struct CreateSessionReq {
     title: Option<String>,
     /// Optional model pin.
     model: Option<String>,
+    /// Permission mode, using the same canonical vocabulary as `forge run --mode`.
+    #[serde(alias = "permission_mode")]
+    mode: Option<String>,
     /// Resume an existing session id instead of starting fresh.
     resume: Option<String>,
     /// Start the session directly in this temper/permission-mode instead of the default,
@@ -868,6 +873,10 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(
             &format!("{base}/api/sessions/{{id}}/message"),
             post(send_fleet_message),
+        )
+        .route(
+            &format!("{base}/api/sessions/{{id}}/mode"),
+            post(set_session_mode),
         )
         .route(
             &format!("{base}/api/sessions/{{id}}/diff"),
@@ -1160,6 +1169,7 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             context_tokens: snap.context_tokens,
             context_limit: snap.context_limit,
             model: snap.model,
+            permission_mode: Some(snap.permission_mode),
             created_at: h.created_at,
             last_activity: h.last_activity.load(std::sync::atomic::Ordering::Relaxed),
             read_only: false,
@@ -1186,6 +1196,7 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             context_tokens: 0,
             context_limit: None,
             model: local.model.unwrap_or_default(),
+            permission_mode: None,
             created_at: local.created_at,
             last_activity: local.last_activity,
             read_only: true,
@@ -1200,7 +1211,14 @@ async fn create_session(
     State(state): State<Arc<DaemonState>>,
     axum::Json(req): axum::Json<CreateSessionReq>,
 ) -> Response {
-    // Validate temper before creating a worktree or driver.
+    // Validate mode before creating a worktree or driver.
+    let mode = match req.mode.as_deref() {
+        Some(raw) => match parse_permission_mode(raw) {
+            Ok(mode) => Some(mode),
+            Err(msg) => return err_response(axum::http::StatusCode::BAD_REQUEST, &msg),
+        },
+        None => None,
+    };
     let temper = match req.temper.as_deref() {
         Some(raw) => match parse_temper(raw) {
             Ok(mode) => Some(mode),
@@ -1436,7 +1454,7 @@ async fn create_session(
         mock: state.mock,
         model: pinned_model.clone(),
         resume: req.resume,
-        temper,
+        temper: mode.or(temper),
         push: state.push.clone(),
         apns: state.apns.clone(),
         registry: Some(state.registry.clone()),
@@ -3145,6 +3163,39 @@ pub(crate) fn err_response_coded(
         .into_response()
 }
 
+#[derive(serde::Deserialize)]
+struct SetSessionModeReq {
+    #[serde(alias = "permission_mode")]
+    mode: String,
+}
+
+async fn set_session_mode(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id): AxumPath<String>,
+    axum::Json(req): axum::Json<SetSessionModeReq>,
+) -> Response {
+    let mode = match parse_permission_mode(&req.mode) {
+        Ok(mode) => mode,
+        Err(message) => return err_response(axum::http::StatusCode::BAD_REQUEST, &message),
+    };
+    let Some(handle) = state.registry.get(&id).await else {
+        return err_response(axum::http::StatusCode::NOT_FOUND, "session not found");
+    };
+    if let Err(error) = handle.set_permission_mode(mode).await {
+        return err_response(
+            axum::http::StatusCode::CONFLICT,
+            &format!("session mode change failed: {error}"),
+        );
+    }
+    json_response(&serde_json::json!({ "id": id, "permission_mode": mode.key() }))
+}
+
+fn parse_permission_mode(raw: &str) -> Result<forge_types::PermissionMode, String> {
+    forge_types::PermissionMode::from_key(raw).ok_or_else(|| {
+        format!("mode: unknown value {raw:?} — valid values: default, accept-edits, bypass, plan")
+    })
+}
+
 /// Parse `CreateSessionReq::temper` — case-insensitive, the same names/aliases
 /// [`forge_types::PermissionMode::from_label`] accepts for the `/mode` picker. On failure,
 /// returns the `400` body text listing every valid name (never silently defaults).
@@ -3828,6 +3879,141 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn daemon_session_permission_mode_create_list_set_and_validate() {
+        use tower::ServiceExt;
+
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FORGE_DB", dir.path().join("mode-api.db"));
+        std::env::set_var("FORGE_PERMISSION_MODE", "plan");
+
+        let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let registry = Arc::new(SessionRegistry::new());
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store,
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.path().display().to_string(),
+            project_roots: vec![dir.path().to_path_buf()],
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+
+        let explicit = router
+            .clone()
+            .oneshot(post_json_req(
+                "/api/sessions",
+                serde_json::json!({ "mode": "bypass", "title": "explicit" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(explicit.status(), axum::http::StatusCode::OK);
+        let explicit_id = json_body(explicit).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let omitted = router
+            .clone()
+            .oneshot(post_json_req(
+                "/api/sessions",
+                serde_json::json!({ "title": "omitted" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(omitted.status(), axum::http::StatusCode::OK);
+        let omitted_id = json_body(omitted).await["id"].as_str().unwrap().to_string();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::get("/tok/api/sessions")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let rows = json_body(response).await;
+            let mode_for = |id: &str| {
+                rows.as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["id"] == id)
+                    .and_then(|row| row["permission_mode"].as_str())
+                    .map(str::to_string)
+            };
+            if mode_for(&explicit_id).as_deref() == Some("bypass")
+                && mode_for(&omitted_id).as_deref() == Some("plan")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session modes not projected: {rows}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let changed = router
+            .clone()
+            .oneshot(post_json_req(
+                &format!("/api/sessions/{explicit_id}/mode"),
+                serde_json::json!({ "mode": "accept-edits" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(changed.status(), axum::http::StatusCode::OK);
+        assert_eq!(json_body(changed).await["permission_mode"], "accept-edits");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let current = registry
+                .get(&explicit_id)
+                .await
+                .unwrap()
+                .snapshot_rx
+                .borrow()
+                .snapshot
+                .permission_mode
+                .clone();
+            if current == "accept-edits" {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "mode change not projected"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let invalid = router
+            .clone()
+            .oneshot(post_json_req(
+                "/api/sessions",
+                serde_json::json!({ "mode": "reckless" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(json_body(invalid).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("valid values"));
+
+        for handle in registry.all().await {
+            handle.shutdown();
+        }
+        std::env::remove_var("FORGE_PERMISSION_MODE");
+        std::env::remove_var("FORGE_DB");
+    }
+
     /// Worktree-backed session create: the worktree exists on disk, is a real git worktree of
     /// the repo, and the driver session runs inside it (cwd + snapshot.worktree agree).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3969,6 +4155,13 @@ mod tests {
     fn post_req(base_and_path: &str) -> axum::http::Request<axum::body::Body> {
         axum::http::Request::post(base_and_path)
             .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    fn post_json_req(path: &str, body: serde_json::Value) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::post(format!("/tok{path}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
             .unwrap()
     }
 
@@ -5666,6 +5859,7 @@ mod tests {
             context_tokens: 18_200,
             context_limit: Some(200_000),
             model: "m".into(),
+            permission_mode: Some("default".into()),
             created_at,
             last_activity: created_at,
             read_only: false,
@@ -5718,6 +5912,11 @@ mod tests {
                 context_tokens: 0,
                 context_limit: None,
                 model: "m".into(),
+                permission_mode: if read_only {
+                    None
+                } else {
+                    Some("default".into())
+                },
                 created_at,
                 last_activity: created_at,
                 read_only,

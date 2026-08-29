@@ -294,6 +294,7 @@ export interface SessionRow {
   context_tokens: number;
   context_limit: number | null;
   model: string;
+  permission_mode: "default" | "accept-edits" | "bypass" | "plan" | null;
   created_at: number;
   last_activity: number;
   /** Terminal-local session the daemon merely observes via the store, never drives — no remote
@@ -362,13 +363,16 @@ export interface HistoryRow {
   elapsed_ms?: number | null;
 }
 
+export type PermissionMode = "default" | "accept-edits" | "bypass" | "plan";
+
 export interface CreateSessionRequest {
   cwd?: string;
   worktree?: boolean;
   title?: string;
   model?: string;
+  mode?: PermissionMode;
   resume?: string;
-  temper?: "Read-only" | "Ask" | "Auto-edit" | "Full";
+  temper?: string;
 }
 
 export interface ForkSessionRequest { at_seq: number; }
@@ -629,6 +633,17 @@ export function createSession(
   return request(baseUrl, "/api/sessions", {
     method: "POST",
     body: JSON.stringify(body),
+  });
+}
+
+export function setSessionPermissionMode(
+  baseUrl: string,
+  id: string,
+  mode: PermissionMode,
+): Promise<{ id: string; permission_mode: PermissionMode }> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/mode`, {
+    method: "POST",
+    body: JSON.stringify({ mode }),
   });
 }
 

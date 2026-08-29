@@ -1,4 +1,4 @@
-// WebSocket client for the Forge daemon session protocol v9. See protocol/remote-v9.json.
+// WebSocket client for the Forge daemon session protocol v10. See protocol/remote-v10.json.
 //
 // One `Snapshot` frame per server message (full state, not a delta). Client tracks the
 // last-seen `revision` and reconnects with `?rev=<revision>` for replay; `resync:true`
@@ -141,6 +141,7 @@ export interface Snapshot {
   busy: boolean;
   done: boolean;
   temper: string;
+  permission_mode?: string;
   effort?: string | null;
   tier: string | null;
   model: string;

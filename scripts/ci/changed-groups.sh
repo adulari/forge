@@ -80,7 +80,7 @@ classify() {
     deny.toml)
       enable cargo_deny
       ;;
-    protocol/remote-v9.json)
+    protocol/remote-v*.json)
       enable rust release_build mobile_app
       ;;
     crates/*|vendor/*)
