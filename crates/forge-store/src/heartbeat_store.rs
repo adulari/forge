@@ -27,6 +27,14 @@ impl Store {
     /// existing user heartbeat on this session is deleted first — this IS the "creating another
     /// replaces it" semantics the command promises, not a failure path the caller must avoid.
     /// `id` is caller-generated ([`forge_types::new_id`]).
+    ///
+    /// The DELETE + INSERT are one IMMEDIATE transaction: a replacement that fails halfway (the
+    /// INSERT hitting the user-singleton index in a race, a duplicate id, an FK failure against a
+    /// just-pruned session, or the process dying between the two statements) must leave the old
+    /// heartbeat in place, never wipe it and write nothing — a `/heartbeat every` that errors
+    /// leaves the session with the heartbeat it already had. IMMEDIATE for the same reason as
+    /// `record_usage`: taking the write lock up front avoids a DEFERRED read snapshot failing its
+    /// upgrade with SQLITE_BUSY_SNAPSHOT, which `busy_timeout` does not cover.
     pub fn set_user_heartbeat(
         &self,
         id: &str,
@@ -35,18 +43,22 @@ impl Store {
         interval_secs: i64,
         now: i64,
     ) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
-            "DELETE FROM session_heartbeat WHERE session_id = ?1 AND owner = 'user'",
-            [session_id],
-        )?;
-        conn.execute(
-            "INSERT INTO session_heartbeat \
-                (id, session_id, owner, label, prompt, interval_secs, status, next_due_at, updated_at) \
-             VALUES (?1, ?2, 'user', NULL, ?3, ?4, 'active', ?5, ?6)",
-            (id, session_id, prompt, interval_secs, now + interval_secs, now),
-        )?;
-        Ok(())
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "DELETE FROM session_heartbeat WHERE session_id = ?1 AND owner = 'user'",
+                [session_id],
+            )?;
+            tx.execute(
+                "INSERT INTO session_heartbeat \
+                    (id, session_id, owner, label, prompt, interval_secs, status, next_due_at, updated_at) \
+                 VALUES (?1, ?2, 'user', NULL, ?3, ?4, 'active', ?5, ?6)",
+                (id, session_id, prompt, interval_secs, now + interval_secs, now),
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// The session's user-owned heartbeat, if any (`/heartbeat status`).
@@ -220,6 +232,38 @@ mod tests {
                 .filter(|h| h.owner == "user")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn a_failed_replacement_leaves_the_old_heartbeat_firing() {
+        let (store, sid) = store_with_session();
+        store
+            .set_user_heartbeat("hb1", &sid, "first prompt", 60, 1_000)
+            .unwrap();
+        // Collides with this id, so the replacement's INSERT fails *after* its DELETE ran.
+        store
+            .add_agent_heartbeat("taken", &sid, "watch-ci", "check CI", 30, 1_000)
+            .unwrap();
+
+        let err = store.set_user_heartbeat("taken", &sid, "second prompt", 120, 1_000);
+        assert!(err.is_err(), "the colliding insert must fail");
+
+        // The old heartbeat is not merely still on disk — it is unchanged and still due, so the
+        // session keeps ticking instead of falling silent after a failed `/heartbeat every`.
+        let hb = store
+            .user_heartbeat(&sid)
+            .unwrap()
+            .expect("a failed replacement must not leave the session with no heartbeat");
+        assert_eq!(hb.id, "hb1");
+        assert_eq!(hb.prompt, "first prompt");
+        assert_eq!(hb.interval_secs, 60);
+        assert_eq!(hb.next_due_at, 1_060);
+
+        let claimed = store.claim_due_heartbeats(&sid, 1_060).unwrap();
+        assert!(
+            claimed.iter().any(|h| h.id == "hb1"),
+            "the surviving heartbeat must still fire"
         );
     }
 
