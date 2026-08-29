@@ -56,7 +56,7 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 ## 3. Implementation
 
 - **`forge-config`** — `KeyCombo`, `KeybindsConfig` (`BTreeMap<String, KeyCombo>`), a `Default`
-  with the 19 binds above, and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
+  with the binds above (the shipped default map has 22), and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
   preserving all other config keys). `Config` gains a `keybinds` field.
 - **`forge-tui/keybinds.rs`** — `matches(combo, key_event)` compares a combo against a crossterm
   `KeyEvent`; `resolve_action()` returns the `KeyKind` for the first matching configured action.
