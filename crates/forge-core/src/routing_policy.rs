@@ -5,6 +5,16 @@
 use super::*;
 use crate::context_pipeline::tool_spec_tokens;
 
+/// Last-resort architect model, used only when every tier candidate is unusable AND the caller gave
+/// no pin or config override.
+///
+/// Deliberately ONE constant rather than the four inline literals this replaced. A hardcoded model
+/// id goes stale silently: `groq::llama-3.3-70b-versatile` sat in `default_classifier_model` long
+/// after the provider stopped serving it, and because the classifier failed soft, every user on
+/// defaults silently lost LLM classification with no error naming the cause. Four copies of a
+/// literal is four places to miss when that happens here.
+const ARCHITECT_LAST_RESORT: &str = "anthropic::claude-opus-5";
+
 impl Session {
     /// One source of truth for the health and quota inputs of every mesh decision.
     pub fn provider_readiness(&self) -> readiness::ProviderReadiness {
@@ -264,7 +274,7 @@ Rules:\n\
             return pin
                 .first()
                 .cloned()
-                .unwrap_or_else(|| "anthropic::claude-opus-5".to_string());
+                .unwrap_or_else(|| ARCHITECT_LAST_RESORT.to_string());
         }
         // Explicit config override.
         if let Some(m) = &self.config.mesh.architect_model {
@@ -283,7 +293,7 @@ Rules:\n\
                     .model_for(forge_types::TaskTier::Complex)
                     .map(str::to_string)
             })
-            .unwrap_or_else(|| "anthropic::claude-opus-5".to_string())
+            .unwrap_or_else(|| ARCHITECT_LAST_RESORT.to_string())
     }
 
     /// The first configured candidate for `tier` whose provider has a key — keyless providers
@@ -305,7 +315,7 @@ Rules:\n\
             return pin
                 .first()
                 .cloned()
-                .unwrap_or_else(|| "anthropic::claude-opus-5".to_string());
+                .unwrap_or_else(|| ARCHITECT_LAST_RESORT.to_string());
         }
         // Explicit config override.
         if let Some(m) = &self.config.mesh.editor_model {
@@ -323,7 +333,7 @@ Rules:\n\
                     .model_for(forge_types::TaskTier::Standard)
                     .map(str::to_string)
             })
-            .unwrap_or_else(|| "anthropic::claude-opus-5".to_string())
+            .unwrap_or_else(|| ARCHITECT_LAST_RESORT.to_string())
     }
 
     pub(crate) fn auxiliary_model(&self, routed: &forge_mesh::RoutingDecision) -> String {
