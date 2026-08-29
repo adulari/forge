@@ -130,8 +130,34 @@ pub async fn run() -> anyhow::Result<usize> {
 /// `forge-serve.service` and, more insidiously, took the Anywhere connector down while local Forge
 /// kept answering on a connection opened before the migration — so "the daemon is running" looked
 /// healthy while cloud sync was dead. Nothing in doctor asked the one question that explains it.
+/// The store this process would actually open.
+///
+/// `FORGE_DB` overrides the default path everywhere else (see `replay.rs`, the bridge env
+/// passthrough in `cli_provider.rs`, and every test that isolates its store). Doctor ignored it and
+/// always reported on `data_dir()/forge.db`, so it could answer "the session store opens cleanly"
+/// about a DIFFERENT database than the one the session under investigation uses — which is exactly
+/// backwards for the tool people run when the store is the suspect.
+fn doctor_store_path() -> Option<std::path::PathBuf> {
+    resolve_store_path(
+        std::env::var("FORGE_DB").ok().as_deref(),
+        forge_config::data_dir(),
+    )
+}
+
+/// Pure so the override is testable without mutating process env, which races under the parallel
+/// test harness. A blank `FORGE_DB` counts as unset rather than as a request to open "".
+fn resolve_store_path(
+    forge_db: Option<&str>,
+    data_dir: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if let Some(custom) = forge_db.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(std::path::PathBuf::from(custom));
+    }
+    data_dir.map(|dir| dir.join("forge.db"))
+}
+
 fn store_checks() -> Vec<Check> {
-    let Some(path) = forge_config::data_dir().map(|dir| dir.join("forge.db")) else {
+    let Some(path) = doctor_store_path() else {
         return vec![check(
             Status::Warn,
             "session store",
@@ -754,6 +780,27 @@ fn binary_on_path(bin: &str) -> bool {
 #[cfg(test)]
 mod store_check_tests {
     use super::*;
+
+    /// Doctor is what people run WHEN the store is the suspect, so describing a different store
+    /// than the session would open is the one answer it must never give. It previously ignored
+    /// FORGE_DB and always reported on `data_dir()/forge.db`.
+    #[test]
+    fn store_path_prefers_forge_db_over_the_default_location() {
+        let data = Some(std::path::PathBuf::from("/data"));
+        assert_eq!(
+            resolve_store_path(Some("/tmp/iso/forge.db"), data.clone()),
+            Some(std::path::PathBuf::from("/tmp/iso/forge.db")),
+            "an explicit FORGE_DB must win"
+        );
+        for blank in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                resolve_store_path(blank, data.clone()),
+                Some(std::path::PathBuf::from("/data/forge.db")),
+                "a blank FORGE_DB must fall back to the default"
+            );
+        }
+        assert_eq!(resolve_store_path(None, None), None);
+    }
 
     #[test]
     fn a_store_migrated_by_a_newer_build_fails_with_the_remedy() {
