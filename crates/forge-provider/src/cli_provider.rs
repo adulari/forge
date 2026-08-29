@@ -4764,7 +4764,6 @@ mod tests {
         ));
     }
 
-    #[test]
     /// The user-facing message deliberately carries an "is it authenticated?" setup hint. That
     /// hint must never decide the error VARIANT: the classifier matches `contains("auth")`, so
     /// feeding it the wrapped message made every nonzero-exit-with-stderr failure permanent Auth —
@@ -4793,6 +4792,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn classify_in_band_error_maps_to_retryable_variants() {
         assert!(matches!(
             classify_in_band_error("claude", "rate_limit_error: slow down"),
