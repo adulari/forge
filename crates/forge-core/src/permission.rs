@@ -753,6 +753,59 @@ mod tests {
         );
     }
 
+    /// The builtin floor is documented as unoverridable — it must hold in BYPASS, which is the
+    /// whole point of having it. Two trivial shell forms evaded it:
+    ///
+    /// - `bash --norc -c '<payload>'`: the `-c` detector fired on the first token that started
+    ///   with `-` and contained the letter `c`, so `--norc` won and the "script" became the literal
+    ///   "-c". The payload was never scanned.
+    /// - `FOO=1 rm -rf /`: only `env FOO=1` was stripped, not a bare assignment prefix. The command
+    ///   is single-line and parses cleanly, so the multi-line substring fallback never ran either.
+    ///
+    /// Both were ALLOWED under bypass while their covered equivalents were denied.
+    #[test]
+    fn gwt8b_floor_holds_against_flag_and_assignment_prefixes() {
+        let rules = [builtin_deny("shell", &["rm -rf /"])];
+        for cmd in [
+            "bash --norc -c 'rm -rf /'",
+            "bash --rcfile=x -c 'rm -rf /'",
+            "sh -lc 'rm -rf /'",
+            "FOO=1 rm -rf /",
+            "FOO=1 BAR=2 rm -rf /",
+            "env FOO=1 rm -rf /",
+        ] {
+            assert_eq!(
+                decide(
+                    PermissionMode::Bypass,
+                    SideEffect::Shell,
+                    "shell",
+                    &shell(cmd),
+                    &rules
+                ),
+                Deny,
+                "the builtin floor must deny `{cmd}` even in bypass"
+            );
+        }
+    }
+
+    /// An ordinary argument containing `=` must not be mistaken for an assignment prefix, or the
+    /// wrong token becomes the command word and matching shifts.
+    #[test]
+    fn an_argument_containing_equals_is_not_an_assignment_prefix() {
+        let rules = [builtin_deny("shell", &["rm -rf /"])];
+        assert_ne!(
+            decide(
+                PermissionMode::Bypass,
+                SideEffect::Shell,
+                "shell",
+                &shell("git log --format=%H"),
+                &rules
+            ),
+            Deny,
+            "a benign --opt=value command must not be caught by the floor"
+        );
+    }
+
     #[test]
     fn gwt8_arg_hidden_danger_is_unwrapped() {
         let rules = [builtin_deny("shell", &["rm -rf /"])];
