@@ -760,6 +760,7 @@ pub fn ollama_start_serve() -> bool {
     use std::process::Stdio;
     if Command::new("ollama")
         .arg("serve")
+        .current_dir(crate::daemon_cwd::stable_daemon_cwd())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

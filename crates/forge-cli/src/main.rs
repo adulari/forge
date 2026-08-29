@@ -62,6 +62,7 @@ mod blame;
 mod bridge_stats;
 mod cli;
 mod context_windows;
+mod daemon_cwd;
 mod doctor;
 mod doctor_health;
 mod image_input;

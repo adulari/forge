@@ -1300,6 +1300,9 @@ async fn ensure_managed_connector() -> Result<&'static str> {
     let mut command = std::process::Command::new(&executable);
     command
         .args(["serve", "--local"])
+        // Detached: outlives this CLI process, so it must not inherit a cwd that can be deleted
+        // out from under it. See crate::daemon_cwd.
+        .current_dir(crate::daemon_cwd::stable_daemon_cwd())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
