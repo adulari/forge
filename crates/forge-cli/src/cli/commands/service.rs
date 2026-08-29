@@ -320,7 +320,14 @@ pub(crate) const UNIT_VERSION_PREFIX: &str = "# forge-unit-version: ";
 fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> String {
     format!(
         "[Unit]\nDescription=Forge serve — headless multi-session daemon\n\
-         {UNIT_VERSION_PREFIX}{}\n\n\
+         {UNIT_VERSION_PREFIX}{}\n\
+         # Stopping is not the same as telling anyone: the observed outages sat in `failed` for\n\
+         # days and were found only because someone went looking. systemd delivers this, so the\n\
+         # alarm does not share fate with the daemon it watches.\n\
+         # MUST live in [Unit]: OnFailure= is a unit-section directive and systemd SILENTLY\n\
+         # ignores it under [Service], which is where it was first written — the alarm looked\n\
+         # installed and never fired.\n\
+         OnFailure={}\n\n\
          [Service]\nExecStart={forge_exe} serve {} --port {port}\nRestart=on-failure\n\
          # A permanent failure (exit 78 = EX_CONFIG, e.g. a store this build cannot open) cannot be\n\
          # fixed by retrying. Without this the daemon restarts forever — 632 times in one observed\n\
@@ -328,15 +335,11 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
          # makes it `failed`, which is at least visible. Transient failures still retry forever,\n\
          # which is what the network-resilience drop-in wants.\nRestartPreventExitStatus=78\n\
          # An agent-owned compiler or language server may be the kernel's OOM victim. Keep the\n\
-         # daemon and its recoverable session metadata alive in that case.\nOOMPolicy=continue\n\
-         # Stopping is not the same as telling anyone: the observed outages sat in `failed` for\n\
-         # days and were found only because someone went looking. systemd delivers this, so the\n\
-         # alarm does not share fate with the daemon it watches.\n\
-         OnFailure={}\n\n\
+         # daemon and its recoverable session metadata alive in that case.\nOOMPolicy=continue\n\n\
          [Install]\nWantedBy=default.target\n",
         env!("CARGO_PKG_VERSION"),
-        exposure.flag(),
-        super::service_alert::ALERT_UNIT_NAME
+        super::service_alert::ALERT_UNIT_NAME,
+        exposure.flag()
     )
 }
 
@@ -647,6 +650,41 @@ mod tests {
             "an OOM-selected agent child must not stop the daemon"
         );
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    /// `OnFailure=` is a [Unit] directive. systemd SILENTLY ignores it under [Service] — no
+    /// warning, no parse error, `systemctl show -p OnFailure` simply returns empty. It was first
+    /// rendered under [Service], so the deadman alarm from #1134 looked installed on every machine
+    /// and never fired once. Verified on a real host: the unit file contained
+    /// `OnFailure=forge-serve-alert.service` while `systemctl --user show forge-serve -p OnFailure`
+    /// printed `OnFailure=`.
+    ///
+    /// Asserting the string is present is NOT enough — that assertion passed while the alarm was
+    /// dead. The section it lands in is the whole bug, so that is what this pins.
+    #[test]
+    fn systemd_on_failure_is_in_the_unit_section_not_the_service_section() {
+        let unit = render_systemd_service("/usr/local/bin/forge", Exposure::Lan, 7420);
+        let on_failure = unit
+            .find("OnFailure=")
+            .expect("unit must wire the deadman alarm");
+        let service_section = unit
+            .find("[Service]")
+            .expect("unit must have a [Service] section");
+        let unit_section = unit
+            .find("[Unit]")
+            .expect("unit must have a [Unit] section");
+
+        assert!(
+            on_failure > unit_section && on_failure < service_section,
+            "OnFailure= must sit in [Unit]; systemd ignores it in [Service]:\n{unit}"
+        );
+        assert!(
+            unit.contains(&format!(
+                "OnFailure={}",
+                super::super::service_alert::ALERT_UNIT_NAME
+            )),
+            "OnFailure must name the alert unit:\n{unit}"
+        );
     }
 
     /// The unit records which Forge rendered it. Without the stamp there is no way to tell a
