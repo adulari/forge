@@ -103,11 +103,11 @@ impl Session {
 
     /// The last-resort model to try when the routed fallback chain is exhausted: the non-excluded
     /// model whose transient bench expires soonest (the "least dead"). Returns `None` once already
-    /// used, or when the only candidate is the model that just failed (`just_failed`), or when
+    /// used, or when every candidate was already attempted in this chain, or when
     /// nothing transient is benched — so the caller falls through to [`CoreError::NoHealthyModel`].
     pub(crate) fn last_resort_model(
         &self,
-        just_failed: &str,
+        attempted: &std::collections::HashSet<String>,
         already_used: bool,
     ) -> Option<String> {
         if already_used {
@@ -132,7 +132,7 @@ impl Session {
         // (ollama, the claude/codex bridges), so those still qualify.
         let ordered = self.store.transient_benched_ordered().unwrap_or_default();
         ordered.into_iter().find(|m| {
-            m != just_failed
+            !attempted.contains(m)
                 && !forge_config::is_model_disabled(m, &self.config.mesh.disabled)
                 && forge_config::has_api_key(forge_config::provider_of(m))
                 // A pin SET confines failover to its members everywhere else; last-resort must not

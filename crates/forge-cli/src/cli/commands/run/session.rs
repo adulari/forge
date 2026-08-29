@@ -184,6 +184,16 @@ pub(crate) async fn build_session_with_self_mcp(
             const DISCOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
             match tokio::time::timeout(DISCOVERY_BUDGET, discover_catalog(&config)).await {
                 Ok(cat) => {
+                    if !cat
+                        .models()
+                        .iter()
+                        .any(|model| model.starts_with("ollama::"))
+                    {
+                        presenter.emit(forge_tui::PresenterEvent::Warning(
+                            "mesh skipped Ollama: the server is unreachable or no local models are pulled"
+                                .to_string(),
+                        ));
+                    }
                     save_catalog(&cat);
                     Some(cat)
                 }
