@@ -212,6 +212,7 @@ impl Session {
             project_prompt_injected,
             pending_images: Vec::new(),
             edits_this_turn: 0,
+            mutations_this_turn: 0,
             expect_code_change: false,
             tools_unavailable_run: false,
             turn_deadline: None,

@@ -301,6 +301,13 @@ export interface SessionRow {
    * input path exists for it. Additive field: optional so a response from an older daemon (which
    * never emitted the key) still parses, defaulting to drivable. */
   read_only?: boolean;
+  /** How the session's most recent turn ended. `null`/absent until one has (and always absent for
+   * a `read_only` row). Without it, `busy: false` is the whole story: a session that did the work
+   * and one that burned a turn producing nothing look identical. Additive. */
+  last_turn_outcome?: "success" | "failed" | null;
+  /** The precise reason behind `last_turn_outcome` (`final_answer`, `max_steps`,
+   * `budget_exhausted`, `interrupted`, `no_output`). Additive. */
+  last_stop_reason?: string | null;
 }
 
 export interface PastSessionRow {

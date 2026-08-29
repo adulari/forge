@@ -83,6 +83,7 @@ pub(super) async fn request_provider_response(
     proposed_plan: &mut Option<forge_types::PlanProposal>,
     tools_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     inspect_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    mutations_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     bridge_build_fight: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     verification_ledger: &std::sync::Arc<std::sync::Mutex<VerificationLedger>>,
     bridge_observations: &std::sync::Arc<
@@ -164,6 +165,7 @@ pub(super) async fn request_provider_response(
             let active = std::sync::Arc::clone(&active_tools);
             let tools = std::sync::Arc::clone(tools_ran);
             let inspects = std::sync::Arc::clone(inspect_ran);
+            let mutations = std::sync::Arc::clone(mutations_ran);
             let build_fight = std::sync::Arc::clone(bridge_build_fight);
             let verification = std::sync::Arc::clone(verification_ledger);
             let pending_observations = std::sync::Arc::clone(bridge_observations);
@@ -180,6 +182,7 @@ pub(super) async fn request_provider_response(
                     &active,
                     &tools,
                     &inspects,
+                    &mutations,
                     &build_fight,
                     &verification,
                     &pending_observations,

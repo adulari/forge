@@ -1273,6 +1273,38 @@ pub enum StopReason {
     BudgetExhausted,
     /// Turn was aborted via `forge_interrupt` (or an equivalent signal).
     Interrupted,
+    /// The turn ended having produced NO assistant text and no successful mutating tool call —
+    /// it burned a turn and changed nothing. Reported as a failure, never as a completed turn:
+    /// from an orchestrator or the phone this was previously indistinguishable from real work.
+    NoOutput,
+}
+
+impl StopReason {
+    /// Stable wire name, identical to the serde representation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FinalAnswer => "final_answer",
+            Self::MaxSteps => "max_steps",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::Interrupted => "interrupted",
+            Self::NoOutput => "no_output",
+        }
+    }
+
+    /// The coarse outcome a remote client needs: did the turn finish the work (`success`) or fail
+    /// to do so (`failed`)? Callers wanting the precise reason read [`StopReason::as_str`]
+    /// alongside this.
+    pub const fn outcome(self) -> &'static str {
+        match self {
+            Self::FinalAnswer => "success",
+            Self::MaxSteps | Self::BudgetExhausted | Self::Interrupted | Self::NoOutput => "failed",
+        }
+    }
+
+    /// Whether the turn is an honest success. A no-output turn is NOT.
+    pub const fn is_success(self) -> bool {
+        matches!(self, Self::FinalAnswer)
+    }
 }
 
 /// The result of a completed (or interrupted) agent turn.
@@ -1303,6 +1335,14 @@ impl LoopOutcome {
         Self {
             text,
             stop_reason: StopReason::BudgetExhausted,
+        }
+    }
+
+    /// The turn produced nothing — no assistant text, no successful mutating tool call.
+    pub fn no_output(text: String) -> Self {
+        Self {
+            text,
+            stop_reason: StopReason::NoOutput,
         }
     }
 }
@@ -1347,6 +1387,34 @@ impl PartialEq<String> for LoopOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_reason_outcome_separates_success_failure_and_produced_nothing() {
+        assert_eq!(StopReason::FinalAnswer.outcome(), "success");
+        assert_eq!(StopReason::NoOutput.outcome(), "failed");
+        for failed in [
+            StopReason::MaxSteps,
+            StopReason::BudgetExhausted,
+            StopReason::Interrupted,
+        ] {
+            assert_eq!(failed.outcome(), "failed", "{failed:?} is not a success");
+        }
+        // `as_str` is the wire name and must stay identical to the serde representation, which
+        // remote clients decode.
+        for reason in [
+            StopReason::FinalAnswer,
+            StopReason::MaxSteps,
+            StopReason::BudgetExhausted,
+            StopReason::Interrupted,
+            StopReason::NoOutput,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&reason).unwrap(),
+                format!("\"{}\"", reason.as_str())
+            );
+            assert_eq!(reason.is_success(), reason == StopReason::FinalAnswer);
+        }
+    }
 
     #[test]
     fn provider_bench_blocks_every_model_alias_for_that_provider() {
