@@ -351,6 +351,21 @@ impl Session {
                         "model returned an empty response (no text, no tool call) — stopping the turn"
                             .to_string(),
                     ));
+                    // Keep an answer the model already gave. Execution falls through to the
+                    // terminal below, which does `final_text = resp.content` — and `resp.content`
+                    // is empty here by definition. Without this, a turn that produced a real answer
+                    // earlier (has_prior_final) and then hit an unrecoverable empty response
+                    // DISCARDED that answer and reported StopReason::FinalAnswer with "".
+                    // publish_terminal_answer no-ops on empty, so nothing was shown either: a
+                    // headless caller (`forge run`, MCP forge_chat, a subagent) received an empty
+                    // string as a successful result. Reachable whenever failover cannot help —
+                    // a single pinned model, or any decision=None re-drive.
+                    if has_prior_final {
+                        let accepted = final_text.clone();
+                        self.publish_terminal_answer(&accepted)?;
+                        hit_step_cap = false;
+                        break;
+                    }
                 } else if completion_promises_followup(&resp.content) && followup_intent_nudges == 0
                 {
                     followup_intent_nudges += 1;
