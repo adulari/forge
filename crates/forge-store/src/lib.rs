@@ -5010,6 +5010,43 @@ mod tests {
     }
 
     #[test]
+    fn live_event_append_outlasts_a_writer_stall_longer_than_busy_timeout() {
+        // A foreign writer that holds the single WAL write lock for longer than the 5s
+        // `busy_timeout` — a VACUUM, or a large lattice indexing batch — makes the IMMEDIATE BEGIN
+        // in `append_live_event` fail with SQLITE_BUSY once the handler gives up. The append must
+        // still land, otherwise the session's live feed goes dark while the agent keeps working.
+        // Held 6.5s: past the 5s timeout (so the first attempt is certain to fail) but well inside
+        // the retry's remaining budget (so the second attempt is certain to succeed).
+        let path = temp_db_path();
+        let store = Store::open(&path).unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let blocker_path = path.clone();
+        let blocker = std::thread::spawn(move || {
+            let mut conn = Connection::open(&blocker_path).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("UPDATE session SET title = 'stalled'", [])
+                .unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(6_500));
+            tx.commit().unwrap();
+        });
+
+        held_rx.recv().unwrap();
+        let appended = store.append_live_event(&sid, "{\"type\":\"Done\"}");
+        blocker.join().unwrap();
+        appended.expect("append must survive a writer stall longer than busy_timeout");
+
+        let events = store.live_events_after(&sid, 0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1, "{\"type\":\"Done\"}");
+        cleanup(&path);
+    }
+
+    #[test]
     fn v20_database_gains_live_event_counter_and_prunes() {
         let path = temp_db_path();
         Store::open(&path).unwrap();
