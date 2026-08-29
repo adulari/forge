@@ -579,10 +579,16 @@ impl Catalog {
 
     /// `(name, description)` of every skill in the catalog, sorted by name — for advertising the
     /// `use_skill` tool's available-skills list to the model.
-    pub fn skill_listing(&self) -> Vec<(String, String)> {
+    /// `allow_project` gates PROJECT-scope skills, which arrive with a cloned repo and are
+    /// therefore attacker-authored. It is a required argument rather than a default so a new
+    /// call site cannot silently expose them: this listing is embedded in the `use_skill` tool
+    /// description the model sees on turn 1, so an untrusted skill's NAME and DESCRIPTION alone
+    /// are already an injection surface, before any skill is loaded.
+    pub fn skill_listing(&self, allow_project: bool) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = self
             .skills
             .values()
+            .filter(|m| allow_project || m.scope != Scope::Project)
             .map(|m| (m.name.clone(), forge_native(&m.description)))
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -592,8 +598,14 @@ impl Catalog {
     /// Load a skill by name and render its full methodology guidance (body + resources), or
     /// `None` if no skill has that name. Used by the `use_skill` virtual tool on both the direct
     /// and CLI-bridge paths.
-    pub fn skill_guidance(&self, name: &str) -> Option<String> {
-        self.skills.get(name).map(|m| Skill::load(m).guidance())
+    /// `allow_project` gates PROJECT-scope skills for the same reason as [`Self::skill_listing`].
+    /// Loading returns the skill's FULL body as authoritative methodology, so an untrusted project
+    /// skill here is direct instruction injection from a cloned repo.
+    pub fn skill_guidance(&self, name: &str, allow_project: bool) -> Option<String> {
+        self.skills
+            .get(name)
+            .filter(|m| allow_project || m.scope != Scope::Project)
+            .map(|m| Skill::load(m).guidance())
     }
 
     /// Methodology guidance for every known skill that `body` references as a markdown-bold token

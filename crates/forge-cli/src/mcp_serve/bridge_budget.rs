@@ -128,8 +128,15 @@ pub(super) const LEAN_DROPPED_TOOLS: &[&str] = &[
 pub(super) const BRIDGE_USE_SKILL_DESC_CAP: usize = 1536;
 
 /// Names-only `use_skill` description for the bridge, truncated to [`BRIDGE_USE_SKILL_DESC_CAP`].
-pub(super) fn bridge_use_skill_description(skills: &forge_skills::Catalog) -> String {
-    let names: Vec<String> = skills.skill_listing().into_iter().map(|(n, _)| n).collect();
+pub(super) fn bridge_use_skill_description(
+    skills: &forge_skills::Catalog,
+    allow_project: bool,
+) -> String {
+    let names: Vec<String> = skills
+        .skill_listing(allow_project)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
     names_only_skill_description(&names)
 }
 

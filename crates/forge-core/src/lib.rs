@@ -2093,8 +2093,8 @@ impl Session {
         // The skill-loading tool — advertised (with the available-skills list) only when a
         // non-empty catalog is attached, so the model can find + apply Forge's own skills.
         if let Some(cat) = &self.skills {
-            if !cat.skill_listing().is_empty() {
-                specs.push(use_skill_spec(cat));
+            if !cat.skill_listing(self.commands_trust_project()).is_empty() {
+                specs.push(use_skill_spec(cat, self.commands_trust_project()));
             }
         }
         // Fleet agent-to-agent messaging — advertised only when this session is hosted by
@@ -3736,9 +3736,9 @@ pub const USE_SKILL_TOOL: &str = "use_skill";
 /// The `ToolSpec` advertised for [`USE_SKILL_TOOL`], listing the available Forge skills in its
 /// description so the model both *discovers* what exists and can *invoke* one. Shared by the
 /// direct path and the CLI-bridge `mcp-serve` handler so a bridged claude/codex sees it too.
-pub fn use_skill_spec(catalog: &forge_skills::Catalog) -> ToolSpec {
+pub fn use_skill_spec(catalog: &forge_skills::Catalog, allow_project: bool) -> ToolSpec {
     let listing = catalog
-        .skill_listing()
+        .skill_listing(allow_project)
         .into_iter()
         .map(|(name, desc)| {
             let desc: String = desc.chars().take(100).collect();

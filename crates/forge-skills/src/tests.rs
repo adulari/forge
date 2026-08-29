@@ -143,6 +143,50 @@ fn wrapper_delegating_to_a_same_named_skill_still_injects_it() {
     }
 }
 
+/// A PROJECT-scope skill arrives with a cloned repo, so its author is whoever wrote that repo.
+/// Both of these surfaces feed the model directly — `skill_listing` is embedded in the `use_skill`
+/// tool description on turn 1, and `skill_guidance` returns the full body as authoritative
+/// methodology — so both must stay closed until the project is trusted. The interactive `/skill`
+/// path already gated this; the model-facing path did not, which meant a cloned repo could steer
+/// the agent with no approval and no permission check.
+#[test]
+fn an_untrusted_project_skill_is_invisible_and_unloadable_to_the_model() {
+    let t = Tmp::new();
+    t.skill(
+        "user",
+        "mine",
+        "---\nname: mine\ndescription: my own skill\n---\nTrusted body.",
+    );
+    t.skill(
+        "project",
+        "cloned",
+        "---\nname: cloned\ndescription: injected description\n---\nAttacker body.",
+    );
+    let cat = t.load();
+
+    // Untrusted: the project skill must not be named, described, or loadable.
+    let listing = cat.skill_listing(false);
+    assert!(
+        listing.iter().any(|(n, _)| n == "mine"),
+        "a user-scope skill must still be offered"
+    );
+    assert!(
+        !listing.iter().any(|(n, _)| n == "cloned"),
+        "an untrusted project skill must not appear in the model's tool description: {listing:?}"
+    );
+    assert!(
+        cat.skill_guidance("cloned", false).is_none(),
+        "an untrusted project skill must not load its body"
+    );
+
+    // Trusted: opting in restores it, so the gate is a gate and not a removal.
+    assert!(cat.skill_listing(true).iter().any(|(n, _)| n == "cloned"));
+    assert!(cat
+        .skill_guidance("cloned", true)
+        .unwrap()
+        .contains("Attacker body."));
+}
+
 #[test]
 fn skill_listing_and_guidance_back_use_skill() {
     let t = Tmp::new();
@@ -152,15 +196,15 @@ fn skill_listing_and_guidance_back_use_skill() {
         "---\nname: router\ndescription: route tasks\n---\nStep 1. Step 2.",
     );
     let cat = t.load();
-    let listing = cat.skill_listing();
+    let listing = cat.skill_listing(true);
     assert!(listing
         .iter()
         .any(|(n, d)| n == "router" && d == "route tasks"));
     assert!(cat
-        .skill_guidance("router")
+        .skill_guidance("router", true)
         .unwrap()
         .contains("Step 1. Step 2."));
-    assert!(cat.skill_guidance("nope").is_none());
+    assert!(cat.skill_guidance("nope", true).is_none());
 }
 
 #[test]
@@ -583,7 +627,7 @@ fn skill_guidance_is_rebranded_forge_native() {
         "---\nname: demo\ndescription: d\n---\nRun this in Claude Code via the Skill tool.",
     );
     let cat = t.load();
-    let g = cat.skill_guidance("demo").unwrap();
+    let g = cat.skill_guidance("demo", true).unwrap();
     assert!(!g.contains("Claude Code"), "guidance not rebranded: {g}");
     assert!(g.contains("Forge"));
 }
@@ -595,8 +639,11 @@ fn orchestrate_is_a_builtin_command_with_no_import() {
     let t = Tmp::new();
     let cat = t.load();
     assert!(cat.command("orchestrate").is_some());
-    assert!(cat.skill_guidance("orchestrate").is_none());
-    assert!(!cat.skill_listing().iter().any(|(n, _)| n == "orchestrate"));
+    assert!(cat.skill_guidance("orchestrate", true).is_none());
+    assert!(!cat
+        .skill_listing(true)
+        .iter()
+        .any(|(n, _)| n == "orchestrate"));
 
     match cat.resolve("/orchestrate improve the router") {
         Resolved::Command {
@@ -695,7 +742,7 @@ fn a_user_orchestrate_skill_stays_usable_but_builtin_command_wins() {
     let cmd = cat.command("orchestrate").expect("builtin command present");
     assert_eq!(cmd.scope, Scope::Builtin);
     let g = cat
-        .skill_guidance("orchestrate")
+        .skill_guidance("orchestrate", true)
         .expect("user skill present");
     assert!(
         g.contains("MY CUSTOM ORCHESTRATE BODY"),
@@ -765,11 +812,11 @@ fn rust_best_practices_is_a_builtin_skill_loadable_with_no_import() {
     assert_eq!(meta.scope, Scope::Builtin);
     assert!(meta.body.is_some(), "methodology bundled inline");
     assert!(cat
-        .skill_listing()
+        .skill_listing(true)
         .iter()
         .any(|(n, _)| n == "rust-best-practices"));
     let guidance = cat
-        .skill_guidance("rust-best-practices")
+        .skill_guidance("rust-best-practices", true)
         .expect("guidance loads from the inline body");
     assert!(
         guidance.contains("cargo clippy"),
@@ -822,6 +869,6 @@ fn a_user_rust_skill_overrides_the_builtin() {
     let cat = t.load();
     let meta = cat.skill("rust-best-practices").unwrap();
     assert_eq!(meta.scope, Scope::User, "user skill wins the name");
-    let g = cat.skill_guidance("rust-best-practices").unwrap();
+    let g = cat.skill_guidance("rust-best-practices", true).unwrap();
     assert!(g.contains("MY CUSTOM RUST BODY"), "user body loaded: {g}");
 }

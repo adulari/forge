@@ -99,6 +99,10 @@ struct ForgeMcp {
     /// Command/skill catalog so a bridged model can discover + load Forge's own skills via the
     /// `use_skill` tool (otherwise claude/codex hunt their own ~/.claude / ~/.codex skills).
     skills: Arc<forge_skills::Catalog>,
+    /// Whether PROJECT-scope skills (which arrive with a cloned repo, i.e. attacker-authored) may
+    /// be advertised to and loaded by the model. Mirrors `commands.trust_project`; false by
+    /// default, matching the gate the interactive `/skill` path already applies.
+    trust_project: bool,
     /// Lean tool surface (`FORGE_BRIDGE_LEAN=1` / `mesh.bridge_lean`): drop the tools in
     /// [`LEAN_DROPPED_TOOLS`] from the advertised list.
     lean: bool,
@@ -318,23 +322,25 @@ impl ForgeMcp {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim();
-            return Ok(match self.skills.skill_guidance(skill) {
-                Some(g) => CallToolResult::success(vec![ContentBlock::text(format!(
-                    "Loaded the '{skill}' skill. Apply this methodology now:\n\n{g}"
-                ))]),
-                None => {
-                    let available = self
-                        .skills
-                        .skill_listing()
-                        .into_iter()
-                        .map(|(n, _)| n)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    CallToolResult::error(vec![ContentBlock::text(format!(
-                        "no Forge skill named '{skill}'. Available: {available}"
-                    ))])
-                }
-            });
+            return Ok(
+                match self.skills.skill_guidance(skill, self.trust_project) {
+                    Some(g) => CallToolResult::success(vec![ContentBlock::text(format!(
+                        "Loaded the '{skill}' skill. Apply this methodology now:\n\n{g}"
+                    ))]),
+                    None => {
+                        let available = self
+                            .skills
+                            .skill_listing(self.trust_project)
+                            .into_iter()
+                            .map(|(n, _)| n)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        CallToolResult::error(vec![ContentBlock::text(format!(
+                            "no Forge skill named '{skill}'. Available: {available}"
+                        ))])
+                    }
+                },
+            );
         }
 
         // External MCP meta-tools — gate (External/ReadOnly) then route to the manager. Server
@@ -732,12 +738,12 @@ impl ForgeMcp {
         // its native ones. The description is capped to a names-only listing here: the direct
         // path's full catalog (name + description per skill) is re-ingested by the bridged CLI
         // on EVERY turn of its own loop, so it costs far more through the bridge.
-        if !self.skills.skill_listing().is_empty() {
-            let us = forge_core::use_skill_spec(&self.skills);
+        if !self.skills.skill_listing(self.trust_project).is_empty() {
+            let us = forge_core::use_skill_spec(&self.skills, self.trust_project);
             let us_schema: JsonObject = us.schema.as_object().cloned().unwrap_or_default();
             tools.push(Tool::new(
                 us.name,
-                bridge_use_skill_description(&self.skills),
+                bridge_use_skill_description(&self.skills, self.trust_project),
                 Arc::new(us_schema),
             ));
         }
@@ -882,6 +888,7 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
     }
     let server = ForgeMcp {
         registry,
+        trust_project: config.commands.trust_project,
         mode: config.permission_mode,
         rules: config.permission_rules(),
         config,
@@ -987,6 +994,7 @@ mod tests {
         };
         ForgeMcp {
             registry: ToolRegistry::with_core_tools(),
+            trust_project: false,
             mode,
             rules: Vec::new(),
             config,
@@ -1076,6 +1084,7 @@ mod tests {
         let config = Config::default();
         ForgeMcp {
             registry: ToolRegistry::with_core_tools(),
+            trust_project: false,
             mode: config.permission_mode,
             rules: Vec::new(),
             config,
