@@ -31,7 +31,6 @@ fn classifier_candidates(config: &forge_config::Config, mock: bool) -> Vec<Strin
     // how the previous single hardcoded default died silently. Do not add an id here without
     // calling it first.
     const FALLBACKS: &[&str] = &[
-        "groq::openai/gpt-oss-20b",
         "groq::groq/compound-mini",
         "groq::openai/gpt-oss-120b",
         "cerebras::gpt-oss-120b",
@@ -785,14 +784,9 @@ mod bridge_harness_tests {
 
     #[test]
     fn classifier_uses_a_stable_fixed_order_independent_of_catalog_contents() {
-        let empty_catalog = ModelCatalog::new(Vec::new());
-        let noisy_catalog = ModelCatalog::new(vec![
-            "openrouter::random/free-model".into(),
-            "groq::unrelated-discovered-model".into(),
-        ]);
         let expected = [
-            "groq::groq/compound-mini",
             "groq::openai/gpt-oss-20b",
+            "groq::groq/compound-mini",
             "groq::openai/gpt-oss-120b",
             "cerebras::gpt-oss-120b",
         ];
@@ -801,7 +795,9 @@ mod bridge_harness_tests {
             classifier_candidates(&forge_config::Config::default(), true),
             expected
         );
-        assert_ne!(empty_catalog.models(), noisy_catalog.models());
+        // `classifier_candidates` takes no catalog at all — that is precisely why the order is
+        // catalog-independent, so this test pins the property by construction rather than by
+        // comparing two catalogs it never passes in.
         assert_eq!(
             classifier_candidates(&forge_config::Config::default(), true),
             expected
@@ -817,7 +813,6 @@ mod bridge_harness_tests {
             classifier_candidates(&config, true),
             [
                 "groq::permanently-dead",
-                "groq::openai/gpt-oss-20b",
                 "groq::groq/compound-mini",
                 "groq::openai/gpt-oss-120b",
                 "cerebras::gpt-oss-120b",

@@ -134,7 +134,7 @@ unrelated `continue` sharing one seed.
 
 - `heuristic` — explicit opt-in, `score_prompt` only, zero added cost/latency.
 - `llm` (default) — `LlmRouter` calls one fixed capable model
-  (`mesh.classifier_model`, default `groq::llama-3.3-70b-versatile`) at temperature zero. The
+  (`mesh.classifier_model`, default `groq::openai/gpt-oss-20b`) at temperature zero. The
   classifier is not itself mesh-routed, so catalog discovery order cannot make identical input
   bounce between classifier models. The configured model has a 5-second attempt within the
   15-second classification budget; an unavailable, benched, timed-out, or unparseable classifier
@@ -1027,7 +1027,7 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `models` | shipped free-first lists | Per-tier candidate lists; used verbatim when auto-discovery is off/empty (§3.1) |
 | `auto_discover` | `true` | Rank the discovered catalog instead of `[mesh.models]` (`lib.rs:1279`) |
 | `benchmark_ranking` | `true` | Use AA indices when cached (`lib.rs:1336`) |
-| `classifier` / `classifier_model` | `llm` / `groq::llama-3.3-70b-versatile` | Fixed task classifier; §2.3 |
+| `classifier` / `classifier_model` | `llm` / `groq::openai/gpt-oss-20b` | Fixed task classifier; §2.3 |
 | `classifier_activity_focused` | `false` | Legacy unstructured-prompt compatibility: classify the final non-empty paragraph; §2.3 |
 | `prefer_subscription` | `true` | Configured-path ordering: subscriptions before metered (`lib.rs:1221`) |
 | `subscriptions` | `{}` | Plan slug per provider, captured by `forge init` (`lib.rs:1400`) |
