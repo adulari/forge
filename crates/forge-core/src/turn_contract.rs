@@ -142,16 +142,68 @@ impl Default for TurnContract {
     }
 }
 
+/// Directive phrases that are imperative by construction, so they are safe to match anywhere in
+/// the prompt: no ordinary description of a system contains them.
+const READ_ONLY_DIRECTIVES: [&str; 7] = [
+    "do not make changes",
+    "without changing files",
+    "this is read-only",
+    "this is read only",
+    "this task is read-only",
+    "this request is read-only",
+    "this turn is read-only",
+];
+
+/// Bare read-only tokens. These are ordinary technical vocabulary — a bug report says the sandbox
+/// stays read-only, or that a turn silently ran READ-ONLY — so they only count as a contract when
+/// they OPEN a segment, i.e. when they address this turn rather than describe something.
+const READ_ONLY_ANCHORS: [&str; 2] = ["read-only", "read only"];
+
+/// A read-only contract removes write capability for the whole turn: [`crate::TaskScope`] denies
+/// every mutating tool and the model is told to change nothing. Inferring that from ANY occurrence
+/// of the token silently downgraded turns whose SUBJECT was read-only behavior — a `--mode bypass`
+/// run asked to fix a read-only bug produced a full analysis, zero edits, and a report that it
+/// lacked permission to write. So the bare tokens must open a segment to count.
 fn explicitly_read_only(prompt: &str) -> bool {
-    let prompt = prompt.to_ascii_lowercase();
-    [
-        "read-only",
-        "read only",
-        "do not make changes",
-        "without changing files",
-    ]
-    .iter()
-    .any(|needle| prompt.contains(needle))
+    let lower = prompt.to_ascii_lowercase();
+    if READ_ONLY_DIRECTIVES
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        return true;
+    }
+    lower.split(['\n', '.', '!', '?', ';']).any(|segment| {
+        let segment = trim_directive_decoration(segment);
+        READ_ONLY_ANCHORS
+            .iter()
+            .any(|needle| segment.starts_with(needle))
+    })
+}
+
+/// Strip list bullets, markdown emphasis and one leading framing label so an anchored directive is
+/// still recognized as `- **Read-only**: ...` or `Note: read only`.
+fn trim_directive_decoration(segment: &str) -> &str {
+    let segment = segment
+        .trim()
+        .trim_start_matches(|c: char| {
+            matches!(c, '-' | '*' | '#' | '>' | '`' | '_' | '[' | '(')
+                || c.is_ascii_digit()
+                || c.is_whitespace()
+        })
+        .trim_start();
+    for label in [
+        "note:",
+        "important:",
+        "constraint:",
+        "scope:",
+        "mode:",
+        "please",
+    ] {
+        if let Some(rest) = segment.strip_prefix(label) {
+            return rest.trim_start();
+        }
+    }
+    segment
 }
 
 fn explicitly_preserves_public_api(prompt: &str) -> bool {
@@ -239,6 +291,52 @@ mod tests {
         assert_eq!(contract.intent(), TaskIntent::Mutating);
         assert_eq!(contract.source(), ContractSource::HarnessExpectation);
         assert!(contract.requires_changed_artifact());
+    }
+
+    #[test]
+    fn describing_read_only_behavior_does_not_strip_write_capability() {
+        // The reported failure: a `--mode bypass` turn whose SUBJECT was read-only behavior was
+        // given a read-only contract, so every mutating tool was denied and the model reported it
+        // lacked permission to write. Descriptions must not be read as directives.
+        for described in [
+            "BUG: a --mode bypass turn silently runs READ-ONLY and produces no edits. Fix it.",
+            "The codex sandbox stays read-only, so writes go through the MCP gate. Add a test.",
+            "Its reasoning cites a read-only contract from the harness; work out why.",
+            "Explain why the bridge is read only",
+        ] {
+            let contract = TurnContract::derive(described, PermissionMode::Bypass, false);
+            assert_eq!(
+                contract.intent(),
+                TaskIntent::Mutating,
+                "described read-only behavior became a read-only contract: {described}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_addressed_read_only_directive_still_holds_in_every_mode() {
+        for directive in [
+            "Read-only: inspect the parser",
+            "read only — tell me what the router does",
+            "- **Read-only**: audit the store",
+            "Note: read-only investigation, no edits",
+            "Audit the store. This is read-only.",
+            "Answer without changing files",
+            "Do not make changes; just explain the failover chain",
+        ] {
+            for mode in [
+                PermissionMode::Default,
+                PermissionMode::AcceptEdits,
+                PermissionMode::Bypass,
+            ] {
+                let contract = TurnContract::derive(directive, mode, false);
+                assert_eq!(
+                    contract.intent(),
+                    TaskIntent::ReadOnlyReview,
+                    "explicit read-only directive was dropped in {mode:?}: {directive}"
+                );
+            }
+        }
     }
 
     #[test]

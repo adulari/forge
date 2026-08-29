@@ -843,6 +843,15 @@ fn bridge_mcp_env(
     env
 }
 
+/// The `FORGE_PERMISSION_MODE` a bridge child is (or would be) spawned with, read back from the
+/// env [`bridge_mcp_env`] built for that turn so there is one source of truth for the value.
+fn live_permission_mode(mcp_env: &[(String, String)]) -> Option<String> {
+    mcp_env
+        .iter()
+        .find(|(key, _)| key == "FORGE_PERMISSION_MODE")
+        .map(|(_, value)| value.clone())
+}
+
 /// Build the CLI argv for a bridge turn. The prompt is NOT included here — it is streamed to the
 /// child's stdin by [`CliProvider::complete`] instead of passed as an argument, because a turn's
 /// flattened transcript (system preamble + injected Lattice context + history) easily exceeds the
@@ -2211,6 +2220,11 @@ struct LiveSession {
     /// bridge-edit `/undo` granularity correct. Re-drives WITHIN a turn keep the same seq and reuse
     /// the process (where the per-step latency win is).
     checkpoint_seq: Option<String>,
+    /// `FORGE_PERMISSION_MODE` baked into the served `forge mcp-serve` child's env at spawn. The
+    /// child gates every bridged tool on it, so a parked process can only be reused for a turn
+    /// running under the SAME temper — otherwise switching to Full/Auto-edit would keep writing
+    /// through a child still enforcing the mode the session started in.
+    permission_mode: Option<String>,
     sink_path: Option<std::path::PathBuf>,
     sub_rx: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
     tailer: Option<tokio::task::JoinHandle<()>>,
@@ -2579,6 +2593,7 @@ impl CliProvider {
         let checkpoint_seq = checkpoint
             .map(|c| c.seq.to_string())
             .or_else(Self::current_checkpoint_seq);
+        let permission_mode = live_permission_mode(&mcp_env);
 
         // No `--resume`: a persistent process holds its own context across turns. Add the
         // streaming-input flag so it reads user turns from stdin instead of one prompt + EOF.
@@ -2626,6 +2641,7 @@ impl CliProvider {
             model: bare.to_string(),
             sent: 0,
             checkpoint_seq,
+            permission_mode,
             sink_path,
             sub_rx,
             tailer,
@@ -2650,6 +2666,10 @@ impl CliProvider {
         let checkpoint_seq = checkpoint
             .map(|c| c.seq.to_string())
             .or_else(Self::current_checkpoint_seq);
+        // The temper this turn runs under. A parked process serves its tools from a `forge mcp-serve`
+        // child whose permission gate was fixed at spawn, so reusing it across a temper switch would
+        // keep enforcing the OLD mode — the user flips to Full and the bridge still refuses to write.
+        let permission_mode = live_permission_mode(&bridge_mcp_env(None, checkpoint));
         let mut guard = self.live.lock().await;
 
         // Reuse only a session that matches the model, has strictly grown (a shrink → its in-process
@@ -2657,7 +2677,7 @@ impl CliProvider {
         // isn't mid-turn from a prior call that never finished (see `LiveSession::turn_in_flight`) —
         // reusing that one would write a new turn into a stream whose read position is ambiguous.
         let reuse = matches!(&*guard, Some(s)
-            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.checkpoint_seq == checkpoint_seq && !s.turn_in_flight);
+            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.checkpoint_seq == checkpoint_seq && s.permission_mode == permission_mode && !s.turn_in_flight);
         if !reuse {
             if let Some(old) = guard.take() {
                 old.teardown().await;
@@ -3714,6 +3734,91 @@ mod tests {
         // The prompt is fed via stdin, never as an argv positional (ARG_MAX fix).
         assert!(!args.iter().any(|a| a == "do a thing"));
         assert!(!args.contains(&"--model".to_string()));
+    }
+
+    /// THE regression guard for "bypass means bypass on every provider". Both bridges gate their
+    /// tools in a `forge mcp-serve` child, so the session's temper crosses the process boundary as
+    /// `FORGE_PERMISSION_MODE` *inside the argv* — claude in the `--mcp-config` JSON, codex in a
+    /// `-c mcp_servers.forge.env.*` override (codex hands its MCP servers a curated env, so an
+    /// inherited variable would never arrive). If either stops carrying it, the bridged model runs
+    /// under the stale on-disk config mode instead of the mode the user selected.
+    #[test]
+    fn every_session_mode_reaches_both_bridges_in_the_command_line() {
+        for (mode, expected) in [
+            (PermissionMode::Plan, "plan"),
+            (PermissionMode::Default, "default"),
+            (PermissionMode::AcceptEdits, "accept-edits"),
+            (PermissionMode::Bypass, "bypass"),
+        ] {
+            let ctx = CheckpointContext {
+                session: "mode-session".to_string(),
+                seq: 3,
+                root: "/tmp/checkpoints".to_string(),
+                workspace: "/tmp/workspace".to_string(),
+                mode: mode.label().to_string(),
+            };
+            let mcp_env = bridge_mcp_env(None, Some(&ctx));
+
+            let claude = build_args(
+                CliKind::ClaudeCode,
+                "opus",
+                true,
+                "/bin/forge",
+                &mcp_env,
+                None,
+            );
+            let config = claude
+                .iter()
+                .position(|a| a == "--mcp-config")
+                .map(|i| claude[i + 1].clone())
+                .expect("claude harness argv carries --mcp-config");
+            let parsed: Value = serde_json::from_str(&config).expect("mcp-config is valid JSON");
+            assert_eq!(
+                parsed["mcpServers"]["forge"]["env"]["FORGE_PERMISSION_MODE"],
+                Value::String(expected.to_string()),
+                "claude bridge dropped the session mode {mode:?}"
+            );
+
+            let codex = build_args(CliKind::Codex, "", true, "/bin/forge", &mcp_env, None);
+            assert!(
+                codex
+                    .iter()
+                    .any(|a| a
+                        == &format!("mcp_servers.forge.env.FORGE_PERMISSION_MODE=\"{expected}\"")),
+                "codex bridge dropped the session mode {mode:?}: {codex:?}"
+            );
+        }
+    }
+
+    /// The persistent claude transport parks a live process between calls. Its served
+    /// `forge mcp-serve` child has the temper baked into its env at spawn, so the reuse key must
+    /// discriminate on mode: reusing across a Plan→Full switch would keep denying writes the user
+    /// has already allowed.
+    #[test]
+    fn the_live_session_reuse_key_discriminates_on_permission_mode() {
+        let ctx = |mode: PermissionMode| CheckpointContext {
+            session: "live-session".to_string(),
+            seq: 5,
+            root: "/tmp/checkpoints".to_string(),
+            workspace: "/tmp/workspace".to_string(),
+            mode: mode.label().to_string(),
+        };
+        let key =
+            |mode: PermissionMode| live_permission_mode(&bridge_mcp_env(None, Some(&ctx(mode))));
+
+        assert_eq!(key(PermissionMode::Bypass), Some("bypass".to_string()));
+        assert_eq!(key(PermissionMode::Bypass), key(PermissionMode::Bypass));
+        for other in [
+            PermissionMode::Plan,
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+        ] {
+            assert_ne!(
+                key(PermissionMode::Bypass),
+                key(other),
+                "a parked {other:?} bridge process would be reused for a Bypass turn"
+            );
+        }
     }
 
     #[test]
