@@ -44,9 +44,11 @@ const MAX_INLINE_BODY: usize = 256 * 1024;
 const MAX_OUTBOUND_INLINE_BODY: usize = 64 * 1024;
 const MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_QUERY_LEN: usize = 4096;
-const RECONNECT_DELAY: Duration = Duration::from_secs(10);
+const RECONNECT_MIN_DELAY: Duration = Duration::from_secs(1);
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);
 const RELAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const RELAY_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
+const CONNECTED_LOG_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const COMMAND_WORKER_LEASE_MS: u64 = 2 * 60 * 1000;
 const COMMAND_JOURNAL_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -187,21 +189,47 @@ pub(super) fn spawn(local_base_url: String) -> tokio::task::JoinHandle<()> {
 }
 
 async fn relay_connector_loop(local_base_url: &str) {
-    let mut last_error = String::new();
+    let mut reconnect_delay = RECONNECT_MIN_DELAY;
     loop {
+        let connected_at = Instant::now();
         match connect_once(local_base_url).await {
-            Ok(()) => last_error.clear(),
+            Ok(()) => reconnect_delay = RECONNECT_MIN_DELAY,
             Err(error) => {
                 let message = format!("{error:#}");
-                if message != last_error {
-                    eprintln!(
-                        "⚠ Forge Anywhere connector offline — local/direct Forge is unaffected: {message}"
-                    );
-                    last_error = message;
-                }
+                record_link_state(false, 0, Some(message.clone()));
+                eprintln!(
+                    "⚠ Forge Anywhere connector offline; reconnecting in {}s — local/direct Forge is unaffected: {message}",
+                    reconnect_delay.as_secs()
+                );
             }
         }
-        tokio::time::sleep(RECONNECT_DELAY).await;
+        if connected_at.elapsed() >= RELAY_HEARTBEAT_TIMEOUT {
+            reconnect_delay = RECONNECT_MIN_DELAY;
+        }
+        tokio::time::sleep(reconnect_delay).await;
+        reconnect_delay = (reconnect_delay * 2).min(RECONNECT_MAX_DELAY);
+    }
+}
+
+fn record_link_state(connected: bool, last_exchange_ms: u64, error: Option<String>) {
+    let result = super::LinkStateStore::platform().and_then(|store| {
+        let last_exchange_ms = if last_exchange_ms == 0 {
+            store
+                .load()?
+                .map_or(0, |previous| previous.last_exchange_ms)
+        } else {
+            last_exchange_ms
+        };
+        store.save(&super::LinkState {
+            daemon_pid: std::process::id(),
+            connected,
+            last_exchange_ms,
+            updated_at_ms: now_ms(),
+            error,
+        })
+    });
+    if let Err(error) = result {
+        eprintln!("⚠ Forge Anywhere could not persist relay link state: {error:#}");
     }
 }
 
@@ -282,12 +310,17 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
     let (relay, _) = tokio_tungstenite::connect_async(relay_url.as_str())
         .await
         .context("connect encrypted Anywhere relay")?;
-    println!("⚒ Forge Anywhere connector online");
+    let mut last_exchange_ms = now_ms();
+    record_link_state(true, last_exchange_ms, None);
+    println!("⚒ Forge Anywhere connector online — relay exchange successful");
     let (mut relay_write, mut relay_read) = relay.split();
     let mut heartbeat = RelayHeartbeat::new(Instant::now());
     let mut heartbeat_interval = tokio::time::interval(RELAY_HEARTBEAT_INTERVAL);
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat_interval.tick().await;
+    let mut connected_log_interval = tokio::time::interval(CONNECTED_LOG_INTERVAL);
+    connected_log_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    connected_log_interval.tick().await;
     let (local_events_tx, mut local_events_rx) = mpsc::channel(128);
     let mut streams = HashMap::<[u8; 16], StreamHandle>::new();
     let blobs = RelayBlobClient {
@@ -303,6 +336,8 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                 };
                 match relay_message.context("read relay frame")? {
                     Message::Binary(bytes) => {
+                        last_exchange_ms = now_ms();
+                        record_link_state(true, last_exchange_ms, None);
                         handle_relay_envelope(
                             &store,
                             &identity,
@@ -317,9 +352,15 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                     }
                     Message::Ping(bytes) => {
                         heartbeat.record_pong(Instant::now());
+                        last_exchange_ms = now_ms();
+                        record_link_state(true, last_exchange_ms, None);
                         relay_write.send(Message::Pong(bytes)).await?;
                     }
-                    Message::Pong(_) => heartbeat.record_pong(Instant::now()),
+                    Message::Pong(_) => {
+                        heartbeat.record_pong(Instant::now());
+                        last_exchange_ms = now_ms();
+                        record_link_state(true, last_exchange_ms, None);
+                    }
                     Message::Close(_) => bail!("relay closed the connection"),
                     Message::Text(_) | Message::Frame(_) => bail!("relay sent a non-binary data frame"),
                 }
@@ -332,6 +373,12 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                     .send(Message::Ping(Vec::new().into()))
                     .await
                     .context("send relay heartbeat")?;
+            }
+            _ = connected_log_interval.tick() => {
+                println!(
+                    "⚒ Forge Anywhere connector healthy — last relay exchange {}s ago",
+                    now_ms().saturating_sub(last_exchange_ms) / 1000
+                );
             }
             event = local_events_rx.recv() => {
                 let Some(event) = event else {
