@@ -15,6 +15,7 @@ function row(index: number, state: "waiting" | "busy" | "idle"): SessionRow {
     context_tokens: 0,
     context_limit: null,
     model: "mock",
+    permission_mode: "default",
     created_at: index,
     last_activity: index,
   };

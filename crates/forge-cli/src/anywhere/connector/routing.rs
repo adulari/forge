@@ -51,7 +51,8 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::ArchiveSession
         | RouteId::ForkSession
         | RouteId::MergeSession
-        | RouteId::DiscardSession => {
+        | RouteId::DiscardSession
+        | RouteId::SetSessionMode => {
             if request.parameters.is_empty() || request.parameters.len() > 2 {
                 bail!("session route requires one path parameter and an optional query");
             }
@@ -61,6 +62,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
                 RouteId::ForkSession => "fork",
                 RouteId::MergeSession => "merge",
                 RouteId::DiscardSession => "discard",
+                RouteId::SetSessionMode => "mode",
                 _ => unreachable!(),
             };
             Ok(RouteTarget {

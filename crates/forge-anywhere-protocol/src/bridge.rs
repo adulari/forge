@@ -12,6 +12,7 @@ pub enum RouteId {
     Health,
     ListSessions,
     CreateSession,
+    SetSessionMode,
     SessionSnapshot,
     SessionHistory,
     SessionInput,

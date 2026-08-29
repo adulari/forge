@@ -5,7 +5,7 @@ import { filterSessions, isOfflineError, sessionPickerState } from "./sessionPic
 
 const row = (id: string, title: string, state: "waiting" | "busy" | "idle"): SessionRow => ({
   id, title, cwd: `/work/${id}`, worktree: null, busy: state === "busy", waiting: state === "waiting",
-  cost_usd: 0, context_tokens: 0, context_limit: null, model: "mock", created_at: 0, last_activity: 0,
+  cost_usd: 0, context_tokens: 0, context_limit: null, model: "mock", permission_mode: "default", created_at: 0, last_activity: 0,
 });
 
 describe("session picker", () => {

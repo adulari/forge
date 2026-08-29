@@ -1,6 +1,6 @@
 "use strict";
 const BASE = "__BASE__";
-const PROTO = 9;
+const PROTO = 10;
 const $ = (id) => document.getElementById(id);
 let ws = null, dead = false, notif = false, curSeq = 0, retries = 0, curOverlay = null;
 // The /copy payload stashed outside the DOM (it can be large / contain anything).

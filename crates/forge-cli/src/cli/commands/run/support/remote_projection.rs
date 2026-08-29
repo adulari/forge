@@ -57,6 +57,10 @@ pub(crate) fn build_snapshot_frame(
         exposure: ident.exposure,
         busy: view.busy,
         done: view.done,
+        permission_mode: forge_types::PermissionMode::from_label(&view.temper)
+            .map(forge_types::PermissionMode::key)
+            .unwrap_or_default()
+            .to_string(),
         temper: view.temper,
         effort: view
             .effort

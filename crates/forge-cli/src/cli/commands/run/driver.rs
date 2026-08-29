@@ -75,6 +75,7 @@ pub(crate) struct SessionDriverHandle {
     pub events: std::sync::Arc<std::sync::Mutex<remote::EventLog>>,
     /// Feed remote inputs to the driver (the WS receive half pushes here).
     pub input_tx: tokio::sync::mpsc::Sender<remote::RemoteInput>,
+    mode_tx: tokio::sync::mpsc::Sender<ModeChange>,
     /// Unix seconds of the last broadcast state change — "last activity" in the session list.
     pub last_activity: std::sync::Arc<AtomicI64>,
     /// How many WebSocket clients are currently attached (the daemon's WS route holds a guard
@@ -85,6 +86,18 @@ pub(crate) struct SessionDriverHandle {
 }
 
 impl SessionDriverHandle {
+    pub(crate) async fn set_permission_mode(
+        &self,
+        mode: forge_types::PermissionMode,
+    ) -> Result<()> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.mode_tx
+            .send(ModeChange { mode, reply })
+            .await
+            .context("session driver stopped")?;
+        result.await.context("session driver stopped")
+    }
+
     pub(crate) fn title(&self) -> String {
         self.title
             .read()
@@ -167,14 +180,10 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     }
 
     let mut session = session;
-    // API-requested starting temper (`POST /api/sessions {"temper": ...}`) — reuses the exact
-    // setter `picker_accept` calls for `PickerKind::Tempers` (including the best-effort
-    // persist-as-next-default), so a session created this way starts exactly where picking that
-    // row in the `/mode` picker would have left it. Full is included: picker-level availability
-    // is the bar, and the request-level parse already rejected anything else before we got here.
+    // API-requested starting mode is session-scoped: use the same runtime setter as the `/mode`
+    // picker without changing the configured default inherited by later sessions.
     if let Some(mode) = spec.temper {
         session.set_temper(mode);
-        let _ = forge_config::write_permission_mode(mode);
     }
     // The workspace is validated during session construction. Keep the legacy setter only
     // as a compatibility no-op; every session now roots tools unconditionally.
@@ -214,6 +223,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         remote::SnapshotFrame::new(remote::Snapshot::default()),
     ));
     let (input_tx, input_rx) = tokio::sync::mpsc::channel::<remote::RemoteInput>(64);
+    let (mode_tx, mode_rx) = tokio::sync::mpsc::channel::<ModeChange>(8);
     let events = std::sync::Arc::new(std::sync::Mutex::new(remote::EventLog::new(
         remote::EVENT_LOG_CAP,
     )));
@@ -230,6 +240,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         spec.worktree.clone(),
         ui_rx,
         input_rx,
+        mode_rx,
         snapshot_tx,
         events.clone(),
         shutdown_rx,
@@ -248,11 +259,17 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         snapshot_rx,
         events,
         input_tx,
+        mode_tx,
         last_activity,
         ws_clients,
         shutdown_tx,
         task: std::sync::Mutex::new(Some(task)),
     })
+}
+
+struct ModeChange {
+    mode: forge_types::PermissionMode,
+    reply: tokio::sync::oneshot::Sender<()>,
 }
 
 fn now_secs() -> i64 {
@@ -328,6 +345,7 @@ async fn drive_session(
     worktree: Option<String>,
     ui_rx: std::sync::mpsc::Receiver<UiMsg>,
     mut input_rx: tokio::sync::mpsc::Receiver<remote::RemoteInput>,
+    mut mode_rx: tokio::sync::mpsc::Receiver<ModeChange>,
     snapshot_tx: tokio::sync::watch::Sender<std::sync::Arc<remote::SnapshotFrame>>,
     events: std::sync::Arc<std::sync::Mutex<remote::EventLog>>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
@@ -502,6 +520,12 @@ async fn drive_session(
             if let Err(e) = st.handle_input(input).await {
                 st.app.note(&format!("⚠ {e}"));
             }
+        }
+        while let Ok(change) = mode_rx.try_recv() {
+            let label = st.session.lock().await.set_temper(change.mode).label();
+            st.app.set_temper(label);
+            dirty = true;
+            let _ = change.reply.send(());
         }
         // 3. Keys queued by the drain (named keys + synthesized overlay commits) through the
         //    headless modal router — same precedence as the TUI key loop.
@@ -1018,6 +1042,7 @@ mod tests {
             remote::SnapshotFrame::new(remote::Snapshot::default()),
         ));
         let (input_tx, _) = tokio::sync::mpsc::channel(1);
+        let (mode_tx, _) = tokio::sync::mpsc::channel(1);
         drop(SessionDriverHandle {
             session_id: "test".into(),
             title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
@@ -1027,6 +1052,7 @@ mod tests {
             snapshot_rx,
             events: std::sync::Arc::new(std::sync::Mutex::new(remote::EventLog::new(1))),
             input_tx,
+            mode_tx,
             last_activity: std::sync::Arc::new(AtomicI64::new(0)),
             ws_clients: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             shutdown_tx,
@@ -1046,6 +1072,7 @@ mod tests {
         ));
         drop(snapshot_tx);
         let (input_tx, _) = tokio::sync::mpsc::channel(1);
+        let (mode_tx, _) = tokio::sync::mpsc::channel(1);
         let handle = SessionDriverHandle {
             session_id: "test".into(),
             title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
@@ -1055,6 +1082,7 @@ mod tests {
             snapshot_rx,
             events: std::sync::Arc::new(std::sync::Mutex::new(remote::EventLog::new(1))),
             input_tx,
+            mode_tx,
             last_activity: std::sync::Arc::new(AtomicI64::new(0)),
             ws_clients: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             shutdown_tx,

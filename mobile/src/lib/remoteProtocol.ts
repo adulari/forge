@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 
 export interface SnapshotIdentity {
   protocol: number;
@@ -6,6 +6,7 @@ export interface SnapshotIdentity {
   revision: number;
   resync: boolean;
   closed: boolean;
+  permission_mode?: string;
 }
 
 /** Minimal structural guard for untrusted WebSocket frames. */

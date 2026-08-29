@@ -1,5 +1,5 @@
 {
-  "protocol": 9,
+  "protocol": 10,
   "required_snapshot_fields": [
     "protocol",
     "session_id",
@@ -10,28 +10,31 @@
     "queued",
     "prompt_seq",
     "transcript",
-    "transcript_rows"
+    "transcript_rows",
+    "permission_mode"
   ],
   "frames": [
     {
-      "protocol": 9,
+      "protocol": 10,
       "session_id": "golden-session",
       "revision": 1,
       "resync": false,
       "closed": false,
       "busy": false,
       "queued": [],
-      "prompt_seq": 0
+      "prompt_seq": 0,
+      "permission_mode": "default"
     },
     {
-      "protocol": 9,
+      "protocol": 10,
       "session_id": "golden-session",
       "revision": 9,
       "resync": true,
       "closed": false,
       "busy": true,
       "queued": ["second prompt"],
-      "prompt_seq": 2
+      "prompt_seq": 2,
+      "permission_mode": "bypass"
     }
   ],
   "inputs": [
