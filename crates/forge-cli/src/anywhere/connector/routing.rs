@@ -27,8 +27,13 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::UpdateConfig => exact(Method::PUT, "/api/config"),
         RouteId::ListHooks => exact(Method::GET, "/api/hooks"),
         RouteId::ListPlans => exact(Method::GET, "/api/plans"),
+        // Read-only MCP review. Registering a server is not bridged: `POST /api/mcp` persists a
+        // caller-supplied command that the host executes the next time a session starts that
+        // client, which is more durable code execution than the commit the git routes below
+        // already refuse. Configuring an MCP server stays a local action, on the machine that
+        // runs it.
         RouteId::ReadMcp => exact(Method::GET, "/api/mcp"),
-        RouteId::UpdateMcp => exact(Method::POST, "/api/mcp"),
+        RouteId::UpdateMcp => bail!("MCP server registration is not reachable over the bridge"),
         RouteId::Usage => exact(Method::GET, "/api/usage"),
         RouteId::Diagnostics => exact(Method::GET, "/api/diagnostics"),
         RouteId::Answer => exact(Method::POST, "/api/answer"),
@@ -38,7 +43,8 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::ListTerminals => exact(Method::GET, "/api/terminals"),
         // Read-only git review (see the note on `RouteId::GitStatus`). `GET` only: the daemon's
         // mutating git endpoints stay unreachable over the bridge, so a compromised relay command
-        // cannot stage or commit in the user's repository.
+        // cannot stage or commit in the user's repository, any more than it can register an MCP
+        // server the host would then run.
         RouteId::GitStatus => exact(Method::GET, "/api/git/status"),
         RouteId::GitBranches => exact(Method::GET, "/api/git/branches"),
         RouteId::GitDiff => exact(Method::GET, "/api/git/diff"),
@@ -187,6 +193,33 @@ mod tests {
                 assert!(
                     validate_command_request(&request(route, method, &[])).is_err(),
                     "{route:?} must refuse {method} over the bridge"
+                );
+            }
+        }
+    }
+
+    /// The MCP catalog reads; registering a server does not. `POST /api/mcp` writes a
+    /// caller-supplied command into `mcp.toml` that the host later executes, so bridging it would
+    /// hand anything that can speak to the relay durable code execution — strictly more than the
+    /// commit the git routes already refuse.
+    #[test]
+    fn mcp_registration_is_not_reachable_over_the_bridge() {
+        let read = request(RouteId::ReadMcp, "GET", &[]);
+        let target = route_target(&read).unwrap();
+        assert_eq!(target.method, Method::GET);
+        assert_eq!(target.path, "/api/mcp");
+        assert!(validate_command_request(&read).is_ok());
+
+        assert!(route_target(&request(RouteId::UpdateMcp, "POST", &[])).is_err());
+        for method in ["POST", "PUT", "PATCH", "DELETE", "GET"] {
+            assert!(
+                validate_command_request(&request(RouteId::UpdateMcp, method, &[])).is_err(),
+                "MCP registration must refuse {method} over the bridge"
+            );
+            if method != "GET" {
+                assert!(
+                    validate_command_request(&request(RouteId::ReadMcp, method, &[])).is_err(),
+                    "the MCP catalog route must refuse {method} over the bridge"
                 );
             }
         }

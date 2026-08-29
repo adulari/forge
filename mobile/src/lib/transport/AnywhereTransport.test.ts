@@ -71,6 +71,35 @@ describe("AnywhereTransport", () => {
     ).rejects.toThrow("not allowlisted");
   });
 
+  it("maps the MCP catalog read but never MCP server registration", async () => {
+    // Registering a stdio server persists a command the host executes, so it is a local-only
+    // action: the host has no bridge route for it and the phone must not emit one.
+    const captured: AnywhereBridgeRequest[] = [];
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        captured.push(request);
+        return { status: 200, body: new TextEncoder().encode("{}") };
+      },
+      openSessionSocket: socket,
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+
+    await transport.fetch("fany://host-1/api/mcp");
+
+    expect(captured[0]).toMatchObject({ route: "read_mcp", method: "GET", parameters: [] });
+    await expect(
+      transport.fetch("fany://host-1/api/mcp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "evil", transport: "stdio", command: "sh" }),
+      }),
+    ).rejects.toThrow("not allowlisted");
+    await expect(
+      transport.fetch("fany://host-1/api/mcp", { method: "PATCH" }),
+    ).rejects.toThrow("not allowlisted");
+    expect(captured).toHaveLength(1);
+  });
+
   it("maps global search and session lifecycle requests without widening the allowlist", async () => {
     const captured: AnywhereBridgeRequest[] = [];
     const relay: AnywhereRelay = {
