@@ -159,7 +159,7 @@ Once you're comfortable with the basics:
 | Control sessions from desktop/mobile/web | `forge serve --tunnel`, then open or scan its URL |
 | Import your Claude Code skills | `forge import claude` |
 | Connect MCP servers | `forge mcp add ...` or `forge mcp import` |
-| Move Forge to another machine | `forge migrate export ./bundle.tar.gz` |
+| Move Forge to another machine | `forge migrate export ./bundle` |
 
 **Full CLI reference:** [README →](../README.md#cli-reference)
 **Configuration options:** [README →](../README.md#configuration)

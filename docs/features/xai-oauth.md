@@ -22,7 +22,7 @@ either confirms API access or explains why it can't.
 Once signed in, pin a model with the `xai-oauth::` namespace:
 
 ```
-forge --model xai-oauth::grok-4.3
+forge run --model xai-oauth::grok-4.3
 ```
 
 Other commands:

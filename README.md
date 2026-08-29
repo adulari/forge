@@ -67,7 +67,7 @@ assumed from different-model runs.
 - **A harness that doesn't lie** — an objective, tool-grounded completion gate, doom-loop and
   repeated-failure guards, and recovery of tool calls a model writes as prose. It never reports a
   phantom success — and there's a `cargo test` behind every one of those claims (324 conformance tests).
-- **Built-in code intelligence** — Lattice: a tree-sitter symbol graph (9 languages) with blast-radius,
+- **Built-in code intelligence** — Lattice: a tree-sitter symbol graph (19 languages) with blast-radius,
   call-chains, and semantic retrieval, auto-injected before each turn.
 - **Cross-session memory** — durable, typed facts per project, auto-captured at turn end and
   relevance-ranked back into context next session — only the relevant ones, not a dump.
@@ -365,7 +365,7 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   resume and render consistently in TUI, desktop, mobile, and headless output
 - A staged context pipeline: project guidance, relevant memories, Lattice retrieval, task/goal state,
   and recent transcript; automatic pruning/compaction keeps long sessions inside the model window
-- Lattice code intelligence: tree-sitter symbol graph (9 languages), blast-radius, call-chains,
+- Lattice code intelligence: tree-sitter symbol graph (19 languages), blast-radius, call-chains,
   semantic embeddings, auto-injected before each turn
 - Planning mode (`/plan` read-only → `/execute`); Architect mode (strong planner + cheap editor)
 - Live LSP diagnostics fed back after edits; opt-in autofix loop (lint/test self-heal)
@@ -682,6 +682,8 @@ viewer (main chat + subagents + critics).
 | `/new` · `/resume [id]` · `/sessions` | Start fresh · resume · browse past sessions |
 | `/undo` · `/checkpoint [label]` · `/checkpoints` | Revert last turn · save · rewind to a checkpoint |
 | `/compact` · `/uncompact` | Summarize older context to free the window (also auto-triggers at 80% gauge) · undo it — restore the full transcript |
+| `/export [path]` | Export the session transcript as standalone HTML |
+| `/anywhere` | Manage the Forge Anywhere connector from inside a session |
 | `/workflow [<task>\|run <name>\|list]` | Author a workflow script for a task · run a saved one · list saved scripts |
 | `/duel <task>` | Race models on the task in parallel worktrees; merge the winner, teach the router |
 | `/mode` · `/model [<id>]` · `/models` | Switch temper · pin a model · browse all discovered models |
@@ -703,7 +705,7 @@ viewer (main chat + subagents + critics).
 | `/help` · `/keys` · `/quit` | Command reference · keyboard reference · exit Forge |
 | `/` | Open command palette (fuzzy-find skills + commands) |
 
-**Keyboard shortcuts:** `SHIFT+TAB`/`Alt+T` cycle temper · `Ctrl+K` mid-turn — abort + retry the same
+**Keyboard shortcuts:** `SHIFT+TAB`/`Alt+T` cycle temper · `Ctrl+Shift+K` mid-turn — abort + retry the same
 prompt on the mesh's next-ranked model (excludes ones already skipped this turn) · `Ctrl+↑`/`Ctrl+↓`
 bias the routing tier up/down, re-running immediately if mid-turn · `Ctrl+O` activity viewer ·
 `Ctrl+J` newline · `Esc` interrupt (mid-turn) / quit (idle) · `↑/↓` navigate ·
@@ -1041,10 +1043,14 @@ also an MCP **server**, exposing its own tools to other agents.
 ```toml
 [[servers]]
 name = "github"
-transport = "stdio"
-command = "npx -y @modelcontextprotocol/server-github"
-[servers.allowlist]
-tools = ["create_issue", "list_prs"]
+[servers.transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+
+# The allowlist is global, not per-server, and tool names are qualified `server__tool`.
+[allow]
+tools = ["github__create_issue", "github__list_prs"]
 ```
 
 **Skills & commands** — reusable prompt templates (commands) and methodology guides (skills) as markdown
@@ -1058,8 +1064,9 @@ including MCP calls.
 ```toml
 [[hooks]]
 event = "pre_tool_use"
-tool_pattern = "shell"
-command = "bash -c 'jq .args <<< $FORGE_TOOL_INPUT >> audit.log'"
+matcher = "shell"
+# The hook payload arrives on STDIN (there is no FORGE_TOOL_INPUT variable).
+command = "bash -c 'jq .args >> audit.log'"
 ```
 
 ---
