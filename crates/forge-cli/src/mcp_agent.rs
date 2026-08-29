@@ -474,7 +474,17 @@ impl ForgeAgentServer {
                     }
                 };
 
-                let config = forge_config::load().unwrap_or_default();
+                // Same hazard as `forge api`: Config::default() is AcceptEdits, so a config
+                // that fails to parse must not pass silently as "no config". This path cannot
+                // propagate, so it is at least loud.
+                let config = forge_config::load().unwrap_or_else(|e| {
+                    tracing::error!(
+                        error = %e,
+                        "config failed to parse - falling back to DEFAULTS, which are more \
+                         permissive than a configured permission posture; fix the config"
+                    );
+                    Default::default()
+                });
                 let pricing = forge_mesh::pricing::Pricing::from_config(&config);
                 let cat = discover_catalog(&config).await;
                 if cat.is_empty() {
