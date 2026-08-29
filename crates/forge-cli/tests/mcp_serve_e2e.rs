@@ -68,9 +68,17 @@ fn rpc(
     None
 }
 
-#[test]
-fn bridge_advertises_and_serves_use_skill() {
-    // Seed a project skill in a throwaway cwd so the served catalog has a known entry.
+/// Seed a project skill in a throwaway cwd, spawn `forge mcp-serve` there, and complete the MCP
+/// handshake. `trust_project` writes `.forge/config.toml` with `[commands] trust_project = true`
+/// so the project-trust gate admits the seeded skill; without it the gate must withhold it.
+fn spawn_bridge(
+    trust_project: bool,
+) -> (
+    tempfile::TempDir,
+    ChildGuard,
+    impl Write,
+    Receiver<serde_json::Value>,
+) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".forge/skills/e2eskill")).unwrap();
     std::fs::write(
@@ -78,6 +86,13 @@ fn bridge_advertises_and_serves_use_skill() {
         "---\nname: e2eskill\ndescription: bridge e2e skill\n---\nBRIDGE_SKILL_MARKER: do it.",
     )
     .unwrap();
+    if trust_project {
+        std::fs::write(
+            dir.path().join(".forge/config.toml"),
+            "[commands]\ntrust_project = true\n",
+        )
+        .unwrap();
+    }
 
     let mut child = ChildGuard(
         Command::new(env!("CARGO_BIN_EXE_forge"))
@@ -107,6 +122,13 @@ fn bridge_advertises_and_serves_use_skill() {
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
         None,
     );
+
+    (dir, child, stdin, reader)
+}
+
+#[test]
+fn bridge_advertises_and_serves_use_skill() {
+    let (_dir, _child, mut stdin, reader) = spawn_bridge(true);
 
     // use_skill must be advertised to the bridged model.
     let tools = rpc(
@@ -139,6 +161,24 @@ fn bridge_advertises_and_serves_use_skill() {
     assert!(
         text.contains("BRIDGE_SKILL_MARKER"),
         "use_skill returned the methodology: {text}"
+    );
+}
+
+#[test]
+fn bridge_withholds_untrusted_project_skill() {
+    let (_dir, _child, mut stdin, reader) = spawn_bridge(false);
+
+    let call = rpc(
+        &mut stdin,
+        &reader,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"use_skill","arguments":{"name":"e2eskill"}}}"#,
+        Some(2),
+    )
+    .unwrap();
+    let text = serde_json::to_string(&call).unwrap();
+    assert!(
+        !text.contains("BRIDGE_SKILL_MARKER"),
+        "untrusted project skill methodology was withheld: {text}"
     );
 }
 

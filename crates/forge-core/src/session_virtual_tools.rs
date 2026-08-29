@@ -314,7 +314,11 @@ impl Session {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim();
-        let (result, ok) = match self.skills.as_ref().and_then(|c| c.skill_guidance(name)) {
+        let (result, ok) = match self
+            .skills
+            .as_ref()
+            .and_then(|c| c.skill_guidance(name, self.commands_trust_project()))
+        {
             Some(guidance) => {
                 self.presenter
                     .emit(PresenterEvent::Warning(format!("⚒ skill loaded · {name}")));
@@ -328,7 +332,7 @@ impl Session {
                     .skills
                     .as_ref()
                     .map(|c| {
-                        c.skill_listing()
+                        c.skill_listing(self.commands_trust_project())
                             .into_iter()
                             .map(|(n, _)| n)
                             .collect::<Vec<_>>()
