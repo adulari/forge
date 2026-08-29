@@ -940,8 +940,8 @@ fn build_args(
             "read-only".into(),
         ],
         // Antigravity (`agy`) has no MCP/`--tools` wiring, so it ALWAYS runs as its own agent
-        // (text mode), regardless of `harness`. `-p`/--print with no positional → agy reads the
-        // prompt from stdin (verified live, like claude). `--dangerously-skip-permissions`
+        // (text mode), regardless of `harness`. `build_oneshot_args` attaches the prompt to `-p`;
+        // otherwise agy consumes the next flag as the prompt. `--dangerously-skip-permissions`
         // auto-approves agy's own tools so it doesn't block headless. `--model` is appended below.
         (CliKind::Antigravity, _) => {
             vec!["-p".into(), "--dangerously-skip-permissions".into()]
@@ -998,6 +998,28 @@ fn build_args(
     }
     // The prompt is fed via stdin (see build_args doc), so no trailing positional: `codex exec`
     // with no PROMPT reads instructions from stdin.
+    args
+}
+
+/// Build the complete argv for a one-shot turn. Claude and Codex consume the prompt from stdin,
+/// while agy's `-p` accepts an optional value and otherwise consumes the following flag.
+fn build_oneshot_args(
+    kind: CliKind,
+    bare_model: &str,
+    harness: bool,
+    forge_exe: &str,
+    mcp_env: &[(String, String)],
+    resume_id: Option<&str>,
+    prompt: &str,
+) -> Vec<String> {
+    let mut args = build_args(kind, bare_model, harness, forge_exe, mcp_env, resume_id);
+    if kind == CliKind::Antigravity {
+        let print = args
+            .iter_mut()
+            .find(|arg| arg.as_str() == "-p")
+            .expect("agy arguments always include print mode");
+        *print = format!("-p={prompt}");
+    }
     args
 }
 
@@ -1600,24 +1622,30 @@ impl CliProvider {
         // vars, so they're forwarded explicitly into the MCP config (see `build_args`).
         let mcp_env = bridge_mcp_env(sink_path.as_deref(), checkpoint);
 
-        let args = build_args(
+        let args = build_oneshot_args(
             self.kind,
             bare_model(model),
             self.harness,
             &forge_exe,
             &mcp_env,
             resume_id.as_deref(),
+            &prompt,
         );
 
         let mut cmd = bridge_command(&self.binary, &args);
         if let Some(context) = checkpoint {
             cmd.current_dir(&context.workspace);
         }
-        // The prompt is written to stdin (not argv) to avoid `ARG_MAX` on big transcripts.
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        // Claude and Codex read the prompt from stdin to avoid `ARG_MAX`; agy requires it attached
+        // to `-p` and must not receive a duplicate copy on stdin.
+        cmd.stdin(if self.kind == CliKind::Antigravity {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
         // claude inherits this process env for its MCP child, so the sink env also works via the
         // process; codex does not, hence the explicit `mcp_env` injection above. Setting it here too
         // is harmless and keeps the claude path robust if the JSON `env` is ever dropped.
@@ -1900,22 +1928,11 @@ impl CliProvider {
                 let code_str = code
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "signal".into());
-                // When there's no stderr, the only detail we have IS the setup hint — so don't also
-                // append it in the parenthetical (it used to print verbatim twice). With real stderr,
-                // show it as the detail and keep the hint as the actionable follow-up.
-                let msg = if tail.is_empty() {
-                    format!(
-                        "`{}` exited with {code_str} and no output — is it authenticated? {}",
-                        self.binary,
-                        self.kind.setup_hint(),
-                    )
-                } else {
-                    format!(
-                        "`{}` exited with {code_str} and no output — {tail} (is it authenticated? {})",
-                        self.binary,
-                        self.kind.setup_hint(),
-                    )
-                };
+                let msg = format!(
+                    "`{}` exited with {code_str} and no output — is it authenticated? {}",
+                    self.binary,
+                    self.kind.setup_hint(),
+                );
                 // A bridge can fail before emitting any structured stdout event. Its stderr is
                 // still authoritative: in particular, an expired CLI login must become `Auth`
                 // so the core benches the whole provider rather than retrying sibling aliases.
@@ -1938,7 +1955,7 @@ impl CliProvider {
                 return Err(if tail.is_empty() {
                     ProviderError::Request(msg)
                 } else {
-                    classify_in_band_error_with_message(&self.binary, tail, msg)
+                    classify_in_band_error(&self.binary, tail)
                 });
             }
         }
@@ -3666,6 +3683,70 @@ mod tests {
             let i = args.iter().position(|a| a == "--model").unwrap();
             assert_eq!(args[i + 1], "gemini-3.5-flash");
         }
+    }
+
+    #[test]
+    fn oneshot_constructed_argv_is_exact_for_each_cli_bridge() {
+        let prompt = "hello --from-forge";
+        assert_eq!(
+            build_oneshot_args(
+                CliKind::ClaudeCode,
+                "sonnet",
+                false,
+                "/bin/forge",
+                &[],
+                None,
+                prompt,
+            ),
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-mode",
+                "acceptEdits",
+                "--include-partial-messages",
+                "--model",
+                "sonnet",
+            ]
+        );
+        assert_eq!(
+            build_oneshot_args(
+                CliKind::Codex,
+                "gpt-5",
+                false,
+                "/bin/forge",
+                &[],
+                None,
+                prompt,
+            ),
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "--model",
+                "gpt-5",
+            ]
+        );
+        assert_eq!(
+            build_oneshot_args(
+                CliKind::Antigravity,
+                "gemini-3.5-flash",
+                false,
+                "/bin/forge",
+                &[],
+                None,
+                prompt,
+            ),
+            [
+                "-p=hello --from-forge",
+                "--dangerously-skip-permissions",
+                "--model",
+                "gemini-3.5-flash",
+            ]
+        );
     }
 
     #[test]
@@ -5509,6 +5590,28 @@ esac
         assert!(
             matches!(err, ProviderError::Auth(ref msg) if msg.contains("authentication required")),
             "CLI login failures must exclude the whole provider; got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonzero_exit_with_agy_argv_stderr_is_request_error() {
+        let stderr = "Error: -p took --dangerously-skip-permissions as its prompt";
+        let fake = make_fake_cli_exit_with_stderr("", stderr, 2);
+        let provider = CliProvider::new(CliKind::Antigravity).with_binary(&fake);
+        let mut on_event = |_: StreamEvent| {};
+        let err = provider
+            .complete(
+                "agy-cli::gemini-3.1-pro",
+                &[Message::user("hi")],
+                &[],
+                &mut on_event,
+            )
+            .await
+            .expect_err("argv failure must error");
+        assert!(
+            matches!(err, ProviderError::Request(ref msg) if msg.contains(stderr)),
+            "agy stderr must remain authoritative; got {err:?}"
         );
     }
 
