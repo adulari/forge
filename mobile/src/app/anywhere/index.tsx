@@ -461,6 +461,7 @@ function HubOverview({ anywhere, trialBadge, login }: { anywhere: ReturnType<typ
           />
           <HubRow label="Devices" value={`${anywhere.devices.length} paired`} onPress={() => router.push("/anywhere/devices")} />
           <HubRow label="Remote jobs" value={`${anywhere.remoteJobs.length} queued`} onPress={() => router.push("/anywhere/jobs")} />
+          <HubRow label="Offline history" value="Encrypted sync feed" onPress={() => router.push("/anywhere/history")} />
           <HubRow label="Notifications" value={pushStatusLabel(anywhere.pushStatus)} onPress={() => router.push("/anywhere/notifications")} />
           <HubRow
             label="Encrypted storage"
