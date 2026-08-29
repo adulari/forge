@@ -4,6 +4,24 @@
 
 use super::*;
 
+/// Patterns for a runtime "always allow", scoped to the command the user was shown. An empty list
+/// means tool-wide (the previous behaviour), kept for cases we cannot narrow confidently.
+fn always_allow_patterns(tool: &str, args: &serde_json::Value) -> Vec<String> {
+    if tool != "shell" {
+        return Vec::new();
+    }
+    let Some(cmd) = args.get("command").and_then(serde_json::Value::as_str) else {
+        return Vec::new();
+    };
+    // The leading word only: `git status --short` grants `git *`, never `--short`.
+    match cmd.split_whitespace().next() {
+        Some(verb) if !verb.is_empty() && !verb.starts_with('-') => {
+            vec![format!("{verb} *"), verb.to_string()]
+        }
+        _ => Vec::new(),
+    }
+}
+
 impl Session {
     /// Run a single tool call, applying the permission policy, and return its result text.
     /// Whether `name` is a side-effect-free registry tool that's safe to run concurrently in a
@@ -438,7 +456,10 @@ impl Session {
                 forge_types::ConfirmOutcome::AlwaysAllow => {
                     self.rules.push(forge_types::PermissionRule {
                         tool: call.name.clone(),
-                        patterns: vec![],
+                        // Scope to what the user SAW: an empty list matches every segment (see
+                        // decide_shell_segments), so approving `git status` used to auto-approve
+                        // every later shell command in the session.
+                        patterns: always_allow_patterns(&call.name, &call.args),
                         decision: forge_types::PermissionDecision::Allow,
                         source: forge_types::RuleSource::Configured,
                         reason: Some("user answered 'always' at runtime prompt".into()),
@@ -771,5 +792,32 @@ impl Session {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod always_allow_tests {
+    use super::always_allow_patterns;
+
+    /// "Always allow" must grant what the user was SHOWN, not the whole tool. An empty pattern
+    /// list matches every shell segment (see `decide_shell_segments`), so approving `git status`
+    /// once used to authorise every later shell command in the session.
+    #[test]
+    fn always_allow_scopes_the_grant_to_the_approved_verb() {
+        let args = serde_json::json!({ "command": "git status --short" });
+        let pats = always_allow_patterns("shell", &args);
+        assert!(
+            pats.iter().any(|p| p == "git *"),
+            "the approved verb must be granted: {pats:?}"
+        );
+        assert!(
+            !pats.iter().any(|p| p == "--short"),
+            "a flag must never become the granted pattern: {pats:?}"
+        );
+
+        // Cases we cannot narrow confidently stay tool-wide rather than silently granting less
+        // than the user expects, which would make "always" unreliable in the other direction.
+        assert!(always_allow_patterns("shell", &serde_json::json!({ "command": "" })).is_empty());
+        assert!(always_allow_patterns("read_file", &serde_json::json!({})).is_empty());
     }
 }
