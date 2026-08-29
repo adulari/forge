@@ -1919,12 +1919,26 @@ impl CliProvider {
                 // A bridge can fail before emitting any structured stdout event. Its stderr is
                 // still authoritative: in particular, an expired CLI login must become `Auth`
                 // so the core benches the whole provider rather than retrying sibling aliases.
-                // Do not classify the empty-stderr case through `msg`: it deliberately contains
-                // an "is it authenticated?" setup hint, which is advice rather than evidence.
+                // Classify on the STDERR, never on `msg`.
+                //
+                // `msg` deliberately contains an "is it authenticated?" setup hint — advice, not
+                // evidence. The empty-stderr branch already avoided the classifier for that reason,
+                // but the non-empty branch passed `msg` straight into it, and
+                // `classify_in_band_error` matches `lower.contains("auth")`. That hint is present
+                // unconditionally, so EVERY nonzero-exit-with-stderr failure classified as Auth:
+                // a segfault, an OOM, "network unreachable", a bad flag after a CLI update.
+                //
+                // Auth is permanent (`is_permanent`), so a single transient crash excluded the
+                // whole subscription bridge — claude-cli / codex-cli / agy-cli — from routing on
+                // the long window, silently degrading every later turn to API-key models while the
+                // subscription was perfectly healthy.
+                //
+                // The stderr itself is still authoritative: a genuinely expired login says so
+                // there, and is still classified Auth.
                 return Err(if tail.is_empty() {
                     ProviderError::Request(msg)
                 } else {
-                    classify_in_band_error(&self.binary, &msg)
+                    classify_in_band_error_with_message(&self.binary, tail, msg)
                 });
             }
         }
@@ -2023,8 +2037,21 @@ fn mentions_status_code(haystack: &str, code: &str) -> bool {
 }
 
 fn classify_in_band_error(binary: &str, e: &str) -> ProviderError {
-    let lower = e.to_ascii_lowercase();
     let msg = format!("{binary} error: {e}");
+    classify_in_band_error_with_message(binary, e, msg)
+}
+
+/// Classify on `evidence` but report `msg`.
+///
+/// Separating the two matters: the message shown to the user is allowed to carry advice ("is it
+/// authenticated?"), while only the provider's own output may decide the error VARIANT. Passing a
+/// message containing that advice into the classifier made every failure look like an auth failure.
+fn classify_in_band_error_with_message(
+    _binary: &str,
+    evidence: &str,
+    msg: String,
+) -> ProviderError {
+    let lower = evidence.to_ascii_lowercase();
     // Match rate-limit phrasings, NOT the bare substring "rate" — that matched ordinary words
     // (gene`rate`, ite`rate`, mode`rate`, accu`rate`, sepa`rate`), so a plain error like "failed to
     // generate a response" was misclassified as a rate limit → spurious bench + failover under serve.
@@ -4735,6 +4762,34 @@ mod tests {
             classify_in_band_error("cli", "got 503 from upstream"),
             ProviderError::Unavailable(_)
         ));
+    }
+
+    /// The user-facing message deliberately carries an "is it authenticated?" setup hint. That
+    /// hint must never decide the error VARIANT: the classifier matches `contains("auth")`, so
+    /// feeding it the wrapped message made every nonzero-exit-with-stderr failure permanent Auth —
+    /// a crash, an OOM, a network error — excluding the whole subscription bridge from routing.
+    #[test]
+    fn advice_in_the_message_does_not_make_a_crash_look_like_an_auth_failure() {
+        // Evidence says "segmentation fault"; the message carries the auth hint.
+        let msg = "`codex` exited with 134 and no output — segmentation fault \
+                   (is it authenticated? run `codex login`)"
+            .to_string();
+        let err = classify_in_band_error_with_message("codex", "segmentation fault", msg);
+        assert!(
+            !err.is_permanent(),
+            "a crash must not be permanent just because the hint says 'authenticated': {err:?}"
+        );
+
+        // A genuinely expired login still classifies as Auth, from its own stderr.
+        let real = classify_in_band_error_with_message(
+            "codex",
+            "Not logged in — please run `codex login`",
+            "codex error: Not logged in".to_string(),
+        );
+        assert!(
+            real.is_permanent(),
+            "a real auth failure must still be permanent: {real:?}"
+        );
     }
 
     #[test]
