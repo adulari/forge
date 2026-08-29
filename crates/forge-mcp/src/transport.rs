@@ -29,17 +29,37 @@ pub(crate) struct HandlerDeps {
 }
 
 /// Connect to a server (spawn the stdio child / open the HTTP stream) and run `initialize`,
+/// The local directory a `roots/list` entry points at, if it is a usable `file://` path.
+///
+/// Returns `None` for a non-file URI or a path that does not exist, so a bad root leaves the child
+/// inheriting our cwd rather than failing to spawn at all.
+fn root_dir(uri: &str) -> Option<std::path::PathBuf> {
+    let raw = uri.strip_prefix("file://").unwrap_or(uri);
+    let path = std::path::PathBuf::from(raw);
+    path.is_dir().then_some(path)
+}
+
 /// presenting Forge's [`ForgeClientHandler`] (advertises sampling/roots/elicitation; serves
 /// `tools/list_changed`).
 pub(crate) async fn serve(
     server: &McpServerConfig,
     deps: HandlerDeps,
 ) -> Result<RunningService<RoleClient, ForgeClientHandler>, String> {
+    // Capture the workspace root BEFORE the handler takes ownership: a stdio server is a child
+    // process and inherits our cwd unless told otherwise. Forge's own daemon deliberately runs from
+    // a stable directory that outlives it (see forge-cli crate::daemon_cwd), which is correct for
+    // the daemon but is NOT the directory a project-scoped MCP server should resolve against — a
+    // filesystem server given a relative path would look in $HOME. The first advertised root is the
+    // project the session is actually working in, so use it.
+    let workspace_cwd = deps.roots.first().and_then(|r| root_dir(&r.uri));
     let handler =
         ForgeClientHandler::new(server.name.clone(), deps.roots, deps.sampling, deps.conns);
     match &server.transport {
         McpTransport::Stdio { command, args, env } => {
             let mut cmd = stdio_command(command, args);
+            if let Some(dir) = &workspace_cwd {
+                cmd.current_dir(dir);
+            }
             for (k, v) in env {
                 cmd.env(k, v);
             }
@@ -294,6 +314,23 @@ fn build_http_client(
 
 #[cfg(test)]
 mod tests {
+    /// A stdio MCP server is a child process: without an explicit cwd it inherits ours, which for
+    /// the daemon is a stable directory chosen to outlive it rather than the project. A relative
+    /// path handed to a filesystem server would then resolve against the wrong root.
+    #[test]
+    fn root_dir_accepts_a_real_file_uri_and_rejects_the_rest() {
+        let dir = std::env::temp_dir();
+        let uri = format!("file://{}", dir.display());
+        assert_eq!(
+            root_dir(&uri),
+            Some(dir.clone()),
+            "a file:// root that exists must become the child's cwd"
+        );
+        // A path that does not exist must fall back to inheriting, not fail the spawn.
+        assert_eq!(root_dir("file:///definitely/not/here"), None);
+        assert_eq!(root_dir("https://example.test"), None);
+    }
+
     use super::*;
 
     #[test]
