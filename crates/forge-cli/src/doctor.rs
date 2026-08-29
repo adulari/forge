@@ -739,7 +739,7 @@ async fn bridge_roundtrip_checks() -> Vec<Check> {
                 }
                 forge_provider::CliKind::Codex => "run `codex login`; confirm the binary launches",
                 forge_provider::CliKind::Antigravity => {
-                    "run `agy` once to log in; confirm the binary launches"
+                    "check the reported `agy` error; confirm the binary launches"
                 }
             };
             match tokio::time::timeout(BRIDGE_TIMEOUT + std::time::Duration::from_secs(2), fut)
