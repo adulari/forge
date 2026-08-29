@@ -2007,7 +2007,14 @@ fn default_prefer_subscription() -> bool {
 }
 
 fn default_classifier_model() -> Option<String> {
-    Some("groq::groq/compound-mini".to_string())
+    // NOT `groq/compound-mini`: that is Groq's agentic *compound* system with server-side web
+    // search and code execution, not a plain chat model. Two disqualifiers for a classifier whose
+    // whole contract is determinism — its answer can vary with live web results for identical
+    // input, and the classifier prompt embeds the user's task text, which an agentic search
+    // pipeline may forward to third-party infrastructure. `openai/gpt-oss-20b` is the plain, fast
+    // model actually observed answering a classify call ("classified by groq::openai/gpt-oss-20b
+    // as trivial"); compound-mini stays in the chain as a backup but must not lead it.
+    Some("groq::openai/gpt-oss-20b".to_string())
 }
 
 /// How a CLI-bridge turn runs (RFC cli-bridge-full-harness).
@@ -4529,7 +4536,7 @@ deployments = ["gpt-4o"]
         let mesh = Config::default().mesh;
         assert_eq!(
             mesh.classifier_model.as_deref(),
-            Some("groq::groq/compound-mini")
+            Some("groq::openai/gpt-oss-20b")
         );
         assert!(!mesh.classifier_activity_focused);
         // The help text must still say the setting names the FIRST model tried and that backups

@@ -103,10 +103,10 @@ Standard OpenAI `chat.completion` (or `chat.completion.chunk` when streaming), p
 ```jsonc
 {
   "object": "chat.completion",
-  "model": "groq::llama-3.3-70b-versatile",
+  "model": "groq::openai/gpt-oss-20b",
   "choices": [{ "index": 0, "message": { "role": "assistant", "content": "..." }, "finish_reason": "stop" }],
   "usage": { "prompt_tokens": 41, "completion_tokens": 12, "total_tokens": 53 },
-  "x_forge": { "routed_model": "groq::llama-3.3-70b-versatile", "rationale": "...", "cost_usd": 0.00002 }
+  "x_forge": { "routed_model": "groq::openai/gpt-oss-20b", "rationale": "...", "cost_usd": 0.00002 }
 }
 ```
 

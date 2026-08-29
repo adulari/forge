@@ -16,7 +16,7 @@ on:
       model:
         description: Real provider model to exercise
         required: false
-        default: groq::llama-3.3-70b-versatile
+        default: groq::openai/gpt-oss-20b
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC — catch cross-platform drift weekly
 
@@ -47,7 +47,7 @@ jobs:
         shell: bash # bash is present on the Windows runner too — one script for all OSes
     env:
       # The 70B model has enough TPM for Forge's full system prompt; the old 8B smoke model did not.
-      E2E_MODEL: ${{ inputs.model || 'groq::llama-3.3-70b-versatile' }}
+      E2E_MODEL: ${{ inputs.model || 'groq::openai/gpt-oss-20b' }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:

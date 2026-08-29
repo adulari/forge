@@ -86,7 +86,7 @@ that demonstrably handle its work (boost = `(wins − losses) × 0.5`, clamped �
 
 ```
 model                            wins  losses   boost
-groq::llama-3.3-70b-versatile       4       1    +1.5
+groq::openai/gpt-oss-20b       4       1    +1.5
 deepseek::deepseek-chat             1       2    -0.5
 ```
 
