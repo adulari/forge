@@ -52,8 +52,16 @@ const diagnostics: DiagnosticsResponse = {
 };
 
 describe("assessCompatibility", () => {
-  it("requires a client update when the daemon protocol is newer", () => {
-    expect(assessCompatibility(10, "2.0.0", 9, "1.0.0").status).toBe("client-outdated");
+  it("keeps a v9 client trustworthy against the additive v10 daemon", () => {
+    expect(assessCompatibility(10, "2.0.0", 9, "1.0.0")).toEqual({
+      status: "client-limited",
+      title: "Compatible with limited controls",
+      detail: "Permission mode controls require app protocol v10. The session remains usable and its state is trustworthy.",
+    });
+  });
+
+  it("requires a client update for an unclassified newer daemon protocol", () => {
+    expect(assessCompatibility(11, "3.0.0", 10, "2.0.0").status).toBe("client-outdated");
   });
 
   it("requires a daemon update when the daemon protocol is older", () => {
