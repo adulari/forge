@@ -10,6 +10,26 @@
 > Lattice (and a similar margin vs the previous signature-only default at reps=8), on a
 > repo-question benchmark — with the model answering in ~2 steps instead of ~4.5.
 
+## What the index refuses to assert
+
+Lattice output is injected as context the model treats as fact, so two paths deliberately return
+*less* rather than something possibly wrong.
+
+**A parse that did not succeed is not recorded as clean.** tree-sitter reports ERROR nodes in a
+file's tree, and a file that fails to parse cleanly yields partial or zero symbols. That is stored
+as `parse_status = "error"`, not `"ok"` — otherwise the content hash matches on every later run, the
+file is never retried, `status()` counts it as indexed, and retrieval presents its missing symbols
+as *absence of fact*: the model concludes "nothing calls this" because the file happened to be
+mid-save when it was indexed.
+
+**A body whose span no longer matches is not injected.** Body injection slices the current file
+using byte offsets recorded at index time. If the file changed since — the watcher's debounce
+window, a dead watcher, a `git checkout` moments before the turn — those offsets land in unrelated
+code. A symbol's own body contains its name, so retrieval checks that before injecting; when it does
+not hold, the span has drifted and the caller falls back to the signature line, which is already the
+behaviour for an unavailable body. The alternative is emitting arbitrary mid-statement code under a
+`path:line — kind name` header, which reads to the model as that symbol's verified source.
+
 ## Parser budget and large generated files
 
 The indexer applies a hard **8 MiB per-source-file parser budget** before reading a file. A

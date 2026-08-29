@@ -436,7 +436,16 @@ impl Lattice {
             rel_path: rel,
             lang: lang.to_string(),
             content_hash: hash,
-            parse_status: "ok".to_string(),
+            // Not hardcoded "ok". tree-sitter reports ERROR nodes in the tree, and a file that did
+            // not parse cleanly yields PARTIAL or ZERO symbols. Recording that as "ok" meant the
+            // hash matched on every later run so it was never retried, `status()` counted it as
+            // indexed, and retrieval presented its missing symbols as absence-of-fact — the model
+            // concluding "nothing calls this" because the file was mid-save when it was indexed.
+            parse_status: if parsed.had_error {
+                "error".to_string()
+            } else {
+                "ok".to_string()
+            },
         };
         self.store
             .replace_lattice_file(&file, &nodes, &edges, &refs)?;
