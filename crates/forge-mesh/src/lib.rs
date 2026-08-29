@@ -22,6 +22,7 @@ mod context;
 mod doc_sync;
 pub mod explain;
 pub mod pricing;
+pub mod vision;
 
 pub use bench::{BenchScore, BenchmarkScores};
 pub use catalog::{
