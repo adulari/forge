@@ -5,33 +5,41 @@ use super::*;
 impl Store {
     /// Write an event for an active MCP agent session. Retains at most [`LIVE_EVENT_KEEP`] plus
     /// [`LIVE_EVENT_PRUNE_EVERY`] - 1 events per session while amortizing pruning work.
+    ///
+    /// Retried like every other critical write: `busy_timeout` only buys a bounded 5s wait for the
+    /// single WAL writer lock, and a longer stall (a lattice indexing batch, or the write lock
+    /// `VACUUM` holds for its whole run — see [`Store::vacuum`]) makes the IMMEDIATE `BEGIN` return
+    /// `SQLITE_BUSY` instead. Without [`with_busy_retry`] that error propagates to the streaming
+    /// caller and the session's live feed goes dark while the agent is still working.
     pub fn append_live_event(&self, session_id: &str, payload_json: &str) -> Result<()> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO live_event (session_id, payload_json) VALUES (?1, ?2)",
-            (session_id, payload_json),
-        )?;
-        // Keep one durable counter per session so separate Store handles and sessions cannot
-        // delay each other's pruning schedule.
-        let writes: i64 = tx.query_row(
-            "UPDATE session
-             SET live_event_writes = live_event_writes + 1
-             WHERE id = ?1
-             RETURNING live_event_writes",
-            [session_id],
-            |row| row.get(0),
-        )?;
-        if writes % LIVE_EVENT_PRUNE_EVERY as i64 == 0 {
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute(
-                "DELETE FROM live_event WHERE session_id = ?1 AND id <= (
-                    SELECT id FROM live_event WHERE session_id = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2
-                 )",
-                (session_id, LIVE_EVENT_KEEP),
+                "INSERT INTO live_event (session_id, payload_json) VALUES (?1, ?2)",
+                (session_id, payload_json),
             )?;
-        }
-        tx.commit()?;
-        Ok(())
+            // Keep one durable counter per session so separate Store handles and sessions cannot
+            // delay each other's pruning schedule.
+            let writes: i64 = tx.query_row(
+                "UPDATE session
+                 SET live_event_writes = live_event_writes + 1
+                 WHERE id = ?1
+                 RETURNING live_event_writes",
+                [session_id],
+                |row| row.get(0),
+            )?;
+            if writes % LIVE_EVENT_PRUNE_EVERY as i64 == 0 {
+                tx.execute(
+                    "DELETE FROM live_event WHERE session_id = ?1 AND id <= (
+                        SELECT id FROM live_event WHERE session_id = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2
+                     )",
+                    (session_id, LIVE_EVENT_KEEP),
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Fetch all events for `session_id` with `id > after_id`, in order.
