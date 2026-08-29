@@ -35,6 +35,9 @@ pub enum RouteId {
     ListHooks,
     ListPlans,
     ReadMcp,
+    /// Kept so an older client's request is refused rather than undecodable; the host has no
+    /// bridge target for it. Registering a server persists a command the host executes, so it is
+    /// configured locally, on the machine that runs it.
     UpdateMcp,
     Usage,
     Diagnostics,

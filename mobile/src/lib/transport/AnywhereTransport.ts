@@ -27,8 +27,10 @@ export type BridgeRoute =
   | "update_config"
   | "list_hooks"
   | "list_plans"
+  // Read-only MCP review. Registering a server is deliberately absent: `POST /api/mcp` persists
+  // a command the host executes, so the host refuses it over the bridge and listing it here would
+  // only produce a request that comes back denied.
   | "read_mcp"
-  | "update_mcp"
   | "usage"
   | "diagnostics"
   | "answer"
@@ -215,7 +217,7 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/config": { GET: "read_config", PUT: "update_config" },
     "/api/hooks": { GET: "list_hooks" },
     "/api/plans": { GET: "list_plans" },
-    "/api/mcp": { GET: "read_mcp", POST: "update_mcp" },
+    "/api/mcp": { GET: "read_mcp" },
     "/api/usage": { GET: "usage" },
     "/api/diagnostics": { GET: "diagnostics" },
     "/api/history": { GET: "session_history" },
