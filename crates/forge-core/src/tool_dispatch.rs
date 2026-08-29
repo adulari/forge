@@ -4,12 +4,8 @@
 
 use super::*;
 
-/// The pattern list for a runtime "always allow", scoped to the command the user was actually shown.
-///
-/// For `shell`, that is the approved command's leading word plus a wildcard (`git *`), so the grant
-/// covers that verb and not the whole tool. Anything we cannot narrow confidently falls back to an
-/// empty list — tool-wide, the previous behaviour — because silently granting LESS than the user
-/// expects would make "always" unreliable in the other direction.
+/// Patterns for a runtime "always allow", scoped to the command the user was shown. An empty list
+/// means tool-wide (the previous behaviour), kept for cases we cannot narrow confidently.
 fn always_allow_patterns(tool: &str, args: &serde_json::Value) -> Vec<String> {
     if tool != "shell" {
         return Vec::new();
@@ -460,12 +456,9 @@ impl Session {
                 forge_types::ConfirmOutcome::AlwaysAllow => {
                     self.rules.push(forge_types::PermissionRule {
                         tool: call.name.clone(),
-                        // Scope the grant to what the user actually SAW. An empty pattern list
-                        // matches every segment (see decide_shell_segments), so approving
-                        // `git status` with "always" used to auto-approve every future shell
-                        // command for the rest of the session — `rm -rf target`, anything not on
-                        // the builtin floor — which is far broader than the one command in the
-                        // prompt they answered.
+                        // Scope to what the user SAW: an empty list matches every segment (see
+                        // decide_shell_segments), so approving `git status` used to auto-approve
+                        // every later shell command in the session.
                         patterns: always_allow_patterns(&call.name, &call.args),
                         decision: forge_types::PermissionDecision::Allow,
                         source: forge_types::RuleSource::Configured,
