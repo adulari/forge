@@ -307,7 +307,7 @@ By default `/remote --anywhere` or `forge serve --tunnel` opens an ephemeral **q
 `trycloudflare.com`/`ngrok-free.app` URL every launch. Bookmarking or installing that URL to a
 phone home screen is pointless — it dies the moment you restart. `[remote] tunnel_name` /
 `tunnel_hostname` pin it to a stable hostname instead, so the same link keeps working across
-every `forge chat --anywhere` / `forge serve --tunnel` launch. The older
+every in-chat `/remote --anywhere` / `forge serve --tunnel` launch. The older
 `forge serve --anywhere` spelling remains a deprecated alias during migration.
 
 **cloudflared (named tunnel)** — one-time setup, then a config line:
