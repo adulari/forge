@@ -1,9 +1,9 @@
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { base64Url, fromBase64Url } from "./anywhereApi";
 import { deriveDeviceWrapKey } from "./anywhereCrypto";
-import type { PairingDetails } from "./anywherePairing";
-import { describeRejectedPairings, listPairings, openApprovedPairing, parsePairingChallenge, pairingCapability, pairingSafetyCode, pollPairing, preparePairingApproval } from "./anywherePairing";
+import type { ListedPairing, PairingDetails } from "./anywherePairing";
+import { describeRejectedPairings, listPairings, openApprovedPairing, pairingDetails, parsePairingChallenge, pairingCapability, pairingSafetyCode, pollPairing, preparePairingApproval } from "./anywherePairing";
 import type { StoredAnywhereCredentials } from "./transport";
 import { bytesToHex, openEnvelope } from "./transport/anywhereEnvelope";
 
@@ -97,38 +97,36 @@ it("wraps the current account key to a supported QR pairing challenge", () => {
 // a green run said nothing about it. These pin the behaviour the screen depends on.
 
 const key32 = base64Url(new Uint8Array(32).fill(7));
-const entry = (over: Partial<PairingDetails> = {}): PairingDetails => ({
-  version: 1, pairing_id: pairingId, device_id: "a".repeat(32), device_name: "phone",
-  signing_public_key: key32, exchange_public_key: key32,
-  expires_at_ms: Date.now() + 600_000, ...over,
+const entry = (over: Partial<ListedPairing> = {}): ListedPairing => ({
+  device_name: "Forge Web", expires_at_ms: Date.now() + 600_000, ...over,
 });
 
-const inboxOf = (...pairings: PairingDetails[]) => async () =>
+const inboxOf = (...pairings: ListedPairing[]) => async () =>
   new Response(JSON.stringify({ version: 1, pairings }), { headers: { "content-type": "application/json" } });
 
-async function inbox(...pairings: PairingDetails[]) {
+async function inbox(...pairings: ListedPairing[]) {
   const original = globalThis.fetch;
   globalThis.fetch = inboxOf(...pairings);
   try { return await listPairings("https://app.example", "token"); }
   finally { globalThis.fetch = original; }
 }
 
-it("keeps a valid pending request and rejects nothing", async () => {
-  const result = await inbox(entry());
-  expect(result.pairings).toHaveLength(1);
+it("displays a real-shaped minimal listing entry without requiring challenge details", async () => {
+  const listed = entry();
+  const result = await inbox(listed);
+  expect(result.pairings).toEqual([listed]);
   expect(result.rejected).toEqual([]);
 });
 
-it("names why an entry could not be shown instead of dropping it silently", async () => {
-  const result = await inbox(entry({ device_id: "not-hex" }));
+it("names the invalid listing field instead of claiming its absent version is unsupported", async () => {
+  const result = await inbox(entry({ device_name: "" }));
   expect(result.pairings).toEqual([]);
-  expect(result.rejected).toEqual([{ pairingId: `${pairingId.slice(0, 8)}\u2026`, reason: "malformed device id" }]);
+  expect(result.rejected).toEqual([{ pairingId: "unidentified request", reason: "device_name must be a non-empty string" }]);
 });
 
-it("rejects a key that is not 32 bytes, naming which key", async () => {
-  const short = base64Url(new Uint8Array(31).fill(9));
-  expect((await inbox(entry({ signing_public_key: short }))).rejected[0].reason).toBe("malformed signing key");
-  expect((await inbox(entry({ exchange_public_key: short }))).rejected[0].reason).toBe("malformed exchange key");
+it("reports an invalid listing expiry by its contract field", async () => {
+  const result = await inbox(entry({ expires_at_ms: Number.NaN }));
+  expect(result.rejected[0].reason).toBe("expires_at_ms must be a non-negative safe integer");
 });
 
 // Expiry is ordinary lifecycle and the service already filters it, so the only way one arrives is
@@ -139,11 +137,9 @@ it("drops an expired entry quietly rather than reporting it as a failure", async
   expect(result.rejected).toEqual([]);
 });
 
-it("never puts a whole opaque pairing id in the message", async () => {
-  const { rejected } = await inbox(entry({ device_id: "not-hex" }));
-  const message = describeRejectedPairings(rejected);
-  expect(message).not.toContain(pairingId);
-  expect(message).toContain(pairingId.slice(0, 8));
+it("uses the service's safe pairing reference in a rejection message", async () => {
+  const { rejected } = await inbox(entry({ pairing_ref: "RcmD5jw8…", expires_at_ms: Number.NaN }));
+  expect(describeRejectedPairings(rejected)).toContain("RcmD5jw8… expires_at_ms must be a non-negative safe integer");
 });
 
 it("caps the banner at three entries and counts the rest", async () => {
@@ -157,4 +153,27 @@ it("caps the banner at three entries and counts the rest", async () => {
 
 it("says 1 device request, singular, for a single rejection", () => {
   expect(describeRejectedPairings([{ pairingId: "abc", reason: "malformed expiry" }])).toContain("1 device request could not");
+});
+
+it("keeps strict full-detail checks on the scanned-QR path", async () => {
+  const scanned = parsePairingChallenge(challenge(Date.now() + 60_000), "https://app.example");
+  const valid: PairingDetails = {
+    version: 1,
+    pairing_id: scanned.pairing_id,
+    device_id: "a".repeat(32),
+    device_name: "phone",
+    signing_public_key: key32,
+    exchange_public_key: scanned.exchange_public_key,
+    expires_at_ms: scanned.expires_at_ms,
+  };
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...valid, device_id: "not-hex" }), {
+    headers: { "content-type": "application/json" },
+  })));
+  await expect(pairingDetails("https://app.example", "token", scanned)).rejects.toThrow("malformed device id");
+
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...valid, pairing_id: base64Url(new Uint8Array(32).fill(9)) }), {
+    headers: { "content-type": "application/json" },
+  })));
+  await expect(pairingDetails("https://app.example", "token", scanned)).rejects.toThrow("do not match the scanned challenge");
+  vi.unstubAllGlobals();
 });

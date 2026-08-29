@@ -358,24 +358,8 @@ function ReadyCenter() {
   const anywhere = useAnywhere();
   const tokens = useTokens();
   const toast = useToast();
-  const [actingId, setActingId] = useState<string | null>(null);
   const storageUsedBytes = anywhere.account?.storage_used_bytes ?? 0;
   const storageLimitBytes = anywhere.account?.storage_limit_bytes ?? 0;
-
-  const decide = useCallback(async (request: AnywherePendingApproval, approve: boolean) => {
-    setActingId(request.id);
-    try {
-      if (approve) {
-        await anywhere.approvePendingDevice(request.id);
-        toast.show(`${request.deviceName} approved.`, { tone: "neutral" });
-      } else {
-        await anywhere.denyPendingDevice(request.id);
-        toast.show(`${request.deviceName} denied. No keys were shared.`, { tone: "neutral" });
-      }
-    } catch (reason) {
-      toast.show(reason instanceof Error ? reason.message : "Approval could not be completed.", { tone: "danger" });
-    } finally { setActingId(null); }
-  }, [anywhere, toast]);
 
   const trialBadge = trialBadgeLabel(anywhere.account?.entitlement, anywhere.account?.trial_ends_at ?? null);
   const login = anywhere.credentials?.githubLogin;
@@ -410,7 +394,10 @@ function ReadyCenter() {
 
       <Section title="Approval inbox" meta={anywhere.pendingApprovals.length ? `${anywhere.pendingApprovals.length} pending` : "No pending requests"}>
         {anywhere.approvalError ? <Banner tone="warn" message={anywhere.approvalError} actionLabel="Retry" onAction={() => void anywhere.refreshPendingApprovals(true)} style={styles.flushBanner} /> : null}
-        {anywhere.pendingApprovals.length ? anywhere.pendingApprovals.map((request) => <ApprovalRequest key={request.id} request={request} busy={actingId === request.id} onApprove={() => void decide(request, true)} onDeny={() => void decide(request, false)} />) : !anywhere.approvalError ? <EmptyLine icon={<ShieldCheck size={18} color={tokens.ink3} />} text="New device requests appear here automatically." /> : null}
+        {anywhere.pendingApprovals.length ? <>
+          <Banner tone="neutral" message="The challenge is shown on the device that is waiting — it is deliberately not listed here, so a stolen account token cannot approve a device on its own." style={styles.flushBanner} />
+          {anywhere.pendingApprovals.map((request) => <ApprovalRequest key={request.id} request={request} />)}
+        </> : !anywhere.approvalError ? <EmptyLine icon={<ShieldCheck size={18} color={tokens.ink3} />} text="New device requests appear here automatically." /> : null}
       </Section>
 
       <HubOverview anywhere={anywhere} trialBadge={trialBadge} login={login} />
@@ -574,15 +561,13 @@ function HubRow({ label, value, valueColor, onPress, last }: { label: string; va
   );
 }
 
-function ApprovalRequest({ request, busy, onApprove, onDeny }: { request: AnywherePendingApproval; busy: boolean; onApprove(): void; onDeny(): void }) {
+function ApprovalRequest({ request }: { request: AnywherePendingApproval }) {
   const tokens = useTokens();
   const remaining = useCountdown(request.expiresAtMs);
   return (
     <View style={[styles.approval, { borderColor: tokens.borderStrong, backgroundColor: tokens.bg2 }]}>
       <View style={styles.approvalTop}><View style={[styles.pendingDot, { backgroundColor: tokens.warn }]} /><View style={styles.resourceCopy}><Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{request.deviceName}</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>New device · expires {remaining}</Text></View></View>
-      <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Compare this safety code with the new device:</Text>
-      <Text selectable style={[styles.inboxCode, tabularNums, { color: tokens.ink }]}>{request.safetyCode}</Text>
-      <View style={styles.actionRow}><Button label="Approve device" variant="allow" loading={busy} onPress={onApprove} style={styles.flexAction} /><Button label="Deny" variant="danger" disabled={busy} onPress={onDeny} style={styles.flexAction} /></View>
+      <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Open or scan the challenge shown on the waiting device to review and approve it.</Text>
     </View>
   );
 }

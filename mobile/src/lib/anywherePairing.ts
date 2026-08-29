@@ -8,9 +8,10 @@ import { bytesFromHex, bytesToHex, decodeEnvelope, openEnvelope } from "./transp
 export interface PairingChallenge { version: 1; pairing_id: string; exchange_public_key: string; expires_at_ms: number; service_origin: string }
 export interface PairingCapability { supported: boolean; message: string }
 export interface PairingDetails { version: 1; pairing_id: string; device_id: string; device_name: string; signing_public_key: string; exchange_public_key: string; expires_at_ms: number }
-export interface PairingInbox { version: 1; pairings: PairingDetails[] }
+export interface ListedPairing { device_name: string; expires_at_ms: number; pairing_ref?: string }
+export interface PairingInbox { version: 1; pairings: ListedPairing[] }
 /** What the inbox actually contained: entries fit to show, and why the rest were not. */
-export interface PairingInboxResult { pairings: PairingDetails[]; rejected: RejectedPairing[] }
+export interface PairingInboxResult { pairings: ListedPairing[]; rejected: RejectedPairing[] }
 export interface RejectedPairing { pairingId: string; reason: string }
 export interface PairingApproval { version: 1; epoch: number; device_wrap_envelope: string }
 export interface PairingCreateRequest { version: 1; device_name: string; signing_public_key: string; exchange_public_key: string }
@@ -135,7 +136,7 @@ export async function listPairings(serviceUrl: string, token: string): Promise<P
     throw new Error("Forge Anywhere returned an invalid approval inbox");
   }
   const now = Date.now();
-  const pairings: PairingDetails[] = [];
+  const pairings: ListedPairing[] = [];
   const rejected: RejectedPairing[] = [];
   for (const details of inbox.pairings) {
     // A dropped entry used to be indistinguishable from an empty inbox, which is why the
@@ -157,10 +158,11 @@ export async function listPairings(serviceUrl: string, token: string): Promise<P
   return { pairings, rejected };
 }
 
-/** Enough of the id to correlate with `forge anywhere approvals`, never the whole opaque value. */
-function rejectedPairingLabel(details: Partial<PairingDetails> | null | undefined): string {
-  const id = typeof details?.pairing_id === "string" ? details.pairing_id : "";
-  return id ? `${id.slice(0, 8)}…` : "unidentified request";
+/** A safe label for identifying a listing entry without exposing the raw pairing id. */
+function rejectedPairingLabel(details: Partial<ListedPairing> | null | undefined): string {
+  if (typeof details?.pairing_ref === "string" && details.pairing_ref) return details.pairing_ref;
+  if (typeof details?.device_name === "string" && details.device_name.trim()) return details.device_name.trim();
+  return "unidentified request";
 }
 
 function reasonText(reason: unknown): string {
@@ -278,17 +280,17 @@ export async function submitPairingApproval(serviceUrl: string, token: string, p
   }, token);
 }
 
-/**
- * Checks an entry against itself only. The inbox has no scanned challenge to compare against —
- * it previously built one *from the same entry*, so three of the six checks compared fields to
- * themselves and could never fail, under a message promising a match that was never tested.
- */
-function validatePairingEntry(details: PairingDetails): void {
-  if (details?.version !== 1) throw new Error("unsupported pairing version");
-  if (!/^[0-9a-f]{32}$/.test(details.device_id ?? "")) throw new Error("malformed device id");
-  if (!Number.isFinite(details.expires_at_ms)) throw new Error("malformed expiry");
-  if (keyByteLength(details.exchange_public_key) !== 32) throw new Error("malformed exchange key");
-  if (keyByteLength(details.signing_public_key) !== 32) throw new Error("malformed signing key");
+function validatePairingEntry(details: ListedPairing): void {
+  if (typeof details?.device_name !== "string" || !details.device_name.trim()) {
+    throw new Error("device_name must be a non-empty string");
+  }
+  if (!Number.isSafeInteger(details.expires_at_ms) || details.expires_at_ms < 0) {
+    throw new Error("expires_at_ms must be a non-negative safe integer");
+  }
+  if (details.pairing_ref !== undefined
+    && (typeof details.pairing_ref !== "string" || !details.pairing_ref.trim())) {
+    throw new Error("pairing_ref must be a non-empty string when present");
+  }
 }
 
 function keyByteLength(value: string): number {
@@ -297,7 +299,11 @@ function keyByteLength(value: string): number {
 
 /** The scanned-QR path, where a real challenge exists and the comparison means something. */
 function validatePairingDetails(details: PairingDetails, challenge: PairingChallenge): void {
-  validatePairingEntry(details);
+  if (details?.version !== 1) throw new Error("unsupported pairing version");
+  if (!/^[0-9a-f]{32}$/.test(details.device_id ?? "")) throw new Error("malformed device id");
+  if (!Number.isSafeInteger(details.expires_at_ms)) throw new Error("malformed expiry");
+  if (keyByteLength(details.exchange_public_key) !== 32) throw new Error("malformed exchange key");
+  if (keyByteLength(details.signing_public_key) !== 32) throw new Error("malformed signing key");
   if (details.pairing_id !== challenge.pairing_id
     || details.exchange_public_key !== challenge.exchange_public_key
     || details.expires_at_ms !== challenge.expires_at_ms) {
