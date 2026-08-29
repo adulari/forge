@@ -198,6 +198,7 @@ fn est_tokens(s: &str) -> usize {
 fn read_body_cached(
     repo_root: &str,
     rel_path: &str,
+    name: &str,
     start: i64,
     end: i64,
     cache: &mut HashMap<String, Result<String, String>>,
@@ -240,7 +241,24 @@ fn read_body_cached(
     if s >= e {
         return Err("empty source span".into());
     }
-    Ok(full[s..e].to_string())
+    let body = &full[s..e];
+    // FRESHNESS GUARD. `start`/`end` were recorded when the file was INDEXED; `full` is the file as
+    // it is NOW. Nothing else compares the two, so if the file changed since indexing — the
+    // watcher's debounce window, a dead watcher, a `git checkout` a moment before the turn — the
+    // offsets land at arbitrary positions in the new content. The clamps above stop a panic, but
+    // the result was still emitted under a `path:line — kind name` header, handing the model
+    // unrelated, often mid-statement code presented as that symbol's verified source.
+    //
+    // A symbol's own body contains its name. If it does not, the span has drifted; say so and let
+    // the caller fall back to the signature line, which is the existing behaviour for an
+    // unavailable body.
+    if !name.is_empty() && !body.contains(name) {
+        return Err(format!(
+            "stale span: the indexed byte range no longer contains `{name}` — the file changed \
+             since it was indexed; re-run `forge lattice update`"
+        ));
+    }
+    Ok(body.to_string())
 }
 
 /// Build a fenced body block: `path:line — kind name` header then the source in a code fence.
@@ -327,6 +345,7 @@ pub fn retrieve(
                 match read_body_cached(
                     lat.repo_root(),
                     &n.rel_path,
+                    &n.name,
                     n.span_start,
                     n.span_end,
                     &mut body_cache,
@@ -479,6 +498,51 @@ mod tests {
         assert!(b.contains("```rs\nfn foo() {}\n```"));
     }
 
+    /// A span recorded at index time is sliced out of the file as it is NOW. When the file has
+    /// changed since, the offsets land in unrelated code — and it was previously emitted under a
+    /// `path:line — kind name` header, i.e. wrong source presented to the model as that symbol's
+    /// verified body. The guard must refuse instead, so the caller falls back to the signature.
+    #[test]
+    fn a_span_that_no_longer_holds_the_symbol_is_refused() {
+        let dir = std::env::temp_dir().join(format!("forge-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("source.rs"), "fn one() {}\nfn two() {}\n").unwrap();
+        let mut cache = HashMap::new();
+        let mut bytes = 0usize;
+
+        // The span still covers `fn one() {}`, so asking for `one` succeeds.
+        let fresh = read_body_cached(
+            dir.to_str().unwrap(),
+            "source.rs",
+            "one",
+            0,
+            11,
+            &mut cache,
+            &mut bytes,
+        );
+        assert_eq!(fresh.as_deref(), Ok("fn one() {}"));
+
+        // Same offsets, but the symbol recorded there was `renamed` — the file moved on.
+        let stale = read_body_cached(
+            dir.to_str().unwrap(),
+            "source.rs",
+            "renamed",
+            0,
+            11,
+            &mut cache,
+            &mut bytes,
+        );
+        let err = stale.expect_err("a drifted span must not be returned as the symbol's body");
+        assert!(
+            err.contains("stale span"),
+            "error should name the cause: {err}"
+        );
+        assert!(
+            err.contains("renamed"),
+            "error should name the symbol: {err}"
+        );
+    }
+
     #[test]
     fn cached_body_reads_each_file_once_and_respects_byte_budget() {
         let dir = std::env::temp_dir().join(format!("forge-retrieve-{}", std::process::id()));
@@ -491,6 +555,7 @@ mod tests {
         let first = read_body_cached(
             dir.to_str().unwrap(),
             "source.rs",
+            "",
             0,
             11,
             &mut cache,
@@ -501,6 +566,7 @@ mod tests {
         let second = read_body_cached(
             dir.to_str().unwrap(),
             "source.rs",
+            "",
             12,
             24,
             &mut cache,
@@ -517,6 +583,7 @@ mod tests {
         let reason = read_body_cached(
             dir.to_str().unwrap(),
             "large.rs",
+            "",
             0,
             10,
             &mut cache,

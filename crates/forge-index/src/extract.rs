@@ -106,6 +106,11 @@ pub struct Ref {
 pub struct Parsed {
     pub defs: Vec<Def>,
     pub refs: Vec<Ref>,
+    /// The tree contained ERROR nodes, or tag generation failed outright. Recorded rather than
+    /// discarded: a file that did not parse cleanly yields partial or zero symbols, and the index
+    /// must not present that as a complete answer. `impact` reporting "no callers" because the file
+    /// was mid-save is a wrong answer the model treats as fact.
+    pub had_error: bool,
 }
 
 struct LangEntry {
@@ -315,8 +320,12 @@ pub fn extract(path: &str, src: &str) -> Parsed {
 fn extract_with(config: &TagsConfiguration, src: &str) -> Parsed {
     let mut ctx = TagsContext::new();
     let bytes = src.as_bytes();
-    let Ok((tags, _had_error)) = ctx.generate_tags(config, bytes, None) else {
-        return Parsed::default();
+    let Ok((tags, had_error)) = ctx.generate_tags(config, bytes, None) else {
+        // Hard failure: no symbols at all. Flag it so the caller does not record a clean parse.
+        return Parsed {
+            had_error: true,
+            ..Parsed::default()
+        };
     };
 
     // Pass 1: collect raw tags (definitions and references) with byte spans + categories.
@@ -453,7 +462,11 @@ fn extract_with(config: &TagsConfiguration, src: &str) -> Parsed {
         })
         .collect();
 
-    Parsed { defs, refs }
+    Parsed {
+        defs,
+        refs,
+        had_error,
+    }
 }
 
 /// A one-line signature: the definition's text up to the body delimiter, collapsed to one line.
