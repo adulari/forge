@@ -68,7 +68,12 @@ pub(crate) async fn api_serve_cmd(
     api_key: Option<String>,
     mock: bool,
 ) -> Result<()> {
-    let config = forge_config::load().unwrap_or_default();
+    // Refuse to start on a broken config rather than silently running with Config::default(),
+    // whose permission_mode is AcceptEdits. A TOML typo previously downgraded this network-facing
+    // daemon's permission posture and discarded the user's providers and budget caps, with nothing
+    // said. Failing loudly at startup is the only safe reading of "the config did not parse".
+    let config = forge_config::load()
+        .context("load Forge config for `forge api` (refusing to start with defaults, which are more permissive than a configured posture)")?;
     // Hydrate keyring-stored provider keys into this process's env, exactly as `forge run`/`models`/
     // `mcp` do. Without this, single-key NATIVE-adapter providers (gemini/openai/anthropic) — whose
     // genai auth is `FromEnv(<VAR>)` — fail every request with a resolver error, so a pin to one of
