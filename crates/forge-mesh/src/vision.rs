@@ -65,21 +65,77 @@ pub fn vision_capability(id: &str) -> Option<bool> {
         return Some(true);
     }
     let m = id.to_lowercase();
+    // `Some(false)` is a HARD REJECT on a pinned model (400), so a pattern here must not be
+    // broader than the vision allowlist it complements. Substring matching made three of these
+    // swallow real vision models: bare "gpt-4" also matched `gpt-4.5-preview` and
+    // `gpt-4-vision-preview`; "llama3.2" matched Ollama's dotless `llama3.2-vision:11b`; and
+    // "qwen2.5-" matched the multimodal `qwen2.5-omni-7b`. Each was rejected with "does not
+    // support image input" while in fact supporting it.
+    //
+    // Anything containing a vision marker is therefore never classified text-only — when the id
+    // says it takes images and the allowlist simply has not heard of it, `None` (let the provider
+    // decide) is the honest answer, not a hard reject.
+    const VISION_MARKERS: &[&str] = &["vision", "-vl", "omni", "multimodal"];
+    if VISION_MARKERS.iter().any(|marker| m.contains(marker)) {
+        return None;
+    }
     const TEXT_ONLY_PATTERNS: &[&str] = &[
         "gpt-3",
-        "gpt-4", // gpt-4o, gpt-4-turbo and gpt-4.1 return above as vision-capable.
+        // Exact legacy gpt-4 ids only. `gpt-4o`/`-turbo`/`.1` return vision above, but `gpt-4.5`
+        // and future `gpt-4.x` must fall through to None rather than be rejected outright.
+        "gpt-4-0",
+        "gpt-4-1106",
+        "gpt-4-32k",
         "claude-2",
         "claude-instant",
         "llama-3.1",
         "llama-3.3",
-        "llama3.2",
         "deepseek-v3",
-        "qwen2.5-",
         "mistral-large",
         "davinci",
     ];
+    if m.ends_with("gpt-4") || m.ends_with("llama3.2") || m.ends_with("qwen2.5") {
+        return Some(false);
+    }
     TEXT_ONLY_PATTERNS
         .iter()
         .any(|pattern| m.contains(pattern))
         .then_some(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Some(false)` is a hard 400 on a pinned model, so over-matching here rejects working
+    /// models. These four were all wrongly rejected by substring patterns.
+    #[test]
+    fn known_vision_models_are_never_classified_text_only() {
+        for id in [
+            "openai::gpt-4.5-preview",
+            "openai::gpt-4-vision-preview",
+            "ollama::llama3.2-vision:11b",
+            "qwen2.5-omni-7b",
+        ] {
+            assert_ne!(
+                vision_capability(id),
+                Some(false),
+                "{id} must not be rejected"
+            );
+        }
+    }
+
+    /// The genuinely text-only families must still be caught, or the pin check stops protecting.
+    #[test]
+    fn legacy_text_only_models_are_still_rejected() {
+        for id in [
+            "openai::gpt-4",
+            "anthropic::claude-2.1",
+            "groq::llama-3.3-70b",
+        ] {
+            assert_eq!(vision_capability(id), Some(false), "{id} must be text-only");
+        }
+        assert_eq!(vision_capability("openai::gpt-4o"), Some(true));
+        assert_eq!(vision_capability("openrouter::stealth/ox-alpha"), None);
+    }
 }
