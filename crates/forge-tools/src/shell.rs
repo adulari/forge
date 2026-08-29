@@ -300,6 +300,26 @@ async fn run_command_inner(
 
     // Sandbox wiring: probe in the parent, install pre_exec only when supported. The scoped target
     // dir is passed as an extra writable path so the confined build can write there.
+    //
+    // FAIL CLOSED. Previously, an enabled sandbox on a host without Landlock (kernel < 5.13,
+    // Landlock off in the LSM list, many container runtimes, and every non-Linux platform) simply
+    // ran the command UNCONFINED behind a one-time `warn!`. The user had asked for confinement,
+    // believed writes were contained, and nothing enforced it — the worst shape a security control
+    // can take. `sandbox` is opt-in (default false), so refusing here only affects someone who
+    // explicitly requested confinement, which is exactly who must not silently go without it.
+    // Accepting no confinement stays available and explicit: set `shell.sandbox = false`.
+    if policy.enabled && !sandbox::is_supported() {
+        return (
+            format!(
+                "shell: refusing to run unconfined. `shell.sandbox = true` is set, but this host \
+                 cannot enforce it (Landlock unavailable — kernel too old, Landlock disabled, or a \
+                 non-Linux platform). Running anyway would give you no confinement while looking \
+                 confined. Either run on a host with Landlock, or set `shell.sandbox = false` to \
+                 accept unconfined execution deliberately. (cwd {cwd})"
+            ),
+            None,
+        );
+    }
     maybe_install_sandbox(&mut cmd, policy, cwd, scoped_target.as_deref());
 
     let start = Instant::now();
