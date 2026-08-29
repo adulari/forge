@@ -484,6 +484,21 @@ fn read_substitution(chars: &[char], i: usize) -> Option<(String, usize)> {
     None
 }
 
+/// `NAME=value` in the shell's assignment-prefix sense: a valid identifier, then `=`.
+///
+/// Deliberately strict so an ordinary argument that happens to contain `=` (`--opt=v`, `a=b/c`
+/// after the command word) is not mistaken for a prefix and does not shift which token is treated
+/// as the command.
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+}
+
 /// Drop leading no-op wrapper binaries so `env X=1 nice rm ...` matches `rm ...`.
 fn strip_wrappers(tokens: &[String]) -> Vec<String> {
     let mut i = 0;
@@ -497,6 +512,12 @@ fn strip_wrappers(tokens: &[String]) -> Vec<String> {
                     i += 1;
                 }
             }
+            // A BARE `VAR=value` prefix is as valid as `env VAR=value`, and skipping it here is
+            // what makes `FOO=1 rm -rf /` reach the deny floor. Without this the segment stayed
+            // "FOO=1 rm -rf /", the anchored glob `rm -rf /` did not match, and — because the
+            // command is single-line and parses cleanly — the substring fallback never ran either,
+            // so it was allowed while the covered `env FOO=1 rm -rf /` was correctly denied.
+            other if is_env_assignment(other) => i += 1,
             _ => break,
         }
     }
@@ -514,9 +535,24 @@ fn inner_script(tokens: &[String]) -> Option<String> {
         .and_then(|s| s.to_str())
         .unwrap_or(&tokens[0]);
     if matches!(bin, "bash" | "sh" | "zsh" | "dash") {
-        // find a `-c` (possibly combined like `-lc`) and take the following token as the script.
+        // Find the `-c` flag and take the following token as the script.
+        //
+        // This MUST NOT fire on a long option that merely contains the letter `c`. It used to, and
+        // `bash --norc -c 'rm -rf /'` therefore returned the literal string "-c" as the "script":
+        // the real payload was never scanned, so the builtin catastrophic-deny floor did not see
+        // `rm -rf /` and allowed it even under bypass. `--rcfile=x` did the same.
+        //
+        // Only a SHORT flag cluster counts: exactly `-c`, or a combined cluster like `-lc` where
+        // `c` is last and thus takes the next argument. A cluster with `c` in the middle (`-cx`)
+        // does not take the next token as its argument either, so it is not treated as one.
         for (i, t) in tokens.iter().enumerate().skip(1) {
-            if t.starts_with('-') && t.contains('c') {
+            if t.starts_with("--") {
+                continue; // long option: never the -c flag
+            }
+            let Some(short) = t.strip_prefix('-') else {
+                break; // first non-flag token: the interpreter has no -c
+            };
+            if short.ends_with('c') {
                 return tokens.get(i + 1).cloned();
             }
         }
