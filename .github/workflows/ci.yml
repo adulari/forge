@@ -107,6 +107,12 @@ jobs:
         run: bash scripts/ci/test-desktop-version-guard.sh
       - name: Enforce desktop version parity
         run: bash scripts/ci/desktop-version-guard.sh
+      # Signing is a single config flag, and flipping it off is invisible until a release run
+      # collects assets that were never signed. That is how v2.13.0 lost all five desktop legs.
+      - name: Test desktop updater artifact guard
+        run: bash scripts/ci/test-desktop-updater-guard.sh
+      - name: Enforce desktop updater artifacts
+        run: bash scripts/ci/desktop-updater-guard.sh
 
   anywhere-policy:
     name: anywhere plaintext-canary harness

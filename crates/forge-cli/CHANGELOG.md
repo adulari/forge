@@ -6,6 +6,19 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Desktop releases could not publish at all.** Three independent regressions took down every one
+  of the five `app-desktop.yml` build legs for v2.13.0: `bundle.createUpdaterArtifacts` had been
+  flipped off inside an unrelated squash, so tauri-cli signed nothing and asset collection found no
+  `.sig` files; the Windows leg's `beforeBuildCommand` spawned `npx.cmd`, which Node has refused
+  without `shell: true` since the CVE-2024-27980 mitigation, and reported it as a silent 50 ms exit
+  1; and the self-hosted Linux leg's pinned linuxdeploy plugin was fetched from a rolling
+  `continuous` tag whose bytes were republished upstream, so its reviewed digest no longer matched.
+  Signing is restored, the Expo CLI now runs under `process.execPath` and reports why a spawn
+  failed, the plugin is pinned to an immutable tagged release, and a new CI guard fails any PR that
+  disables updater artifacts again. See `docs/known-issues.md`.
+
 ## [2.13.0] - 2026-08-28
 
 ### Added
