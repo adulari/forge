@@ -623,9 +623,11 @@ impl CodexOauthProvider {
                 .chain_output_tokens
                 .saturating_add(response.usage.output_tokens);
             state.last_input_tokens = response.usage.input_tokens;
+            // A chain-reuse heuristic, not accounting: unreported caching is treated as none
+            // cached, which only makes the cold-prefix estimate more pessimistic.
             state.last_cached_input_tokens = response
                 .usage
-                .cached_input_tokens
+                .cached_input_tokens_or_zero()
                 .min(response.usage.input_tokens);
         }
         result

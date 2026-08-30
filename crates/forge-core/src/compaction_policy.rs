@@ -151,7 +151,7 @@ impl Session {
             session_cached_in: self
                 .store
                 .session_cached_input_tokens(&self.id)
-                .unwrap_or(0),
+                .unwrap_or(None),
             session_out,
             context_tokens: self.estimated_transcript_tokens(),
             // The gauge denominator is the model's REAL window, not the transient overflow cap.

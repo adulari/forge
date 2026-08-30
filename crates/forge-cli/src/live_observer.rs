@@ -33,8 +33,9 @@ pub enum LiveEvent {
     Cost {
         session_total_usd: f64,
         session_in: u64,
+        /// `None` = no provider in the session reports cache hits, not "nothing was cached".
         #[serde(default)]
-        session_cached_in: u64,
+        session_cached_in: Option<u64>,
         session_out: u64,
         context_tokens: u64,
         context_limit: Option<u32>,

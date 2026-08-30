@@ -583,7 +583,7 @@ fn staged_history_applies_in_dependency_order_without_replacing_host_paths() {
         store
             .session_cached_input_tokens(&session_id)
             .expect("cached input tokens"),
-        2
+        Some(2)
     );
 }
 
@@ -629,7 +629,9 @@ fn legacy_remote_usage_without_cached_tokens_remains_importable() {
         store
             .session_cached_input_tokens(&session_id)
             .expect("cached input tokens"),
-        0
+        // The legacy payload omits the field entirely, so the peer never claimed a figure. That
+        // stays unknown rather than collapsing into a confident zero.
+        None
     );
 }
 
@@ -835,7 +837,7 @@ fn core_store_writes_enqueue_complete_sync_snapshots() {
             &Usage {
                 input_tokens: 10,
                 output_tokens: 5,
-                cached_input_tokens: 2,
+                cached_input_tokens: Some(2),
                 cost_usd: 0.01,
             },
             Some("anthropic::claude-opus-5"),

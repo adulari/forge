@@ -1253,13 +1253,15 @@ impl Provider for GenAiProvider {
 /// Normalize genai's provider-independent usage into Forge accounting. OpenAI-compatible APIs
 /// report prompt-cache hits under `prompt_tokens_details.cached_tokens`; preserving that subset
 /// lets every API-key provider receive the correct discounted cache-read pricing when known.
+///
+/// Providers that omit `prompt_tokens_details` entirely (groq among them) yield `None` rather than
+/// 0: they never told us how much was cached, which is not a claim that nothing was.
 fn normalize_usage(usage: &genai::chat::Usage) -> Usage {
     let cached = usage
         .prompt_tokens_details
         .as_ref()
         .and_then(|details| details.cached_tokens)
-        .unwrap_or(0)
-        .max(0) as u64;
+        .map(|cached| cached.max(0) as u64);
     Usage {
         input_tokens: usage.prompt_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: usage.completion_tokens.unwrap_or(0).max(0) as u64,

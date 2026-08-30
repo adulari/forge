@@ -154,7 +154,7 @@ impl ClaudeStreamState {
                 self.text.clear();
                 self.reasoning.clear();
                 self.tool_ids.clear();
-                if let Some(usage) = v.get("usage").map(usage_from) {
+                if let Some(usage) = v.get("usage").map(claude_usage_from) {
                     out.push(Parsed::Usage(usage));
                 }
                 let result_text = v.get("result").and_then(Value::as_str).map(str::to_string);
@@ -418,7 +418,7 @@ pub(super) fn parse_codex_line(line: &str) -> Vec<Parsed> {
             .unwrap_or_default(),
         Some("turn.completed") => v
             .get("usage")
-            .map(usage_from)
+            .map(codex_usage_from)
             .map(Parsed::Usage)
             .into_iter()
             .collect(),

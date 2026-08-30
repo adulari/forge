@@ -48,7 +48,7 @@ impl Store {
                     &usage_id,
                     msg_id.as_str(),
                     usage.input_tokens as i64,
-                    usage.cached_input_tokens as i64,
+                    usage.cached_input_tokens.map(|c| c as i64),
                     usage.output_tokens as i64,
                     usage.cost_usd,
                 ),

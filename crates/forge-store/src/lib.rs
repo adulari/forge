@@ -59,7 +59,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 29;
+const SCHEMA_VERSION: i64 = 30;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -383,9 +383,18 @@ const USAGE_PROVIDER_EXPR: &str = "COALESCE(NULLIF(CASE WHEN instr(m.model, '::'
 pub struct ProviderUsage {
     pub provider: String,
     pub input_tokens: u64,
-    pub cached_input_tokens: u64,
+    /// `None` when not one of this provider's calls reported prompt-cache hits, so the split is
+    /// unknown. `Some(0)` means the provider reported that nothing was cached.
+    pub cached_input_tokens: Option<u64>,
     pub output_tokens: u64,
     pub cost_usd: f64,
+}
+
+/// Fold a `SUM(cached_input_tokens)` / `COUNT(cached_input_tokens)` pair into an honest total.
+/// `COUNT` over a nullable column skips NULLs, so a zero count means no row in the group came from
+/// a provider that reports caching.
+fn cached_total(sum: i64, reporting: i64) -> Option<u64> {
+    (reporting > 0).then(|| sum.max(0) as u64)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -748,8 +757,9 @@ struct RemoteUsagePayload {
     id: String,
     message_id: String,
     input_tokens: i64,
+    /// Absent/null = the remote provider does not report cache hits (see `usage.cached_input_tokens`).
     #[serde(default)]
-    cached_input_tokens: i64,
+    cached_input_tokens: Option<i64>,
     output_tokens: i64,
     cost_usd: f64,
 }
@@ -2038,7 +2048,7 @@ mod tests {
                 &Usage {
                     input_tokens: 10,
                     output_tokens: 5,
-                    cached_input_tokens: 7,
+                    cached_input_tokens: Some(7),
                     cost_usd: 0.02,
                 },
                 None,
@@ -2050,7 +2060,7 @@ mod tests {
 
         assert_eq!(store.message_count(&sid).unwrap(), 1);
         assert!((store.session_cost(&sid).unwrap() - 0.02).abs() < 1e-9);
-        assert_eq!(store.session_cached_input_tokens(&sid).unwrap(), 7);
+        assert_eq!(store.session_cached_input_tokens(&sid).unwrap(), Some(7));
     }
 
     fn record_cost(store: &Store, cost: f64) {
@@ -2063,7 +2073,7 @@ mod tests {
                 &Usage {
                     input_tokens: 1,
                     output_tokens: 1,
-                    cached_input_tokens: 0,
+                    cached_input_tokens: Some(0),
                     cost_usd: cost,
                 },
                 None,
@@ -2163,7 +2173,7 @@ mod tests {
                 &Usage {
                     input_tokens: 12,
                     output_tokens: 7,
-                    cached_input_tokens: 0,
+                    cached_input_tokens: Some(0),
                     cost_usd: 0.03,
                 },
                 None,
@@ -2983,7 +2993,7 @@ mod tests {
         let usage = |i: u64, o: u64, cached: u64| Usage {
             input_tokens: i,
             output_tokens: o,
-            cached_input_tokens: cached,
+            cached_input_tokens: Some(cached),
             cost_usd: 0.0,
         };
         let m0 = store
@@ -3026,7 +3036,7 @@ mod tests {
             .find(|r| r.provider == "codex-oauth")
             .expect("codex-oauth provider derived from model namespace");
         assert_eq!(terra.input_tokens, 150, "both terra turns summed");
-        assert_eq!(terra.cached_input_tokens, 85);
+        assert_eq!(terra.cached_input_tokens, Some(85));
         assert_eq!(terra.output_tokens, 15);
         let nvidia = week
             .iter()
@@ -3037,7 +3047,7 @@ mod tests {
             "side-call usage inherits nearest provider"
         );
         assert_eq!(nvidia.output_tokens, 5);
-        assert_eq!(nvidia.cached_input_tokens, 25);
+        assert_eq!(nvidia.cached_input_tokens, Some(25));
 
         let session = store.usage_by_provider_for_session(&sid).unwrap();
         assert_eq!(session.len(), 2, "two distinct providers in the session");
@@ -3412,7 +3422,7 @@ mod tests {
                 "memory",
                 &Usage {
                     input_tokens: 7,
-                    cached_input_tokens: 2,
+                    cached_input_tokens: Some(2),
                     output_tokens: 3,
                     ..Default::default()
                 },
@@ -3421,7 +3431,9 @@ mod tests {
         assert_eq!(store.session_tokens(&sid).unwrap(), (10, 5));
         let consumed = store.session_token_usage(&sid).unwrap();
         assert_eq!((consumed.input_tokens, consumed.output_tokens), (37, 18));
-        assert_eq!(consumed.cached_input_tokens, 2);
+        // The two transcript rows above reported nothing, so the session total is exactly the one
+        // figure a provider did report — not a sum polluted by assumed zeroes.
+        assert_eq!(consumed.cached_input_tokens, Some(2));
     }
 
     #[test]
@@ -5378,7 +5390,7 @@ mod tests {
                             &Usage {
                                 input_tokens: 1,
                                 output_tokens: 1,
-                                cached_input_tokens: 0,
+                                cached_input_tokens: Some(0),
                                 cost_usd: 0.01,
                             },
                         )
@@ -5890,6 +5902,87 @@ mod tests {
                 .unwrap();
             assert_eq!((input, cached, output), (123, 0, 45), "{pass}");
             assert!((cost - 0.67).abs() < f64::EPSILON, "{pass}");
+        }
+        cleanup(&path);
+    }
+
+    /// Migration 0030 relaxes `usage.cached_input_tokens` to nullable and retires the zeros the
+    /// codex bridge fabricated. Forge's bridge parser only ever read Claude's
+    /// `cache_read_input_tokens`; Codex emits `cached_input_tokens`, so every codex-cli zero is a
+    /// dropped field, not a measurement. Zeros from providers that do report caching are real
+    /// measurements and must survive untouched.
+    #[test]
+    fn migration_0030_nulls_only_the_codex_bridge_fabricated_zeros() {
+        let path = temp_db_path();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(schema::SCHEMA).unwrap();
+            // Restore the pre-0030 shape: NOT NULL DEFAULT 0, which cannot express unknown.
+            conn.execute_batch(
+                "DROP TABLE usage;
+                 CREATE TABLE usage (
+                     id TEXT PRIMARY KEY,
+                     message_id TEXT NOT NULL,
+                     provider TEXT,
+                     model TEXT,
+                     input_tokens INTEGER NOT NULL,
+                     cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                     output_tokens INTEGER NOT NULL,
+                     cost_usd REAL NOT NULL,
+                     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                 );
+                 INSERT INTO usage (id, message_id, provider, model, input_tokens, cached_input_tokens, output_tokens, cost_usd) VALUES
+                     ('u-codex-zero',  'm', 'codex-cli',   'gpt', 18767286, 0,  21780, 0.0),
+                     ('u-codex-real',  'm', 'codex-cli',   'gpt',   151655, 151296, 176, 0.0),
+                     ('u-oauth-zero',  'm', 'codex-oauth', 'gpt',     6771, 0,     11, 0.0),
+                     ('u-claude-real', 'm', 'claude-cli',  'opus', 11952000, 11800922, 900, 0.0);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 29i64).unwrap();
+        }
+
+        for pass in ["first open (migrates)", "second open (idempotent)"] {
+            let store = Store::open(&path).unwrap_or_else(|e| panic!("{pass}: {e:?}"));
+            let conn = store.lock().unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION,
+                "{pass}"
+            );
+            let cached = |id: &str| {
+                conn.query_row(
+                    "SELECT cached_input_tokens FROM usage WHERE id = ?1",
+                    [id],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(cached("u-codex-zero"), None, "{pass}: dropped field, not 0");
+            assert_eq!(cached("u-codex-real"), Some(151_296), "{pass}");
+            assert_eq!(
+                cached("u-oauth-zero"),
+                Some(0),
+                "{pass}: codex-oauth always parsed its own field, so its 0 is a measurement"
+            );
+            assert_eq!(cached("u-claude-real"), Some(11_800_922), "{pass}");
+            // The rebuild must not lose the column's other rows or the indexes.
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM usage", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                4,
+                "{pass}"
+            );
+            assert!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_usage_created_at', 'idx_usage_message')",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap()
+                    == 2,
+                "{pass}: indexes recreated after the table rebuild"
+            );
         }
         cleanup(&path);
     }

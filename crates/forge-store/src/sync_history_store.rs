@@ -481,7 +481,7 @@ impl Store {
                 HistoryMutation::Usage(payload) => {
                     if payload.message_id.trim().is_empty()
                         || payload.input_tokens < 0
-                        || payload.cached_input_tokens < 0
+                        || payload.cached_input_tokens.is_some_and(|cached| cached < 0)
                         || payload.output_tokens < 0
                         || !payload.cost_usd.is_finite()
                         || payload.cost_usd < 0.0

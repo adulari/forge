@@ -1449,21 +1449,42 @@ fn find_codex_rollout(thread_id: &str) -> Option<std::path::PathBuf> {
     search(&dir, &format!("-{thread_id}.jsonl"), 5)
 }
 
-fn usage_from(v: &Value) -> Usage {
+/// Claude Code's `result.usage`. Claude reports the UNCACHED `input_tokens` separately from
+/// `cache_read_input_tokens` and `cache_creation_input_tokens`, whereas Forge's `Usage.input_tokens`
+/// is the FULL input the model processed (cached is a subset, see its doc) — so the three are
+/// summed. Otherwise a resumed / prompt-cached bridge turn looks almost free, undercounting input
+/// everywhere (the token gauge, and — critically — any Forge-vs-raw-CLI efficiency comparison,
+/// which then isn't apples-to-apples because the raw-CLI metric counts cache reads).
+///
+/// Only cache *reads* are the discounted subset; cache *creation* is billed at a premium and stays
+/// out of `cached_input_tokens` so pricing does not discount it.
+fn claude_usage_from(v: &Value) -> Usage {
     let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
-    // claude/codex report the UNCACHED `input_tokens` separately from `cache_read_input_tokens` and
-    // `cache_creation_input_tokens`. Forge's `Usage.input_tokens` is the FULL input the model
-    // processed (cached is a subset, see its doc), so sum all three — otherwise a resumed /
-    // prompt-cached bridge turn looks almost free, undercounting input everywhere (the token gauge,
-    // and — critically — any Forge-vs-raw-CLI efficiency comparison, which then isn't apples-to-apples
-    // because the raw-CLI metric counts cache reads).
     let cache_read = n("cache_read_input_tokens");
     Usage {
         input_tokens: n("input_tokens") + cache_read + n("cache_creation_input_tokens"),
         output_tokens: n("output_tokens"),
-        // The cached subset of `input_tokens` (billed at a fraction; cost stays $0 on a subscription).
-        cached_input_tokens: cache_read,
+        cached_input_tokens: Some(cache_read),
         // Subscription-billed via the user's own CLI — $0 against Forge's USD budget (FR-5).
+        cost_usd: 0.0,
+    }
+}
+
+/// Codex's `turn.completed.usage` (codex-rs `exec_events::Usage`). Unlike Claude, Codex's
+/// `input_tokens` is ALREADY the full input and `cached_input_tokens` is a subset of it — adding
+/// them would double-count. Forge previously read only Claude's `cache_read_input_tokens` here, a
+/// key Codex never emits, so every codex turn was recorded as 100% fresh input.
+///
+/// The counts are summed over the model calls Codex made inside the one `codex exec` process that
+/// serves this Forge turn, so they are a per-turn total rather than a single-call figure. That is
+/// the same unit `Usage` carries for every other provider (one Forge turn's consumption).
+fn codex_usage_from(v: &Value) -> Usage {
+    let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Usage {
+        input_tokens: n("input_tokens"),
+        output_tokens: n("output_tokens"),
+        // Absent only on a truncated/older event — then the split is genuinely unknown, not zero.
+        cached_input_tokens: v.get("cached_input_tokens").and_then(Value::as_u64),
         cost_usd: 0.0,
     }
 }
@@ -4766,18 +4787,73 @@ mod tests {
         );
     }
 
+    /// Pins the literal `turn.completed` shape codex-cli emits, field-for-field against
+    /// codex-rs `exec/src/exec_events.rs::Usage` (verified on codex-cli 0.149.1). Forge used to
+    /// read only Claude's `cache_read_input_tokens` here — a key Codex never emits — so every
+    /// codex turn was stored as 100% fresh input.
+    ///
+    /// The numbers are a real `last_token_usage` record from a local rollout under
+    /// `~/.codex/sessions`, which also fixes the arithmetic: `total_tokens` (151831) equals
+    /// `input_tokens + output_tokens`, and `cached_input_tokens` is strictly less than
+    /// `input_tokens`. Cached is therefore a SUBSET of input, never an addend.
     #[test]
-    fn codex_turn_completed_yields_usage_zero_cost() {
+    fn codex_turn_completed_records_cached_input_as_a_subset_not_an_addend() {
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":151655,"cached_input_tokens":151296,"cache_write_input_tokens":0,"output_tokens":176,"reasoning_output_tokens":58}}"#;
+        let parsed = parse_codex_line(line);
+        assert_eq!(
+            parsed,
+            vec![Parsed::Usage(Usage {
+                input_tokens: 151_655,
+                output_tokens: 176,
+                cached_input_tokens: Some(151_296),
+                cost_usd: 0.0
+            })]
+        );
+        let Parsed::Usage(usage) = &parsed[0] else {
+            panic!("expected usage");
+        };
+        assert_eq!(
+            usage.total_tokens(),
+            151_831,
+            "matches Codex's total_tokens"
+        );
+        assert_eq!(usage.fresh_input_tokens(), Some(359));
+    }
+
+    /// A `turn.completed` without the field means the split is unknown. Recording 0 would assert
+    /// that Codex cached nothing, which is precisely the accounting error this path had.
+    #[test]
+    fn codex_turn_completed_without_cache_field_is_unknown_not_zero() {
         let line = r#"{"type":"turn.completed","usage":{"input_tokens":16927,"output_tokens":23}}"#;
         assert_eq!(
             parse_codex_line(line),
             vec![Parsed::Usage(Usage {
                 input_tokens: 16927,
                 output_tokens: 23,
-                cached_input_tokens: 0,
+                cached_input_tokens: None,
                 cost_usd: 0.0
             })]
         );
+    }
+
+    /// The contrasting Claude schema, to keep the two normalizations from drifting back together:
+    /// Claude's `input_tokens` EXCLUDES the cache counters, so all three are summed into Forge's
+    /// full-input figure while only the cache-READ half is the discountable subset.
+    #[test]
+    fn claude_result_sums_cache_counters_into_full_input() {
+        let line = r#"{"type":"result","result":"done","usage":{"input_tokens":12,"cache_read_input_tokens":8000,"cache_creation_input_tokens":300,"output_tokens":45}}"#;
+        let mut state = ClaudeStreamState::default();
+        let usage = state
+            .parse_line(line)
+            .into_iter()
+            .find_map(|p| match p {
+                Parsed::Usage(u) => Some(u),
+                _ => None,
+            })
+            .expect("result carries usage");
+        assert_eq!(usage.input_tokens, 8312);
+        // Cache CREATION is billed at a premium, so it stays out of the discounted subset.
+        assert_eq!(usage.cached_input_tokens, Some(8000));
     }
 
     #[test]
