@@ -1446,6 +1446,53 @@ impl HeuristicRouter {
         });
     }
 
+    /// While a subscription is over its linear allowance, keep only its cheapest usable sibling.
+    /// If the only usable sibling is also the provider's highest-burn model, remove the provider
+    /// entirely; ordinary pacing never spends a flagship through the protected reserve.
+    fn apply_subscription_pacing(
+        &self,
+        usable: &mut Vec<String>,
+        candidates: &[String],
+        quota: &SubscriptionQuota,
+    ) {
+        let burn_weight = |model: &str| {
+            crate::capability::subscription_burn_weight(model, &self.config.mesh.burn_weights)
+        };
+        let providers: std::collections::HashSet<String> = usable
+            .iter()
+            .map(String::as_str)
+            .filter(|model| catalog::is_subscription(model))
+            .map(forge_config::provider_of)
+            .filter(|provider| {
+                quota
+                    .pacing_for(provider)
+                    .is_some_and(|pace| pace.is_over_pace())
+            })
+            .map(str::to_string)
+            .collect();
+        for provider in providers {
+            let min_usable = usable
+                .iter()
+                .filter(|model| forge_config::provider_of(model) == provider)
+                .map(|model| burn_weight(model))
+                .min_by(f64::total_cmp);
+            let max_catalog = candidates
+                .iter()
+                .filter(|model| forge_config::provider_of(model) == provider)
+                .map(|model| burn_weight(model))
+                .max_by(f64::total_cmp);
+            let Some(min_usable) = min_usable else {
+                continue;
+            };
+            let no_lower_sibling =
+                max_catalog.is_some_and(|max| min_usable >= max && min_usable > 1.0);
+            usable.retain(|model| {
+                forge_config::provider_of(model) != provider
+                    || (!no_lower_sibling && burn_weight(model) <= min_usable)
+            });
+        }
+    }
+
     /// Pick the cheapest *usable* model from `candidates` (L1). Ranking key:
     /// `(prefer_subscription && subscription ? 0 : 1, estimated_cost, config_order)` — so a
     /// paid subscription (the $0 CLI bridges) wins when preferred, then lowest est. cost, then
@@ -1509,6 +1556,7 @@ impl HeuristicRouter {
                 usable = vision_only;
             }
         }
+        self.apply_subscription_pacing(&mut usable, &candidates, quota);
         Self::suppress_usable_oauth_superseded_bridges(&mut usable);
         if !self.auto_active() {
             // Configured path: cost-aware order (auto path keeps the ranked order verbatim).
@@ -2243,6 +2291,26 @@ impl HeuristicRouter {
                 }
                 if self.config.mesh.prefer_subscription && catalog::is_subscription(&model) {
                     why.push_str(" (paid subscription)");
+                }
+                if let Some(pacing) = quota
+                    .pacing_for(forge_config::provider_of(&model))
+                    .filter(|pacing| pacing.is_over_pace())
+                {
+                    let from = self
+                        .candidates_for_tier(tier, hints, quota, effort)
+                        .into_iter()
+                        .find(|candidate| {
+                            forge_config::provider_of(candidate)
+                                == forge_config::provider_of(&model)
+                                && candidate != &model
+                        })
+                        .unwrap_or_else(|| model.clone());
+                    why.push_str(&format!(
+                        " — over pace: {:.0}% spent, {:.0}% allowed in {} -> downgraded {from} to {model}",
+                        pacing.fraction_used * 100.0,
+                        pacing.allowed_fraction * 100.0,
+                        pacing.window,
+                    ));
                 }
                 chain.retain(|m| m != &model);
                 RoutingDecision {
@@ -3144,6 +3212,46 @@ mod tests {
             "must not mislabel a credit-mode policy exclusion as quota exhaustion: {}",
             d.rationale
         );
+    }
+
+    #[tokio::test]
+    async fn over_pace_routes_to_the_cheapest_subscription_sibling() {
+        let r = HeuristicRouter::new(Config::default())
+            .with_availability(|_| true)
+            .with_catalog(ModelCatalog::new(vec![
+                "codex-cli::gpt-5.6-sol".into(),
+                "codex-cli::gpt-5.6-terra".into(),
+                "codex-cli::gpt-5.6-luna".into(),
+                "groq::llama-3.3-70b-versatile".into(),
+            ]));
+        let quota = SubscriptionQuota::default().with_pacing(std::collections::HashMap::from([(
+            "codex-cli".to_string(),
+            forge_types::SubscriptionPacing {
+                window: "weekly".to_string(),
+                fraction_used: 0.37,
+                allowed_fraction: 0.21,
+                elapsed_secs: 2 * 24 * 60 * 60,
+                total_secs: 7 * 24 * 60 * 60,
+                resets_at: Some(1_000_000),
+                used_nominal_fallback: false,
+            },
+        )]));
+        let decision = r
+            .route(
+                "design and prove correct a lock-free queue",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &quota,
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(decision.model, "codex-cli::gpt-5.6-luna");
+        assert!(!decision.fallbacks.iter().any(|m| m.contains("gpt-5.6-sol")));
+        assert!(decision
+            .rationale
+            .contains("over pace: 37% spent, 21% allowed"));
     }
 
     /// A realistic mixed catalog mirroring a user with claude+codex CLIs, local ollama, and
