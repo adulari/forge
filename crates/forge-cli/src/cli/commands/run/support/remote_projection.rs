@@ -61,6 +61,8 @@ pub(crate) fn build_snapshot_frame(
             .map(forge_types::PermissionMode::key)
             .unwrap_or_default()
             .to_string(),
+        last_turn_outcome: view.last_stop_reason.map(|r| r.outcome().to_string()),
+        last_stop_reason: view.last_stop_reason.map(|r| r.as_str().to_string()),
         temper: view.temper,
         effort: view
             .effort

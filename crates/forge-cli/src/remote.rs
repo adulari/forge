@@ -1019,6 +1019,16 @@ pub struct Snapshot {
     pub exposure: String,
     pub busy: bool,
     pub done: bool,
+    /// Coarse outcome of the most recent finished turn: `"success"` or `"failed"`. `None` until
+    /// a turn has finished. Additive — a client that doesn't know the key behaves as before, but
+    /// without it `busy: false` is the ONLY thing an orchestrator or the phone sees, and a session
+    /// that did the work is indistinguishable from one that burned a turn doing nothing.
+    #[serde(default)]
+    pub last_turn_outcome: Option<String>,
+    /// The precise stop reason behind `last_turn_outcome` (`final_answer`, `max_steps`,
+    /// `budget_exhausted`, `interrupted`, `no_output`), for callers that want the detail.
+    #[serde(default)]
+    pub last_stop_reason: Option<String>,
     /// The active operating temper label (e.g. "Ask").
     pub temper: String,
     /// The canonical permission-mode key (`default`, `accept-edits`, `bypass`, or `plan`) (v10).
@@ -1110,6 +1120,8 @@ impl Default for Snapshot {
             exposure: String::new(),
             busy: false,
             done: false,
+            last_turn_outcome: None,
+            last_stop_reason: None,
             temper: String::new(),
             permission_mode: String::new(),
             effort: String::new(),

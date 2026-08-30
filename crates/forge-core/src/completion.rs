@@ -89,6 +89,29 @@ impl VerificationLedger {
     }
 }
 
+/// Whether a tool NAME denotes a state-changing call (a write-family tool or a shell). Used where
+/// only the name is available: a CLI bridge runs its tool loop in a subprocess and surfaces calls
+/// as stream events, so there is no local registry to ask for a [`forge_types::SideEffect`]. The
+/// direct path uses the registry instead — see `Session::execute_model_tool_step`. Suffix matching
+/// keeps it working for the bridge's namespaced names (`mcp__forge__write_file`).
+pub(crate) fn tool_name_mutates(name: &str) -> bool {
+    [
+        "write_file",
+        "append_file",
+        "edit_file",
+        "multi_edit",
+        "apply_patch",
+        "delete_file",
+        "move_file",
+        "copy_file",
+        "notebook_edit",
+        "shell",
+        "exec_command",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+}
+
 pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
     if [
         "update_tasks",
