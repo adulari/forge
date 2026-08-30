@@ -84,6 +84,8 @@ jobs:
         run: bash scripts/ci/test-unstick-stale-run-cancellation.sh
       - name: Test AppImage Wayland backend fix
         run: bash scripts/ci/test-appimage-wayland-backend.sh
+      - name: Test AppImage plugin shim
+        run: bash scripts/ci/test-appimage-plugin-shim.sh
       - name: Test CI store isolation
         run: bash scripts/ci/test-ci-store-isolation.sh
       - name: Test persistent runner cache bounds
