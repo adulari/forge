@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod interaction;
+mod turn_outcome;
+
 pub use interaction::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, ReplayItem, NO_ANSWER};
+pub use turn_outcome::{LoopOutcome, StopReason};
 
 /// Who produced a message in a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1267,89 +1270,6 @@ pub fn compute_quota_pace(
         time_to_exhaustion_secs,
         exhaustion_warning,
     })
-}
-
-/// Why a `run_turn_with` loop ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StopReason {
-    /// Model produced a final answer without requesting more tools.
-    FinalAnswer,
-    /// Loop hit the configured `max_steps` limit while the model still wanted tools.
-    MaxSteps,
-    /// Daily/monthly budget cap was reached before the turn ran.
-    BudgetExhausted,
-    /// Turn was aborted via `forge_interrupt` (or an equivalent signal).
-    Interrupted,
-}
-
-/// The result of a completed (or interrupted) agent turn.
-#[derive(Debug, Clone)]
-pub struct LoopOutcome {
-    /// The assistant's final text response.
-    pub text: String,
-    /// Why the turn ended.
-    pub stop_reason: StopReason,
-}
-
-impl LoopOutcome {
-    pub fn final_answer(text: String) -> Self {
-        Self {
-            text,
-            stop_reason: StopReason::FinalAnswer,
-        }
-    }
-
-    pub fn max_steps(text: String) -> Self {
-        Self {
-            text,
-            stop_reason: StopReason::MaxSteps,
-        }
-    }
-
-    pub fn budget_exhausted(text: String) -> Self {
-        Self {
-            text,
-            stop_reason: StopReason::BudgetExhausted,
-        }
-    }
-}
-
-impl std::ops::Deref for LoopOutcome {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.text
-    }
-}
-
-impl std::fmt::Display for LoopOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.text)
-    }
-}
-
-impl PartialEq for LoopOutcome {
-    fn eq(&self, other: &Self) -> bool {
-        self.text == other.text && self.stop_reason == other.stop_reason
-    }
-}
-
-impl PartialEq<str> for LoopOutcome {
-    fn eq(&self, other: &str) -> bool {
-        self.text == other
-    }
-}
-
-impl PartialEq<&str> for LoopOutcome {
-    fn eq(&self, other: &&str) -> bool {
-        self.text == *other
-    }
-}
-
-impl PartialEq<String> for LoopOutcome {
-    fn eq(&self, other: &String) -> bool {
-        &self.text == other
-    }
 }
 
 #[cfg(test)]

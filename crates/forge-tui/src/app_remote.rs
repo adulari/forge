@@ -15,6 +15,7 @@ impl App {
         RemoteSnapshot {
             busy: self.busy,
             done: self.done,
+            last_stop_reason: self.last_stop_reason,
             temper: self.temper.clone(),
             effort: self.effort,
             tier: self.routing.as_ref().map(|r| r.tier.clone()),
@@ -634,6 +635,10 @@ pub struct DiffSnapshot {
 pub struct RemoteSnapshot {
     pub busy: bool,
     pub done: bool,
+    /// How the most recent turn ended. `None` until one has. Remote clients read this to tell a
+    /// turn that finished the work from one that failed or produced nothing at all — `busy` and
+    /// `done` alone report both as an ordinary idle session.
+    pub last_stop_reason: Option<forge_types::StopReason>,
     pub temper: String,
     pub effort: Option<forge_types::EffortLevel>,
     pub tier: Option<String>,

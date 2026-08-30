@@ -13,6 +13,10 @@ pub(super) fn handle_stream_event(
     active: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     tools: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     inspects: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    // `mutations`: successful state-changing calls a CLI bridge made this loop. The bridge runs its
+    // tool loop in a subprocess, so this stream is the ONLY place its writes are observable —
+    // without it a bridge turn always looks like it mutated nothing.
+    mutations: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     build_fight: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     verification: &std::sync::Arc<std::sync::Mutex<VerificationLedger>>,
     pending_observations: &std::sync::Arc<
@@ -66,6 +70,9 @@ pub(super) fn handle_stream_event(
                 .and_then(std::collections::VecDeque::pop_front)
                 .unwrap_or(VerificationObservation::Generic);
             verification.lock().unwrap().observe(observation, ok);
+            if ok && completion::tool_name_mutates(&name) {
+                mutations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             presenter.emit(PresenterEvent::ToolResult { name, ok, summary })
         }
         StreamEvent::SubagentStarted { id, agent, task } => {

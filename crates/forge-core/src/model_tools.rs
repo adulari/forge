@@ -114,14 +114,6 @@ impl Session {
             if !call.name.ends_with("update_tasks") && !call.name.ends_with("present_plan") {
                 inspect_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            if self.tools.get(&call.name).is_some_and(|tool| {
-                matches!(
-                    tool.side_effect(),
-                    forge_types::SideEffect::Write | forge_types::SideEffect::Shell
-                )
-            }) {
-                mutations_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
         }
 
         // Fast path: when the model batched several independent side-effect-free calls (and no
@@ -172,6 +164,19 @@ impl Session {
                     completion::classify_tool(&call.name, &call.args.to_string()),
                     failure.is_none(),
                 );
+                // Count the mutation only once it SUCCEEDED. A denied or failing write changed
+                // nothing, so treating the attempt as evidence would let both the phantom-edit
+                // gate and the no-output turn classification accept a turn that mutated nothing.
+                if failure.is_none()
+                    && self.tools.get(&call.name).is_some_and(|tool| {
+                        matches!(
+                            tool.side_effect(),
+                            forge_types::SideEffect::Write | forge_types::SideEffect::Shell
+                        )
+                    })
+                {
+                    mutations_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 match failure {
                     Some(kind) => {
                         *failure_counts.entry((call.name.clone(), kind)).or_insert(0) += 1;
