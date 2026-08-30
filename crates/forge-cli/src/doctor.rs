@@ -9,6 +9,9 @@
 //! Forge is unusable" cases: a keyed provider that's unreachable (→ keyless fallback churn) and a
 //! bridge that's on PATH but can't actually launch (the Windows `cmd /S /C` shim path).
 
+#[path = "doctor_bridge_models.rs"]
+mod bridge_models;
+
 use crate::local;
 
 /// One diagnostic line's outcome.
@@ -83,6 +86,10 @@ pub async fn run() -> anyhow::Result<usize> {
     let bridge_live = bridge_roundtrip_checks().await;
     if !bridge_live.is_empty() {
         sections.push(("Bridge liveness", bridge_live));
+    }
+    let bridge_models = bridge_models::checks().await;
+    if !bridge_models.is_empty() {
+        sections.push(("Bridge model discovery", bridge_models));
     }
     sections.push(("Background daemon", daemon_checks().await));
     sections.push(("Forge Anywhere", crate::doctor_health::anywhere_checks()));
