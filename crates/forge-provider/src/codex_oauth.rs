@@ -623,9 +623,11 @@ impl CodexOauthProvider {
                 .chain_output_tokens
                 .saturating_add(response.usage.output_tokens);
             state.last_input_tokens = response.usage.input_tokens;
+            // A chain-reuse heuristic, not accounting: unreported caching is treated as none
+            // cached, which only makes the cold-prefix estimate more pessimistic.
             state.last_cached_input_tokens = response
                 .usage
-                .cached_input_tokens
+                .cached_input_tokens_or_zero()
                 .min(response.usage.input_tokens);
         }
         result
@@ -1137,14 +1139,14 @@ mod tests {
             .await
             .expect("second live completion");
         eprintln!(
-            "cache probe: first input={} cached={}; second input={} cached={}",
+            "cache probe: first input={} cached={:?}; second input={} cached={:?}",
             first.usage.input_tokens,
             first.usage.cached_input_tokens,
             second.usage.input_tokens,
             second.usage.cached_input_tokens
         );
         assert!(
-            second.usage.cached_input_tokens > 0,
+            second.usage.cached_input_tokens.is_some_and(|c| c > 0),
             "second call did not report a cached prefix"
         );
     }
@@ -1613,7 +1615,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 123,
                 output_tokens: 45,
-                cached_input_tokens: 6,
+                cached_input_tokens: Some(6),
                 cost_usd: 0.0,
             },
             ..Default::default()

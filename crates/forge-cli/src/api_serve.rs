@@ -429,9 +429,7 @@ fn non_stream_response(state: &ApiState, done: Completed) -> impl IntoResponse {
         }],
         "usage": {
             "prompt_tokens": usage.input_tokens,
-            "prompt_tokens_details": {
-                "cached_tokens": usage.cached_input_tokens,
-            },
+            "prompt_tokens_details": prompt_tokens_details(usage),
             "completion_tokens": usage.output_tokens,
             "total_tokens": usage.total_tokens(),
         },
@@ -443,6 +441,17 @@ fn non_stream_response(state: &ApiState, done: Completed) -> impl IntoResponse {
         },
     });
     axum::Json(body)
+}
+
+/// OpenAI's `usage.prompt_tokens_details`, or JSON null when the routed provider does not report
+/// prompt-cache hits. Emitting `cached_tokens: 0` there would assert to every API client that the
+/// call had no cache hits, which is a stronger claim than Forge can make; omitting the object is
+/// exactly what a non-reporting OpenAI-compatible provider does, so it round-trips.
+fn prompt_tokens_details(usage: &forge_types::Usage) -> serde_json::Value {
+    match usage.cached_input_tokens {
+        Some(cached) => serde_json::json!({ "cached_tokens": cached }),
+        None => serde_json::Value::Null,
+    }
 }
 
 /// Build the OpenAI `message` object + `finish_reason` for a completed response.
@@ -600,9 +609,7 @@ fn stream_completion(
                             "choices": [],
                             "usage": {
                                 "prompt_tokens": usage.input_tokens,
-                                "prompt_tokens_details": {
-                                    "cached_tokens": usage.cached_input_tokens,
-                                },
+                                "prompt_tokens_details": prompt_tokens_details(usage),
                                 "completion_tokens": usage.output_tokens,
                                 "total_tokens": usage.total_tokens(),
                             }
@@ -810,8 +817,8 @@ mod tests {
         assert!(text.contains("\"role\":\"assistant\""));
         assert!(text.contains("\"content\":"));
         assert!(text.contains("\"finish_reason\":\"stop\""));
-        assert!(text.contains("\"prompt_tokens_details\":{"));
-        assert!(text.contains("\"cached_tokens\":0"));
+        assert!(text.contains("\"prompt_tokens_details\":null"));
+        assert!(!text.contains("\"cached_tokens\":0"));
         assert!(text.trim_end().ends_with("data: [DONE]"));
     }
 

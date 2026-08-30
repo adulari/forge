@@ -308,11 +308,11 @@ pub fn apply_sse_event(
             if let Some(u) = resp.get("usage") {
                 let input_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                 let output_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                // Absent details mean the provider does not report cache hits — unknown, not zero.
                 let cached_input_tokens = u
                     .get("input_tokens_details")
                     .and_then(|d| d.get("cached_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                    .and_then(|v| v.as_u64());
                 acc.usage = Usage {
                     input_tokens,
                     output_tokens,

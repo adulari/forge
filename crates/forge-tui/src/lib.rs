@@ -633,7 +633,7 @@ mod stream_json_tests {
         p.emit(PresenterEvent::Cost {
             session_total_usd: 0.01,
             session_in: 1_200,
-            session_cached_in: 900,
+            session_cached_in: Some(900),
             session_out: 40,
             context_tokens: 1_240,
             context_limit: Some(128_000),

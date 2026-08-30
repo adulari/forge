@@ -92,7 +92,9 @@ CREATE TABLE IF NOT EXISTS usage (
     provider      TEXT,
     model         TEXT,
     input_tokens  INTEGER NOT NULL,
-    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    -- NULL means the provider does not report prompt-cache hits. Deliberately nullable: storing 0
+    -- for "unknown" made cache-heavy providers look like they burned every token fresh.
+    cached_input_tokens INTEGER,
     output_tokens INTEGER NOT NULL,
     cost_usd      REAL NOT NULL,
     created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now'))

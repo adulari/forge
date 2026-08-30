@@ -165,11 +165,16 @@ impl Pricing {
     /// = `input_tokens - cached_input_tokens`. With no cache rate or no cached tokens this equals
     /// [`cost_for`](Self::cost_for). Unknown models cost nothing.
     /// Documented in docs/features/mesh-routing.md.
+    ///
+    /// When the provider does not report cache hits at all, no discount is claimed and the whole
+    /// input is priced fresh. That makes the result a conservative UPPER bound for such providers
+    /// rather than a measurement — the one safe direction to err, since inventing a cache hit rate
+    /// would under-bill a real budget.
     pub fn cost_for_usage(&self, model: &str, usage: &forge_types::Usage) -> f64 {
         let Some(rate) = self.rates.get(model) else {
             return 0.0;
         };
-        let cached = usage.cached_input_tokens.min(usage.input_tokens);
+        let cached = usage.cached_input_tokens_or_zero().min(usage.input_tokens);
         let fresh = usage.input_tokens - cached;
         let cache_rate = rate.cache_read_per_1k.unwrap_or(rate.input_per_1k);
         (fresh as f64 / 1000.0) * rate.input_per_1k
@@ -462,10 +467,17 @@ mod tests {
         let usage = forge_types::Usage {
             input_tokens: 1000,
             output_tokens: 500,
-            cached_input_tokens: 800,
+            cached_input_tokens: Some(800),
             cost_usd: 0.0,
         };
         assert!((pricing.cost_for_usage("openrouter::m", &usage) - 1.28).abs() < 1e-9);
+        // A provider that does not report caching earns no discount it never evidenced: the whole
+        // input prices as fresh (1.0 + 1.0 = 2.0), an upper bound rather than an invented split.
+        let unknown = forge_types::Usage {
+            cached_input_tokens: None,
+            ..usage
+        };
+        assert!((pricing.cost_for_usage("openrouter::m", &unknown) - 2.0).abs() < 1e-9);
         // Without a cache rate, cached tokens fall back to the full input rate (= cost_for).
         let fetched2 = vec![("openrouter::n".to_string(), 1.0, 2.0, None)];
         let pricing2 =
@@ -473,7 +485,7 @@ mod tests {
         let u2 = forge_types::Usage {
             input_tokens: 1000,
             output_tokens: 500,
-            cached_input_tokens: 800,
+            cached_input_tokens: Some(800),
             cost_usd: 0.0,
         };
         assert!(

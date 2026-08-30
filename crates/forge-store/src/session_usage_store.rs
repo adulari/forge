@@ -489,7 +489,7 @@ impl Store {
                     provider,
                     model,
                     usage.input_tokens as i64,
-                    usage.cached_input_tokens as i64,
+                    usage.cached_input_tokens.map(|c| c as i64),
                     usage.output_tokens as i64,
                     usage.cost_usd,
                 ),
@@ -579,19 +579,31 @@ impl Store {
     /// accounting even though they no longer contribute to the active transcript.
     pub fn session_token_usage(&self, session_id: &str) -> Result<Usage> {
         let conn = self.lock()?;
-        let (input, cached, output, cost): (i64, i64, i64, f64) = conn.query_row(
+        // `COUNT(col)` skips NULLs, so `reporting == 0` means not one call in the session came
+        // from a provider that reports cache hits — the session total is unknown, not zero. When
+        // only some calls reported, the sum covers exactly those and the rest stay uncounted.
+        let (input, cached, reporting, output, cost): (i64, i64, i64, i64, f64) = conn.query_row(
             "SELECT COALESCE(SUM(u.input_tokens), 0),
                     COALESCE(SUM(u.cached_input_tokens), 0),
+                    COUNT(u.cached_input_tokens),
                     COALESCE(SUM(u.output_tokens), 0),
                     COALESCE(SUM(u.cost_usd), 0.0)
              FROM usage u JOIN message m ON m.id = u.message_id
              WHERE m.session_id = ?1",
             [session_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )?;
         Ok(Usage {
             input_tokens: input.max(0) as u64,
-            cached_input_tokens: cached.max(0) as u64,
+            cached_input_tokens: (reporting > 0).then(|| cached.max(0) as u64),
             output_tokens: output.max(0) as u64,
             cost_usd: cost.max(0.0),
         })
@@ -613,16 +625,19 @@ impl Store {
 
     /// Provider-reported prompt tokens served from cache across active calls in a session.
     /// This is a subset of `input_tokens`, not an additional token charge.
-    pub fn session_cached_input_tokens(&self, session_id: &str) -> Result<u64> {
+    ///
+    /// `None` when not one active call came from a provider that reports cache hits — the total is
+    /// unknown, not zero. A `Some` total covers only the calls that did report.
+    pub fn session_cached_input_tokens(&self, session_id: &str) -> Result<Option<u64>> {
         let conn = self.lock()?;
-        let cached: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(u.cached_input_tokens), 0)
+        let (cached, reporting): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(u.cached_input_tokens), 0), COUNT(u.cached_input_tokens)
              FROM usage u JOIN message m ON m.id = u.message_id
              WHERE m.session_id = ?1 AND m.active = 1",
             [session_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        Ok(cached.max(0) as u64)
+        Ok((reporting > 0).then(|| cached.max(0) as u64))
     }
 
     /// Number of provider calls (model steps) recorded in a session — one `usage` row per call.
@@ -653,6 +668,9 @@ impl Store {
     }
 
     /// Per-provider usage since a rolling epoch timestamp.
+    ///
+    /// See [`cached_total`] for how a provider that never reports cache hits is distinguished from
+    /// one that reported zero.
     pub fn usage_by_provider_since(&self, since_epoch: i64) -> Result<Vec<ProviderUsage>> {
         self.usage_query("WHERE u.created_at >= ?1", [since_epoch])
     }
@@ -661,7 +679,7 @@ impl Store {
         let conn = self.lock()?;
         // Provider derived from `message.model` (see `usage_query`) — `usage.provider` is NULL.
         let sql = format!(
-            "SELECT {USAGE_PROVIDER_EXPR} AS prov, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.cached_input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0) \
+            "SELECT {USAGE_PROVIDER_EXPR} AS prov, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.cached_input_tokens), 0), COUNT(u.cached_input_tokens), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0) \
              FROM usage u JOIN message m ON m.id = u.message_id WHERE m.session_id = ?1 GROUP BY prov \
              ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens + u.output_tokens) DESC"
         );
@@ -670,9 +688,9 @@ impl Store {
             Ok(ProviderUsage {
                 provider: r.get(0)?,
                 input_tokens: r.get::<_, i64>(1)? as u64,
-                cached_input_tokens: r.get::<_, i64>(2)? as u64,
-                output_tokens: r.get::<_, i64>(3)? as u64,
-                cost_usd: r.get(4)?,
+                cached_input_tokens: cached_total(r.get::<_, i64>(2)?, r.get::<_, i64>(3)?),
+                output_tokens: r.get::<_, i64>(4)? as u64,
+                cost_usd: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -690,15 +708,17 @@ impl Store {
         // `message.model` IS populated (e.g. `codex-oauth::gpt-5.6-terra`); the namespace before
         // `::` is the provider. GROUP BY the alias `prov`, never a bare `provider` (that binds to
         // the still-NULL column, not this expression).
-        let sql = format!("SELECT {USAGE_PROVIDER_EXPR} AS prov, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.cached_input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0) FROM usage u JOIN message m ON m.id = u.message_id {predicate} GROUP BY prov ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens + u.output_tokens) DESC");
+        // `COUNT(u.cached_input_tokens)` skips NULLs, so a zero count marks a provider that never
+        // reported caching — reported back as unknown instead of a fabricated 0.
+        let sql = format!("SELECT {USAGE_PROVIDER_EXPR} AS prov, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.cached_input_tokens), 0), COUNT(u.cached_input_tokens), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0) FROM usage u JOIN message m ON m.id = u.message_id {predicate} GROUP BY prov ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens + u.output_tokens) DESC");
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params, |r| {
             Ok(ProviderUsage {
                 provider: r.get(0)?,
                 input_tokens: r.get::<_, i64>(1)? as u64,
-                cached_input_tokens: r.get::<_, i64>(2)? as u64,
-                output_tokens: r.get::<_, i64>(3)? as u64,
-                cost_usd: r.get(4)?,
+                cached_input_tokens: cached_total(r.get::<_, i64>(2)?, r.get::<_, i64>(3)?),
+                output_tokens: r.get::<_, i64>(4)? as u64,
+                cost_usd: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)

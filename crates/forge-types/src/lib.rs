@@ -192,16 +192,36 @@ pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Of `input_tokens`, how many were served from the provider's prompt cache (billed at a
-    /// fraction of the input rate). 0 when caching is unused/unsupported. Subset of `input_tokens`,
-    /// not additive. Used so cost reflects the cache-read discount the provider actually bills.
+    /// fraction of the input rate). A subset of `input_tokens`, never additive. Used so cost
+    /// reflects the cache-read discount the provider actually bills.
+    ///
+    /// `None` means the provider does not report cache hits at all, which is NOT the same as
+    /// `Some(0)` ("the provider told us nothing was cached"). Collapsing the two makes a
+    /// cache-heavy provider look like it burned every token fresh — see
+    /// [`Self::cached_input_tokens_or_zero`] before reaching for a default.
     #[serde(default)]
-    pub cached_input_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
     pub cost_usd: f64,
 }
 
 impl Usage {
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens + self.output_tokens
+    }
+
+    /// The cached subset as a number, treating "not reported" as zero. Only for callers that must
+    /// produce a figure and whose result is understood to be a conservative bound — pricing
+    /// (no discount is claimed that the provider did not confirm) and display totals. Anything
+    /// that reports cache behaviour as a fact should match on the option instead.
+    pub fn cached_input_tokens_or_zero(&self) -> u64 {
+        self.cached_input_tokens.unwrap_or(0)
+    }
+
+    /// Input tokens the provider did NOT serve from cache, or `None` when it does not report
+    /// caching and the split is genuinely unknown.
+    pub fn fresh_input_tokens(&self) -> Option<u64> {
+        self.cached_input_tokens
+            .map(|cached| self.input_tokens.saturating_sub(cached))
     }
 }
 
@@ -1343,10 +1363,55 @@ mod tests {
         let u = Usage {
             input_tokens: 10,
             output_tokens: 5,
-            cached_input_tokens: 0,
+            cached_input_tokens: Some(4),
             cost_usd: 0.01,
         };
-        assert_eq!(u.total_tokens(), 15);
+        assert_eq!(u.total_tokens(), 15, "cached is a subset, never an addend");
+        assert_eq!(u.fresh_input_tokens(), Some(6));
+        assert_eq!(u.cached_input_tokens_or_zero(), 4);
+    }
+
+    /// "The provider does not report caching" must stay distinguishable from "the provider
+    /// reported no cache hits" — collapsing the two is what made cache-heavy providers look like
+    /// they burned every token fresh.
+    #[test]
+    fn unreported_cache_is_unknown_not_zero() {
+        let unknown = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cached_input_tokens: None,
+            cost_usd: 0.0,
+        };
+        assert_eq!(unknown.fresh_input_tokens(), None);
+        // Only the explicitly-bounded accessor flattens it, and it says so in its name.
+        assert_eq!(unknown.cached_input_tokens_or_zero(), 0);
+
+        let reported_zero = Usage {
+            cached_input_tokens: Some(0),
+            ..unknown
+        };
+        assert_ne!(unknown, reported_zero);
+        assert_eq!(reported_zero.fresh_input_tokens(), Some(10));
+    }
+
+    /// The wire form round-trips both states, and a payload from a peer that predates the field
+    /// deserializes as unknown rather than as a claimed zero.
+    #[test]
+    fn usage_cache_state_round_trips_through_serde() {
+        for cached in [None, Some(0), Some(4)] {
+            let u = Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cached_input_tokens: cached,
+                cost_usd: 0.01,
+            };
+            let json = serde_json::to_string(&u).unwrap();
+            assert_eq!(serde_json::from_str::<Usage>(&json).unwrap(), u);
+        }
+        let legacy: Usage =
+            serde_json::from_str(r#"{"input_tokens":10,"output_tokens":5,"cost_usd":0.0}"#)
+                .unwrap();
+        assert_eq!(legacy.cached_input_tokens, None);
     }
 
     #[test]

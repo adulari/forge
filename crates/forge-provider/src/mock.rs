@@ -57,7 +57,7 @@ fn resp(content: &str, tool_calls: Vec<ToolCall>, input: u64, output: u64) -> Mo
         usage: Usage {
             input_tokens: input,
             output_tokens: output,
-            cached_input_tokens: 0,
+            cached_input_tokens: None,
             cost_usd: 0.0,
         },
         quotas: Vec::new(),

@@ -16,7 +16,9 @@ pub(super) struct UsageParams {
 #[serde(rename_all = "camelCase")]
 struct UsageTotals {
     input_tokens: u64,
-    cached_input_tokens: u64,
+    /// Summed over the providers that report caching. `None` when none of them do — the total is
+    /// unknown rather than zero, and a partial total covers only the reporting providers.
+    cached_input_tokens: Option<u64>,
     output_tokens: u64,
     cost_usd: f64,
 }
@@ -27,7 +29,8 @@ struct UsageProvider {
     provider: String,
     kind: String,
     input_tokens: u64,
-    cached_input_tokens: u64,
+    /// `None` when this provider does not report prompt-cache hits at all.
+    cached_input_tokens: Option<u64>,
     output_tokens: u64,
     cost_usd: f64,
 }
@@ -81,13 +84,17 @@ fn usage_providers(rows: Vec<forge_store::ProviderUsage>) -> (UsageTotals, Vec<U
     let total = rows.iter().fold(
         UsageTotals {
             input_tokens: 0,
-            cached_input_tokens: 0,
+            cached_input_tokens: None,
             output_tokens: 0,
             cost_usd: 0.0,
         },
         |mut total, row| {
             total.input_tokens += row.input_tokens;
-            total.cached_input_tokens += row.cached_input_tokens;
+            // Stays None until some provider reports, so a fleet of non-reporting providers does
+            // not add up to a confident zero.
+            if let Some(cached) = row.cached_input_tokens {
+                total.cached_input_tokens = Some(total.cached_input_tokens.unwrap_or(0) + cached);
+            }
             total.output_tokens += row.output_tokens;
             total.cost_usd += row.cost_usd;
             total
@@ -185,14 +192,14 @@ mod tests {
             forge_store::ProviderUsage {
                 provider: "openai".into(),
                 input_tokens: 10,
-                cached_input_tokens: 3,
+                cached_input_tokens: Some(3),
                 output_tokens: 5,
                 cost_usd: 0.25,
             },
             forge_store::ProviderUsage {
                 provider: "claude-cli".into(),
                 input_tokens: 20,
-                cached_input_tokens: 7,
+                cached_input_tokens: Some(7),
                 output_tokens: 9,
                 cost_usd: 0.5,
             },
@@ -202,7 +209,7 @@ mod tests {
             total,
             UsageTotals {
                 input_tokens: 30,
-                cached_input_tokens: 10,
+                cached_input_tokens: Some(10),
                 output_tokens: 14,
                 cost_usd: 0.75,
             }

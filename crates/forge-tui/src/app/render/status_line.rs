@@ -446,12 +446,12 @@ pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             // suppress the ↑/↓ counts when both are zero to avoid showing stale "↑0 ↓0".
             let has_token_data = app.turn_in > 0 || app.turn_out > 0;
             let turn_label = if has_token_data {
-                if app.turn_cached_in > 0 {
+                if app.turn_cached_in.is_some_and(|cached| cached > 0) {
                     format!(
                         "⧖ {} ↑{} (↻{}) ↓{}",
                         fmt_dur(app.turn_elapsed_secs),
                         human(app.turn_in),
-                        human(app.turn_cached_in),
+                        human(app.turn_cached_in.unwrap_or(0)),
                         human(app.turn_out)
                     )
                 } else {
@@ -491,11 +491,13 @@ pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             if line2.len() > 1 {
                 line2.push(sep("  │  "));
             }
-            let total_label = if app.session_cached_in > 0 {
+            // Omitted both when nothing was cached and when the provider does not report caching:
+            // the row states a cache figure only where one was actually measured.
+            let total_label = if app.session_cached_in.is_some_and(|cached| cached > 0) {
                 format!(
                     "Σ ↑{} (↻{}) ↓{}",
                     human(app.session_in),
-                    human(app.session_cached_in),
+                    human(app.session_cached_in.unwrap_or(0)),
                     human(app.session_out)
                 )
             } else {

@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod usage;
+use usage::migration_0030;
+
 /// Migrate `subscription_usage` from its old single-column PK to the composite
 /// `(provider, window_kind)` PK. Safe to call on any DB version: a no-op when the table
 /// doesn't exist yet (schema will create it correctly) or already has the composite key.
@@ -676,6 +679,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0027,
     migration_0028,
     migration_0029,
+    migration_0030,
 ];
 
 /// Create the singleton rows the Anywhere sync state machine expects, if they are missing.

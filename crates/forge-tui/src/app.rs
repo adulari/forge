@@ -189,8 +189,9 @@ pub struct App {
     pub cost_usd: f64,
     /// Live token counter (tui-token-counter.md): session totals + current context fill.
     pub session_in: u64,
-    /// Prompt tokens served from provider cache (subset of `session_in`).
-    pub session_cached_in: u64,
+    /// Prompt tokens served from provider cache (subset of `session_in`). `None` when no call in
+    /// the session came from a provider that reports cache hits — distinct from `Some(0)`.
+    pub session_cached_in: Option<u64>,
     pub session_out: u64,
     pub context_tokens: u64,
     pub context_limit: Option<u32>,
@@ -201,11 +202,11 @@ pub struct App {
     /// Input/output tokens attributed to the current/last turn (session totals minus the snapshot
     /// taken at turn start). Shown alongside the timer; the session totals stay on their own.
     pub turn_in: u64,
-    pub turn_cached_in: u64,
+    pub turn_cached_in: Option<u64>,
     pub turn_out: u64,
     /// Session in/out totals captured at turn start, so `turn_in/out` are deltas from here.
     turn_base_in: u64,
-    turn_base_cached_in: u64,
+    turn_base_cached_in: Option<u64>,
     turn_base_out: u64,
     /// True once at least one turn has started this session — so the turn timer/token segment shows
     /// the last turn's frozen stats even for a sub-second turn (where `turn_elapsed_secs` is 0).
@@ -1230,7 +1231,8 @@ impl App {
                 self.context_limit = context_limit;
                 // Per-turn token deltas from the baseline snapshotted in `on_turn_start`.
                 self.turn_in = session_in.saturating_sub(self.turn_base_in);
-                self.turn_cached_in = session_cached_in.saturating_sub(self.turn_base_cached_in);
+                self.turn_cached_in = session_cached_in
+                    .map(|now| now.saturating_sub(self.turn_base_cached_in.unwrap_or(0)));
                 self.turn_out = session_out.saturating_sub(self.turn_base_out);
             }
             PresenterEvent::SubagentStart {
@@ -1695,7 +1697,7 @@ impl App {
         // turn's in/out are measured as a delta from here.
         self.turn_elapsed_secs = 0;
         self.turn_in = 0;
-        self.turn_cached_in = 0;
+        self.turn_cached_in = None;
         self.turn_out = 0;
         self.turn_base_in = self.session_in;
         self.turn_base_cached_in = self.session_cached_in;
@@ -5066,7 +5068,7 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.0033,
             session_in: 0,
-            session_cached_in: 0,
+            session_cached_in: Some(0),
             session_out: 0,
             context_tokens: 0,
             context_limit: None,
@@ -5088,7 +5090,7 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.01,
             session_in: 12_300,
-            session_cached_in: 6_000,
+            session_cached_in: Some(6_000),
             session_out: 4_100,
             context_tokens: 18_200,
             context_limit: Some(200_000),
@@ -5105,7 +5107,7 @@ mod tests {
     fn statusline_shows_live_turn_timer_and_per_turn_tokens() {
         let mut app = App {
             session_in: 1_000,
-            session_cached_in: 400,
+            session_cached_in: Some(400),
             session_out: 200,
             ..Default::default()
         };
@@ -5115,9 +5117,9 @@ mod tests {
         app.turn_elapsed_secs = 73; // 1m13s
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.02,
-            session_in: 2_200,      // +1.2k this turn
-            session_cached_in: 700, // +300 cached this turn
-            session_out: 540,       // +340 this turn
+            session_in: 2_200,            // +1.2k this turn
+            session_cached_in: Some(700), // +300 cached this turn
+            session_out: 540,             // +340 this turn
             context_tokens: 0,
             context_limit: None,
         });
@@ -5142,7 +5144,7 @@ mod tests {
         );
         app.on_turn_start();
         assert_eq!(
-            app.turn_cached_in, 0,
+            app.turn_cached_in, None,
             "a new turn clears the prior cache delta"
         );
         assert!(
@@ -5189,7 +5191,7 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.01,
             session_in: 5_000,
-            session_cached_in: 0,
+            session_cached_in: Some(0),
             session_out: 1_000,
             context_tokens: 6_000,
             context_limit: None,
@@ -5312,7 +5314,7 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.0033,
             session_in: 12_300,
-            session_cached_in: 0,
+            session_cached_in: Some(0),
             session_out: 4_100,
             context_tokens: 18_200,
             context_limit: Some(200_000),
