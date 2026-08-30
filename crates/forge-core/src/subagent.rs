@@ -113,6 +113,7 @@ pub async fn route_child(
             // A duel candidate is a hard, explicit pin: switching models mid-duel would
             // invalidate the comparison, so the pinned rate-limit backoff applies here too.
             pinned: true,
+            unroutable: false,
         };
     }
     // When a pin is active for the turn and subagent inheritance is on (the default), the child
@@ -152,6 +153,7 @@ pub async fn route_child(
             fallbacks: Vec::new(),
             // An agent-type tier default, not an explicit user pin — normal failover rules.
             pinned: false,
+            unroutable: false,
         },
         // Route around benched models too (docs/features/mesh-routing.md): a child still avoids a
         // model the parent just rate-limited. When pin inheritance is disabled, route through the
@@ -1341,6 +1343,7 @@ mod tests {
                 rationale: "test".into(),
                 fallbacks: self.fallbacks.clone(),
                 pinned: false,
+                unroutable: false,
             }
         }
     }
@@ -1398,6 +1401,7 @@ mod tests {
                     rationale: "pinned via --model".into(),
                     fallbacks: Vec::new(),
                     pinned: true,
+                    unroutable: false,
                 },
                 None => RoutingDecision {
                     tier: TaskTier::Standard,
@@ -1405,6 +1409,7 @@ mod tests {
                     rationale: "mesh".into(),
                     fallbacks: self.mesh_fallbacks.clone(),
                     pinned: false,
+                    unroutable: false,
                 },
             }
         }
@@ -1424,6 +1429,7 @@ mod tests {
                 rationale: "mesh".into(),
                 fallbacks: self.mesh_fallbacks.clone(),
                 pinned: false,
+                unroutable: false,
             }
         }
         async fn route_with_pin_set(
@@ -1450,6 +1456,7 @@ mod tests {
                     Vec::new()
                 },
                 pinned: true,
+                unroutable: false,
             }
         }
         fn pin(&self) -> Option<&[String]> {

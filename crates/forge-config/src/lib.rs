@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod oauth;
 mod paths;
 pub mod provider_oauth;
+pub mod quota_status;
 pub mod secret_store;
 pub use agents::{load_agents, AgentDef};
 pub use mcp::{
@@ -2502,7 +2503,53 @@ pub fn load() -> Result<Config, ConfigError> {
             }
         }
     }
+
+    // Honest-config guard: `[mesh.models]` per-tier pins are silently replaced by auto-discovery
+    // ranking whenever `mesh.auto_discover` is on (the default) — documented behaviour
+    // (docs/features/mesh-routing.md §3.1), but a user who hand-writes a tier pin to route around
+    // a live problem (e.g. a near-exhausted subscription) has no way to notice it was never
+    // consulted. Warn once at load time rather than leave that substitution silent.
+    let mut model_config_paths = Vec::new();
+    if let Some(dir) = config_dir() {
+        model_config_paths.push(dir.join("config.toml"));
+    }
+    model_config_paths.push(PathBuf::from("./.forge/config.toml"));
+    for path in model_config_paths {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some(warning) =
+                configured_models_ignored_warning(&text, config.mesh.auto_discover)
+            {
+                tracing::warn!("{}: {warning}", path.display());
+            }
+        }
+    }
+
     Ok(config)
+}
+
+/// Pure check behind the "honest-config guard" above: `raw_toml` is one config file's text,
+/// `auto_discover` is the FINAL merged value (a later layer may still flip it back off). Returns
+/// the warning to log, or `None` when there's nothing to warn about.
+fn configured_models_ignored_warning(raw_toml: &str, auto_discover: bool) -> Option<String> {
+    if !auto_discover {
+        return None;
+    }
+    let value: toml::Value = toml::from_str(raw_toml).ok()?;
+    let tiers: Vec<&str> = value
+        .get("mesh")?
+        .get("models")?
+        .as_table()?
+        .keys()
+        .map(String::as_str)
+        .collect();
+    if tiers.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[mesh.models] sets {tiers:?} but mesh.auto_discover is true (the default) — \
+         auto-discovery ranks the full discovered catalog instead and these per-tier models are \
+         never consulted. Set mesh.auto_discover = false to route strictly from [mesh.models]."
+    ))
 }
 
 /// Whether the user has a persisted config file (the onboarding "first run" signal — combined
@@ -3160,6 +3207,36 @@ mod tests {
                 assert_eq!(cc_tool_alias(tool), claude);
             }
         }
+    }
+
+    #[test]
+    fn warns_when_mesh_models_would_be_silently_ignored() {
+        let warning = configured_models_ignored_warning(
+            "[mesh]\nmodels = { complex = \"claude-cli::sonnet\" }\n",
+            true,
+        );
+        assert!(
+            warning.is_some(),
+            "an explicit tier pin under auto_discover must warn"
+        );
+        assert!(warning.unwrap().contains("complex"));
+    }
+
+    #[test]
+    fn no_warning_when_auto_discover_is_off() {
+        assert!(configured_models_ignored_warning(
+            "[mesh]\nmodels = { complex = \"claude-cli::sonnet\" }\n",
+            false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn no_warning_when_mesh_models_is_not_set() {
+        assert!(
+            configured_models_ignored_warning("[mesh]\nauto_discover = true\n", true).is_none()
+        );
+        assert!(configured_models_ignored_warning("", true).is_none());
     }
 
     static TEST_CWD_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();

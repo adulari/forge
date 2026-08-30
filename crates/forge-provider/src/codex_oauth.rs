@@ -110,13 +110,7 @@ pub(crate) fn parse_codex_quota_headers(
         }
         let mins = header_i64(headers, mins_key).unwrap_or(0);
         let fraction = used / 100.0;
-        let status = if fraction >= 0.98 {
-            forge_types::QuotaStatus::Exhausted
-        } else if fraction >= 0.80 {
-            forge_types::QuotaStatus::Warning
-        } else {
-            forge_types::QuotaStatus::Ok
-        };
+        let status = forge_config::quota_status::status_from_fraction(fraction);
         let label = match mins {
             300 => "five_hour".to_string(),
             10080 => "weekly".to_string(),

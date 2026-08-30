@@ -581,8 +581,31 @@ resets_at, fraction_used }`. Hints are produced by:
   record externally-observed percentages: codex from its rollout files, claude from a gated
   one-shot `claude --debug` rate-limit probe (skipped when the store row is younger than
   5 minutes, `models.rs:534-537`; freshness via `subscription_age_secs`,
-  `crates/forge-store/src/lib.rs:1888`). Seeded rows map fraction ≥ 0.98 → Exhausted, ≥ 0.80 →
-  Warning, else Ok, and carry no reset time so a real in-turn hint replaces them.
+   `crates/forge-store/src/lib.rs:1888`). Seeded rows, like every other source above, classify
+   through `forge_config::quota_status::status_from_fraction` (§5.3.1) and carry no reset time so
+   a real in-turn hint replaces them.
+
+#### 5.3.1 The Exhausted/Warning thresholds are one shared function
+
+All six observation sources classify a fraction through one function,
+`forge_config::quota_status::status_from_fraction` (`crates/forge-config/src/quota_status.rs`):
+fraction ≥ `EXHAUSTED_FRACTION` (0.97) → `Exhausted`, ≥ `WARNING_FRACTION` (0.80) → `Warning`,
+else `Ok`. They used to each carry an independent `0.98`/`0.80` literal, which could drift and,
+worse, let a subscription's live status disagree with what a different source reported for the
+same fraction.
+
+`Exhausted` is a routing EXCLUSION (`LlmRouter::is_usable`, `lib.rs:1385`), not a down-rank — an
+exhausted subscription is dropped from the candidate set entirely, the same as a benched model.
+`Warning` is a soft demotion only (`catalog::route_score`'s −5, and `is_pressured` sorting it
+behind same-tier healthy candidates in `ordered_usable_for_tier`).
+
+`EXHAUSTED_FRACTION` was lowered from 0.98 to 0.97 after a live incident (2026-08-30): a
+codex-cli five-hour window measured at exactly 0.97 had already stopped serving turns — the
+bridge process exited 0 with no assistant content and no tool calls. Under the 0.98 gate that
+observation stayed `Warning`, so the mesh treated it as merely down-ranked instead of unusable,
+and it kept winning complex-tier routing over a healthy alternative whose capability-score
+advantage exceeded the 5-point `Warning` penalty. The turn produced nothing and nothing reported
+it. The gate now sits at the measured failure point instead of one point past it.
 
 Persistence — `Store::record_quota` (`crates/forge-store/src/lib.rs:1761`) writes each hint
 twice:

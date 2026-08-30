@@ -603,13 +603,7 @@ impl Session {
     ) {
         let Some(pct) = pct else { return };
         let frac = (pct / 100.0).clamp(0.0, 1.0);
-        let status = if frac >= 0.98 {
-            forge_types::QuotaStatus::Exhausted
-        } else if frac >= 0.80 {
-            forge_types::QuotaStatus::Warning
-        } else {
-            forge_types::QuotaStatus::Ok
-        };
+        let status = forge_config::quota_status::status_from_fraction(frac);
         let hint = forge_types::QuotaHint {
             provider: provider.to_string(),
             window: window.to_string(),
