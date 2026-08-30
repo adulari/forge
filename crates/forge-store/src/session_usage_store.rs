@@ -719,6 +719,7 @@ impl Store {
                     status: row.get(2)?,
                     resets_at: row.get(3)?,
                     fraction: row.get(4)?,
+                    updated_at: row.get(5)?,
                 },
                 row.get::<_, i64>(5)?,
             ))
@@ -727,9 +728,7 @@ impl Store {
             std::collections::HashMap::<(String, String), (SubscriptionWindow, i64)>::new();
         for row in rows {
             let (mut window, updated_at) = row?;
-            if matches!(window.provider.as_str(), "codex-cli" | "codex-oauth") {
-                window.provider = "codex-oauth".to_string();
-            }
+            window.provider = canonical_quota_provider(&window.provider).to_string();
             let key = (window.provider.clone(), window.window_kind.clone());
             if latest
                 .get(&key)
@@ -742,11 +741,13 @@ impl Store {
         let mut windows = latest
             .into_values()
             .filter_map(|(window, updated_at)| {
-                if window.resets_at.is_some_and(|resets_at| resets_at <= now) {
-                    return None;
-                }
-                if matches!(window.provider.as_str(), "codex-oauth")
-                    && now.saturating_sub(updated_at) > 300
+                if window.resets_at.is_some_and(|resets_at| resets_at <= now)
+                    || !quota_observation_is_current(
+                        &window.provider,
+                        &window.window_kind,
+                        updated_at,
+                        now,
+                    )
                 {
                     return None;
                 }

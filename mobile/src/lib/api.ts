@@ -282,6 +282,8 @@ export interface UsageQuota {
   status: string;
   resetsAt: number | null;
   fraction: number | null;
+  /** Optional for compatibility with older daemons that predate quota observation timestamps. */
+  updatedAt?: number;
 }
 export interface SessionRow {
   id: string;

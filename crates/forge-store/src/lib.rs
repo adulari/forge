@@ -395,6 +395,8 @@ pub struct SubscriptionWindow {
     pub status: String,
     pub resets_at: Option<i64>,
     pub fraction: Option<f64>,
+    /// Epoch seconds at which this quota observation was recorded.
+    pub updated_at: i64,
 }
 
 /// How the pool opens a fresh connection. `:memory:` makes a DISTINCT empty DB on every open, so an
@@ -491,6 +493,13 @@ const QUOTA_ALIAS_GROUPS: &[&[&str]] = &[&["codex-cli", "codex-oauth"]];
 
 /// Every provider `p` should be treated as equivalent to for quota purposes: the full alias group
 /// containing `p`, or just `[p]` when it isn't in any group (the common case — a no-op merge).
+pub(crate) fn canonical_quota_provider(provider: &str) -> &str {
+    match provider {
+        "codex-oauth" => "codex-cli",
+        provider => provider,
+    }
+}
+
 fn quota_alias_members(provider: &str) -> Vec<&str> {
     for group in QUOTA_ALIAS_GROUPS {
         if group.contains(&provider) {
@@ -4230,6 +4239,43 @@ mod tests {
             remaining, 1,
             "expired and dead windows are removed from the snapshot table"
         );
+    }
+
+    #[test]
+    fn subscription_windows_keep_open_weekly_observations_with_their_age() {
+        let store = Store::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let hint = |provider: &str, window: &str, fraction| forge_types::QuotaHint {
+            provider: provider.into(),
+            window: window.into(),
+            status: forge_types::QuotaStatus::Ok,
+            resets_at: None,
+            fraction_used: Some(fraction),
+        };
+        store
+            .record_quota_at(&hint("claude-cli", "weekly", 0.36), now - 33 * 60 * 60)
+            .unwrap();
+        store
+            .record_quota_at(&hint("codex-oauth", "five_hour", 0.32), now)
+            .unwrap();
+        store
+            .record_quota_at(
+                &hint("codex-cli", "secondary", 0.0),
+                now - 31 * 24 * 60 * 60,
+            )
+            .unwrap();
+
+        let windows = store.subscription_windows().unwrap();
+        assert!(windows.iter().any(|window| {
+            window.provider == "claude-cli"
+                && window.window_kind == "weekly"
+                && window.fraction == Some(0.36)
+                && window.updated_at == now - 33 * 60 * 60
+        }));
+        assert!(windows.iter().any(|window| window.provider == "codex-cli"));
+        assert!(!windows
+            .iter()
+            .any(|window| window.window_kind == "secondary"));
     }
 
     #[test]

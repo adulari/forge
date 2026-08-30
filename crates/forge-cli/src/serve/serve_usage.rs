@@ -41,6 +41,7 @@ struct UsageQuota {
     status: String,
     resets_at: Option<i64>,
     fraction: Option<f64>,
+    updated_at: i64,
 }
 
 #[derive(serde::Serialize)]
@@ -137,6 +138,7 @@ pub(super) async fn usage_page(
                 status: quota.status,
                 resets_at: quota.resets_at,
                 fraction: quota.fraction,
+                updated_at: quota.updated_at,
             })
             .collect();
         Ok(UsageResponse {
