@@ -1786,6 +1786,7 @@ struct ClaudeStreamState {
 }
 
 mod cli_stream;
+mod empty_turn;
 mod error_policy;
 use cli_stream::*;
 
@@ -2329,20 +2330,10 @@ impl CliProvider {
             (Vec::new(), text)
         };
 
-        // A bridge can exit 0 with genuinely nothing to show: no assistant text, no tool it ran,
-        // no tool call recovered from prose. Observed live: codex-cli at a 0.97 five-hour window
-        // exited cleanly with empty stdout instead of erroring — the earlier nonzero-exit check
-        // above never fired, so this silently became a "successful" empty `ModelResponse`, the
-        // run-loop had nothing to act on or show, and the session just went idle with no error
-        // anywhere (quota-stall incident, mesh-routing.md §5.3.1). Fail the turn instead so the
-        // caller can retry, fail over, or surface the reason — an empty result must never look
-        // like a completed turn.
+        // A clean exit with nothing to show is not a completed turn (see `empty_turn`).
         if content.is_empty() && tool_calls.is_empty() && tool_names.is_empty() {
-            return Err(ProviderError::Request(format!(
-                "`{}` exited 0 but produced no assistant content and ran no tool this turn{}",
-                self.binary,
-                empty_turn_quota_note(&quotas)
-            )));
+            let phrase = "exited 0 but produced no assistant content and ran no tool this turn";
+            return Err(empty_turn::error(&self.binary, phrase, &quotas));
         }
 
         Ok(ModelResponse {
@@ -2352,43 +2343,6 @@ impl CliProvider {
             quotas,
         })
     }
-}
-
-/// Best-effort explanation for an empty-but-successful bridge exit: the most pressured window
-/// observed THIS turn, if any. `""` when nothing was pressured — an empty turn can have other
-/// causes (a genuinely blank reply, a CLI update), so this only adds detail, never invents a
-/// cause.
-fn empty_turn_quota_note(quotas: &[forge_types::QuotaHint]) -> String {
-    let worst = quotas
-        .iter()
-        .filter(|q| q.status != forge_types::QuotaStatus::Ok)
-        .max_by(|a, b| {
-            a.fraction_used
-                .unwrap_or(0.0)
-                .total_cmp(&b.fraction_used.unwrap_or(0.0))
-        });
-    let Some(q) = worst else {
-        return String::new();
-    };
-    let pct = q
-        .fraction_used
-        .map(|f| format!(" at {:.0}%", f * 100.0))
-        .unwrap_or_default();
-    let reset = q
-        .resets_at
-        .map(|t| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            let mins = (t - now).max(0) / 60;
-            format!(", resets in {}m", mins)
-        })
-        .unwrap_or_default();
-    format!(
-        " — likely cause: {} {} window is {:?}{pct}{reset}",
-        q.provider, q.window, q.status
-    )
 }
 
 /// Whether a bridged CLI's stderr shows that Forge's own MCP tool server (`forge mcp-serve`) failed
@@ -2566,15 +2520,10 @@ fn finish_persistent_turn(binary: &str, turn: TurnData) -> Result<ModelResponse,
     } else {
         (Vec::new(), text)
     };
-    // Mirror the one-shot path's empty-turn guard (see its comment): a persistent turn that
-    // reported a clean `result` with no content, no recovered tool call, and no native tool run
-    // is not a completed turn, it's silence, and must fail rather than return as if it succeeded.
+    // Same guard on the persistent path: a clean `result` with nothing in it is silence.
     if content.is_empty() && tool_calls.is_empty() && !turn.tool_ran {
-        return Err(ProviderError::Request(format!(
-            "`{binary}` completed the turn but produced no assistant content and ran no \
-             tool{}",
-            empty_turn_quota_note(&turn.quotas)
-        )));
+        let phrase = "completed the turn but produced no assistant content and ran no tool";
+        return Err(empty_turn::error(binary, phrase, &turn.quotas));
     }
     Ok(ModelResponse {
         content,
