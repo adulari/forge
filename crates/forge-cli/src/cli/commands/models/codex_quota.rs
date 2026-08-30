@@ -57,13 +57,7 @@ fn seed_codex_rollout_quota(store: &Store, stats: &crate::bridge_stats::BridgeSt
             continue;
         }
         let fraction = (percent / 100.0).clamp(0.0, 1.0);
-        let status = if fraction >= 0.98 {
-            forge_types::QuotaStatus::Exhausted
-        } else if fraction >= 0.80 {
-            forge_types::QuotaStatus::Warning
-        } else {
-            forge_types::QuotaStatus::Ok
-        };
+        let status = forge_config::quota_status::status_from_fraction(fraction);
         let _ = store.record_codex_quota_at(
             &forge_types::QuotaHint {
                 provider: "codex-cli".to_string(),

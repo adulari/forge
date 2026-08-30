@@ -2466,6 +2466,22 @@ impl Session {
             decision.fallbacks.retain(|m| pin.iter().any(|p| p == m));
         }
         let decision = decision;
+        if decision.unroutable {
+            let msg = decision.rationale.clone();
+            self.presenter.emit(PresenterEvent::Error(msg.clone()));
+            let seq = self.next_seq();
+            self.store
+                .add_message(&self.id, seq, Role::User, prompt, None)?;
+            self.transcript.push(Message::user(prompt));
+            let seq = self.next_seq();
+            self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
+            self.transcript.push(Message::system(&msg).ui_only());
+            self.presenter.emit(PresenterEvent::Done {
+                final_text: msg.clone(),
+                stop_reason: StopReason::FinalAnswer,
+            });
+            return Ok(LoopOutcome::final_answer(msg));
+        }
         let routed_model = decision.model.clone();
         let reuse_response_chain = should_reuse_response_chain(
             prompt,

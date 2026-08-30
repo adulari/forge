@@ -890,6 +890,9 @@ pub struct RoutingDecision {
     /// backoff on the SAME model and never silently switched (unless `mesh.pin_failover = true`) —
     /// a pin must pin (harness-robustness wave 2).
     pub pinned: bool,
+    /// No model in the routed or fallback tiers can serve this turn. Consumers must stop before
+    /// provider dispatch and surface `rationale` as the user-visible error.
+    pub unroutable: bool,
 }
 
 /// A routing strategy. `async` so an implementation may consult a model (e.g. the opt-in
@@ -1041,6 +1044,7 @@ pub trait Router: Send + Sync {
             // A single pin is strict: no chain. A set may fail over WITHIN itself, never outside.
             fallbacks: pin.iter().skip(1).cloned().collect(),
             pinned: true,
+            unroutable: false,
         }
     }
 
@@ -1391,6 +1395,25 @@ impl HeuristicRouter {
         }
         // An exhausted subscription is routed around entirely (L3), like a benched model.
         !(catalog::is_subscription(m) && quota.is_exhausted(forge_config::provider_of(m)))
+    }
+
+    /// Report WHY a candidate is not `is_usable`, for a fallback/unroutable rationale. `is_usable`
+    /// has three checked failure modes here (a fourth, config-disabled, never reaches this call
+    /// site in practice — a disabled model is dropped before it can become `original`) and only
+    /// one is a missing key; for a benched or quota-exhausted model the key IS present, so
+    /// defaulting to "no usable key" was misleading. A model can also be `is_usable` but still
+    /// dropped by the separate strict-credit-mode filter (a paid/metered model policy exclusion,
+    /// not a quota problem) — checked before defaulting to "quota exhausted".
+    fn unusable_reason(&self, model: &str, health: &ModelHealth) -> &'static str {
+        if !(self.model_available)(model) {
+            "no usable key"
+        } else if health.is_benched(model) {
+            "model benched"
+        } else if !self.allowed_under_credit_mode(model) {
+            "excluded by strict credit mode"
+        } else {
+            "quota exhausted"
+        }
     }
 
     /// Whether `m` may be auto-routed / failed-over to under the active credit mode. `Strict` means
@@ -2140,6 +2163,7 @@ impl HeuristicRouter {
                 rationale: why,
                 fallbacks: chain,
                 pinned,
+                unroutable: false,
             };
         }
 
@@ -2208,21 +2232,7 @@ impl HeuristicRouter {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "unknown".into());
-                    // Report WHY the primary was skipped — `is_usable` has three failure modes and
-                    // only one is a missing key; for a benched or quota-exhausted model the key IS
-                    // present, so "no usable key" was misleading. A model can also be `is_usable`
-                    // but still dropped by the separate strict-credit-mode filter (a paid/metered
-                    // model policy exclusion, not a quota problem) — check that before defaulting
-                    // to "quota exhausted".
-                    let reason = if !(self.model_available)(&original) {
-                        "no usable key"
-                    } else if health.is_benched(&original) {
-                        "model benched"
-                    } else if !self.allowed_under_credit_mode(&original) {
-                        "excluded by strict credit mode"
-                    } else {
-                        "quota exhausted"
-                    };
+                    let reason = self.unusable_reason(&original, health);
                     why.push_str(&format!(
                         " — fell back to {model} ({reason} for {original})"
                     ));
@@ -2237,6 +2247,7 @@ impl HeuristicRouter {
                     rationale: why,
                     fallbacks: chain,
                     pinned: false,
+                    unroutable: false,
                 }
             }
             None => {
@@ -2245,8 +2256,16 @@ impl HeuristicRouter {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "unknown".into());
+                // Nothing at all is usable for this tier (or its cross-tier fallbacks) — the same
+                // `reason` labelling as the fallback case above, so this doesn't default to a
+                // misleading "no usable key" when the real cause is e.g. every subscription
+                // exhausted. `model` still names `original` (there's nothing better to try): a
+                // caller must treat the decision as a visible routing failure before dispatch.
+                let reason = self.unusable_reason(&original, health);
                 why.push_str(&format!(
-                    " — warning: no usable key for {original} and no fallback"
+                    " — unroutable: no usable candidate for {} tier ({reason} for {original}, \
+                     no fallback)",
+                    tier.as_str()
                 ));
                 RoutingDecision {
                     tier,
@@ -2254,6 +2273,7 @@ impl HeuristicRouter {
                     rationale: why,
                     fallbacks: Vec::new(),
                     pinned: false,
+                    unroutable: true,
                 }
             }
         }
@@ -2467,6 +2487,7 @@ impl Router for HeuristicRouter {
                 rationale: format!("duel candidate #{} — {reason}", i + 1),
                 fallbacks: Vec::new(),
                 pinned: false,
+                unroutable: false,
             })
             .collect()
     }
@@ -3546,6 +3567,58 @@ mod tests {
         assert!(
             !d.fallbacks.iter().any(|m| catalog::is_subscription(m)),
             "exhausted subs absent from the chain too: {:?}",
+            d.fallbacks
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_reported_at_measured_incident_fraction_is_excluded_not_penalized() {
+        // Quota-stall incident (2026-08-30, mesh-routing.md §5.3.1): codex-cli's five-hour window
+        // was measured at fraction 0.97 while claude-cli was healthy, and codex kept winning
+        // complex-tier routing anyway — a `Warning` status is only a soft down-rank
+        // (`catalog::route_score`'s -5), which a same-tier capability-score gap routinely
+        // exceeds. Prove the measured fraction now excludes the subscription from the candidate
+        // set entirely (like an already-`Exhausted` one), not merely scores it lower.
+        let r = mixed_router();
+        let fraction = 0.97;
+        let mut status_map = std::collections::HashMap::new();
+        status_map.insert(
+            "codex-cli".to_string(),
+            forge_config::quota_status::status_from_fraction(fraction),
+        );
+        let mut frac_map = std::collections::HashMap::new();
+        frac_map.insert("codex-cli".to_string(), fraction);
+        let quota = SubscriptionQuota::new(status_map).with_fractions(frac_map);
+
+        assert_eq!(
+            quota.status_for("codex-cli"),
+            forge_types::QuotaStatus::Exhausted,
+            "a 0.97 fraction must classify as Exhausted, not a soft Warning"
+        );
+
+        let d = r
+            .route(
+                "refactor the auth module to use the new token store",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &quota,
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_ne!(
+            forge_config::provider_of(&d.model),
+            "codex-cli",
+            "a subscription at fraction 0.97 must be excluded from routing, not just \
+             down-ranked: {}",
+            d.model
+        );
+        assert!(
+            !d.fallbacks
+                .iter()
+                .any(|m| forge_config::provider_of(m) == "codex-cli"),
+            "excluded even from the failover chain: {:?}",
             d.fallbacks
         );
     }

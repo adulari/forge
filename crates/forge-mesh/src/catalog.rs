@@ -415,8 +415,25 @@ fn route_score(
     if is_subscription(id) {
         base -= subscription_burn_penalty(id, tier, quota, burn_weight_overrides);
         match quota.status_for(provider_of(id)) {
-            forge_types::QuotaStatus::Exhausted => return base - 100.0, // effectively last
-            forge_types::QuotaStatus::Warning => return base - 5.0,     // below any plausible alt
+            // This ranking pass (`ranked_seeded`) scores every routable catalog model BEFORE
+            // `LlmRouter::is_usable` applies the real, hard exclusion for `Exhausted` (a score
+            // penalty alone cannot express "this will fail" — see quota-stall incident,
+            // mesh-routing.md §5.3.1). The large penalty here only keeps an exhausted subscription
+            // last within THIS ranked-but-unfiltered list, for callers that consult it before
+            // `is_usable` runs (e.g. classifier shortlists, the `/mesh` inspector) — it is not
+            // itself what makes an exhausted subscription unroutable.
+            forge_types::QuotaStatus::Exhausted => return base - 100.0,
+            // A soft demotion, NOT an exclusion — `Warning` covers 0.80..EXHAUSTED_FRACTION, a
+            // band where the subscription is pressured but has not been observed to fail. It is
+            // NOT reliably "below any plausible alt": a same-tier alternative's capability-score
+            // gap routinely exceeds 5, which is exactly how a near-exhausted subscription kept
+            // winning complex-tier routing in the incident this comment documents. The real
+            // exclusion for the unusable range lives in `EXHAUSTED_FRACTION`
+            // (`forge_config::quota_status`), not here; `ordered_usable_for_tier`'s
+            // `is_pressured` sort additionally pushes a `Warning` subscription behind every
+            // healthy candidate for the SAME tier (though not across tiers, where this score is
+            // still the only signal).
+            forge_types::QuotaStatus::Warning => return base - 5.0,
             forge_types::QuotaStatus::Ok => {}
         }
     }

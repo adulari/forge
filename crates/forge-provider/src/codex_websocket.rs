@@ -411,12 +411,10 @@ fn parse_rate_limits_frame(value: &serde_json::Value) -> Vec<QuotaHint> {
         }
         let fraction = used / 100.0;
         let reached = reached_type.is_some_and(|rt| rt == reached_key);
-        let status = if reached || fraction >= 0.98 {
+        let status = if reached {
             forge_types::QuotaStatus::Exhausted
-        } else if fraction >= 0.80 {
-            forge_types::QuotaStatus::Warning
         } else {
-            forge_types::QuotaStatus::Ok
+            forge_config::quota_status::status_from_fraction(fraction)
         };
         let label = match mins {
             300 => "five_hour".to_string(),
