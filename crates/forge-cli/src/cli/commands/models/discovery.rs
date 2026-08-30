@@ -435,29 +435,6 @@ fn bridge_discovery_status(
     }
 }
 
-#[cfg(test)]
-mod bridge_status_tests {
-    use super::*;
-
-    #[test]
-    fn failed_live_bridge_lookup_reports_fallback_and_reason() {
-        let discovered = forge_provider::BridgeModels {
-            models: vec!["stale-model".into()],
-            source: forge_provider::BridgeModelSource::Fallback,
-            probe_error: Some("please sign in".into()),
-        };
-
-        let status = bridge_discovery_status("agy-cli", &discovered);
-
-        assert_eq!(status.kind, DiscoveryStatusKind::Failed);
-        assert_eq!(status.models, 1);
-        let detail = status.detail.unwrap();
-        assert!(detail.contains("built-in fallback"), "{detail}");
-        assert!(detail.contains("may be out of date"), "{detail}");
-        assert!(detail.contains("please sign in"), "{detail}");
-    }
-}
-
 /// Build [`forge_mesh::pricing::Pricing`] with the per-model rates discovery has already fetched
 /// and persisted, not just the bundled/config ones.
 ///
@@ -515,5 +492,28 @@ pub(crate) async fn drop_unaffordable_models(
                 balance::MIN_CREDIT_USD
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bridge_status_tests {
+    use super::*;
+
+    #[test]
+    fn failed_live_bridge_lookup_reports_fallback_and_reason() {
+        let discovered = forge_provider::BridgeModels {
+            models: vec!["stale-model".into()],
+            source: forge_provider::BridgeModelSource::Fallback,
+            probe_error: Some("please sign in".into()),
+        };
+
+        let status = bridge_discovery_status("agy-cli", &discovered);
+
+        assert_eq!(status.kind, DiscoveryStatusKind::Failed);
+        assert_eq!(status.models, 1);
+        let detail = status.detail.unwrap();
+        assert!(detail.contains("built-in fallback"), "{detail}");
+        assert!(detail.contains("may be out of date"), "{detail}");
+        assert!(detail.contains("please sign in"), "{detail}");
     }
 }
