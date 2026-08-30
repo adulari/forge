@@ -668,17 +668,8 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
 /// `observed_at` is when the reading was actually OBSERVED (rollout line timestamp / file mtime)
 /// — pass it for cache-derived readings so a re-seeded old observation can't mask a fresher one
 /// (`Store::record_quota_at`'s stale guard). `None` means "observed now" (live probes).
-pub(crate) fn seed_store_quota(
-    store: &Store,
-    provider: &str,
-    window: &str,
-    pct: Option<f64>,
-    observed_at: Option<i64>,
-) {
-    seed_store_quota_with_reset(store, provider, window, pct, observed_at, None);
-}
-
-/// [`seed_store_quota`] with the window's reset instant when the source reports one (Claude's
+///
+/// `resets_at` is the window's reset instant when the source reports one (Claude's
 /// `anthropic-ratelimit-unified-*-reset` headers). Without it the row can never be displayed or
 /// paced against.
 pub(crate) fn seed_store_quota_with_reset(
