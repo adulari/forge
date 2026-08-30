@@ -2244,6 +2244,97 @@ mod tests {
         assert!(cap.is_permanent());
     }
 
+    /// The live defect, verbatim. `curl` against groq on 2026-08-30 returned exactly this status
+    /// and body for `llama-3.3-70b-versatile`. Before the fix it fell through `classify_status`'s
+    /// `match code` catch-all to `ProviderError::Request` — non-retryable AND never benched — so
+    /// no `model_health` row was ever written and the mesh kept routing to a dead model.
+    #[test]
+    fn contract_groq_model_not_found_is_a_permanent_no_access_failure() {
+        let body = r#"{"error":{"message":"The model `llama-3.3-70b-versatile` does not exist or you do not have access to it.","type":"invalid_request_error","code":"model_not_found"}}"#;
+        let e = classify_status(404, "HTTP error".into(), body, None);
+
+        assert!(matches!(e, ProviderError::NoModelAccess(_)), "got {e:?}");
+        assert!(e.is_permanent(), "must be excluded, not benched briefly");
+        assert!(e.is_retryable(), "the mesh must fail over to another model");
+        assert!(
+            !e.is_auth(),
+            "the credential is fine — excluding the whole provider would take groq's \
+             working models down with it"
+        );
+        assert!(
+            !e.is_credential_failure(),
+            "an explicit pin still surfaces this: it is about the model, not the account"
+        );
+        assert!(
+            e.to_string().contains("llama-3.3-70b-versatile"),
+            "the provider's message must survive: {e}"
+        );
+        assert_eq!(e.reason(), "not available on this account");
+
+        // Same body on the structured stream-error path: groq's `code` is the STRING
+        // `model_not_found`, which no numeric/rate-limit/auth branch reads, so it used to fall
+        // through to text scanning and come back `Unavailable` (a short transient bench).
+        let structured = classify_error_body(&serde_json::from_str(body).unwrap());
+        assert!(
+            matches!(structured, Some(ProviderError::NoModelAccess(_))),
+            "got {structured:?}"
+        );
+
+        // And on the free-text streaming path.
+        let streamed = classify_text(
+            "The model `llama-3.3-70b-versatile` does not exist or you do not have access to it.",
+            "stream err".into(),
+        );
+        assert!(
+            matches!(streamed, ProviderError::NoModelAccess(_)),
+            "got {streamed:?}"
+        );
+    }
+
+    /// "This account cannot call this model" and "this model is rate-limited right now" must not
+    /// collapse into each other: different variant, different message, and a different bench
+    /// duration (a permanent exclusion versus the server's own short cooldown).
+    #[test]
+    fn no_access_and_rate_limit_stay_distinct() {
+        let default = std::time::Duration::from_secs(120);
+        let no_access = classify_status(
+            404,
+            "x".into(),
+            r#"{"error":{"code":"model_not_found","message":"no such model"}}"#,
+            None,
+        );
+        let limited = classify_status(
+            429,
+            "x".into(),
+            r#"{"error":{"message":"Rate limit reached"}}"#,
+            Some(std::time::Duration::from_secs(7)),
+        );
+
+        assert!(no_access.is_permanent());
+        assert!(!limited.is_permanent(), "a rate limit clears on its own");
+        assert_eq!(limited.cooldown(default), std::time::Duration::from_secs(7));
+        assert_ne!(no_access.reason(), limited.reason());
+        assert!(no_access.to_string().starts_with("model not available"));
+        assert!(limited.to_string().starts_with("rate limited"));
+    }
+
+    /// The marker set names a MODEL, so an unrelated 404 (a mistyped base URL, a missing route)
+    /// keeps its old non-benching `Request` classification rather than excluding a healthy model.
+    #[test]
+    fn unrelated_404s_are_not_read_as_a_dead_model() {
+        for body in [
+            r#"{"detail":"Not Found"}"#,
+            "404 page not found",
+            r#"{"error":{"message":"Unknown request URL. Please check the URL for typos."}}"#,
+        ] {
+            let e = classify_status(404, "HTTP error".into(), body, None);
+            assert!(
+                matches!(e, ProviderError::Request(_)),
+                "expected Request for {body:?}, got {e:?}"
+            );
+        }
+    }
+
     #[test]
     fn contract_openrouter_402_and_no_tool_endpoints() {
         // 402 numeric code in the structured body → permanent Capability.

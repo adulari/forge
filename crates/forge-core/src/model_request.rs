@@ -554,7 +554,7 @@ pub(super) async fn request_provider_response(
                 // provider's remaining chain entries and cross to the next provider; every
                 // other failure keeps rank order intact. (Without this, dropping the old
                 // provider-interleave would re-expose the 429-storm the interleave guarded.)
-                let skip_provider = if e.is_rate_limited() || e.is_permanent() {
+                let skip_provider = if e.is_rate_limited() || e.is_auth() {
                     Some(forge_config::provider_of(active_model).to_string())
                 } else {
                     None
@@ -698,5 +698,117 @@ mod tests {
         assert!(verdict.contains("1 missing credentials"));
         assert!(verdict.contains("1 rate-limited"));
         assert!(verdict.contains("1 network errors"));
+    }
+
+    fn test_session() -> Session {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config = Config::default();
+        Session::start(
+            Arc::new(Store::open_in_memory().unwrap()),
+            Arc::new(forge_provider::MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(workspace),
+            Box::new(forge_tui::HeadlessPresenter::new(false)),
+            config,
+            workspace.to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap()
+    }
+
+    const DEAD: &str = "groq::llama-3.3-70b-versatile";
+    const SIBLING: &str = "groq::groq/compound-mini";
+
+    /// The reported defect: after the turn failed, `select count(*) from model_health where model
+    /// like '%llama%'` was 0, so ranking and failover were free to pick the model again — and did.
+    /// A permanent model-specific failure must leave exactly one row, for the MODEL.
+    #[test]
+    fn permanent_model_failures_bench_the_model_and_leave_siblings_routable() {
+        for error in [
+            forge_provider::ProviderError::NoModelAccess(
+                "The model `llama-3.3-70b-versatile` does not exist or you do not have access to it."
+                    .into(),
+            ),
+            forge_provider::ProviderError::Capability("no tool support".into()),
+        ] {
+            let session = test_session();
+            session.record_model_failure(DEAD, &error, std::time::Duration::from_secs(120));
+
+            let health = session.store.current_benched().unwrap();
+            assert!(health.is_benched(DEAD), "{error:?} left no health row");
+            assert!(
+                !health.is_benched(SIBLING),
+                "{error:?} took a working sibling on the same provider down with it"
+            );
+
+            let rows = session.store.current_benched_report().unwrap();
+            assert_eq!(rows.len(), 1, "{error:?} wrote more than the model's row");
+            assert_eq!(rows[0].0, DEAD);
+            assert!(
+                rows[0].2.starts_with("excluded:"),
+                "a permanent failure is an exclusion, not a short bench: {}",
+                rows[0].2
+            );
+        }
+    }
+
+    /// Counter-case proving the scope assertion above is not vacuous: an auth failure is
+    /// credential-wide and DOES bench every alias of the provider.
+    #[test]
+    fn auth_failures_still_bench_the_whole_provider() {
+        let session = test_session();
+        session.record_model_failure(
+            DEAD,
+            &forge_provider::ProviderError::Auth("invalid api key".into()),
+            std::time::Duration::from_secs(120),
+        );
+
+        let health = session.store.current_benched().unwrap();
+        assert!(health.is_benched(DEAD));
+        assert!(health.is_benched(SIBLING), "auth is provider-wide");
+    }
+
+    /// A rate limit keeps the short, server-signalled cooldown — it must not be swept into the
+    /// permanent-exclusion path along with a model the account cannot call.
+    #[test]
+    fn rate_limits_keep_their_short_transient_bench() {
+        let session = test_session();
+        session.record_model_failure(
+            DEAD,
+            &forge_provider::ProviderError::RateLimited {
+                message: "slow down".into(),
+                retry_after: Some(std::time::Duration::from_secs(7)),
+            },
+            std::time::Duration::from_secs(120),
+        );
+
+        let rows = session.store.current_benched_report().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            !rows[0].2.starts_with("excluded:"),
+            "a rate limit is transient: {}",
+            rows[0].2
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let remaining = rows[0].1 - now;
+        assert!(
+            (1..=7).contains(&remaining),
+            "expected the 7s server cooldown, got {remaining}s"
+        );
+        assert_eq!(
+            session.store.soonest_unbenched().unwrap().as_deref(),
+            Some(DEAD),
+            "a transient bench stays eligible for the last-resort model; an exclusion does not"
+        );
+    }
+
+    #[test]
+    fn no_model_access_counts_as_a_capability_failure_in_the_verdict() {
+        assert_eq!(
+            classify_attempt_failure(&forge_provider::ProviderError::NoModelAccess("x".into())),
+            AttemptFailure::Capability
+        );
     }
 }
