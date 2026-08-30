@@ -16,7 +16,7 @@
 
 use super::*;
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Instant;
 
 use forge_tui::{handle_key, App, ChannelPresenter, ConfirmOutcome, InputOutcome, KeyKind, UiMsg};
@@ -81,6 +81,8 @@ pub(crate) struct SessionDriverHandle {
     /// How many WebSocket clients are currently attached (the daemon's WS route holds a guard
     /// per connection). The push debounce: any client connected ⇒ no push.
     pub ws_clients: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    draining: std::sync::Arc<AtomicBool>,
+    daemon_shutdown: std::sync::Arc<AtomicBool>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -115,6 +117,15 @@ impl SessionDriverHandle {
     /// Ask the driver to stop (archive): the loop aborts any running turn, runs SessionEnd
     /// hooks, broadcasts one final `closed` frame, and exits. Idempotent.
     pub fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+
+    pub(crate) fn begin_drain(&self) {
+        self.draining.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn shutdown_for_daemon(&self) {
+        self.daemon_shutdown.store(true, Ordering::Release);
         let _ = self.shutdown_tx.send(true);
     }
 
@@ -228,6 +239,8 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         remote::EVENT_LOG_CAP,
     )));
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let draining = std::sync::Arc::new(AtomicBool::new(false));
+    let daemon_shutdown = std::sync::Arc::new(AtomicBool::new(false));
     let last_activity = std::sync::Arc::new(AtomicI64::new(now_secs()));
     let ws_clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let title = std::sync::Arc::new(std::sync::RwLock::new(spec.title));
@@ -244,6 +257,8 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         snapshot_tx,
         events.clone(),
         shutdown_rx,
+        draining.clone(),
+        daemon_shutdown.clone(),
         last_activity.clone(),
         spec.push,
         spec.apns,
@@ -262,6 +277,8 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         mode_tx,
         last_activity,
         ws_clients,
+        draining,
+        daemon_shutdown,
         shutdown_tx,
         task: std::sync::Mutex::new(Some(task)),
     })
@@ -321,6 +338,8 @@ struct DriverState {
     /// Last heartbeat-store error already shown to the user, so a persistent failure does not
     /// generate a new warning on every periodic check.
     last_heartbeat_error: Option<String>,
+    draining: std::sync::Arc<AtomicBool>,
+    daemon_shutdown: std::sync::Arc<AtomicBool>,
 }
 
 /// How often the driver loop checks for a due session heartbeat while idle. Turn-end already
@@ -349,6 +368,8 @@ async fn drive_session(
     snapshot_tx: tokio::sync::watch::Sender<std::sync::Arc<remote::SnapshotFrame>>,
     events: std::sync::Arc<std::sync::Mutex<remote::EventLog>>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    draining: std::sync::Arc<AtomicBool>,
+    daemon_shutdown: std::sync::Arc<AtomicBool>,
     last_activity: std::sync::Arc<AtomicI64>,
     push: Option<std::sync::Arc<crate::push::PushNotifier>>,
     apns: Option<std::sync::Arc<crate::apns::ApnsNotifier>>,
@@ -445,6 +466,8 @@ async fn drive_session(
         cwd: cwd.clone(),
         last_heartbeat_check: Instant::now(),
         last_heartbeat_error: None,
+        draining,
+        daemon_shutdown,
     };
 
     let mut last_snap: Option<remote::Snapshot> = None;
@@ -464,6 +487,13 @@ async fn drive_session(
     loop {
         if *shutdown_rx.borrow_and_update() {
             break;
+        }
+        if st.draining.load(Ordering::Acquire) {
+            st.queued_prompts.clear();
+            st.app.set_queued(&st.queued_prompts);
+            if !st.busy {
+                break;
+            }
         }
         let current_title = title
             .read()
@@ -650,6 +680,17 @@ async fn drive_session(
     if let Some(h) = st.turn_handle.take() {
         h.abort();
     }
+    if st.busy {
+        st.app.apply(forge_tui::PresenterEvent::Done {
+            final_text: String::new(),
+            stop_reason: if st.daemon_shutdown.load(Ordering::Acquire) {
+                forge_types::StopReason::DaemonShutdown
+            } else {
+                forge_types::StopReason::Interrupted
+            },
+        });
+    }
+    st.busy = false;
     st.pending = None;
     st.pending_question = None;
     {
@@ -673,6 +714,16 @@ async fn drive_session(
         .await;
     }
     let mut closed = last_snap.unwrap_or_default();
+    closed.busy = false;
+    closed.done = st.app.done;
+    closed.last_turn_outcome = st
+        .app
+        .last_stop_reason
+        .map(|reason| reason.outcome().to_string());
+    closed.last_stop_reason = st
+        .app
+        .last_stop_reason
+        .map(|reason| reason.as_str().to_string());
     closed.closed = true;
     closed.revision += 1;
     let closed = std::sync::Arc::new(remote::SnapshotFrame::new(closed));
@@ -711,6 +762,10 @@ impl DriverState {
         self.app.clear_question();
         self.app.workflow.on_interrupt();
         self.app.apply(forge_tui::PresenterEvent::AssistantDone);
+        self.app.apply(forge_tui::PresenterEvent::Done {
+            final_text: String::new(),
+            stop_reason: forge_types::StopReason::Interrupted,
+        });
 
         // An interrupt cancels only the active turn. Prompts submitted while it was running are
         // still valid work and must drain FIFO; start the head under the new generation so the
@@ -1016,6 +1071,8 @@ mod tests {
             cwd: String::new(),
             last_heartbeat_check: Instant::now(),
             last_heartbeat_error: None,
+            draining: std::sync::Arc::new(AtomicBool::new(false)),
+            daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1055,6 +1112,8 @@ mod tests {
             mode_tx,
             last_activity: std::sync::Arc::new(AtomicI64::new(0)),
             ws_clients: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            draining: std::sync::Arc::new(AtomicBool::new(false)),
+            daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
             shutdown_tx,
             task: std::sync::Mutex::new(Some(task)),
         });
@@ -1085,6 +1144,8 @@ mod tests {
             mode_tx,
             last_activity: std::sync::Arc::new(AtomicI64::new(0)),
             ws_clients: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            draining: std::sync::Arc::new(AtomicBool::new(false)),
+            daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
             shutdown_tx,
             task: std::sync::Mutex::new(Some(tokio::spawn(std::future::pending()))),
         };

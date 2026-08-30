@@ -13,6 +13,14 @@ impl DriverState {
     /// One remote input — the headless mirror of `run_chat_tui`'s remote drain, minus the
     /// host-terminal cases (`/remote` toggling, host clipboard).
     pub(super) async fn handle_input(&mut self, input: remote::RemoteInput) -> Result<()> {
+        if self.draining.load(Ordering::Acquire)
+            && matches!(
+                input,
+                remote::RemoteInput::Prompt { .. } | remote::RemoteInput::Steer { .. }
+            )
+        {
+            return Ok(());
+        }
         match input {
             remote::RemoteInput::Prompt { text, attachments } => {
                 // A fresh prompt starts a fresh interaction — drop stale notices + copy payload.
