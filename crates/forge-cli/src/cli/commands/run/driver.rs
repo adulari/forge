@@ -1097,6 +1097,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aborting_a_busy_turn_does_not_retain_a_previous_success() {
+        let mut state = test_driver_state().await;
+        state.app.apply(forge_tui::PresenterEvent::Done {
+            final_text: "previous turn finished".into(),
+            stop_reason: forge_types::StopReason::FinalAnswer,
+        });
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+
+        state.interrupt_turn();
+
+        let snapshot = state.app.remote_snapshot();
+        assert_eq!(
+            snapshot.last_stop_reason,
+            Some(forge_types::StopReason::Interrupted),
+            "an aborted in-flight turn must replace the previous turn's success"
+        );
+        assert_eq!(
+            snapshot
+                .last_stop_reason
+                .map(forge_types::StopReason::outcome),
+            Some("failed")
+        );
+    }
+
+    #[tokio::test]
     async fn interrupt_with_queue_starts_fifo_head_and_keeps_driver_busy() {
         let mut state = test_driver_state().await;
         state.busy = true;
