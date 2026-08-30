@@ -21,6 +21,19 @@ All notable changes to Forge are documented here. The format follows
   the same account (`crates/forge-store/src/quota_store.rs`, `crates/forge-cli/src/serve/serve_usage.rs`,
   `crates/forge-cli/src/cli/commands/models/presentation.rs`, `mobile/src/app/usage.tsx`).
 
+- **Codex bridge usage no longer counts cached input as fresh or invents zero cache use.**
+  Cached input reported by Codex is now recorded for context, budget, cost and routing calculations,
+  while providers that omit it store an unknown value instead of zero
+  (`crates/forge-provider/src/cli_provider.rs`, `crates/forge-types/src/lib.rs`,
+  `crates/forge-store/src/migrations/usage.rs`, `crates/forge-mesh/src/pricing.rs`).
+
+- **CLI model discovery failures no longer masquerade as live model inventory.**
+  `forge models` and `forge doctor` now show each list's provenance and the probe error, reuse the
+  last successful live inventory while retrying, and discover Codex 0.149+ models through
+  `codex debug models` (`crates/forge-provider/src/cli_provider.rs`,
+  `crates/forge-cli/src/cli/commands/models/discovery.rs`,
+  `crates/forge-cli/src/doctor_bridge_models.rs`).
+
 - **A turn that produces no assistant text and no successful mutation is reported as a failure.**
   Forge now classifies that outcome as `no_output` and exposes the result in the TUI, remote
   snapshots and fleet session rows, so phone clients and orchestrators can distinguish a no-op turn
