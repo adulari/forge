@@ -6,6 +6,40 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.2] - 2026-08-30
+
+### Fixed
+
+- **Bridged Codex sessions no longer abort their first turn by believing Forge tools are missing.**
+  The provider harness now tells each CLI how Forge MCP tools are actually acquired: Claude receives
+  schemas up front, Codex must resolve deferred `mcp__forge__*` registry entries, and Antigravity no
+  longer receives a Forge MCP preamble it cannot use (`crates/forge-provider/src/cli_provider.rs`).
+
+- **Subscription quota displays no longer present stale or unknown readings as live headroom.**
+  Expired quota snapshots are dropped before display and unknown fractions stay unknown instead of
+  rendering as `0%`, while Codex CLI and OAuth share one subscription quota view because they spend
+  the same account (`crates/forge-store/src/quota_store.rs`, `crates/forge-cli/src/serve/serve_usage.rs`,
+  `crates/forge-cli/src/cli/commands/models/presentation.rs`, `mobile/src/app/usage.tsx`).
+
+- **Codex bridge usage no longer counts cached input as fresh or invents zero cache use.**
+  Cached input reported by Codex is now recorded for context, budget, cost and routing calculations,
+  while providers that omit it store an unknown value instead of zero
+  (`crates/forge-provider/src/cli_provider.rs`, `crates/forge-types/src/lib.rs`,
+  `crates/forge-store/src/migrations/usage.rs`, `crates/forge-mesh/src/pricing.rs`).
+
+- **CLI model discovery failures no longer masquerade as live model inventory.**
+  `forge models` and `forge doctor` now show each list's provenance and the probe error, reuse the
+  last successful live inventory while retrying, and discover Codex 0.149+ models through
+  `codex debug models` (`crates/forge-provider/src/cli_provider.rs`,
+  `crates/forge-cli/src/cli/commands/models/discovery.rs`,
+  `crates/forge-cli/src/doctor_bridge_models.rs`).
+
+- **A turn that produces no assistant text and no successful mutation is reported as a failure.**
+  Forge now classifies that outcome as `no_output` and exposes the result in the TUI, remote
+  snapshots and fleet session rows, so phone clients and orchestrators can distinguish a no-op turn
+  from a successful one (`crates/forge-core/src/lib.rs`, `crates/forge-cli/src/remote.rs`,
+  `crates/forge-cli/src/serve.rs`, `crates/forge-types/src/turn_outcome.rs`).
+
 ## [2.13.1] - 2026-08-30
 
 ### Fixed
@@ -3542,7 +3576,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.2...HEAD
+[2.13.2]: https://github.com/Adulari/forge/compare/v2.13.1...v2.13.2
 [2.13.1]: https://github.com/Adulari/forge/compare/v2.13.0...v2.13.1
 [2.13.0]: https://github.com/Adulari/forge/compare/v2.12.1...v2.13.0
 [2.12.1]: https://github.com/Adulari/forge/compare/v2.12.0...v2.12.1
