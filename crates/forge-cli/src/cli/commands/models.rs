@@ -108,9 +108,10 @@ fn print_discovery_statuses(statuses: &[ProviderDiscoveryStatus]) {
 
 fn discovery_status_line(status: &ProviderDiscoveryStatus) -> String {
     match status.kind {
-        DiscoveryStatusKind::Discovered => {
-            format!("  ✓ {:<18} {} model(s)", status.provider, status.models)
-        }
+        DiscoveryStatusKind::Discovered => match status.detail.as_deref() {
+            Some(detail) => format!("  ✓ {:<18} {detail}", status.provider),
+            None => format!("  ✓ {:<18} {} model(s)", status.provider, status.models),
+        },
         DiscoveryStatusKind::Unsupported => format!(
             "  · {:<18} skipped ({})",
             status.provider,

@@ -51,6 +51,86 @@ pub enum CliKind {
     Antigravity,
 }
 
+/// Where a bridge's model-alias list came from. A list is only as trustworthy as its source:
+/// [`BridgeModelSource::Live`] is the installed CLI's own answer, while
+/// [`BridgeModelSource::Fallback`] is a constant compiled into this Forge release and is exactly
+/// as old as the release. Surfaces report this so a failed live lookup can never masquerade as an
+/// up-to-date inventory — the defect this type exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeModelSource {
+    /// The installed CLI advertised these aliases just now.
+    Live,
+    /// The last list this CLI advertised, replayed from disk because the live lookup failed.
+    Cached { age_secs: u64 },
+    /// Pinned by hand in `[mesh.bridge_models]`; never probed. Constructed by config-aware
+    /// callers, not by the probe itself.
+    Configured,
+    /// The built-in [`CliKind::default_models`] table: the live lookup failed and nothing was
+    /// cached. As old as this Forge release.
+    Fallback,
+}
+
+/// A bridge's model aliases together with the provenance of that list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeModels {
+    pub models: Vec<String>,
+    pub source: BridgeModelSource,
+    /// Why the live lookup produced no list — the CLI's own error text where it emitted one.
+    pub probe_error: Option<String>,
+}
+
+impl BridgeModels {
+    /// A hand-pinned `[mesh.bridge_models]` list.
+    pub fn configured(models: Vec<String>) -> Self {
+        Self {
+            models,
+            source: BridgeModelSource::Configured,
+            probe_error: None,
+        }
+    }
+
+    /// True when these aliases did NOT come from the installed CLI, i.e. the list can be stale
+    /// without anything else noticing.
+    pub fn is_unverified(&self) -> bool {
+        !matches!(self.source, BridgeModelSource::Live)
+    }
+
+    /// One line naming the source and, when the live lookup failed, why it did.
+    pub fn describe(&self) -> String {
+        let count = self.models.len();
+        let because = || match &self.probe_error {
+            Some(error) => format!("; live lookup failed: {error}"),
+            None => String::new(),
+        };
+        match &self.source {
+            BridgeModelSource::Live => format!("{count} model(s) advertised by the CLI"),
+            BridgeModelSource::Cached { age_secs } => format!(
+                "{count} model(s) cached from a successful lookup {}{}",
+                humanize_age(*age_secs),
+                because()
+            ),
+            BridgeModelSource::Configured => {
+                format!("{count} model(s) pinned in [mesh.bridge_models]")
+            }
+            BridgeModelSource::Fallback => format!(
+                "{count} built-in fallback model(s) — shipped with Forge {}, may be out of date{}",
+                env!("CARGO_PKG_VERSION"),
+                because()
+            ),
+        }
+    }
+}
+
+/// "3 minutes ago" / "2 days ago", coarse enough to be honest about a cached probe's age.
+fn humanize_age(secs: u64) -> String {
+    match secs {
+        0..=90 => "just now".to_string(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86_400),
+    }
+}
+
 /// Sanitized model/capability record returned by Claude Code's authoritative streaming
 /// `initialize` control request. Deliberately excludes the response's `account`, process and
 /// user-configuration fields so callers can safely persist this in benchmark artifacts.
@@ -145,18 +225,18 @@ impl CliKind {
         format!("{}::", self.prefix())
     }
 
-    /// FALLBACK model aliases, used only when [`Self::detect_models`] yields nothing (CLI can't be
-    /// probed, or offers no enumeration). These are the documented `--model` aliases at the time
-    /// of writing; the live CLI's own advertised list ([`Self::bridge_models`]) is the primary
-    /// source, so this table going stale only affects offline/unprobeable installs. Any alias
-    /// that's stale or unavailable just benches itself via failover (never a hard error).
+    /// FALLBACK model aliases, used only when [`Self::detect_models_result`] fails AND no
+    /// previously-probed list is cached on disk. These are the documented `--model` aliases at the
+    /// time of writing, so this table is exactly as old as the Forge release that ships it — which
+    /// is why every surface reports [`BridgeModelSource::Fallback`] rather than presenting it as
+    /// the CLI's own inventory. Any alias that's stale or unavailable just benches itself via
+    /// failover (never a hard error).
     pub fn default_models(self) -> &'static [&'static str] {
         match self {
             // `claude --model` aliases (claude 2.1 --help names fable/opus/sonnet; haiku is the
             // documented fast tier); they span the capability tiers.
             CliKind::ClaudeCode => &["fable", "opus", "sonnet", "haiku"],
             // `codex --model` (codex 0.13x model picker). gpt-5.4-mini is the fast/cheap tier.
-            // codex is ALWAYS on this table: it exposes no model enumeration (see detect_models).
             CliKind::Codex => &[
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
@@ -174,14 +254,17 @@ impl CliKind {
     }
 
     /// Model aliases the installed CLI itself advertises — the primary, non-hardcoded source, so
-    /// a model Anthropic/Google ships to subscribers appears in the mesh without a Forge release.
-    /// Best-effort and cheap: Claude uses the non-billing streaming `initialize` control request
-    /// (the official Agent SDK's authoritative capability source), while agy uses `agy models`.
-    /// The legacy `claude --help` parser remains a fallback for older CLIs that do not implement
-    /// `initialize`. Empty on any failure. codex 0.141 exposes no model enumeration
-    /// (`--model` is free-form, no `models` subcommand — verified against its full command list),
-    /// so it always falls back to the static table; extend it via `[mesh.bridge_models]`.
-    pub async fn detect_models(self) -> Vec<String> {
+    /// a model Anthropic/Google/OpenAI ships to subscribers appears in the mesh without a Forge
+    /// release. Best-effort and cheap: Claude uses the non-billing streaming `initialize` control
+    /// request (the official Agent SDK's authoritative capability source, with the legacy
+    /// `claude --help` parser as a fallback for older CLIs), codex renders its own catalog with
+    /// `codex debug models`, and agy uses `agy models`.
+    ///
+    /// `Err` carries WHY the live lookup produced nothing (the CLI's own error text where it
+    /// emitted one). That distinction is the whole point: an unauthenticated CLI returning
+    /// nothing must never be indistinguishable from a CLI that happened to advertise exactly the
+    /// aliases Forge hardcodes — see [`Self::bridge_models_detailed`].
+    pub async fn detect_models_result(self) -> Result<Vec<String>, String> {
         if self == CliKind::ClaudeCode {
             if let Some(initialization) =
                 probe_claude_initialization_response(self.default_binary()).await
@@ -193,29 +276,35 @@ impl CliKind {
                     .filter(|value| value != "default" && !value.is_empty())
                     .collect::<Vec<_>>();
                 if !advertised.is_empty() {
-                    return advertised;
+                    return Ok(advertised);
                 }
             }
         }
         let args: &[&str] = match self {
             CliKind::ClaudeCode => &["--help"],
             CliKind::Antigravity => &["models"],
-            CliKind::Codex => return Vec::new(),
+            CliKind::Codex => &["debug", "models"],
         };
-        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        let mut cmd = bridge_command(self.default_binary(), &args);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let out = match tokio::time::timeout(Duration::from_secs(5), cmd.output()).await {
-            Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-            _ => return Vec::new(),
-        };
-        match self {
+        let out = run_model_probe(self.default_binary(), args).await?;
+        let models = match self {
             CliKind::ClaudeCode => parse_claude_model_aliases(&out),
             CliKind::Antigravity => parse_agy_models(&out),
-            CliKind::Codex => Vec::new(),
+            CliKind::Codex => parse_codex_catalog_models(&out),
+        };
+        if models.is_empty() {
+            return Err(format!(
+                "`{} {}` succeeded but advertised no models",
+                self.default_binary(),
+                args.join(" ")
+            ));
         }
+        Ok(models)
+    }
+
+    /// [`Self::detect_models_result`] with the reason discarded. Prefer the `_result` form
+    /// anywhere the answer is shown to a user.
+    pub async fn detect_models(self) -> Vec<String> {
+        self.detect_models_result().await.unwrap_or_default()
     }
 
     /// Installed CLI version, without invoking a model. Returns `None` when the CLI is absent,
@@ -240,26 +329,57 @@ impl CliKind {
         Some(initialization.clone())
     }
 
-    /// The model-alias list for this bridge: whatever the installed CLI itself advertises
-    /// ([`Self::detect_models`]), falling back to the static [`Self::default_models`] table only
-    /// when detection yields nothing. Detection-first keeps the list tracking the live CLI —
-    /// no hardcoded model list to go stale — at the cost that an alias the CLI stops advertising
-    /// drops out with it (by design).
-    pub async fn bridge_models(self) -> Vec<String> {
-        let detected: Vec<String> = self
-            .detect_models()
-            .await
-            .into_iter()
-            .filter(|m| !m.is_empty())
-            .collect();
-        if detected.is_empty() {
-            return self
-                .default_models()
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+    /// The model-alias list for this bridge **plus where it came from**.
+    ///
+    /// Order of preference: what the installed CLI advertises right now → the last list it
+    /// advertised (cached on disk) → the static [`Self::default_models`] table. Only the first is
+    /// evidence about the CLI as it exists today; the other two are reported as such
+    /// ([`BridgeModels::is_unverified`]) so no surface can present a guess as an inventory.
+    ///
+    /// The disk cache is what makes a failed lookup self-healing: a user who signs the CLI in
+    /// later gets the real list on the next discovery pass, and a transient failure after a
+    /// successful one replays the real list instead of dropping back to release-age constants.
+    pub async fn bridge_models_detailed(self) -> BridgeModels {
+        match self.detect_models_result().await {
+            Ok(models) => {
+                let models: Vec<String> = models.into_iter().filter(|m| !m.is_empty()).collect();
+                remember_bridge_models(self, &models);
+                BridgeModels {
+                    models,
+                    source: BridgeModelSource::Live,
+                    probe_error: None,
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "{} model discovery failed: {error} — the mesh will use an unverified model \
+                     list for this bridge",
+                    self.prefix()
+                );
+                match recall_bridge_models(self) {
+                    Some((models, age_secs)) => BridgeModels {
+                        models,
+                        source: BridgeModelSource::Cached { age_secs },
+                        probe_error: Some(error),
+                    },
+                    None => BridgeModels {
+                        models: self
+                            .default_models()
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect(),
+                        source: BridgeModelSource::Fallback,
+                        probe_error: Some(error),
+                    },
+                }
+            }
         }
-        detected
+    }
+
+    /// [`Self::bridge_models_detailed`] with the provenance discarded. Only for callers that
+    /// cannot report it.
+    pub async fn bridge_models(self) -> Vec<String> {
+        self.bridge_models_detailed().await.models
     }
 
     /// How to tell the user to make this CLI usable.
@@ -545,6 +665,167 @@ fn parse_claude_model_aliases(help: &str) -> Vec<String> {
         }
     }
     out
+}
+
+const MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run a model-enumeration command and return its stdout, or a one-line explanation of why it
+/// produced nothing. The explanation quotes the CLI's own message (`agy models` says "Please sign
+/// in to view available models") because that, not a generic "discovery failed", is what tells a
+/// user what to do about it.
+async fn run_model_probe(binary: &str, args: &[&str]) -> Result<String, String> {
+    let owned: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+    let label = format!("`{binary} {}`", args.join(" "));
+    let mut cmd = bridge_command(binary, &owned);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    match tokio::time::timeout(MODEL_PROBE_TIMEOUT, cmd.output()).await {
+        Ok(Ok(out)) if out.status.success() => {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        }
+        Ok(Ok(out)) => Err(format!(
+            "{label} {}: {}",
+            match out.status.code() {
+                Some(code) => format!("exited {code}"),
+                None => "was killed by a signal".to_string(),
+            },
+            probe_failure_message(&out.stderr, &out.stdout)
+        )),
+        Ok(Err(e)) => Err(format!("{label} could not be launched: {e}")),
+        Err(_) => Err(format!(
+            "{label} timed out after {}s",
+            MODEL_PROBE_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// The most useful single line a failed probe printed (stderr first, then stdout), clamped so a
+/// chatty CLI cannot dump a screenful into every status line.
+fn probe_failure_message(stderr: &[u8], stdout: &[u8]) -> String {
+    const MAX: usize = 200;
+    let pick = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_string)
+    };
+    let mut message = pick(stderr)
+        .or_else(|| pick(stdout))
+        .unwrap_or_else(|| "no output".to_string());
+    if message.chars().count() > MAX {
+        message = message.chars().take(MAX).collect::<String>() + "…";
+    }
+    message
+}
+
+/// Model slugs from `codex debug models` — codex ≥ 0.149 renders its raw catalog as JSON
+/// (`{"models":[{"slug":…,"visibility":…}]}`) and needs no login to do it. Only entries codex
+/// itself lists are usable aliases: the catalog also carries hidden internal entries
+/// (`gpt-reserve`, `codex-auto-review`) that are not user-selectable models. An older codex has no
+/// `debug models` subcommand at all, which surfaces as a probe failure and the static fallback.
+fn parse_codex_catalog_models(out: &str) -> Vec<String> {
+    let Ok(catalog) = serde_json::from_str::<Value>(out) else {
+        return Vec::new();
+    };
+    let Some(models) = catalog.get("models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut slugs: Vec<String> = Vec::new();
+    for model in models {
+        let visibility = model
+            .get("visibility")
+            .and_then(Value::as_str)
+            .unwrap_or("list");
+        if visibility != "list" {
+            continue;
+        }
+        let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+            continue;
+        };
+        if !slug.is_empty() && !slugs.iter().any(|s| s == slug) {
+            slugs.push(slug.to_string());
+        }
+    }
+    slugs
+}
+
+/// One bridge's last successfully-probed model list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedBridgeModels {
+    models: Vec<String>,
+    /// Unix seconds when the CLI advertised this list.
+    probed_at: u64,
+}
+
+/// Last-known-good model lists, keyed by [`CliKind::prefix`]. Persisted next to the catalog cache
+/// so a CLI that was signed in yesterday keeps contributing its REAL models today, and so signing
+/// a CLI in never requires a Forge release or a manual cache bust to take effect.
+fn bridge_model_cache_path() -> Option<std::path::PathBuf> {
+    forge_config::data_dir().map(|d| d.join("bridge-models.json"))
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn read_bridge_model_cache(
+    path: &std::path::Path,
+) -> std::collections::HashMap<String, CachedBridgeModels> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn remember_bridge_models_at(path: &std::path::Path, prefix: &str, models: &[String], now: u64) {
+    if models.is_empty() {
+        return;
+    }
+    let mut cache = read_bridge_model_cache(path);
+    cache.insert(
+        prefix.to_string(),
+        CachedBridgeModels {
+            models: models.to_vec(),
+            probed_at: now,
+        },
+    );
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_vec(&cache) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// The cached list and its age in seconds. A clock that moved backwards yields age 0 rather than
+/// an underflow.
+fn recall_bridge_models_at(
+    path: &std::path::Path,
+    prefix: &str,
+    now: u64,
+) -> Option<(Vec<String>, u64)> {
+    let entry = read_bridge_model_cache(path).remove(prefix)?;
+    if entry.models.is_empty() {
+        return None;
+    }
+    Some((entry.models, now.saturating_sub(entry.probed_at)))
+}
+
+fn remember_bridge_models(kind: CliKind, models: &[String]) {
+    if let Some(path) = bridge_model_cache_path() {
+        remember_bridge_models_at(&path, kind.prefix(), models, now_unix());
+    }
+}
+
+fn recall_bridge_models(kind: CliKind) -> Option<(Vec<String>, u64)> {
+    let path = bridge_model_cache_path()?;
+    recall_bridge_models_at(&path, kind.prefix(), now_unix())
 }
 
 /// Model slugs from `agy models` output. It prints one display name per line, each with an

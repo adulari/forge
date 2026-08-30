@@ -340,20 +340,26 @@ pub(crate) async fn discover_catalog_with_status(
             .filter(|k| k.available())
             .map(|k| async move {
                 let prefix = k.prefix();
-                let aliases = match config.mesh.bridge_models.get(prefix) {
-                    Some(custom) if !custom.is_empty() => custom.clone(),
-                    _ => k.bridge_models().await,
+                let discovered = match config.mesh.bridge_models.get(prefix) {
+                    Some(custom) if !custom.is_empty() => {
+                        forge_provider::BridgeModels::configured(custom.clone())
+                    }
+                    _ => k.bridge_models_detailed().await,
                 };
-                aliases
+                let status = bridge_discovery_status(prefix, &discovered);
+                let models = discovered
+                    .models
                     .into_iter()
                     .filter(|m| !m.is_empty())
                     .map(|m| format!("{prefix}::{m}"))
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                (models, status)
             }),
     )
     .await;
-    for list in bridge_lists {
+    for (list, status) in bridge_lists {
         models.extend(list);
+        statuses.push(status);
     }
     // Keep the configured tier candidates as a cold-start safety net. A provider's model-list
     // endpoint can be unavailable while its completion endpoint still works (the doctor output
@@ -408,6 +414,48 @@ pub(crate) async fn discover_catalog_with_status(
 
 pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mesh::ModelCatalog {
     discover_catalog_with_status(config).await.0
+}
+
+fn bridge_discovery_status(
+    prefix: &str,
+    discovered: &forge_provider::BridgeModels,
+) -> ProviderDiscoveryStatus {
+    let kind = match discovered.source {
+        forge_provider::BridgeModelSource::Live | forge_provider::BridgeModelSource::Configured => {
+            DiscoveryStatusKind::Discovered
+        }
+        forge_provider::BridgeModelSource::Cached { .. }
+        | forge_provider::BridgeModelSource::Fallback => DiscoveryStatusKind::Failed,
+    };
+    ProviderDiscoveryStatus {
+        provider: prefix.to_string(),
+        kind,
+        models: discovered.models.len(),
+        detail: Some(discovered.describe()),
+    }
+}
+
+#[cfg(test)]
+mod bridge_status_tests {
+    use super::*;
+
+    #[test]
+    fn failed_live_bridge_lookup_reports_fallback_and_reason() {
+        let discovered = forge_provider::BridgeModels {
+            models: vec!["stale-model".into()],
+            source: forge_provider::BridgeModelSource::Fallback,
+            probe_error: Some("please sign in".into()),
+        };
+
+        let status = bridge_discovery_status("agy-cli", &discovered);
+
+        assert_eq!(status.kind, DiscoveryStatusKind::Failed);
+        assert_eq!(status.models, 1);
+        let detail = status.detail.unwrap();
+        assert!(detail.contains("built-in fallback"), "{detail}");
+        assert!(detail.contains("may be out of date"), "{detail}");
+        assert!(detail.contains("please sign in"), "{detail}");
+    }
 }
 
 /// Build [`forge_mesh::pricing::Pricing`] with the per-model rates discovery has already fetched
