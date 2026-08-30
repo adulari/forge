@@ -76,6 +76,7 @@ const FLEET_INVALIDATION_MIN_INTERVAL: std::time::Duration = std::time::Duration
 
 /// How long an archive waits for the driver task to wind down before letting go.
 const ARCHIVE_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const DAEMON_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_SESSION_SEARCH_QUERY_CHARS: usize = 256;
 const MAX_SESSION_SEARCH_RESULTS: usize = 100;
 const MAX_SESSION_TITLE_CHARS: usize = 120;
@@ -272,6 +273,7 @@ fn remove_state() -> Result<()> {
 pub(crate) struct SessionRegistry {
     sessions: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<SessionDriverHandle>>>>,
     fleet_tx: tokio::sync::watch::Sender<u64>,
+    draining: std::sync::atomic::AtomicBool,
 }
 
 impl SessionRegistry {
@@ -279,6 +281,7 @@ impl SessionRegistry {
         Self {
             sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fleet_tx: tokio::sync::watch::channel(0).0,
+            draining: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -289,6 +292,15 @@ impl SessionRegistry {
 
     fn subscribe_fleet(&self) -> tokio::sync::watch::Receiver<u64> {
         self.fleet_tx.subscribe()
+    }
+
+    fn begin_draining(&self) {
+        self.draining
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn is_draining(&self) -> bool {
+        self.draining.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Register a driver handle in the live fleet, then flush any fleet messages that were
@@ -459,6 +471,12 @@ async fn send_fleet_message(
     AxumPath(id): AxumPath<String>,
     axum::Json(req): axum::Json<SendFleetMessageReq>,
 ) -> Response {
+    if state.registry.is_draining() {
+        return err_response(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "daemon is draining for shutdown",
+        );
+    }
     if state.registry.get(&id).await.is_none() {
         return err_response(
             axum::http::StatusCode::NOT_FOUND,
@@ -799,7 +817,7 @@ pub(crate) async fn serve_cmd(
         println!("  ⚠ anyone with the link can drive these sessions — the token is the only gate");
     }
 
-    // Serve until Ctrl-C, then wind sessions down cleanly.
+    // Serve until SIGINT/SIGTERM, then give active turns a bounded window to finish.
     let server = async {
         if local || anywhere {
             let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
@@ -819,15 +837,9 @@ pub(crate) async fn serve_cmd(
     };
     let serve_result = tokio::select! {
         r = server => r,
-        _ = tokio::signal::ctrl_c() => {
-            println!("\n⚒ shutting down — stopping sessions…");
-            let handles = registry.all().await;
-            for handle in &handles {
-                handle.shutdown();
-            }
-            for handle in handles {
-                handle.join(ARCHIVE_JOIN_TIMEOUT).await;
-            }
+        _ = shutdown_signal() => {
+            println!("\n⚒ shutting down — draining active turns…");
+            drain_sessions(&registry, DAEMON_DRAIN_TIMEOUT).await;
             remove_state()?;
             Ok(())
         }
@@ -835,6 +847,51 @@ pub(crate) async fn serve_cmd(
     anywhere_task.abort();
     drop(tunnel_child); // kill_on_drop tears the tunnel down with the daemon
     serve_result
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn drain_sessions(registry: &SessionRegistry, timeout: std::time::Duration) {
+    registry.begin_draining();
+    let handles = registry.all().await;
+    for handle in &handles {
+        handle.begin_drain();
+    }
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline
+        && handles
+            .iter()
+            .any(|handle| handle.snapshot_rx.borrow().snapshot.busy)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    for handle in &handles {
+        if handle.snapshot_rx.borrow().snapshot.busy {
+            handle.shutdown_for_daemon();
+        } else {
+            handle.shutdown();
+        }
+    }
+    for handle in handles {
+        handle.join(ARCHIVE_JOIN_TIMEOUT).await;
+    }
 }
 
 /// The daemon's full route table over `state.base` — extracted from [`serve_cmd`] so tests can
@@ -1226,6 +1283,12 @@ async fn create_session(
     State(state): State<Arc<DaemonState>>,
     axum::Json(req): axum::Json<CreateSessionReq>,
 ) -> Response {
+    if state.registry.is_draining() {
+        return err_response(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "daemon is draining for shutdown",
+        );
+    }
     // Validate mode before creating a worktree or driver.
     let mode = match req.mode.as_deref() {
         Some(raw) => match parse_permission_mode(raw) {
@@ -3656,6 +3719,63 @@ mod tests {
         registry.notify_fleet();
         subscriber.changed().await.unwrap();
         assert_eq!(*subscriber.borrow_and_update(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_timeout_records_daemon_shutdown_instead_of_stale_success() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FORGE_DB", dir.path().join("drain-test.db"));
+
+        let registry = SessionRegistry::new();
+        let store = forge_store::Store::open_in_memory().unwrap();
+        let handle = registry
+            .insert(
+                spawn_session_driver(DriverSpec {
+                    cwd: dir.path().display().to_string(),
+                    worktree: None,
+                    title: "drain-test".into(),
+                    mock: true,
+                    model: None,
+                    resume: None,
+                    temper: None,
+                    push: None,
+                    apns: None,
+                    registry: None,
+                })
+                .await
+                .unwrap(),
+                &store,
+            )
+            .await;
+        handle
+            .input_tx
+            .send(remote::RemoteInput::Prompt {
+                text: "mock:write please".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !handle.snapshot_rx.borrow().snapshot.busy {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "mock turn never became busy"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        drain_sessions(&registry, std::time::Duration::ZERO).await;
+
+        let snapshot = handle.snapshot_rx.borrow().snapshot.clone();
+        assert!(registry.is_draining());
+        assert!(!snapshot.busy);
+        assert_eq!(snapshot.last_turn_outcome.as_deref(), Some("interrupted"));
+        assert_eq!(
+            snapshot.last_stop_reason.as_deref(),
+            Some("daemon_shutdown")
+        );
     }
 
     #[test]

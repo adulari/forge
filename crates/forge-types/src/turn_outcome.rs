@@ -12,6 +12,8 @@ pub enum StopReason {
     BudgetExhausted,
     /// Turn was aborted via `forge_interrupt` (or an equivalent signal).
     Interrupted,
+    /// The hosting daemon shut down before the turn could finish.
+    DaemonShutdown,
     /// The turn ended having produced NO assistant text and no successful mutating tool call —
     /// it burned a turn and changed nothing. Reported as a failure, never as a completed turn:
     /// from an orchestrator or the phone this was previously indistinguishable from real work.
@@ -26,6 +28,7 @@ impl StopReason {
             Self::MaxSteps => "max_steps",
             Self::BudgetExhausted => "budget_exhausted",
             Self::Interrupted => "interrupted",
+            Self::DaemonShutdown => "daemon_shutdown",
             Self::NoOutput => "no_output",
         }
     }
@@ -36,6 +39,7 @@ impl StopReason {
     pub const fn outcome(self) -> &'static str {
         match self {
             Self::FinalAnswer => "success",
+            Self::DaemonShutdown => "interrupted",
             Self::MaxSteps | Self::BudgetExhausted | Self::Interrupted | Self::NoOutput => "failed",
         }
     }
@@ -145,6 +149,7 @@ mod tests {
             StopReason::MaxSteps,
             StopReason::BudgetExhausted,
             StopReason::Interrupted,
+            StopReason::DaemonShutdown,
             StopReason::NoOutput,
         ] {
             assert_eq!(
@@ -153,5 +158,7 @@ mod tests {
             );
             assert_eq!(reason.is_success(), reason == StopReason::FinalAnswer);
         }
+        assert_eq!(StopReason::DaemonShutdown.outcome(), "interrupted");
+        assert_eq!(StopReason::DaemonShutdown.as_str(), "daemon_shutdown");
     }
 }
