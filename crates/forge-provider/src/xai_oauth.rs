@@ -854,7 +854,7 @@ mod tests {
         assert!(acc.saw_terminal);
         assert_eq!(acc.usage.input_tokens, 10);
         assert_eq!(acc.usage.output_tokens, 5);
-        assert_eq!(acc.usage.cached_input_tokens, 2);
+        assert_eq!(acc.usage.cached_input_tokens, Some(2));
         assert_eq!(
             events.len(),
             2,

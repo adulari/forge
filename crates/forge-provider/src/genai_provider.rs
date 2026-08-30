@@ -1510,7 +1510,7 @@ mod tests {
             Usage {
                 input_tokens: 12_056,
                 output_tokens: 35,
-                cached_input_tokens: 11_520,
+                cached_input_tokens: Some(11_520),
                 cost_usd: 0.0,
             }
         );

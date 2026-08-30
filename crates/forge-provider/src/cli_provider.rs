@@ -4523,7 +4523,8 @@ mod tests {
         assert!(items.contains(&Parsed::Usage(Usage {
             input_tokens: 16612,
             output_tokens: 4,
-            cached_input_tokens: 0,
+            // Claude always emits the cache counters, so their absence here is a reported zero.
+            cached_input_tokens: Some(0),
             cost_usd: 0.0
         })));
         assert!(items.contains(&Parsed::Final("hello".into())));

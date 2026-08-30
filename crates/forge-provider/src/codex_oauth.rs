@@ -1139,14 +1139,14 @@ mod tests {
             .await
             .expect("second live completion");
         eprintln!(
-            "cache probe: first input={} cached={}; second input={} cached={}",
+            "cache probe: first input={} cached={:?}; second input={} cached={:?}",
             first.usage.input_tokens,
             first.usage.cached_input_tokens,
             second.usage.input_tokens,
             second.usage.cached_input_tokens
         );
         assert!(
-            second.usage.cached_input_tokens > 0,
+            second.usage.cached_input_tokens.is_some_and(|c| c > 0),
             "second call did not report a cached prefix"
         );
     }
@@ -1615,7 +1615,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 123,
                 output_tokens: 45,
-                cached_input_tokens: 6,
+                cached_input_tokens: Some(6),
                 cost_usd: 0.0,
             },
             ..Default::default()
