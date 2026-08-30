@@ -300,6 +300,29 @@ fn an_unmerged_branch_is_refused_with_the_reason() {
     std::fs::remove_dir_all(repo.parent().unwrap()).ok();
 }
 
+/// Regression, caught the first time this ran against a real repository: surveying FROM a linked
+/// worktree listed the main checkout — on `main`, merged, clean — as reclaimable. Deleting it would
+/// have taken the repository with it.
+#[test]
+fn the_main_checkout_is_never_a_candidate() {
+    if !git_available() {
+        return;
+    }
+    let repo = init_repo("main-checkout");
+    let wt = add_worktree(&repo, "linked");
+
+    for root in [repo.as_path(), wt.as_path()] {
+        let report = worktree_reclaim::survey(root, &[]).unwrap();
+        assert!(
+            !report.candidates.iter().any(|c| c.facts.path == repo),
+            "the main checkout must not appear when surveying from {}",
+            root.display()
+        );
+    }
+
+    std::fs::remove_dir_all(repo.parent().unwrap()).ok();
+}
+
 #[test]
 fn human_bytes_reads_like_a_disk_report() {
     assert_eq!(worktree_reclaim::human_bytes(512), "512 B");

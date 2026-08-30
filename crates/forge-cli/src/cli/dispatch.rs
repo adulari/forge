@@ -211,6 +211,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             let http = matches!(transport, crate::cli::args::ServeTransportArg::Http);
             mcp_serve::run(http, bind).await
         }
+        Command::Worktree { op } => crate::cli::commands::worktree::worktree_cmd(op),
         Command::Lattice { op } => lattice_cmd(op).await,
         Command::Import { source } => import_cmd(source),
         Command::Git { cmd } => git_cmd(cmd),

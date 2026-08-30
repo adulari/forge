@@ -24,6 +24,7 @@ pub(crate) mod skill;
 mod tests;
 pub(crate) mod tour;
 pub(crate) mod voice;
+pub(crate) mod worktree;
 
 use anyhow::{Context, Result};
 

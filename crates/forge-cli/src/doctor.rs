@@ -106,6 +106,12 @@ pub async fn run() -> anyhow::Result<usize> {
     sections.push(("Forge Anywhere", crate::doctor_health::anywhere_checks()));
     sections.push(("Local LLM (Ollama)", ollama_checks()));
     sections.push(("Session store", store_checks()));
+    // Worktree build artifacts are the quietest way to lose a machine: 76 registered worktrees
+    // filled a 1.8 TB disk to zero free and killed a linker with a bus error before anything
+    // reported the cost. Surveying is git + a directory walk, so it is skipped outside a repo.
+    if let Some(worktrees) = crate::cli::commands::worktree::doctor_summary() {
+        sections.push(("Worktree disk", vec![worktrees]));
+    }
     sections.push(("Environment", environment_checks()));
 
     let mut fails = 0;

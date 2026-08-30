@@ -123,7 +123,12 @@ pub fn survey(repo_root: &Path, live_paths: &[PathBuf]) -> Result<ReclaimReport,
 
     let mut candidates: Vec<Candidate> = entries
         .into_iter()
-        .filter(|e| !e.bare && canonical(&e.path) != main)
+        // The main checkout is never a candidate. Comparing against `repo_root` alone is NOT
+        // enough: run from a linked worktree, `git rev-parse --show-toplevel` names THAT worktree,
+        // and the main checkout (branch `main`, merged, clean) would classify as reclaimable —
+        // caught the first time this was pointed at a real repository. `git worktree list` always
+        // emits the main worktree first, so that flag is the authority.
+        .filter(|e| !e.bare && !e.is_main && canonical(&e.path) != main)
         .map(|entry| {
             let facts = facts_for(
                 repo_root,
@@ -347,6 +352,8 @@ struct WorktreeEntry {
     prunable: bool,
     locked: bool,
     bare: bool,
+    /// The repository's main checkout — the first record git emits.
+    is_main: bool,
 }
 
 /// Parse `git worktree list --porcelain`. Records are separated by blank lines; the first is the
@@ -368,8 +375,10 @@ fn parse_worktree_list(text: &str) -> Vec<WorktreeEntry> {
         match key {
             "worktree" => {
                 out.extend(current.take());
+                let first = out.is_empty();
                 current = Some(WorktreeEntry {
                     path: PathBuf::from(value),
+                    is_main: first,
                     ..Default::default()
                 });
             }
