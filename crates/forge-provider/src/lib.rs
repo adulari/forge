@@ -406,26 +406,44 @@ pub enum ProviderError {
     /// the mesh excludes it (a long bench window) rather than benching it on a short cooldown.
     #[error("model unsupported: {0}")]
     Capability(String),
+    /// This ACCOUNT cannot call this MODEL: the id was never valid, was decommissioned, or is
+    /// gated behind a tier this key doesn't have (`model_not_found` — groq's "does not exist or
+    /// you do not have access to it"). Permanent like [`Capability`](Self::Capability) and scoped
+    /// the same way — only the model is excluded, since the provider's other models keep working —
+    /// but a distinct variant because the cause and the fix differ: nothing about Forge's payload
+    /// is wrong, the model simply isn't callable here. Previously classified as
+    /// [`Request`](Self::Request), which is non-retryable AND never benched, so the mesh kept
+    /// routing to a dead model turn after turn.
+    #[error("model not available on this account: {0}")]
+    NoModelAccess(String),
 }
 
 impl ProviderError {
     /// Whether the mesh should bench this model and fail over to another. True for
-    /// rate-limit / unavailable / auth; false for [`Request`](Self::Request) (would fail
-    /// identically everywhere).
+    /// rate-limit / unavailable / auth / capability / no-access; false for
+    /// [`Request`](Self::Request) (would fail identically everywhere).
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::RateLimited { .. } | Self::Unavailable(_) | Self::Auth(_) | Self::Capability(_)
+            Self::RateLimited { .. }
+                | Self::Unavailable(_)
+                | Self::Auth(_)
+                | Self::Capability(_)
+                | Self::NoModelAccess(_)
         )
     }
 
     /// Whether this failure is PERMANENT for the model: it will recur on every call, so the model
     /// should be *excluded* (a long bench window + periodic re-probe), not benched on the short
     /// transient cooldown. True for [`Capability`](Self::Capability) (the model can't serve
-    /// tool-using turns) and [`Auth`](Self::Auth) (the credential is bad/missing and won't fix
-    /// itself mid-session) — both auth-fail/incapability-fail identically every turn otherwise.
+    /// tool-using turns), [`Auth`](Self::Auth) (the credential is bad/missing and won't fix
+    /// itself mid-session), and [`NoModelAccess`](Self::NoModelAccess) (the account can't call
+    /// this model id at all) — each fails identically on every turn otherwise.
     pub fn is_permanent(&self) -> bool {
-        matches!(self, Self::Capability(_) | Self::Auth(_))
+        matches!(
+            self,
+            Self::Capability(_) | Self::Auth(_) | Self::NoModelAccess(_)
+        )
     }
 
     /// Whether this is a rate-limit / quota-exhaustion failure (HTTP 429, `RESOURCE_EXHAUSTED`).
@@ -485,6 +503,7 @@ impl ProviderError {
             Self::Auth(_) => "auth failed",
             Self::Request(_) => "request error",
             Self::Capability(_) => "unsupported (no tool calling / unaffordable)",
+            Self::NoModelAccess(_) => "not available on this account",
         }
     }
 }

@@ -17,6 +17,7 @@ fn classify_attempt_failure(error: &forge_provider::ProviderError) -> AttemptFai
         forge_provider::ProviderError::Auth(_) => AttemptFailure::NoCredentials,
         forge_provider::ProviderError::RateLimited { .. } => AttemptFailure::RateLimited,
         forge_provider::ProviderError::Capability(_)
+        | forge_provider::ProviderError::NoModelAccess(_)
         | forge_provider::ProviderError::Request(_) => AttemptFailure::Capability,
         forge_provider::ProviderError::Unavailable(message) => {
             let message = message.to_ascii_lowercase();
@@ -323,14 +324,17 @@ pub(super) async fn request_provider_response(
                 continue;
             }
             Err(e) if failover_enabled && (e.is_retryable() || e.is_context_overflow()) => {
-                // Persist credential failures before applying pinned-model policy. A strict
-                // pin correctly makes *this* turn fail rather than switch models, but the
-                // expired credential applies to all aliases and must not remain routable
-                // on the next mesh decision.
-                let auth_error = e.is_auth();
+                // Persist PERMANENT failures before applying pinned-model policy. A strict pin
+                // correctly makes *this* turn fail rather than switch models, but the finding
+                // outlives the turn: an expired credential applies to every alias of the
+                // provider, and a capability / no-access failure applies to the model on every
+                // future mesh decision. Both `FailTurn` and the exhausted-backoff branches below
+                // return early, so recording after them left a pinned `--model` run with no
+                // health row at all.
+                let permanent = e.is_permanent();
                 attempted.insert(active_model.clone());
                 failures.push(classify_attempt_failure(&e));
-                if auth_error {
+                if permanent {
                     session.record_model_failure(active_model, &e, default_cooldown);
                 }
                 // A transient failure other than an explicit provider outage (for example
@@ -531,9 +535,10 @@ pub(super) async fn request_provider_response(
                         continue;
                     }
                 }
-                // Auth failures exclude the whole provider; permanent capability failures
-                // exclude only this model; transient failures take a short bench.
-                if !auth_error {
+                // Auth failures exclude the whole provider; permanent capability / no-access
+                // failures exclude only this model; transient failures take a short bench.
+                // Permanent ones were already recorded above, before the pin policy.
+                if !permanent {
                     session.record_model_failure(active_model, &e, default_cooldown);
                 }
                 // Drive the single animated "finding a model" indicator instead of emitting
@@ -645,7 +650,17 @@ pub(super) async fn request_provider_response(
                     },
                 }
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                // Paths that never enter the failover arm above — `mesh.failover = false`, or a
+                // re-run with no routing decision — still have to leave a health trace for a
+                // PERMANENT failure. Without it the model stays fully ranked and the next turn
+                // picks it again, which is exactly how a groq id the account cannot call kept
+                // being routed to for two days.
+                if e.is_permanent() {
+                    session.record_model_failure(active_model, &e, default_cooldown);
+                }
+                return Err(e.into());
+            }
         }
     };
     Ok((tools_before, resp))
