@@ -163,6 +163,20 @@ pub(crate) async fn build_session_with_self_mcp(
             )));
         }
     }
+    // A provider-wide exclusion deserves its own line: it silently removes an entire subscription
+    // (every alias) from routing, which the count above does not convey — the row is keyed
+    // `__forge_provider__::<name>` and reads as one benched "model".
+    if let Ok(excluded) = store.current_excluded_providers() {
+        for (provider, _, reason) in &excluded {
+            presenter.emit(forge_tui::PresenterEvent::Warning(format!(
+                "provider {provider} is EXCLUDED from routing ({reason}) — \
+                 `forge models --probe` to re-verify it"
+            )));
+        }
+        crate::cli::commands::models::retire_verified_provider_exclusions(
+            &store, &config, excluded,
+        );
+    }
 
     // Auto-discovery: build a live model catalog so the mesh routes to the best usable model
     // (docs/features/mesh-routing.md). Skipped for the offline mock and when disabled.

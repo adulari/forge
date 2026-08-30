@@ -640,10 +640,10 @@ mod tests {
         );
     }
 
-    /// The store side of re-authentication: an auth failure excludes the whole provider for 24h and
-    /// nothing in the runtime re-probes it, so a successful credential write is the only chance to
-    /// make the fix take effect. A rate-limit bench on a sibling must survive — a new key does not
-    /// reset someone else's quota.
+    /// The store side of re-authentication: a corroborated auth failure excludes the whole
+    /// provider, and a user who has just fixed the credential expects the next turn to work rather
+    /// than to wait for the window or a probe. A rate-limit bench on a sibling must survive — a new
+    /// key does not reset someone else's quota.
     #[test]
     fn reauthenticating_clears_the_provider_auth_exclusion_but_keeps_unrelated_benches() {
         let store = Store::open_in_memory().unwrap();

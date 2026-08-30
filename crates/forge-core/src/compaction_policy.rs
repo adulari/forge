@@ -4,6 +4,10 @@
 
 use super::*;
 
+/// Minimum age of a prior auth failure before it corroborates a new one into a provider-wide
+/// exclusion. Sized to separate a repeat from a burst of concurrent turns, not to be a cooldown.
+const AUTH_ESCALATION_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl Session {
     /// Real BPE token count of the current transcript (content + tool calls + per-message framing),
     /// via [`tokens`]. Used to decide compaction + drive the gauge; not billed. UI-only messages
@@ -217,7 +221,8 @@ impl Session {
     }
 
     /// Persist health at the correct scope: a capability failure is model-specific, while an
-    /// authentication failure applies to every alias of its provider and must stop sibling churn.
+    /// authentication failure eventually applies to every alias of its provider and must stop
+    /// sibling churn — but only once a repeat corroborates it (see the auth branch below).
     pub(crate) fn record_model_failure(
         &self,
         model: &str,
@@ -234,9 +239,7 @@ impl Session {
         }
         let reason = err.reason();
         if err.is_auth() {
-            let _ = self
-                .store
-                .exclude_provider(forge_config::provider_of(model), reason);
+            self.record_auth_failure(model, reason);
         } else if err.is_permanent() {
             let _ = self.store.exclude_model(model, reason);
         } else {
@@ -244,6 +247,36 @@ impl Session {
                 .store
                 .bench_for(model, err.cooldown(default_cooldown), reason);
         }
+    }
+
+    /// Persist an authentication failure at the narrowest scope the evidence supports.
+    ///
+    /// One failed turn is not proof that a subscription's credential is dead. A CLI bridge that
+    /// exits abnormally for an unrelated reason still prints something auth-shaped on stderr, and
+    /// that is enough to reach here — which is how a healthy claude-cli subscription was benched
+    /// provider-wide for 24 hours while `forge run --model claude-cli::sonnet` answered in four
+    /// seconds. So the first failure benches only the MODEL, and provider scope waits for a repeat
+    /// that is separated in time from the first by at least [`AUTH_ESCALATION_MIN_GAP`].
+    ///
+    /// The gap matters as much as the repeat. Concurrent turns against one provider fail together
+    /// within the same second, so a bare "has it failed before?" would let a single burst of
+    /// parallel sessions escalate exactly as before — which is what normal parallel use of Forge
+    /// looks like.
+    fn record_auth_failure(&self, model: &str, reason: &str) {
+        let provider = forge_config::provider_of(model);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs() as i64);
+        let cutoff = now - AUTH_ESCALATION_MIN_GAP.as_secs() as i64;
+        let corroborated = self
+            .store
+            .provider_auth_failed_before(provider, cutoff)
+            .unwrap_or(false);
+        let _ = if corroborated {
+            self.store.exclude_provider(provider, reason)
+        } else {
+            self.store.exclude_model_auth(model, reason)
+        };
     }
 
     /// Token budget for ONE compaction request against `model`: its window, minus the standing

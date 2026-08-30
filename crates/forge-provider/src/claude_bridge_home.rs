@@ -49,10 +49,26 @@ pub fn real_claude_config_dir() -> Option<std::path::PathBuf> {
 /// `CLAUDE_CONFIG_DIR` keeps auth/session/resume continuity fully intact while guaranteeing the
 /// user's own hooks never fire during a Forge-driven turn.
 ///
-/// Builds into a temp sibling directory first, then atomically renames it over `isolated_dir` — a
-/// crash mid-build (or a concurrent bridge spawn) never leaves a half-populated or half-stale dir
-/// live. Idempotent and cheap enough to call before every bridge turn (rebuilding is fine; the real
-/// config dir is small and this only runs once per spawn, never a hot loop).
+/// Builds into a private temp sibling directory first, then swaps it into place with renames — a
+/// crash mid-build never leaves a half-populated or half-stale dir live.
+///
+/// # Concurrency (the defect this shape exists for)
+///
+/// This runs before EVERY claude bridge spawn, and one `forge serve` daemon spawns many bridges at
+/// once. The original shape did `remove_dir_all(isolated_dir)` and then repopulated it, so with
+/// several sessions running, one spawn's rebuild routinely deleted the live `CLAUDE_CONFIG_DIR`
+/// out from under another spawn's already-running `claude`. That child then found no
+/// `.credentials.json`, reported that it was not logged in, and Forge — correctly reading its
+/// stderr — classified a perfectly healthy subscription as an authentication failure and benched
+/// the entire provider. Measured: 303 observations of a credential-less config dir across 4
+/// concurrent builders (`concurrent_builds_never_expose_a_credential_less_config_dir`).
+///
+/// Three properties keep that from recurring:
+/// 1. [`BUILD_LOCK`] serializes builds within the process, so builders never share temp state.
+/// 2. [`mirror_is_current`] makes the steady state a pure read — the overwhelmingly common case
+///    does not touch `isolated_dir` at all, so there is nothing to race with.
+/// 3. When a rebuild IS needed, the live dir is renamed aside and the new one renamed into place;
+///    the gap is two rename syscalls rather than a full delete-and-repopulate.
 ///
 /// `real_home` not existing (nothing to mirror) is a no-op, not an error — claude then falls back
 /// to its own default/unauthenticated behavior, which is an existing-behavior edge case, not a
@@ -61,19 +77,25 @@ pub fn prepare_claude_bridge_home(real_home: &Path, isolated_dir: &Path) -> anyh
     if !real_home.is_dir() {
         return Ok(());
     }
+    let _guard = BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if mirror_is_current(real_home, isolated_dir) {
+        return Ok(());
+    }
     let parent = isolated_dir
         .parent()
         .ok_or_else(|| anyhow::anyhow!("isolated claude bridge home has no parent directory"))?;
     std::fs::create_dir_all(parent)?;
 
-    // Build fresh into a private temp dir beside the target, then atomically rename over it.
+    // Build fresh into a private temp dir beside the target, then swap it in with renames. The
+    // suffix is unique per call (not just per process): two builders in one process must never
+    // share a scratch directory, or one deletes the other's half-built mirror.
     let tmp_dir = parent.join(format!(
         ".{}.tmp-{}",
         isolated_dir
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("claude-bridge-home"),
-        std::process::id()
+        unique_suffix()
     ));
     if tmp_dir.exists() {
         std::fs::remove_dir_all(&tmp_dir)?;
@@ -113,11 +135,94 @@ pub fn prepare_claude_bridge_home(real_home: &Path, isolated_dir: &Path) -> anyh
         symlink_through(&real_path, &dest_path)?;
     }
 
-    if isolated_dir.exists() {
-        std::fs::remove_dir_all(isolated_dir)?;
+    let retired = isolated_dir.exists().then(|| {
+        parent.join(format!(
+            ".{}.retired-{}",
+            isolated_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("claude-bridge-home"),
+            unique_suffix()
+        ))
+    });
+    if let Some(retired) = &retired {
+        std::fs::rename(isolated_dir, retired)?;
     }
-    std::fs::rename(&tmp_dir, isolated_dir)?;
+    if let Err(error) = std::fs::rename(&tmp_dir, isolated_dir) {
+        // Put the previous mirror back rather than leaving the bridge with no config dir at all —
+        // a stale mirror still authenticates, an absent one looks exactly like a logged-out CLI.
+        if let Some(retired) = &retired {
+            let _ = std::fs::rename(retired, isolated_dir);
+        }
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(error.into());
+    }
+    if let Some(retired) = &retired {
+        let _ = std::fs::remove_dir_all(retired);
+    }
     Ok(())
+}
+
+/// Serializes mirror builds within this process. Concurrent bridge spawns are the norm under
+/// `forge serve`; without this they interleave scratch-directory and swap steps.
+static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A suffix unique to one call, so two builders never collide on a scratch/retired path.
+fn unique_suffix() -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// Whether `isolated_dir` already mirrors `real_home` exactly, so the rebuild can be skipped.
+///
+/// This is what makes the steady state race-free: a bridge spawn while other bridges are running
+/// must not disturb the config dir they are reading. Conservative — any doubt returns `false` and
+/// the caller rebuilds.
+fn mirror_is_current(real_home: &Path, isolated_dir: &Path) -> bool {
+    let Ok(real_entries) = std::fs::read_dir(real_home) else {
+        return false;
+    };
+    let mut expected = std::collections::BTreeSet::new();
+    for entry in real_entries {
+        let Ok(entry) = entry else { return false };
+        let name = entry.file_name();
+        let dest = isolated_dir.join(&name);
+        let is_filtered_settings = name
+            .to_str()
+            .is_some_and(|n| FILTERED_SETTINGS_FILES.contains(&n));
+        if is_filtered_settings {
+            match filtered_settings_json(&entry.path()) {
+                // A settings file that produces no filtered copy legitimately has no mirror entry.
+                Ok(None) => continue,
+                Ok(Some(filtered)) => {
+                    if std::fs::read(&dest).ok() != Some(filtered) {
+                        return false;
+                    }
+                }
+                Err(_) => return false,
+            }
+        } else if std::fs::read_link(&dest).ok().as_deref() != Some(&entry.path()) {
+            return false;
+        }
+        expected.insert(name);
+    }
+    // A leftover entry for a file the user has since deleted means the mirror is stale.
+    let Ok(mirrored) = std::fs::read_dir(isolated_dir) else {
+        return false;
+    };
+    let mut seen = 0usize;
+    for entry in mirrored {
+        let Ok(entry) = entry else { return false };
+        if !expected.contains(&entry.file_name()) {
+            return false;
+        }
+        seen += 1;
+    }
+    seen == expected.len()
 }
 
 /// Parse `path` as JSON and strip [`STRIPPED_KEYS`]. Missing files are a race-safe no-op; read,
@@ -273,6 +378,69 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&isolated);
+    }
+
+    /// Concurrent bridge spawns must never expose a `CLAUDE_CONFIG_DIR` without credentials in it.
+    ///
+    /// This is the whole defect in one test. Before the fix this observed a credential-less config
+    /// dir 303 times across 4 concurrent builders: a `claude` launched into that window reports it
+    /// is not logged in, and Forge classifies a healthy subscription as an auth failure.
+    #[test]
+    fn concurrent_builds_never_expose_a_credential_less_config_dir() {
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join(".credentials.json"), r#"{"token":"abc"}"#).unwrap();
+        write_json(
+            &real.path().join("settings.json"),
+            &serde_json::json!({"theme": "dark"}),
+        );
+        let isolated = real.path().parent().unwrap().join(format!(
+            "isolated-concurrent-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        prepare_claude_bridge_home(real.path(), &isolated).unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let missing = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let watcher = {
+            let isolated = isolated.clone();
+            let stop = stop.clone();
+            let missing = missing.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if !isolated.join(".credentials.json").exists() {
+                        missing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            })
+        };
+
+        let builders: Vec<_> = (0..4)
+            .map(|_| {
+                let real = real.path().to_path_buf();
+                let isolated = isolated.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..20 {
+                        let _ = prepare_claude_bridge_home(&real, &isolated);
+                    }
+                })
+            })
+            .collect();
+        for b in builders {
+            b.join().unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        watcher.join().unwrap();
+
+        let observed = missing.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&isolated);
+        assert_eq!(
+            observed, 0,
+            "a concurrently-spawning claude saw CLAUDE_CONFIG_DIR without credentials {observed} times"
+        );
     }
 
     #[test]

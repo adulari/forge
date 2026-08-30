@@ -24,12 +24,65 @@ pub(crate) fn pace_suffix(
     }
 }
 
+/// A provider currently excluded from routing: `(provider, cooldown_until, reason)`, as read from
+/// `Store::current_excluded_providers`.
+pub(crate) type ProviderExclusion = (String, i64, String);
+
+/// Render the excluded-provider block shared by the mesh overview and the per-prompt explanation.
+///
+/// An excluded provider is the single most consequential thing the mesh can be doing, and it was
+/// the one thing no surface said: a whole subscription vanished from every candidate table with no
+/// row, no note, and no reason. It prints before the rankings because it explains them.
+pub(crate) fn print_provider_exclusions(excluded: &[ProviderExclusion]) {
+    if excluded.is_empty() {
+        return;
+    }
+    println!("excluded providers (every alias is out of routing):");
+    for (provider, until, reason) in excluded {
+        println!(
+            "  ⊘ {provider:<11} {} · expires in {}",
+            reason,
+            remaining(*until)
+        );
+    }
+    println!("  → `forge models --probe` re-verifies them now\n");
+}
+
+/// JSON form of [`print_provider_exclusions`], shared by both `--json` shapes.
+pub(crate) fn provider_exclusions_json(excluded: &[ProviderExclusion]) -> Vec<serde_json::Value> {
+    excluded
+        .iter()
+        .map(|(provider, until, reason)| {
+            serde_json::json!({
+                "provider": provider,
+                "reason": reason,
+                "expires_at": until,
+                "expires_in_secs": (until - chrono::Utc::now().timestamp()).max(0),
+            })
+        })
+        .collect()
+}
+
+/// A compact "12m" / "3h 20m" until an absolute epoch-second expiry.
+fn remaining(until_epoch: i64) -> String {
+    let secs = (until_epoch - chrono::Utc::now().timestamp()).max(0);
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// The no-prompt overview: subscription quota gauges + per-tier ranked picks.
 pub(crate) fn mesh_overview(
     cat: &forge_mesh::ModelCatalog,
     config: &forge_config::Config,
     quota: &forge_types::SubscriptionQuota,
+    excluded: &[ProviderExclusion],
 ) {
+    print_provider_exclusions(excluded);
     let pricing = super::discovery::pricing_with_fetched_rates(config);
     println!(
         "subscription quota (conservation {}):",
@@ -94,6 +147,7 @@ pub(crate) fn mesh_overview_json(
     cat: &forge_mesh::ModelCatalog,
     config: &forge_config::Config,
     quota: &forge_types::SubscriptionQuota,
+    excluded: &[ProviderExclusion],
 ) -> String {
     let pricing = super::discovery::pricing_with_fetched_rates(config);
     let mut providers: Vec<&str> = cat
@@ -152,6 +206,7 @@ pub(crate) fn mesh_overview_json(
             .collect();
     serde_json::to_string_pretty(&serde_json::json!({
         "subscription_conservation": config.mesh.subscription_conserve,
+        "excluded_providers": provider_exclusions_json(excluded),
         "subscriptions": subscriptions,
         "rankings": rankings,
     }))
@@ -167,7 +222,11 @@ pub(crate) fn cost_tag(class: u8) -> &'static str {
 }
 
 /// The formatted single-prompt explanation.
-pub(crate) fn print_mesh_explanation(e: &forge_mesh::RoutingExplanation) {
+pub(crate) fn print_mesh_explanation(
+    e: &forge_mesh::RoutingExplanation,
+    excluded: &[ProviderExclusion],
+) {
+    print_provider_exclusions(excluded);
     println!("prompt: {:?}", e.prompt);
     println!("classifier: {}", e.classifier_label);
     print!("classified: {}", e.classified_tier.as_str());
@@ -259,7 +318,10 @@ pub(crate) fn print_mesh_explanation(e: &forge_mesh::RoutingExplanation) {
 }
 
 /// JSON form of the explanation (stable shape for scripting / tests).
-pub(crate) fn mesh_explanation_json(e: &forge_mesh::RoutingExplanation) -> String {
+pub(crate) fn mesh_explanation_json(
+    e: &forge_mesh::RoutingExplanation,
+    excluded: &[ProviderExclusion],
+) -> String {
     let candidates: Vec<_> = e
         .candidates
         .iter()
@@ -310,6 +372,7 @@ pub(crate) fn mesh_explanation_json(e: &forge_mesh::RoutingExplanation) -> Strin
             "fired": e.conserve.fired,
         },
         "quota": quota,
+        "excluded_providers": provider_exclusions_json(excluded),
         "candidates": candidates,
         "pick": e.pick,
         "fallbacks": e.fallbacks,
@@ -320,7 +383,7 @@ pub(crate) fn mesh_explanation_json(e: &forge_mesh::RoutingExplanation) -> Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{mesh_explanation_json, meter, pace_suffix};
+    use super::{mesh_explanation_json, meter, pace_suffix, remaining};
     use forge_mesh::ProviderQuotaView;
 
     fn explanation() -> forge_mesh::RoutingExplanation {
@@ -343,9 +406,46 @@ mod tests {
 
     #[test]
     fn explanation_json_exposes_classifier_label() {
-        let value: serde_json::Value = serde_json::from_str(&mesh_explanation_json(&explanation()))
-            .expect("valid explanation JSON");
+        let value: serde_json::Value =
+            serde_json::from_str(&mesh_explanation_json(&explanation(), &[]))
+                .expect("valid explanation JSON");
         assert_eq!(value["classifier"], "heuristic fallback");
+        assert_eq!(
+            value["excluded_providers"],
+            serde_json::json!([]),
+            "the key is always present so a consumer can distinguish 'none' from 'not reported'"
+        );
+    }
+
+    /// An excluded provider must be visible wherever the mesh explains a routing choice — with its
+    /// reason and its expiry, not merely as an absence from the candidate table.
+    #[test]
+    fn explanation_json_surfaces_an_excluded_provider_with_reason_and_expiry() {
+        let until = chrono::Utc::now().timestamp() + 900;
+        let excluded = vec![(
+            "claude-cli".to_string(),
+            until,
+            "excluded: provider auth failed: auth failed".to_string(),
+        )];
+        let value: serde_json::Value =
+            serde_json::from_str(&mesh_explanation_json(&explanation(), &excluded))
+                .expect("valid explanation JSON");
+        let row = &value["excluded_providers"][0];
+        assert_eq!(row["provider"], "claude-cli");
+        assert_eq!(row["reason"], "excluded: provider auth failed: auth failed");
+        assert_eq!(row["expires_at"], until);
+        assert!(
+            row["expires_in_secs"].as_i64().unwrap() > 0,
+            "the user must be told how long the subscription stays gone: {row}"
+        );
+    }
+
+    #[test]
+    fn remaining_reads_as_a_human_duration() {
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(remaining(now - 5), "0s");
+        assert_eq!(remaining(now + 90), "1m");
+        assert_eq!(remaining(now + 3 * 3600 + 20 * 60), "3h 20m");
     }
 
     #[test]

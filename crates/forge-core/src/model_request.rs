@@ -248,6 +248,11 @@ pub(super) async fn request_provider_response(
                     tool_calls: r.tool_calls.len() as u32,
                     verified_completion: !r.wants_tools(),
                 });
+                // A completed turn retires this model's bench AND its provider's auth exclusion:
+                // the strongest possible liveness evidence, produced for free. Nothing else in the
+                // runtime re-probes, so before this a wrong exclusion outlived every observation
+                // that contradicted it.
+                let _ = session.store.clear_health_after_success(active_model);
                 if !r.content.is_empty() && r.wants_tools() {
                     session.presenter.emit(PresenterEvent::AssistantDone);
                 }

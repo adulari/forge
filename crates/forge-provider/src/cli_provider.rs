@@ -2380,6 +2380,33 @@ fn mentions_status_code(haystack: &str, code: &str) -> bool {
     })
 }
 
+/// Phrases that mean a CLI actually reported a credential problem.
+///
+/// The classifier used to match the bare substring `"auth"`, which an auth verdict is far too
+/// expensive to rest on: it fires on `oauth`, `author`, `authority`, and on any of those appearing
+/// anywhere in the 600-character stderr tail that gets appended as evidence. An `Auth` error is
+/// permanent — it excludes rather than benches — so a single incidental substring was enough to
+/// take a subscription out of routing. These require the CLI to have said something that only
+/// means "your credential did not work".
+const AUTH_PHRASES: &[&str] = &[
+    "authentication",
+    "authorization",
+    "unauthenticated",
+    "unauthorized",
+    "auth failed",
+    "auth error",
+    "auth required",
+    "invalid api key",
+    "invalid_api_key",
+    "api key not valid",
+    "not logged in",
+    "login required",
+    "please log in",
+    "please run /login",
+    "permission denied",
+    "credentials",
+];
+
 fn is_cli_auth_instruction(text: &str) -> bool {
     let lower = text.trim().to_ascii_lowercase();
     lower.contains("not logged in") && (lower.contains("/login") || lower.contains("log in"))
@@ -2416,12 +2443,9 @@ fn classify_in_band_error_with_message(
             message: msg,
             retry_after: None,
         }
-    } else if lower.contains("auth")
-        || mentions_status_code(&lower, "401")
+    } else if mentions_status_code(&lower, "401")
         || mentions_status_code(&lower, "403")
-        || lower.contains("not logged in")
-        || lower.contains("login required")
-        || lower.contains("please log in")
+        || AUTH_PHRASES.iter().any(|phrase| lower.contains(phrase))
     {
         ProviderError::Auth(msg)
     } else if lower.contains("overload")
@@ -5447,6 +5471,21 @@ mod tests {
             classify_in_band_error("claude", "login required before continuing"),
             ProviderError::Auth(_)
         ));
+        // The bare substring "auth" is not evidence of an auth failure. These are the shapes that
+        // reached the classifier as stderr tails and turned an unrelated bridge failure into a
+        // permanent, provider-wide exclusion of a healthy subscription.
+        for benign in [
+            "oauth token refreshed for the next request",
+            "written by author: forge",
+            "no authority record for this host",
+            "warning: unsupported oauth scope hint ignored",
+        ] {
+            let classified = classify_in_band_error("claude", benign);
+            assert!(
+                !classified.is_permanent(),
+                "an incidental 'auth' substring must not exclude the provider: {benign:?} → {classified:?}"
+            );
+        }
         assert!(matches!(
             classify_in_band_error("claude", "weird unmapped thing"),
             ProviderError::Request(_)

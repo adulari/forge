@@ -91,6 +91,7 @@ pub async fn run() -> anyhow::Result<usize> {
     if !bridge_models.is_empty() {
         sections.push(("Bridge model discovery", bridge_models));
     }
+    sections.push(("Model health", crate::doctor_health::model_health_checks()));
     sections.push(("Background daemon", daemon_checks().await));
     sections.push(("Forge Anywhere", crate::doctor_health::anywhere_checks()));
     sections.push(("Local LLM (Ollama)", ollama_checks()));
@@ -144,7 +145,7 @@ pub async fn run() -> anyhow::Result<usize> {
 /// always reported on `data_dir()/forge.db`, so it could answer "the session store opens cleanly"
 /// about a DIFFERENT database than the one the session under investigation uses — which is exactly
 /// backwards for the tool people run when the store is the suspect.
-fn doctor_store_path() -> Option<std::path::PathBuf> {
+pub(crate) fn doctor_store_path() -> Option<std::path::PathBuf> {
     resolve_store_path(
         std::env::var("FORGE_DB").ok().as_deref(),
         forge_config::data_dir(),
