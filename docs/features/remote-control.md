@@ -498,6 +498,16 @@ dashboard's top row is always the session that needs a human NOW — red pulsing
 cost, token gauge, and last-activity age. Tap to attach. The page's existing 5-second list
 poll carries it; no extra protocol.
 
+**Turn outcome (`last_turn_outcome` / `last_stop_reason`).** `busy: false` says a turn ended,
+never how. A session that did the work and one that burned a whole turn producing no assistant
+text and making no successful change were the same signal from the fleet API, the phone, and any
+orchestrator polling status. Both `GET /api/sessions` rows and `Snapshot` now carry the coarse
+outcome — `"success"` or `"failed"` — plus the precise
+[`StopReason`](../../crates/forge-types/src/lib.rs) behind it. Additive and optional: a `null`
+means no turn has finished yet (and a `read_only` local-presence row never reports one). The
+producing side is the session core, which classifies a turn with no assistant content and no
+successful mutating tool call as `StopReason::NoOutput` rather than a final answer.
+
 **Structured diff card (`Snapshot.diff`).** Reuses exactly what the TUI already computes:
 the write-tool `preview()` `FileDiff` emitted as `PresenterEvent::Diff` *before* the
 permission gate, hunked by the same `similar` grouped-ops(3) pass `diff_to_lines` renders

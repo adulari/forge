@@ -1527,6 +1527,12 @@ pub struct Session {
     /// Count of successful writes made by `invoke_tool` in the current turn. Reset at the start
     /// of each turn; used to gate the autofix stage (skip it when nothing was edited).
     edits_this_turn: u32,
+    /// Successful state-changing tool calls (side effect Write or Shell on the direct path, a
+    /// mutating tool name on the CLI-bridge stream) summed across EVERY model loop this turn.
+    /// Broader than `edits_this_turn`, which only counts in-process file writes: a turn whose only
+    /// product was a `git commit` still did work. Reset at the start of each turn; the turn's
+    /// no-output classification reads it.
+    mutations_this_turn: u64,
     /// Headless code-change mode (harness-robustness wave 2): the caller KNOWS each prompt
     /// demands a code change (`bench swe` sets it — an explicit option, not prompt sniffing).
     /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
@@ -2633,6 +2639,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Reset the per-turn edit counter so the autofix stage only fires when THIS turn wrote
         // something (not a carry-over from a prior turn).
         self.edits_this_turn = 0;
+        self.mutations_this_turn = 0;
         self.failure_tracker.reset_turn();
         self.env_fight = EnvFightTracker::default();
 
@@ -3566,7 +3573,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // and bridge turns are fully drained). Approval switches to Auto-edit and recursively runs
         // the build turn through the full machinery (autofix, self-review, gate); typed feedback
         // runs a fresh planning turn; Cancel falls through and ends the turn in planning mode.
+        // A plan card IS the deliverable of a planning turn, so remember that one was produced:
+        // when approval is declined (Cancel, or a presenter that cannot ask — a headless `forge
+        // serve` session answers NO_ANSWER) this falls through to the no-op classification below,
+        // which would otherwise call a turn that produced a whole plan "no output".
+        let mut presented_plan = false;
         if let Some(plan) = self.pending_plan.take() {
+            presented_plan = true;
             if !halted_by_loop_guard {
                 if let Some(followup) = self.resolve_plan_approval(&plan) {
                     return Box::pin(self.run_turn_with(&followup, &[], Some(TaskTier::Complex)))
@@ -3639,7 +3652,27 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
         }
 
-        let stop_reason = if hit_step_cap {
+        // ── No-op turn classification ─────────────────────────────────────────────────────────
+        // A turn that ends with NO assistant text and NO successful mutating tool call produced
+        // nothing at all: it may have read and grepped for minutes, but nothing was said and
+        // nothing changed. Reported as a completed turn this was indistinguishable — from the
+        // fleet API, the phone, or an orchestrator polling status — from a turn that did the work.
+        // This is the same "the model's claim is not the completion authority" rule PR #1143
+        // applied to phantom edits; that gate keys on the final text ASSERTING a change, so an
+        // empty final text slipped straight past it. Extend the rule: no text is no answer.
+        // Checked BEFORE the step cap: a step-capped turn already warned about the cap and told
+        // the user to send `continue`, so the fact worth reporting here is the rarer one — that
+        // the whole turn produced nothing.
+        let produced_nothing =
+            final_text.trim().is_empty() && self.mutations_this_turn == 0 && !presented_plan;
+        let stop_reason = if produced_nothing {
+            self.presenter.emit(PresenterEvent::Error(
+                "the turn produced NO answer and made no successful change — reporting it as a \
+                 failed turn, not a completed one"
+                    .to_string(),
+            ));
+            StopReason::NoOutput
+        } else if hit_step_cap {
             StopReason::MaxSteps
         } else {
             StopReason::FinalAnswer
@@ -3683,10 +3716,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             // consumers commonly stop reading at the result event.
             self.emit_terminal_events(&final_text, stop_reason, context_tokens, &active_model)?;
         }
-        Ok(if hit_step_cap {
-            LoopOutcome::max_steps(final_text)
-        } else {
-            LoopOutcome::final_answer(final_text)
+        // The returned outcome carries the SAME `stop_reason` the presenter was told, so a headless
+        // caller (`forge run`, the MCP `forge_chat` tool, a subagent) cannot read a no-output turn
+        // as a final answer while the TUI shows it as failed.
+        Ok(LoopOutcome {
+            text: final_text,
+            stop_reason,
         })
     }
 }
@@ -4235,6 +4270,9 @@ mod tests {
 
     #[path = "phantom_edit.rs"]
     mod phantom_edit_tests;
+
+    #[path = "no_op_turn.rs"]
+    mod no_op_turn_tests;
 
     #[test]
     fn response_chain_reuse_is_scoped_to_dependent_same_model_continuations() {

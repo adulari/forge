@@ -223,6 +223,7 @@ impl Session {
                 &mut proposed_plan,
                 &tools_ran,
                 &inspect_ran,
+                &mutations_ran,
                 &bridge_build_fight,
                 &verification_ledger,
                 &bridge_observations,
@@ -740,6 +741,12 @@ impl Session {
                 break;
             }
         }
+
+        // Roll this loop's successful mutations into the turn-wide tally. `run_turn_with` re-enters
+        // this loop several times (nudges, self-review, autofix, stop-hook continuations), each with
+        // a fresh counter, so the turn's outcome classification reads the session field rather than
+        // any single loop's count.
+        self.mutations_this_turn += mutations_ran.load(std::sync::atomic::Ordering::Relaxed);
 
         Ok(ModelLoopOutcome {
             final_text,

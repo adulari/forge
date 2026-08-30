@@ -4714,6 +4714,47 @@ mod tests {
     }
 
     #[test]
+    fn turn_outcome_reaches_the_wire_so_a_no_op_turn_is_visible_remotely() {
+        // The load-bearing half of the fix: a remote client (the phone, an orchestrator polling
+        // `GET /api/sessions`) must be able to tell "finished successfully" from "produced
+        // nothing". Before this, `busy: false` was the entire statement about either.
+        let mut app = forge_tui::App::default();
+        assert_eq!(
+            frame_of(&app).last_turn_outcome,
+            None,
+            "no outcome is claimed before a turn has finished"
+        );
+
+        app.apply(forge_tui::PresenterEvent::Done {
+            final_text: String::new(),
+            stop_reason: forge_types::StopReason::NoOutput,
+        });
+        let snap = frame_of(&app);
+        assert_eq!(snap.last_turn_outcome.as_deref(), Some("failed"));
+        assert_eq!(snap.last_stop_reason.as_deref(), Some("no_output"));
+        assert!(
+            !snap.busy,
+            "a no-op turn still ends the session's busy state"
+        );
+
+        app.apply(forge_tui::PresenterEvent::Done {
+            final_text: "done".into(),
+            stop_reason: forge_types::StopReason::FinalAnswer,
+        });
+        let snap = frame_of(&app);
+        assert_eq!(snap.last_turn_outcome.as_deref(), Some("success"));
+        assert_eq!(snap.last_stop_reason.as_deref(), Some("final_answer"));
+
+        app.apply(forge_tui::PresenterEvent::Done {
+            final_text: "partial".into(),
+            stop_reason: forge_types::StopReason::MaxSteps,
+        });
+        let snap = frame_of(&app);
+        assert_eq!(snap.last_turn_outcome.as_deref(), Some("failed"));
+        assert_eq!(snap.last_stop_reason.as_deref(), Some("max_steps"));
+    }
+
+    #[test]
     fn task_assignee_reaches_the_wire() {
         let mut app = forge_tui::App::default();
         app.apply(forge_tui::PresenterEvent::Tasks(vec![

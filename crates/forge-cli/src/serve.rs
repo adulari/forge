@@ -551,6 +551,17 @@ struct SessionRow {
     /// `false` for a `read_only` row: local presence doesn't publish that state (see the struct
     /// doc comment), and a remote client couldn't act on it anyway.
     waiting: bool,
+    /// How this session's most recent turn ended: `"success"` or `"failed"`. `None` until a turn
+    /// has finished,
+    /// and always `None` for a `read_only` row (local presence publishes no turn outcome).
+    /// Additive, so an older client simply never reads it.
+    ///
+    /// Without this, `busy: false` was this endpoint's ENTIRE statement about a finished session:
+    /// a session that did the work and one that burned a turn producing nothing looked identical
+    /// to the phone and to any orchestrator polling the fleet.
+    last_turn_outcome: Option<String>,
+    /// The precise stop reason behind `last_turn_outcome` — see [`forge_types::StopReason`].
+    last_stop_reason: Option<String>,
     cost_usd: f64,
     /// Context-window fill (v7 fleet fields), same numbers the statusline gauge shows.
     context_tokens: u64,
@@ -1165,6 +1176,8 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             worktree: h.worktree.clone(),
             busy: snap.busy,
             waiting: snap.permission_prompt.is_some() || snap.question.is_some(),
+            last_turn_outcome: snap.last_turn_outcome.clone(),
+            last_stop_reason: snap.last_stop_reason.clone(),
             cost_usd: snap.cost_usd,
             context_tokens: snap.context_tokens,
             context_limit: snap.context_limit,
@@ -1192,6 +1205,8 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             worktree: local.worktree_path,
             busy: local.busy,
             waiting: false,
+            last_turn_outcome: None,
+            last_stop_reason: None,
             cost_usd: 0.0,
             context_tokens: 0,
             context_limit: None,
@@ -5855,6 +5870,8 @@ mod tests {
             worktree: None,
             busy: !waiting,
             waiting,
+            last_turn_outcome: Some("failed".into()),
+            last_stop_reason: Some("no_output".into()),
             cost_usd: 0.5,
             context_tokens: 18_200,
             context_limit: Some(200_000),
@@ -5896,6 +5913,10 @@ mod tests {
         assert_eq!(v["context_limit"], 200_000);
         assert_eq!(v["cost_usd"], 0.5);
         assert_eq!(v["last_activity"], 10);
+        // A finished turn's outcome must be readable from the fleet list itself: `busy: false`
+        // alone cannot tell "did the work" from "did literally nothing".
+        assert_eq!(v["last_turn_outcome"], "failed");
+        assert_eq!(v["last_stop_reason"], "no_output");
     }
 
     #[test]
@@ -5908,6 +5929,8 @@ mod tests {
                 worktree: None,
                 busy,
                 waiting,
+                last_turn_outcome: None,
+                last_stop_reason: None,
                 cost_usd: 0.0,
                 context_tokens: 0,
                 context_limit: None,

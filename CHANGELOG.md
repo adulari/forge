@@ -6,18 +6,52 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.1] - 2026-08-30
+
 ### Fixed
 
-- **Desktop releases could not publish at all.** Three independent regressions took down every one
-  of the five `app-desktop.yml` build legs for v2.13.0: `bundle.createUpdaterArtifacts` had been
-  flipped off inside an unrelated squash, so tauri-cli signed nothing and asset collection found no
-  `.sig` files; the Windows leg's `beforeBuildCommand` spawned `npx.cmd`, which Node has refused
-  without `shell: true` since the CVE-2024-27980 mitigation, and reported it as a silent 50 ms exit
-  1; and the self-hosted Linux leg's pinned linuxdeploy plugin was fetched from a rolling
-  `continuous` tag whose bytes were republished upstream, so its reviewed digest no longer matched.
-  Signing is restored, the Expo CLI now runs under `process.execPath` and reports why a spawn
-  failed, the plugin is pinned to an immutable tagged release, and a new CI guard fails any PR that
-  disables updater artifacts again. See `docs/known-issues.md`.
+- **Desktop releases could not publish at all.** Every one of the five `app-desktop.yml` build legs
+  for v2.13.0 failed, for three independent reasons, after all the CLI and desktop binaries had
+  already been built. The release correctly stayed a draft, so nothing shipped and v2.12.1 remained
+  Latest and installable — but no desktop bundle, `desktop-checksums.txt` or `latest.json` could be
+  produced until all three were fixed. This release carries those repairs.
+
+- **Updater artifacts were never generated, which killed three legs.**
+  `bundle.createUpdaterArtifacts` in `mobile/src-tauri/tauri.conf.json` had been flipped `true` →
+  `false` inside the unrelated perf/parity squash #954 (`a2b8a29e`, merged 2026-08-04), whose
+  description never mentions updater artifacts. In tauri-cli 2.11.4 that one flag decides whether
+  anything is signed: the interface builds updater settings only when it is not `false`, and
+  `sign_updaters` returns immediately when those settings are absent. So no `.sig` was written on
+  any platform despite `TAURI_SIGNING_PRIVATE_KEY` being present — the Linux leg bundled both its
+  AppImage and `.deb`, logged that updater signing was enabled, and then died on
+  `cp: cannot stat '...AppImage.sig'`. The signing key was never the problem; nothing had been
+  asked to produce a signature. The flag is restored to `true`, the v2 self-contained layout the
+  workflow actually collects.
+
+- **The Windows leg failed before compiling anything.** The same squash replaced the
+  `beforeBuildCommand` with `mobile/scripts/export-web-clean.mjs`, which spawned the `npx.cmd`
+  shim directly. Since the CVE-2024-27980 mitigation (Node ≥ 20.12.2, and the runner pins Node 20)
+  `spawnSync` refuses a `.cmd` target without `shell: true` and reports `EINVAL` in `result.error`
+  with a **null** status; the script checked only `result.status !== 0` and exited without printing
+  anything, so the leg failed in ~50 ms with no output at all. The script now resolves the
+  installed Expo CLI from `expo`'s own manifest and runs it under `process.execPath`, taking the
+  `.cmd` shim out of the picture on every platform, and reports spawn errors, signals and exit
+  codes.
+
+- **The self-hosted `linux-x86_64` leg never reached the build.** Its `linuxdeploy` AppImage plugin
+  was pinned by SHA-256 but downloaded from linuxdeploy's rolling `continuous` release, which keeps
+  one asset name and republishes its bytes; the upstream rebuild on 2026-08-01 changed the payload
+  out from under the reviewed digest and `Prepare Arch Linux webview deps` failed closed with
+  `checksum mismatch for pinned linuxdeploy AppImage plugin`. That check behaved exactly as
+  intended — the pin was pointing at a moving target. It now names the immutable tagged release
+  `1-alpha-20250213-1`, whose assets cannot be rewritten, and the mismatch message prints the digest
+  actually served.
+
+- **A CI guard so the updater flag cannot regress silently again.**
+  `scripts/ci/desktop-updater-guard.sh` (with `scripts/ci/test-desktop-updater-guard.sh`) fails any
+  PR that disables updater artifacts or selects the deprecated `"v1Compatible"` layout, wired into
+  the same CI job as the existing desktop version guard. The original flip sat unnoticed for four
+  weeks because nothing checked it. See `docs/known-issues.md`.
 
 ## [2.13.0] - 2026-08-28
 
@@ -3508,7 +3542,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.1...HEAD
+[2.13.1]: https://github.com/Adulari/forge/compare/v2.13.0...v2.13.1
 [2.13.0]: https://github.com/Adulari/forge/compare/v2.12.1...v2.13.0
 [2.12.1]: https://github.com/Adulari/forge/compare/v2.12.0...v2.12.1
 [2.12.0]: https://github.com/Adulari/forge/compare/v2.11.0...v2.12.0
