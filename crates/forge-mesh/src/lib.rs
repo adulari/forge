@@ -306,6 +306,7 @@ mod session_affinity_tests {
                 rationale: "normal continuation order".into(),
                 fallbacks: vec![BEST.into(), WEAK.into()],
                 pinned: false,
+                unroutable: false,
             },
             &context,
             RouteHints {
@@ -341,6 +342,7 @@ mod session_affinity_tests {
                 rationale: "normal mesh order".into(),
                 fallbacks: vec![WARM.into()],
                 pinned: false,
+                unroutable: false,
             },
             &context,
             RouteHints {
@@ -762,6 +764,7 @@ mod session_affinity_tests {
                     rationale: "retained route replay".into(),
                     fallbacks,
                     pinned: false,
+                    unroutable: false,
                 },
                 &context,
                 hints,
@@ -816,6 +819,7 @@ mod session_affinity_tests {
                 rationale: "confirmation-v3 turn-4 replay".into(),
                 fallbacks: vec![SOL.into(), TERRA.into()],
                 pinned: false,
+                unroutable: false,
             },
             &post_failover_context,
             RouteHints::from_context(prompts[3], &post_failover_context),
@@ -2523,6 +2527,7 @@ mod tests {
                 rationale: "classified".into(),
                 fallbacks: vec!["mesh::second".into()],
                 pinned: false,
+                unroutable: false,
             }
         }
     }
@@ -5102,6 +5107,7 @@ mod tests {
                     rationale: "fixed".into(),
                     fallbacks: vec![],
                     pinned: false,
+                    unroutable: false,
                 }
             }
         }

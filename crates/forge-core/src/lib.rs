@@ -6127,6 +6127,7 @@ mod tests {
             rationale: "explicit pin".into(),
             fallbacks: vec![],
             pinned: true,
+            unroutable: false,
         };
         let routed = forge_mesh::RoutingDecision {
             pinned: false,
@@ -9884,6 +9885,7 @@ mod tests {
                 rationale: "test".into(),
                 fallbacks: self.fallbacks.clone(),
                 pinned: false,
+                unroutable: false,
             }
         }
         async fn route_with_pin_set(
@@ -9903,6 +9905,7 @@ mod tests {
                 rationale: "test".into(),
                 fallbacks: self.fallbacks.clone(),
                 pinned: true,
+                unroutable: false,
             }
         }
     }
@@ -9932,6 +9935,7 @@ mod tests {
                 rationale: "pinned via --model".into(),
                 fallbacks: self.fallbacks.clone(),
                 pinned: true,
+                unroutable: false,
             }
         }
     }
@@ -10056,6 +10060,7 @@ mod tests {
                 rationale: "ignores the pin".into(),
                 fallbacks: self.fallbacks.clone(),
                 pinned: false,
+                unroutable: false,
             }
         }
     }

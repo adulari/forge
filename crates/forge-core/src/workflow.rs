@@ -896,6 +896,7 @@ mod tests {
                 rationale: "test".into(),
                 fallbacks: Vec::new(),
                 pinned: false,
+                unroutable: false,
             }
         }
     }
