@@ -437,13 +437,12 @@ impl CodexOauthProvider {
                     .to_string(),
             ));
         };
-        let refreshed = refresh_tokens(&self.http, &refresh_token)
-            .await
-            .map_err(|e| {
-                ProviderError::Auth(format!(
-                    "Codex OAuth token refresh failed: {e} — run `forge auth codex-oauth` to sign in again"
-                ))
-            })?;
+        let refreshed = carry_refresh_token(
+            refresh_tokens(&self.http, &refresh_token)
+                .await
+                .map_err(refresh_failure_to_provider_error)?,
+            &current,
+        );
         self.store_refreshed(account_id, &refreshed);
         Ok(refreshed.access_token)
     }
@@ -734,19 +733,59 @@ impl CodexOauthProvider {
                 "Codex OAuth 401 and no refresh token — run `forge auth codex-oauth`".to_string(),
             ));
         };
-        let refreshed = refresh_tokens(&self.http, &rt)
-            .await
-            .map_err(|e| ProviderError::Auth(format!("Codex OAuth token refresh failed: {e}")))?;
+        let refreshed = carry_refresh_token(
+            refresh_tokens(&self.http, &rt)
+                .await
+                .map_err(refresh_failure_to_provider_error)?,
+            &current,
+        );
         self.store_refreshed(account_id, &refreshed);
         let chatgpt_id = self.chatgpt_id_for(&refreshed.access_token, account_id);
         Ok((refreshed.access_token, chatgpt_id))
     }
 }
 
+/// Only a token the authorization server REJECTED is an auth failure; a rate-limited, down, or
+/// unreachable token endpoint leaves the credential unproven, and reporting that as `Auth` would
+/// exclude a healthy subscription provider-wide. Either way the upstream status and message are
+/// carried through verbatim so the user reads the real cause.
+fn refresh_failure_to_provider_error(
+    failure: provider_oauth::TokenRefreshFailure,
+) -> ProviderError {
+    match failure {
+        provider_oauth::TokenRefreshFailure::Rejected { status, message } => {
+            ProviderError::Auth(format!(
+                "Codex OAuth refresh token rejected (HTTP {status}: {message}) — \
+                 re-authentication required: run `forge auth codex-oauth`"
+            ))
+        }
+        transient => ProviderError::Unavailable(format!(
+            "Codex OAuth token refresh could not complete ({transient}) — credential not disabled, \
+             will retry"
+        )),
+    }
+}
+
+/// A refresh response may omit `refresh_token` (non-rotating server). Keep the previous one so the
+/// stored credential stays refreshable instead of degrading to a single expiring access token.
+fn carry_refresh_token(
+    mut refreshed: forge_config::oauth::OAuthTokens,
+    previous: &forge_config::oauth::OAuthTokens,
+) -> forge_config::oauth::OAuthTokens {
+    if refreshed.refresh_token.is_none() {
+        refreshed.refresh_token = previous.refresh_token.clone();
+    }
+    refreshed
+}
+
 async fn refresh_tokens(
     http: &reqwest::Client,
     refresh_token: &str,
-) -> anyhow::Result<forge_config::oauth::OAuthTokens> {
+) -> Result<forge_config::oauth::OAuthTokens, provider_oauth::TokenRefreshFailure> {
+    let transient = |message: String| provider_oauth::TokenRefreshFailure::Transient {
+        status: None,
+        message,
+    };
     let resp = http
         .post(CODEX_OAUTH_TOKEN_ENDPOINT)
         .form(&[
@@ -755,14 +794,21 @@ async fn refresh_tokens(
             ("client_id", CODEX_OAUTH_CLIENT_ID),
         ])
         .send()
-        .await?;
+        .await
+        .map_err(|e| transient(e.to_string()))?;
     let status = resp.status().as_u16();
-    let body = resp.text().await?;
-    Ok(provider_oauth::parse_codex_token_response(
-        status,
-        &body,
-        now_unix(),
-    )?)
+    let body = resp.text().await.map_err(|e| transient(e.to_string()))?;
+    if status != 200 {
+        return Err(provider_oauth::classify_token_refresh_failure(
+            status, &body,
+        ));
+    }
+    provider_oauth::parse_codex_token_response(status, &body, now_unix()).map_err(|e| {
+        provider_oauth::TokenRefreshFailure::Transient {
+            status: Some(status),
+            message: e.to_string(),
+        }
+    })
 }
 
 pub fn has_session() -> bool {
@@ -834,7 +880,24 @@ pub async fn exchange_code(
     )?)
 }
 
+/// Classify an entitlement-probe HTTP status. ONLY 401 (token rejected) and 403 (plan not
+/// entitled) are verdicts about the credential; every other status — notably a 400 about request
+/// shape — is reported as itself so a malformed probe can never read as a dead subscription.
+fn classify_entitlement_status(status: u16, body: &str) -> crate::EntitlementStatus {
+    match status {
+        200..=299 => crate::EntitlementStatus::Entitled,
+        403 => crate::EntitlementStatus::NotEntitled(error_message(body)),
+        401 => crate::EntitlementStatus::AuthFailed(error_message(body)),
+        429 => crate::EntitlementStatus::RateLimited,
+        other => crate::EntitlementStatus::Other(other, error_message(body)),
+    }
+}
+
 /// One-shot entitlement probe after login.
+///
+/// The ChatGPT Codex backend serves the Responses endpoint over SSE only and answers `stream:
+/// false` with `400 {"detail":"Stream must be set to true"}`, so the probe MUST stream. Only the
+/// response status is inspected; the SSE body is dropped unread.
 pub async fn probe_entitlement(
     access_token: &str,
     chatgpt_account_id: &str,
@@ -843,25 +906,24 @@ pub async fn probe_entitlement(
     let body = serde_json::json!({
         "model": "gpt-5.4-mini",
         "input": [{"role": "user", "content": "Reply with OK."}],
-        "stream": false,
+        "stream": true,
         "store": false,
     });
     let resp = http
         .post(responses_url())
         .bearer_auth(access_token)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
         .header("ChatGPT-Account-Id", chatgpt_account_id)
         .json(&body)
         .send()
         .await?;
     let status = resp.status().as_u16();
-    let text = resp.text().await.unwrap_or_default();
-    Ok(match status {
-        200..=299 => crate::EntitlementStatus::Entitled,
-        403 => crate::EntitlementStatus::NotEntitled(error_message(&text)),
-        401 => crate::EntitlementStatus::AuthFailed(error_message(&text)),
-        429 => crate::EntitlementStatus::RateLimited,
-        other => crate::EntitlementStatus::Other(other, error_message(&text)),
-    })
+    let text = if (200..300).contains(&status) {
+        String::new()
+    } else {
+        resp.text().await.unwrap_or_default()
+    };
+    Ok(classify_entitlement_status(status, &text))
 }
 
 /// Read the active ChatGPT subscription's current Codex quota with the smallest reliable request.
@@ -1659,6 +1721,114 @@ mod tests {
             "https://evilchatgpt.com/backend-api/codex/responses"
         ));
         assert!(!is_pinned_codex_url("not a url"));
+    }
+
+    /// A 400 about request SHAPE is not a verdict on the credential. Misfiling it as `Auth` is what
+    /// excluded a healthy codex-oauth subscription provider-wide and pushed every OpenAI turn onto
+    /// the codex-cli bridge.
+    #[tokio::test]
+    async fn malformed_request_400_never_excludes_the_provider() {
+        let server = httpmock::MockServer::start();
+        let hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/responses");
+            then.status(400)
+                .header("content-type", "application/json")
+                .body(r#"{"detail":"Stream must be set to true"}"#);
+        });
+        let store = memory_store(&[("only", "only")], "only");
+        let provider = CodexOauthProvider::new()
+            .with_api_base(server.base_url())
+            .with_accounts(store);
+        let mut sink = |_: StreamEvent| {};
+        let err = provider
+            .complete(
+                "codex-oauth::gpt-5.5",
+                &[Message::user("hi")],
+                &[],
+                &mut sink,
+            )
+            .await
+            .expect_err("400 must surface as an error");
+        assert!(!err.is_auth(), "400 misclassified as auth: {err}");
+        assert!(!err.is_permanent(), "400 must not exclude anything: {err}");
+        assert!(
+            err.to_string().contains("Stream must be set to true"),
+            "upstream message must be surfaced verbatim: {err}"
+        );
+        assert_eq!(hit.calls(), 1);
+    }
+
+    #[test]
+    fn entitlement_probe_only_treats_401_403_as_credential_verdicts() {
+        assert!(matches!(
+            classify_entitlement_status(400, r#"{"detail":"Stream must be set to true"}"#),
+            crate::EntitlementStatus::Other(400, ref m) if m == "Stream must be set to true"
+        ));
+        assert!(matches!(
+            classify_entitlement_status(401, "{}"),
+            crate::EntitlementStatus::AuthFailed(_)
+        ));
+        assert!(matches!(
+            classify_entitlement_status(403, "{}"),
+            crate::EntitlementStatus::NotEntitled(_)
+        ));
+        assert!(matches!(
+            classify_entitlement_status(200, ""),
+            crate::EntitlementStatus::Entitled
+        ));
+    }
+
+    #[test]
+    fn only_a_server_rejected_refresh_is_an_auth_failure() {
+        let rejected =
+            refresh_failure_to_provider_error(provider_oauth::classify_token_refresh_failure(
+                400,
+                r#"{"error":"invalid_grant","error_description":"refresh token expired"}"#,
+            ));
+        assert!(matches!(rejected, ProviderError::Auth(_)));
+        assert!(rejected.to_string().contains("invalid_grant"));
+        assert!(rejected.to_string().contains("refresh token expired"));
+        assert!(rejected.to_string().contains("forge auth codex-oauth"));
+
+        for status in [429, 500, 503] {
+            let transient = refresh_failure_to_provider_error(
+                provider_oauth::classify_token_refresh_failure(status, "upstream busy"),
+            );
+            assert!(
+                matches!(transient, ProviderError::Unavailable(_)),
+                "HTTP {status} must not disable the subscription: {transient}"
+            );
+            assert!(!transient.is_permanent());
+            assert!(transient.to_string().contains(&status.to_string()));
+        }
+
+        let offline =
+            refresh_failure_to_provider_error(provider_oauth::TokenRefreshFailure::Transient {
+                status: None,
+                message: "dns error".into(),
+            });
+        assert!(matches!(offline, ProviderError::Unavailable(_)));
+        assert!(offline.to_string().contains("dns error"));
+    }
+
+    #[test]
+    fn refresh_without_a_new_refresh_token_keeps_the_old_one() {
+        let previous = forge_config::oauth::OAuthTokens {
+            access_token: "old".into(),
+            refresh_token: Some("rt".into()),
+            expires_at: 0,
+            token_endpoint: CODEX_OAUTH_TOKEN_ENDPOINT.into(),
+            client_id: CODEX_OAUTH_CLIENT_ID.into(),
+            scopes: vec![],
+        };
+        let refreshed = forge_config::oauth::OAuthTokens {
+            access_token: "new".into(),
+            refresh_token: None,
+            ..previous.clone()
+        };
+        let merged = carry_refresh_token(refreshed, &previous);
+        assert_eq!(merged.access_token, "new");
+        assert_eq!(merged.refresh_token.as_deref(), Some("rt"));
     }
 
     #[test]
