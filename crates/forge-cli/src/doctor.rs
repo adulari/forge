@@ -79,8 +79,18 @@ pub async fn run() -> anyhow::Result<usize> {
     let mut sections: Vec<(&str, Vec<Check>)> = Vec::new();
     sections.push(("Config", config_checks()));
     let (mut provider_v, has_usable_provider) = provider_checks();
-    // Live, timeout-bounded: prove keyed providers are actually reachable (not just key-present).
-    provider_v.extend(provider_reachability_checks().await);
+    // Reachability is evidence for the routing verdict, not the verdict itself. A provider can
+    // answer discovery while the mesh has excluded it or exhausted its subscription.
+    let reachability = provider_reachability_checks().await;
+    let routing = crate::doctor_health::provider_routing_checks(&reachability);
+    let has_usable_provider = if routing.is_empty() {
+        has_usable_provider
+    } else {
+        routing.iter().any(|check| check.status == Status::Ok)
+            || local::ollama_installed() && !local::ollama_installed_models().is_empty()
+    };
+    provider_v.extend(routing);
+    provider_v.extend(reachability);
     sections.push(("Providers", provider_v));
     // Live, timeout-bounded: prove a detected bridge can actually launch + answer (not just on PATH).
     let bridge_live = bridge_roundtrip_checks().await;
@@ -674,14 +684,14 @@ async fn provider_reachability_checks() -> Vec<Check> {
             match res {
             Ok(Ok(list)) if !list.is_empty() => check(
                 Status::Ok,
-                &format!("{p} reachable"),
+                &format!("{p} reachability"),
                 format!("{} models", list.len()),
                 None,
             ),
             // Reachable but empty listing — chat may still work; not actionable, so Info.
             Ok(Ok(_)) => check(
                 Status::Info,
-                &format!("{p} reachable"),
+                &format!("{p} reachability"),
                 "responded, but listed no models",
                 None,
             ),
@@ -692,14 +702,14 @@ async fn provider_reachability_checks() -> Vec<Check> {
             // real credential validation would need a paid chat call doctor won't make by default.
             Ok(Err(_)) => check(
                 Status::Info,
-                &format!("{p} reachable"),
+                &format!("{p} reachability"),
                 "model listing unavailable — chat unaffected",
                 None,
             ),
             // The churn cause: keyed but unreachable. Its models won't route.
             Err(_) => check(
                 Status::Fail,
-                &format!("{p} reachable"),
+                &format!("{p} reachability"),
                 format!("discovery timed out (> {}s)", REACH_TIMEOUT.as_secs()),
                 Some(
                     "provider/network unreachable — its models won't route this session; the mesh \
