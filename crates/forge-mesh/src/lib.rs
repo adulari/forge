@@ -4797,8 +4797,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_benched_falls_through_to_the_no_fallback_warning() {
-        // Every model benched → behaves like nothing usable (AC-6 surfaces downstream).
+    async fn all_benched_is_unroutable_with_no_fallback() {
+        // Every model benched → nothing usable, which is now an explicit unroutable decision the
+        // session must stop on rather than a warning it dispatches through anyway.
         let r = HeuristicRouter::new(Config::default()).with_availability(|_| true);
         let everything = HeuristicRouter::new(Config::default()).candidates_for_tier(
             TaskTier::Complex,
@@ -4831,7 +4832,14 @@ mod tests {
             )
             .await;
         assert!(d.fallbacks.is_empty());
-        assert!(d.rationale.contains("no usable key"), "{}", d.rationale);
+        assert!(
+            d.unroutable,
+            "nothing usable must mark the decision unroutable"
+        );
+        // The cause here is benching, not a missing key — the rationale must say so rather than
+        // default to the misleading "no usable key" it used to report.
+        assert!(d.rationale.contains("unroutable"), "{}", d.rationale);
+        assert!(d.rationale.contains("model benched"), "{}", d.rationale);
     }
 
     // --- Classification signal coverage ---
