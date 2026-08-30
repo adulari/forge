@@ -1313,7 +1313,6 @@ impl Store {
                     "ALTER TABLE sync_journal ADD COLUMN payload BLOB NOT NULL DEFAULT X''",
                 )?;
                 add_column_if_missing(&conn, "ALTER TABLE sync_journal ADD COLUMN base_hash BLOB")?;
-                model_health_store::retire_superseded_auth_exclusions(&conn)?;
                 Ok(())
             })?;
         }

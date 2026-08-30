@@ -17,24 +17,28 @@ const AUTH_REASON: &str = "auth failed";
 /// damage of being wrong while still suppressing per-turn churn against a truly bad credential.
 const AUTH_EXCLUSION_SECS: i64 = 30 * 60;
 
-/// Drop auth exclusions written under a classification rule this build no longer implements.
+/// SQL predicate hiding auth exclusions written under a classification rule this build no longer
+/// implements. Every health read ANDs it in, so a superseded row can never influence routing.
 ///
-/// **Decision (do releases invalidate incompatible health rows? yes, for auth rows only.)** A
+/// **Decision (do releases invalidate incompatible health rows? yes, for auth rows, at READ.)** A
 /// `model_health` row is a cached VERDICT, not an observation, and a release that changes how
 /// verdicts are reached leaves rows behind that the new rules would never have produced — they go
 /// on suppressing a provider for up to a day after the fix ships, which is precisely how a fixed
 /// bug keeps costing the user. The rule is self-describing rather than version-stamped: an auth
 /// exclusion whose window is longer than [`AUTH_EXCLUSION_SECS`] cannot have been written by this
-/// build, so it came from the superseded 24 h provider-wide rule and is discarded. Idempotent, and
-/// scoped to auth rows only — a capability exclusion or a rate-limit bench is an observation about
-/// the model that this release did not change, and those must survive.
-pub(super) fn retire_superseded_auth_exclusions(conn: &rusqlite::Connection) -> Result<()> {
-    conn.execute(
-        "DELETE FROM model_health
-         WHERE reason LIKE ?1 AND cooldown_until - updated_at > ?2",
-        (format!("%{AUTH_REASON}%"), AUTH_EXCLUSION_SECS),
-    )?;
-    Ok(())
+/// build, so it came from the superseded 24 h provider-wide rule.
+///
+/// It filters rather than deleting because the invalidation would otherwise have to run on the
+/// open/migrate path, and `Store::open` must never need the WAL writer: several Forge processes
+/// share one store, so an opening process would fail to start with "database is locked" whenever
+/// another was mid-write — a worse defect than the one being fixed. Nothing accumulates: there is
+/// at most one row per key, and the next bench on that key overwrites it. Scoped to auth rows only
+/// — a capability exclusion or a rate-limit bench is an observation this release did not change,
+/// and those stay visible.
+fn not_superseded_auth() -> String {
+    format!(
+        "NOT (reason LIKE '%{AUTH_REASON}%' AND cooldown_until - updated_at > {AUTH_EXCLUSION_SECS})"
+    )
 }
 
 impl Store {
@@ -134,10 +138,11 @@ impl Store {
     pub fn provider_auth_failed_before(&self, provider: &str, cutoff: i64) -> Result<bool> {
         let now = chrono::Utc::now().timestamp();
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT model FROM model_health
-             WHERE cooldown_until > ?1 AND updated_at <= ?2 AND reason LIKE ?3",
-        )?;
+             WHERE cooldown_until > ?1 AND updated_at <= ?2 AND reason LIKE ?3 AND {}",
+            not_superseded_auth()
+        ))?;
         let provider_key = forge_types::provider_bench_key(provider);
         // Provider matching happens in Rust, not in a LIKE pattern: provider names legitimately
         // contain `_` (`opencode_go`), which is a LIKE wildcard.
@@ -162,11 +167,12 @@ impl Store {
     /// subscription stayed invisible for a day. Surfaces use this instead of re-deriving the key.
     pub fn excluded_providers(&self, now: i64) -> Result<Vec<(String, i64, String)>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT model, cooldown_until, reason FROM model_health
-             WHERE cooldown_until > ?1 AND model LIKE ?2
+             WHERE cooldown_until > ?1 AND model LIKE ?2 AND {}
              ORDER BY cooldown_until DESC",
-        )?;
+            not_superseded_auth()
+        ))?;
         let rows = stmt
             .query_map(
                 rusqlite::params![now, format!("{}%", forge_types::PROVIDER_BENCH_PREFIX)],
@@ -362,8 +368,10 @@ impl Store {
     /// Snapshot of models still benched as of `now` (epoch secs) — cooldown not yet elapsed.
     pub fn benched_models(&self, now: i64) -> Result<forge_types::ModelHealth> {
         let conn = self.lock()?;
-        let mut stmt =
-            conn.prepare_cached("SELECT model FROM model_health WHERE cooldown_until > ?1")?;
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT model FROM model_health WHERE cooldown_until > ?1 AND {}",
+            not_superseded_auth()
+        ))?;
         let set = stmt
             .query_map([now], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
@@ -374,10 +382,11 @@ impl Store {
     /// startup hint, newest cooldown first.
     pub fn benched_report(&self, now: i64) -> Result<Vec<(String, i64, String)>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT model, cooldown_until, reason FROM model_health
-             WHERE cooldown_until > ?1 ORDER BY cooldown_until DESC",
-        )?;
+             WHERE cooldown_until > ?1 AND {} ORDER BY cooldown_until DESC",
+            not_superseded_auth()
+        ))?;
         let rows = stmt
             .query_map([now], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -453,15 +462,24 @@ mod tests {
         assert!(!store
             .provider_auth_failed_before("claude-cli", now() - 120)
             .unwrap());
-        // Aged past the window: a genuine repeat.
-        let (model, until, reason) = store
+        // Aged past the window: a genuine repeat. Both fields move together, because a row written
+        // ten minutes ago has `cooldown_until = updated_at + AUTH_EXCLUSION_SECS` — shifting only
+        // `updated_at` would fabricate a wider window than this build can write, which
+        // `not_superseded_auth` (correctly) treats as a row from the old rule.
+        let (model, _, reason) = store
             .current_benched_report()
             .unwrap()
             .into_iter()
             .find(|(m, _, _)| m == "claude-cli::opus")
             .unwrap();
+        let written_at = now() - 600;
         store
-            .bench_model_at(&model, until, &reason, now() - 600)
+            .bench_model_at(
+                &model,
+                written_at + AUTH_EXCLUSION_SECS,
+                &reason,
+                written_at,
+            )
             .unwrap();
         assert!(store
             .provider_auth_failed_before("claude-cli", now() - 120)
@@ -500,7 +518,7 @@ mod tests {
     /// A row written under the superseded 24 h provider-wide rule must not outlive the release that
     /// fixed the rule; a capability exclusion or a rate-limit bench must survive untouched.
     #[test]
-    fn opening_a_store_retires_auth_rows_written_under_the_old_rule() {
+    fn health_reads_ignore_auth_rows_written_under_the_old_rule() {
         let store = Store::open_in_memory().unwrap();
         let day = 24 * 60 * 60;
         store
@@ -523,8 +541,6 @@ mod tests {
             .bench_model_at("groq::x", now() + 600, "rate-limited", now())
             .unwrap();
 
-        retire_superseded_auth_exclusions(&store.lock().unwrap()).unwrap();
-
         let remaining: Vec<_> = store
             .current_benched_report()
             .unwrap()
@@ -535,15 +551,25 @@ mod tests {
         assert!(!remaining.iter().any(|m| m.contains("claude-cli")));
         assert!(remaining.iter().any(|m| m == "openrouter::some/model"));
         assert!(remaining.iter().any(|m| m == "groq::x"));
+
+        // Every other health read must agree, or the stale row still reaches routing.
+        assert!(store.current_excluded_providers().unwrap().is_empty());
+        assert!(!store
+            .current_benched()
+            .unwrap()
+            .is_benched("__forge_provider__::claude-cli"));
+        assert!(!store
+            .provider_auth_failed_before("claude-cli", now())
+            .unwrap());
     }
 
-    /// A CURRENT-rule auth exclusion is not swept away by the same pass — otherwise every store
-    /// open would silently unbench a provider that just failed.
+    /// A CURRENT-rule auth exclusion is not caught by the same filter — otherwise every read would
+    /// silently unbench a provider that just failed.
     #[test]
-    fn retiring_old_rows_leaves_a_current_rule_auth_exclusion_in_place() {
+    fn the_filter_leaves_a_current_rule_auth_exclusion_in_place() {
         let store = Store::open_in_memory().unwrap();
         store.exclude_provider("claude-cli", "auth failed").unwrap();
-        retire_superseded_auth_exclusions(&store.lock().unwrap()).unwrap();
         assert_eq!(store.current_excluded_providers().unwrap().len(), 1);
+        assert_eq!(store.current_benched_report().unwrap().len(), 1);
     }
 }

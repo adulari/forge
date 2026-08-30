@@ -6,6 +6,14 @@ use super::*;
 
 /// Minimum age of a prior auth failure before it corroborates a new one into a provider-wide
 /// exclusion. Sized to separate a repeat from a burst of concurrent turns, not to be a cooldown.
+///
+/// Picked from the measured incident rather than from taste: on 2026-08-30 the false provider-wide
+/// exclusion of a healthy claude-cli subscription fired seven times, and every occurrence followed
+/// several hosted sessions starting against the same bridge — at 11:59 the fourth session's start
+/// and the exclusion were about 60 seconds apart. 120 s is that observed spread doubled, which is
+/// the right direction to round: a gap too SHORT re-admits exactly this bug, while a gap too long
+/// only costs a genuinely dead credential some extra per-model benches, each of which still fails
+/// over and completes the turn.
 const AUTH_ESCALATION_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(120);
 
 impl Session {
