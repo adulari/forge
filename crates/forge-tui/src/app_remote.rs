@@ -510,10 +510,13 @@ impl App {
                 body.push_str(&format!("rationale: {}\n", m.rationale));
             }
             for q in &m.quota {
+                let usage = q
+                    .fraction
+                    .map(|fraction| format!("{:.0}% used", fraction * 100.0))
+                    .unwrap_or_else(|| "unknown".to_string());
                 body.push_str(&format!(
-                    "quota {}: {:.0}% used ({} · {}){}\n",
+                    "quota {}: {usage} ({} · {}){}\n",
                     q.provider,
-                    q.fraction * 100.0,
                     q.plan,
                     q.status,
                     mesh_pace_suffix(q.projected_fraction_at_reset, q.exhaustion_warning),

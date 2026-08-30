@@ -84,8 +84,8 @@ pub struct QuotaPaceInfo {
 #[derive(Debug, Default, Clone)]
 pub struct MeshQuotaRow {
     pub provider: String,
-    /// Window fraction consumed (0.0–1.0).
-    pub fraction: f64,
+    /// Freshly observed window fraction consumed (0.0–1.0), if available.
+    pub fraction: Option<f64>,
     pub plan: String,
     /// "Ok" / "Warning" / "Exhausted".
     pub status: String,

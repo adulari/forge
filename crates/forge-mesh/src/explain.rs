@@ -31,7 +31,8 @@ pub struct CandidateRow {
 pub struct ProviderQuotaView {
     pub provider: String,
     pub status: QuotaStatus,
-    pub fraction: f64,
+    /// Freshly observed usage fraction, absent when no current observation exists.
+    pub fraction: Option<f64>,
     pub plan: String,
     /// Probability a task of this tier spreads OFF this subscription (the conservation pull).
     /// Pace-projected (mesh-routing.md) — fed `effective_fraction_for`, matching what real
@@ -288,7 +289,7 @@ impl HeuristicRouter {
         let quota_views = sub_providers
             .into_iter()
             .map(|p| {
-                let fraction = quota.fraction_for(&p);
+                let fraction = quota.observed_fraction_for(&p);
                 let plan = quota.plan_for(&p).to_string();
                 let pace = quota.pace_for(&p);
                 ProviderQuotaView {

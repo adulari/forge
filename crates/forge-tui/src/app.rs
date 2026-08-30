@@ -6086,7 +6086,7 @@ mod tests {
             conserve_line: "FIRED (roll 0.05 < P 0.53) → spread to free frontier".into(),
             quota: vec![MeshQuotaRow {
                 provider: "claude-cli".into(),
-                fraction: 0.78,
+                fraction: Some(0.78),
                 plan: "max-20x".into(),
                 status: "Ok".into(),
                 spread_complex: 0.5,

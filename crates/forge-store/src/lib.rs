@@ -4212,7 +4212,12 @@ mod tests {
         assert_eq!(
             quota.fraction_for("claude-cli"),
             0.0,
-            "unknown fraction is never a value"
+            "expired observations apply no routing pressure"
+        );
+        assert_eq!(
+            quota.observed_fraction_for("claude-cli"),
+            None,
+            "expired observations remain absent for display"
         );
         let remaining: i64 = store
             .lock()
