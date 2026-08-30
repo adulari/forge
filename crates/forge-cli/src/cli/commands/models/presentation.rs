@@ -460,8 +460,9 @@ mod tests {
             projected_fraction_at_reset: None,
             exhaustion_warning: false,
         });
-        let value: serde_json::Value = serde_json::from_str(&mesh_explanation_json(&explanation))
-            .expect("valid explanation JSON");
+        let value: serde_json::Value =
+            serde_json::from_str(&mesh_explanation_json(&explanation, &[]))
+                .expect("valid explanation JSON");
         assert!(value["quota"][0]["fraction"].is_null());
     }
 
