@@ -67,6 +67,7 @@ pub mod turn_contract;
 pub mod workflow;
 mod workspace_context;
 pub mod worktree;
+pub mod worktree_reclaim;
 
 pub use llm_router::LlmRouter;
 use replay::messages_to_replay_items;
