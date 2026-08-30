@@ -553,9 +553,16 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
         let limits = tokio::task::spawn_blocking(bridge_stats::probe_claude_limits)
             .await
             .unwrap_or_default();
-        for (window, frac) in limits {
+        for (window, frac, resets_at) in limits {
             // Live probe — its observation time genuinely is now.
-            seed_store_quota(&store, "claude-cli", &window, Some(frac * 100.0), None);
+            seed_store_quota_with_reset(
+                &store,
+                "claude-cli",
+                &window,
+                Some(frac * 100.0),
+                None,
+                resets_at,
+            );
         }
     }
     let readiness = forge_core::readiness::ProviderReadiness::snapshot(&config, &store);
@@ -668,6 +675,20 @@ pub(crate) fn seed_store_quota(
     pct: Option<f64>,
     observed_at: Option<i64>,
 ) {
+    seed_store_quota_with_reset(store, provider, window, pct, observed_at, None);
+}
+
+/// [`seed_store_quota`] with the window's reset instant when the source reports one (Claude's
+/// `anthropic-ratelimit-unified-*-reset` headers). Without it the row can never be displayed or
+/// paced against.
+pub(crate) fn seed_store_quota_with_reset(
+    store: &Store,
+    provider: &str,
+    window: &str,
+    pct: Option<f64>,
+    observed_at: Option<i64>,
+    resets_at: Option<i64>,
+) {
     let Some(pct) = pct else { return };
     let frac = (pct / 100.0).clamp(0.0, 1.0);
     let status = forge_config::quota_status::status_from_fraction(frac);
@@ -675,7 +696,7 @@ pub(crate) fn seed_store_quota(
         provider: provider.to_string(),
         window: window.to_string(),
         status,
-        resets_at: None,
+        resets_at,
         fraction_used: Some(frac),
     };
     let _ = match observed_at {

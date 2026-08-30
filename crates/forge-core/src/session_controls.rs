@@ -587,7 +587,7 @@ impl Session {
     /// files) must use [`Self::seed_subscription_quota_at`] with their true observation time, or a
     /// re-seeded hours-old reading would mask fresher data in the shared codex quota bucket.
     pub fn seed_subscription_quota(&self, provider: &str, window: &str, pct: Option<f64>) {
-        self.seed_subscription_quota_at(provider, window, pct, None);
+        self.seed_subscription_quota_with_reset(provider, window, pct, None, None);
     }
 
     /// [`Self::seed_subscription_quota`] with the reading's true OBSERVATION time (epoch secs) —
@@ -601,6 +601,20 @@ impl Session {
         pct: Option<f64>,
         observed_at: Option<i64>,
     ) {
+        self.seed_subscription_quota_with_reset(provider, window, pct, observed_at, None);
+    }
+
+    /// [`Self::seed_subscription_quota_at`] with the window's reset instant when the source
+    /// reports one (Claude's `anthropic-ratelimit-unified-*-reset` headers). A reset instant is
+    /// what lets a window be displayed and paced against; dropping it leaves the row unpaceable.
+    pub fn seed_subscription_quota_with_reset(
+        &self,
+        provider: &str,
+        window: &str,
+        pct: Option<f64>,
+        observed_at: Option<i64>,
+        resets_at: Option<i64>,
+    ) {
         let Some(pct) = pct else { return };
         let frac = (pct / 100.0).clamp(0.0, 1.0);
         let status = forge_config::quota_status::status_from_fraction(frac);
@@ -608,7 +622,7 @@ impl Session {
             provider: provider.to_string(),
             window: window.to_string(),
             status,
-            resets_at: None,
+            resets_at,
             fraction_used: Some(frac),
         };
         let _ = match observed_at {
