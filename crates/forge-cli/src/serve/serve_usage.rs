@@ -192,14 +192,14 @@ mod tests {
             forge_store::ProviderUsage {
                 provider: "openai".into(),
                 input_tokens: 10,
-                cached_input_tokens: 3,
+                cached_input_tokens: Some(3),
                 output_tokens: 5,
                 cost_usd: 0.25,
             },
             forge_store::ProviderUsage {
                 provider: "claude-cli".into(),
                 input_tokens: 20,
-                cached_input_tokens: 7,
+                cached_input_tokens: Some(7),
                 output_tokens: 9,
                 cost_usd: 0.5,
             },
@@ -209,7 +209,7 @@ mod tests {
             total,
             UsageTotals {
                 input_tokens: 30,
-                cached_input_tokens: 10,
+                cached_input_tokens: Some(10),
                 output_tokens: 14,
                 cost_usd: 0.75,
             }

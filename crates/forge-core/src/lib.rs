@@ -8747,7 +8747,7 @@ mod tests {
                 usage: forge_types::Usage {
                     input_tokens,
                     output_tokens,
-                    cached_input_tokens,
+                    cached_input_tokens: Some(cached_input_tokens),
                     cost_usd: 0.0,
                 },
                 quotas: Vec::new(),
@@ -8799,7 +8799,7 @@ mod tests {
         );
         let consumed = store.session_token_usage(session.id()).unwrap();
         assert_eq!((consumed.input_tokens, consumed.output_tokens), (102, 42));
-        assert_eq!(consumed.cached_input_tokens, 30);
+        assert_eq!(consumed.cached_input_tokens, Some(30));
         assert_eq!(session.session_usage_db(), (102, 42, 0.0));
         let events = captured_events.lock().unwrap();
         let done_index = events
@@ -8820,7 +8820,7 @@ mod tests {
             })
             .next_back()
             .expect("turn emits Cost");
-        assert_eq!(event_tokens, (102, 30, 42));
+        assert_eq!(event_tokens, (102, Some(30), 42));
         assert!(cost_index < done_index, "terminal Cost must precede Done");
         assert_eq!(
             done_index,
@@ -9329,7 +9329,7 @@ mod tests {
             let usage = Usage {
                 input_tokens: 30,
                 output_tokens: 12,
-                cached_input_tokens: 0,
+                cached_input_tokens: Some(0),
                 cost_usd: 0.0,
             };
             if is_subagent {
@@ -9480,7 +9480,7 @@ mod tests {
             let usage = Usage {
                 input_tokens: 30,
                 output_tokens: 12,
-                cached_input_tokens: 0,
+                cached_input_tokens: Some(0),
                 cost_usd: 0.0,
             };
             let is_subagent = messages
@@ -9670,7 +9670,7 @@ mod tests {
             let usage = Usage {
                 input_tokens: 5,
                 output_tokens: 2,
-                cached_input_tokens: 0,
+                cached_input_tokens: Some(0),
                 cost_usd: 0.0,
             };
             if used_tool {

@@ -817,8 +817,8 @@ mod tests {
         assert!(text.contains("\"role\":\"assistant\""));
         assert!(text.contains("\"content\":"));
         assert!(text.contains("\"finish_reason\":\"stop\""));
-        assert!(text.contains("\"prompt_tokens_details\":{"));
-        assert!(text.contains("\"cached_tokens\":0"));
+        assert!(text.contains("\"prompt_tokens_details\":null"));
+        assert!(!text.contains("\"cached_tokens\":0"));
         assert!(text.trim_end().ends_with("data: [DONE]"));
     }
 
