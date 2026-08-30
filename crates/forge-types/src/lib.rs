@@ -7,9 +7,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod interaction;
+mod subscription_pacing;
 mod turn_outcome;
 
 pub use interaction::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, ReplayItem, NO_ANSWER};
+pub use subscription_pacing::{
+    nominal_window_secs, SubscriptionPacing, SubscriptionWindow, SUBSCRIPTION_PACE_SPEND_FRACTION,
+};
 pub use turn_outcome::{LoopOutcome, StopReason};
 
 /// Who produced a message in a session.
@@ -1066,6 +1070,9 @@ pub struct SubscriptionQuota {
     /// the strictest active window is headed by its reset time, not just its current fraction.
     /// Absent when there isn't enough history to derive a rate (see `compute_quota_pace`).
     pace: std::collections::HashMap<String, QuotaPace>,
+    /// Per-window pacing decisions. Unlike `fraction`, this retains both rolling windows so a
+    /// short window can constrain routing even when the weekly window remains healthy.
+    pacing: std::collections::HashMap<String, SubscriptionPacing>,
     /// Whether proactive subscription-conservation spreading is enabled (config opt-out).
     conserve: bool,
 }
@@ -1102,6 +1109,18 @@ impl SubscriptionQuota {
         self
     }
 
+    /// Attach the strictest real-time pacing decision for each subscription provider.
+    ///
+    /// The store computes this from every active quota window at its authoritative clock, rather
+    /// than collapsing windows into the legacy maximum-fraction snapshot.
+    pub fn with_pacing(
+        mut self,
+        pacing: std::collections::HashMap<String, SubscriptionPacing>,
+    ) -> Self {
+        self.pacing = pacing;
+        self
+    }
+
     /// Enable/disable proactive conservation spreading (`config.mesh.subscription_conserve`).
     /// Documented in docs/features/mesh-routing.md.
     pub fn with_conserve(mut self, on: bool) -> Self {
@@ -1135,6 +1154,11 @@ impl SubscriptionQuota {
     /// history to derive it (see [`compute_quota_pace`]).
     pub fn pace_for(&self, provider: &str) -> Option<QuotaPace> {
         self.pace.get(provider).copied()
+    }
+
+    /// The active pacing decision for `provider`, if quota-window observations were available.
+    pub fn pacing_for(&self, provider: &str) -> Option<&SubscriptionPacing> {
+        self.pacing.get(provider)
     }
 
     /// The conservation input for a provider (mesh-routing.md): `fraction_for(provider)`
