@@ -1032,24 +1032,22 @@ fn build_oneshot_args(
     args
 }
 
-/// Assemble a harness preamble from the shared core + finish fragments with a per-CLI middle.
+/// Assemble a harness preamble from the shared tool map + finish fragments with a per-CLI middle.
 /// Single source of truth: both variants concat the SAME core/finish bytes at compile time, so
-/// they cannot drift silently. The core states the tool map + "native tools are disabled"; the
-/// finish paragraph states the completion criteria (incl. the poll-mode wait rule — the ~120s
-/// shell timeout kills any single blocking watch).
+/// they cannot drift silently. Tool acquisition deliberately lives in the per-CLI middle: Claude
+/// receives MCP schemas up front, while Codex defers them behind its registry.
 macro_rules! harness_preamble {
     ($($mid:expr),* $(,)?) => {
         concat!(
             // ---- shared core: mcp__forge__ prefix map + native tools disabled ----
             "[Forge harness] You are running inside the Forge coding agent. Your native \
-built-in tools (shell, file, web) are DISABLED — the ONLY callable tools are the `mcp__forge__*` \
-ones from the `forge` MCP server: `mcp__forge__shell` (ANY shell command; real exit code + \
+built-in task tools (shell, file, web) are DISABLED. Forge exposes task tools through the \
+`mcp__forge__*` tools from the `forge` MCP server: `mcp__forge__shell` (ANY shell command; real exit code + \
 output), `mcp__forge__read_file`/`write_file`/`edit_file`/`multi_edit`/`apply_patch`/\
 `delete_file`/`list_dir`/`search`, `mcp__forge__web_search`/`web_fetch` (ALL web access), \
 `mcp__forge__update_tasks`, `mcp__forge__present_plan`, `mcp__forge__spawn_agents`, \
-`mcp__forge__use_skill`. They ARE available even if your host does not enumerate them — call \
-them by their exact prefixed name; a bare tool name in a task (\"update_tasks\", \"present a \
-plan\") means its `mcp__forge__*` form.",
+`mcp__forge__use_skill`. A bare tool name in a task (\"update_tasks\", \"present a plan\") \
+means its `mcp__forge__*` form.",
             $("\n\n", $mid,)*
             // ---- shared finish criteria ----
             "\n\nFinishing the task: complete the ENTIRE task before ending your turn — every \
@@ -1068,6 +1066,8 @@ fully achieved and every task is resolved."
 /// commands", sandbox/writability probing + refusal, bare-name tool denial, and filesystem
 /// skill discovery (`~/.claude`).
 const CLAUDE_HARNESS_PREAMBLE: &str = harness_preamble!(
+    "Claude receives the Forge MCP tool schemas up front through `--mcp-config`; call them by \
+their exact prefixed names.",
     "Guards — each fixed a real failure; follow them exactly. Do NOT emit a `Bash`/`Shell`/\
 `Read`/`Edit`/`Write` tool call, and never write a tool-call block out as plain text and then \
 imagine its output: that output is fiction. If a tool result looks garbled, truncated, or \
@@ -1096,6 +1096,14 @@ directories or \"discover skills from system context\"."
 /// `--sandbox read-only`, so without it the model probes writability and refuses writes), a
 /// one-sentence skills pointer, and the finish criteria.
 const CODEX_HARNESS_PREAMBLE: &str = harness_preamble!(
+    "Codex may initially omit MCP tools from its callable list because they are deferred. Load \
+them with `functions.exec` using `const matches = ALL_TOOLS.filter(({ name }) => \
+name.startsWith(\"mcp__forge__\")); matches.forEach(({ name, description }) => text(name + \
+\"\\n\" + description));`, then call them as `tools.mcp__forge__<name>(...)` inside \
+`functions.exec`. An empty initial tool list does NOT mean the tools are absent. If that lookup \
+returns only some Forge tools, repeat it for the missing exact name, for example \
+`ALL_TOOLS.filter(({ name }) => name === \"mcp__forge__shell\")`. Only a failed exact-name \
+registry lookup justifies saying that tool is unavailable.",
     "Your own sandbox may look read-only with approvals disabled — by design, not a block: \
 the `mcp__forge__` write tools run outside it and always work; never refuse or probe \
 writability. Skills: load skills ONLY via `mcp__forge__use_skill` (its description lists them)."
@@ -1110,7 +1118,8 @@ const HARNESS_RESUME_REMINDER: &str =
 const fn harness_preamble_for(kind: CliKind) -> &'static str {
     match kind {
         CliKind::ClaudeCode => CLAUDE_HARNESS_PREAMBLE,
-        CliKind::Codex | CliKind::Antigravity => CODEX_HARNESS_PREAMBLE,
+        CliKind::Codex => CODEX_HARNESS_PREAMBLE,
+        CliKind::Antigravity => "",
     }
 }
 
@@ -1120,7 +1129,7 @@ const fn harness_preamble_for(kind: CliKind) -> &'static str {
 /// re-drive (forge-core), which is cheaper than an always-on preamble clause (it lets the model
 /// work the turn normally, then do a single final diff-review).
 fn apply_harness_preamble(harness: bool, kind: CliKind, prompt: String) -> String {
-    if harness && kind != CliKind::ClaudeCode {
+    if harness && kind == CliKind::Codex {
         format!("{}\n\n{prompt}", harness_preamble_for(kind))
     } else {
         prompt
@@ -1132,7 +1141,7 @@ fn apply_harness_preamble(harness: bool, kind: CliKind, prompt: String) -> Strin
 /// on every internal model call (30-80 per instance) — a full re-prepend cost ~30-90k tokens per
 /// instance measured.
 fn apply_resume_reminder(harness: bool, kind: CliKind, prompt: String) -> String {
-    if harness && kind != CliKind::ClaudeCode {
+    if harness && kind == CliKind::Codex {
         format!("{HARNESS_RESUME_REMINDER}\n\n{prompt}")
     } else {
         prompt
@@ -4079,10 +4088,10 @@ mod tests {
     #[test]
     fn codex_harness_preamble_is_slim() {
         // Hard budget: the bridged CLI re-ingests the preamble on every internal model call, so
-        // the codex variant must stay small. 1536 bytes = the wave-3 diet target.
+        // the codex variant must stay small while still explaining deferred acquisition.
         assert!(
-            CODEX_HARNESS_PREAMBLE.len() <= 1536,
-            "codex preamble is {} bytes (> 1536)",
+            CODEX_HARNESS_PREAMBLE.len() <= 2304,
+            "codex preamble is {} bytes (> 2304)",
             CODEX_HARNESS_PREAMBLE.len()
         );
         // …but still carries the essentials: prefix map, disabled-native-tools, finish criteria,
@@ -4101,9 +4110,30 @@ mod tests {
         assert!(!CODEX_HARNESS_PREAMBLE.contains("~/.claude"));
         assert!(!CODEX_HARNESS_PREAMBLE.contains("STILL RAN"));
         assert_eq!(harness_preamble_for(CliKind::Codex), CODEX_HARNESS_PREAMBLE);
+        assert_eq!(harness_preamble_for(CliKind::Antigravity), "");
+    }
+
+    #[test]
+    fn harness_preamble_pins_tool_acquisition_per_bridge() {
+        for required in [
+            "functions.exec",
+            "ALL_TOOLS.filter",
+            "name.startsWith(\"mcp__forge__\")",
+            "name === \"mcp__forge__shell\"",
+            "empty initial tool list does NOT mean the tools are absent",
+            "Only a failed exact-name registry lookup",
+        ] {
+            assert!(
+                CODEX_HARNESS_PREAMBLE.contains(required),
+                "codex lost deferred-tool guidance: {required}"
+            );
+        }
+        assert!(!CLAUDE_HARNESS_PREAMBLE.contains("ALL_TOOLS"));
+        assert!(CLAUDE_HARNESS_PREAMBLE.contains("receives the Forge MCP tool schemas up front"));
         assert_eq!(
-            harness_preamble_for(CliKind::Antigravity),
-            CODEX_HARNESS_PREAMBLE
+            apply_harness_preamble(true, CliKind::Antigravity, "User: hi".into()),
+            "User: hi",
+            "Antigravity has no Forge MCP wiring"
         );
     }
 
