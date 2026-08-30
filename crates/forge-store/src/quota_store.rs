@@ -445,6 +445,7 @@ impl Store {
         &self,
     ) -> Result<std::collections::HashMap<String, std::collections::HashMap<String, f64>>> {
         let now = chrono::Utc::now().timestamp();
+        self.purge_expired_quota_observations_at(now)?;
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT provider, window_kind, fraction, updated_at FROM subscription_usage
@@ -460,7 +461,7 @@ impl Store {
                 ))
             })?
             .filter_map(std::result::Result::ok)
-            .filter(|row| codex_quota_is_fresh(&row.0, row.3, now))
+            .filter(|row| quota_observation_is_current(&row.0, &row.1, row.3, now))
             .collect();
 
         let mut output_providers: std::collections::BTreeSet<&str> =
@@ -510,6 +511,7 @@ impl Store {
     /// [`quota_alias_members`]. Non-grouped providers (e.g. `claude-cli`) are unaffected: a
     /// provider outside any group only ever merges with itself, which is a no-op.
     pub fn quota_at(&self, now: i64) -> Result<forge_types::SubscriptionQuota> {
+        self.purge_expired_quota_observations_at(now)?;
         let conn = self.lock()?;
 
         struct UsageRow {
@@ -538,7 +540,9 @@ impl Store {
                     })
                 })?
                 .filter_map(std::result::Result::ok)
-                .filter(|row| codex_quota_is_fresh(&row.provider, row.updated_at, now))
+                .filter(|row| {
+                    quota_observation_is_current(&row.provider, &row.window, row.updated_at, now)
+                })
                 .collect();
             rows
         };
@@ -626,6 +630,21 @@ impl Store {
         Ok(forge_types::SubscriptionQuota::new(map)
             .with_fractions(fractions)
             .with_paces(paces))
+    }
+
+    /// Delete expired snapshots so discontinued window kinds cannot remain apparent state.
+    fn purge_expired_quota_observations_at(&self, now: i64) -> Result<()> {
+        self.lock()?.execute(
+            "DELETE FROM subscription_usage
+             WHERE (resets_at IS NOT NULL AND resets_at <= ?1)
+                OR updated_at < ?1 - CASE window_kind
+                    WHEN 'five_hour' THEN 18000
+                    WHEN 'weekly' THEN 604800
+                    ELSE 2592000
+                END",
+            [now],
+        )?;
+        Ok(())
     }
 
     /// History points for `window`, observed at or after `since`, unioned across every provider

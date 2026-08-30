@@ -274,7 +274,10 @@ impl HeuristicRouter {
                     .models()
                     .iter()
                     .filter(|m| catalog::is_subscription(m))
-                    .map(|m| catalog::provider_of(m).to_string())
+                    .map(|m| match catalog::provider_of(m) {
+                        "codex-oauth" => "codex-cli".to_string(),
+                        provider => provider.to_string(),
+                    })
                     .collect();
                 v.sort();
                 v.dedup();

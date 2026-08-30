@@ -43,7 +43,10 @@ pub(crate) fn mesh_overview(
         .models()
         .iter()
         .filter(|m| forge_mesh::catalog::is_subscription(m))
-        .map(|m| forge_mesh::catalog::provider_of(m))
+        .map(|m| match forge_mesh::catalog::provider_of(m) {
+            "codex-oauth" => "codex-cli",
+            provider => provider,
+        })
         .collect();
     subs.sort_unstable();
     subs.dedup();
@@ -94,7 +97,10 @@ pub(crate) fn mesh_overview_json(
         .models()
         .iter()
         .filter(|model| forge_mesh::catalog::is_subscription(model))
-        .map(|model| forge_mesh::catalog::provider_of(model))
+        .map(|model| match forge_mesh::catalog::provider_of(model) {
+            "codex-oauth" => "codex-cli",
+            provider => provider,
+        })
         .collect();
     providers.sort_unstable();
     providers.dedup();
