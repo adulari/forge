@@ -1788,6 +1788,7 @@ struct ClaudeStreamState {
 }
 
 mod cli_stream;
+mod error_policy;
 use cli_stream::*;
 
 #[async_trait]
@@ -2380,33 +2381,6 @@ fn mentions_status_code(haystack: &str, code: &str) -> bool {
     })
 }
 
-/// Phrases that mean a CLI actually reported a credential problem.
-///
-/// The classifier used to match the bare substring `"auth"`, which an auth verdict is far too
-/// expensive to rest on: it fires on `oauth`, `author`, `authority`, and on any of those appearing
-/// anywhere in the 600-character stderr tail that gets appended as evidence. An `Auth` error is
-/// permanent — it excludes rather than benches — so a single incidental substring was enough to
-/// take a subscription out of routing. These require the CLI to have said something that only
-/// means "your credential did not work".
-const AUTH_PHRASES: &[&str] = &[
-    "authentication",
-    "authorization",
-    "unauthenticated",
-    "unauthorized",
-    "auth failed",
-    "auth error",
-    "auth required",
-    "invalid api key",
-    "invalid_api_key",
-    "api key not valid",
-    "not logged in",
-    "login required",
-    "please log in",
-    "please run /login",
-    "permission denied",
-    "credentials",
-];
-
 fn is_cli_auth_instruction(text: &str) -> bool {
     let lower = text.trim().to_ascii_lowercase();
     lower.contains("not logged in") && (lower.contains("/login") || lower.contains("log in"))
@@ -2445,7 +2419,7 @@ fn classify_in_band_error_with_message(
         }
     } else if mentions_status_code(&lower, "401")
         || mentions_status_code(&lower, "403")
-        || AUTH_PHRASES.iter().any(|phrase| lower.contains(phrase))
+        || error_policy::is_auth_failure(&lower)
     {
         ProviderError::Auth(msg)
     } else if lower.contains("overload")
