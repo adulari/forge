@@ -751,10 +751,13 @@ mod tests {
         }
     }
 
-    /// Counter-case proving the scope assertion above is not vacuous: an auth failure is
-    /// credential-wide and DOES bench every alias of the provider.
+    /// Counter-case for the scope assertion above. A capability failure is a fact about one model;
+    /// a *single* auth failure is only a guess about a credential, so it takes the same model scope
+    /// until a measurably older failure corroborates it. Escalation to provider scope needs a
+    /// backdated prior row, which only the store can write, so it is asserted there rather than
+    /// here — see `model_health_store`'s `provider_auth_failed_before` tests.
     #[test]
-    fn auth_failures_still_bench_the_whole_provider() {
+    fn a_lone_auth_failure_does_not_take_the_provider_down_with_it() {
         let session = test_session();
         session.record_model_failure(
             DEAD,
@@ -764,7 +767,10 @@ mod tests {
 
         let health = session.store.current_benched().unwrap();
         assert!(health.is_benched(DEAD));
-        assert!(health.is_benched(SIBLING), "auth is provider-wide");
+        assert!(
+            !health.is_benched(SIBLING),
+            "one failed call must not disable an entire subscription"
+        );
     }
 
     /// A rate limit keeps the short, server-signalled cooldown — it must not be swept into the
