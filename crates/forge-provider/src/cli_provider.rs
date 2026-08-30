@@ -706,11 +706,16 @@ async fn run_model_probe(binary: &str, args: &[&str]) -> Result<String, String> 
 fn probe_failure_message(stderr: &[u8], stdout: &[u8]) -> String {
     const MAX: usize = 200;
     let pick = |bytes: &[u8]| {
-        String::from_utf8_lossy(bytes)
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(str::to_string)
+        let text = String::from_utf8_lossy(bytes);
+        let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+        let first = lines.next()?;
+        Some(
+            std::iter::once(first)
+                .chain(lines)
+                .find(|line| line.starts_with("Error:"))
+                .unwrap_or(first)
+                .to_string(),
+        )
     };
     let mut message = pick(stderr)
         .or_else(|| pick(stdout))
@@ -3619,6 +3624,42 @@ mod tests {
             ["fable", "opus", "sonnet"]
         );
         assert!(parse_claude_model_aliases("no model flag here").is_empty());
+    }
+
+    #[test]
+    fn failed_probe_prefers_the_actionable_error_over_progress_output() {
+        let stderr =
+            b"Fetching available models...\nError: Please sign in to view available models.\n";
+        assert_eq!(
+            probe_failure_message(stderr, b""),
+            "Error: Please sign in to view available models."
+        );
+    }
+
+    #[test]
+    fn codex_catalog_only_includes_visible_model_slugs() {
+        let catalog = r#"{"models":[
+            {"slug":"gpt-current","visibility":"list"},
+            {"slug":"gpt-hidden","visibility":"hide"},
+            {"slug":"gpt-current","visibility":"list"},
+            {"visibility":"list"}
+        ]}"#;
+        assert_eq!(parse_codex_catalog_models(catalog), ["gpt-current"]);
+        assert!(parse_codex_catalog_models("not json").is_empty());
+    }
+
+    #[test]
+    fn bridge_model_cache_replays_the_last_successful_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bridge-models.json");
+        let models = vec!["new-fast-model".to_string(), "new-smart-model".to_string()];
+
+        remember_bridge_models_at(&path, "agy-cli", &models, 1_000);
+
+        assert_eq!(
+            recall_bridge_models_at(&path, "agy-cli", 1_120),
+            Some((models, 120))
+        );
     }
 
     #[test]
