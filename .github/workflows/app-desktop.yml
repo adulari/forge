@@ -82,7 +82,9 @@ jobs:
           fi
 
   build:
-    name: build (${{ matrix.os }})
+    # `matrix.os` is a label ARRAY for the self-hosted linux leg, which renders as the literal
+    # "build (Array)" and makes the failing platform unidentifiable in the checks list.
+    name: build (${{ matrix.name }})
     needs: preflight
     strategy:
       fail-fast: false
@@ -237,25 +239,7 @@ jobs:
           # hard-codes `export GDK_BACKEND=x11`, which is why every AppImage user has launched
           # through XWayland while the direct binary runs native Wayland. See
           # scripts/ci/appimage-wayland-backend.sh for the evidence.
-          cat > "$plugin" <<'SH'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          appdir=""
-          previous=""
-          for argument in "$@"; do
-            [[ $previous == --appdir ]] && appdir="$argument"
-            [[ $argument == --appdir=* ]] && appdir="${argument#--appdir=}"
-            previous="$argument"
-          done
-          if [[ -n "$appdir" ]]; then
-            bash "${FORGE_APPIMAGE_BACKEND_FIX:?}" "$appdir"
-          else
-            echo 'appimage plugin invoked without --appdir; backend fix not applied' >&2
-            exit 1
-          fi
-          exec "${FORGE_LINUXDEPLOY_PLUGIN_ROOT:?}/AppRun" "$@"
-          SH
-          chmod 0755 "$plugin"
+          install -m 0755 "$GITHUB_WORKSPACE/scripts/ci/appimage-plugin-shim.sh" "$plugin"
           echo "FORGE_LINUXDEPLOY_PLUGIN_ROOT=$plugin_root" >> "$GITHUB_ENV"
           echo "FORGE_APPIMAGE_BACKEND_FIX=$GITHUB_WORKSPACE/scripts/ci/appimage-wayland-backend.sh" >> "$GITHUB_ENV"
 
