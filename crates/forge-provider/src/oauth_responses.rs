@@ -57,6 +57,10 @@ pub fn error_message(body: &str) -> String {
         if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
             return m.to_string();
         }
+        // The ChatGPT Codex backend reports request-shape rejections as a bare `detail`.
+        if let Some(m) = v.get("detail").and_then(|m| m.as_str()) {
+            return m.to_string();
+        }
     }
     let line = body.lines().next().unwrap_or(body).trim();
     if line.chars().count() > 200 {

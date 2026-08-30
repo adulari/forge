@@ -283,6 +283,83 @@ pub fn extract_chatgpt_plan_type(access_token: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Why a token refresh failed. Only [`Rejected`](TokenRefreshFailure::Rejected) means the stored
+/// credential is dead and the provider may be excluded; everything else is a transient upstream
+/// or transport condition that must not disable a working subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenRefreshFailure {
+    /// The authorization server rejected the refresh token itself (OAuth `invalid_grant` family:
+    /// 400/401/403). Re-authentication is genuinely required.
+    Rejected { status: u16, message: String },
+    /// Anything else — 429, 5xx, an unparseable body, a network/DNS/TLS error. The credential is
+    /// unproven, not dead.
+    Transient {
+        status: Option<u16>,
+        message: String,
+    },
+}
+
+impl TokenRefreshFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Rejected { message, .. } | Self::Transient { message, .. } => message,
+        }
+    }
+}
+
+impl std::fmt::Display for TokenRefreshFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected { status, message } => write!(f, "HTTP {status}: {message}"),
+            Self::Transient {
+                status: Some(status),
+                message,
+            } => write!(f, "HTTP {status}: {message}"),
+            Self::Transient {
+                status: None,
+                message,
+            } => write!(f, "{message}"),
+        }
+    }
+}
+
+/// Classify a non-2xx token-endpoint response. Reports the upstream status and message verbatim so
+/// the caller can surface the real cause instead of a bare "auth failed".
+pub fn classify_token_refresh_failure(status: u16, body: &str) -> TokenRefreshFailure {
+    let message = token_error_message(body);
+    match status {
+        400 | 401 | 403 => TokenRefreshFailure::Rejected { status, message },
+        _ => TokenRefreshFailure::Transient {
+            status: Some(status),
+            message,
+        },
+    }
+}
+
+/// `error — error_description` from an OAuth error body, else the body's first line (capped).
+fn token_error_message(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        let err = v.get("error").and_then(|x| x.as_str());
+        let desc = v
+            .get("error_description")
+            .and_then(|x| x.as_str())
+            .or_else(|| v.get("detail").and_then(|x| x.as_str()));
+        match (err, desc) {
+            (Some(e), Some(d)) => return format!("{e} — {d}"),
+            (Some(e), None) => return e.to_string(),
+            (None, Some(d)) => return d.to_string(),
+            (None, None) => {}
+        }
+    }
+    let line = body.lines().next().unwrap_or(body).trim();
+    if line.chars().count() > 200 {
+        let cut: String = line.chars().take(197).collect();
+        format!("{cut}…")
+    } else {
+        line.to_string()
+    }
+}
+
 /// Parse a ChatGPT / Codex OAuth token-endpoint JSON body into [`crate::oauth::OAuthTokens`].
 /// `now` is unix seconds for absolute `expires_at`.
 pub fn parse_codex_token_response(
@@ -335,6 +412,37 @@ pub fn parse_codex_token_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_rejection_is_distinguished_from_a_transient_failure() {
+        let rejected = classify_token_refresh_failure(
+            400,
+            r#"{"error":"invalid_grant","error_description":"token expired"}"#,
+        );
+        assert_eq!(
+            rejected,
+            TokenRefreshFailure::Rejected {
+                status: 400,
+                message: "invalid_grant — token expired".into()
+            }
+        );
+        assert!(matches!(
+            classify_token_refresh_failure(401, "{}"),
+            TokenRefreshFailure::Rejected { .. }
+        ));
+        for status in [429, 500, 502, 503] {
+            assert!(
+                matches!(
+                    classify_token_refresh_failure(status, "upstream busy"),
+                    TokenRefreshFailure::Transient { .. }
+                ),
+                "HTTP {status} is not proof of a dead credential"
+            );
+        }
+        assert!(classify_token_refresh_failure(503, "upstream busy")
+            .to_string()
+            .contains("upstream busy"));
+    }
 
     #[test]
     fn keyring_key_is_namespaced() {
