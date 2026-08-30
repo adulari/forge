@@ -13137,6 +13137,35 @@ mod tests {
         assert!(!health.is_benched("good::model"));
     }
 
+    #[tokio::test]
+    async fn permanent_capability_error_excludes_only_the_model_and_fails_over_to_its_sibling() {
+        // Modelled on the real incident: `groq::llama-3.3-70b-versatile` is listed by discovery
+        // but the account cannot call it, while its sibling on the same provider works. Named
+        // against a CLI bridge here so the fixture needs no API key.
+        let dead = "agy-cli::gemini-3.1-pro";
+        let sibling = "agy-cli::gemini-3.5-flash";
+        let provider = Arc::new(FlakyProvider {
+            bad: [dead.to_string()].into_iter().collect(),
+            err: |_| forge_provider::ProviderError::Capability("no tool support".into()),
+        });
+        let router = Arc::new(FixedRouter {
+            model: dead.into(),
+            fallbacks: vec![sibling.into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+
+        assert_eq!(session.run_turn("hi").await.unwrap(), "recovered");
+
+        let report = store.current_benched_report().unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].0, dead);
+        assert!(report[0].2.starts_with("excluded:"));
+
+        let health = store.current_benched().unwrap();
+        assert!(health.is_benched(dead));
+        assert!(!health.is_benched(sibling));
+    }
+
     /// Concurrent turns against one provider fail together within the same second. That burst must
     /// not corroborate itself into a provider-wide exclusion — normal parallel use of Forge would
     /// otherwise disable its own best subscription within minutes, which is exactly what happened.

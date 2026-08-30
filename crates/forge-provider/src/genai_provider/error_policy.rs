@@ -96,6 +96,12 @@ pub(super) fn classify_error_body(body: &serde_json::Value) -> Option<ProviderEr
     if is_capability_failure(&raw) {
         return Some(ProviderError::Capability(short(&msg)));
     }
+    // Same precedence on the structured stream-error path: groq's `code` here is the STRING
+    // `model_not_found`, which `json_status_code` can't read and no code/type branch below claims,
+    // so without this the body fell through to text scanning and came back `Unavailable`.
+    if is_model_access_failure(&raw) {
+        return Some(ProviderError::NoModelAccess(short(&msg)));
+    }
     // 1. Numeric HTTP code — delegate to the shared status classifier (handles 402/429/401/5xx/…).
     if let Some(code) = err.get("code").and_then(json_status_code) {
         return Some(classify_status(
@@ -309,6 +315,43 @@ pub(super) fn is_capability_failure(text: &str) -> bool {
     })
 }
 
+/// Markers of a model this ACCOUNT cannot call: the id was never valid, was decommissioned, or is
+/// gated behind a tier this key doesn't have. Distinct from [`is_capability_failure`] — the model
+/// isn't refusing our payload, it simply isn't reachable on this key — and from a rate limit,
+/// which clears on its own.
+///
+/// The live defect this exists for: groq answers a decommissioned id with HTTP 404 and
+/// `{"error":{"message":"The model \`llama-3.3-70b-versatile\` does not exist or you do not have
+/// access to it.","code":"model_not_found"}}`. No marker below matched, no capability marker
+/// matched, and 404 fell through [`classify_status`]'s catch-all to [`ProviderError::Request`] —
+/// which is neither retryable nor benched, so nothing was ever written to `model_health` and the
+/// mesh went on selecting the model on every subsequent turn.
+///
+/// Deliberately narrow: each marker names a MODEL, so a mistyped base URL or an unrelated 404 on
+/// some other route is not read as a dead model and does not exclude one.
+pub(super) fn is_model_access_failure(text: &str) -> bool {
+    let l = text.to_lowercase();
+    const MARKERS: &[&str] = &[
+        // The OpenAI-compatible `model_not_found` body (groq, openai, together, fireworks, …).
+        "does not exist or you do not have access",
+        "does not exist or you don't have access",
+        "model_not_found",
+        "model not found",
+        "model does not exist",
+        "no such model",
+        "unknown model",
+        // OpenRouter rejects an unrecognised id with "<id> is not a valid model ID".
+        "is not a valid model",
+        "invalid model id",
+    ];
+    if MARKERS.iter().any(|m| l.contains(m)) {
+        return true;
+    }
+    // Anthropic's typed 404 (`"type": "not_found_error"`) carries no prose marker of its own, so it
+    // only counts when the body actually names a model.
+    l.contains("not_found_error") && l.contains("model")
+}
+
 /// Classify from an HTTP status code. `body` is the raw provider response (inspected for
 /// capability markers that a generic 400/404 status hides); `message` is the shortened display
 /// string for the UI.
@@ -344,6 +387,13 @@ pub(super) fn classify_status(
         || is_capability_failure(&message)
     {
         return ProviderError::Capability(message);
+    }
+    // A model this account cannot call, whatever status the provider chose to hang it on (groq and
+    // OpenAI use 404, some gateways 400, some 403). Checked before the status table below, which
+    // would otherwise file 404 under the never-benched `Request` catch-all and 403 under a
+    // provider-wide `Auth` exclusion — the credential is fine, only this model id is dead.
+    if is_model_access_failure(body) || is_model_access_failure(&message) {
+        return ProviderError::NoModelAccess(message);
     }
     match code {
         429 => ProviderError::RateLimited {
@@ -384,6 +434,8 @@ pub(super) fn classify_text(text: &str, message: String) -> ProviderError {
     // bug that benched-and-retried dead models forever).
     if is_capability_failure(text) {
         ProviderError::Capability(message)
+    } else if is_model_access_failure(text) {
+        ProviderError::NoModelAccess(message)
     } else if has("429") || has("resource_exhausted") || has("rate limit") || has("quota") {
         ProviderError::RateLimited {
             message,
