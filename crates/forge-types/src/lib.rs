@@ -1098,9 +1098,17 @@ impl SubscriptionQuota {
             .unwrap_or(QuotaStatus::Ok)
     }
 
-    /// Fraction of the strictest window consumed for a provider (0.0 when unknown).
+    /// Fraction of the strictest window consumed for routing. Unknown observations deliberately
+    /// default to zero pressure: routing must remain available until a provider emits a fresh
+    /// server observation. Display code must use [`Self::observed_fraction_for`] instead.
     pub fn fraction_for(&self, provider: &str) -> f64 {
         self.fraction.get(provider).copied().unwrap_or(0.0)
+    }
+
+    /// Fraction of the strictest currently observed window, if a fresh observation exists.
+    /// Unlike [`Self::fraction_for`], this preserves absence for honest user-facing displays.
+    pub fn observed_fraction_for(&self, provider: &str) -> Option<f64> {
+        self.fraction.get(provider).copied()
     }
 
     /// The pace projection for a provider, if one was attached and there was enough quota

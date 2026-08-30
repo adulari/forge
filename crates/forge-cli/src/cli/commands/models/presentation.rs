@@ -43,7 +43,10 @@ pub(crate) fn mesh_overview(
         .models()
         .iter()
         .filter(|m| forge_mesh::catalog::is_subscription(m))
-        .map(|m| forge_mesh::catalog::provider_of(m))
+        .map(|m| match forge_mesh::catalog::provider_of(m) {
+            "codex-oauth" => "codex-cli",
+            provider => provider,
+        })
         .collect();
     subs.sort_unstable();
     subs.dedup();
@@ -51,6 +54,7 @@ pub(crate) fn mesh_overview(
         println!("  (no subscription bridges installed)");
     }
     for p in &subs {
+        let observed = quota.observed_fraction_for(p);
         let frac = quota.fraction_for(p);
         let plan = quota.plan_for(p);
         let plan = if plan.is_empty() { "?" } else { plan };
@@ -58,10 +62,12 @@ pub(crate) fn mesh_overview(
         let ps =
             forge_mesh::ModelCatalog::spread_probability(TaskTier::Standard, frac, plan, false);
         println!(
-            "  {:<11} {} {:>3.0}% · plan {plan} · {:?} · spread P(complex)={:.0}% P(standard)={:.0}%",
+            "  {:<11} {} {} · plan {plan} · {:?} · spread P(complex)={:.0}% P(standard)={:.0}%",
             p,
-            meter(frac),
-            frac * 100.0,
+            observed.map(meter).unwrap_or_else(|| "unknown".to_string()),
+            observed
+                .map(|f| format!("{:.0}%", f * 100.0))
+                .unwrap_or_else(|| "unknown".to_string()),
             quota.status_for(p),
             pc * 100.0,
             ps * 100.0,
@@ -94,7 +100,10 @@ pub(crate) fn mesh_overview_json(
         .models()
         .iter()
         .filter(|model| forge_mesh::catalog::is_subscription(model))
-        .map(|model| forge_mesh::catalog::provider_of(model))
+        .map(|model| match forge_mesh::catalog::provider_of(model) {
+            "codex-oauth" => "codex-cli",
+            provider => provider,
+        })
         .collect();
     providers.sort_unstable();
     providers.dedup();
@@ -102,11 +111,12 @@ pub(crate) fn mesh_overview_json(
     let subscriptions: Vec<_> = providers
         .into_iter()
         .map(|provider| {
+            let observed_fraction = quota.observed_fraction_for(provider);
             let fraction = quota.fraction_for(provider);
             let plan = quota.plan_for(provider);
             serde_json::json!({
                 "provider": provider,
-                "fraction": fraction,
+                "fraction": observed_fraction,
                 "plan": plan,
                 "status": format!("{:?}", quota.status_for(provider)),
                 "complex_spread_probability": forge_mesh::ModelCatalog::spread_probability(
@@ -175,10 +185,14 @@ pub(crate) fn print_mesh_explanation(e: &forge_mesh::RoutingExplanation) {
         for q in &e.quota {
             let plan = if q.plan.is_empty() { "?" } else { &q.plan };
             println!(
-                "  {:<11} {} {:>3.0}% · plan {plan} · {:?} · spread P={:.0}%{}",
+                "  {:<11} {} {} · plan {plan} · {:?} · spread P={:.0}%{}",
                 q.provider,
-                meter(q.fraction),
-                q.fraction * 100.0,
+                q.fraction
+                    .map(meter)
+                    .unwrap_or_else(|| "unknown".to_string()),
+                q.fraction
+                    .map(|fraction| format!("{:.0}%", fraction * 100.0))
+                    .unwrap_or_else(|| "unknown".to_string()),
                 q.status,
                 q.spread_probability * 100.0,
                 pace_suffix(q.projected_fraction_at_reset, q.exhaustion_warning),
@@ -307,6 +321,7 @@ pub(crate) fn mesh_explanation_json(e: &forge_mesh::RoutingExplanation) -> Strin
 #[cfg(test)]
 mod tests {
     use super::{mesh_explanation_json, meter, pace_suffix};
+    use forge_mesh::ProviderQuotaView;
 
     fn explanation() -> forge_mesh::RoutingExplanation {
         forge_mesh::RoutingExplanation {
@@ -331,6 +346,23 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&mesh_explanation_json(&explanation()))
             .expect("valid explanation JSON");
         assert_eq!(value["classifier"], "heuristic fallback");
+    }
+
+    #[test]
+    fn explanation_json_preserves_an_unknown_quota_fraction_as_null() {
+        let mut explanation = explanation();
+        explanation.quota.push(ProviderQuotaView {
+            provider: "claude-cli".into(),
+            status: forge_types::QuotaStatus::Ok,
+            fraction: None,
+            plan: String::new(),
+            spread_probability: 0.0,
+            projected_fraction_at_reset: None,
+            exhaustion_warning: false,
+        });
+        let value: serde_json::Value = serde_json::from_str(&mesh_explanation_json(&explanation))
+            .expect("valid explanation JSON");
+        assert!(value["quota"][0]["fraction"].is_null());
     }
 
     #[test]

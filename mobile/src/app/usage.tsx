@@ -22,8 +22,9 @@ const kindTone = (kind: string) => kind === "api" ? "neutral" : "success";
 // Quota window names on the wire -> the prototype's short mono labels.
 const WINDOW_LABEL: Record<string, string> = { five_hour: "5h", weekly: "week", secondary: "2nd" };
 const resetLabel = (resetsAt: number | null) => resetsAt == null ? null : `resets ${new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date(resetsAt * 1000))}`;
+const observationLabel = (updatedAt: number | undefined, nowSec: number) => updatedAt == null ? null : `as of ${formatDurationShort(nowSec - updatedAt)} ago`;
 
-type QuotaRow = { kind: string; windowKind: string; status: string; fraction: number | null; resetsAt: number | null };
+type QuotaRow = { kind: string; windowKind: string; status: string; fraction: number | null; resetsAt: number | null; updatedAt?: number };
 
 // Fixed window durations for the two quota kinds the wire actually sends (api.ts UsageQuota;
 // "secondary" has no known fixed length, so it's excluded from pace projection).
@@ -93,7 +94,7 @@ const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: {
       {item.quotas.map((quota) => {
         const pct = quota.fraction == null ? null : Math.round(quota.fraction * 100);
         const barColor = quota.status === "exhausted" ? tokens.danger : quota.status === "warning" ? tokens.warn : tokens.accent;
-        const right = [pct == null ? "—" : `${pct}%`, resetLabel(quota.resetsAt)].filter(Boolean).join(" · ");
+        const right = [pct == null ? "—" : `${pct}%`, resetLabel(quota.resetsAt), observationLabel(quota.updatedAt, nowSec)].filter(Boolean).join(" · ");
         const pace = paceAnnotation(quota, nowSec);
         return (
           <View key={quota.windowKind}>

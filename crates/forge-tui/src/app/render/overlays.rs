@@ -350,12 +350,17 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             format!("  {:<11} ", q.provider),
             Style::default(),
         )];
-        spans.extend(mesh_meter(q.fraction, ease, &q.status));
         let plan = if q.plan.is_empty() { "?" } else { &q.plan };
+        let usage = q
+            .fraction
+            .map(|fraction| {
+                spans.extend(mesh_meter(fraction, ease, &q.status));
+                format!(" {:.0}%", fraction * 100.0 * ease as f64)
+            })
+            .unwrap_or_else(|| " unknown".to_string());
         spans.push(Span::styled(
             format!(
-                " {:>3.0}% · {plan} · {} · spread {:.0}%{}",
-                q.fraction * 100.0 * ease as f64,
+                "{usage} · {plan} · {} · spread {:.0}%{}",
                 q.status,
                 q.spread_complex * 100.0,
                 mesh_pace_suffix(q.projected_fraction_at_reset, q.exhaustion_warning),

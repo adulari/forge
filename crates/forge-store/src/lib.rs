@@ -395,6 +395,8 @@ pub struct SubscriptionWindow {
     pub status: String,
     pub resets_at: Option<i64>,
     pub fraction: Option<f64>,
+    /// Epoch seconds at which this quota observation was recorded.
+    pub updated_at: i64,
 }
 
 /// How the pool opens a fresh connection. `:memory:` makes a DISTINCT empty DB on every open, so an
@@ -491,6 +493,13 @@ const QUOTA_ALIAS_GROUPS: &[&[&str]] = &[&["codex-cli", "codex-oauth"]];
 
 /// Every provider `p` should be treated as equivalent to for quota purposes: the full alias group
 /// containing `p`, or just `[p]` when it isn't in any group (the common case — a no-op merge).
+pub(crate) fn canonical_quota_provider(provider: &str) -> &str {
+    match provider {
+        "codex-oauth" => "codex-cli",
+        provider => provider,
+    }
+}
+
 fn quota_alias_members(provider: &str) -> Vec<&str> {
     for group in QUOTA_ALIAS_GROUPS {
         if group.contains(&provider) {
@@ -500,10 +509,24 @@ fn quota_alias_members(provider: &str) -> Vec<&str> {
     vec![provider]
 }
 
-/// Codex OAuth and the Codex CLI spend the same ChatGPT subscription outside Forge as well as
-/// inside it. Their usage snapshots therefore expire quickly; retaining an old high-water mark
-/// would incorrectly make the mesh avoid both surfaces. Other providers retain their existing
-/// reset-window semantics.
+/// A quota observation is useful only while the window it describes can still be active. Unknown
+/// window names are retained briefly for forward compatibility, then discarded as dead kinds.
+fn quota_observation_is_current(provider: &str, window: &str, updated_at: i64, now: i64) -> bool {
+    let window_age = match window {
+        "five_hour" => 5 * 60 * 60,
+        "weekly" => 7 * 24 * 60 * 60,
+        _ => 30 * 24 * 60 * 60,
+    };
+    let freshness = if matches!(provider, "codex-oauth" | "codex-cli") {
+        window_age.min(forge_types::CODEX_QUOTA_FRESHNESS_SECS)
+    } else {
+        window_age
+    };
+    now.saturating_sub(updated_at) <= freshness
+}
+
+/// Codex's shared account can also be consumed outside Forge, so plan observations need a
+/// shorter source-freshness gate than their rolling-window lifetime.
 fn codex_quota_is_fresh(provider: &str, updated_at: i64, now: i64) -> bool {
     !matches!(provider, "codex-oauth" | "codex-cli")
         || now.saturating_sub(updated_at) <= forge_types::CODEX_QUOTA_FRESHNESS_SECS
@@ -4158,6 +4181,101 @@ mod tests {
         assert!((quota.fraction_for("codex-cli") - 0.25).abs() < 1e-9);
         assert!((quota.fraction_for("codex-oauth") - 0.25).abs() < 1e-9);
         assert!(!quota.is_pressured("codex-cli"));
+    }
+
+    #[test]
+    fn quota_observations_expire_with_their_window_and_dead_kinds_are_pruned() {
+        let store = Store::open_in_memory().unwrap();
+        let now = 3_000_000;
+        for (provider, window, updated_at, fraction) in [
+            ("claude-cli", "five_hour", now - 5 * 60 * 60 - 1, Some(0.7)),
+            (
+                "claude-cli",
+                "weekly",
+                now - 7 * 24 * 60 * 60 - 1,
+                Some(0.4),
+            ),
+            (
+                "codex-oauth",
+                "secondary",
+                now - 30 * 24 * 60 * 60 - 1,
+                Some(0.0),
+            ),
+            ("unknown-cli", "five_hour", now, None),
+        ] {
+            store
+                .record_quota_at(
+                    &forge_types::QuotaHint {
+                        provider: provider.into(),
+                        window: window.into(),
+                        status: forge_types::QuotaStatus::Warning,
+                        resets_at: None,
+                        fraction_used: fraction,
+                    },
+                    updated_at,
+                )
+                .unwrap();
+        }
+
+        let quota = store.quota_at(now).unwrap();
+        assert_eq!(
+            quota.fraction_for("claude-cli"),
+            0.0,
+            "expired observations apply no routing pressure"
+        );
+        assert_eq!(
+            quota.observed_fraction_for("claude-cli"),
+            None,
+            "expired observations remain absent for display"
+        );
+        let remaining: i64 = store
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM subscription_usage", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            remaining, 1,
+            "expired and dead windows are removed from the snapshot table"
+        );
+    }
+
+    #[test]
+    fn subscription_windows_keep_open_weekly_observations_with_their_age() {
+        let store = Store::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let hint = |provider: &str, window: &str, fraction| forge_types::QuotaHint {
+            provider: provider.into(),
+            window: window.into(),
+            status: forge_types::QuotaStatus::Ok,
+            resets_at: None,
+            fraction_used: Some(fraction),
+        };
+        store
+            .record_quota_at(&hint("claude-cli", "weekly", 0.36), now - 33 * 60 * 60)
+            .unwrap();
+        store
+            .record_quota_at(&hint("codex-oauth", "five_hour", 0.32), now)
+            .unwrap();
+        store
+            .record_quota_at(
+                &hint("codex-cli", "secondary", 0.0),
+                now - 31 * 24 * 60 * 60,
+            )
+            .unwrap();
+
+        let windows = store.subscription_windows().unwrap();
+        assert!(windows.iter().any(|window| {
+            window.provider == "claude-cli"
+                && window.window_kind == "weekly"
+                && window.fraction == Some(0.36)
+                && window.updated_at == now - 33 * 60 * 60
+        }));
+        assert!(windows.iter().any(|window| window.provider == "codex-cli"));
+        assert!(!windows
+            .iter()
+            .any(|window| window.window_kind == "secondary"));
     }
 
     #[test]

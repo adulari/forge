@@ -31,7 +31,8 @@ pub struct CandidateRow {
 pub struct ProviderQuotaView {
     pub provider: String,
     pub status: QuotaStatus,
-    pub fraction: f64,
+    /// Freshly observed usage fraction, absent when no current observation exists.
+    pub fraction: Option<f64>,
     pub plan: String,
     /// Probability a task of this tier spreads OFF this subscription (the conservation pull).
     /// Pace-projected (mesh-routing.md) — fed `effective_fraction_for`, matching what real
@@ -274,7 +275,10 @@ impl HeuristicRouter {
                     .models()
                     .iter()
                     .filter(|m| catalog::is_subscription(m))
-                    .map(|m| catalog::provider_of(m).to_string())
+                    .map(|m| match catalog::provider_of(m) {
+                        "codex-oauth" => "codex-cli".to_string(),
+                        provider => provider.to_string(),
+                    })
                     .collect();
                 v.sort();
                 v.dedup();
@@ -285,7 +289,7 @@ impl HeuristicRouter {
         let quota_views = sub_providers
             .into_iter()
             .map(|p| {
-                let fraction = quota.fraction_for(&p);
+                let fraction = quota.observed_fraction_for(&p);
                 let plan = quota.plan_for(&p).to_string();
                 let pace = quota.pace_for(&p);
                 ProviderQuotaView {
