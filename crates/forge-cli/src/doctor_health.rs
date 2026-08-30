@@ -2,6 +2,120 @@
 
 use crate::doctor::{check, short, Check, Status};
 
+/// Report the state that decides whether the mesh can select each configured provider. Live
+/// discovery is deliberately passed in separately: it is supporting evidence, while this line is
+/// the provider's routing verdict.
+pub(crate) fn provider_routing_checks(reachability: &[Check]) -> Vec<Check> {
+    let Some(path) = crate::doctor::doctor_store_path() else {
+        return Vec::new();
+    };
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(store) = forge_store::Store::open(&path) else {
+        return Vec::new();
+    };
+
+    let excluded = store.current_excluded_providers().unwrap_or_default();
+    let quota = store.current_quota().unwrap_or_default();
+    provider_routing_report(reachability, &excluded, &quota)
+}
+
+fn configured_routing_providers() -> std::collections::BTreeSet<String> {
+    let config = forge_config::load().ok();
+    let mut providers = std::collections::BTreeSet::new();
+    providers.extend(
+        forge_config::known_key_providers()
+            .filter(|provider| forge_config::has_api_key(provider))
+            .map(str::to_string),
+    );
+    providers.extend(
+        forge_provider::CliKind::all()
+            .into_iter()
+            .filter(|kind| kind.available())
+            .map(|kind| kind.prefix().to_string()),
+    );
+    if let Some(config) = config {
+        providers.extend(config.mesh.subscriptions.into_keys());
+    }
+    providers
+}
+
+fn provider_routing_report(
+    reachability: &[Check],
+    excluded: &[(String, i64, String)],
+    quota: &forge_types::SubscriptionQuota,
+) -> Vec<Check> {
+    let mut providers = configured_routing_providers();
+    providers.extend(excluded.iter().map(|(provider, _, _)| provider.clone()));
+    providers.extend(quota.providers().map(str::to_string));
+    providers.extend(reachability.iter().filter_map(|check| {
+        check
+            .label
+            .strip_suffix(" reachability")
+            .map(str::to_string)
+    }));
+    providers
+        .into_iter()
+        .map(|provider| {
+            let excluded = excluded
+                .iter()
+                .find(|(name, _, _)| name == &provider)
+                .map(|(_, until, reason)| (*until, reason.as_str()));
+            let unreachable = reachability.iter().any(|check| {
+                check.label == format!("{provider} reachability") && check.status == Status::Fail
+            });
+            routing_check(
+                &provider,
+                excluded,
+                quota.status_for(&provider),
+                quota.observed_fraction_for(&provider),
+                unreachable,
+            )
+        })
+        .collect()
+}
+
+fn routing_check(
+    provider: &str,
+    excluded: Option<(i64, &str)>,
+    quota: forge_types::QuotaStatus,
+    fraction: Option<f64>,
+    unreachable: bool,
+) -> Check {
+    if let Some((until, reason)) = excluded {
+        check(
+            Status::Warn,
+            &format!("{provider} routing"),
+            format!(
+                "excluded — out of routing for {} ({})",
+                human_remaining(until),
+                short(reason)
+            ),
+            Some("re-verify with `forge models --probe`, or repair the provider credential"),
+        )
+    } else if quota == forge_types::QuotaStatus::Exhausted {
+        let fraction = fraction
+            .map(|fraction| format!(" ({:.0}% observed)", fraction * 100.0))
+            .unwrap_or_default();
+        check(
+            Status::Warn,
+            &format!("{provider} routing"),
+            format!("quota-exhausted{fraction} — mesh routes around it"),
+            Some("wait for the subscription window to reset or use another provider"),
+        )
+    } else if unreachable {
+        check(
+            Status::Warn,
+            &format!("{provider} routing"),
+            "unreachable — mesh cannot route to it",
+            Some("check the provider/network and run `forge doctor` again"),
+        )
+    } else {
+        check(Status::Ok, &format!("{provider} routing"), "usable", None)
+    }
+}
+
 /// Report what the mesh is currently refusing to route to, and why.
 ///
 /// A provider-wide exclusion was previously invisible: it appeared in no doctor section, no mesh
@@ -266,6 +380,53 @@ mod tests {
     /// `forge doctor` is the command people actually run when Forge feels wrong. A subscription
     /// that has silently vanished from routing must appear there, with its reason and how long it
     /// stays gone — the whole reason this defect cost a day was that nothing said so anywhere.
+    #[test]
+    fn excluded_but_reachable_provider_is_not_reported_healthy() {
+        let until = chrono::Utc::now().timestamp() + 20 * 60;
+        let reachability = vec![check(
+            Status::Ok,
+            "opencode_go reachability",
+            "33 models",
+            None,
+        )];
+        let rows = provider_routing_report(
+            &reachability,
+            &[(
+                "opencode_go".to_string(),
+                until,
+                "excluded: provider auth failed".to_string(),
+            )],
+            &forge_types::SubscriptionQuota::default(),
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.label == "opencode_go routing")
+            .expect("excluded reachable provider gets a routing verdict");
+        assert_eq!(row.status, Status::Warn);
+        assert!(row.detail.contains("excluded"), "{}", row.detail);
+        assert!(!row.detail.contains("usable"), "{}", row.detail);
+    }
+
+    #[test]
+    fn exhausted_subscription_reports_observed_fraction() {
+        let quota = forge_types::SubscriptionQuota::new(std::collections::HashMap::from([(
+            "claude-cli".to_string(),
+            forge_types::QuotaStatus::Exhausted,
+        )]))
+        .with_fractions(std::collections::HashMap::from([(
+            "claude-cli".to_string(),
+            0.97,
+        )]));
+        let rows = provider_routing_report(&[], &[], &quota);
+        let row = rows
+            .iter()
+            .find(|row| row.label == "claude-cli routing")
+            .expect("quota-only provider gets a routing verdict");
+        assert_eq!(row.status, Status::Warn);
+        assert!(row.detail.contains("quota-exhausted"), "{}", row.detail);
+        assert!(row.detail.contains("97% observed"), "{}", row.detail);
+    }
+
     #[test]
     fn doctor_reports_an_excluded_provider_with_its_reason_and_expiry() {
         let until = chrono::Utc::now().timestamp() + 20 * 60;

@@ -1161,6 +1161,14 @@ impl SubscriptionQuota {
         self.plans.get(provider).map(String::as_str).unwrap_or("")
     }
 
+    /// Providers with a currently constraining or display-worthy quota observation.
+    pub fn providers(&self) -> impl Iterator<Item = &str> {
+        self.by_provider
+            .keys()
+            .chain(self.fraction.keys())
+            .map(String::as_str)
+    }
+
     /// Whether proactive conservation spreading is enabled.
     pub fn conserve_enabled(&self) -> bool {
         self.conserve
