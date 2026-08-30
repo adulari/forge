@@ -1788,6 +1788,7 @@ struct ClaudeStreamState {
 }
 
 mod cli_stream;
+mod error_policy;
 use cli_stream::*;
 
 #[async_trait]
@@ -2416,12 +2417,9 @@ fn classify_in_band_error_with_message(
             message: msg,
             retry_after: None,
         }
-    } else if lower.contains("auth")
-        || mentions_status_code(&lower, "401")
+    } else if mentions_status_code(&lower, "401")
         || mentions_status_code(&lower, "403")
-        || lower.contains("not logged in")
-        || lower.contains("login required")
-        || lower.contains("please log in")
+        || error_policy::is_auth_failure(&lower)
     {
         ProviderError::Auth(msg)
     } else if lower.contains("overload")
@@ -5447,6 +5445,21 @@ mod tests {
             classify_in_band_error("claude", "login required before continuing"),
             ProviderError::Auth(_)
         ));
+        // The bare substring "auth" is not evidence of an auth failure. These are the shapes that
+        // reached the classifier as stderr tails and turned an unrelated bridge failure into a
+        // permanent, provider-wide exclusion of a healthy subscription.
+        for benign in [
+            "oauth token refreshed for the next request",
+            "written by author: forge",
+            "no authority record for this host",
+            "warning: unsupported oauth scope hint ignored",
+        ] {
+            let classified = classify_in_band_error("claude", benign);
+            assert!(
+                !classified.is_permanent(),
+                "an incidental 'auth' substring must not exclude the provider: {benign:?} → {classified:?}"
+            );
+        }
         assert!(matches!(
             classify_in_band_error("claude", "weird unmapped thing"),
             ProviderError::Request(_)

@@ -12560,12 +12560,23 @@ mod tests {
         router: Arc<dyn Router>,
     ) -> (Arc<Store>, Session) {
         let store = Arc::new(Store::open_in_memory().unwrap());
+        let session = fixed_session_in(Arc::clone(&store), provider, router);
+        (store, session)
+    }
+
+    /// [`fixed_session`] against an EXISTING store, so several concurrent sessions can share the
+    /// health state they really share on one machine.
+    fn fixed_session_in(
+        store: Arc<Store>,
+        provider: Arc<dyn Provider>,
+        router: Arc<dyn Router>,
+    ) -> Session {
         // Disable the in-turn rate-limit WAIT by default so failover tests don't real-sleep on a
         // server `retry_after`; the wait path has its own test that re-enables it with a tiny reset.
         let mut config = Config::default();
         config.mesh.rate_limit_wait_secs = 0;
-        let session = Session::start(
-            Arc::clone(&store),
+        Session::start(
+            store,
             provider,
             router,
             ToolRegistry::with_core_tools_in(test_workspace()),
@@ -12573,8 +12584,7 @@ mod tests {
             config,
             test_workspace().to_str().expect("workspace path is UTF-8"),
         )
-        .unwrap();
-        (store, session)
+        .unwrap()
     }
 
     /// Panics if asked to complete — proves a code path makes NO provider call.
@@ -12920,8 +12930,14 @@ mod tests {
         );
     }
 
+    /// One auth-classified failure benches the MODEL, never the whole provider.
+    ///
+    /// The defect this pins: a claude-cli bridge that exited abnormally for an unrelated reason
+    /// printed something auth-shaped, and a single such turn wrote
+    /// `__forge_provider__::claude-cli` for 24 hours — benching an entire healthy subscription
+    /// that answered a pinned probe in four seconds while the exclusion was in force.
     #[tokio::test]
-    async fn auth_error_benches_the_entire_provider_before_failover() {
+    async fn one_auth_error_benches_only_the_model_not_the_whole_provider() {
         let provider = Arc::new(FlakyProvider {
             bad: ["agy-cli::gemini-3.1-pro".to_string()]
                 .into_iter()
@@ -12936,14 +12952,201 @@ mod tests {
         assert_eq!(session.run_turn("hi").await.unwrap(), "recovered");
         let health = store.current_benched().unwrap();
         assert!(health.is_benched("agy-cli::gemini-3.1-pro"));
+        assert!(
+            !health.is_benched("agy-cli::gemini-3.5-flash"),
+            "a sibling alias must stay routable until a repeat corroborates the auth verdict"
+        );
+        assert!(!health.is_benched("good::model"));
+        assert!(
+            store
+                .current_excluded_providers()
+                .unwrap()
+                .iter()
+                .all(|(p, _, _)| p != "agy-cli"),
+            "no provider-scope row may exist after a single failure"
+        );
+    }
+
+    /// The exclusion is a bounded bet, not a day-long sentence: `AUTH_EXCLUSION_SECS` (30 min).
+    #[tokio::test]
+    async fn an_auth_exclusion_expires_in_well_under_a_day() {
+        let provider = Arc::new(FlakyProvider {
+            bad: ["agy-cli::gemini-3.1-pro".to_string()]
+                .into_iter()
+                .collect(),
+            err: |_| forge_provider::ProviderError::Auth("login required".into()),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "agy-cli::gemini-3.1-pro".into(),
+            fallbacks: vec!["good::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.run_turn("hi").await.unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let report = store.current_benched_report().unwrap();
+        let (_, until, _) = report
+            .iter()
+            .find(|(m, _, _)| m == "agy-cli::gemini-3.1-pro")
+            .expect("the failing model is benched");
+        assert!(
+            *until - now <= 40 * 60,
+            "an auth exclusion must not outlive an hour, got {}s",
+            until - now
+        );
+    }
+
+    /// Concurrent sessions failing together are a BURST, and a burst never corroborates itself.
+    ///
+    /// The measured trigger: on 2026-08-30 the provider-wide exclusion of a healthy claude-cli
+    /// subscription fired seven times, every time within about a minute of several hosted sessions
+    /// starting against the same bridge (four of them at 11:59). Running Forge in parallel is
+    /// normal use, so no number of simultaneous auth-shaped failures may escalate scope — only a
+    /// failure separated in time from an earlier one, which is what the second half asserts.
+    #[tokio::test]
+    async fn a_burst_of_concurrent_auth_failures_never_escalates_to_provider_scope() {
+        let models = [
+            "agy-cli::gemini-3.1-pro",
+            "agy-cli::gemini-3.5-flash",
+            "agy-cli::gemini-3.5-pro",
+            "agy-cli::gemini-2.9-flash",
+        ];
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        for model in models {
+            let provider = Arc::new(FlakyProvider {
+                bad: [model.to_string()].into_iter().collect(),
+                err: |_| forge_provider::ProviderError::Auth("login required".into()),
+            });
+            let router = Arc::new(FixedRouter {
+                model: (*model).into(),
+                fallbacks: vec!["good::model".into()],
+            });
+            let mut session =
+                fixed_session_in(Arc::clone(&store), provider, router as Arc<dyn Router>);
+            assert_eq!(session.run_turn("hi").await.unwrap(), "recovered");
+        }
+        assert!(
+            store.current_excluded_providers().unwrap().is_empty(),
+            "{} concurrent failures are still one burst, not a repeat",
+            models.len()
+        );
+        let benched = store.current_benched_report().unwrap();
+        assert_eq!(
+            benched.len(),
+            models.len(),
+            "each failure benches its own model only: {benched:?}"
+        );
+
+        // Now age one of them past the gap and fail again: that IS a repeat, and it escalates.
+        let age = 600;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let (model, until, reason) = benched
+            .iter()
+            .find(|(m, _, _)| m == models[0])
+            .cloned()
+            .unwrap();
+        store
+            .bench_model_at(&model, until - age, &reason, now - age)
+            .unwrap();
+        let provider = Arc::new(FlakyProvider {
+            bad: [models[1].to_string()].into_iter().collect(),
+            err: |_| forge_provider::ProviderError::Auth("login required".into()),
+        });
+        let router = Arc::new(FixedRouter {
+            model: models[1].into(),
+            fallbacks: vec!["good::model".into()],
+        });
+        let mut session = fixed_session_in(Arc::clone(&store), provider, router as Arc<dyn Router>);
+        assert_eq!(session.run_turn("hi").await.unwrap(), "recovered");
+        assert_eq!(
+            store
+                .current_excluded_providers()
+                .unwrap()
+                .into_iter()
+                .map(|(p, _, _)| p)
+                .collect::<Vec<_>>(),
+            vec!["agy-cli".to_string()],
+            "a failure separated in time from an earlier one still escalates"
+        );
+    }
+
+    /// A second auth failure, separated in time from the first, IS corroboration — a genuinely
+    /// dead credential still stops sibling churn provider-wide.
+    #[tokio::test]
+    async fn a_corroborated_repeat_escalates_to_a_provider_wide_exclusion() {
+        let provider = Arc::new(FlakyProvider {
+            bad: ["agy-cli::gemini-3.1-pro".to_string()]
+                .into_iter()
+                .collect(),
+            err: |_| forge_provider::ProviderError::Auth("login required".into()),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "agy-cli::gemini-3.1-pro".into(),
+            fallbacks: vec!["good::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.run_turn("hi").await.unwrap();
+        // Age the first failure past the burst window so the second one reads as a repeat. The
+        // whole row shifts back, cooldown included: the store treats an auth row whose window is
+        // wider than one write can produce as a leftover from the superseded 24 h rule and ignores
+        // it, so backdating `updated_at` alone would erase the failure instead of ageing it.
+        let age = 600;
+        let (model, until, reason) = store
+            .current_benched_report()
+            .unwrap()
+            .into_iter()
+            .find(|(m, _, _)| m == "agy-cli::gemini-3.1-pro")
+            .expect("the first failure benched the model");
+        let old = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - age;
+        store
+            .bench_model_at(&model, until - age, &reason, old)
+            .unwrap();
+        session.run_turn("hi again").await.unwrap();
+        let health = store.current_benched().unwrap();
         assert!(health.is_benched("agy-cli::gemini-3.5-flash"));
         assert!(!health.is_benched("good::model"));
     }
 
+    /// Concurrent turns against one provider fail together within the same second. That burst must
+    /// not corroborate itself into a provider-wide exclusion — normal parallel use of Forge would
+    /// otherwise disable its own best subscription within minutes, which is exactly what happened.
     #[tokio::test]
-    async fn pinned_auth_error_still_benches_the_entire_provider() {
+    async fn a_burst_of_simultaneous_auth_failures_does_not_escalate() {
+        let provider = Arc::new(FlakyProvider {
+            bad: ["agy-cli::gemini-3.1-pro".to_string()]
+                .into_iter()
+                .collect(),
+            err: |_| forge_provider::ProviderError::Auth("login required".into()),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "agy-cli::gemini-3.1-pro".into(),
+            fallbacks: vec!["good::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+
+        for prompt in ["one", "two", "three", "four"] {
+            session.run_turn(prompt).await.unwrap();
+        }
+
+        assert!(
+            store.current_excluded_providers().unwrap().is_empty(),
+            "a same-second burst in one shared health store must never reach provider scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_auth_error_still_records_health_before_routing_on() {
         // A pin forbids changing models for this turn, but it must not prevent the durable
-        // provider-wide auth exclusion that protects every subsequent mesh route.
+        // auth record that protects every subsequent mesh route.
         let provider = Arc::new(FlakyProvider {
             bad: ["agy-cli::gemini-3.1-pro".to_string()]
                 .into_iter()
@@ -12957,15 +13160,14 @@ mod tests {
         let (store, mut session) = fixed_session(provider, router);
         // A dead credential is the one failure a strict pin may not hold against: every model on
         // that provider fails identically, so the turn routes on rather than dying. The durable
-        // provider-wide exclusion below is what this test exists to protect, and it is recorded
-        // BEFORE the pin policy runs, so failing over does not weaken it.
+        // exclusion below is what this test exists to protect, and it is recorded BEFORE the pin
+        // policy runs, so failing over does not weaken it.
         session
             .run_turn("hi")
             .await
             .expect("a dead credential routes on instead of failing the turn");
         let health = store.current_benched().unwrap();
         assert!(health.is_benched("agy-cli::gemini-3.1-pro"));
-        assert!(health.is_benched("agy-cli::gemini-3.5-flash"));
         assert!(!health.is_benched("good::model"));
     }
 

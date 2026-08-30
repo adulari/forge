@@ -2,6 +2,81 @@
 
 use crate::doctor::{check, short, Check, Status};
 
+/// Report what the mesh is currently refusing to route to, and why.
+///
+/// A provider-wide exclusion was previously invisible: it appeared in no doctor section, no mesh
+/// overview, no statusline, and nowhere on the phone. The only way to find one was to query
+/// `model_health` by hand — which is how a healthy claude-cli subscription stayed benched while
+/// every complex task piled onto a codex window that then ran out.
+///
+/// The provider rows are keyed `__forge_provider__::<name>`, so they are read through
+/// `current_excluded_providers` rather than by filtering model ids on a provider prefix — a filter
+/// like `claude-cli%` matches none of them.
+pub(crate) fn model_health_checks() -> Vec<Check> {
+    let Some(path) = crate::doctor::doctor_store_path() else {
+        return Vec::new();
+    };
+    if !path.exists() {
+        return Vec::new();
+    }
+    let store = match forge_store::Store::open(&path) {
+        Ok(store) => store,
+        // The store section already reports an unopenable store; don't duplicate the failure.
+        Err(_) => return Vec::new(),
+    };
+    let excluded = store.current_excluded_providers().unwrap_or_default();
+    let benched = store.current_benched_report().unwrap_or_default();
+    model_health_report(&excluded, benched.len())
+}
+
+/// Pure half of [`model_health_checks`], so the reporting is testable without a real store.
+fn model_health_report(excluded: &[(String, i64, String)], benched_rows: usize) -> Vec<Check> {
+    let mut out = Vec::new();
+    for (provider, until, reason) in excluded {
+        out.push(check(
+            Status::Warn,
+            "provider excluded",
+            format!(
+                "{provider} — every model is out of routing for {} ({})",
+                human_remaining(*until),
+                short(reason)
+            ),
+            Some("`forge models --probe` to re-verify it now, or `forge auth <provider>` if the credential really is dead"),
+        ));
+    }
+    let model_rows = benched_rows.saturating_sub(excluded.len());
+    if model_rows > 0 {
+        out.push(check(
+            Status::Info,
+            "models benched",
+            format!("{model_rows} model(s) currently out of routing"),
+            Some("`forge models --probe` to recheck them"),
+        ));
+    }
+    if out.is_empty() {
+        out.push(check(
+            Status::Ok,
+            "model health",
+            "no provider or model is benched",
+            None,
+        ));
+    }
+    out
+}
+
+/// A compact "12m" / "3h 20m" remaining, from an absolute epoch-second expiry.
+fn human_remaining(until_epoch: i64) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let secs = (until_epoch - now).max(0);
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 pub(crate) async fn daemon_fleet_check(port: u16) -> Check {
     // Prefer the live discovery record so LAN daemons are probed over HTTPS with their current
     // token. A stale/missing record is expected after a crash, so fall back to the persisted token
@@ -181,5 +256,62 @@ pub(crate) fn anywhere_checks() -> Vec<Check> {
             "enabled and enrolled, but the local daemon is offline",
             Some("`forge service start` (or `forge serve --local`) to start the connector supervisor"),
         )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `forge doctor` is the command people actually run when Forge feels wrong. A subscription
+    /// that has silently vanished from routing must appear there, with its reason and how long it
+    /// stays gone — the whole reason this defect cost a day was that nothing said so anywhere.
+    #[test]
+    fn doctor_reports_an_excluded_provider_with_its_reason_and_expiry() {
+        let until = chrono::Utc::now().timestamp() + 20 * 60;
+        let checks = model_health_report(
+            &[(
+                "claude-cli".to_string(),
+                until,
+                "excluded: provider auth failed: auth failed".to_string(),
+            )],
+            1,
+        );
+        let row = checks
+            .iter()
+            .find(|c| c.label == "provider excluded")
+            .expect("an excluded provider gets its own doctor line");
+        assert_eq!(row.status, Status::Warn);
+        assert!(row.detail.contains("claude-cli"), "{}", row.detail);
+        assert!(row.detail.contains("auth failed"), "{}", row.detail);
+        assert!(row.detail.contains("20m"), "{}", row.detail);
+        assert!(row.fix.as_deref().unwrap().contains("forge models --probe"));
+    }
+
+    #[test]
+    fn doctor_says_so_plainly_when_nothing_is_benched() {
+        let checks = model_health_report(&[], 0);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, Status::Ok);
+    }
+
+    #[test]
+    fn benched_model_rows_are_counted_separately_from_provider_rows() {
+        let until = chrono::Utc::now().timestamp() + 600;
+        let checks =
+            model_health_report(&[("groq".to_string(), until, "auth failed".to_string())], 3);
+        let models = checks
+            .iter()
+            .find(|c| c.label == "models benched")
+            .expect("the remaining model rows are still reported");
+        assert!(models.detail.starts_with("2 model(s)"), "{}", models.detail);
+    }
+
+    #[test]
+    fn human_remaining_never_goes_negative() {
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(human_remaining(now - 100), "0s");
+        assert_eq!(human_remaining(now + 125), "2m");
+        assert_eq!(human_remaining(now + 7200 + 60), "2h 1m");
     }
 }

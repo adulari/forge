@@ -561,12 +561,15 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
     let readiness = forge_core::readiness::ProviderReadiness::snapshot(&config, &store);
     let quota = readiness.quota;
     let health = readiness.health;
+    // A provider-wide exclusion silently removes every one of its aliases from the tables below;
+    // without this the output looks like the mesh simply never liked that subscription.
+    let excluded = store.current_excluded_providers().unwrap_or_default();
 
     if prompt.trim().is_empty() && !smoke {
         if json {
-            println!("{}", mesh_overview_json(&cat, &config, &quota));
+            println!("{}", mesh_overview_json(&cat, &config, &quota, &excluded));
         } else {
-            mesh_overview(&cat, &config, &quota);
+            mesh_overview(&cat, &config, &quota, &excluded);
         }
         return Ok(());
     }
@@ -645,9 +648,9 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
         }
     };
     if json {
-        println!("{}", mesh_explanation_json(&e));
+        println!("{}", mesh_explanation_json(&e, &excluded));
     } else {
-        print_mesh_explanation(&e);
+        print_mesh_explanation(&e, &excluded);
     }
     Ok(())
 }
@@ -686,6 +689,9 @@ pub(crate) fn seed_store_quota(
         None => store.record_quota(&hint),
     };
 }
+
+mod health;
+pub(crate) use health::retire_verified_provider_exclusions;
 
 mod presentation;
 pub(crate) use presentation::{

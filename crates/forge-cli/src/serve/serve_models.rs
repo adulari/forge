@@ -18,6 +18,11 @@ struct ModelsResponse {
 struct ModelProvider {
     provider: String,
     models: Vec<ModelRow>,
+    /// Set when the WHOLE provider is excluded from routing (a `__forge_provider__::<name>` health
+    /// row). Without it this page showed every alias of a benched subscription as healthy: the
+    /// bench map is keyed by model id, and the provider key matches no model id, so a lookup by
+    /// provider prefix silently omitted it.
+    excluded: Option<ModelHealth>,
 }
 
 #[derive(serde::Serialize)]
@@ -70,12 +75,27 @@ pub(super) async fn models_page(State(state): State<Arc<DaemonState>>) -> Respon
             })
             .collect();
         let context_windows = store.all_model_contexts().unwrap_or_default();
+        let excluded: HashMap<_, _> = store
+            .current_excluded_providers()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(provider, until_epoch, reason)| {
+                (
+                    provider,
+                    ModelHealth {
+                        until_epoch,
+                        reason,
+                    },
+                )
+            })
+            .collect();
         ModelsResponse {
             catalog: "available",
             providers: catalog
                 .by_provider(&pricing)
                 .into_iter()
                 .map(|provider| ModelProvider {
+                    excluded: excluded.get(&provider.provider).cloned(),
                     provider: provider.provider,
                     models: provider
                         .models

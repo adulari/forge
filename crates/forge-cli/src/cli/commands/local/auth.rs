@@ -7,13 +7,13 @@ use anyhow::{Context, Result};
 /// Undo the provider-wide auth bench a credential failure left behind, so a repaired credential
 /// takes effect on the very next turn.
 ///
-/// The first auth error writes a 24h `__forge_provider__::<provider>` exclusion row
+/// A corroborated auth failure writes a `__forge_provider__::<provider>` exclusion row
 /// ([`Store::exclude_provider`]) and `ModelHealth::is_benched` then drops every alias of that
-/// provider from routing AND from the failover chain. `ProviderError::Auth`'s own doc promises the
-/// exclusion "recovers automatically once the user fixes the key" via a periodic re-probe — but no
-/// such re-probe exists in the runtime, so the only thing that ever cleared it was the
-/// undiscoverable `forge models --probe`. Every successful credential write is therefore the place
-/// to clear it: the user's next action after `forge auth` is a turn, not a probe.
+/// provider from routing AND from the failover chain. The runtime now retires such a row on the
+/// next successful turn and re-probes it at session startup, but neither helps a user who has just
+/// fixed the credential and expects the very next turn to work. Every successful credential write
+/// is therefore still the place to clear it: the user's next action after `forge auth` is a turn,
+/// not a probe.
 ///
 /// Best-effort by design: a store that will not open must not fail a sign-in that already succeeded.
 fn clear_auth_exclusion(provider: &str) {
