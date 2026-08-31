@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# Keep CI reproducible: upgrading Rust is an explicit change that can absorb new
+# warn-by-default lints before they land on every open PR at once.
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]

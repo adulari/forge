@@ -365,6 +365,14 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   resume and render consistently in TUI, desktop, mobile, and headless output
 - A staged context pipeline: project guidance, relevant memories, Lattice retrieval, task/goal state,
   and recent transcript; automatic pruning/compaction keeps long sessions inside the model window
+- [Continual Harness (`/refine`)](docs/features/continual-harness.md): capture durable prompt, skill,
+  and subagent lessons from a session, apply them by scope, inspect the journal, and roll back any
+  refinement batch
+- [Side questions (`/btw` or `/side`)](docs/features/side-questions.md): ask a one-off background
+  question without adding it to the session transcript or changing the active task
+- [Session heartbeats (`/heartbeat`)](docs/features/session-heartbeats.md): queue recurring prompts
+  into a live session, preserving its context while keeping user-owned and agent-owned schedules
+  separate
 - Lattice code intelligence: tree-sitter symbol graph (19 languages), blast-radius, call-chains,
   semantic embeddings, auto-injected before each turn
 - Planning mode (`/plan` read-only → `/execute`); Architect mode (strong planner + cheap editor)
@@ -682,6 +690,9 @@ viewer (main chat + subagents + critics).
 | `/new` · `/resume [id]` · `/sessions` | Start fresh · resume · browse past sessions |
 | `/undo` · `/checkpoint [label]` · `/checkpoints` | Revert last turn · save · rewind to a checkpoint |
 | `/compact` · `/uncompact` | Summarize older context to free the window (also auto-triggers at 80% gauge) · undo it — restore the full transcript |
+| `/refine [instructions]` · `/refine status` · `/refine rollback <id>` | Capture durable session/project lessons, inspect the refinement journal, or reverse a prior batch |
+| `/btw <question>` · `/side <question>` | Ask a background side question without adding it to the session transcript |
+| `/heartbeat every <interval> <prompt>` · `/heartbeat [pause\|resume\|clear]` | Queue recurring prompts into this live session; inspect status with bare `/heartbeat` |
 | `/export [path]` | Export the session transcript as standalone HTML |
 | `/anywhere` | Manage the Forge Anywhere connector from inside a session |
 | `/workflow [<task>\|run <name>\|list]` | Author a workflow script for a task · run a saved one · list saved scripts |
