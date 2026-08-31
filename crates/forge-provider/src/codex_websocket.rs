@@ -50,7 +50,9 @@ pub fn is_websocket_model(model: &str) -> bool {
 /// True when the backend explicitly rejects a stale `previous_response_id`. This is deliberately
 /// narrower than generic request failures because callers may retry exactly once without the chain.
 pub(crate) fn is_stale_previous_response_error(error: &ProviderError) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
+    // The backend spells the rejection ``Invalid `previous_response_id`.`` — backticks and all —
+    // so match on a backtick-stripped message rather than the bare identifier.
+    let message = error.to_string().to_ascii_lowercase().replace('`', "");
     message.contains("previous_response_not_found")
         || (message.contains("previous response with id") && message.contains("not found"))
         || message.contains("invalid previous_response_id")
@@ -1205,6 +1207,12 @@ mod tests {
         assert!(is_stale_previous_response_error(&ProviderError::Request(
             "invalid previous_response_id".into()
         )));
+        assert!(
+            is_stale_previous_response_error(&ProviderError::Request(
+                "Invalid `previous_response_id`.".into()
+            )),
+            "the live backend backticks the field name"
+        );
         assert!(!is_stale_previous_response_error(&ProviderError::Request(
             "previous response payload invalid".into()
         )));
