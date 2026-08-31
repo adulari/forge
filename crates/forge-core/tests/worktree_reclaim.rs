@@ -238,6 +238,9 @@ fn survey_reports_size_and_sorts_the_worst_offender_first() {
 
     let report = worktree_reclaim::survey(&repo, &[]).unwrap();
     assert!(find(&report, &big).facts.size_bytes > 200_000);
+    assert!(find(&report, &big).facts.artifact_bytes >= 200_000);
+    assert!(find(&report, &small).facts.artifact_bytes >= 1_000);
+    assert!(report.artifact_bytes() >= 201_000);
     assert_eq!(
         report.candidates.first().map(|c| c.facts.path.clone()),
         Some(big.clone()),
@@ -245,6 +248,78 @@ fn survey_reports_size_and_sorts_the_worst_offender_first() {
     );
     assert!(report.reclaimable_bytes() > 200_000);
     assert!(report.total_bytes() >= report.reclaimable_bytes());
+
+    std::fs::remove_dir_all(repo.parent().unwrap()).ok();
+}
+
+#[test]
+fn artifacts_in_a_kept_worktree_are_prunable_without_touching_source() {
+    if !git_available() {
+        return;
+    }
+    let repo = init_repo("kept-artifacts");
+    let wt = add_worktree(&repo, "kept-artifacts");
+    std::fs::write(wt.join("wip.txt"), "keep me\n").unwrap();
+    std::fs::create_dir_all(wt.join("target/debug")).unwrap();
+    std::fs::write(wt.join("target/debug/blob"), vec![1u8; 4096]).unwrap();
+
+    let report = worktree_reclaim::survey_with_artifact_age(&repo, &[], 0).unwrap();
+    let candidate = find(&report, &wt);
+    assert_eq!(
+        candidate.verdict,
+        Verdict::Skip("uncommitted changes".into())
+    );
+    assert!(candidate.artifact_verdict.is_reclaim());
+
+    assert_eq!(
+        worktree_reclaim::prune_artifacts(&wt, &[], 0).unwrap(),
+        4096
+    );
+    assert!(!wt.join("target").exists());
+    assert_eq!(
+        std::fs::read_to_string(wt.join("wip.txt")).unwrap(),
+        "keep me\n"
+    );
+
+    std::fs::remove_dir_all(repo.parent().unwrap()).ok();
+}
+
+#[test]
+fn live_session_refuses_artifact_pruning() {
+    if !git_available() {
+        return;
+    }
+    let repo = init_repo("live-artifacts");
+    let wt = add_worktree(&repo, "live-artifacts");
+    std::fs::create_dir_all(wt.join("target")).unwrap();
+    std::fs::write(wt.join("target/blob"), vec![1u8; 4096]).unwrap();
+
+    let report =
+        worktree_reclaim::survey_with_artifact_age(&repo, std::slice::from_ref(&wt), 0).unwrap();
+    let candidate = find(&report, &wt);
+    assert_eq!(
+        candidate.artifact_verdict,
+        Verdict::Skip("a live session is using this worktree".into())
+    );
+    assert!(worktree_reclaim::prune_artifacts(&wt, std::slice::from_ref(&wt), 0).is_err());
+    assert!(wt.join("target/blob").exists());
+
+    std::fs::remove_dir_all(repo.parent().unwrap()).ok();
+}
+
+#[test]
+fn artifact_dry_run_observation_deletes_nothing() {
+    if !git_available() {
+        return;
+    }
+    let repo = init_repo("artifact-dry-run");
+    let wt = add_worktree(&repo, "artifact-dry-run");
+    std::fs::create_dir_all(wt.join("target")).unwrap();
+    std::fs::write(wt.join("target/blob"), vec![1u8; 4096]).unwrap();
+
+    let report = worktree_reclaim::survey_with_artifact_age(&repo, &[], 0).unwrap();
+    assert!(find(&report, &wt).artifact_verdict.is_reclaim());
+    assert!(wt.join("target/blob").exists());
 
     std::fs::remove_dir_all(repo.parent().unwrap()).ok();
 }
