@@ -444,6 +444,7 @@ pub(crate) async fn deliver_pending_fleet_messages(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendFleetMessageReq {
     text: String,
     #[serde(default)]
@@ -613,6 +614,7 @@ fn sort_session_rows(rows: &mut [SessionRow]) {
 
 /// Body of `POST /api/sessions`.
 #[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct CreateSessionReq {
     /// Working directory; defaults to the daemon's cwd.
     cwd: Option<String>,
@@ -1281,8 +1283,17 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
 /// `POST /api/sessions` starts a session.
 async fn create_session(
     State(state): State<Arc<DaemonState>>,
-    axum::Json(req): axum::Json<CreateSessionReq>,
+    request: Result<axum::Json<CreateSessionReq>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    let req = match request {
+        Ok(axum::Json(req)) => req,
+        Err(error) => {
+            return err_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                &format!("invalid create-session request: {}", error.body_text()),
+            );
+        }
+    };
     if state.registry.is_draining() {
         return err_response(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -1695,7 +1706,7 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
             resume: Some(id.clone()),
             ..Default::default()
         };
-        let response = create_session(State(state.clone()), axum::Json(request)).await;
+        let response = create_session(State(state.clone()), Ok(axum::Json(request))).await;
         let status = response.status();
         if status.is_success() {
             continue;
@@ -4040,19 +4051,36 @@ mod tests {
         });
         let router = daemon_router(state);
 
+        let unknown = router
+            .clone()
+            .oneshot(post_json_req(
+                "/api/sessions",
+                serde_json::json!({ "workspace": dir.path() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(json_body(unknown).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("workspace"));
+
         let explicit = router
             .clone()
             .oneshot(post_json_req(
                 "/api/sessions",
-                serde_json::json!({ "mode": "bypass", "title": "explicit" }),
+                serde_json::json!({
+                    "cwd": dir.path(),
+                    "permission_mode": "bypass",
+                    "title": "explicit"
+                }),
             ))
             .await
             .unwrap();
         assert_eq!(explicit.status(), axum::http::StatusCode::OK);
-        let explicit_id = json_body(explicit).await["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let explicit = json_body(explicit).await;
+        assert_eq!(explicit["cwd"], dir.path().display().to_string());
+        let explicit_id = explicit["id"].as_str().unwrap().to_string();
 
         let omitted = router
             .clone()
@@ -4063,7 +4091,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(omitted.status(), axum::http::StatusCode::OK);
-        let omitted_id = json_body(omitted).await["id"].as_str().unwrap().to_string();
+        let omitted = json_body(omitted).await;
+        assert_eq!(omitted["cwd"], dir.path().display().to_string());
+        let omitted_id = omitted["id"].as_str().unwrap().to_string();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
