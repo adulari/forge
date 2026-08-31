@@ -24,7 +24,7 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))
                  ON CONFLICT(provider, window_kind) DO UPDATE SET
                    status = excluded.status,
-                   resets_at = excluded.resets_at,
+                   resets_at = COALESCE(excluded.resets_at, subscription_usage.resets_at),
                    fraction = excluded.fraction,
                    updated_at = excluded.updated_at",
                 (
@@ -126,7 +126,7 @@ impl Store {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT(provider, window_kind) DO UPDATE SET
                        status = excluded.status,
-                       resets_at = excluded.resets_at,
+                       resets_at = COALESCE(excluded.resets_at, subscription_usage.resets_at),
                        fraction = excluded.fraction,
                        updated_at = excluded.updated_at
                      WHERE excluded.updated_at >= subscription_usage.updated_at",
@@ -269,7 +269,7 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(provider, window_kind) DO UPDATE SET
                    status = excluded.status,
-                   resets_at = excluded.resets_at,
+                   resets_at = COALESCE(excluded.resets_at, subscription_usage.resets_at),
                    fraction = excluded.fraction,
                    updated_at = excluded.updated_at
                  WHERE excluded.updated_at >= subscription_usage.updated_at",

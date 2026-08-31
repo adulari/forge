@@ -502,13 +502,6 @@ const QUOTA_ALIAS_GROUPS: &[&[&str]] = &[&["codex-cli", "codex-oauth"]];
 
 /// Every provider `p` should be treated as equivalent to for quota purposes: the full alias group
 /// containing `p`, or just `[p]` when it isn't in any group (the common case — a no-op merge).
-pub(crate) fn canonical_quota_provider(provider: &str) -> &str {
-    match provider {
-        "codex-oauth" => "codex-cli",
-        provider => provider,
-    }
-}
-
 fn quota_alias_members(provider: &str) -> Vec<&str> {
     for group in QUOTA_ALIAS_GROUPS {
         if group.contains(&provider) {
@@ -4284,10 +4277,40 @@ mod tests {
                 && window.fraction == Some(0.36)
                 && window.updated_at == now - 33 * 60 * 60
         }));
-        assert!(windows.iter().any(|window| window.provider == "codex-cli"));
+        assert!(windows
+            .iter()
+            .any(|window| window.provider == "codex-oauth"));
         assert!(!windows
             .iter()
             .any(|window| window.window_kind == "secondary"));
+    }
+
+    #[test]
+    fn quota_reset_survives_fraction_only_refresh() {
+        let store = Store::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let reset = now + 5 * 60 * 60;
+        let hint = |resets_at, fraction| forge_types::QuotaHint {
+            provider: "claude-cli".into(),
+            window: "five_hour".into(),
+            status: forge_types::QuotaStatus::Ok,
+            resets_at,
+            fraction_used: Some(fraction),
+        };
+        store
+            .record_quota_at(&hint(Some(reset), 0.14), now)
+            .unwrap();
+        store.record_quota_at(&hint(None, 0.17), now + 1).unwrap();
+
+        let window = store
+            .subscription_windows()
+            .unwrap()
+            .into_iter()
+            .find(|window| window.provider == "claude-cli" && window.window_kind == "five_hour")
+            .unwrap();
+        assert_eq!(window.resets_at, Some(reset));
+        assert_eq!(window.fraction, Some(0.17));
+        assert_eq!(window.updated_at, now + 1);
     }
 
     #[test]

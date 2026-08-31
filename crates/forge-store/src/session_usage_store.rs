@@ -747,8 +747,7 @@ impl Store {
         let mut latest =
             std::collections::HashMap::<(String, String), (SubscriptionWindow, i64)>::new();
         for row in rows {
-            let (mut window, updated_at) = row?;
-            window.provider = canonical_quota_provider(&window.provider).to_string();
+            let (window, updated_at) = row?;
             let key = (window.provider.clone(), window.window_kind.clone());
             if latest
                 .get(&key)

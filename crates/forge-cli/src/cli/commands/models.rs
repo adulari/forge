@@ -553,9 +553,16 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
         let limits = tokio::task::spawn_blocking(bridge_stats::probe_claude_limits)
             .await
             .unwrap_or_default();
-        for (window, frac) in limits {
+        for (window, frac, resets_at) in limits {
             // Live probe — its observation time genuinely is now.
-            seed_store_quota(&store, "claude-cli", &window, Some(frac * 100.0), None);
+            seed_store_quota_with_reset(
+                &store,
+                "claude-cli",
+                &window,
+                Some(frac * 100.0),
+                None,
+                resets_at,
+            );
         }
     }
     let readiness = forge_core::readiness::ProviderReadiness::snapshot(&config, &store);
@@ -661,12 +668,17 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
 /// `observed_at` is when the reading was actually OBSERVED (rollout line timestamp / file mtime)
 /// — pass it for cache-derived readings so a re-seeded old observation can't mask a fresher one
 /// (`Store::record_quota_at`'s stale guard). `None` means "observed now" (live probes).
-pub(crate) fn seed_store_quota(
+///
+/// `resets_at` is the window's reset instant when the source reports one (Claude's
+/// `anthropic-ratelimit-unified-*-reset` headers). Without it the row can never be displayed or
+/// paced against.
+pub(crate) fn seed_store_quota_with_reset(
     store: &Store,
     provider: &str,
     window: &str,
     pct: Option<f64>,
     observed_at: Option<i64>,
+    resets_at: Option<i64>,
 ) {
     let Some(pct) = pct else { return };
     let frac = (pct / 100.0).clamp(0.0, 1.0);
@@ -675,7 +687,7 @@ pub(crate) fn seed_store_quota(
         provider: provider.to_string(),
         window: window.to_string(),
         status,
-        resets_at: None,
+        resets_at,
         fraction_used: Some(frac),
     };
     let _ = match observed_at {

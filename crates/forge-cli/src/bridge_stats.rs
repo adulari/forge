@@ -98,9 +98,9 @@ fn probe_command() -> std::process::Command {
 /// response headers it logs. Unlike the stream-json `rate_limit_event` (which only reports the
 /// window near its limit), the headers always carry both the 5-hour and 7-day windows — the same
 /// data Claude Code feeds its statusline. The only fresh source when the statusline cache is stale.
-/// Returns (window, fraction) pairs, e.g. `[("five_hour", 0.10), ("weekly", 0.81)]`. Best-effort:
-/// empty on failure. Costs one tiny Haiku turn, so callers should gate it on staleness.
-pub fn probe_claude_limits() -> Vec<(String, f64)> {
+/// Returns `(window, fraction, reset instant)` tuples. Best-effort: empty on failure. Costs one
+/// tiny Haiku turn, so callers should gate it on staleness.
+pub fn probe_claude_limits() -> Vec<(String, f64, Option<i64>)> {
     // Bound the probe: `claude --print` can stall on a cold network or an auth prompt. Run it on a
     // detached thread and wait at most PROBE_TIMEOUT for the result; on timeout return empty so the
     // (backgrounded) quota refresh completes instead of leaking a task blocked on a hung child. The
@@ -142,12 +142,24 @@ pub fn probe_claude_limits() -> Vec<(String, f64)> {
     let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stdout));
     let mut res = Vec::new();
-    for (hdr, window) in [
-        ("anthropic-ratelimit-unified-5h-utilization", "five_hour"),
-        ("anthropic-ratelimit-unified-7d-utilization", "weekly"),
+    for (utilization_header, reset_header, window) in [
+        (
+            "anthropic-ratelimit-unified-5h-utilization",
+            "anthropic-ratelimit-unified-5h-reset",
+            "five_hour",
+        ),
+        (
+            "anthropic-ratelimit-unified-7d-utilization",
+            "anthropic-ratelimit-unified-7d-reset",
+            "weekly",
+        ),
     ] {
-        if let Some(frac) = first_float_after(&text, hdr) {
-            res.push((window.to_string(), frac));
+        if let Some(frac) = first_float_after(&text, utilization_header) {
+            res.push((
+                window.to_string(),
+                frac,
+                first_reset_after(&text, reset_header),
+            ));
         }
     }
     res
@@ -176,6 +188,25 @@ fn first_float_after(text: &str, key: &str) -> Option<f64> {
         .find(|c: char| !(c.is_ascii_digit() || c == '.'))
         .unwrap_or(tail.len());
     tail[..end].parse().ok()
+}
+
+fn first_reset_after(text: &str, key: &str) -> Option<i64> {
+    let after = &text[text.find(key)? + key.len()..];
+    after
+        .split_whitespace()
+        .take(8)
+        .map(|token| token.trim_matches(|c: char| "\"',;[]{}()".contains(c)))
+        .find_map(|token| {
+            token
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value > 1_000_000_000)
+                .or_else(|| {
+                    chrono::DateTime::parse_from_rfc3339(token)
+                        .ok()
+                        .map(|timestamp| timestamp.timestamp())
+                })
+        })
 }
 
 pub fn fetch() -> BridgeStats {

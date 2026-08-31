@@ -333,8 +333,14 @@ pub(crate) async fn refresh_claude_quota(session: &std::sync::Arc<tokio::sync::M
         .unwrap_or_default();
     if !limits.is_empty() {
         let s = session.lock().await;
-        for (w, f) in limits {
-            s.seed_subscription_quota("claude-cli", &w, Some(f * 100.0));
+        for (w, f, resets_at) in limits {
+            s.seed_subscription_quota_with_reset(
+                "claude-cli",
+                &w,
+                Some(f * 100.0),
+                None,
+                resets_at,
+            );
         }
     }
 }
