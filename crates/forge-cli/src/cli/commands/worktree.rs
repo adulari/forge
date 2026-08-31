@@ -15,21 +15,33 @@ use crate::open_store;
 /// Below this fraction of free space, the report says so loudly instead of leaving the user to
 /// notice when a linker dies with a bus error.
 const LOW_FREE_FRACTION: f64 = 0.10;
+const DEFAULT_ARTIFACT_MIN_AGE_HOURS: u64 = 24;
 
 pub(crate) fn worktree_cmd(op: WorktreeOp) -> Result<()> {
     let repo_root = repo_root()?;
-    let report = survey(&repo_root)?;
+    let min_age_hours = match op {
+        WorktreeOp::List => DEFAULT_ARTIFACT_MIN_AGE_HOURS,
+        WorktreeOp::Reclaim {
+            artifact_min_age_hours,
+            ..
+        } => artifact_min_age_hours,
+    };
+    let report = survey(&repo_root, min_age_hours)?;
 
     match op {
         WorktreeOp::List => {
             print_list(&repo_root, &report);
             Ok(())
         }
-        WorktreeOp::Reclaim { yes } => reclaim(&repo_root, &report, yes),
+        WorktreeOp::Reclaim {
+            yes,
+            artifacts,
+            artifact_min_age_hours,
+        } => reclaim(&repo_root, &report, yes, artifacts, artifact_min_age_hours),
     }
 }
 
-fn survey(repo_root: &std::path::Path) -> Result<ReclaimReport> {
+fn live_paths() -> Vec<std::path::PathBuf> {
     // A store that won't open is not a reason to refuse the survey — but it IS a reason not to
     // delete anything, since "no live sessions" would then be an assumption rather than a fact.
     let mut live: Vec<std::path::PathBuf> = open_store()
@@ -40,7 +52,14 @@ fn survey(repo_root: &std::path::Path) -> Result<ReclaimReport> {
         .collect();
     // The worktree this command is being run from counts as in use, store or no store.
     live.extend(std::env::current_dir());
-    worktree_reclaim::survey(repo_root, &live).map_err(|e| anyhow::anyhow!("{e}"))
+    live
+}
+
+fn survey(repo_root: &std::path::Path, artifact_min_age_hours: u64) -> Result<ReclaimReport> {
+    let live = live_paths();
+    let min_age_secs = artifact_min_age_hours.saturating_mul(60 * 60);
+    worktree_reclaim::survey_with_artifact_age(repo_root, &live, min_age_secs)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn repo_root() -> Result<std::path::PathBuf> {
@@ -64,12 +83,16 @@ fn print_list(repo_root: &std::path::Path, report: &ReclaimReport) {
         return;
     }
 
-    println!("  {:>9}  {:>5}  {:<9}  PATH", "SIZE", "AGE", "STATE");
+    println!(
+        "  {:>9}  {:>9}  {:>5}  {:<9}  PATH",
+        "SOURCE", "ARTIFACTS", "AGE", "STATE"
+    );
     for candidate in &report.candidates {
         let f = &candidate.facts;
         println!(
-            "  {:>9}  {:>5}  {:<9}  {}{}",
-            human_bytes(f.size_bytes),
+            "  {:>9}  {:>9}  {:>5}  {:<9}  {}{}",
+            human_bytes(f.size_bytes.saturating_sub(f.artifact_bytes)),
+            human_bytes(f.artifact_bytes),
             human_age(f.age_secs),
             if candidate.verdict.is_reclaim() {
                 "reclaim"
@@ -83,7 +106,8 @@ fn print_list(repo_root: &std::path::Path, report: &ReclaimReport) {
                 .unwrap_or_default(),
         );
         println!(
-            "  {:>9}  {:>5}  {:<9}  ↳ {}{}{}",
+            "  {:>9}  {:>9}  {:>5}  {:<9}  ↳ {}{}{}; artifacts: {}",
+            "",
             "",
             "",
             "",
@@ -94,6 +118,7 @@ fn print_list(repo_root: &std::path::Path, report: &ReclaimReport) {
             } else {
                 ""
             },
+            candidate.artifact_verdict.reason(),
         );
     }
     println!();
@@ -103,10 +128,13 @@ fn print_list(repo_root: &std::path::Path, report: &ReclaimReport) {
 fn print_totals(repo_root: &std::path::Path, report: &ReclaimReport) {
     let total = report.total_bytes();
     let reclaimable = report.reclaimable_bytes();
+    let artifact_reclaimable = report.artifact_reclaimable_bytes();
     println!(
-        "  {} worktree(s), {} on disk, {} reclaimable",
+        "  {} worktree(s), {} on disk ({} artifacts, {} artifact-reclaimable), {} total reclaimable",
         report.candidates.len(),
         human_bytes(total),
+        human_bytes(report.artifact_bytes()),
+        human_bytes(artifact_reclaimable),
         human_bytes(reclaimable),
     );
     if let Some((free, capacity)) = free_space(repo_root) {
@@ -120,7 +148,7 @@ fn print_totals(repo_root: &std::path::Path, report: &ReclaimReport) {
         if fraction < LOW_FREE_FRACTION {
             println!("{line}");
             println!(
-                "  ⚠ LOW DISK — run `forge worktree reclaim --yes` to free {}",
+                "  ⚠ LOW DISK — run `forge worktree reclaim --artifacts --yes` to free {}",
                 human_bytes(reclaimable)
             );
         } else {
@@ -129,7 +157,13 @@ fn print_totals(repo_root: &std::path::Path, report: &ReclaimReport) {
     }
 }
 
-fn reclaim(repo_root: &std::path::Path, report: &ReclaimReport, apply: bool) -> Result<()> {
+fn reclaim(
+    repo_root: &std::path::Path,
+    report: &ReclaimReport,
+    apply: bool,
+    artifacts: bool,
+    artifact_min_age_hours: u64,
+) -> Result<()> {
     let targets: Vec<&Candidate> = report.reclaimable().collect();
     println!("⚒ worktree reclaim for {}\n", repo_root.display());
 
@@ -146,6 +180,25 @@ fn reclaim(repo_root: &std::path::Path, report: &ReclaimReport, apply: bool) -> 
         );
     }
 
+    let artifact_targets: Vec<&Candidate> = if artifacts {
+        report
+            .candidates
+            .iter()
+            .filter(|c| c.artifact_verdict.is_reclaim())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for candidate in &artifact_targets {
+        println!(
+            "  {} {:>9}  {}/target  ({})",
+            if apply { "pruned" } else { "would prune" },
+            human_bytes(candidate.facts.artifact_bytes),
+            candidate.facts.path.display(),
+            candidate.artifact_verdict.reason(),
+        );
+    }
+
     let mut freed = 0u64;
     let mut failures = 0usize;
     if apply {
@@ -155,6 +208,20 @@ fn reclaim(repo_root: &std::path::Path, report: &ReclaimReport, apply: bool) -> 
                 Err(e) => {
                     failures += 1;
                     println!("  ✗ {}: {e}", candidate.facts.path.display());
+                }
+            }
+        }
+        let live = live_paths();
+        let min_age_secs = artifact_min_age_hours.saturating_mul(60 * 60);
+        for candidate in &artifact_targets {
+            if candidate.verdict.is_reclaim() && !candidate.facts.path.exists() {
+                continue;
+            }
+            match worktree_reclaim::prune_artifacts(&candidate.facts.path, &live, min_age_secs) {
+                Ok(bytes) => freed = freed.saturating_add(bytes),
+                Err(e) => {
+                    failures += 1;
+                    println!("  ✗ {}/target: {e}", candidate.facts.path.display());
                 }
             }
         }
@@ -180,9 +247,18 @@ fn reclaim(repo_root: &std::path::Path, report: &ReclaimReport, apply: bool) -> 
             println!("  {failures} removal(s) failed — see above");
         }
     } else {
+        let artifact_only = artifact_targets
+            .iter()
+            .filter(|c| !c.verdict.is_reclaim())
+            .map(|c| c.facts.artifact_bytes);
+        let would_free = targets
+            .iter()
+            .map(|c| c.facts.size_bytes)
+            .chain(artifact_only)
+            .sum();
         println!(
             "  dry run — nothing was deleted. {} would be freed; pass --yes to do it",
-            human_bytes(report.reclaimable_bytes())
+            human_bytes(would_free)
         );
     }
     Ok(())
@@ -199,13 +275,15 @@ fn free_space(path: &std::path::Path) -> Option<(u64, u64)> {
 /// `None` when the current directory isn't a git repository (doctor then says nothing about it).
 pub(crate) fn doctor_summary() -> Option<crate::doctor::Check> {
     let repo_root = repo_root().ok()?;
-    let report = survey(&repo_root).ok()?;
+    let report = survey(&repo_root, DEFAULT_ARTIFACT_MIN_AGE_HOURS).ok()?;
     let total = report.total_bytes();
     let reclaimable = report.reclaimable_bytes();
     let detail = format!(
-        "{} worktree(s), {} on disk, {} reclaimable",
+        "{} worktree(s), {} on disk ({} artifacts, {} artifact-reclaimable), {} total reclaimable",
         report.candidates.len(),
         human_bytes(total),
+        human_bytes(report.artifact_bytes()),
+        human_bytes(report.artifact_reclaimable_bytes()),
         human_bytes(reclaimable),
     );
 
@@ -223,7 +301,7 @@ pub(crate) fn doctor_summary() -> Option<crate::doctor::Check> {
         crate::doctor::Status::Info
     };
     let fix = if reclaimable > 0 {
-        Some("`forge worktree reclaim` to preview, `--yes` to free it")
+        Some("`forge worktree reclaim --artifacts` to preview, add `--yes` to free it")
     } else {
         None
     };
@@ -248,6 +326,9 @@ mod tests {
             forge_owned: true,
             orphaned: false,
             size_bytes: size,
+            artifact_bytes: 0,
+            artifact_in_use: false,
+            artifact_age_secs: None,
             age_secs: Some(3_600),
         }
     }
@@ -258,12 +339,20 @@ mod tests {
             candidates: vec![Candidate {
                 facts: facts(1024),
                 verdict: Verdict::Reclaim("branch merged, working tree clean"),
+                artifact_verdict: Verdict::Skip("no build artifacts".into()),
             }],
         };
         assert_eq!(report.reclaimable_bytes(), 1024);
         // `apply = false` never reaches worktree_reclaim::remove — the path below would fail
         // loudly against /tmp/wt if it did.
-        reclaim(std::path::Path::new("/nonexistent-repo"), &report, false).unwrap();
+        reclaim(
+            std::path::Path::new("/nonexistent-repo"),
+            &report,
+            false,
+            false,
+            DEFAULT_ARTIFACT_MIN_AGE_HOURS,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -273,10 +362,12 @@ mod tests {
                 Candidate {
                     facts: facts(1000),
                     verdict: Verdict::Reclaim("branch merged, working tree clean"),
+                    artifact_verdict: Verdict::Skip("no build artifacts".into()),
                 },
                 Candidate {
                     facts: facts(500),
                     verdict: Verdict::Skip("uncommitted changes".into()),
+                    artifact_verdict: Verdict::Skip("no build artifacts".into()),
                 },
             ],
         };

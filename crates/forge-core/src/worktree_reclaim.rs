@@ -50,6 +50,12 @@ pub struct WorktreeFacts {
     pub orphaned: bool,
     /// Size on disk of the whole worktree, `target/` included.
     pub size_bytes: u64,
+    /// Size of the regenerable Cargo build artifacts under `target/`.
+    pub artifact_bytes: u64,
+    /// A process currently has its cwd or an open file below `target/`.
+    pub artifact_in_use: bool,
+    /// Seconds since anything under `target/` was modified.
+    pub artifact_age_secs: Option<u64>,
     /// Seconds since the worktree directory was last modified; `None` when it is gone.
     pub age_secs: Option<u64>,
 }
@@ -81,6 +87,7 @@ impl Verdict {
 pub struct Candidate {
     pub facts: WorktreeFacts,
     pub verdict: Verdict,
+    pub artifact_verdict: Verdict,
 }
 
 /// The whole picture: every worktree, its verdict, and the totals the user needs to see BEFORE the
@@ -98,8 +105,27 @@ impl ReclaimReport {
     pub fn reclaimable_bytes(&self) -> u64 {
         self.candidates
             .iter()
-            .filter(|c| c.verdict.is_reclaim())
-            .map(|c| c.facts.size_bytes)
+            .map(|c| {
+                if c.verdict.is_reclaim() {
+                    c.facts.size_bytes
+                } else if c.artifact_verdict.is_reclaim() {
+                    c.facts.artifact_bytes
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+
+    pub fn artifact_bytes(&self) -> u64 {
+        self.candidates.iter().map(|c| c.facts.artifact_bytes).sum()
+    }
+
+    pub fn artifact_reclaimable_bytes(&self) -> u64 {
+        self.candidates
+            .iter()
+            .filter(|c| c.artifact_verdict.is_reclaim())
+            .map(|c| c.facts.artifact_bytes)
             .sum()
     }
 
@@ -116,6 +142,14 @@ impl ReclaimReport {
 /// the worst offender is first. `live_paths` are the cwd / worktree paths of sessions that are
 /// currently alive; anything inside one of them is never reclaimed.
 pub fn survey(repo_root: &Path, live_paths: &[PathBuf]) -> Result<ReclaimReport, WorktreeError> {
+    survey_with_artifact_age(repo_root, live_paths, 7 * 24 * 60 * 60)
+}
+
+pub fn survey_with_artifact_age(
+    repo_root: &Path,
+    live_paths: &[PathBuf],
+    artifact_min_age_secs: u64,
+) -> Result<ReclaimReport, WorktreeError> {
     let main = canonical(repo_root);
     let default_branch = default_branch(repo_root);
     let owners = read_owners(repo_root);
@@ -138,7 +172,12 @@ pub fn survey(repo_root: &Path, live_paths: &[PathBuf]) -> Result<ReclaimReport,
                 live_paths,
             );
             let verdict = classify(&facts);
-            Candidate { facts, verdict }
+            let artifact_verdict = classify_artifacts(&facts, artifact_min_age_secs);
+            Candidate {
+                facts,
+                verdict,
+                artifact_verdict,
+            }
         })
         .collect();
 
@@ -150,6 +189,72 @@ pub fn survey(repo_root: &Path, live_paths: &[PathBuf]) -> Result<ReclaimReport,
     });
 
     Ok(ReclaimReport { candidates })
+}
+
+/// Build output has a separate lifecycle from its worktree. It is safe to regenerate even when
+/// source is dirty or unmerged, but only after an explicit quiet period and when no live session
+/// points into the worktree.
+pub fn classify_artifacts(f: &WorktreeFacts, min_age_secs: u64) -> Verdict {
+    if f.artifact_bytes == 0 {
+        return Verdict::Skip("no build artifacts".into());
+    }
+    if f.live {
+        return Verdict::Skip("a live session is using this worktree".into());
+    }
+    if f.artifact_in_use {
+        return Verdict::Skip("a build is using these artifacts".into());
+    }
+    let Some(age) = f.artifact_age_secs else {
+        return Verdict::Skip("artifact modification time is unavailable".into());
+    };
+    if age < min_age_secs {
+        return Verdict::Skip(format!(
+            "build artifacts are not stale ({} old, minimum {})",
+            human_age(Some(age)),
+            human_age(Some(min_age_secs))
+        ));
+    }
+    Verdict::Reclaim("stale build artifacts")
+}
+
+/// Delete only `target/`, after observing its size, latest modification, and live-session state
+/// again. The second observation matters because a dry-run report can sit on screen while a build
+/// starts; stale facts must never authorize a later deletion.
+pub fn prune_artifacts(
+    worktree: &Path,
+    live_paths: &[PathBuf],
+    min_age_secs: u64,
+) -> Result<u64, WorktreeError> {
+    let target = worktree.join("target");
+    let (bytes, age) = artifact_facts(&target);
+    let facts = WorktreeFacts {
+        path: worktree.to_path_buf(),
+        branch: None,
+        prunable: false,
+        merged: false,
+        dirty: false,
+        unpushed: false,
+        locked: false,
+        live: live_paths.iter().any(|p| is_within(p, worktree)),
+        forge_owned: false,
+        orphaned: false,
+        size_bytes: bytes,
+        artifact_bytes: bytes,
+        artifact_in_use: path_in_use(&target),
+        artifact_age_secs: age,
+        age_secs: modified_age_secs(worktree),
+    };
+    if let Verdict::Skip(reason) = classify_artifacts(&facts, min_age_secs) {
+        return Err(WorktreeError::NonZeroExit {
+            cmd: "reclaim artifacts".into(),
+            stderr: format!("refusing to prune {}: {reason}", target.display()),
+        });
+    }
+    std::fs::remove_dir_all(&target).map_err(|e| WorktreeError::NonZeroExit {
+        cmd: "reclaim artifacts".into(),
+        stderr: format!("removing {}: {e}", target.display()),
+    })?;
+    Ok(bytes)
 }
 
 /// Decide whether one worktree is provably safe to reclaim. The refusals come first on purpose:
@@ -443,6 +548,9 @@ fn facts_for(
         _ => false,
     };
 
+    let target = entry.path.join("target");
+    let (artifact_bytes, artifact_age_secs) = artifact_facts(&target);
+    let artifact_in_use = path_in_use(&target);
     WorktreeFacts {
         branch: entry.branch.clone(),
         prunable: entry.prunable || !exists,
@@ -454,6 +562,9 @@ fn facts_for(
         forge_owned,
         orphaned: owner.is_some_and(|o| !pid_alive(o.pid)),
         size_bytes: if exists { dir_size(&entry.path) } else { 0 },
+        artifact_bytes,
+        artifact_in_use,
+        artifact_age_secs,
         age_secs: modified_age_secs(&entry.path),
         path: entry.path.clone(),
     }
@@ -537,6 +648,85 @@ fn modified_age_secs(path: &Path) -> Option<u64> {
         .duration_since(modified)
         .ok()
         .map(|d| d.as_secs())
+}
+
+/// Measure artifacts and use the newest descendant mtime as the staleness signal. Looking only at
+/// `target/` itself is unsafe because modifying an existing file does not update its parent.
+fn artifact_facts(target: &Path) -> (u64, Option<u64>) {
+    if !target.is_dir() {
+        return (0, None);
+    }
+    let mut total = 0u64;
+    let mut newest = std::fs::metadata(target)
+        .ok()
+        .and_then(|m| m.modified().ok());
+    let mut stack = vec![target.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            // An unreadable subtree means the age evidence is incomplete, so refuse pruning.
+            return (total, None);
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                return (total, None);
+            };
+            if let Ok(modified) = meta.modified() {
+                newest = Some(newest.map_or(modified, |seen| seen.max(modified)));
+            } else {
+                return (total, None);
+            }
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    let age = newest.and_then(|modified| {
+        SystemTime::now()
+            .duration_since(modified)
+            .ok()
+            .map(|d| d.as_secs())
+    });
+    (total, age)
+}
+
+/// Cargo holds files and lockfiles open below `target/` while it builds. Linux exposes those
+/// references in procfs, giving us a direct in-use signal instead of trying to infer activity from
+/// size or process names. On platforms without procfs the conservative mtime gate still applies.
+fn path_in_use(path: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let root = canonical(path);
+        let Ok(processes) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        for process in processes.flatten().filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .bytes()
+                .all(|b| b.is_ascii_digit())
+        }) {
+            let proc_path = process.path();
+            if std::fs::read_link(proc_path.join("cwd"))
+                .ok()
+                .is_some_and(|p| is_within(&p, &root))
+            {
+                return true;
+            }
+            let Ok(fds) = std::fs::read_dir(proc_path.join("fd")) else {
+                continue;
+            };
+            if fds.flatten().any(|fd| {
+                std::fs::read_link(fd.path())
+                    .ok()
+                    .is_some_and(|p| is_within(&p, &root))
+            }) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Recursive size of a directory, `target/` included — the whole point of the measurement is that

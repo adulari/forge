@@ -1040,7 +1040,7 @@ pub(crate) enum ImportSource {
 
 #[derive(Subcommand)]
 pub(crate) enum WorktreeOp {
-    /// Every worktree with the facts needed to judge it — size (including `target/`), age, branch,
+    /// Every worktree with source and build-artifact sizes reported separately, age, branch, and
     /// merged/dirty/live state — worst offender first.
     List,
     /// Remove the worktrees that are provably safe: a stale registration, or a branch merged into
@@ -1050,6 +1050,12 @@ pub(crate) enum WorktreeOp {
         /// Actually delete. Without this nothing is removed.
         #[arg(long)]
         yes: bool,
+        /// Also prune stale Cargo `target/` directories, including from worktrees being kept.
+        #[arg(long)]
+        artifacts: bool,
+        /// Require this many quiet hours since the newest artifact modification.
+        #[arg(long, default_value_t = 24)]
+        artifact_min_age_hours: u64,
     },
 }
 
