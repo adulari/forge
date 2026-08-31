@@ -6,6 +6,106 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.3] - 2026-09-01
+
+### Fixed
+
+- **Desktop releases can be published again — this is the release that actually reaches users.**
+  linuxdeploy probes a plugin by invoking it with no `--appdir`; the AppImage plugin shim answered
+  that probe with `exit 1`, and under `set -euo pipefail` the `Prepare Arch Linux webview deps`
+  step died before the `linux-x86_64` AppImage was ever built. The publish job then correctly
+  refused to ship an incomplete signed platform set and the release stayed a draft. That one line
+  is why v2.13.0, v2.13.1 and v2.13.2 are all unpublished and why the newest installable Forge was
+  still v2.12.1: four of five desktop legs succeeded every time. The probe path now logs and falls
+  through to the real plugin, whose exit status propagates as before, and the shim moves out of an
+  inline heredoc into `scripts/ci/appimage-plugin-shim.sh` so it can be tested
+  (`scripts/ci/test-appimage-plugin-shim.sh`, `.github/workflows/app-desktop.yml`,
+  `.github/workflows/ci.yml`). The desktop matrix also gains a name expression, because
+  `matrix.os` is a label array for the self-hosted Linux leg and every leg rendered as
+  `build (Array)` — the failing platform could not be identified from the checks list.
+
+- **A mistyped field in `POST /api/sessions` no longer silently starts the session in the wrong
+  directory.** The daemon's request bodies deserialized with unknown fields ignored, so a client
+  sending `workspace` instead of `cwd` got a session rooted in the daemon's own cwd — `$HOME` —
+  rather than the intended repository, with no error anywhere. `CreateSessionReq` and
+  `SendFleetMessageReq` now use `deny_unknown_fields`, and create-session rejections are returned
+  as a `400` naming the offending field instead of axum's default empty body
+  (`crates/forge-cli/src/serve.rs`).
+
+- **Stopping the daemon no longer reports an aborted turn as a successful one.** `forge serve`
+  handled only Ctrl-C and killed session drivers immediately, leaving the last snapshot claiming
+  success. Shutdown now listens for SIGTERM as well, marks the registry as draining, refuses new
+  sessions and fleet messages with `503`, and gives active turns a bounded 30s window to finish;
+  a turn cut short by shutdown ends with the new `StopReason::DaemonShutdown` rather than a stale
+  success (`crates/forge-cli/src/serve.rs`, `crates/forge-cli/src/cli/commands/run/driver.rs`,
+  `crates/forge-types/src/turn_outcome.rs`).
+
+- **A model the account cannot call is now benched instead of being re-selected every turn.** groq
+  answers a decommissioned id with `404 model_not_found`, which matched no capability marker and
+  fell through to the catch-all `ProviderError::Request` — neither retryable nor benched, so
+  nothing was written to `model_health` and ranking kept picking the model. It is classified as a
+  new permanent `ProviderError::NoModelAccess` on all three paths (typed status, structured stream
+  body, free text), and permanent failures are persisted before the pinned-model policy returns
+  and on the non-failover terminal arm, so even a pinned `--model` run leaves a health row. The
+  exclusion is scoped to the model: the provider's other models keep working
+  (`crates/forge-provider/src/error.rs`,
+  `crates/forge-provider/src/genai_provider/error_policy.rs`,
+  `crates/forge-core/src/model_request.rs`).
+
+- **A healthy ChatGPT subscription is no longer disabled by a malformed probe.** The Codex OAuth
+  entitlement probe sent `stream:false`, got a `400` about request shape, and Forge misfiled it as
+  an auth failure — excluding `codex-oauth` provider-wide and pushing every OpenAI turn onto the
+  `codex-cli` bridge. The probe now sends `stream:true` with an `Accept: text/event-stream` header,
+  and only `401`/`403` count as credential verdicts; anything else is reported as itself. Token
+  refresh becomes a first-class path: an expired access token with a live refresh token rotates
+  instead of failing, only a server-rejected refresh becomes `ProviderError::Auth` while a
+  rate-limited or unreachable token endpoint becomes `ProviderError::Unavailable` so the
+  subscription stays enabled. The upstream status and message are surfaced verbatim, replacing the
+  bare `auth failed` (`crates/forge-provider/src/codex_oauth.rs`,
+  `crates/forge-provider/src/codex_oauth/quota_headers.rs`,
+  `crates/forge-config/src/provider_oauth.rs`).
+
+- **`forge doctor` reports whether a provider will actually route, not just whether it answers.**
+  A provider can serve discovery while the mesh has excluded it or its subscription is exhausted.
+  Doctor now derives a routing verdict from the reachability evidence and reports both, and the
+  "usable provider" summary follows the routing verdict; the reachability rows are relabelled
+  accordingly (`crates/forge-cli/src/doctor.rs`, `crates/forge-cli/src/doctor_health.rs`).
+
+- **Subscription windows have a rollover date again.** Every `subscription_usage` row was written
+  with an empty `resets_at`, so the phone showed no rollover and pacing had to assume a nominal
+  window length. The reset instant is now threaded through from the source that already reports it
+  — Claude's `anthropic-ratelimit-unified-*-reset` headers — into the store
+  (`crates/forge-store/src/lib.rs`, `crates/forge-store/src/quota_store.rs`,
+  `crates/forge-cli/src/bridge_stats.rs`, `crates/forge-core/src/session_controls.rs`).
+
+### Added
+
+- **`forge worktree list` / `reclaim` — recover disk from worktrees Forge abandoned.**
+  `WorktreeGuard`'s `Drop` only covers a clean exit, so a killed session left its worktree behind
+  forever; unreclaimed ones filled a 1.8 TB disk to zero free on the development machine and killed
+  a linker with a bus error. A survey measures every registered worktree (size including
+  `target/`, merged, dirty, unpushed, live, age) and a classifier clears **only** a prunable
+  registration or a merged, clean, unreferenced worktree; ownership is recorded at creation so a
+  dead session's worktree is still recognisable. `list` shows the worst offender first, `reclaim`
+  is a dry run unless `--yes` and prints every kept worktree with its reason, and `forge doctor`
+  gains a worktree-disk section that fails when free space is low with something to reclaim
+  (`crates/forge-core/src/worktree_reclaim.rs`, `crates/forge-cli/src/cli/commands/worktree.rs`,
+  `crates/forge-cli/src/doctor_environment.rs`, `crates/forge-store/src/live_session_store.rs`).
+
+- **The mesh paces a subscription that is burning ahead of its window.** While a subscription is
+  over its linear allowance, routing keeps only that provider's cheapest usable model, and if the
+  only usable sibling is also the provider's highest-burn model the provider is dropped entirely —
+  ordinary pacing never spends a flagship through the protected reserve
+  (`crates/forge-mesh/src/lib.rs`, `crates/forge-types/src/subscription_pacing.rs`).
+
+- **The README lists the features that shipped without it, and the Rust toolchain is pinned.**
+  `/refine`, `/btw` and `/heartbeat` each shipped with a docs page and a changelog entry but no
+  README mention — the one document a new user reads first. `rust-toolchain.toml` also tracked
+  `stable`, so a new Rust release could land new warn-by-default lints on every open PR at once and,
+  with CI's `RUSTFLAGS=-D warnings`, arrive as hard failures nobody chose the moment for. It is
+  pinned to 1.98.0, the current stable, so nothing about what compiles changes today
+  (`README.md`, `rust-toolchain.toml`).
+
 ## [2.13.2] - 2026-08-30
 
 ### Fixed
@@ -3576,7 +3676,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.2...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.3...HEAD
+[2.13.3]: https://github.com/Adulari/forge/compare/v2.13.2...v2.13.3
 [2.13.2]: https://github.com/Adulari/forge/compare/v2.13.1...v2.13.2
 [2.13.1]: https://github.com/Adulari/forge/compare/v2.13.0...v2.13.1
 [2.13.0]: https://github.com/Adulari/forge/compare/v2.12.1...v2.13.0
