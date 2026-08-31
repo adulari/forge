@@ -178,4 +178,32 @@ impl Store {
             .unwrap_or(0);
         Ok(live == 1)
     }
+
+    /// Every filesystem path a currently-live session is working in — its cwd and, for a session
+    /// running inside an isolated worktree, that worktree. Read by `forge worktree reclaim` so a
+    /// worktree someone is actively using is never a deletion candidate. Includes daemon-hosted
+    /// sessions (which have no presence heartbeat) and non-stale terminal-local ones; a subagent
+    /// child counts too, so `parent_session_id` is deliberately NOT filtered here.
+    pub fn live_session_paths(&self) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT s.cwd, s.worktree_path FROM session s
+             WHERE s.daemon_live = 1
+                OR (s.local_live = 1 AND s.local_last_seen >= strftime('%s','now') - ?1)",
+        )?;
+        let rows = stmt.query_map([LOCAL_PRESENCE_STALE_SECS], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (cwd, worktree) = row?;
+            out.extend(cwd.into_iter().chain(worktree).filter(|p| !p.is_empty()));
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
 }

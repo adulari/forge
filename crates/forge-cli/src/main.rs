@@ -64,6 +64,7 @@ mod cli;
 mod context_windows;
 mod daemon_cwd;
 mod doctor;
+mod doctor_environment;
 mod doctor_health;
 mod image_input;
 pub(crate) mod live_observer;

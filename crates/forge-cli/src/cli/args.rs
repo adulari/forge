@@ -689,6 +689,11 @@ pub(crate) enum Command {
         #[arg(long, global = true)]
         global: bool,
     },
+    /// Git worktrees — what they cost on disk, and reclaiming the ones that are safe to remove.
+    Worktree {
+        #[command(subcommand)]
+        op: WorktreeOp,
+    },
     /// Lattice — native code-intelligence graph (tree-sitter + SQLite). Build it, then query.
     Lattice {
         #[command(subcommand)]
@@ -1030,6 +1035,21 @@ pub(crate) enum ImportSource {
         /// Legacy alias for `--scope project` (hidden; kept for back-compat).
         #[arg(long, hide = true, conflicts_with = "scope")]
         project: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum WorktreeOp {
+    /// Every worktree with the facts needed to judge it — size (including `target/`), age, branch,
+    /// merged/dirty/live state — worst offender first.
+    List,
+    /// Remove the worktrees that are provably safe: a stale registration, or a branch merged into
+    /// the default branch with a clean tree, no unpushed commits, and no live session. Everything
+    /// else is listed with the reason it was kept. Dry run unless `--yes`.
+    Reclaim {
+        /// Actually delete. Without this nothing is removed.
+        #[arg(long)]
+        yes: bool,
     },
 }
 

@@ -37,6 +37,7 @@ pub struct WorktreeGuard {
     path: PathBuf,
     branch: String,
     repo_root: PathBuf,
+    id: String,
 }
 
 impl WorktreeGuard {
@@ -66,10 +67,15 @@ impl WorktreeGuard {
         // (`commit_worktree` explicitly excludes `.cargo` so this shim is never merged back.)
         write_shared_target_config(&worktree_path, repo_root);
 
+        // Drop only runs when the process lives to run it. Record who owns this worktree so a
+        // later `forge worktree reclaim` can still recognise it as an orphan after a kill -9.
+        crate::worktree_reclaim::record_ownership(repo_root, child_id, &worktree_path, &branch);
+
         Ok(WorktreeGuard {
             path: worktree_path,
             branch,
             repo_root: repo_root.to_path_buf(),
+            id: child_id.to_string(),
         })
     }
 
@@ -84,6 +90,7 @@ impl WorktreeGuard {
 
 impl Drop for WorktreeGuard {
     fn drop(&mut self) {
+        crate::worktree_reclaim::clear_ownership(&self.repo_root, &self.id);
         let path_str = self.path.to_string_lossy().to_string();
         if let Err(error) = run_git(
             &self.repo_root,
