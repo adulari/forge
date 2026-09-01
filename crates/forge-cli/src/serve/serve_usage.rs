@@ -119,6 +119,10 @@ pub(super) async fn usage_page(
     Query(params): Query<UsageParams>,
 ) -> Response {
     let store = state.store.clone();
+    // OpenCode Go only reveals its windows through a poll, so the daemon refreshes them here
+    // before reading. The refresher's own freshness gate collapses repeated page loads into at
+    // most one request every few minutes, which is also the cadence routing needs.
+    crate::cli::commands::models::refresh_opencode_go_quota(&store).await;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<UsageResponse> {
         let now = chrono::Utc::now().timestamp();
         let week_rows = store.usage_by_provider_since(now - 604800)?;

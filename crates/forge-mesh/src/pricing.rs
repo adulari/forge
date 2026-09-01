@@ -190,6 +190,30 @@ impl Pricing {
         self.cost_for(model, NOMINAL_INPUT_TOKENS, NOMINAL_OUTPUT_TOKENS)
     }
 
+    /// A LIST price for the model behind `model`, even when `model` itself is billed some other
+    /// way. Falls back to any tracked rate for the same bare model name under a different
+    /// namespace (e.g. `openrouter::moonshotai/kimi-k3` answers for `opencode_go::kimi-k3`).
+    ///
+    /// This exists for subscription surfaces, which correctly cost $0 through
+    /// [`estimated_cost`](Self::estimated_cost) — nothing is billed per request — yet still spend a
+    /// dollar-denominated plan allowance at wildly different rates per model. The marginal price is
+    /// the only signal that separates them, and it must NOT be written back into the rate table:
+    /// that would bill a subscription turn against the user's real budget. The lowest tracked rate
+    /// wins when several namespaces list the same model, so the derived figure is conservative and
+    /// deterministic. Returns `None` when nothing is tracked — never a fabricated zero.
+    pub fn reference_estimated_cost(&self, model: &str) -> Option<f64> {
+        if let Some(rate) = self.rates.get(model) {
+            return Some(estimate(rate));
+        }
+        let bare = bare_model_name(model);
+        self.rates
+            .iter()
+            .filter(|(id, _)| bare_model_name(id).eq_ignore_ascii_case(bare))
+            .map(|(_, rate)| estimate(rate))
+            .filter(|cost| *cost > 0.0)
+            .min_by(f64::total_cmp)
+    }
+
     /// Whether we hold a rate for `model` that is EXPLICITLY zero on both input and output.
     ///
     /// This is the difference between "we know it is free" and "we have no idea what it costs",
@@ -202,6 +226,22 @@ impl Pricing {
             rate.input_per_1k <= f64::EPSILON && rate.output_per_1k <= f64::EPSILON
         })
     }
+}
+
+/// The vendor-independent model name inside an id: everything after `provider::`, then after the
+/// last `/` of a vendor-scoped gateway path. `opencode_go::kimi-k3` and
+/// `openrouter::moonshotai/kimi-k3` both reduce to `kimi-k3`.
+fn bare_model_name(id: &str) -> &str {
+    id.split_once("::")
+        .map_or(id, |(_, model)| model)
+        .rsplit('/')
+        .next()
+        .unwrap_or(id)
+}
+
+fn estimate(rate: &ModelRate) -> f64 {
+    (NOMINAL_INPUT_TOKENS as f64 / 1000.0) * rate.input_per_1k
+        + (NOMINAL_OUTPUT_TOKENS as f64 / 1000.0) * rate.output_per_1k
 }
 
 /// Nominal token mix used only to rank candidate models by relative cost.

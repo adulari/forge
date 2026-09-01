@@ -89,6 +89,9 @@ pub(crate) const CODEX_QUOTA_MAX_AGE_SECS: i64 = forge_types::CODEX_QUOTA_FRESHN
 mod codex_quota;
 pub(crate) use codex_quota::refresh_codex_quota;
 
+mod opencode_go_quota;
+pub(crate) use opencode_go_quota::{refresh_opencode_go_quota, OPENCODE_GO_PROVIDER};
+
 mod discovery;
 pub(crate) use discovery::{
     discover_catalog, discover_catalog_with_status, invalidate_catalog_cache, load_cached_catalog,
@@ -283,6 +286,10 @@ pub(crate) async fn models(
     }
 
     let pricing = discovery::pricing_with_fetched_rates(&config);
+    // Subscription windows are what decides whether a listed model can actually be used right
+    // now; OpenCode Go only publishes its three windows through a poll.
+    refresh_opencode_go_quota(&store).await;
+    let subscription_windows = store.subscription_windows().unwrap_or_default();
     let benched = forge_core::readiness::ProviderReadiness::snapshot(&config, &store).health;
     let s = cat.stats(&pricing);
     println!(
@@ -291,6 +298,28 @@ pub(crate) async fn models(
     );
     for g in cat.by_provider(&pricing) {
         println!("{} ({} models)", g.provider, g.total());
+        for window in subscription_windows
+            .iter()
+            .filter(|window| window.provider == g.provider)
+        {
+            let Some(fraction) = window.fraction else {
+                continue;
+            };
+            println!(
+                "  quota {:<10} {:>4.0}% used{}",
+                window.window_kind,
+                fraction * 100.0,
+                window
+                    .resets_at
+                    .map(|resets_at| format!(
+                        " · resets {}",
+                        chrono::DateTime::from_timestamp(resets_at, 0)
+                            .map(|instant| instant.format("%Y-%m-%d %H:%M UTC").to_string())
+                            .unwrap_or_default()
+                    ))
+                    .unwrap_or_default(),
+            );
+        }
         for m in &g.models {
             let name = if m.name.is_empty() {
                 "(default)"
@@ -543,6 +572,9 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
     // Codex prefers a fresh account-wide OAuth header reading; a fresh CLI rollout is the
     // no-cost fallback. Expired readings are never allowed to bias this route.
     refresh_codex_quota(&store).await;
+    // OpenCode Go publishes its three windows only through a poll, so `forge mesh` refreshes them
+    // on the same cadence as Codex rather than showing an unobserved provider.
+    refresh_opencode_go_quota(&store).await;
     // `/mesh` must score exactly like a real session: static benchmark data remains dominant,
     // while sufficiently broad local outcome evidence provides a small quality/latency tie-break.
     let cat = apply_outcome_calibration(cat, &store);
@@ -573,10 +605,14 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
     let excluded = store.current_excluded_providers().unwrap_or_default();
 
     if prompt.trim().is_empty() && !smoke {
+        let windows = store.subscription_windows().unwrap_or_default();
         if json {
-            println!("{}", mesh_overview_json(&cat, &config, &quota, &excluded));
+            println!(
+                "{}",
+                mesh_overview_json(&cat, &config, &quota, &excluded, &windows)
+            );
         } else {
-            mesh_overview(&cat, &config, &quota, &excluded);
+            mesh_overview(&cat, &config, &quota, &excluded, &windows);
         }
         return Ok(());
     }

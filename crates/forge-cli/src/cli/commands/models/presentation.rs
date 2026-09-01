@@ -81,6 +81,7 @@ pub(crate) fn mesh_overview(
     config: &forge_config::Config,
     quota: &forge_types::SubscriptionQuota,
     excluded: &[ProviderExclusion],
+    windows: &[forge_store::SubscriptionWindow],
 ) {
     print_provider_exclusions(excluded);
     let pricing = super::discovery::pricing_with_fetched_rates(config);
@@ -125,6 +126,24 @@ pub(crate) fn mesh_overview(
             pc * 100.0,
             ps * 100.0,
         );
+        // The provider line above collapses to the single strictest window. Providers that report
+        // several simultaneous windows (OpenCode Go reports three) need each one shown with its
+        // own reset, or a healthy 5-hour reading hides a nearly-spent month.
+        for window in windows.iter().filter(|window| &window.provider == p) {
+            let Some(fraction) = window.fraction else {
+                continue;
+            };
+            println!(
+                "      {:<10} {} {:>4.0}%{}",
+                window.window_kind,
+                meter(fraction),
+                fraction * 100.0,
+                window
+                    .resets_at
+                    .map(|resets_at| format!(" · resets in {}", remaining(resets_at)))
+                    .unwrap_or_default(),
+            );
+        }
     }
     println!("\nper-tier ranking (top 5):");
     for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
@@ -148,6 +167,7 @@ pub(crate) fn mesh_overview_json(
     config: &forge_config::Config,
     quota: &forge_types::SubscriptionQuota,
     excluded: &[ProviderExclusion],
+    windows: &[forge_store::SubscriptionWindow],
 ) -> String {
     let pricing = super::discovery::pricing_with_fetched_rates(config);
     let mut providers: Vec<&str> = cat
@@ -171,6 +191,16 @@ pub(crate) fn mesh_overview_json(
             serde_json::json!({
                 "provider": provider,
                 "fraction": observed_fraction,
+                "windows": windows
+                    .iter()
+                    .filter(|window| window.provider == provider)
+                    .map(|window| serde_json::json!({
+                        "window": window.window_kind,
+                        "fraction": window.fraction,
+                        "status": window.status,
+                        "resets_at": window.resets_at,
+                    }))
+                    .collect::<Vec<_>>(),
                 "plan": plan,
                 "status": format!("{:?}", quota.status_for(provider)),
                 "complex_spread_probability": forge_mesh::ModelCatalog::spread_probability(

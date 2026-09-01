@@ -45,6 +45,12 @@ pub struct UsageOverlay {
     pub claude_5h_pct: Option<f64>,
     /// Claude weekly used % (0–100), from ~/.claude/.rate-limits-cache.json.
     pub claude_weekly_pct: Option<f64>,
+    /// OpenCode Go 5-hour (`rolling`) used % (0–100), polled from its usage endpoint.
+    pub opencode_go_5h_pct: Option<f64>,
+    /// OpenCode Go weekly used % (0–100).
+    pub opencode_go_weekly_pct: Option<f64>,
+    /// OpenCode Go monthly used % (0–100). Go is the only provider reporting a monthly window.
+    pub opencode_go_monthly_pct: Option<f64>,
     /// Claude tokens (input incl cache) used in the last 5 hours.
     pub claude_5h_in: u64,
     pub claude_5h_out: u64,
@@ -59,6 +65,22 @@ pub struct UsageOverlay {
 }
 
 impl UsageOverlay {
+    /// The OpenCode Go window closest to its cap, as `(short label, used %)`.
+    ///
+    /// Go bills one dollar allowance across three simultaneous windows, so "the" percentage is
+    /// meaningless on its own: a surface with room for a single figure must show the binding one
+    /// AND name it, since a 90% monthly and a 90% five-hour call for opposite reactions.
+    pub fn opencode_go_tightest_window(&self) -> Option<(&'static str, f64)> {
+        [
+            ("5h", self.opencode_go_5h_pct),
+            ("wk", self.opencode_go_weekly_pct),
+            ("mo", self.opencode_go_monthly_pct),
+        ]
+        .into_iter()
+        .filter_map(|(label, pct)| pct.map(|pct| (label, pct)))
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+    }
+
     pub(crate) fn totals(rows: &[(String, f64, u64, u64)]) -> (f64, u64, u64) {
         rows.iter().fold((0.0, 0, 0), |acc, r| {
             (acc.0 + r.1, acc.1 + r.2, acc.2 + r.3)

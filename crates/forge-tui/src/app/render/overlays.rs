@@ -54,6 +54,9 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
             // rather than falling back to a confusing multi-million raw-token sum.
             parts.push(format!("claude:5h stale{claude_age}"));
         }
+        if let Some(p) = o.opencode_go_5h_pct {
+            parts.push(format!("go:{:.0}%", p));
+        }
         if parts.is_empty() {
             String::new()
         } else {
@@ -69,6 +72,14 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
             parts.push(format!("claude:{:.0}%{}", p, claude_age));
         } else if o.claude_rl_age_secs.is_some() {
             parts.push(format!("claude:wk stale{claude_age}"));
+        }
+        if let Some(p) = o.opencode_go_weekly_pct {
+            parts.push(format!("go:{:.0}%", p));
+        }
+        // Go is the only provider with a monthly window; it shares the weekly row rather than
+        // getting one of its own, but keeps its own label so the two are never confused.
+        if let Some(p) = o.opencode_go_monthly_pct {
+            parts.push(format!("go month:{:.0}%", p));
         }
         if parts.is_empty() {
             String::new()
