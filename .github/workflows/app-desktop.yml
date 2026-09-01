@@ -248,9 +248,18 @@ jobs:
           echo 'NO_STRIP=1' >> "$GITHUB_ENV"
           FORGE_LINUXDEPLOY_PLUGIN_ROOT="$plugin_root" "$plugin" --plugin-api-version >/dev/null
 
+      # See release.yml: the action's `toolchain` input defaults to `stable`, so without this the
+      # x86_64-apple-darwin std would be installed for stable while cargo builds with the pinned
+      # channel and finds no std for that target.
+      - name: Resolve the pinned toolchain
+        id: toolchain
+        shell: bash
+        run: sed -n 's/^ *channel *= *"\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.name == 'macos-x86_64' && 'x86_64-apple-darwin' || '' }}
 
       - if: matrix.name != 'linux-x86_64'

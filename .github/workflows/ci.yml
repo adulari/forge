@@ -105,6 +105,18 @@ jobs:
       # an installer asks for, and Latest moves only after the public bytes verify (#837).
       - name: Test desktop release publication contract
         run: bash scripts/ci/test-desktop-release-publication.sh
+      # release.yml is workflow_dispatch-only, so nothing at PR time compiles its macOS legs. This
+      # is the cheap stand-in: the targets it builds must resolve against the pinned toolchain,
+      # and every step that installs one must pin that toolchain rather than the action's default.
+      - name: Test release target guard
+        run: bash scripts/ci/test-release-targets-guard.sh
+      - name: Enforce release target resolution
+        run: bash scripts/ci/release-targets-guard.sh
+      # The same blind spot in the other direction: source that only the macOS legs compile.
+      - name: Test linux-only libc guard
+        run: python3 scripts/ci/test_linux_only_libc.py
+      - name: Enforce linux-only libc gating
+        run: python3 scripts/ci/linux_only_libc.py
       - name: Test desktop version guard
         run: bash scripts/ci/test-desktop-version-guard.sh
       - name: Enforce desktop version parity
