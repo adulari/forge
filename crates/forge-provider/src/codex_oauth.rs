@@ -532,7 +532,16 @@ impl CodexOauthProvider {
                 .complete(call.body, on_event, classify_codex_status)
                 .await;
         }
-        if result.is_err() {
+        if result
+            .as_ref()
+            .is_err_and(codex_websocket::is_stale_previous_response_error)
+        {
+            // The chain this socket carries is exactly what the backend just rejected. Stashing it
+            // would re-restore the dead id on every following turn, so one transport drop would
+            // downgrade the whole session to full HTTPS requests forever.
+            state.resume_history = None;
+            state.socket = None;
+        } else if result.is_err() {
             // Keep only the last fully acknowledged response chain. If this request failed before
             // visible output, the caller reconnects once and resends its pending incremental suffix
             // rather than paying for the full transcript again. The failed request itself is never
@@ -1586,6 +1595,169 @@ mod tests {
                 "call_id": "call-1",
                 "output": "ok",
             }])
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::result_large_err,
+        reason = "tungstenite's required handshake callback owns its large HTTP error response"
+    )]
+    async fn rejected_response_id_resends_in_full_once_and_does_not_poison_later_turns() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (frames_tx, frames_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            let handshake =
+                |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert(
+                        "x-codex-turn-state",
+                        tokio_tungstenite::tungstenite::http::HeaderValue::from_static(
+                            "turn-state-1",
+                        ),
+                    );
+                    Ok(response)
+                };
+            let completed = |id: &str| {
+                tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": id,
+                            "usage": {"input_tokens": 1200, "output_tokens": 10},
+                            "output": []
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                )
+            };
+            async fn next_frame(
+                socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+            ) -> serde_json::Value {
+                let tokio_tungstenite::tungstenite::Message::Text(frame) =
+                    socket.next().await.unwrap().unwrap()
+                else {
+                    panic!("expected text request");
+                };
+                serde_json::from_str::<serde_json::Value>(&frame).unwrap()
+            }
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first = tokio_tungstenite::accept_hdr_async(stream, handshake)
+                .await
+                .unwrap();
+            frames.push(next_frame(&mut first).await);
+            first.send(completed("resp-1")).await.unwrap();
+            frames.push(next_frame(&mut first).await);
+            first
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({
+                        "type": "error",
+                        "status": 400,
+                        "error": {"message": "Invalid `previous_response_id`."}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut second = tokio_tungstenite::accept_hdr_async(stream, handshake)
+                .await
+                .unwrap();
+            frames.push(next_frame(&mut second).await);
+            second.send(completed("resp-2")).await.unwrap();
+            frames.push(next_frame(&mut second).await);
+            second.send(completed("resp-3")).await.unwrap();
+            frames_tx.send(frames).unwrap();
+        });
+
+        let provider = CodexOauthProvider::new();
+        let checkpoint = crate::CheckpointContext {
+            session: "stale-chain-session".into(),
+            seq: 7,
+            root: "/tmp/checkpoints".into(),
+            workspace: "/tmp/workspace".into(),
+            mode: "ask".into(),
+        };
+        let ws_url = format!("ws://{address}/responses");
+        let body_with = |input: serde_json::Value| {
+            serde_json::json!({
+                "model": "gpt-5.6-sol",
+                "input": input,
+                "tools": [{"type": "function", "name": "shell"}],
+                "store": false,
+                "stream": true,
+                "prompt_cache_key": "session-1",
+            })
+        };
+        let first_input = serde_json::json!([{"role": "user", "content": "task"}]);
+        let second_input = serde_json::json!([
+            {"role": "user", "content": "task"},
+            {"role": "user", "content": "follow-up"},
+        ]);
+        let third_input = serde_json::json!([
+            {"role": "user", "content": "task"},
+            {"role": "user", "content": "follow-up"},
+            {"role": "user", "content": "third"},
+        ]);
+        let first_body = body_with(first_input);
+        let second_body = body_with(second_input);
+        let third_body = body_with(third_input);
+        let call = TurnWebsocketCall {
+            ws_url: &ws_url,
+            account_id: Some("account-1"),
+            token: "test-token",
+            chatgpt_account_id: "test-chatgpt-account",
+            model: "codex-oauth::gpt-5.6-sol",
+            checkpoint: &checkpoint,
+            reuse_across_turns: true,
+            response_chain_prefix_tokens: 0,
+            body: &first_body,
+        };
+        let mut sink = |_: StreamEvent| {};
+        provider
+            .execute_turn_websocket(call, &mut sink)
+            .await
+            .unwrap();
+        provider
+            .execute_turn_websocket(
+                TurnWebsocketCall {
+                    body: &second_body,
+                    ..call
+                },
+                &mut sink,
+            )
+            .await
+            .expect("a rejected response id is recovered in place, not by falling back to HTTPS");
+        provider
+            .execute_turn_websocket(
+                TurnWebsocketCall {
+                    body: &third_body,
+                    ..call
+                },
+                &mut sink,
+            )
+            .await
+            .expect("the rejected chain must not be replayed on the following turn");
+
+        let frames = frames_rx.await.unwrap();
+        server.await.unwrap();
+        assert_eq!(frames[0].get("previous_response_id"), None);
+        assert_eq!(frames[1]["previous_response_id"], "resp-1");
+        assert_eq!(
+            frames[2].get("previous_response_id"),
+            None,
+            "the rejected chain is resent in full exactly once"
+        );
+        assert_eq!(frames[2]["input"], second_body["input"]);
+        assert_eq!(
+            frames[3]["previous_response_id"], "resp-2",
+            "the recovered chain stays incremental on later turns"
         );
     }
 
