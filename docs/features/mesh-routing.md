@@ -329,9 +329,9 @@ all resolve identically:
 
 | Family | List price (per 1M in/out) | Burn weight |
 |---|---|---|
-| GPT-5.6 Sol | $5 / $30 | weight 5.0 |
-| GPT-5.6 Terra | $2.50 / $15 | weight 2.5 |
-| GPT-5.6 Luna | $1 / $6 | weight 1.0 |
+| GPT-5.6 Sol | $4 / $20 | weight 17.5 |
+| GPT-5.6 Terra | $2 / $12 | weight 10.0 |
+| GPT-5.6 Luna | $0.20 / $1.20 | weight 1.0 |
 | Claude Fable 5 | $10 / $50 | weight 10.0 |
 | Claude Mythos 5 | $10 / $50 | weight 10.0 |
 | Claude Opus 4.8 | $5 / $25 | weight 5.0 |

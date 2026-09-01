@@ -36,6 +36,25 @@ pub struct Pricing {
 /// as $0.0 and cost-tiered routing then treats the most expensive model as the cheapest.
 const DEFAULT_RATES: &[(&str, f64, f64)] = &[
     ("openai::gpt-4o-mini", 0.00015, 0.0006),
+    // GPT-5.6 line. OpenRouter does not list any `openai/gpt-5.6*` model, so the fetched layer
+    // never had a row for these and cost_for() returned $0 for every codex-cli / codex-oauth
+    // decision — the only cost signal left was `capability::known_burn_weight`'s hardcoded
+    // ladder, which still described the pre-discount prices. These rows are the bundled fallback;
+    // the models.dev fetch (`context_windows::models_dev_pricing`) refreshes them live. USD per
+    // 1k tokens; verified against models.dev `api.json` (openai provider, release 2026-07-09)
+    // and OpenCode Go's published table, 2026-09-02. The CLI bridges bill the same model.
+    ("openai::gpt-5.6-luna", 0.0002, 0.0012),
+    ("openai::gpt-5.6-terra", 0.002, 0.012),
+    ("openai::gpt-5.6-sol", 0.004, 0.020),
+    ("openai::gpt-5.6", 0.004, 0.020),
+    ("codex-cli::gpt-5.6-luna", 0.0002, 0.0012),
+    ("codex-cli::gpt-5.6-terra", 0.002, 0.012),
+    ("codex-cli::gpt-5.6-sol", 0.004, 0.020),
+    ("codex-cli::gpt-5.6", 0.004, 0.020),
+    ("codex-oauth::gpt-5.6-luna", 0.0002, 0.0012),
+    ("codex-oauth::gpt-5.6-terra", 0.002, 0.012),
+    ("codex-oauth::gpt-5.6-sol", 0.004, 0.020),
+    ("codex-oauth::gpt-5.6", 0.004, 0.020),
     // Opus 4.8's actual list price is $5/$25 per 1M tokens (0.005/0.025 per 1k). The prior entry
     // here (0.015/0.075, i.e. $15/$75) was a copied Opus 4.1 rate (4.1 genuinely is $15/$75) — ~3x
     // too high for 4.8 — and inflated its estimated_cost enough to distort cost-tiered routing
