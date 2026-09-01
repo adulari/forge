@@ -16,6 +16,10 @@ use anyhow::{Context, Result};
 
 use crate::*;
 
+use super::service_report::{
+    activation_report, running_daemon, wait_for_running_daemon, Activation,
+};
+
 pub(crate) fn service_cmd(cmd: ServiceCmd) -> Result<()> {
     match cmd {
         ServiceCmd::Install {
@@ -92,17 +96,41 @@ fn install_cmd(exposure: Exposure, port: Option<u16>) -> Result<()> {
         .to_string();
     let port = resolved_port(port);
 
-    let outcome = install_service(&forge_exe, exposure, port)?;
+    // Captured BEFORE the unit is rewritten: an upgrade replaces the binary at the same path, so
+    // afterwards there is nothing left to compare the new daemon against.
+    let before = running_daemon();
+    let was_running = query_service_status()?.running;
+
+    let outcome = install_service(&forge_exe, exposure, port, was_running)?;
 
     println!("✓ installed forge-serve ({})", outcome.backend_label);
     println!("  unit: {}", outcome.unit_path);
-    println!(
-        "  runs: {forge_exe} serve {} --port {port}",
-        exposure.flag()
-    );
     if let Some(note) = outcome.note {
         println!("  note: {note}");
     }
+    let after = if cfg!(target_os = "linux") {
+        wait_for_running_daemon()
+    } else {
+        running_daemon()
+    };
+    let post_status = query_service_status();
+    let failure = match (&outcome.activation, &post_status) {
+        (Activation::Failed(err), _) => Some(err.clone()),
+        (_, Ok(status)) if !status.running => {
+            Some("the service manager reports that the daemon is not running".to_string())
+        }
+        (_, Err(err)) => Some(format!(
+            "could not verify the daemon after activation: {err:#}"
+        )),
+        _ if cfg!(target_os = "linux") && after.is_none() => {
+            Some("the service manager has no identifiable daemon process".to_string())
+        }
+        _ => None,
+    };
+    println!(
+        "  {}",
+        activation_report(outcome.activation, before.as_ref(), after.as_ref())
+    );
     if let Some(token_path) = token_file_path() {
         println!(
             "  connect: http://127.0.0.1:{port}/<token> — token is minted on first start at \
@@ -111,6 +139,9 @@ fn install_cmd(exposure: Exposure, port: Option<u16>) -> Result<()> {
         );
     } else {
         println!("  connect: port {port} once running (could not resolve the config dir for the token file)");
+    }
+    if let Some(err) = failure {
+        anyhow::bail!("the unit was written but the daemon is not running it: {err}");
     }
     Ok(())
 }
@@ -136,6 +167,13 @@ fn status_cmd(port: Option<u16>) -> Result<()> {
             "not responding"
         }
     );
+    match running_daemon() {
+        Some(d) => println!("process:   {d}"),
+        None if status.running => {
+            println!("process:   unknown (could not resolve the running binary)")
+        }
+        None => {}
+    }
     if !status.detail.is_empty() {
         println!("detail:    {}", status.detail);
     }
@@ -200,6 +238,7 @@ struct InstallOutcome {
     backend_label: &'static str,
     unit_path: String,
     note: Option<String>,
+    activation: Activation,
 }
 
 pub(crate) struct ServiceStatus {
@@ -225,13 +264,18 @@ pub(crate) const SYSTEMD_UNIT_NAME: &str = "forge-serve.service";
 const LAUNCHD_LABEL: &str = "dev.forge.serve";
 const SCHTASKS_NAME: &str = "ForgeServe";
 
-fn install_service(forge_exe: &str, exposure: Exposure, port: u16) -> Result<InstallOutcome> {
+fn install_service(
+    forge_exe: &str,
+    exposure: Exposure,
+    port: u16,
+    was_running: bool,
+) -> Result<InstallOutcome> {
     if cfg!(target_os = "linux") {
-        install_systemd(forge_exe, exposure, port)
+        install_systemd(forge_exe, exposure, port, was_running)
     } else if cfg!(target_os = "macos") {
-        install_launchd(forge_exe, exposure, port)
+        install_launchd(forge_exe, exposure, port, was_running)
     } else if cfg!(target_os = "windows") {
-        install_schtasks(forge_exe, exposure, port)
+        install_schtasks(forge_exe, exposure, port, was_running)
     } else {
         anyhow::bail!("forge service has no background-daemon backend for this platform")
     }
@@ -297,7 +341,7 @@ fn run_checked(cmd: &str, args: &[&str], hint: &str) -> Result<()> {
 
 /// Run `cmd args…` and return (success, trimmed stdout, trimmed stderr) without treating a
 /// non-zero exit as an error — status queries use exit codes/stdout as signal, not failure.
-fn run_capture(cmd: &str, args: &[&str]) -> Result<(bool, String, String)> {
+pub(crate) fn run_capture(cmd: &str, args: &[&str]) -> Result<(bool, String, String)> {
     let output = std::process::Command::new(cmd)
         .args(args)
         .output()
@@ -343,7 +387,34 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
     )
 }
 
-fn install_systemd(forge_exe: &str, exposure: Exposure, port: u16) -> Result<InstallOutcome> {
+/// Run `cmd` for a whole activation sequence, folding a failed step into `Activation::Failed`
+/// rather than aborting the install — the unit on disk is already correct and worth reporting.
+fn activation_result(inner: Result<Activation>) -> Activation {
+    inner.unwrap_or_else(|e| Activation::Failed(format!("{e:#}")))
+}
+
+type Runner<'a> = &'a mut dyn FnMut(&[&str]) -> Result<()>;
+
+/// `enable --now` cannot move an already-running unit onto a changed `ExecStart`; only `restart`
+/// can. `enable` (without `--now`) still runs so boot-time activation is repaired either way.
+fn activate_systemd(was_running: bool, run: Runner<'_>) -> Result<Activation> {
+    run(&["--user", "daemon-reload"])?;
+    if was_running {
+        run(&["--user", "enable", SYSTEMD_UNIT_NAME])?;
+        run(&["--user", "restart", SYSTEMD_UNIT_NAME])?;
+        Ok(Activation::Restarted)
+    } else {
+        run(&["--user", "enable", "--now", SYSTEMD_UNIT_NAME])?;
+        Ok(Activation::Started)
+    }
+}
+
+fn install_systemd(
+    forge_exe: &str,
+    exposure: Exposure,
+    port: u16,
+    was_running: bool,
+) -> Result<InstallOutcome> {
     let hint = "is a systemd user manager available? (are you in a systemd session / logged in \
                 via a graphical or SSH session with `XDG_RUNTIME_DIR` set?)";
     let dir = systemd_user_dir()?;
@@ -362,15 +433,13 @@ fn install_systemd(forge_exe: &str, exposure: Exposure, port: u16) -> Result<Ins
     )
     .context("writing the systemd failure-notification unit")?;
 
-    run_checked("systemctl", &["--user", "daemon-reload"], hint)?;
-    run_checked(
-        "systemctl",
-        &["--user", "enable", "--now", SYSTEMD_UNIT_NAME],
-        hint,
-    )?;
+    let activation = activation_result(activate_systemd(was_running, &mut |args| {
+        run_checked("systemctl", args, hint)
+    }));
     Ok(InstallOutcome {
         backend_label: "systemd --user",
         unit_path: unit_path.display().to_string(),
+        activation,
         note: Some(
             "surviving reboot BEFORE you log in requires `loginctl enable-linger $USER` \
              (not run automatically — it may need auth)"
@@ -484,7 +553,37 @@ fn macos_gui_target() -> Result<String> {
     Ok(format!("gui/{uid}"))
 }
 
-fn install_launchd(forge_exe: &str, exposure: Exposure, port: u16) -> Result<InstallOutcome> {
+/// A loaded agent keeps serving its ORIGINAL plist, so a changed `ProgramArguments` (or a
+/// replaced binary) needs a bootout/bootstrap cycle; `bootstrap` alone fails on an already
+/// bootstrapped label.
+fn activate_launchd(
+    was_running: bool,
+    target: &str,
+    plist_path: &str,
+    run: Runner<'_>,
+) -> Result<Activation> {
+    let service = format!("{target}/{LAUNCHD_LABEL}");
+    if was_running {
+        run(&["bootout", &service])?;
+    }
+    // `bootstrap` is the modern (10.10+) API; fall back to the legacy `load -w` for older macOS
+    // or launchd builds that reject bootstrap for user agents.
+    if run(&["bootstrap", target, plist_path]).is_err() {
+        run(&["load", "-w", plist_path])?;
+    }
+    if was_running {
+        Ok(Activation::Restarted)
+    } else {
+        Ok(Activation::Started)
+    }
+}
+
+fn install_launchd(
+    forge_exe: &str,
+    exposure: Exposure,
+    port: u16,
+    was_running: bool,
+) -> Result<InstallOutcome> {
     let dir = launchd_agents_dir()?;
     std::fs::create_dir_all(&dir).context("creating ~/Library/LaunchAgents")?;
     let plist = render_launchd_plist(forge_exe, exposure, port);
@@ -493,19 +592,17 @@ fn install_launchd(forge_exe: &str, exposure: Exposure, port: u16) -> Result<Ins
 
     let target = macos_gui_target()?;
     let hint = "is launchd reachable? (are you in a GUI login session?)";
-    // `bootstrap` is the modern (10.10+) API; fall back to the legacy `load -w` for older macOS
-    // or launchd builds that reject bootstrap for user agents.
-    let bootstrap = std::process::Command::new("launchctl")
-        .args(["bootstrap", &target, &path.to_string_lossy()])
-        .output()
-        .with_context(|| format!("spawning `launchctl bootstrap` — {hint}"))?;
-    if !bootstrap.status.success() {
-        run_checked("launchctl", &["load", "-w", &path.to_string_lossy()], hint)?;
-    }
+    let activation = activation_result(activate_launchd(
+        was_running,
+        &target,
+        &path.to_string_lossy(),
+        &mut |args| run_checked("launchctl", args, hint),
+    ));
     Ok(InstallOutcome {
         backend_label: "launchd agent",
         unit_path: path.display().to_string(),
         note: None,
+        activation,
     })
 }
 
@@ -578,17 +675,43 @@ fn render_schtasks_create_args(forge_exe: &str, exposure: Exposure, port: u16) -
     ]
 }
 
-fn install_schtasks(forge_exe: &str, exposure: Exposure, port: u16) -> Result<InstallOutcome> {
+/// `/Create /F` replaces the task definition but never touches the instance already running it,
+/// and `/Run` on a running task is refused — so an upgrade needs an explicit `/End` first.
+fn activate_schtasks(
+    was_running: bool,
+    create_args: &[&str],
+    run: Runner<'_>,
+) -> Result<Activation> {
+    run(create_args)?;
+    if was_running {
+        run(&["/End", "/TN", SCHTASKS_NAME])?;
+    }
+    // Start it now too, rather than waiting for the next logon.
+    run(&["/Run", "/TN", SCHTASKS_NAME])?;
+    Ok(if was_running {
+        Activation::Restarted
+    } else {
+        Activation::Started
+    })
+}
+
+fn install_schtasks(
+    forge_exe: &str,
+    exposure: Exposure,
+    port: u16,
+    was_running: bool,
+) -> Result<InstallOutcome> {
     let hint = "is Task Scheduler reachable? (`schtasks` requires an interactive logon session)";
     let args = render_schtasks_create_args(forge_exe, exposure, port);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_checked("schtasks", &arg_refs, hint)?;
-    // Start it now too, rather than waiting for the next logon.
-    run_checked("schtasks", &["/Run", "/TN", SCHTASKS_NAME], hint)?;
+    let activation = activation_result(activate_schtasks(was_running, &arg_refs, &mut |a| {
+        run_checked("schtasks", a, hint)
+    }));
     Ok(InstallOutcome {
         backend_label: "Task Scheduler logon task",
         unit_path: format!("Task Scheduler: \\{SCHTASKS_NAME}"),
         note: None,
+        activation,
     })
 }
 
@@ -744,6 +867,118 @@ mod tests {
         // ephemeral port this is reliably free in practice for this fast a re-check window.
         // Use an unlikely-to-be-bound low port instead of relying on immediate release.
         assert!(!probe_port(1));
+    }
+
+    /// Records every command an activation issues, so the systemctl/launchctl/schtasks calls can
+    /// be asserted without touching this machine's service manager.
+    type CommandLog = std::rc::Rc<std::cell::RefCell<Vec<String>>>;
+
+    fn recorder() -> (CommandLog, impl FnMut(&[&str]) -> Result<()>) {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = log.clone();
+        (log, move |args: &[&str]| {
+            sink.borrow_mut().push(args.join(" "));
+            Ok(())
+        })
+    }
+
+    /// The whole bug: `enable --now` is a no-op for a unit that is ALREADY running, so a
+    /// re-rendered ExecStart (or a binary replaced at the same path by an upgrade) never took
+    /// effect, while install printed the new command line as if it had.
+    #[test]
+    fn install_restarts_an_already_running_systemd_unit() {
+        let (log, mut run) = recorder();
+        let activation = activate_systemd(true, &mut run).unwrap();
+        assert_eq!(activation, Activation::Restarted);
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "--user daemon-reload",
+                "--user enable forge-serve.service",
+                "--user restart forge-serve.service",
+            ]
+        );
+    }
+
+    #[test]
+    fn install_only_enables_now_when_the_systemd_unit_is_not_running() {
+        let (log, mut run) = recorder();
+        let activation = activate_systemd(false, &mut run).unwrap();
+        assert_eq!(activation, Activation::Started);
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "--user daemon-reload",
+                "--user enable --now forge-serve.service",
+            ]
+        );
+        assert!(!log.borrow().iter().any(|c| c.contains("restart")));
+    }
+
+    /// A loaded launchd agent keeps its original ProgramArguments; `bootstrap` alone also fails
+    /// on an already-bootstrapped label, so re-installing over a running agent used to error out.
+    #[test]
+    fn install_boots_out_and_back_in_for_a_running_launchd_agent() {
+        let (log, mut run) = recorder();
+        let activation = activate_launchd(true, "gui/501", "/tmp/a.plist", &mut run).unwrap();
+        assert_eq!(activation, Activation::Restarted);
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "bootout gui/501/dev.forge.serve",
+                "bootstrap gui/501 /tmp/a.plist",
+            ]
+        );
+
+        let (log, mut run) = recorder();
+        assert_eq!(
+            activate_launchd(false, "gui/501", "/tmp/a.plist", &mut run).unwrap(),
+            Activation::Started
+        );
+        assert_eq!(*log.borrow(), vec!["bootstrap gui/501 /tmp/a.plist"]);
+    }
+
+    #[test]
+    fn install_ends_a_running_scheduled_task_before_running_the_new_definition() {
+        let create = ["/Create", "/TN", "ForgeServe", "/F"];
+        let (log, mut run) = recorder();
+        assert_eq!(
+            activate_schtasks(true, &create, &mut run).unwrap(),
+            Activation::Restarted
+        );
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "/Create /TN ForgeServe /F",
+                "/End /TN ForgeServe",
+                "/Run /TN ForgeServe",
+            ]
+        );
+
+        let (log, mut run) = recorder();
+        assert_eq!(
+            activate_schtasks(false, &create, &mut run).unwrap(),
+            Activation::Started
+        );
+        assert_eq!(
+            *log.borrow(),
+            vec!["/Create /TN ForgeServe /F", "/Run /TN ForgeServe"]
+        );
+    }
+
+    #[test]
+    fn a_failed_activation_step_is_reported_instead_of_aborting_the_install() {
+        let activation = activation_result(activate_systemd(true, &mut |args| {
+            if args.contains(&"restart") {
+                anyhow::bail!("Job for forge-serve.service failed");
+            }
+            Ok(())
+        }));
+        let Activation::Failed(err) = &activation else {
+            panic!("a failed restart must not report success: {activation:?}");
+        };
+        assert!(err.contains("failed"), "{err}");
+        assert!(activation_report(activation, None, None).starts_with("! daemon NOT running"));
     }
 
     #[test]
