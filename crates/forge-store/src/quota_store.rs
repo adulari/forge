@@ -433,7 +433,7 @@ impl Store {
             .optional()
             .ok()
             .flatten()?;
-        codex_quota_is_fresh(provider, observed_at, now).then_some(plan)
+        live_quota_is_fresh(provider, observed_at, now).then_some(plan)
     }
 
     /// Per-provider, per-window fraction from `subscription_usage` (for display).
@@ -630,6 +630,84 @@ impl Store {
         Ok(forge_types::SubscriptionQuota::new(map)
             .with_fractions(fractions)
             .with_paces(paces))
+    }
+
+    /// The strictest pacing decision for every provider with active quota windows.
+    ///
+    /// [`Self::quota_at`] collapses a provider to its single highest-fraction window, which cannot
+    /// answer "is this spend ahead of schedule?" — a weekly window at 40% is healthy on day six and
+    /// alarming on day one. This keeps every window and lets
+    /// [`forge_types::SubscriptionPacing`] pick the one furthest ahead of its linear allowance, so
+    /// the router's pacing (`apply_subscription_pacing`) and the burn-weight tie-break see real
+    /// data rather than an always-empty map.
+    pub fn subscription_pacing(
+        &self,
+    ) -> Result<std::collections::HashMap<String, forge_types::SubscriptionPacing>> {
+        self.subscription_pacing_at(chrono::Utc::now().timestamp())
+    }
+
+    /// [`Self::subscription_pacing`] at an explicit `now` (epoch secs) — testable clock.
+    pub fn subscription_pacing_at(
+        &self,
+        now: i64,
+    ) -> Result<std::collections::HashMap<String, forge_types::SubscriptionPacing>> {
+        let mut by_provider: std::collections::HashMap<
+            String,
+            Vec<forge_types::SubscriptionWindow>,
+        > = std::collections::HashMap::new();
+        for window in self.subscription_windows()? {
+            let Some(fraction_used) = window.fraction else {
+                continue;
+            };
+            // Timing must start where the window did, not where Forge first looked at it: the
+            // oldest history point inside the window is the closest available proxy when the
+            // provider omits `resets_at`.
+            let oldest_observed_at = forge_types::nominal_window_secs(&window.window_kind)
+                .and_then(|total| {
+                    self.oldest_quota_observation(
+                        &window.provider,
+                        &window.window_kind,
+                        now - total,
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .unwrap_or(window.updated_at);
+            by_provider
+                .entry(window.provider.clone())
+                .or_default()
+                .push(forge_types::SubscriptionWindow {
+                    window: window.window_kind,
+                    fraction_used,
+                    oldest_observed_at,
+                    resets_at: window.resets_at,
+                });
+        }
+        Ok(by_provider
+            .into_iter()
+            .filter_map(|(provider, windows)| {
+                forge_types::SubscriptionPacing::from_windows(&windows, now)
+                    .map(|pacing| (provider, pacing))
+            })
+            .collect())
+    }
+
+    fn oldest_quota_observation(
+        &self,
+        provider: &str,
+        window: &str,
+        since: i64,
+    ) -> Result<Option<i64>> {
+        self.lock()?
+            .query_row(
+                "SELECT MIN(observed_at) FROM quota_history
+                 WHERE provider = ?1 AND window_kind = ?2 AND observed_at >= ?3",
+                (provider, window, since),
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(Into::into)
     }
 
     /// Delete expired snapshots so discontinued window kinds cannot remain apparent state.

@@ -20,15 +20,16 @@ import { SettingsShell } from "./(tabs)/settings";
 const compact = (value: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value).toLowerCase();
 const kindTone = (kind: string) => kind === "api" ? "neutral" : "success";
 // Quota window names on the wire -> the prototype's short mono labels.
-const WINDOW_LABEL: Record<string, string> = { five_hour: "5h", weekly: "week", secondary: "2nd" };
+const WINDOW_LABEL: Record<string, string> = { five_hour: "5h", weekly: "week", monthly: "month", secondary: "2nd" };
 const resetLabel = (resetsAt: number | null) => resetsAt == null ? null : `resets ${new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date(resetsAt * 1000))}`;
 const observationLabel = (updatedAt: number | undefined, nowSec: number) => updatedAt == null ? null : `as of ${formatDurationShort(nowSec - updatedAt)} ago`;
 
 type QuotaRow = { kind: string; windowKind: string; status: string; fraction: number | null; resetsAt: number | null; updatedAt?: number };
 
-// Fixed window durations for the two quota kinds the wire actually sends (api.ts UsageQuota;
-// "secondary" has no known fixed length, so it's excluded from pace projection).
-const WINDOW_DURATION_SEC: Record<string, number> = { five_hour: 5 * 3600, weekly: 7 * 24 * 3600 };
+// Fixed window durations for the quota kinds the wire actually sends (api.ts UsageQuota;
+// "secondary" has no known fixed length, so it's excluded from pace projection). "monthly" is
+// OpenCode Go's calendar window — 30 days nominal, matching nominal_window_secs in Rust.
+const WINDOW_DURATION_SEC: Record<string, number> = { five_hour: 5 * 3600, weekly: 7 * 24 * 3600, monthly: 30 * 24 * 3600 };
 
 function formatDurationShort(totalSec: number): string {
   const sec = Math.max(0, Math.round(totalSec));

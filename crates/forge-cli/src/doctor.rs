@@ -82,6 +82,11 @@ pub async fn run() -> anyhow::Result<usize> {
     // Reachability is evidence for the routing verdict, not the verdict itself. A provider can
     // answer discovery while the mesh has excluded it or exhausted its subscription.
     let reachability = provider_reachability_checks().await;
+    // OpenCode Go's windows are poll-only, so without this the routing verdict below would report
+    // whatever a previous command happened to leave behind (or nothing at all).
+    if let Ok(store) = crate::open_store() {
+        crate::cli::commands::models::refresh_opencode_go_quota(&store).await;
+    }
     let routing = crate::doctor_health::provider_routing_checks(&reachability);
     let has_usable_provider = if routing.is_empty() {
         has_usable_provider

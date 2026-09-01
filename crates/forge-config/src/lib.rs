@@ -2098,6 +2098,10 @@ pub enum StatuslineWidget {
     QuotaClaude,
     /// Codex usage % "codex N%" (only when data is available)
     QuotaCodex,
+    /// OpenCode Go usage % for its MOST CONSTRAINED window, e.g. "go 5h 42%". The provider reports
+    /// three simultaneous windows (5-hour / weekly / monthly) and the statusline has room for one,
+    /// so the window is named alongside the percentage rather than left ambiguous.
+    QuotaOpencodeGo,
     /// Consumption-pace meter (mesh-routing.md) for whichever subscription window is
     /// projected closest to exhaustion, e.g. "⏱ claude 5h → 120%" — only renders once enough
     /// usage history has built up to derive a rate (silently absent otherwise, never a guess).

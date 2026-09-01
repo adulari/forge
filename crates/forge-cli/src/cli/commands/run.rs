@@ -172,6 +172,10 @@ pub(crate) fn fill_subscription_pcts(
     overlay.claude_weekly_pct = stored("claude-cli", "weekly").map(|fraction| fraction * 100.0);
     overlay.codex_5h_pct = stored("codex-cli", "five_hour").map(|fraction| fraction * 100.0);
     overlay.codex_weekly_pct = stored("codex-cli", "weekly").map(|fraction| fraction * 100.0);
+    let go = crate::cli::commands::models::OPENCODE_GO_PROVIDER;
+    overlay.opencode_go_5h_pct = stored(go, "five_hour").map(|fraction| fraction * 100.0);
+    overlay.opencode_go_weekly_pct = stored(go, "weekly").map(|fraction| fraction * 100.0);
+    overlay.opencode_go_monthly_pct = stored(go, "monthly").map(|fraction| fraction * 100.0);
     overlay.claude_rl_age_secs = claude_store_age_secs.filter(|&age| age > 300);
 }
 

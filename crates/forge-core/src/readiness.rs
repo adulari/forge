@@ -26,6 +26,10 @@ impl ProviderReadiness {
             .current_quota()
             .unwrap_or_default()
             .with_plans(crate::resolved_subscription_plans_with_store(config, store))
+            // Per-window pacing is a separate read from the collapsed strictest-fraction snapshot
+            // `current_quota` returns; without it `SubscriptionQuota::pacing_for` is empty on every
+            // production path and the router's pacing rules never fire.
+            .with_pacing(store.subscription_pacing().unwrap_or_default())
             .with_conserve(config.mesh.subscription_conserve);
         Self { health, quota }
     }

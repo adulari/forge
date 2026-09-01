@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// Whether to poll the OpenCode Go usage endpoint at session startup. Unlike the Codex probe this
+/// costs no subscription burn (it is a plain GET, not a model request), but it is still skipped for
+/// mock sessions and for any fully-qualified pin, which bypasses mesh selection entirely.
+fn should_refresh_opencode_go_quota(mock: bool, pin: Option<&str>) -> bool {
+    should_refresh_codex_quota(mock, pin)
+}
+
 fn should_refresh_codex_quota(mock: bool, pin: Option<&str>) -> bool {
     if mock {
         return false;
@@ -150,6 +157,12 @@ pub(crate) async fn build_session_with_self_mcp(
     // startup work and can block the requested provider behind an unavailable Secret Service.
     if should_refresh_codex_quota(mock, pin.as_deref()) {
         crate::cli::commands::models::refresh_codex_quota(&store).await;
+    }
+    // OpenCode Go's windows only move when polled — its chat completions carry no rate-limit
+    // headers — so the same pre-routing refresh keeps its pacing from running on stale data. The
+    // helper's own freshness gate bounds this to one request every few minutes.
+    if should_refresh_opencode_go_quota(mock, pin.as_deref()) {
+        crate::cli::commands::models::refresh_opencode_go_quota(&store).await;
     }
     let store_for_lattice = Arc::clone(&store);
     // Startup hint: if models are benched from a prior run/probe, tell the user how to recheck

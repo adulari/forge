@@ -273,12 +273,22 @@ pub(crate) fn known_burn_weight(id: &str) -> Option<f64> {
 /// table. Unknown models default to 1.0 (neutral, no penalty) — load-bearing: an unpriced/unknown
 /// model must get zero penalty in `route_score` so nothing regresses.
 /// Documented in docs/features/mesh-routing.md.
+/// Production routing goes through [`configured_burn_weight`], which distinguishes "no curated
+/// weight" from "neutral"; this collapsed form remains the readable subject of the table's own
+/// tests and the doc-sync guard.
+#[cfg(test)]
 pub(crate) fn subscription_burn_weight(id: &str, overrides: &HashMap<String, f64>) -> f64 {
-    let bare = bare_model(id);
-    if let Some(&w) = overrides.get(bare) {
-        return w;
-    }
-    known_burn_weight(id).unwrap_or(1.0)
+    configured_burn_weight(id, overrides).unwrap_or(1.0)
+}
+
+/// The explicitly-known weight for `id` — a config override, else the bundled family table —
+/// distinguished from "no curated weight" so a caller can substitute a derived one instead of a
+/// neutral 1.0 (see `catalog::price_derived_burn_weights`).
+pub(crate) fn configured_burn_weight(id: &str, overrides: &HashMap<String, f64>) -> Option<f64> {
+    overrides
+        .get(bare_model(id))
+        .copied()
+        .or_else(|| known_burn_weight(id))
 }
 
 /// The subset of `known_burn_weight`'s table that `speed_class` is allowed to derive its class

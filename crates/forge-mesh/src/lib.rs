@@ -22,6 +22,7 @@ mod context;
 mod doc_sync;
 pub mod explain;
 pub mod pricing;
+mod subscription_cost;
 pub mod vision;
 
 pub use bench::{BenchScore, BenchmarkScores};
@@ -1449,14 +1450,64 @@ impl HeuristicRouter {
     /// While a subscription is over its linear allowance, keep only its cheapest usable sibling.
     /// If the only usable sibling is also the provider's highest-burn model, remove the provider
     /// entirely; ordinary pacing never spends a flagship through the protected reserve.
+    /// Explain a cost-aware pick INSIDE a subscription provider: why the plan spent a cheaper
+    /// sibling rather than the provider's most expensive candidate.
+    ///
+    /// The mechanism is the burn penalty in `route_score`, which scales with live window pressure,
+    /// so the note only appears when there is real pressure and a genuinely heavier alternative was
+    /// on the table. Without it the decision reads as "the mesh just likes this model", which is
+    /// exactly the opacity a dollar-denominated plan cannot afford.
+    fn cost_aware_sibling_note(
+        &self,
+        model: &str,
+        candidates: &[String],
+        quota: &SubscriptionQuota,
+    ) -> Option<String> {
+        if !catalog::is_subscription(model) {
+            return None;
+        }
+        let provider = forge_config::provider_of(model);
+        let pressure = quota.effective_fraction_for(provider);
+        if pressure <= 0.0 {
+            return None;
+        }
+        let price_weights = catalog::price_derived_burn_weights(candidates, &self.pricing);
+        let weight = |id: &str| {
+            crate::capability::configured_burn_weight(id, &self.config.mesh.burn_weights)
+                .unwrap_or_else(|| price_weights.get(id).copied().unwrap_or(1.0))
+        };
+        let chosen = weight(model);
+        let (heaviest, heaviest_weight) = candidates
+            .iter()
+            .filter(|candidate| forge_config::provider_of(candidate) == provider)
+            .map(|candidate| (candidate, weight(candidate)))
+            .max_by(|left, right| left.1.total_cmp(&right.1))?;
+        // A 20% spread is the floor for a claim worth making; below it the two siblings drain the
+        // window at effectively the same rate and the pick was decided by capability alone.
+        if heaviest_weight <= chosen * 1.2 {
+            return None;
+        }
+        Some(format!(
+            " — cost-aware within {provider}: {model} spends ≈{chosen:.1}x the provider's \
+             cheapest model per request vs {heaviest}'s ≈{heaviest_weight:.1}x, at {:.0}% window \
+             pressure",
+            pressure * 100.0,
+        ))
+    }
+
     fn apply_subscription_pacing(
         &self,
         usable: &mut Vec<String>,
         candidates: &[String],
         quota: &SubscriptionQuota,
     ) {
+        // Same weight the ranking pass uses, including the price-derived ratio for subscription
+        // providers with no curated family entry — otherwise every OpenCode Go model weighs 1.0
+        // here and "keep only the cheapest sibling" degenerates into keeping all of them.
+        let price_weights = catalog::price_derived_burn_weights(candidates, &self.pricing);
         let burn_weight = |model: &str| {
-            crate::capability::subscription_burn_weight(model, &self.config.mesh.burn_weights)
+            crate::capability::configured_burn_weight(model, &self.config.mesh.burn_weights)
+                .unwrap_or_else(|| price_weights.get(model).copied().unwrap_or(1.0))
         };
         let providers: std::collections::HashSet<String> = usable
             .iter()
@@ -2311,6 +2362,13 @@ impl HeuristicRouter {
                         pacing.allowed_fraction * 100.0,
                         pacing.window,
                     ));
+                }
+                if let Some(note) = self.cost_aware_sibling_note(
+                    &model,
+                    &self.candidates_for_tier(tier, hints, quota, effort),
+                    quota,
+                ) {
+                    why.push_str(&note);
                 }
                 chain.retain(|m| m != &model);
                 RoutingDecision {

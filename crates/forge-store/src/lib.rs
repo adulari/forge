@@ -519,7 +519,7 @@ fn quota_observation_is_current(provider: &str, window: &str, updated_at: i64, n
         "weekly" => 7 * 24 * 60 * 60,
         _ => 30 * 24 * 60 * 60,
     };
-    let freshness = if matches!(provider, "codex-oauth" | "codex-cli") {
+    let freshness = if matches!(provider, "codex-oauth" | "codex-cli" | "opencode_go") {
         window_age.min(forge_types::CODEX_QUOTA_FRESHNESS_SECS)
     } else {
         window_age
@@ -527,10 +527,10 @@ fn quota_observation_is_current(provider: &str, window: &str, updated_at: i64, n
     now.saturating_sub(updated_at) <= freshness
 }
 
-/// Codex's shared account can also be consumed outside Forge, so plan observations need a
-/// shorter source-freshness gate than their rolling-window lifetime.
-fn codex_quota_is_fresh(provider: &str, updated_at: i64, now: i64) -> bool {
-    !matches!(provider, "codex-oauth" | "codex-cli")
+/// Poll-only/shared accounts can be consumed outside Forge, so observations need a shorter
+/// source-freshness gate than their rolling-window lifetime.
+fn live_quota_is_fresh(provider: &str, updated_at: i64, now: i64) -> bool {
+    !matches!(provider, "codex-oauth" | "codex-cli" | "opencode_go")
         || now.saturating_sub(updated_at) <= forge_types::CODEX_QUOTA_FRESHNESS_SECS
 }
 
@@ -4189,6 +4189,29 @@ mod tests {
     }
 
     #[test]
+    fn stale_polled_opencode_go_quota_does_not_mask_a_failed_refresh() {
+        let store = Store::open_in_memory().unwrap();
+        let now = 20_000;
+        store
+            .record_quota_at(
+                &forge_types::QuotaHint {
+                    provider: "opencode_go".into(),
+                    window: "five_hour".into(),
+                    status: forge_types::QuotaStatus::Warning,
+                    resets_at: Some(now + 10_000),
+                    fraction_used: Some(0.92),
+                },
+                now - forge_types::CODEX_QUOTA_FRESHNESS_SECS - 1,
+            )
+            .unwrap();
+
+        let quota = store.quota_at(now).unwrap();
+        assert_eq!(quota.fraction_for("opencode_go"), 0.0);
+        assert!(!quota.is_pressured("opencode_go"));
+        assert_eq!(store.subscription_age_secs("opencode_go"), None);
+    }
+
+    #[test]
     fn quota_observations_expire_with_their_window_and_dead_kinds_are_pruned() {
         let store = Store::open_in_memory().unwrap();
         let now = 3_000_000;
@@ -4243,6 +4266,42 @@ mod tests {
         assert_eq!(
             remaining, 1,
             "expired and dead windows are removed from the snapshot table"
+        );
+    }
+
+    #[test]
+    fn subscription_pacing_covers_every_window_kind_including_monthly() {
+        let store = Store::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let month = forge_types::nominal_window_secs("monthly").unwrap();
+        let five = forge_types::nominal_window_secs("five_hour").unwrap();
+        // An OpenCode Go reading: the 5-hour window is fresh, the monthly one is well ahead of
+        // its linear allowance. `quota_at` would collapse this to one fraction and lose the
+        // schedule; pacing must name the monthly window.
+        for (window, fraction, resets_at) in [
+            ("five_hour", 0.02, now + five / 2),
+            ("monthly", 0.80, now + month / 2),
+        ] {
+            store
+                .record_quota_at(
+                    &forge_types::QuotaHint {
+                        provider: "opencode_go".into(),
+                        window: window.into(),
+                        status: forge_types::QuotaStatus::Ok,
+                        resets_at: Some(resets_at),
+                        fraction_used: Some(fraction),
+                    },
+                    now,
+                )
+                .unwrap();
+        }
+        let pacing = store.subscription_pacing_at(now).unwrap();
+        let go = pacing.get("opencode_go").expect("go windows are paced");
+        assert_eq!(go.window, "monthly");
+        assert!(go.is_over_pace());
+        assert!(
+            !go.used_nominal_fallback,
+            "the reset instant is authoritative"
         );
     }
 

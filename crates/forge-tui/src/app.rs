@@ -1481,6 +1481,9 @@ impl App {
                     ("claude-cli", "weekly") => self.usage_overlay.claude_weekly_pct = pct,
                     ("codex-cli", "five_hour") => self.usage_overlay.codex_5h_pct = pct,
                     ("codex-cli", "weekly") => self.usage_overlay.codex_weekly_pct = pct,
+                    ("opencode_go", "five_hour") => self.usage_overlay.opencode_go_5h_pct = pct,
+                    ("opencode_go", "weekly") => self.usage_overlay.opencode_go_weekly_pct = pct,
+                    ("opencode_go", "monthly") => self.usage_overlay.opencode_go_monthly_pct = pct,
                     _ => {}
                 }
             }

@@ -445,6 +445,9 @@ impl App {
             ("claude weekly", u.claude_weekly_pct),
             ("codex 5h", u.codex_5h_pct),
             ("codex weekly", u.codex_weekly_pct),
+            ("opencode go 5h", u.opencode_go_5h_pct),
+            ("opencode go weekly", u.opencode_go_weekly_pct),
+            ("opencode go monthly", u.opencode_go_monthly_pct),
         ] {
             if let Some(p) = pct {
                 body.push_str(&format!("{label}: {p:.0}% used\n"));
