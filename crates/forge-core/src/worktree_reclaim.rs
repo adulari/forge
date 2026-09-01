@@ -435,9 +435,8 @@ fn sanitize(id: &str) -> String {
 pub fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // Signal 0 performs the existence/permission check without delivering anything.
-        // errno is read through std rather than libc's platform-specific accessor symbol
-        // (`__errno_location` on glibc, `__error` on Apple), which would not compile on macOS.
+        // Signal 0 checks existence/permission without delivering. errno comes from std, not
+        // libc's per-platform accessor (`__errno_location`/`__error`), which breaks macOS builds.
         let delivered = unsafe { libc::kill(pid as i32, 0) } == 0;
         delivered || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
