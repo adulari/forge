@@ -816,6 +816,16 @@ fn normalize_tool_arguments(
     crate::repair_malformed_args(raw)
 }
 
+/// The failure shape OpenCode Go returns when a model is sent to the wrong wire format: an
+/// immediate 5xx (`Unavailable`) or 401 (`Auth`) with no useful body. Rate limits, capability
+/// and access failures are real answers about the model and must not trigger endpoint learning.
+fn opencode_go_wrong_endpoint(error: &ProviderError) -> bool {
+    matches!(
+        error,
+        ProviderError::Unavailable(_) | ProviderError::Auth(_)
+    )
+}
+
 #[async_trait]
 impl Provider for GenAiProvider {
     async fn complete(
@@ -901,10 +911,14 @@ impl Provider for GenAiProvider {
             }
         }
 
-        if !reasoning_engaged {
+        // Low temperature for deterministic edits/patches — but ONLY for a model that takes one.
+        // A reasoning model rejects (or ignores) a custom temperature whether or not an effort
+        // hint engaged it this turn: OpenCode Go's Responses-served `gpt-5.6-luna` answers
+        // `[invalid_request_error] Unsupported parameter: 'temperature' is not supported with
+        // this model` and the turn dies (2026-09-02), and OpenAI's own reasoning line documents
+        // the same restriction. So the gate is the model family, not the effort flag.
+        if !reasoning_engaged && !model_benefits_from_effort(&model_name) {
             if let Some(temp) = opts.temperature {
-                // Low temperature for deterministic edits/patches — but ONLY when reasoning isn't
-                // engaged: thinking models reject (or ignore) a custom temperature, so effort wins.
                 options = options.with_temperature(crate::wire_params::temperature_for_wire(temp));
             }
         }
@@ -947,6 +961,38 @@ impl Provider for GenAiProvider {
         // them. Keep caching opportunistic and compatibility universal: retry once without only
         // that hint when the provider names it as an unsupported request parameter. This occurs
         // before a stream is accepted, so no text/tool event can be duplicated.
+        // OpenCode Go serves each model on ONE wire format and `/models` does not say which:
+        // a model sent to the wrong one answers an instant, deterministic 5xx/401 (measured
+        // 2026-09-02: gpt-5.6-luna 500, grok-4.6 401, grok-4.5 503, muse-spark 500 on
+        // chat/completions; all fine on responses). The adapter seeds the known families;
+        // anything it does not know yet is learned here from that failure shape, once, and
+        // kept only if the Responses path actually answers — a genuine outage on a
+        // chat-only model must not flip it onto a path that would then fail forever.
+        if let Some(bare) = model.strip_prefix("opencode_go::") {
+            if first.as_ref().is_err_and(opencode_go_wrong_endpoint)
+                && !genai::opencode_go::is_responses_model(bare)
+            {
+                genai::opencode_go::mark_responses_model(bare);
+                tracing::info!(
+                    model,
+                    "opencode_go rejected the chat/completions path; retrying on the Responses API"
+                );
+                let retry = tokio::time::timeout(
+                    CONNECT_TIMEOUT,
+                    self.client
+                        .exec_chat_stream(model_name.as_str(), req.clone(), Some(&options)),
+                )
+                .await
+                .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
+                .map_err(|e| classify_genai_error(&e));
+                if retry.is_ok() {
+                    first = retry;
+                } else {
+                    genai::opencode_go::unmark_responses_model(bare);
+                }
+            }
+        }
+
         if options.prompt_cache_key.is_some()
             && first
                 .as_ref()
@@ -1280,6 +1326,34 @@ fn is_phantom_truncation(saw_end: bool, has_tool_calls: bool, usage: &Usage) -> 
 
 #[cfg(test)]
 mod tests {
+    /// The temperature gate is the model family, not the effort flag: a reasoning model rejects a
+    /// custom temperature whether or not an effort hint engaged it this turn. Live failure this
+    /// pins: OpenCode Go's Responses-served `gpt-5.6-luna` answered `Unsupported parameter:
+    /// 'temperature' is not supported with this model` and the turn died (2026-09-02).
+    #[test]
+    fn reasoning_families_are_recognised_under_every_namespace() {
+        for id in [
+            "opencode_go::gpt-5.6-luna",
+            "codex-oauth::gpt-5.6-sol",
+            "openai::o3-mini",
+            "nvidia::deepseek-ai/deepseek-r1",
+        ] {
+            assert!(
+                super::model_benefits_from_effort(id),
+                "{id} is a reasoning model"
+            );
+        }
+        for id in [
+            "opencode_go::glm-5.3-flash",
+            "groq::llama-3.3-70b-versatile",
+        ] {
+            assert!(
+                !super::model_benefits_from_effort(id),
+                "{id} takes a temperature"
+            );
+        }
+    }
+
     /// Qwen3.8's chat template raises "System message must be at the beginning", which llama.cpp
     /// reports as `Unable to generate parser for this template` — failing EVERY tool-bearing turn.
     /// Forge injects system content mid-transcript (lattice symbols, command guidance), so the

@@ -107,6 +107,7 @@ pub(super) async fn request_provider_response(
     pinned_outage_attempts: &mut u32,
     pinned_outage_waited: &mut std::time::Duration,
     pinned_outage_warned_halfway: &mut bool,
+    pinned_outage_last_error: &mut Option<String>,
     step: usize,
 ) -> Result<(u64, forge_provider::ModelResponse), CoreError> {
     let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
@@ -445,6 +446,27 @@ pub(super) async fn request_provider_response(
                     // above already gated `mesh.pin_outage_wait_secs > 0` into
                     // `transient_outage`, so this arm never runs with the budget disabled.
                     FailoverPolicy::BackoffSameModel => {
+                        // An outage is worth waiting minutes for; a REJECTION is not. A provider
+                        // that answers the same error text twice in a row, each time within
+                        // `DETERMINISTIC_REJECTION_WINDOW` of the request, is not unreachable —
+                        // it is refusing this model (live case: OpenCode Go returned an identical
+                        // `500 Internal server error` in 0.4s for a model served on a different
+                        // endpoint, and a pinned turn sat in "recovering provider" for 6m47s).
+                        // Surface the real text and fail the turn instead of burning the budget.
+                        let message = e.to_string();
+                        let fast = attempt_started.elapsed() <= DETERMINISTIC_REJECTION_WINDOW;
+                        let repeated =
+                            pinned_outage_last_error.as_deref() == Some(message.as_str());
+                        *pinned_outage_last_error = fast.then(|| message.clone());
+                        if fast && repeated {
+                            session.presenter.emit(PresenterEvent::Warning(format!(
+                                "{active_model}: the provider rejected this model twice in a \
+                                 row ({message}) — not waiting for an outage that isn't one \
+                                 (pinned model; `/model` to unpin, or set \
+                                 `mesh.pin_failover = true` to allow mesh fallback)"
+                            )));
+                            return Err(e.into());
+                        }
                         let attempt = *pinned_outage_attempts + 1;
                         // Cheap jitter without a rand dependency: sub-second wall-clock
                         // nanos.
