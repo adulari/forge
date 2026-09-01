@@ -4191,24 +4191,45 @@ mod tests {
     #[test]
     fn stale_polled_opencode_go_quota_does_not_mask_a_failed_refresh() {
         let store = Store::open_in_memory().unwrap();
-        let now = 20_000;
-        store
-            .record_quota_at(
-                &forge_types::QuotaHint {
-                    provider: "opencode_go".into(),
-                    window: "five_hour".into(),
-                    status: forge_types::QuotaStatus::Warning,
-                    resets_at: Some(now + 10_000),
-                    fraction_used: Some(0.92),
-                },
-                now - forge_types::CODEX_QUOTA_FRESHNESS_SECS - 1,
-            )
-            .unwrap();
+        // Wall clock, because `subscription_age_secs`/`bridge_fractions` are `now()`-based while
+        // `quota_at` takes an explicit clock; a synthetic epoch would compare the two against
+        // different clocks.
+        let now = chrono::Utc::now().timestamp();
+        let hint = |fraction| forge_types::QuotaHint {
+            provider: "opencode_go".into(),
+            window: "five_hour".into(),
+            status: forge_types::QuotaStatus::Warning,
+            resets_at: Some(now + 10_000),
+            fraction_used: Some(fraction),
+        };
+        let stale_at = now - forge_types::CODEX_QUOTA_FRESHNESS_SECS - 1;
+        store.record_quota_at(&hint(0.92), stale_at).unwrap();
 
+        // A /usage poll that fails leaves this stale row as the only observation. It must read as
+        // unknown everywhere routing and display look, never as 92% and never as free headroom.
         let quota = store.quota_at(now).unwrap();
         assert_eq!(quota.fraction_for("opencode_go"), 0.0);
         assert!(!quota.is_pressured("opencode_go"));
-        assert_eq!(store.subscription_age_secs("opencode_go"), None);
+        assert!(!store
+            .bridge_fractions()
+            .unwrap()
+            .contains_key("opencode_go"));
+
+        // `subscription_age_secs` answers "how old is the newest row", not "is it usable" — the
+        // row exists, so it reports an age. What matters is that the age is past the freshness
+        // limit, which is exactly what makes the poll gate re-poll instead of trusting it.
+        let age = store.subscription_age_secs("opencode_go").unwrap();
+        assert!(
+            age > forge_types::CODEX_QUOTA_FRESHNESS_SECS,
+            "a stale row must never look fresh to the poll gate (age {age}s)"
+        );
+
+        // A fresher successful reading becomes authoritative, and a late stale observation
+        // (a retried seed, a slow in-flight poll) can never regress it.
+        store.record_quota_at(&hint(0.10), now).unwrap();
+        store.record_quota_at(&hint(0.92), stale_at).unwrap();
+        let quota = store.quota_at(now).unwrap();
+        assert!((quota.fraction_for("opencode_go") - 0.10).abs() < 1e-9);
     }
 
     #[test]
