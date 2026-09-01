@@ -61,6 +61,13 @@ Expo Doctor's `appConfigFieldsNotSyncedCheck` is the sole disabled check: `ios/`
 committed only as the Xcode Cloud bootstrap, and `ios/ci_scripts/ci_post_clone.sh` replaces it with
 a fresh `expo prebuild -p ios` result before every archive. All other Doctor checks remain enforced.
 
+The release workflows (`app-desktop.yml`, `app-web.yml`) run `scripts/ci/mobile-release-check.sh`
+instead. It is the same gate minus Doctor's "packages match versions required by installed Expo
+SDK" check, whose expected patch versions are fetched from the network: publishing an Expo patch
+otherwise turns an already-tagged commit red, and those workflows build from the tag, so no fix on
+main can rescue it (#993, #1129, #1160, #1213). Keep the drift fixed here, on PRs, where
+`npm run check` still enforces it.
+
 ## Build matrix
 
 | Target | Build | CI |

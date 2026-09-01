@@ -71,7 +71,13 @@ jobs:
           cache: npm
           cache-dependency-path: mobile/package-lock.json
       - run: npm ci
-      - run: npm run check
+      # Release-path form of `npm run check`: everything enforcing except expo-doctor's
+      # non-hermetic SDK version comparison, which an upstream Expo patch publish can turn red on
+      # an already-tagged commit that this job checks out by tag and cannot fix (#993, #1129,
+      # #1160, #1213). PR CI (mobile-typecheck.yml) keeps the comparison enforcing.
+      - name: Verify app
+        working-directory: .
+        run: bash scripts/ci/mobile-release-check.sh
       - name: Bound persistent dependency cache
         if: always()
         run: |
