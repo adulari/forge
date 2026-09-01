@@ -6,6 +6,55 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.4] - 2026-09-01
+
+### Fixed
+
+- **The two macOS legs that failed the v2.13.3 release now compile — this is the release that
+  reaches users.** `pid_alive` read errno through `libc::__errno_location()`, which is a glibc
+  symbol; Apple's libc spells it `__error`, so `aarch64-apple-darwin` could not build at all. errno
+  now comes from `std::io::Error::last_os_error()`, which is portable
+  (`crates/forge-core/src/worktree_reclaim.rs`). Separately, `release.yml` installed its
+  cross-compilation targets with `dtolnay/rust-toolchain`'s default `stable` channel while cargo
+  obeyed `rust-toolchain.toml`, so the pinned channel had only the host target installed and
+  `x86_64-apple-darwin` died with `can't find crate for std`; the workflow now resolves the channel
+  out of `rust-toolchain.toml` and pins the action to it (`.github/workflows/release.yml`,
+  `.github/workflows/app-desktop.yml`). Both defects passed CI green because `release.yml` is
+  `workflow_dispatch`-only and no PR-time job ever builds a macOS target. Two guards close that
+  blind spot at PR time: `scripts/ci/release-targets-guard.sh` asserts every target the release
+  builds resolves against the pinned toolchain and that each installing step pins that toolchain,
+  and `scripts/ci/linux_only_libc.py` rejects glibc-only libc symbols in code the macOS legs
+  compile (`.github/workflows/ci.yml`, plus `scripts/ci/test-release-targets-guard.sh` and
+  `scripts/ci/test_linux_only_libc.py`).
+
+- **A rejected Codex `previous_response_id` no longer pins a session to full-HTTPS resends for the
+  rest of its life.** The backend spells the rejection ``Invalid `previous_response_id`.`` with
+  backticks, but `is_stale_previous_response_error` tested for `invalid previous_response_id` —
+  space, no backticks — so the one-shot reconnect-and-resend-in-full recovery never fired. The
+  failed request then stashed its dead chain as `resume_history`, which every following turn
+  restored and replayed, so a single transport drop downgraded the whole session permanently. The
+  matcher now strips backticks before comparing, and a request rejected for a stale chain clears
+  both `resume_history` and the socket instead of re-stashing them
+  (`crates/forge-provider/src/codex_websocket.rs`, `crates/forge-provider/src/codex_oauth.rs`). The
+  existing unit test asserted the matcher against a message shape the backend never sends, so it
+  passed while the feature was dead; it now covers the real backticked spelling alongside a live
+  end-to-end test that a rejected chain resends in full exactly once and does not poison later
+  turns.
+
+### Added
+
+- **`forge worktree` accounts for Cargo `target/` bytes separately and can prune them from
+  worktrees that must otherwise be kept.** `list` reports source and build-artifact sizes as
+  distinct numbers, and `reclaim --artifacts` deletes stale `target/` directories on their own
+  lifecycle: never from a worktree with a live session or an in-flight build, never without a
+  readable modification time, and only after a quiet period (`--artifact-min-age-hours`, default
+  24). This matters because reclaimable-by-worktree badly understates what is recoverable — on the
+  machine this was built on, `forge worktree list` reported 146.9 GB across 76 worktrees but only
+  107.4 MB reclaimable, since roughly 94% of every worktree is regenerable build output held in
+  place by a live session, an unmerged branch, or uncommitted changes
+  (`crates/forge-core/src/worktree_reclaim.rs`, `crates/forge-cli/src/cli/commands/worktree.rs`,
+  `crates/forge-cli/src/cli/args.rs`, `crates/forge-core/tests/worktree_reclaim.rs`).
+
 ## [2.13.3] - 2026-09-01
 
 ### Fixed
@@ -3676,7 +3725,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.3...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.4...HEAD
+[2.13.4]: https://github.com/Adulari/forge/compare/v2.13.3...v2.13.4
 [2.13.3]: https://github.com/Adulari/forge/compare/v2.13.2...v2.13.3
 [2.13.2]: https://github.com/Adulari/forge/compare/v2.13.1...v2.13.2
 [2.13.1]: https://github.com/Adulari/forge/compare/v2.13.0...v2.13.1
