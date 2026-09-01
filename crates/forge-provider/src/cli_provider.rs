@@ -276,7 +276,16 @@ impl CliKind {
                     .filter(|value| value != "default" && !value.is_empty())
                     .collect::<Vec<_>>();
                 if !advertised.is_empty() {
-                    return Ok(advertised);
+                    // The initialize response is the picker's list, not the CLI's full
+                    // inventory: claude 2.1.257 advertises `opus[1m]`, `sonnet`, `haiku` and
+                    // NOTHING for Fable, while `claude --model fable` answers on the same
+                    // install. `--help` is the CLI's own documentation of `--model` and does
+                    // name it, so the two are unioned; both are non-billing.
+                    let documented = run_model_probe(self.default_binary(), &["--help"])
+                        .await
+                        .map(|out| parse_claude_model_aliases(&out))
+                        .unwrap_or_default();
+                    return Ok(merge_claude_aliases(advertised, &documented));
                 }
             }
         }
@@ -632,6 +641,26 @@ fn windows_cmd_line(program: &std::path::Path, args: &[String]) -> String {
         inner.push_str(&q(a));
     }
     format!("\"{inner}\"")
+}
+
+/// Union of what the initialize protocol advertised and what `--help` documents, advertised
+/// entries first. A documented alias is added only when no advertised value already names that
+/// family — `opus` is covered by `opus[1m]`, so the picker's context-suffixed spelling is kept
+/// and not duplicated by the bare alias.
+fn merge_claude_aliases(advertised: Vec<String>, documented: &[String]) -> Vec<String> {
+    let family = |value: &str| {
+        value
+            .split_once('[')
+            .map(|(base, _)| base.to_string())
+            .unwrap_or_else(|| value.to_string())
+    };
+    let mut merged = advertised;
+    for alias in documented {
+        if !merged.iter().any(|m| family(m) == *alias || m == alias) {
+            merged.push(alias.clone());
+        }
+    }
+    merged
 }
 
 /// The model aliases `claude --help` documents for `--model`: its help names them in single
@@ -3477,6 +3506,23 @@ mod tests {
         assert!(parse_claude_model_aliases("no model flag here").is_empty());
     }
 
+    /// claude 2.1.257 advertises `opus[1m]`/`sonnet`/`haiku` over the initialize protocol and
+    /// nothing for Fable, while `claude --model fable` answers on the same install and `--help`
+    /// names it. The union keeps the picker's spellings and adds only what they do not cover.
+    #[test]
+    fn documented_aliases_fill_the_families_the_initializer_omits() {
+        let advertised = vec!["opus[1m]".to_string(), "sonnet".into(), "haiku".into()];
+        let documented = ["fable".to_string(), "opus".into(), "sonnet".into()];
+        assert_eq!(
+            merge_claude_aliases(advertised, &documented),
+            ["opus[1m]", "sonnet", "haiku", "fable"]
+        );
+        assert_eq!(
+            merge_claude_aliases(vec![], &documented),
+            ["fable", "opus", "sonnet"]
+        );
+    }
+
     #[test]
     fn failed_probe_prefers_the_actionable_error_over_progress_output() {
         let stderr =
@@ -5277,6 +5323,22 @@ mod tests {
             classify_in_band_error("claude", "login required before continuing"),
             ProviderError::Auth(_)
         ));
+        // Claude Code's own permission gate and OS/file errors say "permission denied"; keychain
+        // notices say "credentials". Neither names the login, and an auth verdict benches the
+        // model (then the account) — this is the shape that benched a healthy opus[1m].
+        for not_auth in [
+            "Permission denied: Bash(rm -rf) was not allowed by the permission system",
+            "EACCES: permission denied, open '/tmp/x'",
+            "Reading credentials from keychain",
+        ] {
+            assert!(
+                !matches!(
+                    classify_in_band_error("claude", not_auth),
+                    ProviderError::Auth(_)
+                ),
+                "{not_auth:?} must not classify as auth"
+            );
+        }
         // The bare substring "auth" is not evidence of an auth failure. These are the shapes that
         // reached the classifier as stderr tails and turned an unrelated bridge failure into a
         // permanent, provider-wide exclusion of a healthy subscription.

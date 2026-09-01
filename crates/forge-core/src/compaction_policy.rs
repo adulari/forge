@@ -247,7 +247,15 @@ impl Session {
         }
         let reason = err.reason();
         if err.is_auth() {
-            self.record_auth_failure(model, reason);
+            // The store prefixes the class itself ("excluded: auth failed: …"), so what goes in
+            // here must be the EVIDENCE — the provider's / CLI's own text — not the class label
+            // again. A row reading "auth failed: auth failed" told the mobile app that Opus was
+            // benched for auth while `claude --model opus -p` answered fine on the same login,
+            // and left nothing to diagnose it with (2026-09-02).
+            let detail = err.to_string();
+            let detail = detail.trim();
+            let detail: String = detail.chars().take(240).collect();
+            self.record_auth_failure(model, if detail.is_empty() { reason } else { &detail });
         } else if err.is_permanent() {
             let _ = self.store.exclude_model(model, reason);
         } else {
