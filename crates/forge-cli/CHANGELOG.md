@@ -6,6 +6,34 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.5] - 2026-09-01
+
+### Fixed
+
+- **An Expo patch publish can no longer turn a tagged release red on its own — this is what kept
+  v2.13.4 from ever publishing.** expo-doctor's "packages match versions required by installed Expo
+  SDK" check resolves the SDK's expected patch versions over the network, so the answer lives
+  outside the repository: Expo shipping `expo@57.0.19` upstream was enough to fail `app preflight`
+  on a commit that had passed CI unchanged, and because `app-desktop.yml` checks out
+  `refs/tags/<release_tag>` no fix landing on `main` can rescue the already-cut tag. That is the
+  fourth occurrence of this exact failure mode (#993, #1129, #1160, and v2.13.4). The eleven
+  drifted SDK packages are realigned with a lockfile regenerated under npm 10 to match CI's Node 20
+  toolchain (`mobile/package.json`, `mobile/package-lock.json`), and the release path now runs
+  `scripts/ci/mobile-release-check.sh`, which suppresses only that one check through expo-doctor's
+  own `EXPO_DOCTOR_SKIP_DEPENDENCY_VERSION_CHECK` while the other 18 checks, ESLint, `tsc --noEmit`
+  and Vitest stay fully enforcing (`.github/workflows/app-desktop.yml`,
+  `.github/workflows/app-web.yml`, `scripts/ci/test-mobile-release-check.sh`,
+  `.github/workflows/ci.yml`, `mobile/README.md`). PR CI still runs the plain `npm run check`, so
+  version drift is still caught — just where a human can act on it instead of where it strands a
+  release.
+
+- **The mobile lockfile moves to `browserslist` 4.28.8 for GHSA-73wf-gq98-2v4g and
+  GHSA-c83g-rgw3-j3cx.** Both advisories were published after `main`'s last green run and cover
+  `browserslist <= 4.28.6`, which `main` carried at 4.28.4; every dependent range is `^4.x`, so a
+  lockfile bump clears the audit gate with no override (`mobile/package-lock.json`). Same
+  non-hermetic class as the expo-doctor failure above, on the audit gate rather than the doctor
+  gate.
+
 ## [2.13.4] - 2026-09-01
 
 ### Fixed
@@ -3725,7 +3753,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.4...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.5...HEAD
+[2.13.5]: https://github.com/Adulari/forge/compare/v2.13.4...v2.13.5
 [2.13.4]: https://github.com/Adulari/forge/compare/v2.13.3...v2.13.4
 [2.13.3]: https://github.com/Adulari/forge/compare/v2.13.2...v2.13.3
 [2.13.2]: https://github.com/Adulari/forge/compare/v2.13.1...v2.13.2
