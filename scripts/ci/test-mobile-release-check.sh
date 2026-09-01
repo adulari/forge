@@ -10,6 +10,10 @@ check="$script_dir/mobile-release-check.sh"
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 
+# The fixtures run real `npm run` scripts; a missing toolchain must be an explicit failure rather
+# than a confusing one from inside a case.
+command -v npm >/dev/null || { echo 'npm is required to test the release-path check' >&2; exit 1; }
+
 # A stand-in for mobile/ whose `check` script fails exactly like expo-doctor's non-hermetic
 # dependency-version check: green only when the release path has disabled it.
 fake_mobile() {

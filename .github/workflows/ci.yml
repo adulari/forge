@@ -118,7 +118,11 @@ jobs:
       - name: Enforce linux-only libc gating
         run: python3 scripts/ci/linux_only_libc.py
       # A tagged release must survive an upstream Expo patch publish; four draft releases have
-      # been stuck by one (#993, #1129, #1160, #1213).
+      # been stuck by one (#993, #1129, #1160, #1213). The fixtures drive real `npm run` scripts,
+      # so pin Node rather than inheriting whatever the self-hosted image carries.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "20"
       - name: Test mobile release-path check
         run: bash scripts/ci/test-mobile-release-check.sh
       - name: Test desktop version guard
