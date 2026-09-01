@@ -67,8 +67,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # See scripts/ci/mobile-release-check.sh: this workflow also exports from a tag, so it must
+      # not fail on expo-doctor's network-resolved SDK version comparison.
       - name: Verify app
-        run: npm run check
+        working-directory: .
+        run: bash scripts/ci/mobile-release-check.sh
 
       - name: Export static web build
         run: npx --no-install expo export -p web
