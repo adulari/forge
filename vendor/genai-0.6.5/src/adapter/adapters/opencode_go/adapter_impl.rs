@@ -1,3 +1,4 @@
+use crate::adapter::adapters::openai_resp::OpenAIRespAdapter;
 use crate::adapter::adapters::support::get_api_key;
 use crate::adapter::anthropic::{AnthropicAdapter, AnthropicRequestParts};
 use crate::adapter::openai::OpenAIAdapter;
@@ -20,19 +21,66 @@ impl OpenCodeGoAdapter {
 // region:    --- OpenCodeGoModelKind
 
 /// Internal enum to dispatch wire format based on model name prefix.
-/// MiniMax models use Anthropic protocol; all others use OpenAI protocol.
-/// Unrecognized model names silently fall back to the OpenAI path, reflecting
-/// the dynamic nature of the OpenCode Go proxy which may add new OpenAI-compatible
-/// models at any time.
+///
+/// OpenCode Go serves each model on ONE of three wire formats and `GET /models` does not say
+/// which (`{"id","object","created","owned_by":"opencode"}` only). Sending a model to the wrong
+/// one is an instant, deterministic failure — measured 2026-09-02 against all 33 Go models:
+/// `gpt-5.6-luna`, `grok-4.5`, `grok-4.6` and `muse-spark-1.2-contributor` answer 500/503/401 on
+/// `chat/completions` and 500 on `messages`, and only work on `responses` (OpenAI Responses API).
+/// Every other model works on `chat/completions` (MiniMax additionally on `messages`) and
+/// 401/500s on `responses`. So:
+/// - MiniMax models use the Anthropic protocol (`messages`);
+/// - the OpenAI-family models (`gpt-*`, `grok-*`, `muse-*`) use the Responses protocol;
+/// - everything else, including models the proxy adds later, uses Chat Completions.
+/// A model that turns out to need the Responses path can be registered at runtime with
+/// [`mark_responses_model`]; the caller learns it from the failure shape above.
 enum OpenCodeGoModelKind {
 	OpenAI,
 	Anthropic,
+	Responses,
+}
+
+/// Runtime overrides for models learned to need the Responses path (see
+/// [`OpenCodeGoModelKind`]). Process-wide because the adapter is stateless by design.
+fn responses_overrides() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
+	static OVERRIDES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+		std::sync::OnceLock::new();
+	OVERRIDES.get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()))
+}
+
+/// Register `model_name` (bare, no `opencode_go::` namespace) as served on the Responses API.
+/// Idempotent. Returns `true` when this call changed the routing for the model.
+pub fn mark_responses_model(model_name: &str) -> bool {
+	let lower = model_name.to_lowercase();
+	if OpenCodeGoModelKind::seeded_responses(&lower) {
+		return false;
+	}
+	responses_overrides().write().map(|mut set| set.insert(lower)).unwrap_or(false)
+}
+
+/// True when `model_name` is routed to the Responses API (seeded or learned).
+pub fn is_responses_model(model_name: &str) -> bool {
+	matches!(
+		OpenCodeGoModelKind::from_model_name(model_name),
+		OpenCodeGoModelKind::Responses
+	)
 }
 
 impl OpenCodeGoModelKind {
+	/// The measured Responses-only families. Prefix-matched so a `grok-4.7` or `gpt-5.7-*` the
+	/// proxy adds later lands on the right path without a code change.
+	fn seeded_responses(lower: &str) -> bool {
+		lower.starts_with("gpt-") || lower.starts_with("grok-") || lower.starts_with("muse-")
+	}
+
 	fn from_model_name(name: &str) -> Self {
-		if name.to_lowercase().starts_with("minimax-") {
+		let lower = name.to_lowercase();
+		if lower.starts_with("minimax-") {
 			Self::Anthropic
+		} else if Self::seeded_responses(&lower)
+			|| responses_overrides().read().map(|set| set.contains(&lower)).unwrap_or(false)
+		{
+			Self::Responses
 		} else {
 			Self::OpenAI
 		}
@@ -66,6 +114,7 @@ impl Adapter for OpenCodeGoAdapter {
 		let suffix = match model_kind {
 			OpenCodeGoModelKind::OpenAI => "chat/completions",
 			OpenCodeGoModelKind::Anthropic => "messages",
+			OpenCodeGoModelKind::Responses => "responses",
 		};
 		Ok(format!("{base_url}{suffix}"))
 	}
@@ -87,6 +136,14 @@ impl Adapter for OpenCodeGoAdapter {
 				chat_req,
 				options_set,
 				None,
+			),
+			// The Responses adapter resolves the URL through the dispatcher, i.e. back through
+			// `Self::get_service_url`, so the Go base URL + `responses` suffix is what it hits.
+			OpenCodeGoModelKind::Responses => OpenAIRespAdapter::to_web_request_data(
+				ServiceTarget { endpoint, auth, model },
+				service_type,
+				chat_req,
+				options_set,
 			),
 			OpenCodeGoModelKind::Anthropic => {
 				let model_name = model_name.to_string();
@@ -149,6 +206,9 @@ impl Adapter for OpenCodeGoAdapter {
 
 		match model_kind {
 			OpenCodeGoModelKind::OpenAI => OpenAIAdapter::to_chat_response(model_iden, web_response, options_set),
+			OpenCodeGoModelKind::Responses => {
+				OpenAIRespAdapter::to_chat_response(model_iden, web_response, options_set)
+			}
 			OpenCodeGoModelKind::Anthropic => AnthropicAdapter::to_chat_response(model_iden, web_response, options_set),
 		}
 	}
@@ -163,6 +223,9 @@ impl Adapter for OpenCodeGoAdapter {
 
 		match model_kind {
 			OpenCodeGoModelKind::OpenAI => OpenAIAdapter::to_chat_stream(model_iden, reqwest_builder, options_set),
+			OpenCodeGoModelKind::Responses => {
+				OpenAIRespAdapter::to_chat_stream(model_iden, reqwest_builder, options_set)
+			}
 			OpenCodeGoModelKind::Anthropic => {
 				AnthropicAdapter::to_chat_stream(model_iden, reqwest_builder, options_set)
 			}
@@ -229,6 +292,56 @@ mod tests {
 			"OpenAI path URL should end with chat/completions: {}",
 			data.url
 		);
+	}
+
+	/// The four models measured Responses-only (2026-09-02) must not be sent to chat/completions,
+	/// where they answer an instant 500/503/401 — the failure a pinned turn spun on for 6m47s.
+	#[test]
+	fn test_url_responses_path_for_openai_family() {
+		for name in ["gpt-5.6-luna", "grok-4.6", "grok-4.5", "muse-spark-1.2-contributor"] {
+			let data = make_request(name, ServiceType::Chat);
+			assert!(
+				data.url.ends_with("responses"),
+				"{name} must use the Responses path, got {}",
+				data.url
+			);
+			// The Responses body shape: `input`, never `messages`.
+			assert!(
+				data.payload.get("input").is_some(),
+				"{name}: Responses payload carries `input`"
+			);
+			assert!(
+				data.payload.get("messages").is_none(),
+				"{name}: not a chat/completions payload"
+			);
+			assert!(
+				data.url.starts_with("https://opencode.ai/zen/go/v1/"),
+				"{name}: Go base URL kept"
+			);
+		}
+	}
+
+	#[test]
+	fn test_responses_auth_is_bearer() {
+		let data = make_request("muse-spark-1.2-contributor", ServiceType::Chat);
+		let auth = data
+			.headers
+			.iter()
+			.find(|(k, _)| k.eq_ignore_ascii_case("Authorization"))
+			.map(|(_, v)| v.as_str());
+		assert_eq!(auth, Some("Bearer test-key"));
+	}
+
+	/// A model learned at runtime to need the Responses path is honored on the next request;
+	/// seeded families report "no change". Uses a name no seed matches.
+	#[test]
+	fn test_learned_responses_override() {
+		assert!(make_request("hy9-future", ServiceType::Chat).url.ends_with("chat/completions"));
+		assert!(mark_responses_model("hy9-future"));
+		assert!(!mark_responses_model("hy9-future"), "idempotent");
+		assert!(!mark_responses_model("gpt-5.6-luna"), "seeded family needs no override");
+		assert!(is_responses_model("HY9-Future"), "case-insensitive");
+		assert!(make_request("hy9-future", ServiceType::Chat).url.ends_with("responses"));
 	}
 
 	#[test]
