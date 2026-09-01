@@ -32,6 +32,7 @@ impl OpenCodeGoAdapter {
 /// - MiniMax models use the Anthropic protocol (`messages`);
 /// - the OpenAI-family models (`gpt-*`, `grok-*`, `muse-*`) use the Responses protocol;
 /// - everything else, including models the proxy adds later, uses Chat Completions.
+///
 /// A model that turns out to need the Responses path can be registered at runtime with
 /// [`mark_responses_model`]; the caller learns it from the failure shape above.
 enum OpenCodeGoModelKind {
@@ -56,6 +57,14 @@ pub fn mark_responses_model(model_name: &str) -> bool {
 		return false;
 	}
 	responses_overrides().write().map(|mut set| set.insert(lower)).unwrap_or(false)
+}
+
+/// Undo [`mark_responses_model`] for a model whose Responses retry did not answer either —
+/// a genuine outage on a chat-only model must not leave it pinned to a path that would then
+/// fail on every later request. Seeded families cannot be unmarked. Returns `true` on change.
+pub fn unmark_responses_model(model_name: &str) -> bool {
+	let lower = model_name.to_lowercase();
+	responses_overrides().write().map(|mut set| set.remove(&lower)).unwrap_or(false)
 }
 
 /// True when `model_name` is routed to the Responses API (seeded or learned).

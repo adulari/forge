@@ -21,6 +21,12 @@ pub mod embed;
 pub mod resolver;
 pub mod webc;
 
+/// OpenCode Go per-model wire-format routing, for callers that learn a model's endpoint from a
+/// failure at runtime (see `adapter::adapters::opencode_go`).
+pub mod opencode_go {
+	pub use crate::adapter::opencode_go::{is_responses_model, mark_responses_model, unmark_responses_model};
+}
+
 // endregion: --- Modules
 
 // region:    --- TLS Backend Guard

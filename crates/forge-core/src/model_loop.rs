@@ -59,6 +59,9 @@ impl Session {
         let mut pinned_outage_attempts = 0u32;
         let mut pinned_outage_waited = std::time::Duration::ZERO;
         let mut pinned_outage_warned_halfway = false;
+        // The previous outage attempt's error text when it came back fast — the
+        // "identical fast rejection twice" detector in `request_model_response`.
+        let mut pinned_outage_last_error: Option<String> = None;
 
         let mut final_text = String::new();
         let mut has_prior_final = false;
@@ -242,6 +245,7 @@ impl Session {
                 &mut pinned_outage_attempts,
                 &mut pinned_outage_waited,
                 &mut pinned_outage_warned_halfway,
+                &mut pinned_outage_last_error,
                 step,
             )
             .await?;

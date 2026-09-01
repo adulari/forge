@@ -240,6 +240,12 @@ pub async fn embed_one(cfg: &forge_config::EmbeddingsConfig, text: &str) -> Opti
 /// reaches failover quickly, but a one-off blip doesn't needlessly switch models.
 const MAX_TRANSIENT_RETRIES: u32 = 2;
 
+/// How quickly a provider must answer for its error to count as a REJECTION rather than an
+/// outage in the pinned-outage backoff: two identical error texts, each back within this window,
+/// mean the provider is refusing the model, not unreachable. Well above a real round trip
+/// (the live case answered in 0.4 s), well below any backoff step (5 s minimum).
+const DETERMINISTIC_REJECTION_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Max times per turn Forge will WAIT for a rate-limited model to reset and retry it (rather than
 /// failing over to a lower-ranked model). Bounds total in-turn blocking. The per-wait length cap is
 /// `mesh.rate_limit_wait_secs` (0 disables waiting).
@@ -10371,7 +10377,11 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.outage_calls {
-                return Err(forge_provider::ProviderError::Unavailable("502".into()));
+                // Varying text: a genuine outage, not the identical instant rejection that
+                // short-circuits the outage budget (`DETERMINISTIC_REJECTION_WINDOW`).
+                return Err(forge_provider::ProviderError::Unavailable(format!(
+                    "502 bad gateway (request {n})"
+                )));
             }
             if n < self.outage_calls + self.rl_calls {
                 return Err(forge_provider::ProviderError::RateLimited {
@@ -10460,6 +10470,72 @@ mod tests {
         );
     }
 
+    /// Always `Unavailable`, never the same text twice — the shape of a real outage (gateway
+    /// request ids, varying upstream messages), as opposed to a deterministic rejection.
+    #[derive(Default)]
+    struct VaryingUnavailableProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for VaryingUnavailableProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(forge_provider::ProviderError::Unavailable(format!(
+                "502 bad gateway (request {n})"
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_model_fails_fast_on_an_identical_instant_rejection() {
+        // Live case (OpenCode Go, 2026-09-02): a model served on a different endpoint answered
+        // an identical `500 Internal server error` in 0.4 s on every request, and the pinned turn
+        // sat in "recovering provider" for 6m47s of outage backoff. Two identical instant errors
+        // are a rejection: surface the real text and fail the turn inside the first backoff
+        // step, without spending the outage budget.
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: unavailable, // identical "502", answered instantly, every call
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_outage_wait_secs = 600; // the default budget: must NOT be spent
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        let started = std::time::Instant::now();
+        let err = session.run_turn("fix the bug").await.unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "an identical instant rejection must fail inside the first backoff step, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("502"),
+            "the REAL provider error must surface, got: {err}"
+        );
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("rejected this model twice") && w.contains("502"))),
+            "the warning must say the provider rejected the model and quote the error"
+        );
+        assert!(
+            !events.iter().any(
+                |e| matches!(e, PresenterEvent::Warning(w) if w.contains("still unreachable"))
+            ),
+            "must not run to outage-budget exhaustion"
+        );
+    }
+
     #[tokio::test]
     async fn pinned_outage_backoff_warns_once_at_halfway_then_fails_on_exhaustion() {
         // A small budget (6s) so the halfway warning and exhaustion are both reachable without a
@@ -10467,10 +10543,12 @@ mod tests {
         // 50% of a 6s budget regardless of jitter, and attempt 2's delay (jittered 12-18s off the
         // 15s base) always exceeds whatever budget remains, so exhaustion follows without needing
         // a second real sleep.
-        let provider = Arc::new(EchoProvider {
-            bad: ["pin::model".to_string()].into_iter().collect(),
-            err: unavailable,
-        });
+        //
+        // A genuine outage answers DIFFERENTLY each time (gateway ids, timestamps, timeouts);
+        // an identical instant error twice in a row is a rejection and short-circuits the
+        // budget (see `pinned_model_fails_fast_on_an_identical_instant_rejection`), so this
+        // fixture varies the message to stay on the outage path it exercises.
+        let provider = Arc::new(VaryingUnavailableProvider::default());
         let router = Arc::new(PinnedRouter {
             model: "pin::model".into(),
             fallbacks: vec!["worse::model".into()],
