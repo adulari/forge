@@ -102,6 +102,17 @@ pub async fn fetch_and_persist(models: &[String]) {
             HashMap::new()
         };
 
+    // ── models.dev second (keyless) ─────────────────────────────────────────────────────────────
+    // The price source for the native OpenAI / Anthropic / Google / xAI ids OpenRouter does not
+    // list (no `openai/gpt-5.6*` on OpenRouter at all). Written AFTER OpenRouter so a native id
+    // present in both takes models.dev's number, and only ever additive: a failed fetch leaves
+    // the bundled `DEFAULT_RATES` fallback in force rather than writing $0.
+    if let Some(body) = get_json("https://models.dev/api.json", None).await {
+        for (id, in_1k, out_1k, cache_1k) in models_dev_pricing(&body) {
+            let _ = store.set_model_pricing(&id, in_1k, out_1k, cache_1k);
+        }
+    }
+
     // ── Custom OpenAI-compatible providers (NVIDIA NIM, Cerebras, SambaNova, …) ─────────────────
     // Fetched before the other native providers so the Anthropic/Gemini/Groq authoritative writes
     // happen last and win over any cross-provider basename matches.
@@ -248,8 +259,8 @@ use bridges::{derive_cli_bridge_windows, persist_authoritative_contexts};
 /// When multiple OR models share a basename the largest window wins (conservatively).
 mod parsers;
 use parsers::{
-    anthropic_windows, build_basename_index, gemini_windows, openai_compatible_windows,
-    openrouter_native_cross_map, openrouter_pricing, openrouter_windows,
+    anthropic_windows, build_basename_index, gemini_windows, models_dev_pricing,
+    openai_compatible_windows, openrouter_native_cross_map, openrouter_pricing, openrouter_windows,
 };
 
 /// A llama.cpp server's ACTUAL context window, from its `/props` endpoint (`n_ctx`).
@@ -662,6 +673,50 @@ mod tests {
             Some(128_000),
             "unrelated fetched metadata must remain untouched"
         );
+    }
+
+    #[test]
+    fn models_dev_pricing_maps_native_and_bridge_namespaces() {
+        // The shape of https://models.dev/api.json (USD per 1M tokens), trimmed to what the parser
+        // reads. GPT-5.6 Luna's real list price as of 2026-09-02 — the row OpenRouter never had.
+        let body = serde_json::json!({
+            "openai": { "models": {
+                "gpt-5.6-luna": { "cost": { "input": 0.2, "output": 1.2, "cache_read": 0.02 } },
+                "gpt-5.6-sol":  { "cost": { "input": 4.0, "output": 20.0, "cache_read": 0.4 } },
+                "no-price":     { "cost": { "input": "n/a" } }
+            }},
+            "anthropic": { "models": {
+                "claude-opus-5": { "cost": { "input": 5.0, "output": 25.0 } }
+            }},
+            "ignored-provider": { "models": { "x": { "cost": { "input": 1.0, "output": 1.0 } } } }
+        });
+        let rows = models_dev_pricing(&body);
+        let find = |id: &str| rows.iter().find(|(m, ..)| m == id).cloned();
+        for ns in ["openai", "codex-cli", "codex-oauth"] {
+            let (_, input, output, cache) = find(&format!("{ns}::gpt-5.6-luna"))
+                .unwrap_or_else(|| panic!("{ns}::gpt-5.6-luna must be priced"));
+            assert!((input - 0.0002).abs() < 1e-12, "{ns} luna input per 1k");
+            assert!((output - 0.0012).abs() < 1e-12, "{ns} luna output per 1k");
+            assert!(
+                (cache.unwrap() - 0.00002).abs() < 1e-12,
+                "{ns} luna cache per 1k"
+            );
+        }
+        let (_, sol_in, ..) = find("codex-oauth::gpt-5.6-sol").unwrap();
+        assert!(
+            (sol_in / 0.0002 - 20.0).abs() < 1e-9,
+            "sol is 20x luna on input"
+        );
+        let (_, _, _, cache) = find("anthropic::claude-opus-5").unwrap();
+        assert!(
+            cache.is_none(),
+            "a missing cache_read stays unknown, not $0"
+        );
+        assert!(
+            find("openai::no-price").is_none(),
+            "non-numeric costs are skipped, never $0"
+        );
+        assert!(!rows.iter().any(|(m, ..)| m.starts_with("ignored-provider")));
     }
 
     #[test]

@@ -38,9 +38,6 @@ pub(crate) fn price_derived_burn_weights(
 ) -> HashMap<String, f64> {
     let mut by_provider: HashMap<&str, Vec<(&String, f64)>> = HashMap::new();
     for model in models.iter().filter(|model| is_subscription(model)) {
-        if crate::capability::known_burn_weight(model).is_some() {
-            continue;
-        }
         if let Some(cost) = pricing
             .reference_estimated_cost(model)
             .filter(|cost| *cost > 0.0)
@@ -66,10 +63,43 @@ pub(crate) fn price_derived_burn_weights(
         .collect()
 }
 
-/// Penalize subscription burn while preserving capability-first behavior on a fresh window.
-/// Curated family weights retain their standing 0.5 multiplier; price-derived ratios start at
-/// exactly zero and rise with observed pressure because their much larger spread would otherwise
-/// overturn genuine capability differences before conservation is needed.
+/// The relative burn weight routing uses for `id`, and where it came from. Precedence:
+/// an explicit config override → the weight derived from tracked (fetched or bundled) prices →
+/// the hardcoded family ladder in `capability::known_burn_weight`, which exists only for models
+/// no price source covers. Prices go stale in a table but not in a fetch, so the fetched number
+/// must win; the previous order (table first) kept GPT-5.6's pre-discount ladder in force for
+/// months after Luna's price dropped ~4x.
+pub(crate) fn burn_weight_for(
+    id: &str,
+    overrides: &HashMap<String, f64>,
+    price_weights: &HashMap<String, f64>,
+) -> (f64, BurnWeightSource) {
+    if let Some(weight) = overrides.get(crate::capability::bare_model(id)).copied() {
+        return (weight, BurnWeightSource::Override);
+    }
+    if let Some(weight) = price_weights.get(id).copied() {
+        return (weight, BurnWeightSource::Price);
+    }
+    match crate::capability::known_burn_weight(id) {
+        Some(weight) => (weight, BurnWeightSource::Table),
+        None => (1.0, BurnWeightSource::Unknown),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BurnWeightSource {
+    Override,
+    Price,
+    Table,
+    Unknown,
+}
+
+/// Penalize subscription burn. A subscription pool is shared by every model on it and drained at
+/// each model's own price, so a heavier sibling must be MEANINGFULLY better to be worth picking
+/// even on a fresh window: the penalty carries the standing 0.5 floor at zero pressure and rises
+/// to 2x as the window fills. Price-derived weights used to start at exactly zero and only rise
+/// with pressure; on OpenCode Go's $12/5h pool that let Kimi K3 (~50x Muse Spark's price) win a
+/// 0.14-point score gap on every turn until 64% of the pool was gone in two hours (2026-09-02).
 pub(crate) fn subscription_burn_penalty(
     id: &str,
     tier: TaskTier,
@@ -77,18 +107,10 @@ pub(crate) fn subscription_burn_penalty(
     overrides: &HashMap<String, f64>,
     price_weights: &HashMap<String, f64>,
 ) -> f64 {
-    let (weight, derived) = match crate::capability::configured_burn_weight(id, overrides) {
-        Some(weight) => (weight, false),
-        None => (price_weights.get(id).copied().unwrap_or(1.0), true),
-    };
+    let (weight, _source) = burn_weight_for(id, overrides, price_weights);
     if weight <= 1.0 {
         return 0.0;
     }
     let fraction = quota.effective_fraction_for(provider_of(id));
-    let scale = if derived {
-        pressure_multiplier(fraction) - PRESSURE_MULTIPLIER_FLOOR
-    } else {
-        pressure_multiplier(fraction)
-    };
-    burn_k(tier) * weight.ln() * scale
+    burn_k(tier) * weight.ln() * pressure_multiplier(fraction)
 }

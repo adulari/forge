@@ -169,4 +169,46 @@ pub(super) fn openrouter_pricing(body: &serde_json::Value) -> Vec<(String, f64, 
         .collect()
 }
 
+/// models.dev provider keys → Forge namespaces that bill that exact model id. OpenRouter carries
+/// no `openai/gpt-5.6*` entries at all, so without this source the whole GPT-5.6 line priced as
+/// $0 and only a hardcoded (stale) ladder ordered codex-cli / codex-oauth decisions. The CLI
+/// bridges bill the same model as the API, so they get the same row.
+const MODELS_DEV_NAMESPACES: &[(&str, &[&str])] = &[
+    ("openai", &["openai", "codex-cli", "codex-oauth"]),
+    ("anthropic", &["anthropic"]),
+    ("google", &["gemini"]),
+    ("xai", &["xai", "xai-oauth"]),
+    ("deepseek", &["deepseek"]),
+    ("mistral", &["mistral"]),
+    ("groq", &["groq"]),
+];
+
+/// Extract pricing from models.dev's `api.json` (`{provider: {models: {id: {cost: {input,
+/// output, cache_read}}}}}`, USD per 1M tokens) as `(namespace::id, in_1k, out_1k, cache_1k)`.
+/// Missing or non-numeric costs are skipped, never written as $0.
+pub(super) fn models_dev_pricing(body: &serde_json::Value) -> Vec<(String, f64, f64, Option<f64>)> {
+    let per_1k = |v: &serde_json::Value| -> Option<f64> {
+        let n = v.as_f64()?;
+        (n.is_finite() && n >= 0.0).then_some(n / 1000.0)
+    };
+    let mut out = Vec::new();
+    for (provider, namespaces) in MODELS_DEV_NAMESPACES {
+        let Some(models) = body[provider]["models"].as_object() else {
+            continue;
+        };
+        for (id, model) in models {
+            let cost = &model["cost"];
+            let (Some(input), Some(output)) = (per_1k(&cost["input"]), per_1k(&cost["output"]))
+            else {
+                continue;
+            };
+            let cache_read = per_1k(&cost["cache_read"]);
+            for ns in namespaces.iter() {
+                out.push((format!("{ns}::{id}"), input, output, cache_read));
+            }
+        }
+    }
+    out
+}
+
 // ── HTTP helpers ─────────────────────────────────────────────────────────────────────────────────

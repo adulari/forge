@@ -2586,9 +2586,15 @@ mod tests {
     #[test]
     fn a_pressured_dollar_subscription_prefers_its_far_cheaper_near_equal_model() {
         let (catalog, pricing) = opencode_go_fixture();
-        // Fresh window: the better model wins, exactly as before this behaviour existed.
+        // Fresh window: the pool is shared and dollar-denominated, so a ~52x heavier sibling must
+        // be MEANINGFULLY better to be worth it even at zero pressure. Kimi's small capability
+        // edge is not, so the cheaper near-equal model leads from the first turn — the previous
+        // "penalty starts at zero" rule burned 64% of a real $12/5h pool in two hours.
         let fresh = catalog.ranked_rows(TaskTier::Complex, &pricing, true, 0, &go_quota(0.0), None);
-        assert_eq!(fresh.1[0].model, "opencode_go::kimi-k3");
+        assert_eq!(
+            fresh.1[0].model, "opencode_go::muse-spark-1.2-contributor",
+            "a fresh dollar pool must already prefer the far cheaper near-equal sibling"
+        );
 
         // Five-hour window nearly spent: the ~52x spend difference now outweighs the small
         // capability edge, and the plan buys the cheaper model instead of the provider vanishing.
