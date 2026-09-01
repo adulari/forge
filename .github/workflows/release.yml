@@ -143,10 +143,22 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.release_tag }}
 
+      # dtolnay/rust-toolchain does NOT read rust-toolchain.toml; its `toolchain` input defaults to
+      # `stable`. Left implicit, the action installs `targets:` for stable while cargo — which does
+      # obey the toolchain file — builds with the pinned channel, whose only installed target is the
+      # host. That is exactly how v2.13.3's x86_64-apple-darwin leg failed with `can't find crate
+      # for std`. Resolve the channel from the file so the pin and the targets stay one decision.
+      - name: Resolve the pinned toolchain
+        if: ${{ !matrix.portable_linux }}
+        id: toolchain
+        shell: bash
+        run: sed -n 's/^ *channel *= *"\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
         if: ${{ !matrix.portable_linux }}
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
       # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.

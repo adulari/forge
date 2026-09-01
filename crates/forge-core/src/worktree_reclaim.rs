@@ -436,7 +436,10 @@ pub fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // Signal 0 performs the existence/permission check without delivering anything.
-        unsafe { libc::kill(pid as i32, 0) == 0 || *libc::__errno_location() == libc::EPERM }
+        // errno is read through std rather than libc's platform-specific accessor symbol
+        // (`__errno_location` on glibc, `__error` on Apple), which would not compile on macOS.
+        let delivered = unsafe { libc::kill(pid as i32, 0) } == 0;
+        delivered || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
     #[cfg(not(unix))]
     {
