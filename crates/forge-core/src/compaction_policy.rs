@@ -103,7 +103,14 @@ impl Session {
                 },
             ];
             let ans = self.presenter.ask(&q, &opts, false).trim().to_lowercase();
-            if ans == "always" {
+            if ans == forge_types::NO_ANSWER {
+                // Nobody can answer (headless `forge run`, a detached serve session). Treating
+                // that as "No" skipped every smaller-window fallback and ended the turn on the
+                // last provider error, so an unattended session compacts and carries on.
+                self.presenter.emit(PresenterEvent::Warning(format!(
+                    "no one to ask — compacting to continue on {model}"
+                )));
+            } else if ans == "always" {
                 self.always_compact_on_switch = true;
             } else if ans != "yes" {
                 return Ok(false); // No / cancelled → skip this model
