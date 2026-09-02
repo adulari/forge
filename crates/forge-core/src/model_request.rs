@@ -371,9 +371,10 @@ pub(super) async fn request_provider_response(
                 .await?;
                 warn_paced_held_skips(session, &deferred_held, paced_held_warned);
                 let mut pacing_override = false;
-                if picked.is_none() {
+                if picked.is_none() && !*last_resort_used {
                     picked = admit_paced_held(session, &mut deferred_held).await?;
                     pacing_override = picked.is_some();
+                    *last_resort_used |= pacing_override;
                 }
                 match picked {
                     Some(next) => {
@@ -709,15 +710,12 @@ pub(super) async fn request_provider_response(
                         *transient_retries = 0;
                         continue;
                     }
-                    // The routed chain is exhausted. Rather than hard-fail, make ONE
-                    // last-resort attempt on the "least dead" model — the non-excluded
-                    // model whose transient bench expires soonest. This keeps a turn
-                    // working when every model is briefly rate-limited but none is
-                    // permanently incapable. Guarded by `last_resort_used` so a model that
-                    // fails again can't loop. A model pacing HELD comes first: it is healthy,
-                    // merely over pace, so it beats the least-dead benched model — but only
-                    // here, and only with the override named in the rationale.
-                    None if !deferred_held.is_empty() => {
+                    // Chain exhausted: ONE last-resort attempt, guarded by `last_resort_used`.
+                    // A pacing-HELD model (healthy, merely over pace) comes before the
+                    // least-dead benched model, with the override named in the rationale.
+                    None if !deferred_held.is_empty() && !*last_resort_used => {
+                        // One hop per turn: 126 codex calls ran under this override (2026-09-02).
+                        *last_resort_used = true;
                         match admit_paced_held(session, &mut deferred_held).await? {
                             Some(next) => {
                                 session.presenter.emit(PresenterEvent::Routing {
