@@ -56,6 +56,10 @@ pub(crate) fn auth(provider: &str, remove: bool, list: bool, replace: bool) -> R
         );
     }
     if list {
+        println!(
+            "reading keys from: {}",
+            forge_config::secret_store::backend().describe()
+        );
         let fps = forge_config::api_key_fingerprints(provider);
         if fps.is_empty() {
             println!("no {provider} keys configured");

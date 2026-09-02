@@ -300,6 +300,21 @@ fn config_checks() -> Vec<Check> {
             Some("fix the syntax in your config.toml (see `forge doctor` detail above)"),
         )),
     }
+    // Which store the key checks below read. A `forge` bin built by `cargo test` carries the
+    // in-memory `test-secrets` store, so "no keys" from it says nothing about the user's setup.
+    let backend = forge_config::secret_store::backend();
+    out.push(check(
+        if backend.is_blind() {
+            Status::Warn
+        } else {
+            Status::Ok
+        },
+        "secret store",
+        backend.describe(),
+        backend.is_blind().then_some(
+            "rebuild with `cargo build --bin forge` — this binary cannot see any stored key",
+        ),
+    ));
     let user = forge_config::config_dir().map(|d| d.join("config.toml"));
     let user_exists = user.as_ref().is_some_and(|p| p.exists());
     out.push(check(
