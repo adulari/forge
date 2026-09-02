@@ -113,25 +113,67 @@ mod ask_tests {
         let mut p = HeadlessPresenter::new(false);
         assert_eq!(p.ask("which db?", &opts(), true), NO_ANSWER);
     }
+
+    #[test]
+    fn unstyled_headless_drops_reasoning_instead_of_merging_it_into_the_answer() {
+        let mut p = HeadlessPresenter::new(false).with_styling(false);
+        p.emit(PresenterEvent::Reasoning("private thoughts".into()));
+        assert!(
+            !p.reasoning_open,
+            "nothing was written, so nothing to close"
+        );
+    }
+
+    #[test]
+    fn styled_headless_breaks_the_line_between_reasoning_and_the_answer() {
+        let mut p = HeadlessPresenter::new(false).with_styling(true);
+        p.emit(PresenterEvent::Reasoning("private thoughts".into()));
+        assert!(p.reasoning_open);
+        p.emit(PresenterEvent::AssistantDelta("OK".into()));
+        assert!(!p.reasoning_open);
+    }
 }
 
 /// Plain line-based renderer for non-interactive use.
 pub struct HeadlessPresenter {
     /// When false (e.g. piped, non-tty), confirmations default to deny (safe).
     interactive: bool,
+    /// Whether stdout can carry ANSI styling. Reasoning is only distinguishable from the answer
+    /// when it can be dimmed, so a piped/redirected stdout drops it instead of interleaving a
+    /// model's private thinking into the answer text (a bridged claude turn on a thinking model
+    /// otherwise printed its whole scratchpad as the reply).
+    styled: bool,
+    /// A reasoning delta was the last thing written, so the answer needs a line break first.
+    reasoning_open: bool,
 }
 
 impl Default for HeadlessPresenter {
     fn default() -> Self {
-        Self {
-            interactive: std::io::stdin().is_terminal(),
-        }
+        Self::new(std::io::stdin().is_terminal())
     }
 }
 
 impl HeadlessPresenter {
     pub fn new(interactive: bool) -> Self {
-        Self { interactive }
+        Self {
+            interactive,
+            styled: std::io::stdout().is_terminal(),
+            reasoning_open: false,
+        }
+    }
+
+    /// Override ANSI styling (tests, and callers that know their sink).
+    pub fn with_styling(mut self, styled: bool) -> Self {
+        self.styled = styled;
+        self
+    }
+
+    /// Close an open reasoning run so answer text starts on its own line.
+    fn end_reasoning(&mut self) {
+        if self.reasoning_open {
+            println!();
+            self.reasoning_open = false;
+        }
     }
 }
 
@@ -154,18 +196,25 @@ impl Presenter for HeadlessPresenter {
             // Content-free heartbeat used only by interactive progress surfaces.
             PresenterEvent::ProviderProgress => {}
             PresenterEvent::AssistantText(text) => {
+                self.end_reasoning();
                 println!("\n{text}");
             }
             PresenterEvent::AssistantDelta(delta) => {
+                self.end_reasoning();
                 print!("{delta}");
                 let _ = std::io::stdout().flush();
             }
             PresenterEvent::Reasoning(delta) => {
-                // Dim so reasoning is visually distinct from the answer.
-                print!("\x1b[2m{delta}\x1b[0m");
-                let _ = std::io::stdout().flush();
+                // Dim so reasoning is visually distinct from the answer; without styling it is
+                // indistinguishable, so it is dropped rather than merged into the answer.
+                if self.styled {
+                    print!("\x1b[2m{delta}\x1b[0m");
+                    let _ = std::io::stdout().flush();
+                    self.reasoning_open = true;
+                }
             }
             PresenterEvent::AssistantDone => {
+                self.end_reasoning();
                 println!();
             }
             PresenterEvent::Warning(msg) => {

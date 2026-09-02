@@ -5073,6 +5073,40 @@ mod tests {
         });
     }
 
+    /// Captured live from `claude -p --output-format stream-json --verbose
+    /// --include-partial-messages --model haiku` (2026-09-02): a thinking block streams first,
+    /// each block gets its own consolidated `assistant` snapshot, then the answer. The thinking
+    /// must reach the caller as reasoning only — never as answer text.
+    #[test]
+    fn claude_thinking_block_never_becomes_answer_text() {
+        let sample = [
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user has asked"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" me to reply with OK."}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"Er8F"}}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"The user has asked me to reply with OK.","signature":"Er8F"}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"OK"}}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"OK"}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+            r#"{"type":"result","is_error":false,"result":"OK","usage":{"input_tokens":9,"output_tokens":116}}"#,
+        ];
+        let mut state = ClaudeStreamState::default();
+        let parsed: Vec<Parsed> = sample.iter().flat_map(|l| state.parse_line(l)).collect();
+
+        assert_eq!(texts(&parsed), "OK", "answer text is the answer only");
+        let reasoning: String = parsed
+            .iter()
+            .filter_map(|p| match p {
+                Parsed::Reasoning(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, "The user has asked me to reply with OK.");
+        assert!(parsed.contains(&Parsed::Final("OK".into())));
+    }
+
     #[test]
     fn claude_error_result_is_surfaced() {
         let line = r#"{"type":"result","is_error":true,"api_error_status":"overloaded"}"#;
