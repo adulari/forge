@@ -4947,6 +4947,46 @@ mod tests {
     }
 
     #[test]
+    fn claude_rate_limit_event_reads_every_unified_window() {
+        use forge_types::QuotaStatus;
+        // Captured live 2026-09-02 from `claude -p --output-format stream-json --verbose`: no
+        // top-level `utilization` at all — it moved under `unifiedWindows`. The old parser
+        // yielded `fraction: None` for every real event, so stream-driven quota was blind.
+        let live = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1788360600,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.25,"resetsAt":1788360600},"seven_day":{"utilization":0.23,"resetsAt":1788595200},"seven_day_overage_included":{"utilization":0.39,"resetsAt":1788595200}}}}"#;
+        let parsed = parse_claude_line(live);
+        let quotas: Vec<(String, Option<f64>, Option<i64>, QuotaStatus)> = parsed
+            .iter()
+            .filter_map(|p| match p {
+                Parsed::Quota {
+                    window,
+                    fraction,
+                    resets_at,
+                    status,
+                } => Some((window.clone(), *fraction, *resets_at, *status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            quotas,
+            vec![
+                (
+                    "five_hour".into(),
+                    Some(0.25),
+                    Some(1788360600),
+                    QuotaStatus::Ok
+                ),
+                (
+                    "weekly".into(),
+                    Some(0.23),
+                    Some(1788595200),
+                    QuotaStatus::Ok
+                ),
+            ],
+            "both real windows, and the overage-included meter never overwrites weekly"
+        );
+    }
+
+    #[test]
     fn codex_thread_started_is_captured() {
         let line =
             r#"{"type":"thread.started","thread_id":"019eccdc-9390-72d2-b798-5134cceb95fe"}"#;

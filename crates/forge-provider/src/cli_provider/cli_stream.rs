@@ -180,6 +180,33 @@ impl ClaudeStreamState {
                         .get("isUsingOverage")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
+                    // Current live shape (2026-09): per-window utilisation lives under
+                    // `unifiedWindows` and the top level carries only the window that fired.
+                    // One Quota per known window; the top-level fallback below covers the older
+                    // flat shape. `seven_day_overage_included` is deliberately NOT folded into
+                    // `weekly` — it is a different meter and would overwrite the real weekly.
+                    if let Some(windows) = info.get("unifiedWindows").and_then(Value::as_object) {
+                        for key in ["five_hour", "seven_day"] {
+                            let Some(w) = windows.get(key) else { continue };
+                            let fraction = w.get("utilization").and_then(Value::as_f64);
+                            let resets_at = w.get("resetsAt").and_then(Value::as_i64).map(|t| {
+                                if t > 100_000_000_000 {
+                                    t / 1000
+                                } else {
+                                    t
+                                }
+                            });
+                            out.push(Parsed::Quota {
+                                window: normalize_window(key),
+                                status: quota_status_from(status, using_overage, fraction),
+                                resets_at,
+                                fraction,
+                            });
+                        }
+                        if !out.is_empty() {
+                            return out;
+                        }
+                    }
                     let fraction = info
                         .get("utilization")
                         .or_else(|| info.get("usedFraction"))
