@@ -676,6 +676,38 @@ spent. Both the burn-penalty pressure multiplier (§4.6) and conservation (§6) 
 pace-projected value, so protection ramps up *ahead of* a projected overrun instead of reacting
 to one already at Warning.
 
+### 5.5 Subscription pacing, and where it is shown
+
+Separate from the burn-rate projection above, `SubscriptionPacing`
+(`crates/forge-types/src/subscription_pacing.rs`) compares each observed window against a
+linear allowance: `elapsed / total × SUBSCRIPTION_PACE_SPEND_FRACTION` (0.75 — the final quarter
+of every window is reserve). The store builds one per provider from its most constrained window
+(`Store::subscription_pacing`); the router's `apply_subscription_pacing` then holds every model of
+an over-pace provider above its cheapest usable sibling (sol/terra held, luna kept). The
+hold is computed once, by `HeuristicRouter::pacing_partition`, and reported by
+`pacing_holds` — so an inspector can only describe a hold the router actually applied.
+
+Every surface quotes that decision verbatim (`forge_mesh::pacing_summary`), never a display-side
+re-derivation from fraction and reset time:
+
+- `forge mesh` provider line: `codex-cli … · plan plus · Ok · weekly 32% used · 22% allowed ·
+  OVER PACE → gpt-5.6-sol/gpt-5.6-terra held, gpt-5.6-luna · spread …`, or `… · on pace`.
+  `--json` carries the same under `pacing` (`fraction_used`, `allowed_fraction`,
+  `elapsed_fraction`, `over_pace`, `used_nominal_fallback`, `held`, `kept`).
+- `forge mesh "<task>"` rationale names what was held:
+  `codex-oauth::gpt-5.6-sol, codex-oauth::gpt-5.6-terra held: weekly 32% > 22% allowed at 29%
+  elapsed → codex-oauth::gpt-5.6-luna kept`. The `/mesh` overlay shows the same marker per
+  quota row.
+- `/usage` overlay: one `Pace` line per observed subscription. The serve `/usage` endpoint
+  attaches `pacing` to the window the verdict was judged by, and the companion app's usage
+  screen renders that summary under the bar.
+
+Honesty rule: when a window has no provider-authoritative `resets_at`, timing starts at the
+oldest observation and `used_nominal_fallback` is set. Every surface then prints `pace unknown
+(no reset time — used_nominal_fallback …)` instead of an allowance, and the over-pace colouring
+is suppressed — a guessed window start must never read as a verdict. `codex-oauth` folds into
+the `codex-cli` row (one account), so a hold recorded under either alias lands on that row.
+
 ## 6. Conservation: spreading whole prompts off the subscriptions
 
 Independently of per-model scoring, the mesh decides per prompt whether to route *off* the

@@ -284,6 +284,19 @@ export interface UsageQuota {
   fraction: number | null;
   /** Optional for compatibility with older daemons that predate quota observation timestamps. */
   updatedAt?: number;
+  /** The mesh's own pacing verdict, only on the window routing is currently paced by. Absent on
+   * the other windows and on daemons that predate it. */
+  pacing?: UsagePacing | null;
+}
+/** Mirrors `SubscriptionPacing` in Rust: quoted verbatim, never re-derived on the client. */
+export interface UsagePacing {
+  fractionUsed: number;
+  allowedFraction: number;
+  elapsedFraction: number;
+  overPace: boolean;
+  /** No reset time was known, so the allowance is a guess and `summary` says "pace unknown". */
+  usedNominalFallback: boolean;
+  summary: string;
 }
 export interface SessionRow {
   id: string;

@@ -68,6 +68,15 @@ impl SubscriptionPacing {
     pub fn is_over_pace(&self) -> bool {
         self.fraction_used > self.allowed_fraction
     }
+
+    /// Fraction of the window that has elapsed (0.0–1.0) — the "at X% elapsed" half of a pacing
+    /// claim, which is meaningless without the used/allowed pair beside it.
+    pub fn elapsed_fraction(&self) -> f64 {
+        if self.total_secs <= 0 {
+            return 0.0;
+        }
+        self.elapsed_secs as f64 / self.total_secs as f64
+    }
 }
 
 /// Nominal duration for quota windows with a defined subscription pacing policy.

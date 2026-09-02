@@ -156,10 +156,13 @@ pub(crate) fn seed_subscription_stats(session: &Session, bstats: &bridge_stats::
     }
 }
 
-/// Populate the usage overlay from the shared, normalized quota store.
+/// Populate the usage overlay from the shared, normalized quota store. `pacing` is the router's
+/// own per-provider verdict (`Store::subscription_pacing`), quoted rather than re-derived so the
+/// overlay and `forge mesh` agree on whether a window is over pace.
 pub(crate) fn fill_subscription_pcts(
     overlay: &mut forge_tui::UsageOverlay,
     fractions: &std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
+    pacing: &std::collections::HashMap<String, forge_types::SubscriptionPacing>,
     claude_store_age_secs: Option<i64>,
 ) {
     let stored = |provider: &str, window: &str| {
@@ -177,6 +180,19 @@ pub(crate) fn fill_subscription_pcts(
     overlay.opencode_go_weekly_pct = stored(go, "weekly").map(|fraction| fraction * 100.0);
     overlay.opencode_go_monthly_pct = stored(go, "monthly").map(|fraction| fraction * 100.0);
     overlay.claude_rl_age_secs = claude_store_age_secs.filter(|&age| age > 300);
+    overlay.pace_notes = ["codex-cli", "claude-cli", go]
+        .into_iter()
+        .filter(|provider| fractions.contains_key(*provider))
+        .map(|provider| {
+            let verdict = pacing.get(provider);
+            forge_tui::UsagePaceNote {
+                provider: provider.trim_end_matches("-cli").to_string(),
+                note: forge_mesh::pacing_summary(verdict, None),
+                over_pace: verdict
+                    .is_some_and(|pacing| pacing.is_over_pace() && !pacing.used_nominal_fallback),
+            }
+        })
+        .collect();
 }
 
 /// Synchronize the command palette with the slash token containing the cursor.
@@ -4277,18 +4293,27 @@ pub(crate) async fn run_chat_tui(
                     // the main render loop, and a busy turn parked in a permission/question prompt
                     // holds this lock for the whole prompt. Worst case on contention is one overlay
                     // refresh using stale (empty) fractions, not a permanently wedged loop.
-                    let (fracs, claude_store_age_secs) = session
+                    let (fracs, pacing, claude_store_age_secs) = session
                         .try_lock()
                         .map(|s| {
                             seed_subscription_stats(&s, &bstats);
-                            (s.bridge_fractions(), s.claude_quota_age_secs())
+                            (
+                                s.bridge_fractions(),
+                                s.subscription_pacing(),
+                                s.claude_quota_age_secs(),
+                            )
                         })
                         .unwrap_or_default();
                     app.usage_overlay.claude_5h_in = bstats.claude_5h_in;
                     app.usage_overlay.claude_5h_out = bstats.claude_5h_out;
                     app.usage_overlay.claude_weekly_in = bstats.claude_weekly_in;
                     app.usage_overlay.claude_weekly_out = bstats.claude_weekly_out;
-                    fill_subscription_pcts(&mut app.usage_overlay, &fracs, claude_store_age_secs);
+                    fill_subscription_pcts(
+                        &mut app.usage_overlay,
+                        &fracs,
+                        &pacing,
+                        claude_store_age_secs,
+                    );
                     app.usage_overlay.loading = false;
                     usage_load_rx = None;
                     dirty = true;

@@ -17,7 +17,7 @@ use crate::app_remote::{DiffFileSnapshot, TranscriptKind};
 use crate::{surface, PresenterEvent, QChoice, ReplayItem};
 
 pub use crate::overlays::{
-    MeshCandRow, MeshOverlay, MeshQuotaRow, QuotaPaceInfo, RoutingView, UsageOverlay,
+    MeshCandRow, MeshOverlay, MeshQuotaRow, QuotaPaceInfo, RoutingView, UsageOverlay, UsagePaceNote,
 };
 
 pub use crate::voice::{insert_voice_transcript, VoiceOverlay, VoicePhase};
@@ -6097,6 +6097,8 @@ mod tests {
                 spread_complex: 0.5,
                 projected_fraction_at_reset: Some(0.93),
                 exhaustion_warning: true,
+                pace_note: "weekly 78% used · 21% allowed · OVER PACE → opus held, sonnet".into(),
+                over_pace: true,
             }],
             candidates: vec![
                 MeshCandRow {

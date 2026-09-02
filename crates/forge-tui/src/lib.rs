@@ -34,7 +34,8 @@ pub use app::{
     banner_lines, handle_key, input_cursor_up, insert_voice_transcript, lattice_view_lines,
     print_banner_direct, render_mesh_overlay, render_usage_overlay, render_voice_overlay,
     ActivityKind, ActivityStatus, App, InputOutcome, KeyKind, MeshCandRow, MeshOverlay,
-    MeshQuotaRow, TranscriptRow, TranscriptView, UsageOverlay, VoiceOverlay, VoicePhase,
+    MeshQuotaRow, TranscriptRow, TranscriptView, UsageOverlay, UsagePaceNote, VoiceOverlay,
+    VoicePhase,
 };
 pub use app_remote::{
     picker_kind_wire, DiffFileSnapshot, DiffHunkSnapshot, DiffSnapshot, OverlayRowSnapshot,
