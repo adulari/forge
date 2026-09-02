@@ -10,7 +10,7 @@ import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
 import { BoundedList } from "../components/ds/BoundedList";
 import { Segmented } from "../components/ds/Segmented";
-import { type UsageProvider } from "../lib/api";
+import { type UsagePacing, type UsageProvider } from "../lib/api";
 import { useSessions, useUsage } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
@@ -24,7 +24,7 @@ const WINDOW_LABEL: Record<string, string> = { five_hour: "5h", weekly: "week", 
 const resetLabel = (resetsAt: number | null) => resetsAt == null ? null : `resets ${new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date(resetsAt * 1000))}`;
 const observationLabel = (updatedAt: number | undefined, nowSec: number) => updatedAt == null ? null : `as of ${formatDurationShort(nowSec - updatedAt)} ago`;
 
-type QuotaRow = { kind: string; windowKind: string; status: string; fraction: number | null; resetsAt: number | null; updatedAt?: number };
+type QuotaRow = { kind: string; windowKind: string; status: string; fraction: number | null; resetsAt: number | null; updatedAt?: number; pacing?: UsagePacing | null };
 
 // Fixed window durations for the quota kinds the wire actually sends (api.ts UsageQuota;
 // "secondary" has no known fixed length, so it's excluded from pace projection). "monthly" is
