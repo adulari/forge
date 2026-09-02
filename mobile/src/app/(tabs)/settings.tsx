@@ -64,6 +64,7 @@ import {
   setAnonymousTelemetryEnabled,
 } from "../../lib/anonymousTelemetry";
 import { useHooks, useMcp, useModels, usePlans, useProviders, useServerFleets, useSkills, useUsage } from "../../lib/queries";
+import { catalogModels } from "../../lib/modelCatalog";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { persistTabBadge, publishTabBadge, useTabBadgePreference } from "../../lib/tabBadge";
 import { PROTOCOL_VERSION } from "../../lib/remoteProtocol";
@@ -347,7 +348,7 @@ export function SettingsScreen() {
   const usageWeekLabel = usageQuery.data ? `${formatCost(usageQuery.data.week.combined.costUsd)} this week` : undefined;
   const modelsReadyLabel = useMemo(() => {
     if (!modelsQuery.data) return undefined;
-    const ready = modelsQuery.data.providers.flatMap((p) => p.models).filter((m) => m.health == null).length;
+    const ready = catalogModels(modelsQuery.data).filter(({ model }) => model.health == null).length;
     return `${ready} ready`;
   }, [modelsQuery.data]);
   const providersConfiguredLabel = providersQuery.data

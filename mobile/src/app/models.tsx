@@ -10,7 +10,8 @@ import { SearchField } from "../components/ds/SearchField";
 import { Screen } from "../components/ds/Screen";
 import { SectionHeader } from "../components/ds/SectionHeader";
 import { type ModelRow } from "../lib/api";
-import { useModels } from "../lib/queries";
+import { catalogModels } from "../lib/modelCatalog";
+import { useModels, useRefreshModels } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { monoFamily, type, tabularNums } from "../theme/typography";
@@ -40,14 +41,14 @@ const ModelRowItem = memo(function ModelRowItem({ row }: { row: ProviderModel })
 });
 
 function ModelsScreenBody() {
-  const tokens = useTokens(); const query = useModels(); const [search, setSearch] = useState(""); const needle = search.trim().toLocaleLowerCase();
-  const allServerModels = useMemo(() => (query.data?.providers ?? []).flatMap(({ provider, models }) => models.map((model) => ({ provider, model }))), [query.data?.providers]);
+  const tokens = useTokens(); const query = useModels(); const refresh = useRefreshModels(); const [search, setSearch] = useState(""); const needle = search.trim().toLocaleLowerCase();
+  const allServerModels = useMemo(() => catalogModels(query.data), [query.data]);
   const models = useMemo(() => allServerModels.filter(({ provider, model }) => !needle || `${model.name} ${model.id} ${provider} ${tierFor(model)}`.toLocaleLowerCase().includes(needle)).sort((a, b) => TIER_ORDER.indexOf(tierFor(a.model)) - TIER_ORDER.indexOf(tierFor(b.model)) || (b.model.benchmark_intelligence ?? -Infinity) - (a.model.benchmark_intelligence ?? -Infinity) || a.model.name.localeCompare(b.model.name)), [allServerModels, needle]);
   const items = useMemo<ModelListItem[]>(() => TIER_ORDER.flatMap((tier) => { const rows = models.filter(({ model }) => tierFor(model) === tier); return rows.length ? [{ kind: "tier" as const, tier, count: rows.length }, ...rows.map((row) => ({ kind: "model" as const, row }))] : []; }), [models]);
   const renderItem = useCallback(({ item }: { item: ModelListItem; index: number }) => item.kind === "tier" ? <SectionHeader>{`${item.tier === "all" ? "All models" : item.tier} · ${item.count}`}</SectionHeader> : <ModelRowItem row={item.row} />, []);
   const header = <View style={styles.header}><BackLink /><Text style={[type.title, { color: tokens.ink }]}>Models & mesh health</Text><Text style={[type.sub, { color: tokens.ink3 }]}>Your discovered catalog, ranked by capability.</Text><SearchField value={search} onChangeText={setSearch} placeholder="Search models" accessibilityLabel="Search models" /></View>;
   const empty = query.isLoading ? <View style={styles.loading}><ActivityIndicator color={tokens.accent} /><Text style={[type.sub, { color: tokens.ink3 }]}>Loading model catalog…</Text></View> : query.isError ? <EmptyState icon={Cpu} message="Could not load model health. Pull to retry." /> : allServerModels.length > 0 ? <EmptyState icon={Cpu} message={search ? "No models match that search." : "Models are available but could not be organized."} /> : query.data?.catalog === "unavailable" ? <EmptyState icon={Cpu} message="No recent model catalog. Run forge models on this host to discover providers." /> : <EmptyState icon={Cpu} message="No models are available from this server." />;
-  return <Screen scroll={false} contentContainerStyle={styles.screen}><BoundedList data={items} renderItem={renderItem} keyExtractor={(item) => item.kind === "tier" ? `tier:${item.tier}` : item.row.model.id} ListHeaderComponent={header} ListEmptyComponent={empty} refreshing={query.isRefetching} onRefresh={() => void query.refetch()} contentContainerStyle={styles.content} /></Screen>;
+  return <Screen scroll={false} contentContainerStyle={styles.screen}><BoundedList data={items} renderItem={renderItem} keyExtractor={(item) => item.kind === "tier" ? `tier:${item.tier}` : item.row.model.id} ListHeaderComponent={header} ListEmptyComponent={empty} refreshing={query.isRefetching || refresh.isPending} onRefresh={() => refresh.mutate()} contentContainerStyle={styles.content} /></Screen>;
 }
 
 export default function ModelsScreen() {

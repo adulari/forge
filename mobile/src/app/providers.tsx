@@ -51,6 +51,7 @@ import {
   useStoreProviderKey,
   useSwitchOAuthAccount,
 } from "../lib/queries";
+import { providerReadiness } from "../lib/modelCatalog";
 import { supportsDirectDaemonEndpoints } from "../lib/transport";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
@@ -564,9 +565,9 @@ function ProvidersScreenBody() {
   const modelHealth = useMemo(
     () =>
       new Map(
-        (modelsQuery.data?.providers ?? []).map(({ provider, models }) => [
-          provider,
-          { total: models.length, ready: models.filter((model) => model.health == null).length },
+        (modelsQuery.data?.providers ?? []).map((provider) => [
+          provider.provider,
+          providerReadiness(provider),
         ]),
       ),
     [modelsQuery.data?.providers],
