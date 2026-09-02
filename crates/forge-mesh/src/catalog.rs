@@ -2573,8 +2573,40 @@ mod tests {
         let (catalog, pricing) = opencode_go_fixture();
         let weights = price_derived_burn_weights(catalog.models(), &pricing);
         assert!((weights["opencode_go::muse-spark-1.2-contributor"] - 1.0).abs() < 1e-9);
-        // (1000/1000*0.003 + 500/1000*0.015) / (1000/1000*0.0001 + 500/1000*0.0002) = 52.5
-        assert!((weights["opencode_go::kimi-k3"] - 52.5).abs() < 1e-6);
+        // Price ratio (1000/1000*0.003 + 500/1000*0.015) / (1000/1000*0.0001 + 500/1000*0.0002)
+        // = 52.5, times the weekly-quota multiplier: Kimi K3 draws on a $7.50/wk quota, Muse on
+        // $30/wk, so a Kimi dollar drains the pool 4x as fast (dashboard, 2026-09-02).
+        assert!((weights["opencode_go::kimi-k3"] - 210.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_small_weekly_quota_multiplies_the_price_ratio() {
+        let models = [
+            "opencode_go::grok-4.6".to_string(),
+            "opencode_go::muse-spark-1.2-contributor".to_string(),
+        ];
+        // Same list price for both so the quota multiplier is the only difference.
+        let rate = || crate::pricing::ModelRate {
+            input_per_1k: 0.0001,
+            output_per_1k: 0.0002,
+            cache_read_per_1k: None,
+        };
+        let equal_price = Pricing::from_rates(HashMap::from([
+            ("openrouter::x-ai/grok-4.6".to_string(), rate()),
+            (
+                "openrouter::opencode/muse-spark-1.2-contributor".to_string(),
+                rate(),
+            ),
+        ]));
+        let price_ratio = equal_price.reference_estimated_cost(&models[0]).unwrap()
+            / equal_price.reference_estimated_cost(&models[1]).unwrap();
+        let weights = price_derived_burn_weights(&models, &equal_price);
+        let weight_ratio = weights[&models[0]] / weights[&models[1]];
+        assert!(
+            weight_ratio >= price_ratio * 4.0 - 1e-9,
+            "grok-4.6 ($7.50/wk) vs muse ($30/wk): weight ratio {weight_ratio} must be at least \
+             4x the price ratio {price_ratio}"
+        );
     }
 
     /// The user's screenshot (2026-09-02): opencode_go at 28%, codex at 25%, both "plus"-class or

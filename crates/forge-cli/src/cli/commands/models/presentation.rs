@@ -196,6 +196,9 @@ pub(crate) fn mesh_overview(
                     .unwrap_or_default(),
             );
         }
+        for line in opencode_go_quota_lines(cat, p) {
+            println!("      {line}");
+        }
     }
     println!("\nper-tier ranking (top 5):");
     for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
@@ -203,10 +206,11 @@ pub(crate) fn mesh_overview(
         println!("  {}:", tier.as_str());
         for r in rows.iter().take(5) {
             println!(
-                "    {:<34} score {:>6.2}  {}",
+                "    {:<34} score {:>6.2}  {}{}",
                 r.model,
                 r.final_score,
-                cost_tag(r.cost_class)
+                cost_tag(r.cost_class),
+                quota_suffix(&r.model),
             );
         }
     }
@@ -279,19 +283,21 @@ pub(crate) fn mesh_overview_json(
             .map(|tier| {
                 let (_, rows) = cat.ranked_rows(tier, &pricing, false, 0, quota, None);
                 let rows: Vec<_> = rows
-                    .into_iter()
-                    .take(5)
-                    .map(|row| {
-                        serde_json::json!({
-                            "model": row.model,
-                            "provider": row.provider,
-                            "final_score": row.final_score,
-                            "cost_class": row.cost_class,
-                            "subscription": row.subscription,
-                            "frontier": row.frontier,
-                        })
-                    })
-                    .collect();
+            .into_iter()
+            .take(5)
+            .map(|row| {
+                serde_json::json!({
+                    "model": row.model,
+                    "provider": row.provider,
+                    "final_score": row.final_score,
+                    "cost_class": row.cost_class,
+                    "subscription": row.subscription,
+                    "frontier": row.frontier,
+                    "weekly_quota_usd": forge_mesh::opencode_go_weekly_quota(&row.model),
+                    "quota_multiplier": forge_mesh::opencode_go_quota_multiplier(&row.model),
+                })
+            })
+            .collect();
                 (tier.as_str().to_string(), serde_json::Value::Array(rows))
             })
             .collect();
@@ -302,6 +308,50 @@ pub(crate) fn mesh_overview_json(
         "rankings": rankings,
     }))
     .unwrap_or_else(|_| "{}".to_string())
+}
+
+/// ` · quota $7.50/wk → x4.0` for an OpenCode Go model, empty otherwise.
+fn quota_suffix(model: &str) -> String {
+    forge_mesh::opencode_go_quota_note(model)
+        .map(|note| format!(" · {note}"))
+        .unwrap_or_default()
+}
+
+/// The per-model weekly quota buckets for `provider`'s OpenCode Go models, largest multiplier
+/// first. The weekly pool percentage is the sum of per-model percentages and the usage endpoint
+/// exposes no per-model split, so this is the operator's only view of which models drain the
+/// pool fastest per dollar.
+fn opencode_go_quota_lines(cat: &forge_mesh::ModelCatalog, provider: &str) -> Vec<String> {
+    if provider != "opencode_go" {
+        return Vec::new();
+    }
+    let mut buckets: std::collections::BTreeMap<u64, Vec<&str>> = std::collections::BTreeMap::new();
+    for model in cat.models() {
+        if forge_mesh::catalog::provider_of(model) != provider {
+            continue;
+        }
+        let cents = forge_mesh::opencode_go_weekly_quota(model)
+            .map(|quota| (quota * 100.0).round() as u64)
+            .unwrap_or(0);
+        buckets
+            .entry(cents)
+            .or_default()
+            .push(model.split_once("::").map_or(model.as_str(), |(_, m)| m));
+    }
+    let mut lines = vec!["weekly quota per model (pool % = sum of per-model %):".to_string()];
+    for (cents, models) in &buckets {
+        let label = if *cents == 0 {
+            "unknown   x1.0".to_string()
+        } else {
+            let quota = *cents as f64 / 100.0;
+            format!(
+                "${quota:>5.2}/wk x{:.1}",
+                forge_mesh::OPENCODE_GO_LARGEST_WEEKLY_QUOTA / quota
+            )
+        };
+        lines.push(format!("  {label}  {}", models.join(", ")));
+    }
+    lines
 }
 
 pub(crate) fn cost_tag(class: u8) -> &'static str {
@@ -390,7 +440,7 @@ pub(crate) fn print_mesh_explanation(
                 String::new()
             };
             println!(
-                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}",
+                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}{}",
                 c.rank,
                 c.row.model,
                 c.row.final_score,
@@ -398,6 +448,7 @@ pub(crate) fn print_mesh_explanation(
                 cost_tag(c.row.cost_class),
                 pen,
                 if c.row.frontier { " · frontier" } else { "" },
+                quota_suffix(&c.row.model),
             );
         }
     }
