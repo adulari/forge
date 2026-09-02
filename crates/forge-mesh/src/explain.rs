@@ -602,14 +602,16 @@ mod tests {
                 )
             })
             .collect();
-        // The held sibling ranks below models with lower catalog scores; the row says which rule
-        // put it there instead of restating its score as something it isn't.
+        // Held models rank below models with lower catalog scores; the row says which rule put
+        // them there instead of restating the score as something it isn't. Pacing holds the WHOLE
+        // over-pace provider (#1261), so every claude-cli row carries the tag, not just the
+        // costlier sibling.
         for c in &e.candidates {
-            let expected = if c.row.model == "claude-cli::fable" {
-                Some("cost-aware sibling")
-            } else {
-                None
-            };
+            let expected = c
+                .row
+                .model
+                .starts_with("claude-cli::")
+                .then_some("pacing hold");
             assert_eq!(c.reorder_reason, expected, "{printed:?}");
         }
     }
