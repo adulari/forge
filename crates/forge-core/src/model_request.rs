@@ -833,6 +833,23 @@ mod tests {
     }
 
     #[test]
+    fn watchdog_stalls_record_no_output_reason_in_health() {
+        let session = test_session();
+        session.record_model_failure(
+            DEAD,
+            &forge_provider::ProviderError::Unavailable(
+                "`agy` produced no output for 120s — killed (stalled; agy stream-json idle budget)"
+                    .into(),
+            ),
+            std::time::Duration::from_secs(120),
+        );
+
+        let rows = session.store.current_benched_report().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].2, "produced no output for 120s");
+    }
+
+    #[test]
     fn no_model_access_counts_as_a_capability_failure_in_the_verdict() {
         assert_eq!(
             classify_attempt_failure(&forge_provider::ProviderError::NoModelAccess("x".into())),

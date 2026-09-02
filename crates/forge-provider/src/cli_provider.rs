@@ -131,6 +131,26 @@ fn humanize_age(secs: u64) -> String {
     }
 }
 
+struct BridgeIdleBudget {
+    kind: CliKind,
+    duration: Duration,
+}
+
+impl BridgeIdleBudget {
+    fn new(kind: CliKind, duration: Duration) -> Self {
+        Self { kind, duration }
+    }
+
+    fn description(&self) -> String {
+        let label = match self.kind {
+            CliKind::Antigravity => "agy stream-json idle budget",
+            CliKind::ClaudeCode => "claude-cli idle budget",
+            CliKind::Codex => "codex-cli idle budget",
+        };
+        format!("{label}: {}s", self.duration.as_secs())
+    }
+}
+
 /// Sanitized model/capability record returned by Claude Code's authoritative streaming
 /// `initialize` control request. Deliberately excludes the response's `account`, process and
 /// user-configuration fields so callers can safely persist this in benchmark artifacts.
@@ -920,6 +940,9 @@ fn parse_agy_models(out: &str) -> Vec<String> {
 /// IDLE window (seconds) for a bridged CLI: kill only after this long with NO output. Not a total
 /// cap — a turn streaming events stays alive indefinitely, so long hard tasks aren't truncated.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// agy `--output-format stream-json` still exits after its own print-mode wait. Keep it above
+/// Forge's bridge idle windows so Forge owns stall classification and records the watchdog reason.
+const ANTIGRAVITY_PRINT_TIMEOUT_SECS: u64 = 600;
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
 /// Cap on captured stderr (for error messages) so a chatty CLI can't blow memory.
@@ -1293,10 +1316,18 @@ fn build_args(
         ],
         // Antigravity (`agy`) has no MCP/`--tools` wiring, so it ALWAYS runs as its own agent
         // (text mode), regardless of `harness`. `build_oneshot_args` attaches the prompt to `-p`;
-        // otherwise agy consumes the next flag as the prompt. `--dangerously-skip-permissions`
-        // auto-approves agy's own tools so it doesn't block headless. `--model` is appended below.
+        // otherwise agy consumes the next flag as the prompt. Use agy's stream-json output so long
+        // healthy turns emit progress before the final answer; keep its own print timeout longer
+        // than Forge's watchdog so stalls are attributed consistently here.
         (CliKind::Antigravity, _) => {
-            vec!["-p".into(), "--dangerously-skip-permissions".into()]
+            vec![
+                "-p".into(),
+                "--dangerously-skip-permissions".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--print-timeout".into(),
+                format!("{}s", ANTIGRAVITY_PRINT_TIMEOUT_SECS),
+            ]
         }
     };
     if kind == CliKind::ClaudeCode {
@@ -1580,6 +1611,7 @@ fn clamp_to_chars(prompt: &str, max_chars: usize) -> String {
 /// are handled by `complete`; the rest map to [`StreamEvent`]s.
 #[derive(Debug, PartialEq)]
 enum Parsed {
+    Activity,
     Reasoning(String),
     Text(String),
     ToolStarted {
@@ -1972,6 +2004,7 @@ impl CliProvider {
                         }
                         for item in parse_stream_line(self.kind, &line, &mut claude_stream) {
                             match item {
+                                Parsed::Activity => on_event(StreamEvent::ProviderActivity),
                                 Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                                 Parsed::Text(t) => {
                                     if !is_cli_auth_instruction(&t) {
@@ -2017,6 +2050,7 @@ impl CliProvider {
             Ok::<(), std::io::Error>(())
         }
         .await;
+        let idle_budget = BridgeIdleBudget::new(self.kind, idle);
         // The read future completed (was NOT dropped mid-stream), so the explicit cleanup below owns
         // teardown — cancel the drop-time group kill.
         kill_guard.disarm();
@@ -2050,9 +2084,10 @@ impl CliProvider {
                 None => String::new(),
             };
             return Err(ProviderError::Unavailable(format!(
-                "`{}` produced no output for {}s — killed (stalled){write_suffix}{}",
+                "`{}` produced no output for {}s — killed (stalled; {}){write_suffix}{}",
                 self.binary,
                 idle.as_secs(),
+                idle_budget.description(),
                 stderr_suffix(&stderr_text)
             )));
         }
@@ -2709,6 +2744,7 @@ impl LiveSession {
             let mut turn_done = false;
             for item in parse_stream_line(kind, &line, &mut claude_stream) {
                 match item {
+                    Parsed::Activity => on_event(StreamEvent::ProviderActivity),
                     Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                     Parsed::Text(t) => {
                         if !is_cli_auth_instruction(&t) {
@@ -4009,6 +4045,10 @@ mod tests {
                 "non-interactive print mode"
             );
             assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+            assert!(args.contains(&"--output-format".to_string()));
+            assert!(args.contains(&"stream-json".to_string()));
+            assert!(args.contains(&"--print-timeout".to_string()));
+            assert!(args.contains(&format!("{}s", ANTIGRAVITY_PRINT_TIMEOUT_SECS)));
             // Never wires Forge's MCP server (agy can't host it).
             assert!(!args.iter().any(|a| a.contains("mcp")));
             assert!(!args.iter().any(|a| a == "--tools"));
@@ -4075,6 +4115,10 @@ mod tests {
             [
                 "-p=hello --from-forge",
                 "--dangerously-skip-permissions",
+                "--output-format",
+                "stream-json",
+                "--print-timeout",
+                "600s",
                 "--model",
                 "gemini-3.5-flash",
             ]
@@ -4087,6 +4131,44 @@ mod tests {
         assert_eq!(
             parse_antigravity_line("hello world"),
             vec![Parsed::Text("hello world\n".to_string())]
+        );
+    }
+
+    #[test]
+    fn antigravity_parse_line_handles_stream_json_progress_result_and_usage() {
+        assert_eq!(
+            parse_antigravity_line(
+                r#"{"event":"step_update","step_update":{"text_delta":"hello"}}"#
+            ),
+            vec![Parsed::Text("hello".to_string())]
+        );
+        assert_eq!(
+            parse_antigravity_line(r#"{"event":"init","conversation_id":"abc"}"#),
+            vec![Parsed::Activity]
+        );
+        assert_eq!(
+            parse_antigravity_line(
+                r#"{"event":"result","result":{"status":"SUCCESS","response":"hello","usage":{"input_tokens":2,"output_tokens":3,"thinking_tokens":4,"cache_read_tokens":5,"total_tokens":14}}}"#,
+            ),
+            vec![
+                Parsed::Usage(Usage {
+                    input_tokens: 2,
+                    output_tokens: 3,
+                    cached_input_tokens: Some(5),
+                    cost_usd: 0.0,
+                }),
+                Parsed::Final("hello".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn antigravity_parse_line_handles_stream_json_failure() {
+        assert_eq!(
+            parse_antigravity_line(
+                r#"{"event":"result","result":{"status":"FAILED","error":"no output"}}"#
+            ),
+            vec![Parsed::Error("no output".to_string())]
         );
     }
 
@@ -6155,6 +6237,29 @@ esac
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn antigravity_stall_error_names_watchdog_budget() {
+        let fake = make_fake_cli_sleep(5);
+        let provider = CliProvider::new(CliKind::Antigravity)
+            .with_binary(&fake)
+            .with_timeout(Duration::from_millis(50));
+        let mut on_event = |_: StreamEvent| {};
+        let err = provider
+            .complete(
+                "agy-cli::gemini-3.1-pro",
+                &[Message::user("hi")],
+                &[],
+                &mut on_event,
+            )
+            .await
+            .expect_err("silent agy must trip the watchdog");
+        assert!(
+            matches!(err, ProviderError::Unavailable(ref msg) if msg.contains("produced no output for 0s") && msg.contains("agy stream-json idle budget")),
+            "got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn nonzero_exit_with_agy_argv_stderr_is_request_error() {
         let stderr = "Error: -p took --dangerously-skip-permissions as its prompt";
         let fake = make_fake_cli_exit_with_stderr("", stderr, 2);
@@ -6195,6 +6300,14 @@ esac
         }
         script.push_str(&format!("exit {code}\n"));
         install_fake_cli("forge-fake-cli", &script)
+    }
+
+    #[cfg(unix)]
+    fn make_fake_cli_sleep(seconds: u64) -> String {
+        install_fake_cli(
+            "forge-fake-cli-sleep",
+            &format!("#!/bin/sh\nsleep {seconds}\n"),
+        )
     }
 
     /// Deterministic fuzz for `clamp_to_chars` — the function that trims an over-long prompt to

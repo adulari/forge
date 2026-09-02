@@ -461,9 +461,72 @@ pub(super) fn parse_stream_line(
 /// tool/usage/quota events to parse — usage stays $0 (free Gemini tier) and the answer is the
 /// accumulated text.
 pub(super) fn parse_antigravity_line(line: &str) -> Vec<Parsed> {
+    if let Ok(v) = serde_json::from_str::<Value>(line) {
+        return parse_antigravity_json(&v);
+    }
     if line.trim().is_empty() {
         Vec::new()
     } else {
         vec![Parsed::Text(format!("{line}\n"))]
+    }
+}
+
+fn parse_antigravity_json(v: &Value) -> Vec<Parsed> {
+    match v.get("event").and_then(Value::as_str) {
+        Some("step_update") => v
+            .get("step_update")
+            .and_then(|s| s.get("text_delta"))
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(|text| vec![Parsed::Text(text.to_string())])
+            .unwrap_or_default(),
+        Some("result") => {
+            let Some(result) = v.get("result") else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            if let Some(usage) = result.get("usage") {
+                out.push(Parsed::Usage(antigravity_usage_from(usage)));
+            }
+            if let Some(response) = result.get("response").and_then(Value::as_str) {
+                out.push(Parsed::Final(response.to_string()));
+            }
+            if result.get("status").and_then(Value::as_str) != Some("SUCCESS") {
+                out.push(Parsed::Error(
+                    result
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .or_else(|| result.get("status").and_then(Value::as_str))
+                        .unwrap_or("Antigravity turn failed")
+                        .to_string(),
+                ));
+            }
+            out
+        }
+        Some(t) if t.contains("error") || t.contains("failed") => vec![Parsed::Error(
+            v.get("message")
+                .and_then(Value::as_str)
+                .or_else(|| v.get("error").and_then(Value::as_str))
+                .map(str::to_string)
+                .unwrap_or_else(|| truncated_event_json(v)),
+        )],
+        Some(_) => vec![Parsed::Activity],
+        None => {
+            if v.get("type").is_some() {
+                vec![Parsed::Activity]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+fn antigravity_usage_from(v: &Value) -> Usage {
+    let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Usage {
+        input_tokens: n("input_tokens"),
+        output_tokens: n("output_tokens"),
+        cached_input_tokens: Some(n("cache_read_tokens")),
+        cost_usd: 0.0,
     }
 }
