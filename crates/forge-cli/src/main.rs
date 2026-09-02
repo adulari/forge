@@ -67,6 +67,7 @@ mod doctor;
 mod doctor_daemon;
 mod doctor_environment;
 mod doctor_health;
+mod first_run;
 mod image_input;
 pub(crate) mod live_observer;
 mod local;
@@ -151,14 +152,22 @@ async fn main() {
     init_tracing();
 
     let cli = Cli::parse();
-    let telemetry_run = telemetry::start(&cli.command);
+    let Some(command) = cli.command else {
+        let interactive = std::io::stdout().is_terminal();
+        print!(
+            "{}",
+            first_run::welcome_text(first_run::provider_configured(), interactive)
+        );
+        return;
+    };
+    let telemetry_run = telemetry::start(&command);
     if telemetry_run.show_notice() && std::io::stdout().is_terminal() {
         println!(
             "note: Forge sends anonymous usage counts (never code, prompts, paths, or device IDs).\n\
              Disable with `[telemetry] enabled = false` or `DO_NOT_TRACK=1`."
         );
     }
-    let result = cli::dispatch::dispatch(cli.command).await;
+    let result = cli::dispatch::dispatch(command).await;
     telemetry::finish(telemetry_run, result.is_ok());
     if let Err(e) = result {
         print_top_level_error(&e);
