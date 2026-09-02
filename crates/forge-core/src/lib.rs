@@ -2520,7 +2520,10 @@ impl Session {
         }
         let decision = decision;
         if decision.unroutable {
-            let msg = decision.rationale.clone();
+            let has_credentials = forge_config::known_key_providers()
+                .any(forge_config::has_api_key)
+                || forge_provider::CliKind::all().iter().any(|k| k.available());
+            let msg = unroutable_message(&decision.rationale, has_credentials);
             self.presenter.emit(PresenterEvent::Error(msg.clone()));
             let seq = self.next_seq();
             self.store
@@ -4224,6 +4227,23 @@ fn over_budget_message(b: &BudgetState) -> String {
         b.spent_month_usd,
         cap(b.monthly_cap_usd)
     )
+}
+
+/// One plain sentence naming the commands that fix a zero-credential install. Shared by the
+/// failover verdict and the unroutable-route path so the two cannot drift.
+pub(crate) const NO_CREDENTIALS_GUIDANCE: &str =
+    "No model provider is configured yet. Run `forge setup` for guided setup, or `forge auth \
+     <provider>` to add a key (`forge doctor` shows which providers need attention).";
+
+/// Message for a routing decision the mesh could not fulfil. On a keyless install the routing
+/// internals alone are unactionable (they name a model, never a command), so lead with the setup
+/// guidance and keep the rationale after it.
+fn unroutable_message(rationale: &str, has_credentials: bool) -> String {
+    if has_credentials {
+        rationale.to_string()
+    } else {
+        format!("{NO_CREDENTIALS_GUIDANCE}\n{rationale}")
+    }
 }
 
 /// Actionable message when the mesh routed to a model whose provider has no API key and nothing
@@ -9532,6 +9552,24 @@ mod tests {
             completed_tasks_recap(&[], &done, "I could not complete the task"),
             None,
             "a negative final answer must not be rewritten as success"
+        );
+    }
+
+    #[test]
+    fn an_unroutable_turn_without_credentials_leads_with_setup_guidance() {
+        let rationale = "short prompt — unroutable: no usable candidate for trivial tier";
+        let msg = unroutable_message(rationale, false);
+        let first_line = msg.lines().next().unwrap();
+        assert!(first_line.contains("forge setup"), "{msg}");
+        assert!(first_line.contains("forge auth"), "{msg}");
+        assert!(
+            msg.contains(rationale),
+            "keeps the routing internals: {msg}"
+        );
+        assert_eq!(
+            unroutable_message(rationale, true),
+            rationale,
+            "a keyed install keeps the bare rationale"
         );
     }
 

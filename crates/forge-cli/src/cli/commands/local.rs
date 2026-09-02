@@ -468,20 +468,29 @@ pub(crate) fn prompt_line(prompt: &str) -> Result<String> {
     Ok(line.trim().to_string())
 }
 
+/// Refusal message for the guided setup on a non-tty. Names the command the user actually typed
+/// (`forge setup` and `forge init` are aliases) and the unattended alternative.
+pub(crate) fn non_interactive_message(invoked_as: &str) -> String {
+    format!(
+        "`{invoked_as}` is interactive — run it in a terminal, or run `forge auth <provider>` \
+         for unattended setup"
+    )
+}
+
 /// `forge init`: interactive first-run setup. Walks the key-based providers (offering to store a
 /// key for each), then each installed CLI bridge (asking which subscription plan backs it), and
 /// writes the plans to the user config. Keys go to the OS keyring, never the config (ADR-0007).
-pub(crate) fn init() -> Result<()> {
+pub(crate) fn init(invoked_as: &str) -> Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        anyhow::bail!("`forge init` is interactive — run it in a terminal");
+        anyhow::bail!(non_interactive_message(invoked_as));
     }
     let cfg = super::load_config()?;
     let outcome =
         forge_tui::init_wizard::run(wizard_input(cfg.permission_mode, cfg.mesh.credit_mode))
             .context("running the setup wizard")?;
     if outcome.cancelled {
-        println!("Setup cancelled — run `forge init` anytime.");
+        println!("Setup cancelled — run `{invoked_as}` anytime.");
         return Ok(());
     }
     let path = apply_wizard_outcome(&outcome)?;
@@ -497,8 +506,8 @@ pub(crate) fn init() -> Result<()> {
 
 /// `forge setup`: the full guided flow — the provider/plan wizard ([`init`]), then an optional
 /// local-LLM step. Used by `forge setup`, `forge init`, and the first-run prompt.
-pub(crate) fn setup() -> Result<()> {
-    init()?;
+pub(crate) fn setup(invoked_as: &str) -> Result<()> {
+    init(invoked_as)?;
     offer_local_setup();
     Ok(())
 }
@@ -618,6 +627,15 @@ pub(crate) fn apply_wizard_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_non_interactive_refusal_names_the_alias_the_user_typed() {
+        let setup = non_interactive_message("forge setup");
+        assert!(setup.starts_with("`forge setup` is interactive"), "{setup}");
+        assert!(!setup.contains("forge init"), "{setup}");
+        assert!(setup.contains("forge auth <provider>"), "{setup}");
+        assert!(non_interactive_message("forge init").starts_with("`forge init` is interactive"));
+    }
 
     /// The Codex authorize request must match OpenAI's registered public client
     /// (`app_EMoamEEZ73f0CkXaXp7hrann`) byte-exact, or Hydra rejects it with

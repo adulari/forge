@@ -337,7 +337,7 @@ pub(crate) fn maybe_first_run_setup(mock: bool) -> Result<()> {
     println!("⚒ Welcome to Forge — no providers are configured yet.");
     let yes = prompt_line("Run guided setup now? [Y/n]: ")?;
     if yes.is_empty() || yes.eq_ignore_ascii_case("y") || yes.eq_ignore_ascii_case("yes") {
-        setup()?;
+        setup("forge setup")?;
     } else {
         let _ = forge_config::write_subscriptions(&std::collections::HashMap::new());
         println!("Skipped. Run `forge setup` anytime, or `forge auth <provider>` to add a key.");
