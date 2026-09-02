@@ -48,8 +48,8 @@ pub use xai_oauth::{
 };
 
 /// Normalize legacy underscore-prefixed bridge/provider ids to the canonical hyphen form so
-/// `codex_cli::gpt-5.4-mini` / `claude_cli::opus` / `xai_oauth::grok-4` work identically to their
-/// hyphen forms.
+/// `codex_cli::gpt-5.4-mini` / `claude_cli::opus` / `agy::gemini-3.7-flash` /
+/// `xai_oauth::grok-4` work identically to their hyphen forms.
 pub fn normalize_model_id(model: &str) -> std::borrow::Cow<'_, str> {
     if let Some(rest) = model.strip_prefix("claude_cli::") {
         return std::borrow::Cow::Owned(format!("claude-cli::{rest}"));
@@ -58,6 +58,9 @@ pub fn normalize_model_id(model: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Owned(format!("codex-cli::{rest}"));
     }
     if let Some(rest) = model.strip_prefix("agy_cli::") {
+        return std::borrow::Cow::Owned(format!("agy-cli::{rest}"));
+    }
+    if let Some(rest) = model.strip_prefix("agy::") {
         return std::borrow::Cow::Owned(format!("agy-cli::{rest}"));
     }
     if let Some(rest) = model.strip_prefix("xai_oauth::") {
@@ -500,6 +503,10 @@ mod error_tests {
             is_cli_bridge("agy_cli::gemini-3.1-pro"),
             "antigravity legacy underscore form"
         );
+        assert!(
+            is_cli_bridge("agy::gemini-3.7-flash"),
+            "short antigravity form"
+        );
         assert!(!is_cli_bridge("openrouter::google/gemini-3.5-flash"));
         assert!(!is_cli_bridge("gemini::gemini-3.5-flash"));
         assert!(!is_cli_bridge("ollama::llama3.2"));
@@ -510,7 +517,15 @@ mod error_tests {
     }
 
     #[test]
-    fn normalize_model_id_handles_xai_oauth_legacy_underscore() {
+    fn normalize_model_id_handles_bridge_aliases_and_legacy_underscores() {
+        assert_eq!(
+            normalize_model_id("agy::gemini-3.7-flash"),
+            "agy-cli::gemini-3.7-flash"
+        );
+        assert_eq!(
+            normalize_model_id("agy_cli::gemini-3.1-pro"),
+            "agy-cli::gemini-3.1-pro"
+        );
         assert_eq!(normalize_model_id("xai_oauth::grok-4"), "xai-oauth::grok-4");
         assert_eq!(normalize_model_id("xai-oauth::grok-4"), "xai-oauth::grok-4");
         assert_eq!(

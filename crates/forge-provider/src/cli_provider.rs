@@ -1295,9 +1295,16 @@ fn build_args(
         // (text mode), regardless of `harness`. `build_oneshot_args` attaches the prompt to `-p`;
         // otherwise agy consumes the next flag as the prompt. `--dangerously-skip-permissions`
         // auto-approves agy's own tools so it doesn't block headless. `--model` is appended below.
-        (CliKind::Antigravity, _) => {
-            vec!["-p".into(), "--dangerously-skip-permissions".into()]
-        }
+        // `--output-format json` makes agy print one JSON result object carrying `response` AND a
+        // `usage` block (input/output/thinking/cache_read tokens). Plain text mode prints only the
+        // answer, which is why every agy turn used to record `↑0 ↓0` — blinding the token gauge,
+        // cost tracking, and the mesh's pacing for this provider.
+        (CliKind::Antigravity, _) => vec![
+            "-p".into(),
+            "--dangerously-skip-permissions".into(),
+            "--output-format".into(),
+            "json".into(),
+        ],
     };
     if kind == CliKind::ClaudeCode {
         // Ask Claude to expose Anthropic stream deltas instead of waiting for each consolidated
@@ -1325,9 +1332,33 @@ fn build_args(
             ));
         }
     }
+    let mut agy_effort: Option<&str> = None;
+    let bare_model = if kind == CliKind::Antigravity {
+        if let Some(base) = bare_model.strip_suffix("-low") {
+            agy_effort = Some("low");
+            base
+        } else if let Some(base) = bare_model.strip_suffix("-medium") {
+            agy_effort = Some("medium");
+            base
+        } else if let Some(base) = bare_model.strip_suffix("-high") {
+            agy_effort = Some("high");
+            base
+        } else {
+            if bare_model.starts_with("gemini-") {
+                agy_effort = Some("low");
+            }
+            bare_model
+        }
+    } else {
+        bare_model
+    };
     if !bare_model.is_empty() {
         args.push("--model".into());
         args.push(bare_model.into());
+    }
+    if let Some(effort) = agy_effort {
+        args.push("--effort".into());
+        args.push(effort.into());
     }
     // Resume a prior claude session (continuity + prompt-cache; claude-only). Appended after the
     // standard flags; only the new turn's messages are streamed to stdin (see `complete`).
@@ -1648,6 +1679,23 @@ fn codex_usage_from(v: &Value) -> Usage {
         output_tokens: n("output_tokens"),
         // Absent only on a truncated/older event — then the split is genuinely unknown, not zero.
         cached_input_tokens: v.get("cached_input_tokens").and_then(Value::as_u64),
+        cost_usd: 0.0,
+    }
+}
+
+/// Antigravity's `--output-format json` `usage` block (verified live on agy 1.1.24:
+/// `{"input_tokens":17136,"output_tokens":1,"thinking_tokens":0,"cache_read_tokens":0,
+/// "total_tokens":17137}`). `input_tokens` is already the full input and `cache_read_tokens` is a
+/// subset of it, as with codex. `thinking_tokens` is reported ALONGSIDE `output_tokens` rather
+/// than inside it (the live sample's `total_tokens` is the plain sum of the three), and reasoning
+/// is generated-and-billed output everywhere else in Forge, so it is folded into `output_tokens`.
+fn antigravity_usage_from(v: &Value) -> Usage {
+    let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Usage {
+        input_tokens: n("input_tokens"),
+        output_tokens: n("output_tokens") + n("thinking_tokens"),
+        cached_input_tokens: v.get("cache_read_tokens").and_then(Value::as_u64),
+        // Free Gemini tier via the user's own CLI — $0 against Forge's USD budget.
         cost_usd: 0.0,
     }
 }
@@ -4075,8 +4123,33 @@ mod tests {
             [
                 "-p=hello --from-forge",
                 "--dangerously-skip-permissions",
+                "--output-format",
+                "json",
                 "--model",
                 "gemini-3.5-flash",
+                "--effort",
+                "low",
+            ]
+        );
+        assert_eq!(
+            build_oneshot_args(
+                CliKind::Antigravity,
+                "gemini-3.7-flash-low",
+                false,
+                "/bin/forge",
+                &[],
+                None,
+                prompt,
+            ),
+            [
+                "-p=hello --from-forge",
+                "--dangerously-skip-permissions",
+                "--output-format",
+                "json",
+                "--model",
+                "gemini-3.7-flash",
+                "--effort",
+                "low",
             ]
         );
     }
@@ -4088,6 +4161,51 @@ mod tests {
             parse_antigravity_line("hello world"),
             vec![Parsed::Text("hello world\n".to_string())]
         );
+        // A JSON line that isn't agy's result object is still just text.
+        assert_eq!(
+            parse_antigravity_line(r#"{"note":"not a result"}"#),
+            vec![Parsed::Text("{\"note\":\"not a result\"}\n".to_string())]
+        );
+    }
+
+    /// Captured verbatim from `agy -p "reply with the single word OK" --output-format json
+    /// --dangerously-skip-permissions --model gemini-3.7-flash-low` (agy 1.1.24, 2026-09-02).
+    /// Before this, agy ran in plain-text mode and every turn recorded `↑0 ↓0`.
+    #[test]
+    fn antigravity_json_result_yields_real_usage_and_the_answer() {
+        let line = r#"{"conversation_id":"cb444f3e-93e1-4072-8ecc-43f85896072c","status":"SUCCESS","response":"OK\n","duration_seconds":2.677115149,"num_turns":1,"usage":{"input_tokens":17136,"output_tokens":1,"thinking_tokens":4,"cache_read_tokens":16000,"total_tokens":17137}}"#;
+        assert_eq!(
+            parse_antigravity_line(line),
+            vec![
+                Parsed::Usage(Usage {
+                    input_tokens: 17136,
+                    // thinking is reported alongside output, and is billed output.
+                    output_tokens: 5,
+                    cached_input_tokens: Some(16000),
+                    cost_usd: 0.0,
+                }),
+                Parsed::Text("OK\n".to_string()),
+                Parsed::Final("OK\n".to_string()),
+            ]
+        );
+    }
+
+    /// An `ERROR` result still carries a usage block; the error must win over the empty response
+    /// so the turn fails loudly rather than completing empty.
+    #[test]
+    fn antigravity_json_error_result_is_an_error_not_an_empty_answer() {
+        let line = r#"{"conversation_id":"","status":"ERROR","response":"","error":"invalid model selection (--model \"gemini-3.7-flash\" --effort \"\"): --model gemini-3.7-flash requires --effort (available: low, medium, high)","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}"#;
+        let parsed = parse_antigravity_line(line);
+        assert_eq!(parsed.len(), 2);
+        assert!(matches!(parsed[0], Parsed::Usage(_)));
+        let Parsed::Error(msg) = &parsed[1] else {
+            panic!("expected an error, got {parsed:?}");
+        };
+        assert!(msg.contains("invalid model selection"));
+        assert!(matches!(
+            classify_in_band_error("agy", msg),
+            ProviderError::NoModelAccess(_)
+        ));
     }
 
     #[test]

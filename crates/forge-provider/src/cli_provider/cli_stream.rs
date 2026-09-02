@@ -456,14 +456,37 @@ pub(super) fn parse_stream_line(
     }
 }
 
-/// agy `-p` prints the answer as PLAIN TEXT (no JSON event stream like claude/codex), so every
-/// non-empty stdout line is answer text that accumulates into the final response. There are no
-/// tool/usage/quota events to parse — usage stays $0 (free Gemini tier) and the answer is the
-/// accumulated text.
+/// agy is spawned with `--output-format json`, so a completed turn arrives as ONE result object:
+/// `{"conversation_id":…,"status":"SUCCESS","response":…,"error":…,"usage":{…}}`. That object is
+/// the only place agy reports token counts, so it is where the answer AND the usage come from.
+///
+/// Anything that is not that object falls back to the older plain-text reading (every non-empty
+/// line is answer text). agy is not an event stream, so a stray non-JSON line — a warning, or an
+/// older/newer agy that ignores the flag — must still produce an answer rather than a silent
+/// empty turn.
 pub(super) fn parse_antigravity_line(line: &str) -> Vec<Parsed> {
     if line.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![Parsed::Text(format!("{line}\n"))]
+        return Vec::new();
     }
+    let Some(v) = serde_json::from_str::<Value>(line)
+        .ok()
+        .filter(|v| v.get("status").is_some() && v.get("usage").is_some())
+    else {
+        return vec![Parsed::Text(format!("{line}\n"))];
+    };
+    let mut out = Vec::new();
+    if let Some(usage) = v.get("usage") {
+        out.push(Parsed::Usage(antigravity_usage_from(usage)));
+    }
+    let error = v.get("error").and_then(Value::as_str).unwrap_or("").trim();
+    if !error.is_empty() {
+        out.push(Parsed::Error(error.to_string()));
+        return out;
+    }
+    let response = v.get("response").and_then(Value::as_str).unwrap_or("");
+    if !response.is_empty() {
+        out.push(Parsed::Text(response.to_string()));
+        out.push(Parsed::Final(response.to_string()));
+    }
+    out
 }

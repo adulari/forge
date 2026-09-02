@@ -274,9 +274,21 @@ Mechanics, mirroring the claude/codex bridges: Forge pipes the flattened transcr
 `agy -p --dangerously-skip-permissions [--model …]` over stdin and reads the printed answer.
 Unlike claude/codex, `agy` has **no MCP/`--tools` wiring**, so it runs **text-mode only** (its
 own agent with its own tools, `with_harness(false)` always) — it does not serve Forge's MCP
-tool gate. Its `-p` output is **plain text** (not a JSON event stream), so `parse_antigravity_line`
-treats each non-empty stdout line as answer text; there are no tool/usage events and usage is $0
-(free tier).
+tool gate.
+
+`agy` is spawned with `--output-format json`, so a turn ends with a single result object —
+`{"conversation_id":…,"status":…,"response":…,"error":…,"usage":{"input_tokens","output_tokens",
+"thinking_tokens","cache_read_tokens","total_tokens"}}`. That object is agy's **only** report of
+token counts, so `parse_antigravity_line` reads the answer *and* the usage from it:
+`input_tokens` is the full input (with `cache_read_tokens` a subset, as on codex, not an addend),
+and `thinking_tokens` is reported alongside `output_tokens` rather than inside it, so the two are
+summed into Forge's `output_tokens`. Cost stays $0 (free tier), but the counts are real, so the
+token gauge, the store's usage rows, and the mesh's subscription pacing all see agy traffic.
+Before this, agy ran in the default **plain-text** mode, which prints only the answer — every agy
+turn recorded `↑0 ↓0`. A stdout line that is not that result object still falls back to the
+plain-text reading (each non-empty line is answer text), so a warning line or an agy build that
+ignores the flag yields an answer rather than a silent empty turn. There are still no incremental
+tool/streaming events: the answer arrives in one piece at the end.
 
 Mesh integration is automatic via `CliKind::all()` + `provider_of`: `agy-cli` is discovered,
 counted as a **subscription** ($0 marginal), priced at a ~1M-token Gemini window, and
