@@ -76,6 +76,13 @@ branch kills the in-flight one mid-job.
 Dependabot #924 sat **two weeks** looking broken: `test (archlinux)` and `clippy` had both passed
 and only `release-build` was cancelled. Nothing was wrong with the dependency bump.
 
+Since 2026-09-03, `release-build` no longer runs on `pull_request` at all. It is the longest job in
+the pipeline (the release compile plus the upgrade/reconnect/rollback e2e, ~12 min) and every heavy
+job serializes on the single `heavy` runner, so running it per PR capped how fast anything could
+merge. It runs on the post-merge push to `main`, on the weekly schedule, and on the manual dispatch
+`release.yml` fires — before anything ships, which is where a packaging break must be caught. On a
+PR it reports `skipped`, which the aggregate gate accepts.
+
 When an aggregate is red, check whether anything genuinely failed:
 
 ```sh
