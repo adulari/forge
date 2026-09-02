@@ -446,35 +446,36 @@ pub(crate) fn print_mesh_explanation(
             }
         }
         println!("\ncandidates (top {}):", shown.len());
+        let mut any_reordered = false;
         for c in shown {
+            any_reordered |= c.reorder_reason.is_some();
             let marker = if c.selected { "*" } else { " " };
             let pen = if c.row.conserve_penalty > 0.0 {
                 format!(" −{:.0}", c.row.conserve_penalty)
             } else {
                 String::new()
             };
-            // Print the score the ordering was decided on, and name the demotion inline when it
-            // differs — a rank that contradicts its own number is worse than no number at all.
-            let score = match &c.adjustment {
-                Some(adjustment) => format!(
-                    "{:>6.2} → {:.2} ({})",
-                    c.row.final_score,
-                    c.effective_score,
-                    adjustment.label()
-                ),
-                None => format!("{:>6.2}", c.effective_score),
+            // The score stays the catalog score; a rank a routing rule decided is marked, not
+            // renumbered — a rank that contradicts its own number is worse than no number at all.
+            let reorder = match c.reorder_reason {
+                Some(reason) => format!(" · ↕ {reason}"),
+                None => String::new(),
             };
             println!(
-                "  {marker} #{:<2} {:<34} score {}  cap {:>5.2}  {}{}{}{}",
+                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}{}{}",
                 c.rank,
                 c.row.model,
-                score,
+                c.row.final_score,
                 c.row.capability,
                 cost_tag(c.row.cost_class),
                 pen,
                 if c.row.frontier { " · frontier" } else { "" },
                 quota_suffix(&c.row.model),
+                reorder,
             );
+        }
+        if any_reordered {
+            println!("  ranks marked ↕ were decided by routing rules; score is the catalog score");
         }
     }
 
@@ -499,13 +500,9 @@ pub(crate) fn mesh_explanation_json(
                 "model": c.row.model,
                 "provider": c.row.provider,
                 "final_score": c.row.final_score,
-                // Added, not renamed: `final_score` stays the raw catalog score for existing
-                // consumers; `effective_score` is what the ranking was decided on.
-                "effective_score": c.effective_score,
-                "score_adjustment": c.adjustment.as_ref().map(|adjustment| serde_json::json!({
-                    "delta": adjustment.delta,
-                    "reason": adjustment.reason,
-                })),
+                // Added, not renamed: the routing rule that decided this row's rank, or null
+                // when its catalog score did.
+                "reorder_reason": c.reorder_reason,
                 "capability": c.row.capability,
                 "cost_class": c.row.cost_class,
                 "conserve_penalty": c.row.conserve_penalty,

@@ -154,9 +154,9 @@ pub struct MeshCandRow {
     pub selected: bool,
     /// Conservation demotion applied (0.0 = none).
     pub penalty: f64,
-    /// Set when `score` is a post-ranking adjustment of the raw catalog score, e.g.
-    /// `8.63 → cost-aware sibling −1.18`.
-    pub adjustment: Option<String>,
+    /// Set when a routing rule, not `score` (the catalog score), decided this rank — the rule's
+    /// name, e.g. `cost-aware sibling`.
+    pub reorder_reason: Option<String>,
 }
 
 /// Data for the `/mesh` overlay — a legible, animated trace of one routing decision (or the

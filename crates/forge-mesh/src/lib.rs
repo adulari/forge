@@ -1147,6 +1147,29 @@ const AFFINITY_MIN_SUCCESS_RATE: f64 = 0.90;
 const AFFINITY_LATENCY_MARGIN_MS: f64 = 5_000.0;
 const INITIAL_ANCHOR_LATENCY_MARGIN_MS: f64 = 1_000.0;
 
+/// Record that a routing rule, not the catalog score, decided where `model` sits. The last rule
+/// to touch a model is the one that decided its final position, so a later rule overwrites.
+fn record_reorder(reasons: &mut Vec<(String, &'static str)>, model: &str, reason: &'static str) {
+    match reasons.iter_mut().find(|(m, _)| m == model) {
+        Some(entry) => entry.1 = reason,
+        None => reasons.push((model.to_string(), reason)),
+    }
+}
+
+/// Record every model a sort actually moved.
+fn record_moved(
+    reasons: &mut Vec<(String, &'static str)>,
+    before: &[String],
+    after: &[String],
+    reason: &'static str,
+) {
+    for (i, model) in after.iter().enumerate() {
+        if before.get(i) != Some(model) {
+            record_reorder(reasons, model, reason);
+        }
+    }
+}
+
 /// Scale the minimum required context window by the active effort level. HIGH effort inflates it
 /// by 1.5×, XHIGH by 2×. No adjustment for Low/Medium or when no minimum is set.
 fn effective_min_context(min_tokens: Option<u32>, effort: Option<EffortLevel>) -> Option<u32> {
@@ -1532,18 +1555,6 @@ impl HeuristicRouter {
         ))
     }
 
-    fn apply_subscription_pacing(
-        &self,
-        usable: &mut Vec<String>,
-        candidates: &[String],
-        quota: &SubscriptionQuota,
-    ) {
-        for provider in Self::paced_providers(usable, quota) {
-            let (_, held) = self.pacing_partition(&provider, usable, candidates);
-            usable.retain(|model| !held.contains(model));
-        }
-    }
-
     /// Subscription providers among `models` whose strictest window is currently over pace.
     fn paced_providers(models: &[String], quota: &SubscriptionQuota) -> Vec<String> {
         let mut providers: Vec<String> = models
@@ -1566,7 +1577,7 @@ impl HeuristicRouter {
     /// Split one over-pace provider's models into the ones pacing keeps and the ones it holds.
     ///
     /// This is the single implementation of the "hold everything above the cheapest usable
-    /// sibling" rule: [`apply_subscription_pacing`](Self::apply_subscription_pacing) enforces it
+    /// sibling" rule: the ordering pass enforces it
     /// and [`pacing_holds`](Self::pacing_holds) reports it, so an inspector can never describe a
     /// hold the router did not actually apply.
     fn pacing_partition(
@@ -1685,9 +1696,9 @@ impl HeuristicRouter {
         )
     }
 
-    /// Usable candidates for one tier, in preference order: the auto-discovered capability
-    /// ranking (cost folded in) when auto is active, else cheapest-first over the configured
-    /// candidates.
+    /// Usable candidates for one tier, in preference order — see
+    /// [`ordered_usable_for_tier_with_reasons`](Self::ordered_usable_for_tier_with_reasons), of
+    /// which this is the order-only view every routing caller wants.
     #[allow(clippy::too_many_arguments)]
     fn ordered_usable_for_tier(
         &self,
@@ -1699,6 +1710,37 @@ impl HeuristicRouter {
         min_context: Option<u32>,
         has_images: bool,
     ) -> Vec<String> {
+        self.ordered_usable_for_tier_with_reasons(
+            tier,
+            health,
+            hints,
+            quota,
+            effort,
+            min_context,
+            has_images,
+        )
+        .0
+    }
+
+    /// Usable candidates for one tier, in preference order: the auto-discovered capability
+    /// ranking (cost folded in) when auto is active, else cheapest-first over the configured
+    /// candidates.
+    ///
+    /// Alongside the order, this records which models a routing *rule* — rather than their
+    /// catalog score — put where they ended up, so an inspector can mark those rows instead of
+    /// inventing a number for them.
+    #[allow(clippy::too_many_arguments)]
+    fn ordered_usable_for_tier_with_reasons(
+        &self,
+        tier: TaskTier,
+        health: &ModelHealth,
+        hints: RouteHints,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        min_context: Option<u32>,
+        has_images: bool,
+    ) -> (Vec<String>, Vec<(String, &'static str)>) {
+        let mut reasons: Vec<(String, &'static str)> = Vec::new();
         let candidates = self.candidates_for_tier(tier, hints, quota, effort);
         let min = effective_min_context(min_context, effort);
         let mut usable: Vec<String> = candidates
@@ -1722,15 +1764,33 @@ impl HeuristicRouter {
                 usable = vision_only;
             }
         }
-        self.apply_subscription_pacing(&mut usable, &candidates, quota);
+        for provider in Self::paced_providers(&usable, quota) {
+            let (kept, held) = self.pacing_partition(&provider, &usable, &candidates);
+            // An empty `kept` is the degenerate case: the provider has no sibling cheaper than
+            // its own usable models, so pacing withholds the provider outright rather than
+            // picking a cheaper one within it.
+            let reason = if kept.is_empty() {
+                "pacing hold"
+            } else {
+                "cost-aware sibling"
+            };
+            for model in &held {
+                record_reorder(&mut reasons, model, reason);
+            }
+            usable.retain(|model| !held.contains(model));
+        }
         Self::suppress_usable_oauth_superseded_bridges(&mut usable);
         if !self.auto_active() {
             // Configured path: cost-aware order (auto path keeps the ranked order verbatim).
+            let before = usable.clone();
             usable.sort_by_key(|m| self.cost_rank(m));
+            record_moved(&mut reasons, &before, &usable, "cost-aware sibling");
         }
         // Demote a near-limit subscription (Warning, L3) to the back — still a fallback, but the
         // mesh tries everything else first. Stable, so it preserves the order within each group.
+        let before = usable.clone();
         usable.sort_by_key(|m| quota.is_pressured(forge_config::provider_of(m)));
+        record_moved(&mut reasons, &before, &usable, "quota pressure");
 
         // The first turn defines the implementation every later continuation inherits. On a
         // complex coding task, constrain the anchor to the strongest measured quality band.
@@ -1753,6 +1813,7 @@ impl HeuristicRouter {
                     .filter_map(|model| metric(model))
                     .max_by(f64::total_cmp)
                 {
+                    let before = usable.clone();
                     usable.sort_by(|a, b| {
                         let a_score = metric(a);
                         let b_score = metric(b);
@@ -1779,6 +1840,7 @@ impl HeuristicRouter {
                             (None, None) => std::cmp::Ordering::Equal,
                         }
                     });
+                    record_moved(&mut reasons, &before, &usable, "quality anchor");
                 }
             }
         }
@@ -1801,8 +1863,11 @@ impl HeuristicRouter {
                     .position(|e| e == m)
                     .unwrap_or(explicit.len())
             });
+            for m in usable.iter().filter(|m| explicit.contains(m)) {
+                reasons.push((m.clone(), "configured [mesh.models]"));
+            }
         }
-        usable
+        (usable, reasons)
     }
 
     /// Build the ordered failover chain for the routed tier: that tier's usable models first,

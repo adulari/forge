@@ -37,11 +37,8 @@ pub(crate) fn build_mesh_overlay(
             .map(|c| forge_tui::MeshCandRow {
                 rank: c.rank,
                 model: c.row.model.clone(),
-                score: c.effective_score,
-                adjustment: c
-                    .adjustment
-                    .as_ref()
-                    .map(|adjustment| format!("{:.2} → {}", c.row.final_score, adjustment.label())),
+                score: c.row.final_score,
+                reorder_reason: c.reorder_reason.map(str::to_string),
                 cost_tag: match c.row.cost_class {
                     0 => "free",
                     1 => "subscription",

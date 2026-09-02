@@ -32,75 +32,13 @@ pub struct CandidateRow {
     pub usable: bool,
     /// The model the mesh actually routed this prompt to.
     pub selected: bool,
-    /// The score the printed ordering was actually decided on. `row.final_score` is the catalog
-    /// score BEFORE the post-ranking adjustments (cost-aware sibling selection, quota pressure
-    /// demotion, the quality anchor) that `ordered_usable_for_tier` applies, so printing it made
-    /// the table contradict its own ranking — rank #1 above a rank #2 with a higher number. This
-    /// is that score reconciled with the real order: non-increasing with `rank`.
-    pub effective_score: f64,
-    /// Set when `effective_score` differs from `row.final_score`, naming the demotion so the table
-    /// explains itself without reading the rationale.
-    pub adjustment: Option<ScoreAdjustment>,
-}
-
-/// Why a candidate's printed score differs from its raw catalog score.
-#[derive(Debug, Clone)]
-/// Documented in docs/features/mesh-routing.md.
-pub struct ScoreAdjustment {
-    /// `effective_score - final_score` — always ≤ 0; the ordering only ever demotes.
-    pub delta: f64,
-    pub reason: &'static str,
-}
-
-impl ScoreAdjustment {
-    /// `cost-aware sibling −0.70`, for inline display next to the score.
-    pub fn label(&self) -> String {
-        format!("{} −{:.2}", self.reason, -self.delta)
-    }
-}
-
-/// Reconcile each row's printed score with the order the router actually chose. The adjustments
-/// that produce that order are structural (a model is dropped behind a sibling, a pressured
-/// provider is demoted, the quality anchor leads) rather than numeric, so the reconciliation is a
-/// running minimum down the ranking: a row can never print a higher score than a row above it.
-fn apply_effective_scores(candidates: &mut [CandidateRow], quota: &SubscriptionQuota) {
-    let mut ceiling = f64::INFINITY;
-    for i in 0..candidates.len() {
-        let base = candidates[i].row.final_score;
-        let effective = base.min(ceiling);
-        ceiling = effective;
-        candidates[i].effective_score = effective;
-        if effective < base {
-            candidates[i].adjustment = Some(ScoreAdjustment {
-                delta: effective - base,
-                reason: demotion_reason(candidates, i, quota),
-            });
-        }
-    }
-}
-
-/// Name the mechanism that pushed row `i` below a higher-scoring row above it.
-fn demotion_reason(
-    candidates: &[CandidateRow],
-    i: usize,
-    quota: &SubscriptionQuota,
-) -> &'static str {
-    let row = &candidates[i];
-    if !row.usable {
-        return "not in routing order";
-    }
-    let provider = forge_config::provider_of(&row.row.model);
-    if candidates[..i].iter().any(|above| {
-        above.usable
-            && forge_config::provider_of(&above.row.model) == provider
-            && above.row.final_score < row.row.final_score
-    }) {
-        return "cost-aware sibling";
-    }
-    if quota.is_pressured(provider) {
-        return "quota pressure";
-    }
-    "routing order"
+    /// Set when a routing rule — not this row's catalog score — decided where it ranks, naming
+    /// that rule (`cost-aware sibling`, `pacing hold`, `quota pressure`, `quality anchor`).
+    /// `row.final_score` stays the catalog score throughout; the ordering adjustments are
+    /// structural, so the honest presentation is to mark the row rather than invent a number for
+    /// it. Without this the table looked like it contradicted its own ranking — rank #1 above a
+    /// rank #2 with a higher score.
+    pub reorder_reason: Option<&'static str>,
 }
 
 /// A subscription provider's quota pressure + the spread probability for the explained tier.
@@ -303,7 +241,7 @@ impl HeuristicRouter {
         // context window doesn't fit, is something `decide()` would NEVER actually pick; showing
         // it as `usable: true` here made the real pick (further down the list, first genuinely
         // eligible row) look inconsistent with the table, when the pick was correct all along.
-        let ordered_visible = self.ordered_usable_for_tier(
+        let (ordered_visible, reorder_reasons) = self.ordered_usable_for_tier_with_reasons(
             routed_tier,
             health,
             hints,
@@ -345,13 +283,13 @@ impl HeuristicRouter {
                 rank: i + 1,
                 usable: visible_models.contains(row.model.as_str()),
                 selected: row.model == decision.model,
-                effective_score: row.final_score,
-                adjustment: None,
+                reorder_reason: reorder_reasons
+                    .iter()
+                    .find(|(model, _)| *model == row.model)
+                    .map(|(_, reason)| *reason),
                 row,
             })
-            .collect();
-        let mut candidates: Vec<CandidateRow> = candidates;
-        apply_effective_scores(&mut candidates, quota);
+            .collect::<Vec<CandidateRow>>();
 
         // Quota views for each subscription provider present in the catalog.
         let mut sub_providers: Vec<String> = self
@@ -619,10 +557,10 @@ mod tests {
     }
 
     #[test]
-    fn printed_candidate_scores_never_rise_with_rank() {
+    fn a_rule_decided_rank_is_marked_with_that_rule() {
         // Live 2026-09-02 (v2.13.7): the table showed `#1 claude-cli::opus[1m] score 7.45` above
         // `#2 claude-cli::fable score 8.63` — the ordering was correct (a cost-aware sibling pick
-        // inside claude-cli under window pressure) but the printed column contradicted it.
+        // inside claude-cli over its pace) but the printed column looked like it contradicted it.
         let r = HeuristicRouter::new(Config::default())
             .with_availability(|_| true)
             .with_catalog(ModelCatalog::new(vec![
@@ -631,9 +569,18 @@ mod tests {
                 "nvidia::moonshotai/kimi-k3".into(),
                 "groq::llama-3.3-70b-versatile".into(),
             ]));
-        let quota = SubscriptionQuota::new(std::collections::HashMap::new()).with_fractions(
-            std::collections::HashMap::from([("claude-cli".to_string(), 0.18)]),
-        );
+        let quota = SubscriptionQuota::default().with_pacing(std::collections::HashMap::from([(
+            "claude-cli".to_string(),
+            forge_types::SubscriptionPacing {
+                window: "weekly".to_string(),
+                fraction_used: 0.37,
+                allowed_fraction: 0.21,
+                elapsed_secs: 2 * 24 * 60 * 60,
+                total_secs: 7 * 24 * 60 * 60,
+                resets_at: Some(1_000_000),
+                used_nominal_fallback: false,
+            },
+        )]));
         let e = r.explain(
             "refactor the failover loop in model_request.rs and add tests",
             BudgetState::default(),
@@ -643,39 +590,28 @@ mod tests {
             &ProjectContext::default(),
         );
 
-        let printed: Vec<(usize, &str, f64)> = e
+        let printed: Vec<(usize, &str, f64, Option<&str>)> = e
             .candidates
             .iter()
-            .map(|c| (c.rank, c.row.model.as_str(), c.effective_score))
+            .map(|c| {
+                (
+                    c.rank,
+                    c.row.model.as_str(),
+                    c.row.final_score,
+                    c.reorder_reason,
+                )
+            })
             .collect();
-        for pair in e.candidates.windows(2) {
-            assert!(
-                pair[1].effective_score <= pair[0].effective_score + f64::EPSILON,
-                "printed score must be non-increasing with rank: {printed:?}"
-            );
-        }
-        // Whenever the reconciliation moved a score, the row must say why, and it may only demote.
+        // The held sibling ranks below models with lower catalog scores; the row says which rule
+        // put it there instead of restating its score as something it isn't.
         for c in &e.candidates {
-            match &c.adjustment {
-                Some(adjustment) => {
-                    assert!(adjustment.delta < 0.0);
-                    assert!(!adjustment.reason.is_empty());
-                    assert!(
-                        (c.effective_score - (c.row.final_score + adjustment.delta)).abs() < 1e-9
-                    );
-                }
-                None => assert!((c.effective_score - c.row.final_score).abs() < 1e-9),
-            }
+            let expected = if c.row.model == "claude-cli::fable" {
+                Some("cost-aware sibling")
+            } else {
+                None
+            };
+            assert_eq!(c.reorder_reason, expected, "{printed:?}");
         }
-        // The pick is rank 1, so it always prints the highest score in the table.
-        let selected = e.candidates.iter().find(|c| c.selected).unwrap();
-        assert_eq!(selected.rank, 1, "{printed:?}");
-        assert!(
-            e.candidates
-                .iter()
-                .all(|c| c.effective_score <= selected.effective_score + f64::EPSILON),
-            "{printed:?}"
-        );
     }
 
     #[test]
