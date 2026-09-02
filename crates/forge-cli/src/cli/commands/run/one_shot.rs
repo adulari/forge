@@ -36,7 +36,7 @@ pub(crate) async fn run(
         let turn = session.run_turn_with(&prompt, &guidance, tier);
         tokio::pin!(turn);
         let result = tokio::select! {
-            r = &mut turn => r.map(|_| ()).context("running agent turn"),
+            r = &mut turn => r.context("running agent turn").and_then(fail_if_incomplete),
             _ = tokio::signal::ctrl_c() => Ok(()),
         };
         result?;
@@ -77,7 +77,7 @@ pub(crate) async fn run(
         let turn = session.run_turn_with(&prompt, &guidance, tier);
         tokio::pin!(turn);
         tokio::select! {
-            r = &mut turn => r.map(|_| ()).context("running agent turn"),
+            r = &mut turn => r.context("running agent turn").and_then(fail_if_incomplete),
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — stopping turn (partial output kept)\x1b[0m");
                 Ok(())
@@ -90,6 +90,16 @@ pub(crate) async fn run(
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
     result?;
+    Ok(())
+}
+
+/// A headless one-shot run is unattended: a turn that stopped with tracked tasks still open has
+/// NOT done the job, and exiting 0 makes an orchestrator (or a human reading `$?`) treat it as if
+/// it had. Turn it into a process failure carrying the harness's ERROR line.
+fn fail_if_incomplete(outcome: forge_types::LoopOutcome) -> Result<()> {
+    if outcome.stop_reason == forge_types::StopReason::TasksUnfinished {
+        anyhow::bail!(outcome.text);
+    }
     Ok(())
 }
 

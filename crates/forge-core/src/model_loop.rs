@@ -130,6 +130,7 @@ impl Session {
         // `bridge_continue_nudges`: bounded RE-RUNS of a CLI bridge that returned with tracked tasks
         // unfinished (a bridge turn is terminal, so long plans stall partway) — as `continue` would.
         let mut bridge_continue_nudges = 0usize;
+        let mut bridge_stall_nudged = false;
         // Verification gate: when a bridge reports every task Done, completion is NOT accepted on
         // its say-so. Fresh tool-grounded evidence newer than the last artifact mutation is enough;
         // otherwise Forge requests a verification turn. This is the completion AUTHORITY: "done"
@@ -555,17 +556,21 @@ impl Session {
                             self.transcript.push(Message::system(&nudge));
                             continue;
                         }
-                        // No progress on the re-run (would spiral) or the re-drive budget is spent:
-                        // stop LOUDLY with the work named, rather than silently reporting success.
-                        let why = if made_progress {
-                            "reached the continue limit"
-                        } else {
-                            "the last attempt made no progress (no task completed, no tool ran)"
-                        };
-                        self.presenter.emit(PresenterEvent::Warning(format!(
-                            "bridge stopped with {} task(s) still unfinished — {why}. Send `continue` to resume.",
-                            unfinished.len()
-                        )));
+                        if !made_progress && !bridge_stall_nudged {
+                            bridge_stall_nudged = true;
+                            self.escalate_bridge_stall(&unfinished);
+                            continue;
+                        }
+                        // Still nothing after the escalation, or the re-drive budget is spent:
+                        if let Some(error) =
+                            self.halt_for_unfinished_tasks(unfinished, made_progress, unattended)
+                        {
+                            final_text = error;
+                            halted_by_loop_guard = true;
+                            hard_guard_abort = true;
+                            hit_step_cap = false;
+                            break;
+                        }
                     } else if !self.tasks.is_empty() {
                         // The bridge reports every task Done — but a self-reported status is exactly
                         // what produced the phantom release (claimed merged + tagged; nothing ran).

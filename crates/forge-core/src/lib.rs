@@ -1585,6 +1585,9 @@ pub struct Session {
     /// spending, and a nudge/verification re-drive would restart the model loop with fresh
     /// counters and defeat them.
     turn_hard_guard_abort: bool,
+    /// Tracked tasks still open when this turn ended, if any. Latched by the halt paths so the
+    /// turn is recorded as `TasksUnfinished` instead of a clean final answer.
+    turn_unfinished_tasks: Vec<String>,
     /// Headless code-change mode (harness-robustness wave 2): the caller KNOWS each prompt
     /// demands a code change (`bench swe` sets it — an explicit option, not prompt sniffing).
     /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
@@ -2715,6 +2718,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.turn_input_tokens = 0;
         self.turn_output_tokens = 0;
         self.turn_hard_guard_abort = false;
+        self.turn_unfinished_tasks.clear();
         self.failure_tracker.reset_turn();
         self.env_fight = EnvFightTracker::default();
 
@@ -3765,6 +3769,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     .to_string(),
             ));
             StopReason::NoOutput
+        } else if !self.turn_unfinished_tasks.is_empty() {
+            // Tracked work is still open: the turn is incomplete, whatever text it ended with.
+            // `forge status` and the fleet view read this outcome, so it must not say success.
+            StopReason::TasksUnfinished
         } else if hit_step_cap {
             StopReason::MaxSteps
         } else {
@@ -4383,6 +4391,9 @@ mod tests {
 
     #[path = "no_op_turn.rs"]
     mod no_op_turn_tests;
+
+    #[path = "bridge_stall.rs"]
+    mod bridge_stall_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {
@@ -7097,18 +7108,17 @@ mod tests {
 
         let answer = session.run_turn("do the thing").await.unwrap();
 
-        // The stall (call 1) made no progress, so the turn ends there — NOT driven into a loop.
-        assert_eq!(answer, "I'll keep going on this.");
-        assert_eq!(session.tasks()[0].status, TodoStatus::InProgress);
-        // ...but it halted LOUDLY: an honest "stopped with unfinished tasks" warning was surfaced.
-        let warned_unfinished = events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("unfinished")));
+        // The stall (call 1) made no progress: it earns ONE escalation demanding a concrete tool
+        // call, which recovers the turn (call 2 closes the task) instead of ending it half-done.
+        assert_eq!(answer, "all done");
+        assert_eq!(session.tasks()[0].status, TodoStatus::Done);
+        // ...and the stall was surfaced LOUDLY rather than accepted as a final answer.
+        let warned_stall = events.lock().unwrap().iter().any(
+            |e| matches!(e, PresenterEvent::Warning(w) if w.contains("without calling any tool")),
+        );
         assert!(
-            warned_unfinished,
-            "a half-done bridge turn must stop loudly, not silently report success"
+            warned_stall,
+            "a prose-only bridge stall must be called out, not silently accepted"
         );
     }
 
@@ -13060,8 +13070,8 @@ mod tests {
     #[tokio::test]
     async fn bridge_with_unfinished_tasks_but_no_progress_halts_without_spiraling() {
         // The anti-spiral guarantee: a bridge that yields with a task still open but did NOTHING
-        // this run (no tool, no task closed) must STOP, not be re-driven into a narration loop
-        // (the old bridge-nudge bug). Exactly one invocation.
+        // this run (no tool, no task closed) gets ONE stronger "call a tool now" escalation and
+        // then STOPS — it is never re-driven into a narration loop (the old bridge-nudge bug).
         let provider = Arc::new(BridgeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
             inspect_calls: 0,
@@ -13069,11 +13079,16 @@ mod tests {
         let (store, mut session) = bridge_session(provider.clone());
         seed_tasks(&store, &session.id, &[("ship the release", false)]);
         let answer = session.run_turn("release it").await.unwrap();
-        assert_eq!(answer, "working");
+        assert!(
+            answer.text.starts_with("ERROR:"),
+            "an unattended half-done turn must fail loudly: {}",
+            answer.text
+        );
+        assert_eq!(answer.stop_reason, StopReason::TasksUnfinished);
         assert_eq!(
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "no-progress bridge must not be re-driven — it would spiral"
+            2,
+            "one escalation, then a hard stop — never a spiral"
         );
     }
 
