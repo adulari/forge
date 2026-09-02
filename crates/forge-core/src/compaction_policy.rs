@@ -313,17 +313,24 @@ impl Session {
         if err.is_context_overflow() {
             return;
         }
-        let reason = err.reason();
+        let detail = err.to_string();
+        let reason = model_health_reason(err, &detail);
         if err.is_auth() {
             // The store prefixes the class itself ("excluded: auth failed: …"), so what goes in
             // here must be the EVIDENCE — the provider's / CLI's own text — not the class label
             // again. A row reading "auth failed: auth failed" told the mobile app that Opus was
             // benched for auth while `claude --model opus -p` answered fine on the same login,
             // and left nothing to diagnose it with (2026-09-02).
-            let detail = err.to_string();
             let detail = detail.trim();
             let detail: String = detail.chars().take(240).collect();
-            self.record_auth_failure(model, if detail.is_empty() { reason } else { &detail });
+            self.record_auth_failure(
+                model,
+                if detail.is_empty() {
+                    err.reason()
+                } else {
+                    &detail
+                },
+            );
         } else if err.is_permanent() {
             let _ = self.store.exclude_model(model, reason);
         } else {
@@ -332,7 +339,24 @@ impl Session {
                 .bench_for(model, err.cooldown(default_cooldown), reason);
         }
     }
+}
 
+pub(crate) fn model_health_reason<'a>(
+    err: &forge_provider::ProviderError,
+    detail: &'a str,
+) -> &'a str {
+    if matches!(err, forge_provider::ProviderError::Unavailable(_)) {
+        if let Some(start) = detail.find("produced no output for ") {
+            let tail = &detail[start..];
+            if let Some(end) = tail.find(" — killed") {
+                return &tail[..end];
+            }
+        }
+    }
+    err.reason()
+}
+
+impl Session {
     /// Persist an authentication failure at the narrowest scope the evidence supports.
     ///
     /// One failed turn is not proof that a subscription's credential is dead. A CLI bridge that
