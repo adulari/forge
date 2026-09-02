@@ -96,10 +96,8 @@ async fn advance_to_next_usable(
         // because it printed its own sign-in prompt earlier in this process — cannot serve this
         // hop. Skipping it saves a subprocess launch that can only fail the same way.
         //
-        // Deliberately NOT fed by this loop's own auth classification: one auth-shaped failure
-        // benches the model and needs corroboration before it may speak for the provider (see
-        // `one_auth_error_benches_only_the_model_not_the_whole_provider`). Only the CLI's own
-        // login machinery — "please sign in", an OAuth consent prompt — sets this verdict.
+        // Set only by the CLI's own login machinery ("please sign in", an OAuth prompt), never by
+        // this loop's auth classification (`one_auth_error_benches_only_the_model_not_the_whole_provider`).
         if forge_provider::bridge_credentials_known_absent(forge_config::provider_of(&next)) {
             continue;
         }
