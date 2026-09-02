@@ -46,7 +46,9 @@ file. That is a belt-and-braces check on top of the committed value, not a subst
 
 
 Add a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md` with REAL entries (what changed and why,
-with the touched file). A minor/major bump with only a "prepared the workspace" line is wrong —
+with the touched file), then copy the file over `crates/forge-cli/CHANGELOG.md` — the crates.io
+package ships its own copy and `scripts/ci/test-crates-release-order.sh` fails the PR when the
+two differ. A minor/major bump with only a "prepared the workspace" line is wrong —
 either there is real content or it should not be a release. Update the compare links at the bottom:
 add `[X.Y.Z]` and repoint `[Unreleased]` to `vX.Y.Z...HEAD`.
 

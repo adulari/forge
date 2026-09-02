@@ -79,4 +79,24 @@ impl Session {
             "ERROR: unattended turn reached hard step ceiling {hard}; work is uncommitted: {work}"
         )
     }
+
+    /// The pacing verdict the primary pick was made under, applied to the failover chain as well:
+    /// a hop must not walk rank order into a subscription the pacing engine is holding back (two
+    /// unattended sessions failed over onto an over-pace ChatGPT plan and burned ~6M input tokens
+    /// each, 2026-09-02). Held models stay in the chain but are deferred to last resort, so a turn
+    /// still completes when nothing else is left. Empty when failover is off (autofix re-runs).
+    pub(crate) fn pacing_held_in_chain(
+        &self,
+        decision: Option<&forge_mesh::RoutingDecision>,
+        active_model: &str,
+        fallbacks: &[String],
+    ) -> Vec<String> {
+        let Some(d) = decision else {
+            return Vec::new();
+        };
+        let mut scope = vec![active_model.to_string()];
+        scope.extend(fallbacks.iter().cloned());
+        let quota = crate::readiness::ProviderReadiness::snapshot(&self.config, &self.store).quota;
+        self.router.pacing_held(d.tier, &scope, &quota)
+    }
 }
