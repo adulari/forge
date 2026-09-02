@@ -10,8 +10,10 @@ use crate::bench;
     after_help = AFTER_HELP
 )]
 pub(crate) struct Cli {
+    /// Optional: bare `forge` prints a short first-run/common-commands panel instead of the
+    /// full help wall (see `first_run.rs`).
     #[command(subcommand)]
-    pub(crate) command: Command,
+    pub(crate) command: Option<Command>,
 }
 
 /// Orientation block appended to `forge --help` so the (large) subcommand list reads as a few

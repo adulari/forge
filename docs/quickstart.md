@@ -42,6 +42,9 @@ After install, verify it works:
 forge --version
 ```
 
+Running `forge` with no arguments prints a short orientation panel — the commands to set up a
+provider if you have none yet, and the handful you need day to day. `forge --help` lists everything.
+
 ---
 
 ## Step 2 — Connect a free AI provider

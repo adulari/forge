@@ -8,10 +8,16 @@ use super::run::{
 use crate::*;
 
 #[test]
+fn bare_forge_parses_to_no_subcommand_instead_of_a_usage_error() {
+    let cli = Cli::try_parse_from(["forge"]).expect("bare `forge` must parse");
+    assert!(cli.command.is_none());
+}
+
+#[test]
 fn serve_prefers_tunnel_and_retains_deprecated_anywhere_flag() {
     let tunnel = Cli::try_parse_from(["forge", "serve", "--tunnel"]).expect("new tunnel flag");
     assert!(matches!(
-        tunnel.command,
+        tunnel.command.unwrap(),
         Command::Serve {
             tunnel: true,
             anywhere: false,
@@ -21,7 +27,7 @@ fn serve_prefers_tunnel_and_retains_deprecated_anywhere_flag() {
 
     let legacy = Cli::try_parse_from(["forge", "serve", "--anywhere"]).expect("deprecated alias");
     assert!(matches!(
-        legacy.command,
+        legacy.command.unwrap(),
         Command::Serve {
             tunnel: false,
             anywhere: true,
@@ -38,7 +44,7 @@ fn anywhere_lists_pending_approvals() {
     let approvals =
         Cli::try_parse_from(["forge", "anywhere", "approvals"]).expect("approvals command");
     assert!(matches!(
-        approvals.command,
+        approvals.command.unwrap(),
         Command::Anywhere {
             cmd: AnywhereCmd::Approvals
         }
@@ -50,7 +56,7 @@ fn anywhere_exposes_approval_and_explicit_recovery_fallback() {
     let approve = Cli::try_parse_from(["forge", "anywhere", "approve", "challenge"])
         .expect("approval command");
     assert!(matches!(
-        approve.command,
+        approve.command.unwrap(),
         Command::Anywhere {
             cmd: AnywhereCmd::Approve { ref challenge }
         } if challenge == "challenge"
@@ -59,7 +65,7 @@ fn anywhere_exposes_approval_and_explicit_recovery_fallback() {
     let setup = Cli::try_parse_from(["forge", "anywhere", "setup", "--recovery"])
         .expect("setup recovery fallback");
     assert!(matches!(
-        setup.command,
+        setup.command.unwrap(),
         Command::Anywhere {
             cmd: AnywhereCmd::Setup { recovery: true, .. }
         }
@@ -68,7 +74,7 @@ fn anywhere_exposes_approval_and_explicit_recovery_fallback() {
     let login = Cli::try_parse_from(["forge", "anywhere", "login", "--recovery"])
         .expect("login recovery fallback");
     assert!(matches!(
-        login.command,
+        login.command.unwrap(),
         Command::Anywhere {
             cmd: AnywhereCmd::Login { recovery: true }
         }
@@ -117,7 +123,7 @@ fn mcp_add_preserves_transport_and_stdio_command_tail() {
     ])
     .expect("stdio MCP config");
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Mcp {
             cmd: Some(McpCmd::Add {
                 transport: McpTransportArg::Stdio,
@@ -142,7 +148,7 @@ fn mcp_add_preserves_transport_and_stdio_command_tail() {
     ])
     .expect("HTTP MCP config");
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Mcp {
             cmd: Some(McpCmd::Add {
                 transport: McpTransportArg::Http,
@@ -704,7 +710,7 @@ fn mcp_add_scope_enum_parses_with_default_local() {
         ("user", Scope::User),
     ] {
         let cli = Cli::try_parse_from(["forge", "mcp", "add", "srv", "--scope", arg]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Mcp {
                 cmd: Some(McpCmd::Add { scope, .. }),
             } => assert_eq!(scope, want),
@@ -714,7 +720,7 @@ fn mcp_add_scope_enum_parses_with_default_local() {
     // Default is `local`; `-s` short flag is preserved.
     let cli = Cli::try_parse_from(["forge", "mcp", "add", "srv"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Mcp {
             cmd: Some(McpCmd::Add {
                 scope: Scope::Local,
@@ -724,7 +730,7 @@ fn mcp_add_scope_enum_parses_with_default_local() {
     ));
     let cli = Cli::try_parse_from(["forge", "mcp", "add", "srv", "-s", "user"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Mcp {
             cmd: Some(McpCmd::Add {
                 scope: Scope::User,
@@ -739,7 +745,7 @@ fn import_claude_scope_and_legacy_project_alias() {
     // New canonical form.
     let cli = Cli::try_parse_from(["forge", "import", "claude", "--scope", "project"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Import {
             source: ImportSource::Claude {
                 scope: Some(Scope::Project),
@@ -750,7 +756,7 @@ fn import_claude_scope_and_legacy_project_alias() {
     // Legacy `--project` still parses (back-compat).
     let cli = Cli::try_parse_from(["forge", "import", "claude", "--project"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Import {
             source: ImportSource::Claude {
                 project: true,
@@ -761,7 +767,7 @@ fn import_claude_scope_and_legacy_project_alias() {
     // Default (neither flag) → user scope: scope None + project false.
     let cli = Cli::try_parse_from(["forge", "import", "codex"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Import {
             source: ImportSource::Codex {
                 project: false,
@@ -779,7 +785,7 @@ fn import_claude_scope_and_legacy_project_alias() {
 fn skill_normalize_scope_and_legacy_project_alias() {
     let cli = Cli::try_parse_from(["forge", "skill", "normalize", "--project"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Skill {
             sub: SkillCmd::Normalize {
                 project: true,
@@ -789,7 +795,7 @@ fn skill_normalize_scope_and_legacy_project_alias() {
     ));
     let cli = Cli::try_parse_from(["forge", "skill", "normalize", "--scope", "project"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Skill {
             sub: SkillCmd::Normalize {
                 scope: Some(Scope::Project),
@@ -805,7 +811,7 @@ fn skill_import_load_alias_and_scope_values() {
     let cli =
         Cli::try_parse_from(["forge", "skill", "load", "/tmp/b", "--scope", "local"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Skill {
             sub: SkillCmd::Import {
                 scope: Scope::Local,
@@ -816,7 +822,7 @@ fn skill_import_load_alias_and_scope_values() {
     // Default scope is `user`.
     let cli = Cli::try_parse_from(["forge", "skill", "import", "/tmp/b"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Skill {
             sub: SkillCmd::Import {
                 scope: Scope::User,
@@ -838,7 +844,7 @@ fn plugin_grammar_preserves_marketplace_and_optional_arguments() {
     ])
     .expect("plugin install grammar");
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Plugin {
             cmd: PluginCmd::Install { ref plugin, marketplace: Some(ref marketplace) }
         } if plugin == "package" && marketplace == "community"
@@ -855,7 +861,7 @@ fn plugin_grammar_preserves_marketplace_and_optional_arguments() {
     ])
     .expect("marketplace grammar");
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Plugin {
             cmd: PluginCmd::Marketplace { cmd: PluginMarketplaceCmd::Add { ref name, ref source, ref ref_ } }
         } if name == "community" && source == "owner/repo" && ref_.as_deref() == Some("main")
@@ -863,7 +869,7 @@ fn plugin_grammar_preserves_marketplace_and_optional_arguments() {
     let cli = Cli::try_parse_from(["forge", "plugin", "list", "--available"])
         .expect("plugin list available grammar");
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Plugin {
             cmd: PluginCmd::List { available: true }
         }
@@ -871,7 +877,7 @@ fn plugin_grammar_preserves_marketplace_and_optional_arguments() {
     let cli = Cli::try_parse_from(["forge", "plugin", "update"])
         .expect("plugin update without a package");
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Plugin {
             cmd: PluginCmd::Update { plugin: None }
         }
@@ -879,7 +885,7 @@ fn plugin_grammar_preserves_marketplace_and_optional_arguments() {
     let cli = Cli::try_parse_from(["forge", "plugin", "marketplace", "remove", "community"])
         .expect("marketplace removal grammar");
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Plugin {
             cmd: PluginCmd::Marketplace { cmd: PluginMarketplaceCmd::Remove { ref name } }
         } if name == "community"
@@ -891,14 +897,14 @@ fn plugin_add_alias_and_plugins_top_alias() {
     // `plugin add` is an alias for `plugin install`.
     let cli = Cli::try_parse_from(["forge", "plugin", "add", "owner/repo"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Plugin {
             cmd: PluginCmd::Install { .. }
         }
     ));
     // `plugins` (top-level) is an alias for `plugin`.
     let cli = Cli::try_parse_from(["forge", "plugins", "list"]).unwrap();
-    assert!(matches!(cli.command, Command::Plugin { .. }));
+    assert!(matches!(cli.command.unwrap(), Command::Plugin { .. }));
 }
 
 #[test]
@@ -906,7 +912,7 @@ fn run_gains_unified_continuity_and_surface_flags() {
     // --continue
     let cli = Cli::try_parse_from(["forge", "run", "do", "a", "thing", "--continue"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Run {
             r#continue: true,
             ..
@@ -914,14 +920,14 @@ fn run_gains_unified_continuity_and_surface_flags() {
     ));
     // --resume <id>
     let cli = Cli::try_parse_from(["forge", "run", "task", "--resume", "abc"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Run { resume, .. } => assert_eq!(resume, Some(Some("abc".to_string()))),
         _ => panic!("expected run"),
     }
     // bare --resume → Some(None) (picker intent, resolved at dispatch)
     let cli = Cli::try_parse_from(["forge", "run", "task", "--resume"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Run {
             resume: Some(None),
             ..
@@ -948,7 +954,7 @@ fn run_accepts_role_separated_system_prompts() {
     ])
     .unwrap();
 
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Run { prompt, system, .. } => {
             assert_eq!(prompt, ["How many tasks are due today?"]);
             assert_eq!(
@@ -977,7 +983,7 @@ fn chat_gains_symmetric_tui_flag() {
 fn oauth_headless_flags_use_optional_paste_value() {
     let cli = Cli::try_parse_from(["forge", "auth", "codex-oauth", "--device"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Auth {
             device: true,
             paste: None,
@@ -987,7 +993,7 @@ fn oauth_headless_flags_use_optional_paste_value() {
 
     let cli = Cli::try_parse_from(["forge", "auth", "codex-oauth", "--paste"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Auth { paste: Some(ref value), .. } if value.is_empty()
     ));
 
@@ -1000,14 +1006,14 @@ fn oauth_headless_flags_use_optional_paste_value() {
     ])
     .unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Auth { paste: Some(ref value), .. } if value.contains("state=s")
     ));
 
     let cli =
         Cli::try_parse_from(["forge", "mcp", "login", "srv", "--paste", "code=c&state=s"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Mcp { cmd: Some(McpCmd::Login { paste: Some(ref value), .. }) } if value.contains("state=s")
     ));
 }

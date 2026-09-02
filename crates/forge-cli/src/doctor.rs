@@ -360,6 +360,13 @@ fn config_checks() -> Vec<Check> {
     out
 }
 
+/// Credential-side readiness only: does any API key, CLI bridge, or local model exist? Same
+/// evidence doctor's "No usable model provider configured" gate starts from, with no network
+/// probe — cheap enough for bare `forge` to consult on every invocation.
+pub(crate) fn provider_credentials_present() -> bool {
+    provider_checks().1
+}
+
 /// Provider checks + whether at least one routable provider exists.
 fn provider_checks() -> (Vec<Check>, bool) {
     let mut out = Vec::new();
