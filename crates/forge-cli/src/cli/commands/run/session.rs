@@ -77,6 +77,7 @@ pub(crate) async fn build_session_with_self_mcp(
     allow_self_mcp: bool,
     session_cwd: Option<&str>,
 ) -> Result<Session> {
+    let mut clock = StartupClock::start();
     if let Some(session_id) = resume.as_deref() {
         if crate::open_store()?
             .session_handoff_blocked(session_id)
@@ -91,8 +92,10 @@ pub(crate) async fn build_session_with_self_mcp(
     forge_config::inject_provider_keys();
     // …and the search-API key visible to the web_search tool.
     forge_config::inject_search_keys();
+    clock.mark("inject keyring keys");
 
     let mut config = forge_config::load().context("loading configuration")?;
+    clock.mark("config load");
     if let Some(m) = mode {
         config.permission_mode = m.into();
     }
@@ -150,6 +153,7 @@ pub(crate) async fn build_session_with_self_mcp(
     let pin = pin.map(|p| forge_provider::normalize_model_id(&p).into_owned());
 
     let store = Arc::new(open_store()?);
+    clock.mark("store open + migrations");
     // Never construct a session router from an expired Codex pressure reading. The helper uses a
     // fresh CLI rollout when available, otherwise performs one bounded minimal OAuth probe; it
     // updates the shared codex-oauth/codex-cli quota bucket before this session's first route.
@@ -157,12 +161,14 @@ pub(crate) async fn build_session_with_self_mcp(
     // startup work and can block the requested provider behind an unavailable Secret Service.
     if should_refresh_codex_quota(mock, pin.as_deref()) {
         crate::cli::commands::models::refresh_codex_quota(&store).await;
+        clock.mark("codex quota refresh");
     }
     // OpenCode Go's windows only move when polled — its chat completions carry no rate-limit
     // headers — so the same pre-routing refresh keeps its pacing from running on stale data. The
     // helper's own freshness gate bounds this to one request every few minutes.
     if should_refresh_opencode_go_quota(mock, pin.as_deref()) {
         crate::cli::commands::models::refresh_opencode_go_quota(&store).await;
+        clock.mark("opencode go quota refresh");
     }
     let store_for_lattice = Arc::clone(&store);
     // Startup hint: if models are benched from a prior run/probe, tell the user how to recheck
@@ -205,6 +211,7 @@ pub(crate) async fn build_session_with_self_mcp(
                 let fresh = discover_catalog(&cfg).await;
                 save_catalog(&fresh);
             });
+            clock.mark("catalog from cache");
             Some(cached)
         } else {
             // First run or stale cache — block on discovery, then persist the result.
@@ -222,6 +229,7 @@ pub(crate) async fn build_session_with_self_mcp(
                         ));
                     }
                     save_catalog(&cat);
+                    clock.mark("catalog discovery (no cache)");
                     Some(cat)
                 }
                 Err(_) => {
@@ -280,6 +288,7 @@ pub(crate) async fn build_session_with_self_mcp(
         .ok()
         .and_then(|s| s.all_model_contexts().ok())
         .unwrap_or_default();
+    clock.mark("calibration + context windows");
     let workspace_root = match session_cwd {
         Some(cwd) => std::path::PathBuf::from(cwd)
             .canonicalize()
@@ -310,6 +319,7 @@ pub(crate) async fn build_session_with_self_mcp(
         ctx_windows,
         repo_boosts,
     );
+    clock.mark("provider + router");
 
     // Build the code-intelligence index up front so it can be shared between the model-facing
     // `lattice` tool and the turn's auto-injection (code-intelligence.md). Cheap to construct; it
@@ -383,6 +393,7 @@ pub(crate) async fn build_session_with_self_mcp(
         )
         .context("starting session")?,
     };
+    clock.mark("tools + lattice + session start");
     if let Some(update_rx) = lattice_update_rx {
         session.set_lattice_update(Some(update_rx));
     }
@@ -466,7 +477,36 @@ pub(crate) async fn build_session_with_self_mcp(
             forge_lsp::LspRegistry::from_config(&lsp_config),
         )));
     }
+    clock.mark("skills + mcp + lsp");
     Ok(session)
+}
+
+/// Startup phase timer: one debug line per phase (`RUST_LOG=forge=debug`), so a slow launch can
+/// be attributed to a phase instead of guessed at. Costs one `Instant::now()` per mark.
+struct StartupClock {
+    started: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl StartupClock {
+    fn start() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            started: now,
+            last: now,
+        }
+    }
+
+    fn mark(&mut self, phase: &str) {
+        let now = std::time::Instant::now();
+        tracing::debug!(
+            target: "forge::startup",
+            "{phase}: {} ms (t+{} ms)",
+            now.duration_since(self.last).as_millis(),
+            now.duration_since(self.started).as_millis()
+        );
+        self.last = now;
+    }
 }
 
 /// Build a session with the default surface (TUI on a tty, else plain).

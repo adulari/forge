@@ -78,7 +78,7 @@ pub async fn run() -> anyhow::Result<usize> {
 
     let mut sections: Vec<(&str, Vec<Check>)> = Vec::new();
     sections.push(("Config", config_checks()));
-    let (mut provider_v, has_usable_provider) = provider_checks();
+    let (mut provider_v, mut has_usable_provider) = provider_checks();
     // Reachability is evidence for the routing verdict, not the verdict itself. A provider can
     // answer discovery while the mesh has excluded it or exhausted its subscription.
     let reachability = provider_reachability_checks().await;
@@ -86,6 +86,12 @@ pub async fn run() -> anyhow::Result<usize> {
     // whatever a previous command happened to leave behind (or nothing at all).
     if let Ok(store) = crate::open_store() {
         crate::cli::commands::models::refresh_opencode_go_quota(&store).await;
+    }
+    mark_rejected_keys(&mut provider_v, &reachability);
+    if provider_v.iter().any(|c| c.status == Status::Fail) {
+        has_usable_provider = provider_v.iter().any(|c| {
+            c.status == Status::Ok && (c.label.ends_with(" key") || c.label.ends_with(" bridge"))
+        });
     }
     let routing = crate::doctor_health::provider_routing_checks(&reachability);
     let has_usable_provider = if routing.is_empty() {
@@ -583,6 +589,61 @@ fn daemon_state_check(state: &str) -> Check {
     }
 }
 
+/// The one wording for "this provider read the stored key and refused it", shared by the key row,
+/// the reachability row and (by prefix match) the routing verdict.
+pub(crate) fn auth_rejected_detail(provider: &str, code: u16) -> String {
+    format!("rejected by {provider} (HTTP {code}): the stored key is invalid")
+}
+
+pub(crate) const AUTH_REJECTED_PREFIX: &str = "rejected by ";
+
+/// Is this listing failure the provider REFUSING the credential (vs. a network/endpoint blip)?
+/// Returns the HTTP status to report. The typed [`ProviderError::Auth`] variant is authoritative;
+/// the text scan is a backstop for adapters that stringify a status before we can classify it.
+///
+/// Deliberately narrow: only 401/403 and unambiguous "invalid/unauthorized key" prose count, so a
+/// connection refusal, a 5xx or a missing listing endpoint keeps the old, softer wording.
+pub(crate) fn auth_rejection_status(err: &forge_provider::ProviderError) -> Option<u16> {
+    let text = err.to_string();
+    let lower = text.to_lowercase();
+    let code = if lower.contains("403") || lower.contains("forbidden") {
+        403
+    } else {
+        401
+    };
+    if matches!(err, forge_provider::ProviderError::Auth(_)) {
+        return Some(code);
+    }
+    let names_401 = lower.contains("401") || lower.contains("unauthorized");
+    let names_403 = lower.contains("403") || lower.contains("forbidden");
+    let names_bad_key = lower.contains("invalid api key")
+        || lower.contains("invalid_api_key")
+        || lower.contains("incorrect api key")
+        || lower.contains("authentication_error")
+        || lower.contains("invalid authentication");
+    (names_401 || names_403 || names_bad_key).then_some(code)
+}
+
+/// Downgrade the `<provider> key` rows for providers whose credential the provider itself
+/// rejected. The key rows are built from key PRESENCE, which cannot see a 401.
+pub(crate) fn mark_rejected_keys(checks: &mut [Check], reachability: &[Check]) {
+    for reach in reachability {
+        let Some(provider) = reach.label.strip_suffix(" reachability") else {
+            continue;
+        };
+        if reach.status != Status::Fail || !reach.detail.starts_with(AUTH_REJECTED_PREFIX) {
+            continue;
+        }
+        for row in checks.iter_mut() {
+            if row.label == format!("{provider} key") {
+                row.status = Status::Fail;
+                row.detail = reach.detail.clone();
+                row.fix = Some(format!("`forge auth {provider}` to replace the stored key"));
+            }
+        }
+    }
+}
+
 /// LIVE: for each KEYED provider, can we actually list its models within a timeout? A keyed
 /// provider whose discovery times out silently drops out of routing and the mesh falls back to a
 /// keyless default (the "groq for everything" churn) — a key-PRESENCE check can't see this.
@@ -609,17 +670,25 @@ async fn provider_reachability_checks() -> Vec<Check> {
                 "responded, but listed no models",
                 None,
             ),
-            // An Err from list_models is NOT a reliable usability signal: several adapters (Gemini,
-            // Groq, the cerebras custom endpoint) have no listing endpoint or key it differently
-            // than chat, so they error here while chat works fine. Surface it as Info, not a
-            // failure — the robust "this provider is dead" signal is the TIMEOUT branch below, and
-            // real credential validation would need a paid chat call doctor won't make by default.
-            Ok(Err(_)) => check(
-                Status::Info,
-                &format!("{p} reachability"),
-                "model listing unavailable — chat unaffected",
-                None,
-            ),
+            // An authentication rejection IS a reliable usability signal: the provider read the
+            // stored key and refused it, so every chat call fails the same way. Anything else
+            // (no listing endpoint, a keying difference, a 5xx, a refused connection) is not —
+            // several adapters (Gemini, Groq, the cerebras custom endpoint) error here while chat
+            // works fine, so those stay Info.
+            Ok(Err(e)) => match auth_rejection_status(&e) {
+                Some(code) => check(
+                    Status::Fail,
+                    &format!("{p} reachability"),
+                    auth_rejected_detail(p, code),
+                    Some(&format!("`forge auth {p}` to replace the stored key")),
+                ),
+                None => check(
+                    Status::Info,
+                    &format!("{p} reachability"),
+                    "model listing unavailable — chat unaffected",
+                    None,
+                ),
+            },
             // The churn cause: keyed but unreachable. Its models won't route.
             Err(_) => check(
                 Status::Fail,
@@ -804,5 +873,95 @@ mod daemon_tests {
         let c = daemon_state_check("reloading");
         assert_eq!(c.status, Status::Warn);
         assert_eq!(c.detail, "reloading");
+    }
+}
+
+#[cfg(test)]
+mod auth_rejection_tests {
+    use super::*;
+    use forge_provider::ProviderError;
+
+    /// Captured from a real groq listing call with a key that was stored but invalid — the exact
+    /// case doctor used to call "usable" and "chat unaffected".
+    const GROQ_401: &str = "provider request failed: HttpError status: 401 Unauthorized, body: \
+        {\"error\":{\"message\":\"Invalid API Key\",\"type\":\"invalid_request_error\",\"code\":\"invalid_api_key\"}}";
+    const OPENAI_403: &str = "provider request failed: HttpError status: 403 Forbidden, body: \
+        {\"error\":{\"message\":\"Country, region, or territory not supported\",\"code\":null}}";
+    const CONN_REFUSED: &str =
+        "error sending request for url (https://api.groq.com/openai/v1/models): \
+        tcp connect error: Connection refused (os error 111)";
+    const UPSTREAM_5XX: &str =
+        "HttpError status: 503 Service Unavailable, body: upstream connect error";
+
+    #[test]
+    fn a_401_listing_failure_is_an_auth_rejection() {
+        assert_eq!(
+            auth_rejection_status(&ProviderError::Auth(GROQ_401.into())),
+            Some(401)
+        );
+        // Backstop path: same body reaching us as an unclassified request error.
+        assert_eq!(
+            auth_rejection_status(&ProviderError::Request(GROQ_401.into())),
+            Some(401)
+        );
+    }
+
+    #[test]
+    fn a_403_listing_failure_is_an_auth_rejection() {
+        assert_eq!(
+            auth_rejection_status(&ProviderError::Request(OPENAI_403.into())),
+            Some(403)
+        );
+    }
+
+    #[test]
+    fn a_connection_refusal_is_not_an_auth_rejection() {
+        assert_eq!(
+            auth_rejection_status(&ProviderError::Unavailable(CONN_REFUSED.into())),
+            None
+        );
+    }
+
+    #[test]
+    fn a_5xx_is_not_an_auth_rejection() {
+        assert_eq!(
+            auth_rejection_status(&ProviderError::Unavailable(UPSTREAM_5XX.into())),
+            None
+        );
+    }
+
+    #[test]
+    fn a_rejected_key_row_names_the_provider_and_the_replacement_command() {
+        let mut keys = vec![check(Status::Ok, "groq key", "configured", None)];
+        let reachability = vec![check(
+            Status::Fail,
+            "groq reachability",
+            auth_rejected_detail("groq", 401),
+            Some("`forge auth groq` to replace the stored key"),
+        )];
+        mark_rejected_keys(&mut keys, &reachability);
+        assert_eq!(keys[0].status, Status::Fail);
+        assert_eq!(
+            keys[0].detail,
+            "rejected by groq (HTTP 401): the stored key is invalid"
+        );
+        assert_eq!(
+            keys[0].fix.as_deref(),
+            Some("`forge auth groq` to replace the stored key")
+        );
+    }
+
+    #[test]
+    fn a_network_blip_leaves_the_key_row_alone() {
+        let mut keys = vec![check(Status::Ok, "groq key", "configured", None)];
+        let reachability = vec![check(
+            Status::Info,
+            "groq reachability",
+            "model listing unavailable — chat unaffected",
+            None,
+        )];
+        mark_rejected_keys(&mut keys, &reachability);
+        assert_eq!(keys[0].status, Status::Ok);
+        assert_eq!(keys[0].detail, "configured");
     }
 }
