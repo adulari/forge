@@ -412,7 +412,13 @@ impl CliKind {
     fn max_input_chars(self) -> Option<usize> {
         match self {
             CliKind::Codex => Some(1_048_576),
-            CliKind::ClaudeCode | CliKind::Antigravity => None,
+            // agy takes the prompt as ONE argv element (`-p <prompt>`, stdin is nulled — see the
+            // spawn), and Linux caps a single argument at MAX_ARG_STRLEN = 128 KiB. Two Forge
+            // sessions at ~100 KB of transcript died with `failed to start agy: Argument list too
+            // long (os error 7)` on 2026-09-02. Clamp under that limit with headroom for the rest
+            // of the argument list; the clamp keeps the newest context (`clamp_to_chars`).
+            CliKind::Antigravity => Some(100_000),
+            CliKind::ClaudeCode => None,
         }
     }
 }
@@ -868,7 +874,29 @@ fn recall_bridge_models(kind: CliKind) -> Option<(Vec<String>, u64)> {
 /// ("gemini-3.5-flash" — the same slugs verified accepted live for the static defaults).
 fn parse_agy_models(out: &str) -> Vec<String> {
     let mut slugs = Vec::new();
+    // When the two-column format is present, ONLY those lines are model rows; the rest is chatter
+    // ("Fetching available models...") that the legacy slugifier would otherwise turn into a fake
+    // model id.
+    let two_column = out.lines().any(|line| line.contains('\t'));
     for line in out.lines() {
+        if two_column && !line.contains('\t') {
+            continue;
+        }
+        // agy ≥ 1.1 prints two tab-separated columns: the exact `--model` slug, then the display
+        // name with its effort parenthetical ("gemini-3.7-flash-high\tGemini 3.7 Flash (High)").
+        // Slugifying the whole line produced "gemini-3.7-flash-high-gemini-3.7-flash", which agy
+        // rejects with `invalid model selection` — and because that answer was classified as a
+        // plain request error, every turn that failed over onto the bridge died there instead of
+        // moving on (three Forge sessions, 2026-09-02). The slug column is authoritative.
+        if let Some((slug, _display)) = line.split_once('\t') {
+            let slug = slug.trim();
+            if slug.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && !slugs.contains(&slug.to_string())
+            {
+                slugs.push(slug.to_string());
+            }
+            continue;
+        }
         let name = line.split('(').next().unwrap_or("").trim();
         if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
             continue;
@@ -1839,7 +1867,11 @@ impl CliProvider {
                     self.kind.setup_hint()
                 ))
             } else {
-                ProviderError::Request(format!("failed to start `{}`: {e}", self.binary))
+                // A bridge that cannot be STARTED (E2BIG, EAGAIN, a broken interpreter) says
+                // nothing about the prompt and everything about this provider right now. Keep it
+                // retryable so the mesh benches the bridge and continues down the chain — as a
+                // non-retryable `Request` it ended the whole turn on the third failover hop.
+                ProviderError::Unavailable(format!("failed to start `{}`: {e}", self.binary))
             }
         })?;
 
@@ -2273,6 +2305,16 @@ fn classify_in_band_error_with_message(
             message: msg,
             retry_after: None,
         }
+    } else if lower.contains("invalid model selection")
+        || lower.contains("unknown model")
+        || lower.contains("model not found")
+        || lower.contains("no such model")
+    {
+        // The CLI rejected the MODEL id itself — a permanent fact about that model on this bridge
+        // (bench it, move on), never a reason to end the turn. Ahead of the auth branch: agy's
+        // rejection text also mentions the model's effort, which contains no auth words today,
+        // but the ordering keeps a future wording from being mistaken for a login failure.
+        ProviderError::NoModelAccess(msg)
     } else if mentions_status_code(&lower, "401")
         || mentions_status_code(&lower, "403")
         || error_policy::is_auth_failure(&lower)
@@ -3577,6 +3619,39 @@ mod tests {
         );
         assert!(parse_agy_models("").is_empty());
         assert!(parse_agy_models("  (weird)\n---\n").is_empty());
+    }
+
+    /// agy 1.1.24 prints `<slug>\t<display name (effort)>`. The slug column is what `--model`
+    /// accepts; slugifying the whole line yielded `gemini-3.7-flash-high-gemini-3.7-flash`, which
+    /// agy rejects — and killed three Forge sessions on failover (2026-09-02).
+    #[test]
+    fn agy_models_two_column_output_keeps_the_slug_column_verbatim() {
+        let out = "Fetching available models...\n\
+                   gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n\
+                   gemini-3.1-pro-low\tGemini 3.1 Pro (Low)\n\
+                   claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n\
+                   gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n";
+        assert_eq!(
+            parse_agy_models(out),
+            [
+                "gemini-3.7-flash-high",
+                "gemini-3.1-pro-low",
+                "claude-opus-4-6-thinking",
+                "gpt-oss-120b-medium"
+            ]
+        );
+    }
+
+    /// A CLI rejecting the model id is a permanent fact about that model on this bridge: bench
+    /// it and continue the failover chain. As a plain `Request` it ended the whole turn.
+    #[test]
+    fn invalid_model_selection_classifies_as_no_model_access_not_a_dead_turn() {
+        let err = classify_in_band_error(
+            "agy",
+            "Error: invalid model selection (--model \"gemini-3.7-flash-high-gemini-3.7-flash\" --effort \"\"): model not available",
+        );
+        assert!(matches!(err, ProviderError::NoModelAccess(_)), "{err:?}");
+        assert!(err.is_retryable() && err.is_permanent());
     }
 
     #[test]
