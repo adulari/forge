@@ -372,6 +372,9 @@ fn route_score(
     if is_subscription(id) {
         base -=
             subscription_burn_penalty(id, tier, quota, burn_weight_overrides, price_burn_weights);
+        // A request's share of its pool: the same model on a larger, fuller pool ranks above
+        // itself on a tiny or nearly-spent one (see `subscription_cost::pool_capacity_penalty`).
+        base -= crate::subscription_cost::pool_capacity_penalty(id, tier, quota);
         match quota.status_for(provider_of(id)) {
             // This ranking pass (`ranked_seeded`) scores every routable catalog model BEFORE
             // `LlmRouter::is_usable` applies the real, hard exclusion for `Exhausted` (a score
@@ -2572,6 +2575,59 @@ mod tests {
         assert!((weights["opencode_go::muse-spark-1.2-contributor"] - 1.0).abs() < 1e-9);
         // (1000/1000*0.003 + 500/1000*0.015) / (1000/1000*0.0001 + 500/1000*0.0002) = 52.5
         assert!((weights["opencode_go::kimi-k3"] - 52.5).abs() < 1e-6);
+    }
+
+    /// The user's screenshot (2026-09-02): opencode_go at 28%, codex at 25%, both "plus"-class or
+    /// smaller by the numbers routing saw, and the identical model ranked as if the pools were the
+    /// same size. The same score on a tiny pool must lose to the same score on a larger one, and a
+    /// pool that is nearly spent must lose to a fresh one of the same size.
+    #[test]
+    fn a_request_out_of_a_smaller_or_emptier_pool_is_penalised_more() {
+        use crate::subscription_cost::{pool_capacity, pool_capacity_penalty, PoolCapacity};
+        let quota = |go: f64, codex: f64| {
+            forge_types::SubscriptionQuota::default()
+                .with_fractions(HashMap::from([
+                    ("opencode_go".to_string(), go),
+                    ("codex-oauth".to_string(), codex),
+                ]))
+                .with_plans(HashMap::from([(
+                    "codex-oauth".to_string(),
+                    "plus".to_string(),
+                )]))
+        };
+        assert_eq!(pool_capacity("opencode_go", ""), PoolCapacity::Tiny);
+        assert_eq!(pool_capacity("codex-oauth", "plus"), PoolCapacity::Small);
+        assert_eq!(pool_capacity("claude-cli", "max-20x"), PoolCapacity::Large);
+        assert_eq!(pool_capacity("claude-cli", ""), PoolCapacity::Unknown);
+
+        let q = quota(0.28, 0.25);
+        let go = pool_capacity_penalty("opencode_go::gpt-5.6-luna", TaskTier::Complex, &q);
+        let codex = pool_capacity_penalty("codex-oauth::gpt-5.6-luna", TaskTier::Complex, &q);
+        assert!(
+            go > codex,
+            "tiny pool {go} must be penalised more than a small one {codex}"
+        );
+        assert!(
+            pool_capacity_penalty("claude-cli::opus", TaskTier::Complex, &q) == 0.0,
+            "an unknown pool is never guessed at"
+        );
+        // Scarcity: the same tiny pool at 80% costs more per request than fresh, capped at 3x.
+        let fresh = pool_capacity_penalty(
+            "opencode_go::gpt-5.6-luna",
+            TaskTier::Complex,
+            &quota(0.0, 0.0),
+        );
+        let spent = pool_capacity_penalty(
+            "opencode_go::gpt-5.6-luna",
+            TaskTier::Complex,
+            &quota(0.8, 0.0),
+        );
+        assert!(
+            spent > fresh && spent <= fresh * 3.0 + 1e-9,
+            "fresh {fresh} spent {spent}"
+        );
+        // Tier scaling: a trivial request never justifies the spend the way a complex one might.
+        assert!(pool_capacity_penalty("opencode_go::gpt-5.6-luna", TaskTier::Trivial, &q) > go);
     }
 
     #[test]

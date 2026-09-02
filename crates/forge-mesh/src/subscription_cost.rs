@@ -114,3 +114,77 @@ pub(crate) fn subscription_burn_penalty(
     let fraction = quota.effective_fraction_for(provider_of(id));
     burn_k(tier) * weight.ln() * pressure_multiplier(fraction)
 }
+
+/// How much of a subscription's pool ONE request is worth, as an ordinal class. Percentages
+/// alone cannot say this: OpenCode Go's whole 5-hour pool is $12 (≈110 Kimi K3 requests), while
+/// a Max-20x Claude plan's is hundreds of times larger, yet both read "25% used" the same way.
+/// The class is the only honest capacity signal Forge has for percentage-only plans, so it is
+/// deliberately coarse and its sources are named here rather than dressed up as numbers:
+/// - `opencode_go`: documented $12 / 5h, $30 / week, $60 / month
+///   (<https://opencode.ai/docs/go/#usage-limits>, read 2026-09-02) → `Tiny`.
+/// - CLI bridges by the plan slug `forge init` captured: `*20x*` → `Large`; `max` / `pro` →
+///   `Medium`; `plus` / `team` → `Small`. Unset → `Unknown` (no penalty; never guess a pool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PoolCapacity {
+    Tiny,
+    Small,
+    Medium,
+    Large,
+    Unknown,
+}
+
+pub(crate) fn pool_capacity(provider: &str, plan: &str) -> PoolCapacity {
+    if provider == "opencode_go" {
+        return PoolCapacity::Tiny;
+    }
+    let plan = plan.to_ascii_lowercase();
+    if plan.is_empty() {
+        PoolCapacity::Unknown
+    } else if plan.contains("20x") {
+        PoolCapacity::Large
+    } else if plan.contains("max") || plan.contains("pro") {
+        PoolCapacity::Medium
+    } else if plan.contains("plus") || plan.contains("team") {
+        PoolCapacity::Small
+    } else {
+        PoolCapacity::Unknown
+    }
+}
+
+impl PoolCapacity {
+    /// Relative share of the pool one request consumes; `Tiny` = 1.0 by definition.
+    fn request_share(self) -> f64 {
+        match self {
+            PoolCapacity::Tiny => 1.0,
+            PoolCapacity::Small => 0.5,
+            PoolCapacity::Medium => 0.25,
+            PoolCapacity::Large => 0.1,
+            PoolCapacity::Unknown => 0.0,
+        }
+    }
+}
+
+/// Penalty for spending a request out of a small or nearly-spent pool. `request_share` says how
+/// big one request is relative to the pool; the scarcity factor (1 / remaining, capped at 3x)
+/// says how much of that pool is left, so the same model on a fuller, larger pool always ranks
+/// above itself on an emptier, smaller one at equal score. Tier-scaled like the burn penalty:
+/// a complex task may still justify the spend, a trivial one never does.
+///
+/// Live case this exists for (2026-09-02): at opencode_go 28% / codex-cli 25% every subscription
+/// model carried the same flat conservation penalty, so `opencode_go::kimi-k3` (3.27) outranked
+/// `codex-oauth::gpt-5.6-sol` (2.96) although one Kimi request took ~1% of a $12 pool and one
+/// Sol request a fraction of that from a far larger plan.
+pub(crate) fn pool_capacity_penalty(
+    id: &str,
+    tier: TaskTier,
+    quota: &forge_types::SubscriptionQuota,
+) -> f64 {
+    let provider = provider_of(id);
+    let share = pool_capacity(provider, quota.plan_for(provider)).request_share();
+    if share <= 0.0 {
+        return 0.0;
+    }
+    let remaining = (1.0 - quota.effective_fraction_for(provider)).max(0.0);
+    let scarcity = (1.0 / remaining.max(1.0 / 3.0)).clamp(1.0, 3.0);
+    burn_k(tier) * share * scarcity
+}
