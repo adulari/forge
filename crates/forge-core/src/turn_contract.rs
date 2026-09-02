@@ -44,9 +44,18 @@ impl TurnContract {
                 preserves_public_api,
             };
         }
-        // A harness expectation is an explicit caller contract. It must win over incidental
-        // wording in a generated prompt that asks for inspection before implementation.
-        if expect_code_change {
+        // An imperative read-only instruction in THIS prompt beats a session-wide expectation.
+        // `spawn_session_driver` arms `expect_code_change` for the life of any worktree-backed
+        // daemon session, so without this order an investigative turn inside a build session — ask
+        // a question, run one search, report — ended with no edits, collected the empty-diff nudge
+        // ("Implement the fix now"), and was re-driven against an instruction that forbade edits.
+        // A weaker model reads the contradiction as a missing task and loops.
+        //
+        // Only the imperative forms defeat the expectation. Incidental wording in a generated
+        // prompt that merely asks for inspection before implementation still loses, which is what
+        // the expectation exists to protect.
+        let explicit_read_only = explicitly_read_only(prompt);
+        if expect_code_change && !explicit_read_only {
             return Self {
                 intent: TaskIntent::Mutating,
                 source: ContractSource::HarnessExpectation,
@@ -54,7 +63,7 @@ impl TurnContract {
                 preserves_public_api,
             };
         }
-        if explicitly_read_only(prompt) {
+        if explicit_read_only {
             return Self {
                 intent: TaskIntent::ReadOnlyReview,
                 source: ContractSource::ExplicitReadOnly,
@@ -144,7 +153,7 @@ impl Default for TurnContract {
 
 /// Directive phrases that are imperative by construction, so they are safe to match anywhere in
 /// the prompt: no ordinary description of a system contains them.
-const READ_ONLY_DIRECTIVES: [&str; 7] = [
+const READ_ONLY_DIRECTIVES: [&str; 15] = [
     "do not make changes",
     "without changing files",
     "this is read-only",
@@ -152,6 +161,16 @@ const READ_ONLY_DIRECTIVES: [&str; 7] = [
     "this task is read-only",
     "this request is read-only",
     "this turn is read-only",
+    // Plain imperatives an operator actually types. Their absence let a "Do not edit anything"
+    // turn inside a worktree session be re-driven as an implementation.
+    "do not edit anything",
+    "do not edit any files",
+    "do not edit",
+    "don't edit",
+    "do not modify anything",
+    "do not modify any files",
+    "do not change any files",
+    "make no edits",
 ];
 
 /// Bare read-only tokens. These are ordinary technical vocabulary — a bug report says the sandbox
@@ -246,6 +265,54 @@ fn explicitly_requests_change(prompt: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The defect: `spawn_session_driver` arms `expect_code_change` for the life of any
+    /// worktree-backed daemon session. An investigative turn in such a session ended with no
+    /// edits, collected the empty-diff nudge, and was re-driven against its own instruction.
+    #[test]
+    fn an_explicit_read_only_turn_beats_a_worktree_sessions_code_change_expectation() {
+        let contract = TurnContract::derive(
+            "[message from cli] One command, then answer. Do not edit anything.\n\nRun: rg -n \
+             'last_relay' crates/forge-cli/src\n\nThen answer two questions.",
+            PermissionMode::Default,
+            true,
+        );
+        assert_eq!(contract.intent(), TaskIntent::ReadOnlyReview);
+        assert_eq!(contract.source(), ContractSource::ExplicitReadOnly);
+        assert!(
+            !contract.requires_changed_artifact(),
+            "an answer-only turn must not be re-driven to produce a diff"
+        );
+    }
+
+    #[test]
+    fn a_harness_expectation_still_wins_over_incidental_inspection_wording() {
+        let contract = TurnContract::derive(
+            "Investigate the failing parser test and read the relevant modules before implementing \
+             a fix.",
+            PermissionMode::Default,
+            true,
+        );
+        assert_eq!(contract.source(), ContractSource::HarnessExpectation);
+        assert!(contract.requires_changed_artifact());
+    }
+
+    #[test]
+    fn the_plain_imperatives_an_operator_types_are_recognized() {
+        for prompt in [
+            "Do not edit anything. Report what you find.",
+            "Answer only — don't edit.",
+            "Do not modify any files; summarize the call graph.",
+            "Make no edits, just list the call sites.",
+        ] {
+            let contract = TurnContract::derive(prompt, PermissionMode::Default, true);
+            assert_eq!(
+                contract.intent(),
+                TaskIntent::ReadOnlyReview,
+                "not recognized as read-only: {prompt}"
+            );
+        }
+    }
 
     #[test]
     fn direct_change_requests_require_an_artifact() {
