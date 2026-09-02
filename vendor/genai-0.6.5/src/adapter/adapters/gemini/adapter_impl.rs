@@ -21,6 +21,19 @@ pub(in crate::adapter) const REASONING_LOW: u32 = 1000;
 pub(in crate::adapter) const REASONING_MEDIUM: u32 = 8000;
 pub(in crate::adapter) const REASONING_HIGH: u32 = 24000;
 
+/// Documented placeholder for a `functionCall` that did not originate from Gemini (a transcript
+/// replayed after failover from another provider), which therefore has no real thought signature.
+/// See <https://ai.google.dev/gemini-api/docs/thought-signatures#faqs>.
+pub(in crate::adapter) const SKIP_THOUGHT_SIGNATURE_VALIDATOR: &str = "skip_thought_signature_validator";
+
+/// Whether this model enforces thought-signature validation on `functionCall` parts. Gemini 3 and
+/// newer do; 1.x/2.x and gemma do not, and must not be sent the placeholder. Unversioned aliases
+/// (`gemini-flash-latest`) resolve to the current generation, so they count as enforcing.
+fn gemini_requires_thought_signature(model_name: &str) -> bool {
+	let name = model_name.to_lowercase();
+	!(name.contains("gemini-1") || name.contains("gemini-2") || name.contains("gemma"))
+}
+
 /// Important
 /// - For now Low and Minimal aare the same for geminia
 /// -
@@ -667,13 +680,12 @@ impl GeminiAdapter {
 				}
 				ChatRole::Assistant => {
 					let mut parts_values: Vec<Value> = Vec::new();
-					let mut pending_thought: Option<String> = None;
-					let mut is_first_tool_call = true;
+					let mut pending_thoughts: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
 					for part in msg.content {
 						match part {
 							ContentPart::Text(text) => {
-								if let Some(thought) = pending_thought.take() {
+								while let Some(thought) = pending_thoughts.pop_front() {
 									parts_values.push(json!({"thoughtSignature": thought}));
 								}
 								parts_values.push(json!({"text": text}));
@@ -688,42 +700,44 @@ impl GeminiAdapter {
 									}),
 								);
 
-								match pending_thought.take() {
+								let thought = pending_thoughts
+									.pop_front()
+									.or_else(|| tool_call.thought_signatures.as_ref().and_then(|s| s.first().cloned()));
+
+								match thought {
 									Some(thought) => {
 										// Inject thoughtSignature alongside functionCall in the same Part object
 										part_obj.insert("thoughtSignature".to_string(), json!(thought));
 									}
 									None => {
-										// For Gemini 3 models, if there haven't been any thoughts, and this is
-										// still the first tool call, we are required to inject a special flag.
+										// Gemini 3+ rejects the WHOLE request when any functionCall part it is
+										// sent back lacks a thoughtSignature. A transcript replayed onto Gemini
+										// after failover carries tool calls made by other models (claude, gpt,
+										// agy), which have no signature at all — so every unsigned call, not
+										// just the first, needs the documented placeholder.
 										// See: https://ai.google.dev/gemini-api/docs/thought-signatures#faqs
-										let is_gemini_3 = model_iden.model_name.contains("gemini-3");
-										if is_gemini_3 && is_first_tool_call {
+										if gemini_requires_thought_signature(&model_iden.model_name) {
 											part_obj.insert(
 												"thoughtSignature".to_string(),
-												json!("skip_thought_signature_validator"),
+												json!(SKIP_THOUGHT_SIGNATURE_VALIDATOR),
 											);
 										}
 									}
 								}
 
 								parts_values.push(Value::Object(part_obj));
-								is_first_tool_call = false;
 							}
 							ContentPart::ThoughtSignature(thought) => {
-								if let Some(prev_thought) = pending_thought.take() {
-									parts_values.push(json!({"thoughtSignature": prev_thought}));
-								}
-								pending_thought = Some(thought);
+								pending_thoughts.push_back(thought);
 							}
 							// Ignore unsupported parts for Assistant role
 							ContentPart::Binary(_) => {
-								if let Some(thought) = pending_thought.take() {
+								while let Some(thought) = pending_thoughts.pop_front() {
 									parts_values.push(json!({"thoughtSignature": thought}));
 								}
 							}
 							ContentPart::ToolResponse(_) => {
-								if let Some(thought) = pending_thought.take() {
+								while let Some(thought) = pending_thoughts.pop_front() {
 									parts_values.push(json!({"thoughtSignature": thought}));
 								}
 							}
@@ -732,7 +746,7 @@ impl GeminiAdapter {
 							ContentPart::Custom(_) => {}
 						}
 					}
-					if let Some(thought) = pending_thought {
+					while let Some(thought) = pending_thoughts.pop_front() {
 						parts_values.push(json!({"thoughtSignature": thought}));
 					}
 					if !parts_values.is_empty() {
@@ -744,12 +758,28 @@ impl GeminiAdapter {
 					for part in msg.content {
 						match part {
 							ContentPart::ToolCall(tool_call) => {
-								parts_values.push(json!({
-									"functionCall": {
+								let mut part_obj = serde_json::Map::new();
+								part_obj.insert(
+									"functionCall".to_string(),
+									json!({
 										"name": tool_call.fn_name,
 										"args": tool_call.fn_arguments,
+									}),
+								);
+								match tool_call.thought_signatures.as_ref().and_then(|s| s.first()) {
+									Some(thought) => {
+										part_obj.insert("thoughtSignature".to_string(), json!(thought));
 									}
-								}));
+									None => {
+										if gemini_requires_thought_signature(&model_iden.model_name) {
+											part_obj.insert(
+												"thoughtSignature".to_string(),
+												json!(SKIP_THOUGHT_SIGNATURE_VALIDATOR),
+											);
+										}
+									}
+								}
+								parts_values.push(Value::Object(part_obj));
 							}
 							ContentPart::ToolResponse(tool_response) => {
 								let fn_name = gemini_function_response_name(&tool_response);
@@ -969,6 +999,65 @@ fn infer_gemini_synthetic_call_fn_name(call_id: &str) -> Option<String> {
 mod tests {
 	use super::*;
 	use crate::chat::{ChatMessage, ChatOptions};
+
+	fn tool_call(name: &str) -> crate::chat::ToolCall {
+		crate::chat::ToolCall {
+			call_id: format!("call#{name}#0"),
+			fn_name: name.to_string(),
+			fn_arguments: json!({}),
+			thought_signatures: None,
+		}
+	}
+
+	fn function_call_parts(model: &str, msg: ChatMessage) -> Vec<Value> {
+		let model_iden = ModelIden::new(AdapterKind::Gemini, model);
+		let chat_req = ChatRequest::new(vec![msg]);
+		let parts = GeminiAdapter::into_gemini_request_parts(&model_iden, chat_req).unwrap();
+		parts
+			.contents
+			.iter()
+			.flat_map(|c| c.get("parts").and_then(|p| p.as_array()).cloned().unwrap_or_default())
+			.filter(|p| p.get("functionCall").is_some())
+			.collect()
+	}
+
+	#[test]
+	fn gemini_3_unsigned_tool_calls_get_the_placeholder_signature() {
+		// A transcript replayed after failover: every tool call came from another provider and
+		// carries no signature, so each functionCall part needs the placeholder.
+		let msg =
+			ChatMessage::assistant_tool_calls_with_thoughts(vec![tool_call("shell"), tool_call("read_file")], vec![]);
+		let parts = function_call_parts("gemini-3.7-flash", msg);
+		assert_eq!(parts.len(), 2);
+		for part in &parts {
+			assert_eq!(part["thoughtSignature"], json!(SKIP_THOUGHT_SIGNATURE_VALIDATOR));
+		}
+
+		// Unversioned aliases resolve to the current generation.
+		let parts = function_call_parts(
+			"gemini-flash-latest",
+			ChatMessage::assistant_tool_calls_with_thoughts(vec![tool_call("shell")], vec![]),
+		);
+		assert_eq!(parts[0]["thoughtSignature"], json!(SKIP_THOUGHT_SIGNATURE_VALIDATOR));
+
+		// Older generations must not receive it.
+		let parts = function_call_parts(
+			"gemini-2.5-flash",
+			ChatMessage::assistant_tool_calls_with_thoughts(vec![tool_call("shell")], vec![]),
+		);
+		assert!(parts[0].get("thoughtSignature").is_none());
+	}
+
+	#[test]
+	fn captured_thought_signatures_are_preserved() {
+		let msg = ChatMessage::assistant_tool_calls_with_thoughts(
+			vec![tool_call("shell")],
+			vec!["real-signature-abc".to_string()],
+		);
+		let parts = function_call_parts("gemini-3.7-flash", msg);
+		assert_eq!(parts.len(), 1);
+		assert_eq!(parts[0]["thoughtSignature"], json!("real-signature-abc"));
+	}
 
 	#[test]
 	fn merge_consecutive_tool_responses() {

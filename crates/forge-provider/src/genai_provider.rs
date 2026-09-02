@@ -2043,6 +2043,32 @@ mod tests {
             assert!(e.is_permanent());
         }
 
+        // Gemini 3 rejecting a transcript whose tool calls came from another model family:
+        // permanent for this model, but the turn must fail over instead of dying.
+        let sig = classify_status(
+            400,
+            "HTTP error".into(),
+            r#"{"error":{"code":400,"message":"Function call is missing a thought_signature in functionCall parts. This is required for tools to work correctly."}}"#,
+            None,
+        );
+        assert!(matches!(sig, ProviderError::Capability(_)), "got {sig:?}");
+        assert!(sig.is_retryable() && sig.is_permanent());
+        for body in [
+            "unsupported content part in message",
+            "assistant message is missing signature",
+        ] {
+            let e = classify_status(400, "x".into(), body, None);
+            assert!(
+                matches!(e, ProviderError::Capability(_)),
+                "expected Capability for {body:?}, got {e:?}"
+            );
+            let e = classify_text(body, body.to_string());
+            assert!(matches!(e, ProviderError::Capability(_)), "got {e:?}");
+        }
+        // An ordinary malformed request is still a turn-ending Request.
+        let plain = classify_status(400, "x".into(), "invalid json payload", None);
+        assert!(matches!(plain, ProviderError::Request(_)));
+
         // A genuine dropped stream is still transient (not permanent).
         let dropped = classify_text("connection reset by peer", "stream dropped".into());
         assert!(matches!(dropped, ProviderError::Unavailable(_)));
