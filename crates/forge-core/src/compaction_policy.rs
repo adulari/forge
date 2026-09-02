@@ -16,6 +16,67 @@ use super::*;
 /// over and completes the turn.
 const AUTH_ESCALATION_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// How recently the provider must have COMPLETED a turn for a fresh "not logged in" to be treated
+/// as an accident of one subprocess rather than as a statement about the credential.
+///
+/// Measured from the incident of 2026-09-02: `claude-cli::fable` was excluded for 30 minutes on
+/// `Not logged in · Please run /login` while the same account answered a direct probe seconds
+/// later, and the same bridge had completed turns moments before. Forge's claude bridge points
+/// every subprocess at one shared credentials file, so a concurrent OAuth token refresh leaves a
+/// sibling process momentarily reading no valid token. Five minutes is well inside the lifetime of
+/// a working session and well under the exclusion it prevents.
+const AUTH_RECENT_SUCCESS_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Scope at which one authentication failure is persisted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthFailureScope {
+    /// A repeat, separated in time from an earlier one: the credential really is bad.
+    Provider,
+    /// First failure with no counter-evidence: bench this model for the auth window.
+    Model,
+    /// The provider answered moments ago — bench only this model, briefly, and don't call it an
+    /// exclusion.
+    ModelUnconfirmed,
+}
+
+/// Decide the scope for one auth failure from the two facts that bear on it.
+pub(crate) fn auth_failure_scope(
+    corroborated: bool,
+    provider_succeeded_recently: bool,
+) -> AuthFailureScope {
+    if corroborated {
+        AuthFailureScope::Provider
+    } else if provider_succeeded_recently {
+        AuthFailureScope::ModelUnconfirmed
+    } else {
+        AuthFailureScope::Model
+    }
+}
+
+/// Persist one auth failure against `store` at the narrowest scope its evidence supports.
+///
+/// A free function over the store rather than a `Session` method so the observed sequence
+/// (success → one "not logged in" → success) is testable without a live session.
+pub(crate) fn record_auth_failure_in(
+    store: &forge_store::Store,
+    model: &str,
+    reason: &str,
+    now: i64,
+) {
+    let provider = forge_config::provider_of(model);
+    let corroborated = store
+        .provider_auth_failed_before(provider, now - AUTH_ESCALATION_MIN_GAP.as_secs() as i64)
+        .unwrap_or(false);
+    let succeeded_recently = store
+        .provider_succeeded_since(provider, now - AUTH_RECENT_SUCCESS_WINDOW.as_secs() as i64)
+        .unwrap_or(false);
+    let _ = match auth_failure_scope(corroborated, succeeded_recently) {
+        AuthFailureScope::Provider => store.exclude_provider(provider, reason),
+        AuthFailureScope::Model => store.exclude_model_auth(model, reason),
+        AuthFailureScope::ModelUnconfirmed => store.bench_model_auth_unconfirmed(model, reason),
+    };
+}
+
 impl Session {
     /// Real BPE token count of the current transcript (content + tool calls + per-message framing),
     /// via [`tokens`]. Used to decide compaction + drive the gauge; not billed. UI-only messages
@@ -278,21 +339,14 @@ impl Session {
     /// within the same second, so a bare "has it failed before?" would let a single burst of
     /// parallel sessions escalate exactly as before — which is what normal parallel use of Forge
     /// looks like.
+    ///
+    /// A first failure is narrowed further still when the provider COMPLETED a turn within
+    /// [`AUTH_RECENT_SUCCESS_WINDOW`]: see [`record_auth_failure_in`].
     fn record_auth_failure(&self, model: &str, reason: &str) {
-        let provider = forge_config::provider_of(model);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs() as i64);
-        let cutoff = now - AUTH_ESCALATION_MIN_GAP.as_secs() as i64;
-        let corroborated = self
-            .store
-            .provider_auth_failed_before(provider, cutoff)
-            .unwrap_or(false);
-        let _ = if corroborated {
-            self.store.exclude_provider(provider, reason)
-        } else {
-            self.store.exclude_model_auth(model, reason)
-        };
+        record_auth_failure_in(&self.store, model, reason, now);
     }
 
     /// Token budget for ONE compaction request against `model`: its window, minus the standing
@@ -473,5 +527,117 @@ impl Session {
             "restored full history: {before} messages → {after} (compaction undone)"
         )));
         Ok((before, after))
+    }
+}
+
+#[cfg(test)]
+mod auth_failure_tests {
+    use super::*;
+    use forge_store::{MeshOutcome, Store};
+
+    fn now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    }
+
+    /// Record a completed turn exactly as the model loop does on success.
+    fn success(store: &Store, model: &str, at: i64) {
+        store
+            .record_mesh_outcome(&MeshOutcome {
+                session_id: "s".into(),
+                model: model.to_string(),
+                tier: forge_types::TaskTier::Standard,
+                started_at: at,
+                completed_at: at,
+                latency_ms: 1_000,
+                outcome: "success".into(),
+                error_kind: None,
+                failover_hop: 0,
+                tool_calls: 0,
+                verified_completion: true,
+            })
+            .unwrap();
+        store.clear_health_after_success(model).unwrap();
+    }
+
+    fn provider_excluded(store: &Store) -> bool {
+        !store.current_excluded_providers().unwrap().is_empty()
+    }
+
+    fn health_of(store: &Store, model: &str) -> Option<(i64, String)> {
+        store
+            .current_benched_report()
+            .unwrap()
+            .into_iter()
+            .find(|(m, _, _)| m == model)
+            .map(|(_, until, reason)| (until, reason))
+    }
+
+    /// The observed 2026-09-02 sequence: the bridge completed turns, then one subprocess printed
+    /// `Not logged in · Please run /login` while the account was logged in the whole time, then it
+    /// completed turns again. The provider must not be excluded, and the single false verdict must
+    /// not cost the model a 30-minute exclusion.
+    #[test]
+    fn one_false_not_logged_in_between_successes_does_not_exclude_the_provider() {
+        let store = Store::open_in_memory().unwrap();
+        success(&store, "claude-cli::opus", now() - 30);
+
+        record_auth_failure_in(
+            &store,
+            "claude-cli::fable",
+            "claude error: Not logged in · Please run /login",
+            now(),
+        );
+
+        assert!(!provider_excluded(&store), "provider must stay routable");
+        let (until, reason) = health_of(&store, "claude-cli::fable").expect("model benched");
+        assert!(
+            !reason.starts_with("excluded:"),
+            "an unconfirmed auth failure is a bench, not an exclusion: {reason}"
+        );
+        assert!(
+            until - now() <= 300,
+            "and it must be minutes, not the 30-minute auth exclusion"
+        );
+
+        // The next successful turn retires it entirely.
+        success(&store, "claude-cli::fable", now());
+        assert!(health_of(&store, "claude-cli::fable").is_none());
+        assert!(!provider_excluded(&store));
+    }
+
+    /// With no recent success behind it, one auth failure still costs the model the full auth
+    /// exclusion — the pre-existing guarantee, unchanged.
+    #[test]
+    fn a_first_failure_without_a_recent_success_still_excludes_the_model() {
+        let store = Store::open_in_memory().unwrap();
+        record_auth_failure_in(&store, "claude-cli::fable", "not logged in", now());
+        assert!(!provider_excluded(&store));
+        let (_, reason) = health_of(&store, "claude-cli::fable").unwrap();
+        assert!(reason.starts_with("excluded: auth failed"), "{reason}");
+    }
+
+    /// A genuinely logged-out account still loses the provider: the unconfirmed bench keeps the
+    /// auth marker, so a repeat separated by more than the escalation gap corroborates it.
+    #[test]
+    fn a_repeated_failure_after_a_success_still_excludes_the_provider() {
+        let store = Store::open_in_memory().unwrap();
+        success(&store, "claude-cli::opus", now() - 30);
+
+        let first = now() - 180;
+        record_auth_failure_in(&store, "claude-cli::fable", "not logged in", first);
+        // Age the unconfirmed bench to when it was actually written (the helper owns the clock);
+        // it is still in force, which is what lets the repeat corroborate.
+        let (_, reason) = health_of(&store, "claude-cli::fable").unwrap();
+        store
+            .bench_model_at("claude-cli::fable", first + 300, &reason, first)
+            .unwrap();
+
+        record_auth_failure_in(&store, "claude-cli::sonnet", "not logged in", now());
+        assert!(
+            provider_excluded(&store),
+            "a repeat separated in time is a real logout"
+        );
     }
 }
