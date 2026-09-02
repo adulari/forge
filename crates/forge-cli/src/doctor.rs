@@ -197,7 +197,63 @@ fn store_checks() -> Vec<Check> {
             None,
         )];
     };
-    vec![store_check_at(&path)]
+    vec![store_check_at(&path), price_feed_check_at(&path)]
+}
+
+/// How current the fetched price feed is. Cost-aware routing derives subscription burn weights
+/// from `model_pricing`; a feed that stopped refreshing is invisible everywhere else and its
+/// symptom — a heavy model winning a shared pool at zero penalty — looks like a routing bug.
+/// Live case: a schema hole failed every price upsert from 2026-06-18 to 2026-09-02.
+fn price_feed_check_at(path: &std::path::Path) -> Check {
+    const STALE_AFTER_SECS: i64 = 7 * 24 * 60 * 60;
+    let Ok(store) = forge_store::Store::open(path) else {
+        return check(Status::Warn, "price feed", "store not readable", None);
+    };
+    match store.model_pricing_freshness() {
+        Ok((rows, Some(newest))) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            let age = now - newest;
+            let age_text = if age < 3600 {
+                format!("{}m ago", age / 60)
+            } else if age < 86_400 {
+                format!("{}h ago", age / 3600)
+            } else {
+                format!("{}d ago", age / 86_400)
+            };
+            if age > STALE_AFTER_SECS {
+                check(
+                    Status::Warn,
+                    "price feed",
+                    format!("{rows} model price(s), last refreshed {age_text} — stale"),
+                    Some(
+                        "run `forge models` to refresh; if it stays stale, check `forge models` \
+                         output for a 'could not persist a fetched model price' warning",
+                    ),
+                )
+            } else {
+                check(
+                    Status::Ok,
+                    "price feed",
+                    format!("{rows} model price(s), refreshed {age_text}"),
+                    None,
+                )
+            }
+        }
+        Ok((_, None)) => check(
+            Status::Warn,
+            "price feed",
+            "no model prices fetched yet",
+            Some("run `forge models` once online so cost-aware routing has real prices"),
+        ),
+        Err(error) => check(
+            Status::Warn,
+            "price feed",
+            format!("could not read model_pricing: {error}"),
+            None,
+        ),
+    }
 }
 
 fn store_check_at(path: &std::path::Path) -> Check {

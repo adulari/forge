@@ -359,6 +359,20 @@ impl Store {
         Ok(rows)
     }
 
+    /// How current the fetched price feed is: `(rows, newest updated_at)`. Routing derives
+    /// subscription burn weights from these rows, so a feed that silently stopped refreshing
+    /// means every cost-aware decision runs on stale (or absent) prices — which is exactly what
+    /// happened when a schema hole made every price upsert fail for two and a half months.
+    pub fn model_pricing_freshness(&self) -> Result<(usize, Option<i64>)> {
+        let conn = self.lock()?;
+        let (rows, newest): (i64, Option<i64>) = conn.query_row(
+            "SELECT COUNT(*), MAX(updated_at) FROM model_pricing",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((rows.max(0) as usize, newest))
+    }
+
     /// Clear every model bench (the `forge models --clear` rescan reset). Returns the number of
     /// benched rows removed so the caller can report it.
     pub fn clear_all_model_health(&self) -> Result<usize> {
