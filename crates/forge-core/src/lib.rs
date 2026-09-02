@@ -5077,6 +5077,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unattended_session_compacts_instead_of_skipping_every_fallback() {
+        let asks = Arc::new(Mutex::new(0));
+        let mut s = scripted_session(forge_types::NO_ANSWER, asks.clone());
+        s.transcript.push(Message::user("data ".repeat(40_000)));
+        assert!(
+            s.admit_failover_model("ollama::tiny").await.unwrap(),
+            "a non-interactive presenter's non-answer admits the model (headless turns must not die)"
+        );
+        assert!(!s.always_compact_on_switch, "not promoted to Always");
+        assert_eq!(*asks.lock().unwrap(), 1);
+    }
+    #[tokio::test]
     async fn always_answer_silences_further_prompts() {
         let asks = Arc::new(Mutex::new(0));
         let mut s = scripted_session("Always", asks.clone());
