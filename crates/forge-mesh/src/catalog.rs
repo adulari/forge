@@ -855,6 +855,14 @@ impl ModelCatalog {
         }
     }
 
+    /// Drop every model `keep` rejects, preserving the attached bench/pricing metadata. Used to
+    /// apply facts discovery cannot know — such as a CLI bridge that has since been logged out —
+    /// to a catalog that was loaded from cache.
+    pub fn retaining(mut self, keep: impl Fn(&str) -> bool) -> Self {
+        self.models.retain(|m| keep(m));
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
     }
@@ -1296,6 +1304,26 @@ mod tests {
             "local observations remain a tie-breaker, never a benchmark replacement"
         );
         assert!(adjustment < 0.0);
+    }
+
+    /// A cached catalog outlives the login it was discovered under, so the loader has to be able
+    /// to subtract a bridge without losing the benchmark data attached to everything else.
+    #[test]
+    fn retaining_drops_only_the_rejected_models_and_keeps_benchmarks() {
+        let survivor = "groq::llama-3.1-8b-instant".to_string();
+        let full = ModelCatalog::new(vec![
+            "agy-cli::gemini-3.1-pro".into(),
+            "agy-cli::gemini-3.5-flash".into(),
+            survivor.clone(),
+        ])
+        .with_burn_weights(HashMap::from([("llama-3.1-8b-instant".to_string(), 0.25)]));
+        let filtered = full.clone().retaining(|m| provider_of(m) != "agy-cli");
+        assert_eq!(filtered.models(), std::slice::from_ref(&survivor));
+        assert_eq!(
+            filtered.ranked_for(TaskTier::Trivial, &Pricing::default(), 4),
+            [survivor],
+            "the surviving model still ranks with its attached metadata"
+        );
     }
 
     fn catalog() -> ModelCatalog {

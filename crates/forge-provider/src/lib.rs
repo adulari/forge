@@ -26,6 +26,19 @@ pub use cli_provider::{
     codex_cli_detected_plan, codex_rollout_is_account_wide, BridgeModelSource, BridgeModels,
     ClaudeInitialization, ClaudeModelCapability, CliKind, CliProvider, SUBAGENT_SINK_ENV,
 };
+
+/// Whether `provider` is a CLI bridge that is known to have no credentials right now, so routing
+/// can drop it instead of spawning it to be told. Non-bridge providers are never "known absent"
+/// here — their key check lives in `forge_config` — so this is a pure filter, not a policy about
+/// which providers exist.
+pub fn bridge_credentials_known_absent(provider: &str) -> bool {
+    CliKind::all().into_iter().any(|kind| {
+        kind.prefix() == provider
+            && cli_provider::credentials::credentials(kind)
+                == cli_provider::credentials::CliCredentials::Absent
+    })
+}
+
 pub use codex_oauth::{
     detected_plan as codex_oauth_detected_plan, exchange_code as exchange_codex_oauth_code,
     has_session as has_codex_oauth_session, is_pinned_codex_url,
