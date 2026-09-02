@@ -361,6 +361,7 @@ pub(crate) async fn discover_catalog_with_status(
         models.extend(list);
         statuses.push(status);
     }
+    let live_models = models.len();
     // Keep the configured tier candidates as a cold-start safety net. A provider's model-list
     // endpoint can be unavailable while its completion endpoint still works (the doctor output
     // calls this out); without these seeds, a transient listing failure silently removed that
@@ -388,6 +389,17 @@ pub(crate) async fn discover_catalog_with_status(
     // Drop any model/provider the user disabled (`[mesh] disabled`), so the mesh never routes to
     // or fails over onto it (known-issues.md: disable a flaky model without deleting its key).
     models.retain(|m| !forge_config::is_model_disabled(m, &config.mesh.disabled));
+    // Nothing above found a single usable model: no key, no bridge, no OAuth session, no local
+    // Ollama. Every enrichment below is a network round trip (openrouter.ai + models.dev listings,
+    // balance probes, the benchmark feed) that can only annotate models that exist, so a keyless
+    // run would pay ~0.5-6 s of fetches just to be told it is unroutable.
+    if !enrichment_needed(live_models) {
+        tracing::debug!(
+            "no credentialed or local model source found — skipping catalog enrichment \
+             (context windows, prices, balances, benchmarks)"
+        );
+        return (forge_mesh::ModelCatalog::new(models), statuses);
+    }
     // Fetch + persist real per-model context windows (OpenRouter exposes `context_length`) so the
     // core can trim each turn to the routed model's window instead of overflowing it. Best-effort;
     // the family heuristic covers everything else.
@@ -414,6 +426,15 @@ pub(crate) async fn discover_catalog_with_status(
 
 pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mesh::ModelCatalog {
     discover_catalog_with_status(config).await.0
+}
+
+/// Whether the catalog is worth enriching over the network. `live_models` counts what the
+/// credentialed and local sources actually returned, BEFORE the configured seed candidates are
+/// appended: seeds are a safety net for a provider whose listing blipped, not evidence that any
+/// provider is usable. Zero live models means nothing can route, so fetching context windows,
+/// prices, balances and benchmarks for them is pure latency.
+fn enrichment_needed(live_models: usize) -> bool {
+    live_models > 0
 }
 
 fn bridge_discovery_status(
@@ -498,6 +519,16 @@ pub(crate) async fn drop_unaffordable_models(
 #[cfg(test)]
 mod bridge_status_tests {
     use super::*;
+
+    #[test]
+    fn keyless_discovery_skips_every_network_enrichment() {
+        assert!(!enrichment_needed(0), "nothing routable → no fetches");
+        assert!(
+            enrichment_needed(1),
+            "one live model needs its window/price"
+        );
+        assert!(enrichment_needed(259));
+    }
 
     #[test]
     fn failed_live_bridge_lookup_reports_fallback_and_reason() {
