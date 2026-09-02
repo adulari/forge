@@ -402,6 +402,10 @@ impl Presenter for HeadlessPresenter {
         NO_ANSWER.to_string()
     }
 
+    fn is_attended(&self) -> bool {
+        self.interactive
+    }
+
     fn read_line(&mut self) -> Option<String> {
         if self.interactive {
             print!("› ");
@@ -544,6 +548,10 @@ impl Presenter for StreamJsonPresenter {
 
     fn read_line(&mut self) -> Option<String> {
         None
+    }
+
+    fn is_attended(&self) -> bool {
+        false
     }
 }
 

@@ -63,6 +63,20 @@ impl Session {
         // "identical fast rejection twice" detector in `request_model_response`.
         let mut pinned_outage_last_error: Option<String> = None;
 
+        if self.turn_hard_guard_abort {
+            return Ok(ModelLoopOutcome {
+                final_text: String::new(),
+                context_tokens: 0,
+                hit_step_cap: false,
+                halted_by_loop_guard: true,
+                active_model,
+                plan: None,
+                tools_ran: 0,
+                mcp_tools_unavailable: false,
+                hard_guard_abort: true,
+            });
+        }
+
         let mut final_text = String::new();
         let mut has_prior_final = false;
         let mut context_tokens: u64 = 0;
@@ -183,7 +197,20 @@ impl Session {
         // constant within a turn); non-bridge providers ignore it.
         let checkpoint_ctx = self.checkpoint_context();
 
+        let unattended = !self.presenter.is_attended() || self.mode == PermissionMode::Bypass;
+        let soft_cap = self.config.mesh.max_steps.max(1);
+        let token_cap = self.config.mesh.max_turn_input_tokens;
+        let mut warned_soft_cap = false;
+        let mut hard_guard_abort = false;
+
         for step in 0..max_steps {
+            if step >= soft_cap && unattended && !warned_soft_cap {
+                warned_soft_cap = true;
+                self.presenter.emit(PresenterEvent::Warning(format!(
+                    "reached soft step cap {soft_cap} at step {step}; unattended turn continuing toward hard cap {max_steps} (turn tokens: input={}, output={})",
+                    self.turn_input_tokens, self.turn_output_tokens
+                )));
+            }
             // ── Timeout reconciliation window (quality guards wave 4, fix 2) ──────────────────
             // The caller's hard timeout (`bench swe`'s tokio kill) is invisible from inside the
             // turn, so without this the kill lands mid-verification and "submit partial work"
@@ -272,6 +299,22 @@ impl Session {
                 &mut bridge_input_accum,
                 &mut empty_nudges,
             )?;
+
+            if token_cap != 0 && self.turn_input_tokens >= token_cap {
+                let work = uncommitted_work_message(self.workspace.root());
+                self.presenter.emit(PresenterEvent::Error(format!(
+                    "ERROR: turn input-token ceiling exceeded (cap {token_cap}, input {}, output {}) — ending turn; work is uncommitted: {work}",
+                    self.turn_input_tokens, self.turn_output_tokens
+                )));
+                final_text = format!(
+                    "ERROR: turn input-token ceiling exceeded; work is uncommitted: {work}"
+                );
+                hit_step_cap = false;
+                halted_by_loop_guard = true;
+                hard_guard_abort = true;
+                self.turn_hard_guard_abort = true;
+                break;
+            }
 
             if !resp.wants_tools() {
                 if !resp.content.trim().is_empty() {
@@ -752,6 +795,20 @@ impl Session {
         // any single loop's count.
         self.mutations_this_turn += mutations_ran.load(std::sync::atomic::Ordering::Relaxed);
 
+        if hit_step_cap && unattended {
+            let work = uncommitted_work_message(self.workspace.root());
+            self.presenter.emit(PresenterEvent::Error(format!(
+                "ERROR: unattended turn reached hard step ceiling {max_steps} after {max_steps} step(s) (soft cap {soft_cap}; turn tokens: input={}, output={}) — ending turn; work is uncommitted: {work}",
+                self.turn_input_tokens, self.turn_output_tokens
+            )));
+            final_text = format!(
+                "ERROR: unattended turn reached hard step ceiling {max_steps}; work is uncommitted: {work}"
+            );
+            halted_by_loop_guard = true;
+            hard_guard_abort = true;
+            self.turn_hard_guard_abort = true;
+        }
+
         Ok(ModelLoopOutcome {
             final_text,
             context_tokens,
@@ -761,6 +818,7 @@ impl Session {
             plan: proposed_plan,
             tools_ran: tools_ran.load(std::sync::atomic::Ordering::Relaxed),
             mcp_tools_unavailable: mcp_tools_unavailable.load(std::sync::atomic::Ordering::Relaxed),
+            hard_guard_abort,
         })
     }
 }

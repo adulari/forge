@@ -28,7 +28,7 @@ These aren't hypotheticals — we hit them in real SWE-bench runs:
 | Same tool call repeated step after step | spins to the cap | nudge → halt | `doom_loop_halts_a_model_repeating_the_same_call` |
 | `A,B,A,B` oscillation (evades the repeat check) | spins to the cap | halt | `doom_loop_halts_a_model_oscillating_between_two_calls` |
 | Same error KIND across changing args (serial **and** concurrent) | spins to the cap | nudge → halt | `failure_loop_halts_a_model_failing_the_same_way`, `concurrent_batch_failure_loop_is_caught` |
-| Runaway turn that always wants one more tool | depends on the CLI | stops at `max_steps` | `step_cap_halts_a_runaway_turn` |
+| Runaway turn that always wants one more tool | depends on the CLI | attended sessions pause at `max_steps`; unattended sessions warn with turn input/output tokens, continue to `mesh.max_steps_unattended`, then error; all surfaces error at `mesh.max_turn_input_tokens` | `interactive_step_cap_pauses_a_runaway_turn`, `headless_step_cap_warns_and_continues_to_hard_ceiling`, `token_ceiling_errors_on_every_surface` |
 | Model claims every task "done" without checking | accepted | forced to PROVE it with a real tool-grounded check, else re-driven / flagged UNVERIFIED | `direct_gate_*`, `bridge_completion_*`, `completion_gate_covers_its_four_outcomes` |
 | Corrupt/truncated line mid-stream | can abort | skipped, turn survives | `truncated_stream_line_is_skipped_not_fatal` |
 

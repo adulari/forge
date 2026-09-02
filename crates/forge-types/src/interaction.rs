@@ -190,6 +190,12 @@ pub trait Presenter: Send {
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> ConfirmOutcome;
     fn ask(&mut self, question: &str, options: &[QChoice], allow_other: bool) -> String;
     fn read_line(&mut self) -> Option<String>;
+    /// Whether a human is present to answer a prompt on this surface. `false` for headless
+    /// `forge run` and other unattended surfaces, where "paused — send `continue`" is a silent
+    /// death rather than a checkpoint.
+    fn is_attended(&self) -> bool {
+        true
+    }
     fn recap_sink(&self) -> Option<Box<dyn Presenter>> {
         None
     }
