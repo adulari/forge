@@ -44,10 +44,12 @@ fn classify_attempt_failure(error: &forge_provider::ProviderError) -> AttemptFai
 fn failure_verdict(failures: &[AttemptFailure]) -> String {
     let count = |kind| failures.iter().filter(|failure| **failure == kind).count();
     if !failures.is_empty() && count(AttemptFailure::NoCredentials) == failures.len() {
-        return "No usable model: none of your configured providers have credentials.\n\
-Run `forge setup` for guided setup, or `forge doctor` to see which providers need attention.\n\
-Set one of ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY, or log in to the Claude or Codex CLI."
-            .to_string();
+        return format!(
+            "No usable model: none of your configured providers have credentials.\n\
+             {NO_CREDENTIALS_GUIDANCE}\n\
+             Set one of ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY, or log in to the \
+             Claude or Codex CLI."
+        );
     }
     if !failures.is_empty() && count(AttemptFailure::RateLimited) == failures.len() {
         return "No usable model: every attempted model was rate-limited.".to_string();
@@ -796,6 +798,10 @@ mod tests {
             failure_verdict(&[AttemptFailure::NoCredentials, AttemptFailure::NoCredentials]);
         assert!(verdict.contains("none of your configured providers have credentials"));
         assert!(verdict.contains("forge setup"));
+        assert!(
+            verdict.contains(NO_CREDENTIALS_GUIDANCE),
+            "reuses the shared guidance so it cannot drift from the unroutable path"
+        );
         assert!(!verdict.contains("rate-limit"));
     }
 
