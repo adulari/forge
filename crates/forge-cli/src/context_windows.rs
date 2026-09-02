@@ -57,6 +57,31 @@ fn native_model_id(openrouter_id: &str) -> Option<String> {
         })
 }
 
+/// Persist one fetched price row, surfacing the FIRST failure per run as a warning that names the
+/// cause. The rest of `fetch_and_persist` is legitimately best-effort (a provider that is down
+/// leaves the conservative floor in place), but a write that fails against our own store is a
+/// defect, and hiding it left routing on stale prices for months.
+fn record_price(
+    store: &forge_store::Store,
+    id: &str,
+    in_1k: f64,
+    out_1k: f64,
+    cache_1k: Option<f64>,
+    already_warned: &mut bool,
+) {
+    if let Err(error) = store.set_model_pricing(id, in_1k, out_1k, cache_1k) {
+        if !*already_warned {
+            *already_warned = true;
+            tracing::warn!(
+                model = id,
+                %error,
+                "could not persist a fetched model price — routing will keep using the previous \
+                 (possibly stale) prices; run `forge doctor` (price feed check)"
+            );
+        }
+    }
+}
+
 /// Fetch per-model context windows AND prices from all reachable provider APIs, persisting
 /// results into the DB. Best-effort and fail-soft — any error just leaves the conservative floor.
 pub async fn fetch_and_persist(models: &[String]) {
@@ -68,6 +93,11 @@ pub async fn fetch_and_persist(models: &[String]) {
     // Running in-memory registry of every context window we persist this run.
     // Used at the end to derive CLI bridge windows without an extra DB round-trip.
     let mut ctx_registry: HashMap<String, u32> = HashMap::new();
+    // A price write that fails is not best-effort noise: routing derives subscription burn
+    // weights from these rows, and a store whose `model_pricing` table lacked a column had every
+    // upsert fail silently for two and a half months — prices frozen at 2026-06-18, no Go / GPT-5.6
+    // rows, zero burn penalty, a $12 pool gone in minutes. One warning per run, with the cause.
+    let mut price_write_failed = false;
 
     // ── OpenRouter first (keyless, always) ───────────────────────────────────────────────────────
     // Fetched before native providers so we can build the basename fallback index used by custom
@@ -91,7 +121,14 @@ pub async fn fetch_and_persist(models: &[String]) {
             // providers intentionally retain a zero recorded cost rather than inheriting an
             // unrelated OpenRouter list price.
             for (id, in_1k, out_1k, cache_1k) in openrouter_pricing(&body) {
-                let _ = store.set_model_pricing(&id, in_1k, out_1k, cache_1k);
+                record_price(
+                    &store,
+                    &id,
+                    in_1k,
+                    out_1k,
+                    cache_1k,
+                    &mut price_write_failed,
+                );
             }
             // basename index: "llama-3.1-405b-instruct" → 131072
             // Used below as fallback for custom providers that don't include context info in /v1/models
@@ -109,7 +146,14 @@ pub async fn fetch_and_persist(models: &[String]) {
     // the bundled `DEFAULT_RATES` fallback in force rather than writing $0.
     if let Some(body) = get_json("https://models.dev/api.json", None).await {
         for (id, in_1k, out_1k, cache_1k) in models_dev_pricing(&body) {
-            let _ = store.set_model_pricing(&id, in_1k, out_1k, cache_1k);
+            record_price(
+                &store,
+                &id,
+                in_1k,
+                out_1k,
+                cache_1k,
+                &mut price_write_failed,
+            );
         }
     }
 

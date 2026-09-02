@@ -59,7 +59,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 30;
+const SCHEMA_VERSION: i64 = 31;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -6014,6 +6014,57 @@ mod tests {
     /// `cache_read_input_tokens`; Codex emits `cached_input_tokens`, so every codex-cli zero is a
     /// dropped field, not a measurement. Zeros from providers that do report caching are real
     /// measurements and must survive untouched.
+    /// A store created before `model_pricing` gained `cache_read_per_1k` (the shape every real
+    /// install had at user_version 30) must gain the column on open, and price upserts — which
+    /// silently failed against it for months — must succeed afterwards.
+    #[test]
+    fn migration_0031_adds_the_missing_pricing_column_to_existing_stores() {
+        let path = temp_db_path();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(schema::SCHEMA).unwrap();
+            conn.execute_batch(
+                "DROP TABLE model_pricing;
+                 CREATE TABLE model_pricing (
+                     model         TEXT PRIMARY KEY,
+                     input_per_1k  REAL NOT NULL,
+                     output_per_1k REAL NOT NULL,
+                     updated_at    INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                 );
+                 INSERT INTO model_pricing (model, input_per_1k, output_per_1k, updated_at)
+                     VALUES ('openrouter::old/model', 0.001, 0.002, 1750000000);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 30i64).unwrap();
+        }
+        for pass in ["first open (migrates)", "second open (idempotent)"] {
+            let store = Store::open(&path).unwrap_or_else(|e| panic!("{pass}: {e:?}"));
+            store
+                .set_model_pricing("openrouter::moonshotai/kimi-k3", 0.003, 0.015, Some(0.0003))
+                .unwrap_or_else(|e| panic!("{pass}: price upsert must work: {e}"));
+            let rows = store.all_model_pricing().unwrap();
+            let kimi = rows
+                .iter()
+                .find(|(m, ..)| m == "openrouter::moonshotai/kimi-k3")
+                .unwrap_or_else(|| panic!("{pass}: new row present"));
+            assert_eq!(kimi.3, Some(0.0003), "{pass}");
+            let old = rows
+                .iter()
+                .find(|(m, ..)| m == "openrouter::old/model")
+                .unwrap();
+            assert_eq!(
+                old.3, None,
+                "{pass}: pre-existing row keeps an unknown cache price"
+            );
+            let (count, newest) = store.model_pricing_freshness().unwrap();
+            assert_eq!(count, 2, "{pass}");
+            assert!(
+                newest.unwrap() > 1750000000,
+                "{pass}: freshness follows the new write"
+            );
+        }
+    }
+
     #[test]
     fn migration_0030_nulls_only_the_codex_bridge_fabricated_zeros() {
         let path = temp_db_path();
