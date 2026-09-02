@@ -10381,24 +10381,42 @@ mod tests {
     }
 
     const HELD_SUB: &str = "codex-oauth::gpt-5.6-sol";
+    /// Stand-in for the rate-limited primary and the free alternative. Both providers are KEYLESS
+    /// (`ollama`/`agy-cli`/`codex-oauth` own their auth), so the routed pick clears the
+    /// no-usable-model key gate: under `cargo test` `forge-config` carries `test-secrets`, whose
+    /// in-memory store holds no key for a keyed provider like `nvidia`/`gemini`. They are on three
+    /// DIFFERENT providers because failover skips the whole provider that just failed. The pacing
+    /// verdict under test comes from [`HeldRouter`], not from the provider identity.
+    const PRIMARY: &str = "ollama::kimi-k3";
+    const FREE_ALT: &str = "agy-cli::gemini-flash";
+
+    fn keyless_precondition() {
+        for m in [PRIMARY, FREE_ALT, HELD_SUB] {
+            assert!(
+                forge_config::has_api_key(forge_config::provider_of(m)),
+                "test precondition: '{m}' must be keyless so the key gate never fires"
+            );
+        }
+    }
 
     /// (a) Failover must apply the SAME pacing verdict as the primary pick: an over-pace
     /// subscription is skipped while any non-held model remains. Two unattended sessions failed
     /// over onto a held ChatGPT plan and burned ~6M input tokens each (2026-09-02).
     #[tokio::test]
     async fn failover_skips_a_pacing_held_model_while_a_non_held_one_remains() {
+        keyless_precondition();
         let provider = Arc::new(EchoUnlessRateLimited {
-            rate_limited: ["nvidia::kimi-k3".to_string()].into_iter().collect(),
+            rate_limited: [PRIMARY.to_string()].into_iter().collect(),
         });
         let router = Arc::new(HeldRouter {
-            model: "nvidia::kimi-k3".into(),
-            fallbacks: vec![HELD_SUB.into(), "gemini::free-flash".into()],
+            model: PRIMARY.into(),
+            fallbacks: vec![HELD_SUB.into(), FREE_ALT.into()],
             held: vec![HELD_SUB.into()],
         });
         let (_store, mut session) = fixed_session(provider, router);
         let answer = session.run_turn("build the thing").await.unwrap();
         assert_eq!(
-            answer, "gemini::free-flash",
+            answer, FREE_ALT,
             "a held subscription must not be reached while a non-held model remains"
         );
     }
@@ -10407,11 +10425,12 @@ mod tests {
     /// still runs, and the rationale says the hold was overridden.
     #[tokio::test]
     async fn an_exhausted_chain_reaches_the_held_model_and_says_the_hold_was_overridden() {
+        keyless_precondition();
         let provider = Arc::new(EchoUnlessRateLimited {
-            rate_limited: ["nvidia::kimi-k3".to_string()].into_iter().collect(),
+            rate_limited: [PRIMARY.to_string()].into_iter().collect(),
         });
         let router = Arc::new(HeldRouter {
-            model: "nvidia::kimi-k3".into(),
+            model: PRIMARY.into(),
             fallbacks: vec![HELD_SUB.into()],
             held: vec![HELD_SUB.into()],
         });
@@ -10455,12 +10474,13 @@ mod tests {
     /// (c) With no pacing verdict the chain keeps strict rank order.
     #[tokio::test]
     async fn without_a_pacing_hold_failover_keeps_rank_order() {
+        keyless_precondition();
         let provider = Arc::new(EchoUnlessRateLimited {
-            rate_limited: ["nvidia::kimi-k3".to_string()].into_iter().collect(),
+            rate_limited: [PRIMARY.to_string()].into_iter().collect(),
         });
         let router = Arc::new(HeldRouter {
-            model: "nvidia::kimi-k3".into(),
-            fallbacks: vec![HELD_SUB.into(), "gemini::free-flash".into()],
+            model: PRIMARY.into(),
+            fallbacks: vec![HELD_SUB.into(), FREE_ALT.into()],
             held: vec![],
         });
         let (_store, mut session) = fixed_session(provider, router);
