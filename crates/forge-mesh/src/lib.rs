@@ -37,6 +37,10 @@ use context::COMPACTION_SUMMARY_PREFIX;
 pub use context::{RoutingContext, SessionAffinity};
 pub use explain::{display_provider, CandidateRow, ProviderQuotaView, RoutingExplanation};
 pub use pacing_view::{pacing_hold_note, pacing_summary, PacingHold};
+pub use subscription_cost::{
+    opencode_go_quota_multiplier, opencode_go_quota_note, opencode_go_weekly_quota,
+    OPENCODE_GO_LARGEST_WEEKLY_QUOTA,
+};
 
 /// Live budget context the router considers when choosing a tier. Carries daily, weekly, and
 /// monthly axes (FR-5); the stricter of all configured axes governs.

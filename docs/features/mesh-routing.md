@@ -341,6 +341,15 @@ all resolve identically:
 Any model not in this table gets weight 1.0 (`subscription_burn_weight`, `capability.rs:244`).
 Config overrides win: `[mesh.burn_weights]` is keyed by the **bare** model name (§13.1).
 
+**OpenCode Go weekly-quota multiplier** — `subscription_cost::opencode_go_quota_multiplier`.
+Go's price-derived weight is multiplied by `largest weekly quota / the model's weekly quota`.
+The Go dashboard (2026-09-02) shows each model has its own weekly dollar quota ($7.50, $15 or
+$30) and the pool percentage is the sum of the per-model percentages, so a dollar on Grok 4.6 or
+Kimi K3 ($7.50/wk) drains the pool 4x as fast as a dollar on Muse Spark or GLM 5.x ($30/wk).
+The usage endpoint exposes no per-model split, so the quotas are a bundled table keyed by bare
+model id; a model absent from it stays at x1.0. `forge mesh` shows the multiplier per Go model
+(`quota $7.50/wk → x4.0`) and the quota buckets under the `opencode_go` block.
+
 **Why `ln(weight)`:** the penalty must tie-break, not dominate. A 10× burn difference is
 `ln(10) ≈ 2.30`, a 5× one `ln(5) ≈ 1.61` — big enough to matter between near-equal siblings,
 small enough that a genuine capability gap (a full bench band ≈ 1.0 quality point ≈ 2.0 Complex

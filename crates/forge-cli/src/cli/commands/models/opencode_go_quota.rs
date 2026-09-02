@@ -15,6 +15,12 @@
 //!               "monthly" :{"status":"ok","percent":0,"resetsAt":"2026-10-01T19:25:30.917Z"}}}
 //! ```
 //!
+//! Re-probed 2026-09-02 for a per-model split (the dashboard shows one weekly quota per model,
+//! with the pool percentage the sum of per-model percentages): `?breakdown=true` and
+//! `?detail=models` return the same three-window body, `/usage/models`, `/usage/breakdown`,
+//! `/quota` and `/limits` 404, and `/models` lists ids only. Per-model quota therefore comes from
+//! the bundled table in `forge_mesh::subscription_cost`, not from this poll.
+//!
 //! Unauthenticated requests return 401; `/limits`, `/me` and `/zen/v1/usage` all 404. Because the
 //! endpoint carries no compatibility promise, every failure mode here degrades to "unknown" — no
 //! store write at all — rather than to a fabricated 0%. A window Forge cannot read must look
@@ -237,6 +243,59 @@ mod tests {
             r#"{"usage":{"rolling":{"status":"ok","percent":100,"resetsAt":"2026-09-02T00:30:48Z"}}}"#,
         );
         assert_eq!(hints[0].status, forge_types::QuotaStatus::Exhausted);
+    }
+
+    /// The body observed live on 2026-09-02 (weekly 67% = Grok 4.6's 41.5% + Kimi K3's 25.8% on
+    /// the dashboard). It carries no per-model split, so the router's per-model quota multiplier
+    /// has to come from the bundled table rather than from this poll.
+    const CAPTURED_2026_09_02: &str = r#"{"usage":{"rolling":{"status":"ok","percent":0,"resetsAt":"2026-09-02T13:58:21.065Z"},"weekly":{"status":"ok","percent":67,"resetsAt":"2026-09-07T00:00:00.065Z"},"monthly":{"status":"ok","percent":33,"resetsAt":"2026-10-01T19:25:30.065Z"}}}"#;
+
+    #[test]
+    fn captured_body_parses_and_has_no_per_model_breakdown() {
+        let hints = parse_usage(CAPTURED_2026_09_02);
+        assert_eq!(hints.len(), 3);
+        assert!((hint(&hints, "weekly").unwrap().fraction_used.unwrap() - 0.67).abs() < 1e-9);
+        let root: serde_json::Value = serde_json::from_str(CAPTURED_2026_09_02).unwrap();
+        let usage = root["usage"].as_object().unwrap();
+        assert_eq!(
+            usage.len(),
+            3,
+            "only the three windows, no per-model entries"
+        );
+        for window in usage.values() {
+            assert!(window.get("models").is_none() && window.get("quota").is_none());
+        }
+        // The multiplier for the models that ate this week's pool comes from the bundled table.
+        assert_eq!(
+            forge_mesh::opencode_go_quota_multiplier("opencode_go::grok-4.6"),
+            Some(4.0)
+        );
+    }
+
+    /// Prints the response's key paths only (no values, no key material).
+    #[tokio::test]
+    #[ignore = "live probe"]
+    async fn probe_live_shape() {
+        let key = forge_config::api_key(OPENCODE_GO_PROVIDER).unwrap();
+        let body = fetch_usage(USAGE_URL, &key).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        fn shape(v: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (k, vv) in map {
+                        shape(vv, &format!("{path}.{k}"), out);
+                    }
+                }
+                serde_json::Value::Array(items) => match items.first() {
+                    Some(first) => shape(first, &format!("{path}[]"), out),
+                    None => out.push(format!("{path}[]")),
+                },
+                _ => out.push(path.to_string()),
+            }
+        }
+        let mut out = Vec::new();
+        shape(&value, "", &mut out);
+        println!("SHAPE:\n{}", out.join("\n"));
     }
 
     fn serve_once(status: u16, body: &'static str) -> String {
