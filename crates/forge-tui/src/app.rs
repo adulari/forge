@@ -4536,6 +4536,7 @@ mod tests {
                 usable: true,
                 selected: true,
                 penalty: 0.0,
+                adjustment: None,
             },
             MeshCandRow {
                 rank: 2,
@@ -6110,6 +6111,7 @@ mod tests {
                     usable: true,
                     selected: true,
                     penalty: 0.0,
+                    adjustment: None,
                 },
                 MeshCandRow {
                     rank: 2,
@@ -6120,6 +6122,7 @@ mod tests {
                     usable: true,
                     selected: false,
                     penalty: 4.0,
+                    adjustment: None,
                 },
             ],
             pick: "groq::llama-3.3-70b-versatile".into(),

@@ -431,9 +431,12 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             String::new()
         };
         let tag = format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             c.cost_tag,
             pen,
+            c.adjustment
+                .as_ref()
+                .map_or_else(String::new, |adjustment| format!(" · {adjustment}")),
             if c.frontier { " · frontier" } else { "" },
             if c.usable { "" } else { " · unusable" },
         );

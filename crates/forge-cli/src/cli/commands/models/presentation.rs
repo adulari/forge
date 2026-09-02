@@ -453,11 +453,22 @@ pub(crate) fn print_mesh_explanation(
             } else {
                 String::new()
             };
+            // Print the score the ordering was decided on, and name the demotion inline when it
+            // differs — a rank that contradicts its own number is worse than no number at all.
+            let score = match &c.adjustment {
+                Some(adjustment) => format!(
+                    "{:>6.2} → {:.2} ({})",
+                    c.row.final_score,
+                    c.effective_score,
+                    adjustment.label()
+                ),
+                None => format!("{:>6.2}", c.effective_score),
+            };
             println!(
-                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}{}",
+                "  {marker} #{:<2} {:<34} score {}  cap {:>5.2}  {}{}{}{}",
                 c.rank,
                 c.row.model,
-                c.row.final_score,
+                score,
                 c.row.capability,
                 cost_tag(c.row.cost_class),
                 pen,
@@ -488,6 +499,13 @@ pub(crate) fn mesh_explanation_json(
                 "model": c.row.model,
                 "provider": c.row.provider,
                 "final_score": c.row.final_score,
+                // Added, not renamed: `final_score` stays the raw catalog score for existing
+                // consumers; `effective_score` is what the ranking was decided on.
+                "effective_score": c.effective_score,
+                "score_adjustment": c.adjustment.as_ref().map(|adjustment| serde_json::json!({
+                    "delta": adjustment.delta,
+                    "reason": adjustment.reason,
+                })),
                 "capability": c.row.capability,
                 "cost_class": c.row.cost_class,
                 "conserve_penalty": c.row.conserve_penalty,
