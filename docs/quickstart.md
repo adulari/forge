@@ -97,6 +97,9 @@ This walks you through:
 
 You can skip any step and come back later. Run `forge setup` again anytime.
 
+It needs a real terminal — run from a pipe or CI it exits with an "is interactive" error. For
+unattended setup use `forge auth <provider>`, which reads the key from stdin.
+
 ---
 
 ## Step 4 — Start your first chat

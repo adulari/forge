@@ -297,6 +297,10 @@ pub(crate) async fn models(
         "{} models · {} frontier · {} free · {} subscription · {} paid · {} providers\n",
         s.total, s.frontier, s.free, s.subscription, s.paid, s.providers
     );
+    let reach = presentation::reachability(cat.models(), forge_mesh::pin_is_dispatchable);
+    if let Some(warning) = reach.warning() {
+        println!("{warning}\n");
+    }
     for g in cat.by_provider(&pricing) {
         println!("{} ({} models)", g.provider, g.total());
         for window in subscription_windows
@@ -345,6 +349,9 @@ pub(crate) async fn models(
             if benched.is_benched(&m.id) {
                 tags.push("benched".into());
             }
+            if !forge_mesh::pin_is_dispatchable(&m.id) {
+                tags.push("no key".into());
+            }
             println!("  {name:<30} {}", tags.join(" · "));
         }
     }
@@ -357,7 +364,17 @@ pub(crate) async fn models(
             .into_iter()
             .find(|m| !benched.is_benched(m))
             .unwrap_or_else(|| "—".into());
-        println!("  {:<9} {pick}", tier.as_str());
+        // The ranking ignores credentials, so on a keyless install the "pick" is a model the
+        // mesh cannot actually route to; say so rather than implying the tier is ready.
+        let note = if pick != "—" && !forge_mesh::pin_is_dispatchable(&pick) {
+            format!(
+                "  (not callable — no key for {})",
+                forge_config::provider_of(&pick)
+            )
+        } else {
+            String::new()
+        };
+        println!("  {:<9} {pick}{note}", tier.as_str());
     }
     if !probe {
         println!(
