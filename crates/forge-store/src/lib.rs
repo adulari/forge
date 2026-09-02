@@ -6720,6 +6720,29 @@ mod tests {
     }
 
     #[test]
+    fn latest_task_tier_reads_most_recent_active_routing_decision() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+        let first = store
+            .add_message(&sid, 0, Role::Assistant, "first", Some("m1"))
+            .unwrap();
+        store
+            .record_routing(&first, TaskTier::Complex, "m1", "first")
+            .unwrap();
+        let second = store
+            .add_message(&sid, 1, Role::Assistant, "second", Some("m2"))
+            .unwrap();
+        store
+            .record_routing(&second, TaskTier::Standard, "m2", "second")
+            .unwrap();
+
+        assert_eq!(
+            store.latest_task_tier(&sid).unwrap(),
+            Some(TaskTier::Standard)
+        );
+    }
+
+    #[test]
     fn turn_context_finds_nearest_user_prompt_and_the_assistant_reply() {
         let store = Store::open_in_memory().unwrap();
         let sid = store.create_session("/repo", "default").unwrap();

@@ -2601,6 +2601,7 @@ impl Router for HeuristicRouter {
             ),
             None => {
                 let (tier, reason) = Self::classify_contextual(activity, project, context);
+                let (tier, reason) = context.inherit_prior_tier(tier, reason, effort);
                 self.decide(
                     tier, reason, budget, health, hints, quota, effort, has_images,
                 )
@@ -2998,6 +2999,108 @@ mod tests {
                 &RoutingContext::from_messages(messages),
             )
             .await
+    }
+
+    #[tokio::test]
+    async fn prior_routing_decision_is_a_floor_for_continue() {
+        let context = RoutingContext::from_messages(&[]).with_prior_tier(Some(TaskTier::Complex));
+        let decision = router()
+            .route_contextual(
+                "continue",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                None,
+                &ProjectContext::default(),
+                &context,
+            )
+            .await;
+
+        assert_eq!(decision.tier, TaskTier::Complex, "{}", decision.rationale);
+        assert!(
+            decision
+                .rationale
+                .contains("tier inherited from previous turn: complex"),
+            "{}",
+            decision.rationale
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_session_still_classifies_followup_normally() {
+        let decision = router()
+            .route_contextual(
+                "continue",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                None,
+                &ProjectContext::default(),
+                &RoutingContext::default(),
+            )
+            .await;
+
+        assert_eq!(decision.tier, TaskTier::Trivial, "{}", decision.rationale);
+        assert!(
+            !decision.rationale.contains("tier inherited"),
+            "{}",
+            decision.rationale
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_effort_does_not_inherit_prior_tier() {
+        let context = RoutingContext::default().with_prior_tier(Some(TaskTier::Complex));
+        let decision = router()
+            .route_contextual(
+                "continue",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                Some(EffortLevel::Low),
+                &ProjectContext::default(),
+                &context,
+            )
+            .await;
+
+        assert_eq!(decision.tier, TaskTier::Trivial, "{}", decision.rationale);
+        assert!(
+            !decision.rationale.contains("tier inherited"),
+            "{}",
+            decision.rationale
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_tier_pin_does_not_inherit_prior_tier() {
+        let context = RoutingContext::default().with_prior_tier(Some(TaskTier::Complex));
+        let decision = router()
+            .route_contextual(
+                "continue",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                Some(TaskTier::Trivial),
+                None,
+                &ProjectContext::default(),
+                &context,
+            )
+            .await;
+
+        assert_eq!(decision.tier, TaskTier::Trivial);
+        assert!(decision.rationale.contains("tier hint"));
+        assert!(
+            !decision.rationale.contains("tier inherited"),
+            "{}",
+            decision.rationale
+        );
     }
 
     #[tokio::test]

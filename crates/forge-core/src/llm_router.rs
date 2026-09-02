@@ -211,21 +211,17 @@ impl LlmRouter {
         let classifier_prompt = context.classifier_prompt(activity);
         let key = prompt_hash(activity, &classifier_prompt);
         if let Some(llm_tier) = self.cached(key) {
-            let tier = guard_tier(llm_tier, deterministic_tier, hints.code_heavy);
-            return self.decide_contextual(
-                tier,
+            let (tier, rationale) = context.inherit_prior_tier(
+                guard_tier(llm_tier, deterministic_tier, hints.code_heavy),
                 format!(
                     "cached classifier result: {}; deterministic floor: {}",
                     llm_tier.as_str(),
                     deterministic_tier.as_str()
                 ),
-                budget,
-                health,
-                hints,
-                quota,
                 effort,
-                has_images,
-                context,
+            );
+            return self.decide_contextual(
+                tier, rationale, budget, health, hints, quota, effort, has_images, context,
             );
         }
 
@@ -288,21 +284,17 @@ impl LlmRouter {
         match answered {
             Some((model, llm_tier)) => {
                 self.store(key, llm_tier);
-                let tier = guard_tier(llm_tier, deterministic_tier, hints.code_heavy);
-                self.decide_contextual(
-                    tier,
+                let (tier, rationale) = context.inherit_prior_tier(
+                    guard_tier(llm_tier, deterministic_tier, hints.code_heavy),
                     format!(
                         "classified by {model} as {}; deterministic floor: {}",
                         llm_tier.as_str(),
                         deterministic_tier.as_str()
                     ),
-                    budget,
-                    health,
-                    hints,
-                    quota,
                     effort,
-                    has_images,
-                    context,
+                );
+                self.decide_contextual(
+                    tier, rationale, budget, health, hints, quota, effort, has_images, context,
                 )
             }
             None => {

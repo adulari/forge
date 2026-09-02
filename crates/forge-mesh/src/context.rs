@@ -4,9 +4,9 @@
 //! limits and task-focused filtering protect classifier cache stability while
 //! preserving enough information to route dependent turns safely.
 
-use forge_types::{Message, Role, TaskTier, Visibility};
+use forge_types::{EffortLevel, Message, Role, TaskTier, Visibility};
 
-use crate::classification::{contains_whole_word, TRIVIAL_PATTERNS};
+use crate::classification::{contains_whole_word, max_tier, TRIVIAL_PATTERNS};
 
 const ROUTING_ANCHOR_CHARS: usize = 4_000;
 const ROUTING_REFINEMENT_CHARS: usize = 1_500;
@@ -40,6 +40,7 @@ pub struct RoutingContext {
     compaction_summary: Option<String>,
     session_affinity: Option<SessionAffinity>,
     reusable_prefix_tokens: u64,
+    prior_tier: Option<TaskTier>,
 }
 
 impl RoutingContext {
@@ -98,6 +99,7 @@ impl RoutingContext {
             compaction_summary,
             session_affinity: None,
             reusable_prefix_tokens: 0,
+            prior_tier: None,
         }
     }
 
@@ -115,6 +117,47 @@ impl RoutingContext {
         self.session_affinity = session_affinity;
         self.reusable_prefix_tokens = reusable_prefix_tokens;
         self
+    }
+
+    /// The tier this session's work was already running at (the most recent recorded routing
+    /// decision). A continuation turn classified on its own text reads as trivial — "continue" is
+    /// three syllables — and handing a half-finished complex refactor to a weak model is the one
+    /// unsafe direction, so this acts as a floor. Only set when the user has not overridden the
+    /// tier themselves (explicit effort, a tier hint, or a model pin).
+    #[must_use]
+    pub fn with_prior_tier(mut self, prior_tier: Option<TaskTier>) -> Self {
+        self.prior_tier = prior_tier;
+        self
+    }
+
+    /// Raise `tier` to the session's prior tier when classification came out below it, annotating
+    /// `reason` so the recorded rationale says why. Returns the inputs unchanged otherwise.
+    pub fn inherit_prior_tier(
+        &self,
+        tier: TaskTier,
+        reason: String,
+        effort: Option<EffortLevel>,
+    ) -> (TaskTier, String) {
+        if effort.is_some() {
+            return (tier, reason);
+        }
+        let Some(prior) = self.prior_tier else {
+            return (tier, reason);
+        };
+        let inherited = max_tier(tier, prior);
+        if inherited != prior {
+            return (tier, reason);
+        }
+        if inherited == tier
+            && !(reason.contains("current: trivial") || reason.contains("current: standard"))
+        {
+            return (tier, reason);
+        }
+        let reason = format!(
+            "{reason}; tier inherited from previous turn: {}",
+            prior.as_str()
+        );
+        (inherited, reason)
     }
 
     /// Whether `prompt` depends on earlier turns rather than introducing a standalone task.

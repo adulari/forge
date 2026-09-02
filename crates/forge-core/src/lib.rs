@@ -2415,7 +2415,8 @@ impl Session {
             .with_session_affinity(
                 self.route_affinity.clone(),
                 self.estimated_reusable_prefix_tokens(),
-            );
+            )
+            .with_prior_tier(self.inheritable_prior_tier(effective_tier));
         let decision = match self.pinned_model.as_deref() {
             // `/model <id>`/`/model a,b` override: route restricted to the pinned set. The mesh
             // still classifies (for tier stats) but the actual call + failover chain stay within
@@ -4296,6 +4297,74 @@ mod tests {
 
     #[path = "no_op_turn.rs"]
     mod no_op_turn_tests;
+
+    #[test]
+    fn inheritable_prior_tier_reads_latest_active_routing_decision() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let session_id = store.create_session("/tmp", "default").unwrap();
+        let first = store
+            .add_message(&session_id, 0, Role::Assistant, "first", Some("m1"))
+            .unwrap();
+        store
+            .record_routing(&first, TaskTier::Complex, "m1", "complex turn")
+            .unwrap();
+        let second = store
+            .add_message(&session_id, 1, Role::Assistant, "second", Some("m2"))
+            .unwrap();
+        store
+            .record_routing(&second, TaskTier::Standard, "m2", "standard turn")
+            .unwrap();
+
+        let session = Session::resume(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            Config::default(),
+            &session_id,
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.inheritable_prior_tier(None),
+            Some(TaskTier::Standard)
+        );
+    }
+
+    #[test]
+    fn model_pin_and_explicit_effort_disable_prior_tier_inheritance() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let session_id = store.create_session("/tmp", "default").unwrap();
+        let message = store
+            .add_message(&session_id, 0, Role::Assistant, "first", Some("m1"))
+            .unwrap();
+        store
+            .record_routing(&message, TaskTier::Complex, "m1", "complex turn")
+            .unwrap();
+
+        let mut session = Session::resume(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            Config::default(),
+            &session_id,
+        )
+        .unwrap();
+
+        session.pin_model(Some("ollama::tiny".into()));
+        assert_eq!(session.inheritable_prior_tier(None), None);
+        session.pin_model(None);
+        session.set_effort(Some(EffortLevel::Low));
+        assert_eq!(session.inheritable_prior_tier(None), None);
+        session.set_effort(None);
+        assert_eq!(
+            session.inheritable_prior_tier(Some(TaskTier::Trivial)),
+            None
+        );
+    }
 
     #[test]
     fn response_chain_reuse_is_scoped_to_dependent_same_model_continuations() {
