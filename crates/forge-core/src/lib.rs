@@ -64,6 +64,7 @@ mod text_policy;
 pub mod tokens;
 mod tool_dispatch;
 pub mod turn_contract;
+mod turn_guards;
 pub mod workflow;
 mod workspace_context;
 pub mod worktree;
