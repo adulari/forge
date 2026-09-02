@@ -242,6 +242,7 @@ pub(crate) async fn models(
         return Ok(());
     }
     forge_config::inject_provider_keys();
+    report_secret_backend();
     let config = super::load_config()?;
     let (cat, statuses) = discover_catalog_with_status(&config).await;
     print_discovery_statuses(&statuses);
@@ -558,8 +559,19 @@ fn load_mesh_budget(
     })
 }
 
+/// Name the secret store this process reads, on stderr so `--json` output stays parseable. A
+/// `forge` bin that cargo built alongside the test suite carries the in-memory `test-secrets`
+/// store and lists only keyless providers; without this line that looks exactly like every key
+/// having vanished.
+pub(crate) fn report_secret_backend() {
+    let backend = forge_config::secret_store::backend();
+    let prefix = if backend.is_blind() { "WARNING: " } else { "" };
+    eprintln!("{prefix}reading keys from: {}", backend.describe());
+}
+
 pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Result<()> {
     forge_config::inject_provider_keys();
+    report_secret_backend();
     let config = super::load_config()?;
     let cat = discover_catalog(&config).await;
     if cat.is_empty() {

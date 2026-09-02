@@ -74,6 +74,22 @@ cargo build --release --locked --bin forge                 # release-profile smo
 scripts/check-linux-runtime-deps.sh target/release/forge    # Linux: glibc/libstdc++ ceiling + no ALSA
 ```
 
+### How a dev build finds API keys
+
+Debug and release builds read the same store: the provider env var, then the OS keyring
+(service `forge`), then the encrypted file `<config dir>/forge/secrets.enc`. Nothing in that path
+is profile-gated, so `cargo build --bin forge` in either profile sees exactly what the installed
+release sees.
+
+The one exception is a `forge` bin that cargo built **alongside the test suite**. `cargo test`
+and `cargo build --all-targets` unify the `test-secrets` dev-dependency feature into `forge-config`
+(it swaps the store for an empty in-memory map so tests can never touch real keys), build the bin
+for the integration tests' `CARGO_BIN_EXE_forge`, and uplift it to `target/debug/forge`. Until the
+next `cargo build --bin forge`, that binary reports "no keys configured" for every provider and
+`forge models`/`forge mesh` list only keyless bridges. Rebuild before any live check, and trust the
+`reading keys from: …` line that `forge auth --list`, `forge models`, `forge mesh` and
+`forge doctor` print: an in-memory test store means the binary is blind, not that a key is missing.
+
 The publishable `genai` fork is intentionally outside the root workspace, and the shared Expo/Tauri
 app has independent gates. Run them when preparing a release (and whenever that surface changes):
 

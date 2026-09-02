@@ -21,8 +21,17 @@
 //!    `[dev-dependencies]` (resolver=2: does not leak into production builds).
 //! 2. **Runtime tripwire** — on the real path, panics if `current_exe` looks like a cargo
 //!    test/bench binary (`…/target/…/deps/…`), unless `FORGE_ALLOW_REAL_SECRETS=1`.
+//!
+//! The feature has one side effect worth knowing about: `cargo test` (and `--all-targets`) builds
+//! the `forge` bin for the integration tests' `CARGO_BIN_EXE_forge` with the dev-dependency
+//! features unified in, and uplifts that bin to `target/debug/forge`. Until the next
+//! `cargo build --bin forge`, that path is a binary whose secret store is this in-memory map:
+//! every `forge auth --list` says "no keys configured" and `forge models`/`forge mesh` see only
+//! keyless providers. It is not a debug-vs-release difference — a plain `cargo build` in either
+//! profile reads the same keyring + file as the release binary. [`backend`] tells which store a
+//! process is reading so the commands can say so.
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 use std::path::PathBuf;
 use std::path::{Component, Path};
 
@@ -51,6 +60,70 @@ const ALLOW_REAL_SECRETS_ENV: &str = "FORGE_ALLOW_REAL_SECRETS";
 // =============================================================================================
 // Public API — feature-gated between in-memory (tests) and real backends (production)
 // =============================================================================================
+
+/// Which store answers [`get`]/[`set`]/[`delete`] in this process. Reported by
+/// `forge auth --list`, `forge models`, `forge mesh` and `forge doctor` so an empty store is never
+/// mistaken for a missing key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretBackend {
+    /// The `test-secrets` process-local map: nothing on disk or in the OS keyring is visible.
+    InMemoryTest,
+    /// The OS keyring (service `forge`) answered the probe; `fallback` is the encrypted file that
+    /// is consulted after it.
+    OsKeyring {
+        fallback: Option<std::path::PathBuf>,
+    },
+    /// The OS keyring is unreachable; the encrypted file is the only store.
+    EncryptedFile(Option<std::path::PathBuf>),
+}
+
+impl SecretBackend {
+    /// One human-readable line naming the store and, for the test map, why it is empty.
+    pub fn describe(&self) -> String {
+        let file = |p: &Option<std::path::PathBuf>| match p {
+            Some(p) => p.display().to_string(),
+            None => "<no config dir>".to_string(),
+        };
+        match self {
+            SecretBackend::InMemoryTest => "in-memory test store — this binary was compiled with \
+                 the `test-secrets` feature (a `forge` built by `cargo test` or `--all-targets`), \
+                 so NO stored key is visible; rebuild with `cargo build --bin forge`"
+                .to_string(),
+            SecretBackend::OsKeyring { fallback } => {
+                format!(
+                    "OS keyring (service `forge`), then encrypted file {}",
+                    file(fallback)
+                )
+            }
+            SecretBackend::EncryptedFile(path) => {
+                format!("encrypted file {} (OS keyring unreachable)", file(path))
+            }
+        }
+    }
+
+    /// Whether reads can never see a stored key, whatever the user configured.
+    pub fn is_blind(&self) -> bool {
+        matches!(self, SecretBackend::InMemoryTest)
+    }
+}
+
+/// The store this process reads. Runs the (cached, bounded) keyring probe on the real path.
+#[cfg(feature = "test-secrets")]
+pub fn backend() -> SecretBackend {
+    SecretBackend::InMemoryTest
+}
+
+/// The store this process reads. Runs the (cached, bounded) keyring probe on the real path.
+#[cfg(not(feature = "test-secrets"))]
+pub fn backend() -> SecretBackend {
+    if keyring_available() {
+        SecretBackend::OsKeyring {
+            fallback: secrets_path(),
+        }
+    } else {
+        SecretBackend::EncryptedFile(secrets_path())
+    }
+}
 
 /// Store `value` under `key`.
 #[cfg(feature = "test-secrets")]
@@ -457,6 +530,45 @@ mod tests {
         assert!(!is_cargo_test_or_bench_binary(Path::new(
             "/home/u/deps-project/src/main"
         )));
+    }
+
+    #[cfg(feature = "test-secrets")]
+    #[test]
+    fn test_secrets_feature_reports_a_blind_in_memory_backend() {
+        // This crate's own unit tests carry the feature, exactly like a `forge` bin that cargo
+        // built alongside the test suite. The report must name the feature and the rebuild
+        // command, because that bin's "no keys configured" is what gets mistaken for a lost key.
+        let backend = backend();
+        assert_eq!(backend, SecretBackend::InMemoryTest);
+        assert!(backend.is_blind());
+        let text = backend.describe();
+        assert!(text.contains("test-secrets"), "{text}");
+        assert!(text.contains("cargo test"), "{text}");
+        assert!(text.contains("cargo build --bin forge"), "{text}");
+    }
+
+    #[test]
+    fn real_backends_name_the_store_they_read() {
+        let file = Some(PathBuf::from("/home/u/.config/forge/secrets.enc"));
+        let keyring = SecretBackend::OsKeyring {
+            fallback: file.clone(),
+        };
+        assert!(!keyring.is_blind());
+        let text = keyring.describe();
+        assert!(text.contains("OS keyring (service `forge`)"), "{text}");
+        assert!(text.contains("/home/u/.config/forge/secrets.enc"), "{text}");
+
+        let file_only = SecretBackend::EncryptedFile(file);
+        assert!(!file_only.is_blind());
+        let text = file_only.describe();
+        assert!(
+            text.starts_with("encrypted file /home/u/.config/forge/secrets.enc"),
+            "{text}"
+        );
+        assert!(text.contains("keyring unreachable"), "{text}");
+
+        let text = SecretBackend::EncryptedFile(None).describe();
+        assert!(text.contains("<no config dir>"), "{text}");
     }
 
     #[cfg(feature = "test-secrets")]
