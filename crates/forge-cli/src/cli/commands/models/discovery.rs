@@ -38,32 +38,46 @@ pub(crate) struct CachedCatalog {
     pub stale: bool,
 }
 
-/// Read the on-disk catalog whatever its age.
+/// Read the on-disk catalog whatever its age, with the epoch second it was written and how many
+/// seconds ago that was.
 ///
 /// Routing must never block a turn on rediscovery when ANY catalog exists: the stale cache is a
 /// strictly better routing input than the built-in seed candidates, which carry no prices, no
 /// benchmarks and no burn weights. Freshness is restored by a background refresh, not by making
 /// the user wait (observed 2026-09-02: a 235-model cache one minute past its window cost a 15 s
 /// stall and then routed to a bare `claude-cli::` alias anyway).
-pub(crate) fn read_cached_catalog() -> Option<CachedCatalog> {
+///
+/// A remote surface needs the same read plus the timestamp: it is better served a stale catalog it
+/// can label than an empty list it cannot explain.
+pub(crate) fn load_cached_catalog_aged() -> Option<(ModelCatalog, i64, u64)> {
     let path = catalog_cache_path()?;
     let meta = std::fs::metadata(&path).ok()?;
-    let age = meta.modified().ok()?.elapsed().unwrap_or_default();
+    let modified = meta.modified().ok()?;
+    let age = modified.elapsed().unwrap_or_default().as_secs();
+    let epoch = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
     let bytes = std::fs::read(&path).ok()?;
-    parse_cached_catalog(&bytes, age)
+    parse_cached_catalog(&bytes, epoch, age)
 }
 
-fn parse_cached_catalog(bytes: &[u8], age: std::time::Duration) -> Option<CachedCatalog> {
+/// The cached catalog with a staleness verdict, for the routing path.
+pub(crate) fn read_cached_catalog() -> Option<CachedCatalog> {
+    load_cached_catalog_aged().map(|(catalog, _, age)| CachedCatalog {
+        catalog,
+        stale: age > CATALOG_CACHE_MAX_AGE_SECS,
+    })
+}
+
+fn parse_cached_catalog(bytes: &[u8], epoch: i64, age: u64) -> Option<(ModelCatalog, i64, u64)> {
     let catalog: ModelCatalog = serde_json::from_slice(bytes).ok()?;
     // The cache was written when the bridge had a login; a logged-out one must not be routed to
     // for up to 24 h afterwards, one dead failover hop per alias it advertises.
     let catalog = catalog.retaining(|model| {
         !forge_provider::bridge_credentials_known_absent(forge_config::provider_of(model))
     });
-    Some(CachedCatalog {
-        catalog,
-        stale: age.as_secs() > CATALOG_CACHE_MAX_AGE_SECS,
-    })
+    Some((catalog, epoch, age))
 }
 
 /// Load the on-disk catalog if it exists and is fresh (< 24 h old).
@@ -587,17 +601,15 @@ mod refresh_tests {
     #[test]
     fn a_stale_cache_is_still_returned_for_routing() {
         let json = serde_json::to_vec(&ModelCatalog::new(vec!["groq::a".to_string()])).unwrap();
-        let fresh = parse_cached_catalog(&json, std::time::Duration::from_secs(60)).unwrap();
-        assert!(!fresh.stale);
+        let (_, epoch, age) = parse_cached_catalog(&json, 1_700_000_000, 60).unwrap();
+        assert_eq!(epoch, 1_700_000_000);
+        assert!(age <= CATALOG_CACHE_MAX_AGE_SECS);
         // Two hours past the window: the old policy dropped this and blocked the turn on a full
         // rediscovery. It must now still be handed to the router, flagged stale.
-        let stale = parse_cached_catalog(
-            &json,
-            std::time::Duration::from_secs(CATALOG_CACHE_MAX_AGE_SECS + 7200),
-        )
-        .unwrap();
-        assert!(stale.stale);
-        assert_eq!(stale.catalog.models(), ["groq::a".to_string()]);
+        let (catalog, _, stale_age) =
+            parse_cached_catalog(&json, 1_700_000_000, CATALOG_CACHE_MAX_AGE_SECS + 7200).unwrap();
+        assert!(stale_age > CATALOG_CACHE_MAX_AGE_SECS);
+        assert_eq!(catalog.models(), ["groq::a".to_string()]);
     }
 
     #[test]

@@ -95,8 +95,8 @@ pub(crate) use opencode_go_quota::{refresh_opencode_go_quota, OPENCODE_GO_PROVID
 mod discovery;
 pub(crate) use discovery::{
     discover_catalog, discover_catalog_with_status, invalidate_catalog_cache, load_cached_catalog,
-    read_cached_catalog, save_catalog, spawn_catalog_refresh, DiscoveryStatusKind,
-    ProviderDiscoveryStatus,
+    load_cached_catalog_aged, read_cached_catalog, save_catalog, spawn_catalog_refresh,
+    DiscoveryStatusKind, ProviderDiscoveryStatus,
 };
 
 fn print_discovery_statuses(statuses: &[ProviderDiscoveryStatus]) {

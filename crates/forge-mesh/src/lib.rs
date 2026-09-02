@@ -1300,8 +1300,17 @@ impl HeuristicRouter {
         .collect()
     }
 
-    /// [`auto_active`](Self::auto_active); otherwise the configured `[mesh.models]` candidates
-    /// (the manual/override path, and the offline/no-catalog default).
+    /// The models a config file explicitly pinned for `tier` under `[mesh.models]`, in written
+    /// order. Shipped seed entries do not count (`Config::explicit_candidates_for`).
+    fn explicit_for_tier(&self, tier: TaskTier) -> Vec<String> {
+        self.config.explicit_candidates_for(tier)
+    }
+
+    /// The auto-discovered ranking when [`auto_active`](Self::auto_active), otherwise the
+    /// configured `[mesh.models]` candidates (the offline/no-catalog default). An explicitly
+    /// file-configured tier leads either list: it is the most specific instruction short of
+    /// `--model`, so it must win over auto-discovery — but it stays in front of the ranking
+    /// rather than replacing it, so an unusable pin falls through instead of stranding the tier.
     fn candidates_for_tier(
         &self,
         tier: TaskTier,
@@ -1336,7 +1345,15 @@ impl HeuristicRouter {
         } else {
             self.config.candidates_for(tier)
         };
-        self.apply_repo_boosts(candidates)
+        let explicit = self.explicit_for_tier(tier);
+        let mut candidates = self.apply_repo_boosts(candidates);
+        if !explicit.is_empty() {
+            candidates.retain(|m| !explicit.contains(m));
+            let mut ordered = explicit;
+            ordered.append(&mut candidates);
+            return ordered;
+        }
+        candidates
     }
 
     /// Stable-reorder `candidates` by repo-learned boost, highest first. A model with no recorded
@@ -1594,17 +1611,15 @@ impl HeuristicRouter {
             .filter(|model| forge_config::provider_of(model) == provider)
             .map(|model| burn_weight(model))
             .max_by(f64::total_cmp);
-        let no_lower_sibling = max_catalog.is_some_and(|max| min_usable >= max && min_usable > 1.0);
-        let (mut kept, mut held) = (Vec::new(), Vec::new());
-        for model in mine {
-            if !no_lower_sibling && burn_weight(model) <= min_usable {
-                kept.push(model.clone());
-            } else {
-                held.push(model.clone());
-            }
-        }
+        // Every subscription window Forge paces is a SHARED pool (ChatGPT, Claude, OpenCode Go
+        // dollars): the cheapest sibling still drains it. Keeping one routable sibling let the
+        // six equal-weight OpenCode Go complex models stay routable at 67% weekly use and grok-4.6
+        // took 61 calls in 13 minutes (2026-09-02). Over pace now holds the whole provider; the
+        // failover loop may still reach it as a named, single-hop last resort.
+        let _ = (min_usable, max_catalog);
+        let kept: Vec<String> = Vec::new();
+        let mut held: Vec<String> = mine.into_iter().cloned().collect();
         // Ranking order is an implementation detail; a reported hold reads the same every run.
-        kept.sort();
         held.sort();
         (kept, held)
     }
@@ -1784,6 +1799,19 @@ impl HeuristicRouter {
         // handled lazily downstream instead: forge-core skips a provider's *remaining* chain
         // entries only after one of its models actually returns a rate-limit error, so rank order
         // is preserved for every other failure mode.
+        //
+        // Last word: a tier the user explicitly pinned in a config file leads, in the order
+        // written. Every filter above still applies, so an unusable pin simply isn't here and the
+        // ranked list keeps the tier routable.
+        let explicit = self.explicit_for_tier(tier);
+        if !explicit.is_empty() {
+            usable.sort_by_key(|m| {
+                explicit
+                    .iter()
+                    .position(|e| e == m)
+                    .unwrap_or(explicit.len())
+            });
+        }
         usable
     }
 
@@ -2442,7 +2470,24 @@ impl HeuristicRouter {
             self.build_chain(tier, health, hints, quota, effort, min_context, has_images);
         match chain.first().cloned() {
             Some(model) => {
-                if routed_usable.contains(&model) {
+                let explicit = self.explicit_for_tier(tier);
+                if !explicit.is_empty() && !explicit.contains(&model) {
+                    // The user asked for this model by name; say why it wasn't used instead of
+                    // quietly substituting the auto-discovered pick.
+                    let configured = &explicit[0];
+                    let reason = self.unusable_reason(configured, health);
+                    why.push_str(&format!(
+                        " — configured [mesh.models].{} {configured} skipped ({reason}), \
+                         fell through to auto-discovery",
+                        tier.as_str()
+                    ));
+                }
+                if !explicit.is_empty() && explicit.contains(&model) {
+                    why.push_str(&format!(
+                        " — configured [mesh.models].{}: {model}",
+                        tier.as_str()
+                    ));
+                } else if routed_usable.contains(&model) {
                     // `routed_usable` (computed above) already applies the FULL routing filter
                     // (usable + credit-mode + context-fit) — reuse its count rather than
                     // `usable_count()`, which only checks `is_usable` and so overstates how many
@@ -3517,7 +3562,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn over_pace_routes_to_the_cheapest_subscription_sibling() {
+    async fn over_pace_holds_the_whole_subscription_provider() {
         let r = HeuristicRouter::new(Config::default())
             .with_availability(|_| true)
             .with_catalog(ModelCatalog::new(vec![
@@ -3549,19 +3594,25 @@ mod tests {
                 &ProjectContext::default(),
             )
             .await;
-        assert_eq!(decision.model, "codex-cli::gpt-5.6-luna");
-        assert!(!decision.fallbacks.iter().any(|m| m.contains("gpt-5.6-sol")));
+        // An over-pace pool is shared by every sibling, so pacing holds the whole provider and
+        // the pick lands on the non-subscription alternative.
+        assert_eq!(decision.model, "groq::llama-3.3-70b-versatile");
+        assert!(!decision
+            .fallbacks
+            .iter()
+            .any(|m| m.starts_with("codex-cli::")));
         // The rationale must NAME what pacing held, not merely report that a pace was exceeded:
         // an operator otherwise cannot tell a pacing downgrade from a coincidental ranking.
         assert!(
-            decision
-                .rationale
-                .contains("codex-cli::gpt-5.6-sol, codex-cli::gpt-5.6-terra held: weekly 37% > 21% allowed at 29% elapsed"),
+            decision.rationale.contains(
+                "codex-cli::gpt-5.6-luna, codex-cli::gpt-5.6-sol, codex-cli::gpt-5.6-terra held: \
+                 weekly 37% > 21% allowed at 29% elapsed"
+            ),
             "{}",
             decision.rationale
         );
         assert!(
-            decision.rationale.contains("codex-cli::gpt-5.6-luna kept"),
+            !decision.rationale.contains(" kept"),
             "{}",
             decision.rationale
         );
@@ -5008,6 +5059,124 @@ mod tests {
         assert_eq!(d.tier, TaskTier::Complex);
         assert_eq!(d.model, "anthropic::claude-opus-4-8", "{}", d.rationale);
         assert!(d.rationale.contains("auto-selected"), "{}", d.rationale);
+    }
+
+    /// `Config::default()` plus a file-explicit `[mesh.models]` pin for one tier.
+    fn explicit_tier_config(tier: &str, models: &[&str]) -> Config {
+        let mut c = Config::default();
+        c.mesh.models.insert(
+            tier.into(),
+            forge_config::OneOrMany::Many(models.iter().map(|m| (*m).to_string()).collect()),
+        );
+        c.mesh.explicit_models = vec![tier.into()];
+        c
+    }
+
+    fn complex_catalog() -> ModelCatalog {
+        ModelCatalog::new(vec![
+            "groq::llama-3.1-8b-instant".into(),
+            "anthropic::claude-opus-4-8".into(),
+        ])
+    }
+
+    const COMPLEX_PROMPT: &str = "design and architect a complex concurrency refactor across \
+                                  modules";
+
+    #[tokio::test]
+    async fn explicit_tier_config_overrides_auto_discovery() {
+        let r = HeuristicRouter::new(explicit_tier_config("complex", &["claude-cli::opus"]))
+            .with_availability(|_| true)
+            .with_catalog(complex_catalog());
+        let d = r
+            .route(
+                COMPLEX_PROMPT,
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(d.model, "claude-cli::opus", "{}", d.rationale);
+        assert!(
+            d.rationale.contains("configured [mesh.models].complex"),
+            "{}",
+            d.rationale
+        );
+    }
+
+    #[tokio::test]
+    async fn unconfigured_tiers_still_auto_route_under_an_explicit_sibling() {
+        let r = HeuristicRouter::new(explicit_tier_config("trivial", &["claude-cli::haiku"]))
+            .with_availability(|_| true)
+            .with_catalog(complex_catalog());
+        let d = r
+            .route(
+                COMPLEX_PROMPT,
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(d.tier, TaskTier::Complex);
+        assert_eq!(d.model, "anthropic::claude-opus-4-8", "{}", d.rationale);
+        assert!(d.rationale.contains("auto-selected"), "{}", d.rationale);
+    }
+
+    #[tokio::test]
+    async fn seeded_mesh_models_do_not_override_auto_discovery() {
+        // Same catalog, same tier — but the `[mesh.models]` entries are the shipped cold-start
+        // seed (no `explicit_models`), so auto-discovery still wins.
+        let r = HeuristicRouter::new(Config::default())
+            .with_availability(|_| true)
+            .with_catalog(complex_catalog());
+        let d = r
+            .route(
+                COMPLEX_PROMPT,
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(d.model, "anthropic::claude-opus-4-8", "{}", d.rationale);
+        assert!(
+            !d.rationale.contains("configured [mesh.models]"),
+            "{}",
+            d.rationale
+        );
+    }
+
+    #[tokio::test]
+    async fn unusable_explicit_tier_config_falls_through_with_a_warning() {
+        let r = HeuristicRouter::new(explicit_tier_config("complex", &["claude-cli::opus"]))
+            .with_availability(|m| m != "claude-cli::opus")
+            .with_catalog(complex_catalog());
+        let d = r
+            .route(
+                COMPLEX_PROMPT,
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(d.model, "anthropic::claude-opus-4-8", "{}", d.rationale);
+        assert!(
+            d.rationale
+                .contains("configured [mesh.models].complex claude-cli::opus skipped"),
+            "{}",
+            d.rationale
+        );
+        assert!(d.rationale.contains("no usable key"), "{}", d.rationale);
     }
 
     #[tokio::test]

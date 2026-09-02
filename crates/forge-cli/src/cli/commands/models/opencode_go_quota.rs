@@ -65,15 +65,19 @@ fn parse_usage(body: &str) -> Vec<forge_types::QuotaHint> {
         .filter_map(|(remote, window)| {
             let entry = usage.get(remote)?;
             // `status` is the provider's own verdict on whether the reading is meaningful; only
-            // "ok" is a usable observation. Anything else (an error marker, a future value we do
-            // not understand) leaves the window unknown.
-            if entry.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
-                return None;
-            }
+            // A window that is over pace reports a non-"ok" status ("warning", "exceeded", …).
+            // Those are exactly the observations pacing needs; dropping them froze the weekly
+            // row at its last "ok" value while the pool kept draining (2026-09-02). Only a
+            // window with no numeric percent at all is unobserved.
+            let status = entry
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             // The field is named `percent` and is documented as a percentage of the window's
             // dollar cap; clamp rather than trust, since the value is undocumented upstream.
             let percent = entry.get("percent").and_then(serde_json::Value::as_f64)?;
             let fraction = (percent / 100.0).clamp(0.0, 1.0);
+            let status = status_from_remote(status, fraction);
             let resets_at = entry
                 .get("resetsAt")
                 .and_then(serde_json::Value::as_str)
@@ -82,7 +86,7 @@ fn parse_usage(body: &str) -> Vec<forge_types::QuotaHint> {
             Some(forge_types::QuotaHint {
                 provider: OPENCODE_GO_PROVIDER.to_string(),
                 window: (*window).to_string(),
-                status: forge_config::quota_status::status_from_fraction(fraction),
+                status,
                 resets_at: Some(resets_at),
                 fraction_used: Some(fraction),
             })
@@ -91,6 +95,16 @@ fn parse_usage(body: &str) -> Vec<forge_types::QuotaHint> {
 }
 
 /// Whether a fresh enough reading already exists, in which case polling is skipped.
+/// The remote status word decides only the exhausted case; below that the observed fraction
+/// decides, so a "warning" at 67% and an "ok" at 67% read the same.
+fn status_from_remote(status: &str, fraction: f64) -> forge_types::QuotaStatus {
+    let s = status.to_ascii_lowercase();
+    if s.contains("exceed") || s.contains("exhaust") || s.contains("limit") || s == "error" {
+        return forge_types::QuotaStatus::Exhausted;
+    }
+    forge_config::quota_status::status_from_fraction(fraction)
+}
+
 fn is_fresh(store: &Store) -> bool {
     store
         .subscription_age_secs(OPENCODE_GO_PROVIDER)
@@ -195,13 +209,33 @@ mod tests {
     }
 
     #[test]
-    fn a_non_ok_status_is_unknown_rather_than_zero_percent() {
+    fn an_over_pace_window_is_still_an_observation() {
+        // The weekly pool at 67% reports "warning"; the old parser dropped it and the weekly
+        // row froze at its last "ok" value while grok-4.6 drained the pool.
         let hints = parse_usage(
-            r#"{"usage":{"rolling":{"status":"error","percent":0,"resetsAt":"2026-09-02T00:30:48Z"},
-                        "weekly":{"status":"ok","percent":0,"resetsAt":"2026-09-07T00:00:00Z"}}}"#,
+            r#"{"usage":{"rolling":{"status":"ok","percent":5,"resetsAt":"2026-09-02T00:30:48Z"},
+                        "weekly":{"status":"warning","percent":67.3,"resetsAt":"2026-09-07T00:00:00Z"},
+                        "monthly":{"status":"exceeded","percent":100,"resetsAt":"2026-10-01T00:00:00Z"}}}"#,
         );
-        assert_eq!(hints.len(), 1, "only the ok window is an observation");
-        assert_eq!(hints[0].window, "weekly");
+        assert_eq!(
+            hints.len(),
+            3,
+            "every window with a percent is an observation"
+        );
+        let weekly = hints.iter().find(|h| h.window == "weekly").unwrap();
+        assert!((weekly.fraction_used.unwrap() - 0.673).abs() < 1e-9);
+        assert_eq!(
+            weekly.status,
+            forge_types::QuotaStatus::Ok,
+            "67% is below the warning line"
+        );
+        let monthly = hints.iter().find(|h| h.window == "monthly").unwrap();
+        assert_eq!(monthly.status, forge_types::QuotaStatus::Exhausted);
+        // A window with an error status but no usable percent is still unobserved.
+        let hints = parse_usage(
+            r#"{"usage":{"rolling":{"status":"error","resetsAt":"2026-09-02T00:30:48Z"}}}"#,
+        );
+        assert!(hints.is_empty());
     }
 
     #[test]
