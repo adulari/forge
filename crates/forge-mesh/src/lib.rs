@@ -1116,6 +1116,10 @@ pub struct HeuristicRouter {
     /// stable reorder over the ranked candidate list — a model that has won duels in THIS repo
     /// floats above an otherwise-equally-ranked peer; empty = no-op (today's behaviour).
     repo_boosts: std::collections::HashMap<String, f64>,
+    /// Auto-discovery is on but no catalog exists yet, so routing runs on the built-in seed
+    /// candidates. Named in every rationale: a seed pick has no price, benchmark or burn weight
+    /// behind it and must never read as a normal catalog decision.
+    seed_only: bool,
 }
 
 fn default_model_available(model: &str) -> bool {
@@ -1169,6 +1173,7 @@ impl HeuristicRouter {
             catalog: None,
             context_windows: std::collections::HashMap::new(),
             repo_boosts: std::collections::HashMap::new(),
+            seed_only: false,
         }
     }
 
@@ -1185,6 +1190,13 @@ impl HeuristicRouter {
     /// Documented in docs/features/mesh-routing.md.
     pub fn with_catalog(mut self, catalog: ModelCatalog) -> Self {
         self.catalog = Some(catalog);
+        self
+    }
+
+    /// Mark that auto-discovery found NO catalog at all, so every decision comes from the
+    /// built-in seed candidates and says so.
+    pub fn with_seed_only_catalog(mut self) -> Self {
+        self.seed_only = true;
         self
     }
 
@@ -2269,6 +2281,38 @@ impl HeuristicRouter {
     /// `mesh.pin_failover`). Budget-override semantics are identical to a router-held pin.
     #[allow(clippy::too_many_arguments)]
     pub fn decide_with_pin(
+        &self,
+        pin: Option<&[String]>,
+        classified_tier: TaskTier,
+        classify_reason: String,
+        budget: BudgetState,
+        health: &ModelHealth,
+        hints: RouteHints,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        has_images: bool,
+    ) -> RoutingDecision {
+        let mut decision = self.decide_from_candidates(
+            pin,
+            classified_tier,
+            classify_reason,
+            budget,
+            health,
+            hints,
+            quota,
+            effort,
+            has_images,
+        );
+        if self.seed_only {
+            decision
+                .rationale
+                .push_str(" — no catalog yet: built-in seed");
+        }
+        decision
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decide_from_candidates(
         &self,
         pin: Option<&[String]>,
         classified_tier: TaskTier,
@@ -4907,6 +4951,35 @@ mod tests {
         assert_eq!(d.tier, TaskTier::Standard);
         assert_eq!(d.model, "openai::gpt-4o-mini");
         assert!(d.rationale.contains("cheapest of 2"), "{}", d.rationale);
+    }
+
+    #[tokio::test]
+    async fn seed_only_routing_says_there_is_no_catalog_yet() {
+        // No cached catalog at all: the pick comes from the configured seeds, which carry no
+        // price, benchmark or burn weight — the rationale must not read like a catalog decision.
+        let c = list_config(
+            "standard",
+            &["deepseek::deepseek-chat", "openai::gpt-4o-mini"],
+        );
+        let r = HeuristicRouter::new(c)
+            .with_availability(|_| true)
+            .with_seed_only_catalog();
+        let d = r
+            .route(
+                &"add a new endpoint that returns the list of users as json".repeat(2),
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert!(
+            d.rationale.contains("no catalog yet: built-in seed"),
+            "{}",
+            d.rationale
+        );
     }
 
     #[tokio::test]

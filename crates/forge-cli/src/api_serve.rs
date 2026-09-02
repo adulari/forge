@@ -89,7 +89,10 @@ pub(crate) async fn api_serve_cmd(
     // Auto-discovery catalog (same cache-first path as `forge run`), so the mesh routes across every
     // usable model rather than only the configured defaults. Skipped for the offline mock.
     let catalog = if !mock && config.mesh.auto_discover {
-        crate::cli::commands::models::load_cached_catalog()
+        // Same always-cache-first policy as `forge run`: route from whatever catalog exists and
+        // refresh it in the background rather than serving requests off the built-in seeds.
+        crate::cli::commands::models::spawn_catalog_refresh(&config);
+        crate::cli::commands::models::read_cached_catalog().map(|cached| cached.catalog)
     } else {
         None
     };

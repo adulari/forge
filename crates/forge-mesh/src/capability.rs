@@ -240,6 +240,19 @@ pub(crate) fn bare_model(id: &str) -> &str {
 /// that specific substitution.
 /// Documented in docs/features/mesh-routing.md; value asserted in sync by `doc_sync::mesh_routing_doc_matches_live_constants`.
 pub(crate) fn known_burn_weight(id: &str) -> Option<f64> {
+    // A bare `provider::` alias ("whatever the CLI's own default model is") names no family, so it
+    // used to fall through to the neutral 1.0 — the LIGHTEST possible weight. Every turn routed to
+    // `claude-cli::` / `codex-cli::` therefore escaped subscription pacing entirely (189 such turns
+    // in the store on 2026-09-02). The CLIs don't cheaply report which model their default resolves
+    // to, so charge the provider's flagship instead: over- rather than under-counting the burn is
+    // the only safe direction for an unknown model on a shared plan.
+    if bare_model(id).is_empty() {
+        return match crate::catalog::provider_of(id) {
+            "claude-cli" => known_burn_weight("claude-cli::opus"),
+            "codex-cli" => known_burn_weight("codex-cli::gpt-5.6-sol"),
+            _ => None,
+        };
+    }
     let toks = crate::bench::tokens(bare_model(id));
     let has = |w: &str| toks.iter().any(|t| t == w);
     // GPT-5.6 family: the sub-name (sol/terra/luna) is the family identifier.
@@ -729,6 +742,25 @@ mod tests {
             5.0,
             "opus regression guard: still 5.0"
         );
+    }
+
+    #[test]
+    fn bare_bridge_aliases_burn_like_their_provider_flagship() {
+        // `claude-cli::` means "the CLI's own default model" — unknown, so it used to score the
+        // neutral 1.0 and slip past subscription pacing entirely. It must cost at least as much as
+        // the provider's flagship.
+        let no_overrides = HashMap::new();
+        assert_eq!(
+            subscription_burn_weight("claude-cli::", &no_overrides),
+            subscription_burn_weight("claude-cli::opus", &no_overrides)
+        );
+        assert_eq!(
+            subscription_burn_weight("codex-cli::", &no_overrides),
+            subscription_burn_weight("codex-cli::gpt-5.6-sol", &no_overrides)
+        );
+        assert!(subscription_burn_weight("claude-cli::", &no_overrides) > 1.0);
+        // An unknown provider's bare alias stays neutral rather than guessing a pool cost.
+        assert_eq!(subscription_burn_weight("agy-cli::", &no_overrides), 1.0);
     }
 
     #[test]

@@ -50,7 +50,11 @@ struct ModelHealth {
 pub(super) async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
     let store = state.store.clone();
     match tokio::task::spawn_blocking(move || {
-        let Some(catalog) = crate::cli::commands::models::load_cached_catalog() else {
+        // Any-age: the control surface shows what routing actually uses, and routing now always
+        // uses the cached catalog (refreshed in the background) rather than blocking on discovery.
+        let Some(catalog) =
+            crate::cli::commands::models::read_cached_catalog().map(|cached| cached.catalog)
+        else {
             return ModelsResponse {
                 catalog: "unavailable",
                 providers: Vec::new(),

@@ -95,7 +95,8 @@ pub(crate) use opencode_go_quota::{refresh_opencode_go_quota, OPENCODE_GO_PROVID
 mod discovery;
 pub(crate) use discovery::{
     discover_catalog, discover_catalog_with_status, invalidate_catalog_cache, load_cached_catalog,
-    save_catalog, DiscoveryStatusKind, ProviderDiscoveryStatus,
+    read_cached_catalog, save_catalog, spawn_catalog_refresh, DiscoveryStatusKind,
+    ProviderDiscoveryStatus,
 };
 
 fn print_discovery_statuses(statuses: &[ProviderDiscoveryStatus]) {
@@ -157,6 +158,8 @@ pub(crate) fn build_provider_and_router(
         .with_repo_boosts(repo_boosts);
     if let Some(cat) = catalog {
         heuristic = heuristic.with_catalog(cat);
+    } else if !mock && config.mesh.auto_discover {
+        heuristic = heuristic.with_seed_only_catalog();
     }
     let router: Arc<dyn Router> = if matches!(
         config.mesh.classifier,
