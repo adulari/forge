@@ -200,17 +200,28 @@ pub(crate) fn mesh_overview(
             println!("      {line}");
         }
     }
+    // A held model can still rank at the top of this table, so mark the hold per MODEL: the
+    // provider line above only names the hold, and failover now treats it as a last resort.
+    let held: std::collections::HashSet<&str> = holds
+        .iter()
+        .flat_map(|hold| hold.held.iter().map(String::as_str))
+        .collect();
     println!("\nper-tier ranking (top 5):");
     for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
         let (_, rows) = cat.ranked_rows(tier, &pricing, false, 0, quota, None);
         println!("  {}:", tier.as_str());
         for r in rows.iter().take(5) {
             println!(
-                "    {:<34} score {:>6.2}  {}{}",
+                "    {:<34} score {:>6.2}  {}{}{}",
                 r.model,
                 r.final_score,
                 cost_tag(r.cost_class),
                 quota_suffix(&r.model),
+                if held.contains(r.model.as_str()) {
+                    " · held (pacing): last resort only"
+                } else {
+                    ""
+                }
             );
         }
     }
@@ -292,6 +303,9 @@ pub(crate) fn mesh_overview_json(
                     "final_score": row.final_score,
                     "cost_class": row.cost_class,
                     "subscription": row.subscription,
+                    "pacing_held": holds
+                        .iter()
+                        .any(|hold| hold.held.contains(&row.model)),
                     "frontier": row.frontier,
                     "weekly_quota_usd": forge_mesh::opencode_go_weekly_quota(&row.model),
                     "quota_multiplier": forge_mesh::opencode_go_quota_multiplier(&row.model),

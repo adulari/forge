@@ -1001,6 +1001,20 @@ pub trait Router: Send + Sync {
         ]
     }
 
+    /// The models in `models` that subscription pacing currently HOLDS for `tier`: over pace on
+    /// the window they are judged by, so routing keeps only the provider's cheapest sibling among
+    /// them. A failover hop consults this to apply the SAME verdict the primary pick applied —
+    /// without it the chain walks strict rank order straight into an over-pace subscription.
+    /// Default empty: a router with no pacing model holds nothing.
+    fn pacing_held(
+        &self,
+        _tier: TaskTier,
+        _models: &[String],
+        _quota: &SubscriptionQuota,
+    ) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Ordered trivial-tier candidate shortlist (health applied by the caller). Default empty so
     /// non-classifying routers are unaffected. Used to route cheap side-calls (classify, compact)
     /// with real failover instead of a single fixed model.
@@ -1604,6 +1618,27 @@ impl HeuristicRouter {
                     kept,
                 })
             })
+            .collect()
+    }
+
+    /// The subset of `models` this provider's pacing verdict holds, judged against the routed
+    /// tier's full candidate list so "the cheapest sibling" means the same thing it does for the
+    /// primary pick (a chain carrying only an expensive sibling must still read as held).
+    pub fn pacing_held_among(
+        &self,
+        tier: TaskTier,
+        models: &[String],
+        quota: &SubscriptionQuota,
+    ) -> Vec<String> {
+        let mut catalog = self.candidates_for_tier(tier, RouteHints::default(), quota, None);
+        for model in models {
+            if !catalog.contains(model) {
+                catalog.push(model.clone());
+            }
+        }
+        Self::paced_providers(models, quota)
+            .into_iter()
+            .flat_map(|provider| self.pacing_partition(&provider, models, &catalog).1)
             .collect()
     }
 
@@ -2467,6 +2502,15 @@ impl HeuristicRouter {
 impl Router for HeuristicRouter {
     fn pin(&self) -> Option<&[String]> {
         self.pin.as_deref()
+    }
+
+    fn pacing_held(
+        &self,
+        tier: TaskTier,
+        models: &[String],
+        quota: &SubscriptionQuota,
+    ) -> Vec<String> {
+        self.pacing_held_among(tier, models, quota)
     }
 
     async fn route(
@@ -3477,6 +3521,47 @@ mod tests {
             "{}",
             decision.rationale
         );
+    }
+
+    /// The failover chain must be judged by the SAME pacing verdict as the primary pick: the
+    /// expensive siblings of an over-pace subscription read as held even when the chain carries
+    /// nothing else from that provider.
+    #[test]
+    fn pacing_held_among_reports_the_chain_entries_the_verdict_holds() {
+        let r = HeuristicRouter::new(Config::default())
+            .with_availability(|_| true)
+            .with_catalog(ModelCatalog::new(vec![
+                "codex-cli::gpt-5.6-sol".into(),
+                "codex-cli::gpt-5.6-terra".into(),
+                "codex-cli::gpt-5.6-luna".into(),
+                "groq::llama-3.3-70b-versatile".into(),
+            ]));
+        let over_pace =
+            SubscriptionQuota::default().with_pacing(std::collections::HashMap::from([(
+                "codex-cli".to_string(),
+                forge_types::SubscriptionPacing {
+                    window: "weekly".to_string(),
+                    fraction_used: 0.37,
+                    allowed_fraction: 0.21,
+                    elapsed_secs: 2 * 24 * 60 * 60,
+                    total_secs: 7 * 24 * 60 * 60,
+                    resets_at: Some(1_000_000),
+                    used_nominal_fallback: false,
+                },
+            )]));
+        let chain = vec![
+            "codex-cli::gpt-5.6-sol".to_string(),
+            "groq::llama-3.3-70b-versatile".to_string(),
+        ];
+        assert_eq!(
+            r.pacing_held_among(TaskTier::Complex, &chain, &over_pace),
+            vec!["codex-cli::gpt-5.6-sol".to_string()],
+            "an expensive sibling alone in the chain must still read as held"
+        );
+        // (c) No pacing verdict — nothing is held and rank order is untouched.
+        assert!(r
+            .pacing_held_among(TaskTier::Complex, &chain, &SubscriptionQuota::default())
+            .is_empty());
     }
 
     /// A realistic mixed catalog mirroring a user with claude+codex CLIs, local ollama, and

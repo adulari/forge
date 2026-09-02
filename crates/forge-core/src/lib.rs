@@ -10605,6 +10605,184 @@ mod tests {
         );
     }
 
+    /// A [`FixedRouter`] whose subscription-pacing verdict HOLDS `held` — the state a live
+    /// over-pace ChatGPT/OpenCode Go plan puts the mesh in.
+    struct HeldRouter {
+        model: String,
+        fallbacks: Vec<String>,
+        held: Vec<String>,
+    }
+    #[async_trait::async_trait]
+    impl Router for HeldRouter {
+        async fn route(
+            &self,
+            _prompt: &str,
+            _has_images: bool,
+            _budget: BudgetState,
+            _health: &forge_types::ModelHealth,
+            _quota: &forge_types::SubscriptionQuota,
+            _effort: Option<forge_types::EffortLevel>,
+            _project: &forge_types::ProjectContext,
+        ) -> forge_mesh::RoutingDecision {
+            forge_mesh::RoutingDecision {
+                tier: forge_types::TaskTier::Complex,
+                model: self.model.clone(),
+                rationale: "test".into(),
+                fallbacks: self.fallbacks.clone(),
+                pinned: false,
+                unroutable: false,
+            }
+        }
+        fn pacing_held(
+            &self,
+            _tier: forge_types::TaskTier,
+            models: &[String],
+            _quota: &forge_types::SubscriptionQuota,
+        ) -> Vec<String> {
+            models
+                .iter()
+                .filter(|m| self.held.contains(m))
+                .cloned()
+                .collect()
+        }
+    }
+
+    /// Answers with the model id, except for `rate_limited` models which always 429.
+    struct EchoUnlessRateLimited {
+        rate_limited: std::collections::HashSet<String>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for EchoUnlessRateLimited {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            if self.rate_limited.contains(model) {
+                return Err(forge_provider::ProviderError::RateLimited {
+                    message: "429 rate limited".into(),
+                    retry_after: None,
+                });
+            }
+            on_event(StreamEvent::Text(model.into()));
+            Ok(forge_provider::ModelResponse {
+                content: model.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    const HELD_SUB: &str = "codex-oauth::gpt-5.6-sol";
+    /// Stand-in for the rate-limited primary and the free alternative. Both providers are KEYLESS
+    /// (`ollama`/`agy-cli`/`codex-oauth` own their auth), so the routed pick clears the
+    /// no-usable-model key gate: under `cargo test` `forge-config` carries `test-secrets`, whose
+    /// in-memory store holds no key for a keyed provider like `nvidia`/`gemini`. They are on three
+    /// DIFFERENT providers because failover skips the whole provider that just failed. The pacing
+    /// verdict under test comes from [`HeldRouter`], not from the provider identity.
+    const PRIMARY: &str = "ollama::kimi-k3";
+    const FREE_ALT: &str = "agy-cli::gemini-flash";
+
+    fn keyless_precondition() {
+        for m in [PRIMARY, FREE_ALT, HELD_SUB] {
+            assert!(
+                forge_config::has_api_key(forge_config::provider_of(m)),
+                "test precondition: '{m}' must be keyless so the key gate never fires"
+            );
+        }
+    }
+
+    /// (a) Failover must apply the SAME pacing verdict as the primary pick: an over-pace
+    /// subscription is skipped while any non-held model remains. Two unattended sessions failed
+    /// over onto a held ChatGPT plan and burned ~6M input tokens each (2026-09-02).
+    #[tokio::test]
+    async fn failover_skips_a_pacing_held_model_while_a_non_held_one_remains() {
+        keyless_precondition();
+        let provider = Arc::new(EchoUnlessRateLimited {
+            rate_limited: [PRIMARY.to_string()].into_iter().collect(),
+        });
+        let router = Arc::new(HeldRouter {
+            model: PRIMARY.into(),
+            fallbacks: vec![HELD_SUB.into(), FREE_ALT.into()],
+            held: vec![HELD_SUB.into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        let answer = session.run_turn("build the thing").await.unwrap();
+        assert_eq!(
+            answer, FREE_ALT,
+            "a held subscription must not be reached while a non-held model remains"
+        );
+    }
+
+    /// (b) …but a hold is not a refusal to work: with everything else exhausted the held model
+    /// still runs, and the rationale says the hold was overridden.
+    #[tokio::test]
+    async fn an_exhausted_chain_reaches_the_held_model_and_says_the_hold_was_overridden() {
+        keyless_precondition();
+        let provider = Arc::new(EchoUnlessRateLimited {
+            rate_limited: [PRIMARY.to_string()].into_iter().collect(),
+        });
+        let router = Arc::new(HeldRouter {
+            model: PRIMARY.into(),
+            fallbacks: vec![HELD_SUB.into()],
+            held: vec![HELD_SUB.into()],
+        });
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let presenter = CapturePresenter::default();
+        let events = Arc::clone(&presenter.events);
+        let mut config = Config::default();
+        config.mesh.rate_limit_wait_secs = 0;
+        let mut session = Session::start(
+            store,
+            provider,
+            router,
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(presenter),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+        let answer = session.run_turn("build the thing").await.unwrap();
+        assert_eq!(answer, HELD_SUB, "a hold is a last resort, not a dead end");
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Routing { model, rationale, .. }
+                    if model == HELD_SUB
+                        && rationale.contains("last resort: pacing hold overridden")
+            )),
+            "the override must be visible to the operator: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Warning(w)
+                    if w.contains("subscription pacing: skipped") && w.contains(HELD_SUB)
+            )),
+            "the skipped held models must be logged once: {events:?}"
+        );
+    }
+
+    /// (c) With no pacing verdict the chain keeps strict rank order.
+    #[tokio::test]
+    async fn without_a_pacing_hold_failover_keeps_rank_order() {
+        keyless_precondition();
+        let provider = Arc::new(EchoUnlessRateLimited {
+            rate_limited: [PRIMARY.to_string()].into_iter().collect(),
+        });
+        let router = Arc::new(HeldRouter {
+            model: PRIMARY.into(),
+            fallbacks: vec![HELD_SUB.into(), FREE_ALT.into()],
+            held: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        assert_eq!(session.run_turn("build the thing").await.unwrap(), HELD_SUB);
+    }
+
     /// Rate-limits the first `fail_first` calls with a tiny `retry_after`, then answers — to prove
     /// the in-turn wait-for-reset retries an explicitly pinned model instead of degrading to a fallback.
     struct RateLimitThenOkProvider {

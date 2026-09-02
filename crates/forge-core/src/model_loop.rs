@@ -27,6 +27,22 @@ impl Session {
         // Failover chain: only meaningful for the primary turn (decision is Some). The autofix
         // path passes None, so `chain` is immediately exhausted and failover never fires.
         let fallbacks: Vec<String> = decision.map(|d| d.fallbacks.clone()).unwrap_or_default();
+        // The pacing verdict the primary pick was made under, applied to the chain as well: a
+        // failover hop must not walk rank order into a subscription the pacing engine is holding
+        // back (two unattended sessions failed over onto an over-pace ChatGPT plan and burned
+        // ~6M input tokens each, 2026-09-02). Held models stay in the chain but are deferred to
+        // last resort, so a turn still completes when nothing else is left.
+        let paced_held: Vec<String> = match decision.filter(|_| failover_enabled) {
+            Some(d) => {
+                let mut scope = vec![active_model.clone()];
+                scope.extend(fallbacks.iter().cloned());
+                let quota =
+                    crate::readiness::ProviderReadiness::snapshot(&self.config, &self.store).quota;
+                self.router.pacing_held(d.tier, &scope, &quota)
+            }
+            None => Vec::new(),
+        };
+        let mut paced_held_warned = false;
         let mut chain = fallbacks.into_iter();
         let explicit_pin = self.pinned_model.is_some() || decision.is_some_and(|d| d.pinned);
         let mut last_resort_used = false;
@@ -248,6 +264,8 @@ impl Session {
                 failover_enabled,
                 default_cooldown,
                 &mut chain,
+                &paced_held,
+                &mut paced_held_warned,
                 &mut last_resort_used,
                 &mut compact_retries,
                 &mut transient_retries,
