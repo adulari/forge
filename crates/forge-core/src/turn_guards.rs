@@ -80,6 +80,80 @@ impl Session {
         )
     }
 
+    /// One stronger push-back for a bridge that answered with prose while tracked tasks stayed
+    /// open: it ran no tool and closed no task, so accepting the reply as an attempt (and then
+    /// giving up on the nudge budget) throws the run away. Forbids another restatement and names
+    /// the task the next tool call must advance.
+    pub(crate) fn escalate_bridge_stall(&mut self, unfinished: &[String]) {
+        self.presenter.emit(PresenterEvent::Warning(format!(
+            "bridge replied without calling any tool while {} task(s) are open — demanding the \
+             next concrete action (1/1)",
+            unfinished.len()
+        )));
+        let nudge = format!(
+            "You replied with prose only: you called NO tool and closed NO task, so nothing \
+             changed. Do NOT restate, summarize, re-review or re-justify your previous answer — a \
+             self-review is not work. Your next message MUST start with a tool call that advances \
+             this exact task:\n\n  {first}\n\nRead or edit the specific files it needs, or run the \
+             command it needs, and then mark it Done via update_tasks. These tasks are still \
+             open:\n- {all}",
+            first = unfinished.first().map(String::as_str).unwrap_or(""),
+            all = unfinished.join("\n- ")
+        );
+        let seq = self.next_seq();
+        let _ = self
+            .store
+            .add_message(&self.id, seq, Role::System, &nudge, None);
+        self.transcript.push(Message::system(&nudge));
+    }
+
+    /// Stop a bridge turn that yielded with tracked tasks open. The turn is always recorded as
+    /// incomplete; an ATTENDED session pauses with the resume prompt, while an UNATTENDED one has
+    /// nobody to type `continue` and gets back the ERROR text to fail the turn with.
+    pub(crate) fn halt_for_unfinished_tasks(
+        &mut self,
+        unfinished: Vec<String>,
+        made_progress: bool,
+        unattended: bool,
+    ) -> Option<String> {
+        let why = if made_progress {
+            "reached the continue limit"
+        } else {
+            "the last attempt made no progress (no task completed, no tool ran)"
+        };
+        self.turn_unfinished_tasks = unfinished;
+        let open = self.turn_unfinished_tasks.clone();
+        if unattended {
+            return Some(self.abort_for_unfinished_tasks(&open, why));
+        }
+        self.presenter.emit(PresenterEvent::Warning(format!(
+            "bridge stopped with {} task(s) still unfinished — {why}. Send `continue` to resume.",
+            open.len()
+        )));
+        None
+    }
+
+    /// End an unattended turn that stopped with tracked tasks still unfinished. Nobody is attached
+    /// to type `continue`, so the turn must fail loudly — naming the open work and whether the
+    /// worktree was actually touched — rather than exiting 0 as if the plan had been carried out.
+    fn abort_for_unfinished_tasks(&mut self, unfinished: &[String], why: &str) -> String {
+        let changed = working_tree_status(Some(self.workspace.root()))
+            .is_some_and(|status| !status.is_empty());
+        let files = if changed {
+            uncommitted_work_message(self.workspace.root())
+        } else {
+            "no files were changed".to_string()
+        };
+        let message = format!(
+            "ERROR: unattended turn ended with {} task(s) unfinished — {why}; open: {}; {files}",
+            unfinished.len(),
+            unfinished.join("; ")
+        );
+        self.presenter.emit(PresenterEvent::Error(message.clone()));
+        self.turn_hard_guard_abort = true;
+        message
+    }
+
     /// The pacing verdict the primary pick was made under, applied to the failover chain as well:
     /// a hop must not walk rank order into a subscription the pacing engine is holding back (two
     /// unattended sessions failed over onto an over-pace ChatGPT plan and burned ~6M input tokens

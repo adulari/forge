@@ -170,9 +170,16 @@ exact existing tag, then transactionally republishes the complete platform set.
 
 - `gh release view vX.Y.Z` shows a published (non-draft) latest release with 5 CLI archives +
   `checksums.txt`, the desktop bundles, `desktop-checksums.txt`, and `latest.json`.
-- The documented one-liner installs on a clean host:
+- Run `scripts/ci/verify-upgrade-path.sh vX.Y.Z` (needs `gh` auth; ~2 min) and paste its `PASS`
+  line into the release notes or the tracking issue. Against published assets in a throwaway HOME
+  it proves the three checks below, which were skipped for 2.13.7 until it existed:
+  - the documented CLI one-liner installs on a clean host and the result passes `forge doctor`:
+    `curl -fsSL https://raw.githubusercontent.com/Adulari/forge/main/install.sh | sh`;
+  - the previous release's `forge update` self-replaces to X.Y.Z with the binary from the
+    checksums.txt-listed archive and no half-replaced file left behind;
+  - `gh attestation verify` accepts the CLI archive with the checksums.txt digest as its subject.
+  Run the desktop one-liner by hand as well:
   `curl -fsSL https://raw.githubusercontent.com/Adulari/forge/main/install-desktop.sh | sh`.
-- A pre-X.Y.Z binary's `forge update` self-replaces to X.Y.Z.
 - `brew install Adulari/forge/forge` and `scoop install forge/forge` resolve X.Y.Z with
   non-placeholder hashes. Publish and verify AUR separately after its maintainer SSH key is set.
 - `cargo install forge-agent --version X.Y.Z` succeeds from a clean Cargo home after crates.io has

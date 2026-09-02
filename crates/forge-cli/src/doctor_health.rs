@@ -62,15 +62,23 @@ fn provider_routing_report(
                 .iter()
                 .find(|(name, _, _)| name == &provider)
                 .map(|(_, until, reason)| (*until, reason.as_str()));
-            let unreachable = reachability.iter().any(|check| {
-                check.label == format!("{provider} reachability") && check.status == Status::Fail
+            let reach = reachability
+                .iter()
+                .find(|check| check.label == format!("{provider} reachability"));
+            let rejected = reach.is_some_and(|check| {
+                check.status == Status::Fail
+                    && check
+                        .detail
+                        .starts_with(crate::doctor::AUTH_REJECTED_PREFIX)
             });
+            let unreachable = !rejected && reach.is_some_and(|check| check.status == Status::Fail);
             routing_check(
                 &provider,
                 excluded,
                 quota.status_for(&provider),
                 quota.observed_fraction_for(&provider),
                 unreachable,
+                rejected,
             )
         })
         .collect()
@@ -82,7 +90,20 @@ fn routing_check(
     quota: forge_types::QuotaStatus,
     fraction: Option<f64>,
     unreachable: bool,
+    rejected: bool,
 ) -> Check {
+    // A refused credential outranks every other verdict: nothing routes to this provider until the
+    // key is replaced, and saying "usable" here is what made an invalid key look healthy.
+    if rejected {
+        return check(
+            Status::Fail,
+            &format!("{provider} routing"),
+            "not usable — the provider rejected the stored credential",
+            Some(&format!(
+                "`forge auth {provider}` to replace the stored key"
+            )),
+        );
+    }
     if let Some((until, reason)) = excluded {
         check(
             Status::Warn,
@@ -405,6 +426,52 @@ mod tests {
         assert_eq!(row.status, Status::Warn);
         assert!(row.detail.contains("excluded"), "{}", row.detail);
         assert!(!row.detail.contains("usable"), "{}", row.detail);
+    }
+
+    #[test]
+    fn a_rejected_credential_makes_routing_not_usable() {
+        let reachability = vec![check(
+            Status::Fail,
+            "groq reachability",
+            crate::doctor::auth_rejected_detail("groq", 401),
+            None,
+        )];
+        let rows = provider_routing_report(
+            &reachability,
+            &[],
+            &forge_types::SubscriptionQuota::default(),
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.label == "groq routing")
+            .expect("a rejected provider still gets a routing verdict");
+        assert_eq!(row.status, Status::Fail);
+        assert!(row.detail.starts_with("not usable"), "{}", row.detail);
+        assert_eq!(
+            row.fix.as_deref(),
+            Some("`forge auth groq` to replace the stored key")
+        );
+    }
+
+    #[test]
+    fn a_timed_out_provider_keeps_the_unreachable_wording() {
+        let reachability = vec![check(
+            Status::Fail,
+            "groq reachability",
+            "discovery timed out (> 8s)",
+            None,
+        )];
+        let rows = provider_routing_report(
+            &reachability,
+            &[],
+            &forge_types::SubscriptionQuota::default(),
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.label == "groq routing")
+            .expect("routing verdict");
+        assert_eq!(row.status, Status::Warn);
+        assert!(row.detail.contains("unreachable"), "{}", row.detail);
     }
 
     #[test]

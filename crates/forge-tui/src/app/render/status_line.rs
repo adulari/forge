@@ -307,6 +307,14 @@ fn stop_notice(app: &App, compact: bool) -> Option<(&'static str, Color)> {
             WARNYEL,
         )),
         Some(forge_types::StopReason::BudgetExhausted) => Some(("✕ budget cap", ERRRED)),
+        Some(forge_types::StopReason::TasksUnfinished) => Some((
+            if compact {
+                "✕ tasks unfinished"
+            } else {
+                "✕ stopped with tasks unfinished"
+            },
+            ERRRED,
+        )),
         Some(forge_types::StopReason::NoOutput) => Some((
             if compact {
                 "✕ no output — turn failed"

@@ -92,6 +92,8 @@ jobs:
         run: bash scripts/ci/test-trim-runner-cache.sh
       - name: Test standing docs freshness guard
         run: bash scripts/ci/test-docs-freshness.sh
+      - name: Test release upgrade-path verifier helpers
+        run: bash scripts/ci/test-verify-upgrade-path.sh
       - name: Enforce standing docs freshness
         env:
           EVENT_NAME: ${{ github.event_name }}
