@@ -153,9 +153,13 @@ impl BenchmarkScores {
                 .filter(|t| t.chars().all(|c| c.is_ascii_digit()))
                 .map(String::as_str)
                 .collect();
-            let version_conflict = !want_nums.is_empty()
-                && !cand_nums.is_empty()
-                && !want_nums.iter().any(|n| cand_nums.contains(n));
+            // Compare version numbers POSITIONALLY. Membership ("does any wanted number
+            // appear anywhere in the candidate?") lets a shared MAJOR digit wave a different
+            // minor through: `muse-spark-1.3` tokenises to [1, 3] and "Muse Spark 1.2" to
+            // [1, 2], they share "1", and 1.3 silently inherited 1.2's measured score. A
+            // shorter candidate (`deepseek-v4-flash-0731` vs "DeepSeek V4 Flash") still
+            // matches — only a differing number at the same position is a conflict.
+            let version_conflict = want_nums.iter().zip(cand_nums.iter()).any(|(w, c)| w != c);
             if !family || shared < 2 || version_conflict {
                 continue;
             }
@@ -184,6 +188,15 @@ impl BenchmarkScores {
             // the family heuristic alone and sorted below every benched peer at high effort.
             // Opus 5 lists at Opus 4.8's price, so 4.8's measured score is the honest prior.
             ("claude-opus-5", "claude-opus-4-8"),
+            // Muse Spark 1.3 shipped 2026-09-02 and is free on OpenCode Zen. Artificial
+            // Analysis's site publishes it (Intelligence Index 62, above 1.2's 56.8) but the
+            // v2 data API feed carries no row for it yet, and the positional version guard
+            // above (correctly) refuses to fuzzy-match it onto 1.2. Inheriting 1.2's measured
+            // 56.8/72.2 is the conservative prior: same family, same vendor, lower published
+            // intelligence than 1.3's own site number.
+            ("muse-spark-1.3", "muse-spark-1.2"),
+            ("muse-spark-1.3-contributor", "muse-spark-1.2"),
+            ("muse-spark-1.3-contributor-free", "muse-spark-1.2"),
         ];
 
         let want = canon(&id_tokens(id));
@@ -291,6 +304,44 @@ fn overlap(want: &[String], have: &[String]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    fn muse_feed() -> BenchmarkScores {
+        let mut b = BenchmarkScores::new();
+        b.insert("Muse Spark 1.2 (xhigh)", 56.8, 72.2);
+        b.insert("Muse Spark 1.1 (xhigh)", 53.2, 71.3);
+        b
+    }
+
+    #[test]
+    fn a_shared_major_digit_does_not_license_a_cross_minor_match() {
+        let b = muse_feed();
+        assert!(
+            b.source_score_for("opencode::muse-spark-1.3-contributor-free")
+                .is_none(),
+            "1.3 must not inherit 1.2's measured row through the fuzzy fallback"
+        );
+    }
+
+    #[test]
+    fn muse_1_3_falls_back_to_the_reviewed_predecessor_score() {
+        let b = muse_feed();
+        let s = b
+            .score_for("opencode::muse-spark-1.3-contributor-free")
+            .expect("1.3 inherits 1.2 until Artificial Analysis publishes its row");
+        assert!((s.intelligence - 56.8).abs() < 1e-9);
+        assert!((s.coding - 72.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_shorter_candidate_number_run_still_matches() {
+        let mut b = BenchmarkScores::new();
+        b.insert("DeepSeek V4 Flash", 40.0, 50.0);
+        assert!(
+            b.source_score_for("nvidia::deepseek-ai/deepseek-v4-flash-0731")
+                .is_some(),
+            "a date suffix the feed does not carry must not read as a version conflict"
+        );
+    }
+
     use super::*;
 
     fn scores() -> BenchmarkScores {

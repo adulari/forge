@@ -77,10 +77,20 @@ fn parse_rows(body: &str) -> Vec<Row> {
             .or_else(|| e.get("model_name"))
             .and_then(Value::as_str);
         let Some(name) = name else { continue };
-        let Some(intel) = find_f64(e, "artificial_analysis_intelligence_index") else {
-            continue;
+        let intel = find_f64(e, "artificial_analysis_intelligence_index");
+        let coding = find_f64(e, "artificial_analysis_coding_index");
+        // A model AA has only partly evaluated (one index published, the other pending) is
+        // still a rated model — dropping it silently left a brand-new release scored by its
+        // predecessor's family entry. Whichever index exists stands in for the other.
+        let (intel, coding) = match (intel, coding) {
+            (Some(i), Some(c)) => (i, c),
+            (Some(i), None) => (i, i),
+            (None, Some(c)) => (c, c),
+            (None, None) => {
+                tracing::debug!(model = name, "benchmark feed row has no index; skipped");
+                continue;
+            }
         };
-        let coding = find_f64(e, "artificial_analysis_coding_index").unwrap_or(intel);
         raw.push((name.to_string(), intel, coding));
     }
     let max = raw
