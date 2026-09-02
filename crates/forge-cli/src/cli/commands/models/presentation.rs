@@ -539,9 +539,49 @@ pub(crate) fn mesh_explanation_json(
     .unwrap_or_else(|_| "{}".into())
 }
 
+/// How much of a listed catalog is actually callable right now.
+///
+/// The catalog always carries the configured tier candidates as cold-start seeds (discovery.rs),
+/// so `forge models` lists entries even on a virgin install with no credentials at all. Listing
+/// them without saying they are unreachable told a first-run user the setup was done, and the
+/// only correction came later as an unroutable turn.
+pub(crate) struct Reachability {
+    pub reachable: usize,
+    pub total: usize,
+}
+
+pub(crate) fn reachability(models: &[String], callable: impl Fn(&str) -> bool) -> Reachability {
+    Reachability {
+        reachable: models.iter().filter(|m| callable(m)).count(),
+        total: models.len(),
+    }
+}
+
+impl Reachability {
+    /// The line to print above the catalog when some or all of it cannot be called, naming the
+    /// exact next command. `None` when every listed model is callable.
+    pub(crate) fn warning(&self) -> Option<String> {
+        match (self.reachable, self.total) {
+            (_, 0) => None,
+            (0, _) => Some(format!(
+                "✗ none of these {} models is callable — no provider credentials are configured.\n  \
+                 They are cold-start seed entries, not models you can run yet.\n  \
+                 → run `forge setup` (or `forge auth <provider>`), then `forge models` again",
+                self.total
+            )),
+            (r, t) if r < t => Some(format!(
+                "⚠ {} of {t} listed models have no credentials (marked `no key` below) — \
+                 `forge auth <provider>` to enable them",
+                t - r
+            )),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{mesh_explanation_json, meter, pace_suffix, pacing_note, remaining};
+    use super::{mesh_explanation_json, meter, pace_suffix, pacing_note, reachability, remaining};
     use forge_mesh::ProviderQuotaView;
     use forge_types::SubscriptionPacing;
 
@@ -711,5 +751,37 @@ mod tests {
     fn pace_suffix_includes_warning_only_with_a_projection() {
         assert_eq!(pace_suffix(None, true), "");
         assert_eq!(pace_suffix(Some(0.93), true), " → 93% at reset ⚠");
+    }
+
+    #[test]
+    fn a_seed_only_catalog_warns_that_nothing_is_callable() {
+        let models = vec!["groq::llama-3.1-8b-instant".into(), "openai::gpt-4o".into()];
+        let warning = reachability(&models, |_| false)
+            .warning()
+            .expect("a keyless catalog must warn");
+        assert!(
+            warning.contains("none of these 2 models is callable"),
+            "{warning}"
+        );
+        assert!(warning.contains("forge setup"), "{warning}");
+    }
+
+    #[test]
+    fn a_partly_keyed_catalog_names_how_many_are_unusable() {
+        let models = vec!["groq::llama-3.1-8b-instant".into(), "openai::gpt-4o".into()];
+        let warning = reachability(&models, |m| m.starts_with("groq::"))
+            .warning()
+            .expect("a partly-keyed catalog must warn");
+        assert!(
+            warning.contains("1 of 2 listed models have no credentials"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn a_fully_keyed_catalog_is_quiet() {
+        let models = vec!["groq::llama-3.1-8b-instant".into()];
+        assert!(reachability(&models, |_| true).warning().is_none());
+        assert!(reachability(&[], |_| false).warning().is_none());
     }
 }
