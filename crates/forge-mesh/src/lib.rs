@@ -21,6 +21,7 @@ mod context;
 #[cfg(test)]
 mod doc_sync;
 pub mod explain;
+pub mod pacing_view;
 pub mod pricing;
 mod subscription_cost;
 pub mod vision;
@@ -34,7 +35,8 @@ pub use classification::{max_tier, RouteHints};
 #[cfg(test)]
 use context::COMPACTION_SUMMARY_PREFIX;
 pub use context::{RoutingContext, SessionAffinity};
-pub use explain::{CandidateRow, ProviderQuotaView, RoutingExplanation};
+pub use explain::{display_provider, CandidateRow, ProviderQuotaView, RoutingExplanation};
+pub use pacing_view::{pacing_hold_note, pacing_summary, PacingHold};
 
 /// Live budget context the router considers when choosing a tier. Carries daily, weekly, and
 /// monthly axes (FR-5); the stricter of all configured axes governs.
@@ -1501,15 +1503,15 @@ impl HeuristicRouter {
         candidates: &[String],
         quota: &SubscriptionQuota,
     ) {
-        // Same weight the ranking pass uses, including the price-derived ratio for subscription
-        // providers with no curated family entry — otherwise every OpenCode Go model weighs 1.0
-        // here and "keep only the cheapest sibling" degenerates into keeping all of them.
-        let price_weights = catalog::price_derived_burn_weights(candidates, &self.pricing);
-        let burn_weight = |model: &str| {
-            crate::capability::configured_burn_weight(model, &self.config.mesh.burn_weights)
-                .unwrap_or_else(|| price_weights.get(model).copied().unwrap_or(1.0))
-        };
-        let providers: std::collections::HashSet<String> = usable
+        for provider in Self::paced_providers(usable, quota) {
+            let (_, held) = self.pacing_partition(&provider, usable, candidates);
+            usable.retain(|model| !held.contains(model));
+        }
+    }
+
+    /// Subscription providers among `models` whose strictest window is currently over pace.
+    fn paced_providers(models: &[String], quota: &SubscriptionQuota) -> Vec<String> {
+        let mut providers: Vec<String> = models
             .iter()
             .map(String::as_str)
             .filter(|model| catalog::is_subscription(model))
@@ -1521,27 +1523,84 @@ impl HeuristicRouter {
             })
             .map(str::to_string)
             .collect();
-        for provider in providers {
-            let min_usable = usable
-                .iter()
-                .filter(|model| forge_config::provider_of(model) == provider)
-                .map(|model| burn_weight(model))
-                .min_by(f64::total_cmp);
-            let max_catalog = candidates
-                .iter()
-                .filter(|model| forge_config::provider_of(model) == provider)
-                .map(|model| burn_weight(model))
-                .max_by(f64::total_cmp);
-            let Some(min_usable) = min_usable else {
-                continue;
-            };
-            let no_lower_sibling =
-                max_catalog.is_some_and(|max| min_usable >= max && min_usable > 1.0);
-            usable.retain(|model| {
-                forge_config::provider_of(model) != provider
-                    || (!no_lower_sibling && burn_weight(model) <= min_usable)
-            });
+        providers.sort();
+        providers.dedup();
+        providers
+    }
+
+    /// Split one over-pace provider's models into the ones pacing keeps and the ones it holds.
+    ///
+    /// This is the single implementation of the "hold everything above the cheapest usable
+    /// sibling" rule: [`apply_subscription_pacing`](Self::apply_subscription_pacing) enforces it
+    /// and [`pacing_holds`](Self::pacing_holds) reports it, so an inspector can never describe a
+    /// hold the router did not actually apply.
+    fn pacing_partition(
+        &self,
+        provider: &str,
+        usable: &[String],
+        candidates: &[String],
+    ) -> (Vec<String>, Vec<String>) {
+        // Same weight the ranking pass uses, including the price-derived ratio for subscription
+        // providers with no curated family entry — otherwise every OpenCode Go model weighs 1.0
+        // here and "keep only the cheapest sibling" degenerates into keeping all of them.
+        let price_weights = catalog::price_derived_burn_weights(candidates, &self.pricing);
+        let burn_weight = |model: &str| {
+            crate::capability::configured_burn_weight(model, &self.config.mesh.burn_weights)
+                .unwrap_or_else(|| price_weights.get(model).copied().unwrap_or(1.0))
+        };
+        let mine: Vec<&String> = usable
+            .iter()
+            .filter(|model| forge_config::provider_of(model) == provider)
+            .collect();
+        let Some(min_usable) = mine
+            .iter()
+            .map(|model| burn_weight(model))
+            .min_by(f64::total_cmp)
+        else {
+            return (Vec::new(), Vec::new());
+        };
+        let max_catalog = candidates
+            .iter()
+            .filter(|model| forge_config::provider_of(model) == provider)
+            .map(|model| burn_weight(model))
+            .max_by(f64::total_cmp);
+        let no_lower_sibling = max_catalog.is_some_and(|max| min_usable >= max && min_usable > 1.0);
+        let (mut kept, mut held) = (Vec::new(), Vec::new());
+        for model in mine {
+            if !no_lower_sibling && burn_weight(model) <= min_usable {
+                kept.push(model.clone());
+            } else {
+                held.push(model.clone());
+            }
         }
+        // Ranking order is an implementation detail; a reported hold reads the same every run.
+        kept.sort();
+        held.sort();
+        (kept, held)
+    }
+
+    /// What subscription pacing is doing to `candidates` right now, per over-pace provider.
+    ///
+    /// `forge mesh` could show a subscription ranked below a free model with nothing saying the
+    /// mesh had held it back; this is the reportable form of that decision.
+    pub fn pacing_holds(
+        &self,
+        candidates: &[String],
+        quota: &SubscriptionQuota,
+    ) -> Vec<PacingHold> {
+        Self::paced_providers(candidates, quota)
+            .into_iter()
+            .filter_map(|provider| {
+                let pacing = quota.pacing_for(&provider)?.clone();
+                let (kept, held) = self.pacing_partition(&provider, candidates, candidates);
+                Some(PacingHold {
+                    provider,
+                    pacing,
+                    held,
+                    kept,
+                })
+            })
+            .collect()
     }
 
     /// Pick the cheapest *usable* model from `candidates` (L1). Ranking key:
@@ -2343,25 +2402,15 @@ impl HeuristicRouter {
                 if self.config.mesh.prefer_subscription && catalog::is_subscription(&model) {
                     why.push_str(" (paid subscription)");
                 }
-                if let Some(pacing) = quota
-                    .pacing_for(forge_config::provider_of(&model))
-                    .filter(|pacing| pacing.is_over_pace())
+                // Name what pacing actually withheld, for every over-pace provider — including
+                // one whose models were all held (the pick then came from elsewhere entirely,
+                // which the old pick-provider-only note could not explain at all).
+                for hold in self
+                    .pacing_holds(&self.candidates_for_tier(tier, hints, quota, effort), quota)
+                    .iter()
+                    .filter(|hold| !hold.held.is_empty())
                 {
-                    let from = self
-                        .candidates_for_tier(tier, hints, quota, effort)
-                        .into_iter()
-                        .find(|candidate| {
-                            forge_config::provider_of(candidate)
-                                == forge_config::provider_of(&model)
-                                && candidate != &model
-                        })
-                        .unwrap_or_else(|| model.clone());
-                    why.push_str(&format!(
-                        " — over pace: {:.0}% spent, {:.0}% allowed in {} -> downgraded {from} to {model}",
-                        pacing.fraction_used * 100.0,
-                        pacing.allowed_fraction * 100.0,
-                        pacing.window,
-                    ));
+                    why.push_str(&pacing_view::pacing_hold_note(hold));
                 }
                 if let Some(note) = self.cost_aware_sibling_note(
                     &model,
@@ -3307,9 +3356,20 @@ mod tests {
             .await;
         assert_eq!(decision.model, "codex-cli::gpt-5.6-luna");
         assert!(!decision.fallbacks.iter().any(|m| m.contains("gpt-5.6-sol")));
-        assert!(decision
-            .rationale
-            .contains("over pace: 37% spent, 21% allowed"));
+        // The rationale must NAME what pacing held, not merely report that a pace was exceeded:
+        // an operator otherwise cannot tell a pacing downgrade from a coincidental ranking.
+        assert!(
+            decision
+                .rationale
+                .contains("codex-cli::gpt-5.6-sol, codex-cli::gpt-5.6-terra held: weekly 37% > 21% allowed at 29% elapsed"),
+            "{}",
+            decision.rationale
+        );
+        assert!(
+            decision.rationale.contains("codex-cli::gpt-5.6-luna kept"),
+            "{}",
+            decision.rationale
+        );
     }
 
     /// A realistic mixed catalog mirroring a user with claude+codex CLIs, local ollama, and

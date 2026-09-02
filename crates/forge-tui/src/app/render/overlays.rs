@@ -7,9 +7,13 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
         return;
     }
     let area = f.area();
-    // Five summary rows, one table header, and every model row. The inspector grows only as far
-    // as its content needs, preventing a small spend report from becoming a tall empty panel.
-    let content_rows = 6u16.saturating_add(app.usage_overlay.by_model.len() as u16);
+    // Five summary rows, one pace row per paced subscription, one table header, and every model
+    // row. The inspector grows only as far as its content needs, preventing a small spend report
+    // from becoming a tall empty panel.
+    let pace_rows = app.usage_overlay.pace_notes.len() as u16;
+    let content_rows = 6u16
+        .saturating_add(pace_rows)
+        .saturating_add(app.usage_overlay.by_model.len() as u16);
     let inspector = surface::inspector_area(area, content_rows);
 
     let spinner = SPINNER[(app.usage_overlay.anim_tick as usize) % SPINNER.len()];
@@ -29,7 +33,7 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
     if inner.width < 20 || inner.height < 4 {
         return;
     }
-    let summary_h = inner.height.min(5);
+    let summary_h = inner.height.min(5 + pace_rows);
     let chunks = Layout::vertical([Constraint::Length(summary_h), Constraint::Min(0)]).split(inner);
 
     let o = &app.usage_overlay;
@@ -120,7 +124,7 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
         format_tok(o.session_out),
         o.session_usd,
     );
-    let summary_text = ratatui::text::Text::from(vec![
+    let mut summary_lines = vec![
         ratatui::text::Line::from(fmt_period("5h", cost_5h, in_5h, out_5h, None, &bridge_5h)),
         ratatui::text::Line::from(fmt_period(
             "Today",
@@ -140,8 +144,22 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
         )),
         ratatui::text::Line::from(month_str),
         ratatui::text::Line::from(session_str),
-    ]);
-    f.render_widget(Paragraph::new(summary_text), chunks[0]);
+    ];
+    // The mesh's pacing verdict per subscription, quoted verbatim: the percentages above say how
+    // much is used, this says whether routing is holding models back because of it.
+    for note in &o.pace_notes {
+        summary_lines.push(ratatui::text::Line::from(vec![
+            Span::raw(format!("{:<8}", "Pace")),
+            Span::styled(
+                format!("{}: {}", note.provider, note.note),
+                Style::default().fg(if note.over_pace { WARNYEL } else { DIM }),
+            ),
+        ]));
+    }
+    f.render_widget(
+        Paragraph::new(ratatui::text::Text::from(summary_lines)),
+        chunks[0],
+    );
 
     use ratatui::style::Modifier;
     use ratatui::widgets::{Cell, Row, Table};
@@ -378,6 +396,12 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             ),
             Style::default().fg(if q.exhaustion_warning { WARNYEL } else { DIM }),
         ));
+        if !q.pace_note.is_empty() {
+            spans.push(Span::styled(
+                format!(" · {}", q.pace_note),
+                Style::default().fg(if q.over_pace { WARNYEL } else { DIM }),
+            ));
+        }
         top.push(Line::from(spans));
     }
     if !o.conserve_line.is_empty() {

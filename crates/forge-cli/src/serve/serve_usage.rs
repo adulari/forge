@@ -45,6 +45,38 @@ struct UsageQuota {
     resets_at: Option<i64>,
     fraction: Option<f64>,
     updated_at: i64,
+    /// The router's pacing verdict, present only on the window pacing is currently judged by.
+    pacing: Option<UsagePacing>,
+}
+
+/// [`forge_types::SubscriptionPacing`] as the phone renders it — the mesh's own numbers and
+/// summary line, never a client-side re-derivation from `fraction` and `resets_at`.
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsagePacing {
+    fraction_used: f64,
+    allowed_fraction: f64,
+    elapsed_fraction: f64,
+    over_pace: bool,
+    /// True when no reset time was known and timing began at the oldest observation; the
+    /// summary then reads "pace unknown" and `over_pace` must not be acted on.
+    used_nominal_fallback: bool,
+    summary: String,
+}
+
+fn usage_pacing(
+    pacing: Option<&forge_types::SubscriptionPacing>,
+    window_kind: &str,
+) -> Option<UsagePacing> {
+    let pacing = pacing.filter(|pacing| pacing.window == window_kind)?;
+    Some(UsagePacing {
+        fraction_used: pacing.fraction_used,
+        allowed_fraction: pacing.allowed_fraction,
+        elapsed_fraction: pacing.elapsed_fraction(),
+        over_pace: pacing.is_over_pace(),
+        used_nominal_fallback: pacing.used_nominal_fallback,
+        summary: forge_mesh::pacing_summary(Some(pacing), None),
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -139,11 +171,13 @@ pub(super) async fn usage_page(
             }
             None => None,
         };
+        let pacing = store.subscription_pacing().unwrap_or_default();
         let quota = store
             .subscription_windows()?
             .into_iter()
             .map(|quota| UsageQuota {
                 kind: provider_kind(&quota.provider).into(),
+                pacing: usage_pacing(pacing.get(&quota.provider), &quota.window_kind),
                 provider: quota.provider,
                 window_kind: quota.window_kind,
                 status: quota.status,
@@ -178,7 +212,43 @@ pub(super) async fn usage_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_kind, usage_providers, UsageTotals};
+    use super::{provider_kind, usage_pacing, usage_providers, UsageTotals};
+
+    fn pacing(window: &str, resets_at: Option<i64>) -> forge_types::SubscriptionPacing {
+        forge_types::SubscriptionPacing {
+            window: window.into(),
+            fraction_used: 0.32,
+            allowed_fraction: 0.22,
+            elapsed_secs: 172_800,
+            total_secs: 604_800,
+            resets_at,
+            used_nominal_fallback: resets_at.is_none(),
+        }
+    }
+
+    #[test]
+    fn the_binding_window_carries_the_routers_pacing_verdict_and_the_others_do_not() {
+        let weekly = pacing("weekly", Some(1_000_000));
+        let row = usage_pacing(Some(&weekly), "weekly").expect("the paced window is annotated");
+        assert!(row.over_pace);
+        assert!(!row.used_nominal_fallback);
+        assert_eq!(row.summary, "weekly 32% used · 22% allowed · OVER PACE");
+        assert!(usage_pacing(Some(&weekly), "five_hour").is_none());
+        assert!(usage_pacing(None, "weekly").is_none());
+    }
+
+    #[test]
+    fn a_window_without_a_reset_time_is_reported_as_pace_unknown() {
+        let guessed = pacing("weekly", None);
+        let row = usage_pacing(Some(&guessed), "weekly").unwrap();
+        assert!(row.used_nominal_fallback);
+        assert!(row.summary.contains("pace unknown"), "{}", row.summary);
+        assert!(
+            row.summary.contains("used_nominal_fallback"),
+            "{}",
+            row.summary
+        );
+    }
 
     #[test]
     fn provider_kinds_preserve_client_grouping_contract() {

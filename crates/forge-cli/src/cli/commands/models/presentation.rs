@@ -24,6 +24,49 @@ pub(crate) fn pace_suffix(
     }
 }
 
+/// What subscription pacing currently withholds, over the whole discovered catalog — the same
+/// rule `decide()` applies per tier, asked provider-wide for the overview.
+fn pacing_holds(
+    cat: &forge_mesh::ModelCatalog,
+    config: &forge_config::Config,
+    quota: &forge_types::SubscriptionQuota,
+) -> Vec<forge_mesh::PacingHold> {
+    forge_mesh::HeuristicRouter::new(config.clone())
+        .with_catalog(cat.clone())
+        .pacing_holds(cat.models(), quota)
+}
+
+/// The pace marker for one provider's most-constrained window, quoting the router's own
+/// [`forge_types::SubscriptionPacing`] rather than a display-side approximation.
+pub(crate) fn pacing_note(
+    pacing: Option<&forge_types::SubscriptionPacing>,
+    hold: Option<&forge_mesh::PacingHold>,
+) -> String {
+    forge_mesh::pacing_summary(pacing, hold)
+}
+
+/// Machine-readable form of the same decision, including `used_nominal_fallback` so a consumer
+/// can tell a provider-timed pace from one inferred off the nominal window length.
+pub(crate) fn pacing_json(
+    pacing: Option<&forge_types::SubscriptionPacing>,
+    hold: Option<&forge_mesh::PacingHold>,
+) -> serde_json::Value {
+    let Some(pacing) = pacing else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "window": pacing.window,
+        "fraction_used": pacing.fraction_used,
+        "allowed_fraction": pacing.allowed_fraction,
+        "elapsed_fraction": pacing.elapsed_fraction(),
+        "over_pace": pacing.is_over_pace(),
+        "used_nominal_fallback": pacing.used_nominal_fallback,
+        "summary": pacing_note(Some(pacing), hold),
+        "held": hold.map(|hold| hold.held.clone()).unwrap_or_default(),
+        "kept": hold.map(|hold| hold.kept.clone()).unwrap_or_default(),
+    })
+}
+
 /// A provider currently excluded from routing: `(provider, cooldown_until, reason)`, as read from
 /// `Store::current_excluded_providers`.
 pub(crate) type ProviderExclusion = (String, i64, String);
@@ -85,6 +128,7 @@ pub(crate) fn mesh_overview(
 ) {
     print_provider_exclusions(excluded);
     let pricing = super::discovery::pricing_with_fetched_rates(config);
+    let holds = pacing_holds(cat, config, quota);
     println!(
         "subscription quota (conservation {}):",
         if config.mesh.subscription_conserve {
@@ -115,14 +159,22 @@ pub(crate) fn mesh_overview(
         let pc = forge_mesh::ModelCatalog::spread_probability(TaskTier::Complex, frac, plan, false);
         let ps =
             forge_mesh::ModelCatalog::spread_probability(TaskTier::Standard, frac, plan, false);
+        let hold = holds
+            .iter()
+            .find(|hold| forge_mesh::display_provider(&hold.provider) == *p);
+        let pacing = quota
+            .pacing_for(p)
+            .cloned()
+            .or_else(|| hold.map(|hold| hold.pacing.clone()));
         println!(
-            "  {:<11} {} {} · plan {plan} · {:?} · spread P(complex)={:.0}% P(standard)={:.0}%",
+            "  {:<11} {} {} · plan {plan} · {:?} · {} · spread P(complex)={:.0}% P(standard)={:.0}%",
             p,
             observed.map(meter).unwrap_or_else(|| "unknown".to_string()),
             observed
                 .map(|f| format!("{:.0}%", f * 100.0))
                 .unwrap_or_else(|| "unknown".to_string()),
             quota.status_for(p),
+            pacing_note(pacing.as_ref(), hold),
             pc * 100.0,
             ps * 100.0,
         );
@@ -170,6 +222,7 @@ pub(crate) fn mesh_overview_json(
     windows: &[forge_store::SubscriptionWindow],
 ) -> String {
     let pricing = super::discovery::pricing_with_fetched_rates(config);
+    let holds = pacing_holds(cat, config, quota);
     let mut providers: Vec<&str> = cat
         .models()
         .iter()
@@ -188,8 +241,16 @@ pub(crate) fn mesh_overview_json(
             let observed_fraction = quota.observed_fraction_for(provider);
             let fraction = quota.fraction_for(provider);
             let plan = quota.plan_for(provider);
+            let hold = holds
+                .iter()
+                .find(|hold| forge_mesh::display_provider(&hold.provider) == provider);
+            let pacing = quota
+                .pacing_for(provider)
+                .cloned()
+                .or_else(|| hold.map(|hold| hold.pacing.clone()));
             serde_json::json!({
                 "provider": provider,
+                "pacing": pacing_json(pacing.as_ref(), hold),
                 "fraction": observed_fraction,
                 "windows": windows
                     .iter()
@@ -274,7 +335,7 @@ pub(crate) fn print_mesh_explanation(
         for q in &e.quota {
             let plan = if q.plan.is_empty() { "?" } else { &q.plan };
             println!(
-                "  {:<11} {} {} · plan {plan} · {:?} · spread P={:.0}%{}",
+                "  {:<11} {} {} · plan {plan} · {:?} · {} · spread P={:.0}%{}",
                 q.provider,
                 q.fraction
                     .map(meter)
@@ -283,6 +344,7 @@ pub(crate) fn print_mesh_explanation(
                     .map(|fraction| format!("{:.0}%", fraction * 100.0))
                     .unwrap_or_else(|| "unknown".to_string()),
                 q.status,
+                pacing_note(q.pacing.as_ref(), q.hold.as_ref()),
                 q.spread_probability * 100.0,
                 pace_suffix(q.projected_fraction_at_reset, q.exhaustion_warning),
             );
@@ -383,6 +445,7 @@ pub(crate) fn mesh_explanation_json(
                 "spread_probability": q.spread_probability,
                 "projected_fraction_at_reset": q.projected_fraction_at_reset,
                 "exhaustion_warning": q.exhaustion_warning,
+                "pacing": pacing_json(q.pacing.as_ref(), q.hold.as_ref()),
             })
         })
         .collect();
@@ -413,8 +476,9 @@ pub(crate) fn mesh_explanation_json(
 
 #[cfg(test)]
 mod tests {
-    use super::{mesh_explanation_json, meter, pace_suffix, remaining};
+    use super::{mesh_explanation_json, meter, pace_suffix, pacing_note, remaining};
     use forge_mesh::ProviderQuotaView;
+    use forge_types::SubscriptionPacing;
 
     fn explanation() -> forge_mesh::RoutingExplanation {
         forge_mesh::RoutingExplanation {
@@ -489,6 +553,8 @@ mod tests {
             spread_probability: 0.0,
             projected_fraction_at_reset: None,
             exhaustion_warning: false,
+            pacing: None,
+            hold: None,
         });
         let value: serde_json::Value =
             serde_json::from_str(&mesh_explanation_json(&explanation, &[]))
@@ -501,6 +567,79 @@ mod tests {
         assert_eq!(meter(-1.0), "[░░░░░░░░░░]");
         assert_eq!(meter(0.05), "[█░░░░░░░░░]");
         assert_eq!(meter(1.0), "[██████████]");
+    }
+
+    fn pacing(
+        fraction_used: f64,
+        allowed_fraction: f64,
+        resets_at: Option<i64>,
+    ) -> SubscriptionPacing {
+        SubscriptionPacing {
+            window: "weekly".into(),
+            fraction_used,
+            allowed_fraction,
+            elapsed_secs: 172_800,
+            total_secs: 604_800,
+            resets_at,
+            used_nominal_fallback: resets_at.is_none(),
+        }
+    }
+
+    /// The whole point of this view: an operator reading `forge mesh` must be able to tell a
+    /// paced window from a healthy one, and a real pace from a guessed one.
+    #[test]
+    fn the_provider_line_states_whether_the_window_is_over_pace() {
+        let over = pacing(0.27, 0.21, Some(1_000_000));
+        let hold = forge_mesh::PacingHold {
+            provider: "codex-oauth".into(),
+            pacing: over.clone(),
+            held: vec![
+                "codex-oauth::gpt-5.6-sol".into(),
+                "codex-oauth::gpt-5.6-terra".into(),
+            ],
+            kept: vec!["codex-oauth::gpt-5.6-luna".into()],
+        };
+        assert_eq!(
+            pacing_note(Some(&over), Some(&hold)),
+            "weekly 27% used · 21% allowed · OVER PACE → gpt-5.6-sol/gpt-5.6-terra held, gpt-5.6-luna"
+        );
+        assert_eq!(
+            pacing_note(Some(&pacing(0.10, 0.21, Some(1_000_000))), None),
+            "weekly 10% used · 21% allowed · on pace"
+        );
+        let unknown = pacing_note(Some(&pacing(0.27, 0.21, None)), None);
+        assert!(unknown.contains("pace unknown"), "{unknown}");
+        assert!(unknown.contains("used_nominal_fallback"), "{unknown}");
+        assert_eq!(pacing_note(None, None), "pace unknown (no observed window)");
+    }
+
+    #[test]
+    fn the_explanation_json_carries_the_pacing_decision_it_printed() {
+        let mut explanation = explanation();
+        let over = pacing(0.27, 0.21, Some(1_000_000));
+        explanation.quota.push(ProviderQuotaView {
+            provider: "codex-cli".into(),
+            status: forge_types::QuotaStatus::Ok,
+            fraction: Some(0.27),
+            plan: "plus".into(),
+            spread_probability: 0.0,
+            projected_fraction_at_reset: None,
+            exhaustion_warning: false,
+            pacing: Some(over.clone()),
+            hold: Some(forge_mesh::PacingHold {
+                provider: "codex-oauth".into(),
+                pacing: over,
+                held: vec!["codex-oauth::gpt-5.6-sol".into()],
+                kept: vec!["codex-oauth::gpt-5.6-luna".into()],
+            }),
+        });
+        let value: serde_json::Value =
+            serde_json::from_str(&mesh_explanation_json(&explanation, &[]))
+                .expect("valid explanation JSON");
+        let pacing = &value["quota"][0]["pacing"];
+        assert_eq!(pacing["over_pace"], true);
+        assert_eq!(pacing["used_nominal_fallback"], false);
+        assert_eq!(pacing["held"][0], "codex-oauth::gpt-5.6-sol");
     }
 
     #[test]

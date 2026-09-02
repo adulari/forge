@@ -67,6 +67,19 @@ function paceAnnotation(quota: QuotaRow, nowSec: number): { text: string; tone: 
   const projected = rate * duration;
   return { text: `≈${Math.round(Math.min(999, projected * 100))}% by reset`, tone: "warn" };
 }
+/**
+ * The pacing verdict the mesh acts on, quoted verbatim from the daemon so the phone tells the
+ * same story as `forge mesh`: used vs allowed, and whether routing is holding models back. The
+ * daemon only attaches it to the window pacing is judged by, and its summary already reads
+ * "pace unknown" when no reset time was known (`usedNominalFallback`), so nothing is
+ * re-derived here from `fraction` and `resetsAt`.
+ */
+function pacingAnnotation(quota: QuotaRow): { text: string; over: boolean } | null {
+  const pacing = quota.pacing;
+  if (!pacing) return null;
+  return { text: pacing.summary, over: pacing.overPace && !pacing.usedNominalFallback };
+}
+
 /** One rendered provider block: token usage (when any), quota windows (when any) — a
  * provider with live quota but no recorded tokens still shows, bars visible. */
 interface ProviderItem {
@@ -97,6 +110,7 @@ const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: {
         const barColor = quota.status === "exhausted" ? tokens.danger : quota.status === "warning" ? tokens.warn : tokens.accent;
         const right = [pct == null ? "—" : `${pct}%`, resetLabel(quota.resetsAt), observationLabel(quota.updatedAt, nowSec)].filter(Boolean).join(" · ");
         const pace = paceAnnotation(quota, nowSec);
+        const pacing = pacingAnnotation(quota);
         return (
           <View key={quota.windowKind}>
             <View style={styles.quota} accessibilityLabel={`${WINDOW_LABEL[quota.windowKind] ?? quota.windowKind} window ${right}`}>
@@ -110,6 +124,12 @@ const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: {
               <View style={styles.paceRow}>
                 <View style={[styles.paceDot, { backgroundColor: pace.tone === "danger" ? tokens.danger : tokens.warn }]} />
                 <Text style={[type.monoMeta, tabularNums, { color: pace.tone === "danger" ? tokens.danger : tokens.warn }]}>{pace.text}</Text>
+              </View>
+            ) : null}
+            {pacing ? (
+              <View style={styles.paceRow}>
+                <View style={[styles.paceDot, { backgroundColor: pacing.over ? tokens.warn : tokens.ink3 }]} />
+                <Text style={[type.monoMeta, tabularNums, { color: pacing.over ? tokens.warn : tokens.ink3 }]}>{pacing.text}</Text>
               </View>
             ) : null}
           </View>

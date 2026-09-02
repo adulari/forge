@@ -571,6 +571,14 @@ impl Session {
         self.store.bridge_fractions().unwrap_or_default()
     }
 
+    /// Per-provider pacing decision over the same windows, exactly as the router sees it — the
+    /// usage overlay quotes this rather than re-deriving an allowance from the fractions above.
+    pub fn subscription_pacing(
+        &self,
+    ) -> std::collections::HashMap<String, forge_types::SubscriptionPacing> {
+        self.store.subscription_pacing().unwrap_or_default()
+    }
+
     /// Seconds since the claude subscription quota was last updated (`None` if never). The CLI
     /// gates its on-demand rate-limit probe on this so it refreshes at most every few minutes.
     pub fn claude_quota_age_secs(&self) -> Option<i64> {
