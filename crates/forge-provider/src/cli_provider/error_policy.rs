@@ -29,6 +29,10 @@ pub(super) fn is_auth_failure(normalized: &str) -> bool {
         "login required",
         "please log in",
         "please run /login",
+        // `agy` phrases its logged-out state this way ("Please sign in to view available
+        // models. Launch the CLI without arguments to sign in."). Like the phrases above it
+        // names the LOGIN, not a tool permission or a keychain read.
+        "please sign in",
     ];
 
     PHRASES.iter().any(|phrase| normalized.contains(phrase))

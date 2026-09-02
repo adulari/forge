@@ -41,7 +41,12 @@ pub(crate) fn load_cached_catalog() -> Option<ModelCatalog> {
         return None;
     }
     let bytes = std::fs::read(&path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let catalog: ModelCatalog = serde_json::from_slice(&bytes).ok()?;
+    // The cache was written when the bridge had a login; a logged-out one must not be routed to
+    // for up to 24 h afterwards, one dead failover hop per alias it advertises.
+    Some(catalog.retaining(|model| {
+        !forge_provider::bridge_credentials_known_absent(forge_config::provider_of(model))
+    }))
 }
 
 /// Persist `catalog` to disk for the next startup to load instantly.
@@ -337,7 +342,10 @@ pub(crate) async fn discover_catalog_with_status(
     let bridge_lists = futures::future::join_all(
         forge_provider::CliKind::all()
             .into_iter()
-            .filter(|k| k.available())
+            // `routable`, not `available`: a bridge whose CLI is installed but has no login
+            // contributes only failover hops that cannot succeed — on a keyless install that was
+            // three CLIs and ~3.5 minutes before the one correct message appeared.
+            .filter(|k| k.routable())
             .map(|k| async move {
                 let prefix = k.prefix();
                 let discovered = match config.mesh.bridge_models.get(prefix) {
@@ -347,9 +355,13 @@ pub(crate) async fn discover_catalog_with_status(
                     _ => k.bridge_models_detailed().await,
                 };
                 let status = bridge_discovery_status(prefix, &discovered);
+                // The probe just above is itself a credential check: a CLI that answers "please
+                // sign in" to a model listing has told us its aliases are all dead. Without this
+                // the fallback table still seeded the catalog and the turn routed to it anyway.
                 let models = discovered
                     .models
                     .into_iter()
+                    .filter(|_| k.routable())
                     .filter(|m| !m.is_empty())
                     .map(|m| format!("{prefix}::{m}"))
                     .collect::<Vec<_>>();

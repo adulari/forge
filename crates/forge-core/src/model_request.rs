@@ -90,6 +90,17 @@ async fn advance_to_next_usable(
         if skip_provider.is_some_and(|p| forge_config::provider_of(&next) == p) {
             continue;
         }
+        // A CLI bridge already known to have no credentials — from its own credential file, or
+        // because it printed its own sign-in prompt earlier in this process — cannot serve this
+        // hop. Skipping it saves a subprocess launch that can only fail the same way.
+        //
+        // Deliberately NOT fed by this loop's own auth classification: one auth-shaped failure
+        // benches the model and needs corroboration before it may speak for the provider (see
+        // `one_auth_error_benches_only_the_model_not_the_whole_provider`). Only the CLI's own
+        // login machinery — "please sign in", an OAuth consent prompt — sets this verdict.
+        if forge_provider::bridge_credentials_known_absent(forge_config::provider_of(&next)) {
+            continue;
+        }
         if skip_reserved && session.store.is_model_reserved(&next) {
             continue;
         }
@@ -837,6 +848,25 @@ mod tests {
 
     const DEAD: &str = "groq::llama-3.3-70b-versatile";
     const SIBLING: &str = "groq::groq/compound-mini";
+
+    /// The predicate `advance_to_next_usable` skips a candidate on. Asserted here rather than by
+    /// driving a chain: the verdict is process-global, and this crate's test binary shares it with
+    /// many fixtures that route to bridge ids, so a test that recorded one would change their
+    /// failover. The verdict's own behaviour is covered in `forge_provider::cli_provider`.
+    #[test]
+    fn the_failover_skip_never_applies_to_a_non_bridge_provider() {
+        for model in [
+            DEAD,
+            SIBLING,
+            "anthropic::claude-opus-4-8",
+            "ollama::llama3",
+        ] {
+            assert!(
+                !forge_provider::bridge_credentials_known_absent(forge_config::provider_of(model)),
+                "{model} has no CLI bridge, so the bridge filter must never remove it"
+            );
+        }
+    }
 
     /// The reported defect: after the turn failed, `select count(*) from model_health where model
     /// like '%llama%'` was 0, so ranking and failover were free to pick the model again — and did.

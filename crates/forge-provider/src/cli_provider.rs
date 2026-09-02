@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use forge_types::{Message, PermissionMode, Role, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::{
@@ -239,6 +239,18 @@ impl CliKind {
         resolve_on_path(self.default_binary()).is_some()
     }
 
+    /// Whether this bridge is worth routing to at all: installed AND not already known — from its
+    /// own credential file or its own "not signed in" output this process — to have no login.
+    ///
+    /// This is what keeps a keyless first run from paying a full failover sweep (three CLIs, one
+    /// of which sits on an interactive OAuth prompt) to discover what the credential check answers
+    /// instantly. It only ever removes a bridge on POSITIVE evidence of no credentials
+    /// ([`credentials::CliCredentials::Absent`]); `Unknown` stays routable, so a rate-limited or
+    /// briefly-down credentialed bridge still fails over normally.
+    pub fn routable(self) -> bool {
+        self.available() && credentials::credentials(self) != credentials::CliCredentials::Absent
+    }
+
     /// The bare Forge model id for this bridge (`claude-cli::` / `codex-cli::`), which resolves to
     /// the CLI's own default model.
     pub fn default_model_id(self) -> String {
@@ -380,11 +392,23 @@ impl CliKind {
                 }
             }
             Err(error) => {
-                tracing::warn!(
-                    "{} model discovery failed: {error} — the mesh will use an unverified model \
-                     list for this bridge",
-                    self.prefix()
-                );
+                // The CLI answering "please sign in" to a model listing is the earliest and
+                // cheapest proof that a turn on this bridge cannot work. Record it so routing
+                // skips the bridge instead of rediscovering it one 60s OAuth prompt later.
+                if error_policy::is_auth_failure(&error.to_ascii_lowercase()) {
+                    credentials::note_unauthenticated(self, &error);
+                    tracing::warn!(
+                        "{} — skipping this bridge for now",
+                        not_logged_in_message(self.default_binary())
+                    );
+                } else {
+                    tracing::warn!(
+                        "{} model discovery failed: {} — the mesh will use an unverified model \
+                         list for this bridge",
+                        self.prefix(),
+                        collapse_oauth_urls(self.default_binary(), &error)
+                    );
+                }
                 match recall_bridge_models(self) {
                     Some((models, age_secs)) => BridgeModels {
                         models,
@@ -1697,9 +1721,12 @@ struct ClaudeStreamState {
 }
 
 mod cli_stream;
+pub mod credentials;
 mod empty_turn;
 mod error_policy;
+mod sign_in;
 use cli_stream::*;
+use sign_in::{collapse_oauth_urls, not_logged_in_message, read_to_cap_watching};
 
 #[async_trait]
 impl Provider for CliProvider {
@@ -1938,7 +1965,13 @@ impl CliProvider {
         }
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let err_task = tokio::spawn(read_to_cap(stderr));
+        // Fires the moment the CLI's stderr becomes an interactive sign-in prompt, so the turn
+        // ends on the CLI's own verdict instead of waiting out its login timeout.
+        let auth_prompt = std::sync::Arc::new(tokio::sync::Notify::new());
+        let err_task = tokio::spawn(read_to_cap_watching(
+            stderr,
+            Some(std::sync::Arc::clone(&auth_prompt)),
+        ));
 
         // Tail the sink concurrently so task / subagent events surface live. They arrive while the
         // CLI is silent (mid-tool, or waiting on a spawn_agents result), so they must be drained live.
@@ -1974,9 +2007,12 @@ impl CliProvider {
         enum BridgeEvent {
             Line(std::io::Result<Option<String>>),
             Sub(StreamEvent),
+            /// The CLI is asking a human to sign in; nothing this turn can answer it.
+            AuthPrompt,
         }
         let idle = self.timeout;
         let mut stalled = false;
+        let mut interactive_auth = false;
         let read = async {
             let mut lines = BufReader::new(stdout).lines();
             loop {
@@ -1986,12 +2022,17 @@ impl CliProvider {
                         biased;
                         line = lines.next_line() => BridgeEvent::Line(line),
                         Some(ev) = sub_rx.recv() => BridgeEvent::Sub(ev),
+                        _ = auth_prompt.notified() => BridgeEvent::AuthPrompt,
                     }
                 })
                 .await;
                 match tick {
                     Err(_) => {
                         stalled = true;
+                        break;
+                    }
+                    Ok(BridgeEvent::AuthPrompt) => {
+                        interactive_auth = true;
                         break;
                     }
                     Ok(BridgeEvent::Sub(ev)) => on_event(ev),
@@ -2070,6 +2111,17 @@ impl CliProvider {
             self.reset_session();
         }
 
+        if interactive_auth {
+            terminate(&mut child, pgid).await;
+            let stderr_text = err_task.await.unwrap_or_default();
+            // The CLI is the authority on its own login: skip this bridge for the rest of the
+            // process rather than making every later hop re-learn it.
+            credentials::note_unauthenticated(self.kind, &stderr_text);
+            return Err(ProviderError::Auth(collapse_oauth_urls(
+                &self.binary,
+                &stderr_text,
+            )));
+        }
         if stalled {
             terminate(&mut child, pgid).await;
             // A stalled bridge is retryable (fail over), like a stalled genai stream — distinct from
@@ -2088,7 +2140,7 @@ impl CliProvider {
                 self.binary,
                 idle.as_secs(),
                 idle_budget.description(),
-                stderr_suffix(&stderr_text)
+                stderr_suffix_for(&self.binary, &stderr_text)
             )));
         }
         if let Err(e) = read {
@@ -2097,7 +2149,7 @@ impl CliProvider {
             return Err(ProviderError::Request(format!(
                 "reading `{}` output failed: {e}{}",
                 self.binary,
-                stderr_suffix(&stderr_text)
+                stderr_suffix_for(&self.binary, &stderr_text)
             )));
         }
 
@@ -2156,7 +2208,7 @@ impl CliProvider {
             // CLI's stderr often carries the actionable cause.
             return Err(classify_in_band_error(
                 &self.binary,
-                &format!("{e}{}", stderr_suffix(&stderr_text)),
+                &format!("{e}{}", stderr_suffix_for(&self.binary, &stderr_text)),
             ));
         }
 
@@ -2200,7 +2252,17 @@ impl CliProvider {
                 return Err(if tail.is_empty() {
                     ProviderError::Request(msg)
                 } else {
-                    classify_in_band_error(&self.binary, tail)
+                    // Classify on the raw stderr, report the collapsed form: an OAuth consent URL
+                    // is evidence to the classifier and noise to the reader.
+                    classify_in_band_error_with_message(
+                        &self.binary,
+                        tail,
+                        format!(
+                            "{} error: {}",
+                            self.binary,
+                            collapse_oauth_urls(&self.binary, tail)
+                        ),
+                    )
                 });
             }
         }
@@ -3150,6 +3212,12 @@ async fn tail_subagent_sink(
 
 /// Format a bridge's captured stderr as a trailing ` — stderr: …` clause for an error message
 /// (empty when there's nothing). Trimmed and tail-capped so a noisy CLI can't bloat the error.
+/// An interactive sign-in prompt is collapsed to one line first — a bridge waiting on a Google
+/// consent URL must read as "not logged in", not as 500 characters of query string.
+fn stderr_suffix_for(binary: &str, stderr: &str) -> String {
+    stderr_suffix(&collapse_oauth_urls(binary, stderr))
+}
+
 fn stderr_suffix(stderr: &str) -> String {
     let t = stderr.trim();
     if t.is_empty() {
@@ -3172,7 +3240,7 @@ fn stderr_suffix(stderr: &str) -> String {
 fn child_wait_failure(binary: &str, error: &str, stderr: &str) -> ProviderError {
     ProviderError::Request(format!(
         "waiting for `{binary}` failed: {error}{}",
-        stderr_suffix(stderr)
+        stderr_suffix_for(binary, stderr)
     ))
 }
 
@@ -3181,17 +3249,8 @@ async fn create_sink_file_at(path: &std::path::Path) -> std::io::Result<std::pat
     Ok(path.to_path_buf())
 }
 
-async fn read_to_cap<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> String {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    while let Ok(n) = r.read(&mut chunk).await {
-        if n == 0 || buf.len() >= STDERR_CAP {
-            break;
-        }
-        let take = n.min(STDERR_CAP - buf.len());
-        buf.extend_from_slice(&chunk[..take]);
-    }
-    String::from_utf8_lossy(&buf).into_owned()
+async fn read_to_cap<R: tokio::io::AsyncRead + Unpin>(r: R) -> String {
+    read_to_cap_watching(r, None).await
 }
 
 fn put_in_own_process_group(cmd: &mut Command) {
@@ -5521,6 +5580,64 @@ mod tests {
             real.is_permanent(),
             "a real auth failure must still be permanent: {real:?}"
         );
+    }
+
+    use sign_in::tests::AGY_SIGN_IN_STDERR;
+
+    /// The stderr clause is the path a consent URL reached the user through.
+    #[test]
+    fn a_sign_in_prompt_never_reaches_the_stderr_clause_of_an_error() {
+        let suffix = stderr_suffix_for("agy", AGY_SIGN_IN_STDERR);
+        assert!(!suffix.contains("accounts.google.com"), "{suffix}");
+        assert!(suffix.contains("not logged in"), "{suffix}");
+    }
+
+    /// The whole point of the collapse: the CLI's own words still decide the error VARIANT, so
+    /// the mesh keeps benching the provider even though the message is now one line.
+    #[test]
+    fn a_collapsed_sign_in_message_still_classifies_as_auth() {
+        let err = classify_in_band_error_with_message(
+            "agy",
+            AGY_SIGN_IN_STDERR,
+            format!(
+                "agy error: {}",
+                collapse_oauth_urls("agy", AGY_SIGN_IN_STDERR)
+            ),
+        );
+        assert!(
+            matches!(err, ProviderError::Auth(_)),
+            "classified on the raw stderr: {err:?}"
+        );
+        assert!(!format!("{err:?}").contains("accounts.google.com"));
+    }
+
+    /// A logged-out bridge must be dropped from routing on the credential check alone — this is
+    /// the difference between a 3-second keyless run and a 3-minute one.
+    #[test]
+    fn a_bridge_that_reported_no_login_stops_being_routable() {
+        let _guard = credentials::test_guard();
+        credentials::reset_live_verdicts();
+        let kind = CliKind::Antigravity;
+        assert_ne!(
+            credentials::credentials(kind),
+            credentials::CliCredentials::Absent,
+            "agy's credential store is not locatable, so it starts Unknown"
+        );
+        credentials::note_unauthenticated(kind, AGY_SIGN_IN_STDERR);
+        assert_eq!(
+            credentials::credentials(kind),
+            credentials::CliCredentials::Absent
+        );
+        assert!(!kind.routable(), "installed or not, it cannot serve a turn");
+        assert!(
+            crate::bridge_credentials_known_absent(kind.prefix()),
+            "the failover chain reads the verdict through the crate-level filter"
+        );
+        assert!(
+            !crate::bridge_credentials_known_absent("groq"),
+            "a non-bridge provider is never 'known absent' here"
+        );
+        credentials::reset_live_verdicts();
     }
 
     #[test]

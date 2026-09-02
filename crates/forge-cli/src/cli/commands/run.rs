@@ -330,7 +330,9 @@ pub(crate) fn maybe_first_run_setup(mock: bool) -> Result<()> {
         return Ok(());
     }
     let has_any_key = forge_config::known_key_providers().any(forge_config::has_api_key);
-    let any_bridge = forge_provider::CliKind::all().iter().any(|k| k.available());
+    // An installed-but-logged-out bridge is not a configured provider — offering setup is exactly
+    // the right thing for that machine.
+    let any_bridge = forge_provider::CliKind::all().iter().any(|k| k.routable());
     if !needs_onboarding(has_any_key, any_bridge, forge_config::user_config_exists()) {
         return Ok(());
     }
