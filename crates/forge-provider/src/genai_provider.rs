@@ -277,7 +277,10 @@ pub async fn list_models(namespace: &str) -> Result<Vec<String>, ProviderError> 
             .build()
             .all_model_names(kind, None)
             .await
-            .map_err(|e| ProviderError::Request(e.to_string()))
+            // Classify instead of collapsing to `Request`: a listing rejected with 401/403 means
+            // the stored credential is bad, and callers (doctor) must be able to tell that apart
+            // from a provider that simply has no usable listing endpoint.
+            .map_err(|e| error_policy::classify_genai_error(&e))
     })
     .await?;
     // Re-namespace with Forge's provider name (so `openrouter` stays `openrouter::…`).
@@ -326,10 +329,14 @@ async fn list_custom_models_at(
             .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Request(format!(
-                "{namespace} `/models` returned HTTP {}",
-                resp.status()
-            )));
+            let status = resp.status();
+            let message = format!("{namespace} `/models` returned HTTP {status}");
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(ProviderError::Auth(message));
+            }
+            return Err(ProviderError::Request(message));
         }
         let body: serde_json::Value = resp
             .json()
