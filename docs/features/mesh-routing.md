@@ -184,9 +184,19 @@ chain). When inactive (or the ranking comes back empty), the configured `[mesh.m
 are used verbatim (`Config::candidates_for`, `crates/forge-config/src/lib.rs:2008`; a tier with
 no entry falls back to the `standard` list).
 
-> Note: when auto-discovery is active, `[mesh.models]` is **not** consulted per-tier — the
-> catalog ranking replaces it wholesale. To route strictly from `[mesh.models]`, set
-> `mesh.auto_discover = false`.
+A tier a **config file** pins under `[mesh.models]` overrides auto-discovery for that tier: its
+models lead the candidate list, in the order written, and the routing rationale reads
+`configured [mesh.models].<tier>: <model>`. Only tiers present in a loaded `config.toml` count —
+the shipped cold-start seed in `Config::default()` does not (`Config::explicit_candidates_for`,
+`crates/forge-config/src/lib.rs`; the file-set tiers are recorded as `mesh.explicit_models` by
+`load()`). Tiers you did not configure keep auto-routing normally.
+
+The override is a preference, not a pin: the configured model still passes the usual usable /
+credit-mode / context filters, so one that is keyless, benched or disabled falls through to the
+auto-discovered ranking and the rationale says
+`configured [mesh.models].<tier> <model> skipped (<reason>), fell through to auto-discovery`.
+For a hard pin with no substitution, use `--model`; to route strictly from `[mesh.models]` for
+*every* tier, set `mesh.auto_discover = false`.
 
 ### 3.2 The routability filter
 
@@ -1088,8 +1098,8 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 
 | Key | Default | Effect |
 |---|---|---|
-| `models` | shipped free-first lists | Per-tier candidate lists; used verbatim when auto-discovery is off/empty (§3.1) |
-| `auto_discover` | `true` | Rank the discovered catalog instead of `[mesh.models]` (`lib.rs:1279`) |
+| `models` | shipped free-first lists | Per-tier candidate lists; a tier set in a config file leads that tier's candidates even under auto-discovery, and is used verbatim when auto-discovery is off/empty (§3.1) |
+| `auto_discover` | `true` | Rank the discovered catalog for tiers `[mesh.models]` does not explicitly configure (`lib.rs:1279`) |
 | `benchmark_ranking` | `true` | Use AA indices when cached (`lib.rs:1336`) |
 | `classifier` / `classifier_model` | `llm` / `groq::openai/gpt-oss-20b` | Fixed task classifier; §2.3 |
 | `classifier_activity_focused` | `false` | Legacy unstructured-prompt compatibility: classify the final non-empty paragraph; §2.3 |

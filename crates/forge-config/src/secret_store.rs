@@ -147,6 +147,7 @@ pub fn delete(key: &str) -> Result<bool, ConfigError> {
 #[cfg(not(feature = "test-secrets"))]
 pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
     refuse_if_test_binary();
+    read_cache().invalidate(key);
     if keyring_available() {
         let key = key.to_string();
         let value = value.to_string();
@@ -164,9 +165,24 @@ pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
 }
 
 /// Read the secret for `key`: env-independent. Keyring first, then the encrypted file.
+///
+/// Memoized for [`READ_CACHE_TTL`]: one startup asks for the same ~30 provider entries five times
+/// over (discovery, key injection, routing, quota refreshes), and on a live Secret Service every
+/// miss is a D-Bus round trip — 138 reads cost ~0.9 s before a single model was even considered.
 #[cfg(not(feature = "test-secrets"))]
 pub fn get(key: &str) -> Option<String> {
     refuse_if_test_binary();
+    let now = std::time::Instant::now();
+    if let Some(hit) = read_cache().lookup(key, now) {
+        return hit;
+    }
+    let value = get_uncached(key);
+    read_cache().store(key, value.clone(), now);
+    value
+}
+
+#[cfg(not(feature = "test-secrets"))]
+fn get_uncached(key: &str) -> Option<String> {
     if keyring_available() {
         let key = key.to_string();
         if let Some(Ok(v)) = keyring_call("read", move || {
@@ -180,11 +196,60 @@ pub fn get(key: &str) -> Option<String> {
     file_get(key)
 }
 
+#[cfg(not(feature = "test-secrets"))]
+fn read_cache() -> std::sync::MutexGuard<'static, ReadCache> {
+    static CACHE: std::sync::Mutex<ReadCache> = std::sync::Mutex::new(ReadCache::new());
+    CACHE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How long a secret read (hit or miss) is trusted before the backends are asked again. Long
+/// enough to cover one command's startup burst; short enough that a key added by `forge auth` in
+/// another process reaches a long-running `forge serve` on its next turn, not its next restart.
+#[cfg_attr(feature = "test-secrets", allow(dead_code))]
+const READ_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Process-local memo of recent secret reads. Pure over an injected clock so the TTL and
+/// invalidation rules are unit-testable without a keyring.
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "test-secrets", allow(dead_code))]
+pub(crate) struct ReadCache {
+    entries: Vec<(String, Option<String>, std::time::Instant)>,
+}
+
+#[cfg_attr(feature = "test-secrets", allow(dead_code))]
+impl ReadCache {
+    pub(crate) const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// `Some(value)` when `key` was read within the TTL (the value itself may be `None`: a
+    /// confirmed miss is cached too — that is where the startup savings are).
+    pub(crate) fn lookup(&self, key: &str, now: std::time::Instant) -> Option<Option<String>> {
+        self.entries
+            .iter()
+            .find(|(k, _, at)| k == key && now.duration_since(*at) < READ_CACHE_TTL)
+            .map(|(_, v, _)| v.clone())
+    }
+
+    pub(crate) fn store(&mut self, key: &str, value: Option<String>, now: std::time::Instant) {
+        self.invalidate(key);
+        self.entries.push((key.to_string(), value, now));
+    }
+
+    /// A write or delete through this process must be visible to its very next read.
+    pub(crate) fn invalidate(&mut self, key: &str) {
+        self.entries.retain(|(k, _, _)| k != key);
+    }
+}
+
 /// Remove `key` from wherever it lives. `Ok(true)` if something was removed (from either store),
 /// `Ok(false)` if nothing was stored — so removal stays idempotent.
 #[cfg(not(feature = "test-secrets"))]
 pub fn delete(key: &str) -> Result<bool, ConfigError> {
     refuse_if_test_binary();
+    read_cache().invalidate(key);
     let mut removed = false;
     if keyring_available() {
         let key = key.to_string();
@@ -493,6 +558,47 @@ mod tests {
                 42
             }),
             None
+        );
+    }
+
+    #[test]
+    fn read_cache_memoizes_hits_and_misses_until_the_ttl_elapses() {
+        let t0 = std::time::Instant::now();
+        let mut cache = ReadCache::new();
+        assert_eq!(
+            cache.lookup("groq", t0),
+            None,
+            "cold cache asks the backend"
+        );
+        cache.store("groq", None, t0);
+        cache.store("openai", Some("sk-1".into()), t0);
+        // A confirmed miss is memoized too: that is the keyless-startup saving.
+        assert_eq!(cache.lookup("groq", t0), Some(None));
+        assert_eq!(cache.lookup("openai", t0), Some(Some("sk-1".into())));
+        let within = t0 + READ_CACHE_TTL - std::time::Duration::from_millis(1);
+        assert_eq!(cache.lookup("groq", within), Some(None));
+        assert_eq!(cache.lookup("groq", t0 + READ_CACHE_TTL), None, "expired");
+    }
+
+    #[test]
+    fn read_cache_forgets_a_key_on_write_or_delete_but_keeps_the_others() {
+        let t0 = std::time::Instant::now();
+        let mut cache = ReadCache::new();
+        cache.store("groq", None, t0);
+        cache.store("openai", Some("sk-1".into()), t0);
+        cache.invalidate("groq");
+        assert_eq!(
+            cache.lookup("groq", t0),
+            None,
+            "`forge auth` must be visible at once"
+        );
+        assert_eq!(cache.lookup("openai", t0), Some(Some("sk-1".into())));
+        cache.store("openai", Some("sk-2".into()), t0);
+        assert_eq!(cache.lookup("openai", t0), Some(Some("sk-2".into())));
+        assert_eq!(
+            cache.entries.len(),
+            1,
+            "re-store replaces, never duplicates"
         );
     }
 
