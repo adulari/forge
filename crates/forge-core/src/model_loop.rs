@@ -63,6 +63,10 @@ impl Session {
         // "identical fast rejection twice" detector in `request_model_response`.
         let mut pinned_outage_last_error: Option<String> = None;
 
+        if let Some(short_circuit) = self.hard_guard_short_circuit(active_model.clone()) {
+            return Ok(short_circuit);
+        }
+
         let mut final_text = String::new();
         let mut has_prior_final = false;
         let mut context_tokens: u64 = 0;
@@ -183,7 +187,16 @@ impl Session {
         // constant within a turn); non-bridge providers ignore it.
         let checkpoint_ctx = self.checkpoint_context();
 
+        let unattended = self.turn_is_unattended();
+        let soft_cap = self.config.mesh.max_steps.max(1);
+        let mut warned_soft_cap = false;
+        let mut hard_guard_abort = false;
+
         for step in 0..max_steps {
+            if step >= soft_cap && unattended && !warned_soft_cap {
+                warned_soft_cap = true;
+                self.warn_soft_step_checkpoint(soft_cap, step, max_steps);
+            }
             // ── Timeout reconciliation window (quality guards wave 4, fix 2) ──────────────────
             // The caller's hard timeout (`bench swe`'s tokio kill) is invisible from inside the
             // turn, so without this the kill lands mid-verification and "submit partial work"
@@ -272,6 +285,14 @@ impl Session {
                 &mut bridge_input_accum,
                 &mut empty_nudges,
             )?;
+
+            if self.turn_input_ceiling_hit() {
+                final_text = self.abort_for_token_ceiling();
+                hit_step_cap = false;
+                halted_by_loop_guard = true;
+                hard_guard_abort = true;
+                break;
+            }
 
             if !resp.wants_tools() {
                 if !resp.content.trim().is_empty() {
@@ -752,6 +773,12 @@ impl Session {
         // any single loop's count.
         self.mutations_this_turn += mutations_ran.load(std::sync::atomic::Ordering::Relaxed);
 
+        if hit_step_cap && unattended {
+            final_text = self.abort_for_step_ceiling(max_steps, soft_cap);
+            halted_by_loop_guard = true;
+            hard_guard_abort = true;
+        }
+
         Ok(ModelLoopOutcome {
             final_text,
             context_tokens,
@@ -761,6 +788,7 @@ impl Session {
             plan: proposed_plan,
             tools_ran: tools_ran.load(std::sync::atomic::Ordering::Relaxed),
             mcp_tools_unavailable: mcp_tools_unavailable.load(std::sync::atomic::Ordering::Relaxed),
+            hard_guard_abort,
         })
     }
 }

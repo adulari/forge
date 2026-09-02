@@ -1612,6 +1612,18 @@ pub struct MeshConfig {
     /// (type `continue` to resume), never a silent stop. Raise for very long agentic turns.
     #[serde(default = "default_max_steps")]
     pub max_steps: usize,
+    /// Hard step ceiling for an UNATTENDED turn (headless `forge run`, a detached session, or
+    /// `--mode bypass`). Nobody can type `continue` there, so `max_steps` is a checkpoint — the
+    /// turn logs a warning with its token spend and keeps going until this ceiling, then ends with
+    /// an error naming the uncommitted work. Interactive sessions ignore this and pause at
+    /// `max_steps` as before.
+    #[serde(default = "default_max_steps_unattended")]
+    pub max_steps_unattended: usize,
+    /// Cumulative input tokens a single turn may consume before it is ended with an error, on any
+    /// surface. The step cap alone does not bound cost (one runaway turn burned 7.0M input tokens
+    /// inside 100 steps). `0` disables the ceiling.
+    #[serde(default = "default_max_turn_input_tokens")]
+    pub max_turn_input_tokens: u64,
     /// Proactively spread complex/standard tasks off the subscription bridges (claude-cli/
     /// codex-cli) onto the free-frontier pool, scaling with how full the weekly/session window is
     /// and how much headroom the plan has (subscription-conservation routing). When true (default)
@@ -1796,6 +1808,17 @@ fn default_max_output_tokens() -> u32 {
 /// bounding a model stuck in a tool-call loop. Configurable via `mesh.max_steps`.
 fn default_max_steps() -> usize {
     100
+}
+
+/// Default hard step ceiling for unattended turns (4× the soft cap). Configurable via
+/// `mesh.max_steps_unattended`.
+fn default_max_steps_unattended() -> usize {
+    400
+}
+
+/// Default per-turn cumulative input-token ceiling. Configurable via `mesh.max_turn_input_tokens`.
+fn default_max_turn_input_tokens() -> u64 {
+    10_000_000
 }
 
 fn default_subscription_conserve() -> bool {
@@ -2319,6 +2342,8 @@ impl Default for Config {
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
                 compact_cap_tokens: default_compact_cap_tokens(),
                 max_steps: default_max_steps(),
+                max_steps_unattended: default_max_steps_unattended(),
+                max_turn_input_tokens: default_max_turn_input_tokens(),
                 subscription_conserve: default_subscription_conserve(),
                 benchmark_ranking: default_benchmark_ranking(),
                 verify_completeness: default_verify_completeness(),

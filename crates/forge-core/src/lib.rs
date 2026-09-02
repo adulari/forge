@@ -64,6 +64,7 @@ mod text_policy;
 pub mod tokens;
 mod tool_dispatch;
 pub mod turn_contract;
+mod turn_guards;
 pub mod workflow;
 mod workspace_context;
 pub mod worktree;
@@ -422,6 +423,18 @@ const fn bridge_turn_over_budget(accumulated_input: u64, cap: u64) -> bool {
     cap != 0 && accumulated_input >= cap
 }
 
+/// Hard step ceiling for one model loop. An unattended turn treats `mesh.max_steps` as a
+/// checkpoint (nobody can type `continue`) and runs on to `mesh.max_steps_unattended`; an attended
+/// turn stops at the soft cap and asks. Never below the soft cap, so lowering the unattended
+/// ceiling can't silently shorten a turn.
+const fn effective_step_ceiling(soft_cap: usize, unattended_cap: usize, unattended: bool) -> usize {
+    if unattended && unattended_cap > soft_cap {
+        unattended_cap
+    } else {
+        soft_cap
+    }
+}
+
 /// Best-effort extraction of a shell command from a bridge tool's serialized args (wave 5, fix 2).
 /// Bridge tools surface args as a String that is either the raw command (codex `command_execution`)
 /// or a JSON blob carrying a `command`/`cmd` field (claude `Bash`, Forge's `shell` over MCP). Falls
@@ -706,6 +719,24 @@ fn working_tree_changed_since(root: Option<&std::path::Path>, baseline: Option<&
         (Some(before), Some(after)) => before != after,
         _ => true,
     }
+}
+
+fn uncommitted_work_message(root: &std::path::Path) -> String {
+    let status = working_tree_status(Some(root))
+        .map(|bytes| {
+            let text = String::from_utf8_lossy(&bytes);
+            let lines: Vec<&str> = text.lines().collect();
+            // A long-running turn can touch dozens of files; name the first few and count the rest
+            // so the error line stays readable in a log stream.
+            match lines.len() {
+                0 => String::new(),
+                n if n <= 10 => lines.join("; "),
+                n => format!("{}; … and {} more", lines[..10].join("; "), n - 10),
+            }
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "git status unavailable or clean".to_string());
+    format!("uncommitted work in {}: {status}", root.display())
 }
 
 fn git_head(root: Option<&std::path::Path>) -> Option<String> {
@@ -1366,6 +1397,10 @@ struct ModelLoopOutcome {
     /// (wave 7). Combined with a zero-tool, empty-tree turn this is the toolless-bridge signal the
     /// harness retries on — distinct from a normal empty completion (the wave-2 nudge's job).
     mcp_tools_unavailable: bool,
+    /// The turn was ENDED by a hard guard (the unattended step ceiling or the per-turn input-token
+    /// ceiling) and already reported it as an error. The caller must not also emit the interactive
+    /// "paused — send `continue`" note.
+    hard_guard_abort: bool,
 }
 
 /// A short-lived snapshot used by the mesh inspector. It owns the live router but snapshots the
@@ -1540,6 +1575,16 @@ pub struct Session {
     /// product was a `git commit` still did work. Reset at the start of each turn; the turn's
     /// no-output classification reads it.
     mutations_this_turn: u64,
+    /// Cumulative provider-reported input/output tokens for the active turn. Reset at turn start
+    /// and shared across primary/re-drive model loops so safety warnings report the whole turn's
+    /// spend, not just the current inner loop.
+    turn_input_tokens: u64,
+    turn_output_tokens: u64,
+    /// Latched when a hard guard (unattended step ceiling or per-turn input-token ceiling) ended
+    /// this turn. Every later re-drive pass must return immediately: the guards exist to stop
+    /// spending, and a nudge/verification re-drive would restart the model loop with fresh
+    /// counters and defeat them.
+    turn_hard_guard_abort: bool,
     /// Headless code-change mode (harness-robustness wave 2): the caller KNOWS each prompt
     /// demands a code change (`bench swe` sets it — an explicit option, not prompt sniffing).
     /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
@@ -2664,6 +2709,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // something (not a carry-over from a prior turn).
         self.edits_this_turn = 0;
         self.mutations_this_turn = 0;
+        self.turn_input_tokens = 0;
+        self.turn_output_tokens = 0;
+        self.turn_hard_guard_abort = false;
         self.failure_tracker.reset_turn();
         self.env_fight = EnvFightTracker::default();
 
@@ -2888,6 +2936,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // 3. Model <-> tool loop. The cap is a runaway guard, not a functional limit — the loop
         // ends naturally when the model stops calling tools.
         let max_steps = self.config.mesh.max_steps.max(1);
+        let unattended = !self.presenter.is_attended() || self.mode == PermissionMode::Bypass;
+        let effective_max_steps = effective_step_ceiling(
+            max_steps,
+            self.config.mesh.max_steps_unattended.max(1),
+            unattended,
+        );
 
         // Primary turn: pass the routing decision so failover, step-0 routing record, and quota
         // hints are all active — EXCEPT when architect mode swapped in a different editor model. The
@@ -2907,7 +2961,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 &specs,
                 primary_decision,
                 reuse_response_chain,
-                max_steps,
+                effective_max_steps,
                 stream_idle,
             )
             .await?;
@@ -2917,6 +2971,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let mut active_model = outcome.active_model;
         let mut hit_step_cap = outcome.hit_step_cap;
         let mut halted_by_loop_guard = outcome.halted_by_loop_guard;
+        let mut hard_guard_abort = outcome.hard_guard_abort;
         // Wave 7: did ANY bridge completion this turn (primary or a guard re-drive) report that
         // `mcp-serve` failed to start? OR-ed across the re-drives below, then combined with the
         // final tree/tool state to classify a toolless-bridge turn (see below the guards).
@@ -2932,7 +2987,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Ran the full step budget while the model still wanted tools: pause loudly instead of
         // ending silently mid-task (the #1 "stops responding" bug). The work so far is persisted,
         // so the user can resume by sending `continue`.
-        if outcome.hit_step_cap {
+        if outcome.hit_step_cap && !outcome.hard_guard_abort {
             self.presenter.emit(PresenterEvent::Warning(format!(
                 "reached the {max_steps}-step limit — turn paused mid-task; send `continue` to keep going \
                  (raise `mesh.max_steps` in config to allow longer turns)"
@@ -3043,7 +3098,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                 &nudge_specs,
                                 primary_decision,
                                 reuse_response_chain,
-                                max_steps,
+                                effective_max_steps,
                                 stream_idle,
                             )
                             .await?;
@@ -3052,6 +3107,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         active_model = nudge_outcome.active_model;
                         hit_step_cap = nudge_outcome.hit_step_cap;
                         halted_by_loop_guard = nudge_outcome.halted_by_loop_guard;
+                        hard_guard_abort |= nudge_outcome.hard_guard_abort;
                         // The nudge re-drive spawns a FRESH bridge process (a new `mcp-serve`); if it
                         // too failed to start, this stays a toolless turn — carry the signal into the
                         // classification below.
@@ -3109,7 +3165,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &guard_specs,
                         primary_decision,
                         reuse_response_chain,
-                        max_steps,
+                        effective_max_steps,
                         stream_idle,
                     )
                     .await?;
@@ -3119,6 +3175,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = guard_outcome.active_model;
                 hit_step_cap = guard_outcome.hit_step_cap;
                 halted_by_loop_guard = guard_outcome.halted_by_loop_guard;
+                hard_guard_abort |= guard_outcome.hard_guard_abort;
             }
         }
 
@@ -3204,7 +3261,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     &review_specs,
                     None,
                     reuse_response_chain,
-                    max_steps,
+                    effective_max_steps,
                     stream_idle,
                 )
                 .await?;
@@ -3213,6 +3270,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             active_model = review.active_model;
             hit_step_cap = review.hit_step_cap;
             halted_by_loop_guard = review.halted_by_loop_guard;
+            hard_guard_abort |= review.hard_guard_abort;
 
             let audit_messages = &self.transcript[audit_transcript_start..];
             let repository_search_ran = completeness_repository_search_ran(audit_messages);
@@ -3245,7 +3303,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &retry_specs,
                         None,
                         reuse_response_chain,
-                        max_steps,
+                        effective_max_steps,
                         stream_idle,
                     )
                     .await?;
@@ -3254,6 +3312,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = retry.active_model;
                 hit_step_cap = retry.hit_step_cap;
                 halted_by_loop_guard = retry.halted_by_loop_guard;
+                hard_guard_abort |= retry.hard_guard_abort;
             } else if empty_search
                 && !self.past_turn_deadline()
                 && !hit_step_cap
@@ -3282,7 +3341,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &retry_specs,
                         None,
                         reuse_response_chain,
-                        max_steps,
+                        effective_max_steps,
                         stream_idle,
                     )
                     .await?;
@@ -3291,6 +3350,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = retry.active_model;
                 hit_step_cap = retry.hit_step_cap;
                 halted_by_loop_guard = retry.halted_by_loop_guard;
+                hard_guard_abort |= retry.hard_guard_abort;
             }
 
             let changed_paths = changed_paths_from_status(
@@ -3328,7 +3388,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &path_specs,
                         None,
                         reuse_response_chain,
-                        max_steps,
+                        effective_max_steps,
                         stream_idle,
                     )
                     .await?;
@@ -3337,6 +3397,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = path_review.active_model;
                 hit_step_cap = path_review.hit_step_cap;
                 halted_by_loop_guard = path_review.halted_by_loop_guard;
+                hard_guard_abort |= path_review.hard_guard_abort;
 
                 let post_review_changed_paths = changed_paths_from_status(
                     working_tree_status(Some(self.workspace.root())).as_deref(),
@@ -3372,7 +3433,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                             &retry_specs,
                             None,
                             reuse_response_chain,
-                            max_steps,
+                            effective_max_steps,
                             stream_idle,
                         )
                         .await?;
@@ -3451,7 +3512,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     &rv_specs,
                     None,
                     reuse_response_chain,
-                    max_steps,
+                    effective_max_steps,
                     stream_idle,
                 )
                 .await?;
@@ -3460,6 +3521,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             active_model = rv.active_model;
             hit_step_cap = rv.hit_step_cap;
             halted_by_loop_guard = rv.halted_by_loop_guard;
+            hard_guard_abort |= rv.hard_guard_abort;
         }
 
         // ── Autofix self-healing loop (autofix.md) ────────────────────────────────────────────
@@ -3541,7 +3603,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                 &fix_specs,
                                 None,
                                 reuse_response_chain,
-                                max_steps,
+                                effective_max_steps,
                                 stream_idle,
                             )
                             .await?;
@@ -3550,6 +3612,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         active_model = fix_outcome.active_model;
                         hit_step_cap = fix_outcome.hit_step_cap;
                         halted_by_loop_guard = fix_outcome.halted_by_loop_guard;
+                        hard_guard_abort |= fix_outcome.hard_guard_abort;
                         if halted_by_loop_guard {
                             break;
                         }
@@ -3662,7 +3725,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     &cont_specs,
                     None,
                     reuse_response_chain,
-                    max_steps,
+                    effective_max_steps,
                     stream_idle,
                 )
                 .await?;
@@ -3671,6 +3734,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             active_model = cont_outcome.active_model;
             hit_step_cap = cont_outcome.hit_step_cap;
             halted_by_loop_guard = cont_outcome.halted_by_loop_guard;
+            hard_guard_abort |= cont_outcome.hard_guard_abort;
             if halted_by_loop_guard {
                 break;
             }
@@ -3687,8 +3751,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Checked BEFORE the step cap: a step-capped turn already warned about the cap and told
         // the user to send `continue`, so the fact worth reporting here is the rarer one — that
         // the whole turn produced nothing.
-        let produced_nothing =
-            final_text.trim().is_empty() && self.mutations_this_turn == 0 && !presented_plan;
+        let produced_nothing = final_text.trim().is_empty()
+            && self.mutations_this_turn == 0
+            && !presented_plan
+            && !hard_guard_abort;
         let stop_reason = if produced_nothing {
             self.presenter.emit(PresenterEvent::Error(
                 "the turn produced NO answer and made no successful change — reporting it as a \
@@ -5041,6 +5107,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct CapturePresenter {
         events: Arc<Mutex<Vec<PresenterEvent>>>,
+        attended: bool,
     }
     impl Presenter for CapturePresenter {
         fn emit(&mut self, event: PresenterEvent) {
@@ -5064,6 +5131,9 @@ mod tests {
         }
         fn read_line(&mut self) -> Option<String> {
             None
+        }
+        fn is_attended(&self) -> bool {
+            self.attended
         }
     }
 
@@ -6516,7 +6586,26 @@ mod tests {
 
     /// Yields a tool call every single step forever (unique args so no doom/failure guard fires) —
     /// only the step cap can stop it.
-    struct EndlessToolProvider;
+    struct EndlessToolProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        input_tokens: u64,
+        output_tokens: u64,
+    }
+
+    impl EndlessToolProvider {
+        fn new(input_tokens: u64) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    calls: Arc::clone(&calls),
+                    input_tokens,
+                    output_tokens: 1,
+                },
+                calls,
+            )
+        }
+    }
+
     #[async_trait::async_trait]
     impl Provider for EndlessToolProvider {
         async fn complete(
@@ -6527,6 +6616,9 @@ mod tests {
             _on_event: &mut forge_provider::EventSink<'_>,
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             use forge_types::{new_id, ToolCall, Usage};
+            let n = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(forge_provider::ModelResponse {
                 content: "still working".into(),
                 tool_calls: vec![ToolCall {
@@ -6534,26 +6626,87 @@ mod tests {
                     // A real successful read each step with a UNIQUE range → no doom/failure guard,
                     // forcing the step cap to be the thing that stops the turn.
                     name: "read_file".into(),
-                    args: serde_json::json!({"path": "Cargo.toml", "start_line": 1, "end_line": 1}),
+                    args: serde_json::json!({"path": "Cargo.toml", "start_line": n + 1, "end_line": n + 1}),
                 }],
-                usage: Usage::default(),
+                usage: Usage {
+                    input_tokens: self.input_tokens,
+                    output_tokens: self.output_tokens,
+                    ..Usage::default()
+                },
                 quotas: Vec::new(),
             })
         }
     }
 
+    /// Wants a tool call for the first `tool_steps` responses, then answers with plain text —
+    /// so a turn that is allowed to run past the soft cap finishes on its own.
+    struct FiniteToolProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        tool_steps: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for FiniteToolProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_types::{new_id, ToolCall, Usage};
+            let n = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tool_calls = if n < self.tool_steps {
+                vec![ToolCall {
+                    id: new_id(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": "Cargo.toml", "start_line": 1, "end_line": 1}),
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(forge_provider::ModelResponse {
+                content: "all done".into(),
+                tool_calls,
+                usage: Usage {
+                    input_tokens: 3,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    /// How many model/tool loop steps actually ran, from the events the core emitted. Counting
+    /// provider calls directly would also count auxiliary side calls (recap, titling), which are
+    /// not loop steps.
+    fn loop_steps(events: &[PresenterEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, PresenterEvent::ProviderRequest { .. }))
+            .count()
+    }
+
     #[tokio::test]
-    async fn step_cap_halts_a_runaway_turn() {
-        // The step cap is the primary infinite-loop backstop. Pin it: with max_steps=2 and a model
-        // that always wants another tool call, the turn must stop at the cap (not spin to default 100).
+    async fn headless_continues_past_the_soft_cap_and_finishes() {
+        // An unattended turn must NOT die at the soft cap: it warns once and runs to completion
+        // well inside the hard ceiling.
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
         let mut config = Config::default();
         config.mesh.max_steps = 2;
+        config.mesh.max_steps_unattended = 50;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut session = Session::start(
             Arc::clone(&store),
-            Arc::new(EndlessToolProvider),
+            Arc::new(FiniteToolProvider {
+                calls: Arc::clone(&calls),
+                tool_steps: 4,
+            }),
             Arc::new(HeuristicRouter::new(Config::default())),
             ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
@@ -6562,22 +6715,163 @@ mod tests {
         )
         .unwrap();
 
-        // Must RETURN (the cap stops it) rather than loop forever.
         session.run_turn("keep reading").await.unwrap();
 
-        let warnings: Vec<String> = events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|e| match e {
-                PresenterEvent::Warning(w) => Some(w.clone()),
-                _ => None,
-            })
-            .collect();
         assert!(
-            warnings.iter().any(|w| w.contains("step limit")),
-            "the step cap should stop a runaway turn; warnings: {warnings:?}"
+            calls.load(std::sync::atomic::Ordering::Relaxed) > 2,
+            "the unattended turn must run past the soft cap"
         );
+        let events = events.lock().unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("soft step cap 2"))));
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Warning(w) if w.contains("send `continue`")
+            )),
+            "unattended turns must never be told to send `continue`"
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_step_cap_pauses_a_runaway_turn() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        };
+        let events = capture.events.clone();
+        let mut config = Config::default();
+        config.mesh.max_steps = 2;
+        config.mesh.max_steps_unattended = 5;
+        let (provider, calls) = EndlessToolProvider::new(7);
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(provider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("keep reading").await.unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Warning(w)
+                if w.contains("2-step limit") && w.contains("send `continue`")
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PresenterEvent::Error(w) if w.contains("step ceiling"))),
+            "an attended turn pauses at the soft cap; it must not hit the unattended hard ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_step_cap_warns_and_continues_to_hard_ceiling() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut config = Config::default();
+        config.mesh.max_steps = 2;
+        config.mesh.max_steps_unattended = 5;
+        let (provider, _calls) = EndlessToolProvider::new(7);
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(provider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("keep reading").await.unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            loop_steps(&events),
+            5,
+            "the unattended turn runs from the soft cap up to the hard ceiling"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Warning(w)
+                if w.contains("soft step cap 2")
+                    && w.contains("hard cap 5")
+                    && w.contains("input=14")
+                    && w.contains("output=2")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Error(w)
+                if w.contains("hard step ceiling 5") && w.contains("work is uncommitted")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Done {
+                stop_reason: StopReason::MaxSteps,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn token_ceiling_errors_on_every_surface() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        };
+        let events = capture.events.clone();
+        let mut config = Config::default();
+        config.mesh.max_steps = 5;
+        config.mesh.max_steps_unattended = 5;
+        config.mesh.max_turn_input_tokens = 10;
+        let (provider, _calls) = EndlessToolProvider::new(6);
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(provider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("keep reading").await.unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            loop_steps(&events),
+            2,
+            "the token ceiling ends the turn well before the step cap"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Error(w)
+                if w.contains("input-token ceiling")
+                    && w.contains("cap 10")
+                    && w.contains("input 12")
+                    && w.contains("output 2")
+                    && w.contains("work is uncommitted")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Done {
+                stop_reason: StopReason::FinalAnswer,
+                ..
+            }
+        )));
     }
 
     /// Stalls on the 2nd call (text, no tool call) while a task is still in_progress, then — once
@@ -9070,6 +9364,7 @@ mod tests {
             ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter {
                 events: events.clone(),
+                ..CapturePresenter::default()
             }),
             config,
             test_workspace().to_str().expect("workspace path is UTF-8"),
@@ -9163,6 +9458,7 @@ mod tests {
             ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter {
                 events: events.clone(),
+                ..CapturePresenter::default()
             }),
             config,
             test_workspace().to_str().expect("workspace path is UTF-8"),
@@ -11897,6 +12193,7 @@ mod tests {
         session.config.mesh.auto_memory = false;
         session.config.mesh.deadline_reconcile = false;
         session.config.mesh.max_steps = 3;
+        session.config.mesh.max_steps_unattended = 3;
         session.set_turn_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
         session
             .run_turn("How would you fix the bug?")
@@ -11925,6 +12222,7 @@ mod tests {
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.config.mesh.max_steps = 3;
+        session.config.mesh.max_steps_unattended = 3;
         session
             .run_turn("How would you fix the bug?")
             .await
@@ -13862,6 +14160,7 @@ mod tests {
             ToolRegistry::with_core_tools_in(&dir),
             Box::new(CapturePresenter {
                 events: events.clone(),
+                ..CapturePresenter::default()
             }),
             config,
             dir.to_str().unwrap(),
