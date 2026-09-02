@@ -1599,17 +1599,15 @@ impl HeuristicRouter {
             .filter(|model| forge_config::provider_of(model) == provider)
             .map(|model| burn_weight(model))
             .max_by(f64::total_cmp);
-        let no_lower_sibling = max_catalog.is_some_and(|max| min_usable >= max && min_usable > 1.0);
-        let (mut kept, mut held) = (Vec::new(), Vec::new());
-        for model in mine {
-            if !no_lower_sibling && burn_weight(model) <= min_usable {
-                kept.push(model.clone());
-            } else {
-                held.push(model.clone());
-            }
-        }
+        // Every subscription window Forge paces is a SHARED pool (ChatGPT, Claude, OpenCode Go
+        // dollars): the cheapest sibling still drains it. Keeping one routable sibling let the
+        // six equal-weight OpenCode Go complex models stay routable at 67% weekly use and grok-4.6
+        // took 61 calls in 13 minutes (2026-09-02). Over pace now holds the whole provider; the
+        // failover loop may still reach it as a named, single-hop last resort.
+        let _ = (min_usable, max_catalog);
+        let kept: Vec<String> = Vec::new();
+        let mut held: Vec<String> = mine.into_iter().cloned().collect();
         // Ranking order is an implementation detail; a reported hold reads the same every run.
-        kept.sort();
         held.sort();
         (kept, held)
     }
@@ -3520,7 +3518,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn over_pace_routes_to_the_cheapest_subscription_sibling() {
+    async fn over_pace_holds_the_whole_subscription_provider() {
         let r = HeuristicRouter::new(Config::default())
             .with_availability(|_| true)
             .with_catalog(ModelCatalog::new(vec![
@@ -3552,19 +3550,25 @@ mod tests {
                 &ProjectContext::default(),
             )
             .await;
-        assert_eq!(decision.model, "codex-cli::gpt-5.6-luna");
-        assert!(!decision.fallbacks.iter().any(|m| m.contains("gpt-5.6-sol")));
+        // An over-pace pool is shared by every sibling, so pacing holds the whole provider and
+        // the pick lands on the non-subscription alternative.
+        assert_eq!(decision.model, "groq::llama-3.3-70b-versatile");
+        assert!(!decision
+            .fallbacks
+            .iter()
+            .any(|m| m.starts_with("codex-cli::")));
         // The rationale must NAME what pacing held, not merely report that a pace was exceeded:
         // an operator otherwise cannot tell a pacing downgrade from a coincidental ranking.
         assert!(
-            decision
-                .rationale
-                .contains("codex-cli::gpt-5.6-sol, codex-cli::gpt-5.6-terra held: weekly 37% > 21% allowed at 29% elapsed"),
+            decision.rationale.contains(
+                "codex-cli::gpt-5.6-luna, codex-cli::gpt-5.6-sol, codex-cli::gpt-5.6-terra held: \
+                 weekly 37% > 21% allowed at 29% elapsed"
+            ),
             "{}",
             decision.rationale
         );
         assert!(
-            decision.rationale.contains("codex-cli::gpt-5.6-luna kept"),
+            !decision.rationale.contains(" kept"),
             "{}",
             decision.rationale
         );
