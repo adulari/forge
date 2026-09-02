@@ -32,21 +32,35 @@ fn catalog_cache_path() -> Option<std::path::PathBuf> {
     forge_config::data_dir().map(|d| d.join("catalog.json"))
 }
 
-/// Load the on-disk catalog if it exists and is fresh (< 24 h old).
-pub(crate) fn load_cached_catalog() -> Option<ModelCatalog> {
+/// Load the on-disk catalog whatever its age, with the epoch second it was written and how many
+/// seconds ago that was.
+///
+/// Age is not always a reason to discard: a remote surface is better served a stale catalog it can
+/// label than an empty list it cannot explain, and it needs the timestamp to say so.
+pub(crate) fn load_cached_catalog_aged() -> Option<(ModelCatalog, i64, u64)> {
     let path = catalog_cache_path()?;
     let meta = std::fs::metadata(&path).ok()?;
-    let age = meta.modified().ok()?.elapsed().ok()?;
-    if age.as_secs() > CATALOG_CACHE_MAX_AGE_SECS {
-        return None;
-    }
+    let modified = meta.modified().ok()?;
+    let age = modified.elapsed().ok()?.as_secs();
+    let epoch = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
     let bytes = std::fs::read(&path).ok()?;
     let catalog: ModelCatalog = serde_json::from_slice(&bytes).ok()?;
     // The cache was written when the bridge had a login; a logged-out one must not be routed to
     // for up to 24 h afterwards, one dead failover hop per alias it advertises.
-    Some(catalog.retaining(|model| {
+    let catalog = catalog.retaining(|model| {
         !forge_provider::bridge_credentials_known_absent(forge_config::provider_of(model))
-    }))
+    });
+    Some((catalog, epoch, age))
+}
+
+/// Load the on-disk catalog if it exists and is fresh (< 24 h old).
+pub(crate) fn load_cached_catalog() -> Option<ModelCatalog> {
+    load_cached_catalog_aged()
+        .filter(|(_, _, age)| *age <= CATALOG_CACHE_MAX_AGE_SECS)
+        .map(|(catalog, _, _)| catalog)
 }
 
 /// Persist `catalog` to disk for the next startup to load instantly.
