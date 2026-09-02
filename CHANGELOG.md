@@ -6,6 +6,68 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.7] - 2026-09-02
+
+### Fixed
+- **Every claude bridge on the machine stopped reporting `Not logged in · Please run /login` after a
+  Forge process ran inside a bridged turn.** `real_claude_config_dir` honoured an inherited
+  `CLAUDE_CONFIG_DIR` even when it was Forge's own isolated mirror, so `forge mcp-serve` (and any
+  child session it spawned) rebuilt the mirror onto itself and every entry became a symlink to
+  itself, `.credentials.json` included. The inherited value is now ignored when it is the mirror,
+  `prepare_claude_bridge_home` refuses to mirror a directory onto itself, and a first auth failure
+  seconds after the same provider completed a turn benches one model for five minutes instead of
+  excluding the provider for thirty (`crates/forge-provider/src/claude_bridge_home.rs`,
+  `crates/forge-core/src/compaction_policy.rs`).
+- **Unattended sessions no longer die on failover with `rate limited: HTTP error.` while 150+
+  models are usable.** The headless presenter answers the compact-on-switch prompt with
+  `NO_ANSWER`, which the consent gate read as "No", skipping every smaller-window fallback until
+  the chain ran dry. A non-answer now compacts and continues (`crates/forge-core/src/compaction_policy.rs`).
+- **Unattended turns run past the soft step cap instead of exiting with uncommitted work.** A
+  headless `forge run` (or `--mode bypass`) treats `mesh.max_steps` as a checkpoint: one warning
+  with the step count and the turn's cumulative tokens, then it continues to
+  `mesh.max_steps_unattended` (default 400) and ends with an ERROR naming the uncommitted work.
+  Attended sessions still pause. A new `mesh.max_turn_input_tokens` ceiling (default 10M) ends a
+  runaway turn on every surface, and both guards latch so re-drives cannot reset the counters
+  (`crates/forge-core/src/turn_guards.rs`, `crates/forge-config/src/lib.rs`).
+- **Failover hops obey the subscription pacing verdict, not just the primary pick.** Two builder
+  sessions failed over onto a held codex model and burned 5–7M input tokens each. Held models are
+  now parked until every non-held candidate is exhausted, reached only as a last resort with the
+  rationale `last resort: pacing hold overridden`, and `forge mesh` marks the hold per model
+  (`crates/forge-core/src/model_request.rs`, `crates/forge-mesh/src/lib.rs`).
+- **A resumed follow-up turn inherits the session's routing tier.** "continue" on a complex
+  session was classified on its own text and handed to a free trivial-tier model; the turn is now
+  floored at the session's most recent routing tier unless a pin or explicit effort overrides it,
+  with `tier inherited from previous turn` in the rationale (`crates/forge-core/src/routing_policy.rs`,
+  `crates/forge-store/src/provenance_store.rs`).
+- **Gemini 3.x no longer rejects a transcript whose tool calls came from another model.** Unsigned
+  `functionCall` parts get the documented placeholder signature, captured signatures are replayed
+  intact, and an HTTP 400 that names a transcript-compatibility problem classifies as a per-model
+  capability failure so failover continues instead of ending the turn
+  (`vendor/genai-0.6.5/src/adapter/adapters/gemini/adapter_impl.rs`,
+  `crates/forge-provider/src/genai_provider/error_policy.rs`).
+- **The Antigravity bridge stops being killed at exactly 120 s on healthy turns.** `agy -p` printed
+  nothing until the whole answer was ready, so the idle watchdog killed every complex turn and the
+  mesh walked through -high/-low/-medium for six minutes per cascade. agy now runs with
+  `--output-format stream-json` and a 600 s print timeout, its usage block is recorded (no more
+  `↑0 ↓0`), and a stall names the budget that fired in `model_health`
+  (`crates/forge-provider/src/cli_provider.rs`, `crates/forge-provider/src/cli_provider/cli_stream.rs`).
+- **OpenCode Go burn weights account for each model's own weekly quota.** The dashboard's weekly
+  percentage is the sum of per-model percentages against $7.50 / $15 / $30 quotas, so a dollar on
+  Grok 4.6 or Kimi K3 drains the pool four times faster than a dollar on Muse; the price-derived
+  weight is now multiplied by `largest quota / model quota` (fallback table, since the usage
+  endpoint exposes no per-model data) and `forge mesh` prints the quota buckets
+  (`crates/forge-mesh/src/subscription_cost.rs`).
+- **A binary compiled alongside the test suite says so instead of reporting "no keys".**
+  `forge auth --list`, `forge models`, `forge mesh` and `forge doctor` name the active secret-store
+  backend and warn loudly when it is the `test-secrets` in-memory store
+  (`crates/forge-config/src/secret_store.rs`).
+
+### Added
+- **The subscription pacing verdict is visible everywhere routing acts on it.** `forge mesh`, the
+  TUI usage overlays, the daemon usage API and the mobile usage screen show used vs allowed, the
+  elapsed fraction and whether models are being held (`crates/forge-types/src/subscription_pacing.rs`,
+  `mobile/src/app/usage.tsx`).
+
 ## [2.13.6] - 2026-09-02
 
 ### Fixed
@@ -3821,7 +3883,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.6...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.7...HEAD
+[2.13.7]: https://github.com/Adulari/forge/compare/v2.13.6...v2.13.7
 [2.13.6]: https://github.com/Adulari/forge/compare/v2.13.5...v2.13.6
 [2.13.5]: https://github.com/Adulari/forge/compare/v2.13.4...v2.13.5
 [2.13.4]: https://github.com/Adulari/forge/compare/v2.13.3...v2.13.4
