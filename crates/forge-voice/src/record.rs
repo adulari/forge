@@ -384,8 +384,10 @@ impl WavLevelTail {
         // Scale by 2^15 to match `decode`'s integer path, so the bars mean the same thing as the
         // samples whisper ends up seeing (and the same as the cpal backend's meter).
         let samples: Vec<f32> = fresh[..whole]
-            .chunks_exact(2)
-            .map(|s| f32::from(i16::from_le_bytes([s[0], s[1]])) / 32_768.0)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|s| f32::from(i16::from_le_bytes(*s)) / 32_768.0)
             .collect();
         Ok(Some(rms(&samples)))
     }
