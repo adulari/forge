@@ -67,4 +67,12 @@ impl Store {
             assistant_content,
         })
     }
+
+    /// The tier of the most recent active routing decision in a session, if any.
+    pub fn latest_task_tier(&self, session_id: &str) -> Result<Option<TaskTier>> {
+        let conn = self.lock()?;
+        let sql = "SELECT r.task_tier FROM routing_decision r JOIN message m ON m.id = r.message_id WHERE m.session_id = ?1 AND m.active = 1 ORDER BY m.seq DESC LIMIT 1";
+        let tier: Option<String> = conn.query_row(sql, [session_id], |r| r.get(0)).optional()?;
+        Ok(tier.as_deref().and_then(TaskTier::from_name))
+    }
 }
