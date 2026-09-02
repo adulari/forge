@@ -27,21 +27,11 @@ impl Session {
         // Failover chain: only meaningful for the primary turn (decision is Some). The autofix
         // path passes None, so `chain` is immediately exhausted and failover never fires.
         let fallbacks: Vec<String> = decision.map(|d| d.fallbacks.clone()).unwrap_or_default();
-        // The pacing verdict the primary pick was made under, applied to the chain as well: a
-        // failover hop must not walk rank order into a subscription the pacing engine is holding
-        // back (two unattended sessions failed over onto an over-pace ChatGPT plan and burned
-        // ~6M input tokens each, 2026-09-02). Held models stay in the chain but are deferred to
-        // last resort, so a turn still completes when nothing else is left.
-        let paced_held: Vec<String> = match decision.filter(|_| failover_enabled) {
-            Some(d) => {
-                let mut scope = vec![active_model.clone()];
-                scope.extend(fallbacks.iter().cloned());
-                let quota =
-                    crate::readiness::ProviderReadiness::snapshot(&self.config, &self.store).quota;
-                self.router.pacing_held(d.tier, &scope, &quota)
-            }
-            None => Vec::new(),
-        };
+        let paced_held = self.pacing_held_in_chain(
+            decision.filter(|_| failover_enabled),
+            &active_model,
+            &fallbacks,
+        );
         let mut paced_held_warned = false;
         let mut chain = fallbacks.into_iter();
         let explicit_pin = self.pinned_model.is_some() || decision.is_some_and(|d| d.pinned);
@@ -95,11 +85,8 @@ impl Session {
         let mut bridge_input_accum: u64 = 0;
         let mut hit_step_cap = true;
         let mut halted_by_loop_guard = false;
-        // A plan a bridge model proposes via the out-of-band sink (StreamEvent::Plan). Captured by
-        // the per-step stream closure and returned in the outcome for the turn's approval flow.
-        // Only honored in planning mode (the bridge advertises present_plan unconditionally — it
-        // can't see the parent's runtime temper — so the parent gates here): outside Plan mode a
-        // stray plan is dropped, which also stops the post-approval build turn from re-proposing.
+        // A plan a bridge proposes via the out-of-band sink (StreamEvent::Plan); only honored in
+        // Plan mode — the bridge advertises present_plan unconditionally, so the parent gates here.
         let mut proposed_plan: Option<forge_types::PlanProposal> = None;
         let in_plan_mode = self.mode == PermissionMode::Plan;
         // Harness reliability guards. `empty_nudges`: bounded retries when the model returns nothing
@@ -140,12 +127,8 @@ impl Session {
         // mutating tool. Separate from tool-call-markup repair because ordinary prose has no markup.
         let mut phantom_edit_nudges = 0usize;
 
-        // `bridge_continue_nudges`: bounded RE-RUNS of a CLI bridge whose turn returned with tracked
-        // tasks still unfinished. A bridge turn is otherwise terminal (it runs its own tool loop and
-        // returns once), so a long multi-step plan stalls partway — the bridge does a few steps,
-        // returns, and the turn ends with work pending (the half-finished release: merged + tagged
-        // but brew-sha + verify never ran). This drives a clean re-run, exactly as the user typing
-        // `continue` would.
+        // `bridge_continue_nudges`: bounded RE-RUNS of a CLI bridge that returned with tracked tasks
+        // unfinished (a bridge turn is terminal, so long plans stall partway) — as `continue` would.
         let mut bridge_continue_nudges = 0usize;
         // Verification gate: when a bridge reports every task Done, completion is NOT accepted on
         // its say-so. Fresh tool-grounded evidence newer than the last artifact mutation is enough;
