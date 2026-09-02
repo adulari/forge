@@ -6,6 +6,74 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.6] - 2026-09-02
+
+### Fixed
+
+- **OpenCode Go's top-ranked models now reach the endpoint they actually implement instead of
+  failing or spending 6m47s in “recovering provider”.** The service exposes three incompatible
+  wire formats without identifying them in `/models`: `gpt-5.6-luna`, `grok-4.5`,
+  `grok-4.6`, and `muse-spark-1.2-contributor` reject Chat Completions immediately and answer
+  only on Responses, while the other Go models do the reverse. Forge now seeds that measured
+  matrix, learns an unknown model's endpoint only after its characteristic rejection and a
+  successful one-shot Responses retry, and omits unsupported temperature parameters by model
+  family. Two identical errors returned within two seconds are treated as a rejection, so a pinned
+  model surfaces the real error immediately instead of consuming the 600-second outage budget;
+  live turn-loop checks answered on Muse, Luna, Grok, and GLM in 7–12 seconds
+  (`vendor/genai-0.6.5/src/adapter/adapters/opencode_go/adapter_impl.rs`,
+  `crates/forge-provider/src/genai_provider.rs`, `crates/forge-core/src/model_request.rs`).
+
+- **Claude CLI tool and filesystem errors no longer disable a valid login for 30 minutes.** A
+  working `claude-cli::opus[1m]` was stored as `excluded: auth failed: auth failed` because the
+  permanent-auth phrase list accepted generic “permission denied” and “credentials” text emitted
+  by tool gates, OS errors, and keychain notices. Only text that identifies the login can now earn
+  that provider-wide verdict, and the stored health row retains up to 240 characters of the CLI's
+  actual evidence instead of repeating the classification. Discovery also unions Claude 2.1.257's
+  initialize picker with its documented aliases, so Fable is available even though initialize
+  advertises only Opus, Sonnet, and Haiku (`crates/forge-provider/src/cli_provider.rs`,
+  `crates/forge-provider/src/cli_provider/error_policy.rs`,
+  `crates/forge-core/src/compaction_policy.rs`).
+
+- **Reinstalling the daemon service now applies the new binary instead of merely rewriting the
+  unit.** `systemctl --user enable --now` is a no-op for an already-active unit, so the rendered
+  `ExecStart` could point at the release while the old process kept serving; in the observed
+  failure this ended in a `203/EXEC` service outage. Active systemd units are explicitly restarted,
+  loaded launchd agents are reloaded, and active Windows scheduled tasks are ended and re-run.
+  Install and status inspect the live process before and after activation, report its executable
+  and version, and fail honestly when the replacement cannot be established
+  (`crates/forge-cli/src/cli/commands/service.rs`,
+  `crates/forge-cli/src/cli/commands/service_report.rs`).
+
+- **`forge doctor` reports the daemon's version, not the version of the doctor binary printing the
+  report.** A unit stamped 2.12.2 with a daemon actually running 2.13.5 was reported as “running
+  2.13.2” because 2.13.2 happened to be the separately installed CLI invoking doctor. Version
+  evidence now comes from the live daemon's authenticated `/api/identity`, then the unit's
+  `ExecStart --version`, otherwise an explicit unknown; the report labels the unit stamp, daemon
+  binary, and current CLI separately so upgraded-on-disk-but-not-restarted processes are visible
+  (`crates/forge-cli/src/doctor.rs`, `crates/forge-cli/src/doctor_daemon.rs`).
+
+### Added
+
+- **Routing prices now follow current model economics instead of stale hardcoded burn weights.**
+  OpenRouter has no GPT-5.6 rows, leaving Codex decisions at `$0`, while the fallback
+  Sol/Terra/Luna ladder of 5/2.5/1 predated current $4/$20, $2/$12, and $0.20/$1.20 per-million-token
+  prices—roughly 17.5× and 10× Luna for Sol and Terra. Forge fetches models.dev beside OpenRouter,
+  maps its prices onto native and CLI-bridge namespaces, preserves bundled rates on fetch failure,
+  and resolves override → fetched/bundled price → table. A nonzero subscription floor prevents a
+  heavier sibling winning on a marginal score at zero pressure; that old behavior burned 64% of a
+  fresh $12/5h OpenCode Go pool in two hours on Kimi K3 over a 0.14-point advantage
+  (`crates/forge-cli/src/context_windows.rs`, `crates/forge-mesh/src/pricing.rs`,
+  `crates/forge-mesh/src/subscription_cost.rs`, `docs/features/mesh-routing.md`).
+
+- **Subscription routing accounts for the size of the pool and the share consumed by one request.**
+  At OpenCode Go 28% and Codex 25%, the former's Kimi K3 scored 3.27 over Codex OAuth's Sol at
+  2.96 even though one Kimi request consumed about 1% of its $12/5h pool and Sol used a fraction of
+  a much larger plan. Providers now carry an explicit capacity class—OpenCode Go is Tiny; captured
+  CLI plan slugs map 20x to Large, max/pro to Medium, plus/team to Small, and an unset plan remains
+  Unknown—and ranking applies request share times model burn times scarcity, with scarcity capped
+  at 3×. Equal models therefore prefer the larger, fuller pool without guessing an unknown plan
+  (`crates/forge-mesh/src/catalog.rs`, `crates/forge-mesh/src/subscription_cost.rs`).
+
 ## [2.13.5] - 2026-09-01
 
 ### Fixed
@@ -3753,7 +3821,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.5...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.6...HEAD
+[2.13.6]: https://github.com/Adulari/forge/compare/v2.13.5...v2.13.6
 [2.13.5]: https://github.com/Adulari/forge/compare/v2.13.4...v2.13.5
 [2.13.4]: https://github.com/Adulari/forge/compare/v2.13.3...v2.13.4
 [2.13.3]: https://github.com/Adulari/forge/compare/v2.13.2...v2.13.3
