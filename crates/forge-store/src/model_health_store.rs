@@ -17,6 +17,17 @@ const AUTH_REASON: &str = "auth failed";
 /// damage of being wrong while still suppressing per-turn churn against a truly bad credential.
 const AUTH_EXCLUSION_SECS: i64 = 30 * 60;
 
+/// How long an UNCONFIRMED auth failure benches the single model that saw it.
+///
+/// Reached when the provider completed a turn moments earlier (see
+/// [`provider_succeeded_since`](Store::provider_succeeded_since)), which makes "not logged in"
+/// a claim about one subprocess rather than about the credential — Forge's claude bridge shares
+/// one OAuth credential file across every concurrent subprocess, so a token refresh in one of them
+/// is enough for another to momentarily read no valid token. Long enough to still be in force when
+/// a genuine repeat arrives (it outlives the escalation gap, so a real logout still corroborates
+/// and escalates), short enough that a false verdict costs one model a few minutes.
+const AUTH_UNCONFIRMED_BENCH_SECS: i64 = 5 * 60;
+
 /// SQL predicate hiding auth exclusions written under a classification rule this build no longer
 /// implements. Every health read ANDs it in, so a superseded row can never influence routing.
 ///
@@ -108,6 +119,45 @@ impl Store {
     pub fn exclude_model_auth(&self, model: &str, reason: &str) -> Result<()> {
         let until = chrono::Utc::now().timestamp() + AUTH_EXCLUSION_SECS;
         self.bench_model(model, until, &format!("excluded: {AUTH_REASON}: {reason}"))
+    }
+
+    /// Bench a model after an auth failure the evidence does not yet support believing.
+    ///
+    /// Deliberately NOT an `excluded:` row: the model stays eligible as a last-resort pick, and the
+    /// window is minutes rather than [`AUTH_EXCLUSION_SECS`]. The reason still carries the
+    /// [`AUTH_REASON`] marker so a repeat is corroborated by
+    /// [`provider_auth_failed_before`](Self::provider_auth_failed_before) and escalates normally.
+    pub fn bench_model_auth_unconfirmed(&self, model: &str, reason: &str) -> Result<()> {
+        let until = chrono::Utc::now().timestamp() + AUTH_UNCONFIRMED_BENCH_SECS;
+        self.bench_model(
+            model,
+            until,
+            &format!("{AUTH_REASON} (unconfirmed): {reason}"),
+        )
+    }
+
+    /// Whether any model of `provider` completed a turn at or after `cutoff` (epoch secs).
+    ///
+    /// The counter-evidence to an auth verdict: a credential that answered a minute ago was not
+    /// logged out when the next subprocess said it was.
+    pub fn provider_succeeded_since(&self, provider: &str, cutoff: i64) -> Result<bool> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT model FROM mesh_outcome
+             WHERE outcome = 'success' AND completed_at >= ?1",
+        )?;
+        let mut rows = stmt.query([cutoff])?;
+        while let Some(row) = rows.next()? {
+            let model: String = row.get(0)?;
+            // Provider matching in Rust, not LIKE: provider names contain `_` (`opencode_go`).
+            if model
+                .split_once("::")
+                .is_some_and(|(prefix, _)| prefix == provider)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Exclude every current and future model alias for `provider` after an authentication

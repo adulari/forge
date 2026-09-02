@@ -3184,7 +3184,7 @@ fn apply_claude_bridge_home(kind: CliKind, cmd: &mut Command) {
     let Some(base) = forge_config::config_dir() else {
         return;
     };
-    let isolated_dir = base.join("claude-bridge-home");
+    let isolated_dir = base.join(crate::claude_bridge_home::BRIDGE_HOME_DIR_NAME);
     match crate::claude_bridge_home::prepare_claude_bridge_home(&real_home, &isolated_dir) {
         Ok(()) => {
             cmd.env("CLAUDE_CONFIG_DIR", &isolated_dir);
