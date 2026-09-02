@@ -667,6 +667,24 @@ impl Store {
         Ok(rows.filter_map(std::result::Result::ok).collect())
     }
 
+    /// The tier of the most recent routing decision in a session, if any. Read back when routing a
+    /// new turn so a continuation ("continue", "fix the test") cannot be routed below the tier the
+    /// session's work was already running at — the resume path otherwise classified the follow-up
+    /// text on its own and handed a half-finished complex task to a trivial-tier model.
+    pub fn latest_task_tier(&self, session_id: &str) -> Result<Option<TaskTier>> {
+        let conn = self.lock()?;
+        let tier: Option<String> = conn
+            .query_row(
+                "SELECT r.task_tier FROM routing_decision r \
+                 JOIN message m ON m.id = r.message_id \
+                 WHERE m.session_id = ?1 AND m.active = 1 ORDER BY m.seq DESC LIMIT 1",
+                [session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(tier.as_deref().and_then(TaskTier::from_name))
+    }
+
     /// Per-provider usage since a rolling epoch timestamp.
     ///
     /// See [`cached_total`] for how a provider that never reports cache hits is distinguished from

@@ -94,11 +94,31 @@ impl Session {
             tier_override: self.pinned_tier,
             effort: self.pinned_effort(),
             project: self.project.clone(),
-            routing_context: RoutingContext::from_messages(&self.transcript).with_session_affinity(
-                self.route_affinity.clone(),
-                self.estimated_reusable_prefix_tokens(),
-            ),
+            routing_context: RoutingContext::from_messages(&self.transcript)
+                .with_session_affinity(
+                    self.route_affinity.clone(),
+                    self.estimated_reusable_prefix_tokens(),
+                )
+                .with_prior_tier(self.inheritable_prior_tier(self.pinned_tier)),
         })
+    }
+
+    /// The tier this session's work was already running at, when it may act as a floor for the
+    /// next turn. `None` — no inheritance — whenever the user has taken the tier decision
+    /// themselves: an explicit tier hint or `tier_up`/`tier_down` pin, an explicit `/effort`, or a
+    /// `/model` pin (a pinned turn does not consult routing context at all, but the inspector
+    /// shares this helper).
+    pub(crate) fn inheritable_prior_tier(
+        &self,
+        effective_tier: Option<TaskTier>,
+    ) -> Option<TaskTier> {
+        if effective_tier.is_some()
+            || self.pinned_effort().is_some()
+            || self.effective_pin().is_some()
+        {
+            return None;
+        }
+        self.store.latest_task_tier(&self.id).unwrap_or_default()
     }
 
     /// The last-resort model to try when the routed fallback chain is exhausted: the non-excluded
