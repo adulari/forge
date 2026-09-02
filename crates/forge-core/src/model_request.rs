@@ -70,6 +70,85 @@ Set one of ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY, or log in to the C
     format!("No usable model: attempted providers failed for mixed reasons ({observed}).")
 }
 
+/// Advance `chain` to the next model this turn may dispatch, applying the live subscription
+/// pacing verdict: a model in `paced_held` is parked in `deferred_held` instead of dispatched,
+/// so failover exhausts every non-held candidate (free or on-pace subscription, in rank order)
+/// first. Returns `None` when only held models remain.
+async fn advance_to_next_usable(
+    session: &mut Session,
+    chain: &mut std::vec::IntoIter<String>,
+    paced_held: &[String],
+    skip_provider: Option<&str>,
+    freshly_benched: Option<&forge_types::ModelHealth>,
+    skip_reserved: bool,
+    deferred_held: &mut Vec<String>,
+) -> Result<Option<String>, CoreError> {
+    for next in chain.by_ref() {
+        if forge_config::is_model_disabled(&next, &session.config.mesh.disabled) {
+            continue;
+        }
+        if skip_provider.is_some_and(|p| forge_config::provider_of(&next) == p) {
+            continue;
+        }
+        if skip_reserved && session.store.is_model_reserved(&next) {
+            continue;
+        }
+        // The original chain was built before this failure. Re-read health so an auth failure's
+        // new provider-wide bench immediately skips its sibling aliases in THIS turn.
+        if freshly_benched.is_some_and(|health| health.is_benched(&next)) {
+            continue;
+        }
+        if paced_held.iter().any(|held| held == &next) {
+            deferred_held.push(next);
+            continue;
+        }
+        match session.admit_failover_model(&next).await {
+            Ok(true) => return Ok(Some(next)),
+            Ok(false) => {
+                session.presenter.emit(PresenterEvent::Warning(format!(
+                    "skipped {next} (declined compaction) — trying the next model"
+                )));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
+/// Take the best held model as a genuine LAST RESORT, once nothing non-held is left. Named as
+/// such in the routing rationale so the operator can see the pacing hold was overridden rather
+/// than ignored.
+async fn admit_paced_held(
+    session: &mut Session,
+    deferred_held: &mut Vec<String>,
+) -> Result<Option<String>, CoreError> {
+    while !deferred_held.is_empty() {
+        let next = deferred_held.remove(0);
+        match session.admit_failover_model(&next).await {
+            Ok(true) => return Ok(Some(next)),
+            Ok(false) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
+/// One per-turn line naming what pacing kept the failover chain away from, so a hop that skipped
+/// an over-pace subscription is explainable after the fact.
+fn warn_paced_held_skips(session: &mut Session, deferred_held: &[String], warned: &mut bool) {
+    if *warned || deferred_held.is_empty() {
+        return;
+    }
+    *warned = true;
+    session.presenter.emit(PresenterEvent::Warning(format!(
+        "subscription pacing: skipped {} in failover — over pace on its window; \
+         trying non-held models first",
+        deferred_held.join(", ")
+    )));
+}
+
+pub(super) const PACING_LAST_RESORT_RATIONALE: &str = "last resort: pacing hold overridden";
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn request_provider_response(
     session: &mut Session,
@@ -97,6 +176,8 @@ pub(super) async fn request_provider_response(
     failover_enabled: bool,
     default_cooldown: std::time::Duration,
     chain: &mut std::vec::IntoIter<String>,
+    paced_held: &[String],
+    paced_held_warned: &mut bool,
     last_resort_used: &mut bool,
     compact_retries: &mut usize,
     transient_retries: &mut u32,
@@ -113,6 +194,9 @@ pub(super) async fn request_provider_response(
     let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
     let mut attempted = std::collections::HashSet::new();
     let mut failures = Vec::new();
+    // Models the chain reached while subscription pacing holds them: parked here, tried only
+    // once every non-held candidate is exhausted (see `admit_paced_held`).
+    let mut deferred_held: Vec<String> = Vec::new();
     // Stream the reply, with transparent failover for this step's completion.
     let mut failover_hop = 0u32;
     let resp = loop {
@@ -264,25 +348,21 @@ pub(super) async fn request_provider_response(
                 // Another session owns this model's reservation. This is scheduling
                 // pressure, not provider health: immediately advance the existing chain
                 // without benching a healthy shared model.
-                let mut picked = None;
-                for next in chain.by_ref() {
-                    if forge_config::is_model_disabled(&next, &session.config.mesh.disabled)
-                        || session.store.is_model_reserved(&next)
-                    {
-                        continue;
-                    }
-                    match session.admit_failover_model(&next).await {
-                        Ok(true) => {
-                            picked = Some(next);
-                            break;
-                        }
-                        Ok(false) => {
-                            session.presenter.emit(PresenterEvent::Warning(format!(
-                                "skipped {next} (declined compaction) — trying the next model"
-                            )));
-                        }
-                        Err(e) => return Err(e),
-                    }
+                let mut picked = advance_to_next_usable(
+                    session,
+                    chain,
+                    paced_held,
+                    None,
+                    None,
+                    true,
+                    &mut deferred_held,
+                )
+                .await?;
+                warn_paced_held_skips(session, &deferred_held, paced_held_warned);
+                let mut pacing_override = false;
+                if picked.is_none() {
+                    picked = admit_paced_held(session, &mut deferred_held).await?;
+                    pacing_override = picked.is_some();
                 }
                 match picked {
                     Some(next) => {
@@ -291,7 +371,11 @@ pub(super) async fn request_provider_response(
                                 .map(|d| d.tier.as_str().to_string())
                                 .unwrap_or_default(),
                             model: next.clone(),
-                            rationale: format!("model busy: {active_model}"),
+                            rationale: if pacing_override {
+                                format!("{PACING_LAST_RESORT_RATIONALE}: {active_model} busy")
+                            } else {
+                                format!("model busy: {active_model}")
+                            },
                         });
                         *active_model = next;
                         failover_hop = failover_hop.saturating_add(1);
@@ -586,35 +670,17 @@ pub(super) async fn request_provider_response(
                 // a switch that needs (lossy) compaction, so it's gated by consent
                 // (Yes/No/Always) — "No" skips it and we keep looking for one that fits.
                 let freshly_benched = session.store.current_benched().unwrap_or_default();
-                let mut picked = None;
-                for next in chain.by_ref() {
-                    if forge_config::is_model_disabled(&next, &session.config.mesh.disabled) {
-                        continue;
-                    }
-                    if let Some(p) = &skip_provider {
-                        if forge_config::provider_of(&next) == p.as_str() {
-                            continue;
-                        }
-                    }
-                    // The original chain was built before this failure. Re-read health
-                    // so an auth failure's new provider-wide bench immediately skips its
-                    // sibling aliases in THIS turn, not only on the next one.
-                    if freshly_benched.is_benched(&next) {
-                        continue;
-                    }
-                    match session.admit_failover_model(&next).await {
-                        Ok(true) => {
-                            picked = Some(next);
-                            break;
-                        }
-                        Ok(false) => {
-                            session.presenter.emit(PresenterEvent::Warning(format!(
-                                "skipped {next} (declined compaction) — trying the next model"
-                            )));
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
+                let picked = advance_to_next_usable(
+                    session,
+                    chain,
+                    paced_held,
+                    skip_provider.as_deref(),
+                    Some(&freshly_benched),
+                    false,
+                    &mut deferred_held,
+                )
+                .await?;
+                warn_paced_held_skips(session, &deferred_held, paced_held_warned);
                 let Some(d) = decision else {
                     return Err(CoreError::Internal(
                         "failover engaged without a routing decision".into(),
@@ -637,7 +703,39 @@ pub(super) async fn request_provider_response(
                     // model whose transient bench expires soonest. This keeps a turn
                     // working when every model is briefly rate-limited but none is
                     // permanently incapable. Guarded by `last_resort_used` so a model that
-                    // fails again can't loop.
+                    // fails again can't loop. A model pacing HELD comes first: it is healthy,
+                    // merely over pace, so it beats the least-dead benched model — but only
+                    // here, and only with the override named in the rationale.
+                    None if !deferred_held.is_empty() => {
+                        match admit_paced_held(session, &mut deferred_held).await? {
+                            Some(next) => {
+                                session.presenter.emit(PresenterEvent::Routing {
+                                    tier: d.tier.as_str().to_string(),
+                                    model: next.clone(),
+                                    rationale: format!(
+                                        "{PACING_LAST_RESORT_RATIONALE}: failover from \
+                                         {active_model}, every non-held model exhausted"
+                                    ),
+                                });
+                                *active_model = next;
+                                failover_hop = failover_hop.saturating_add(1);
+                                *transient_retries = 0;
+                                continue;
+                            }
+                            None => {
+                                let reason = e.reason();
+                                session.presenter.emit(PresenterEvent::Warning(format!(
+                                    "{active_model} {reason} — model chain exhausted: {e}"
+                                )));
+                                return Err(CoreError::NoHealthyModel {
+                                    verdict: failure_verdict(&failures),
+                                    model: active_model.clone(),
+                                    reason,
+                                    last_error: e.to_string(),
+                                });
+                            }
+                        }
+                    }
                     None => match session.last_resort_model(&attempted, *last_resort_used) {
                         Some(m) => {
                             *last_resort_used = true;
