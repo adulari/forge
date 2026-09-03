@@ -189,13 +189,21 @@ impl Session {
         let window = self.base_context_window(model) as u64;
         let cap = compaction_cap(self.router.model_is_free(model), &self.config.mesh);
         let trigger = auto_compact_trigger_tokens(window, cap, AUTO_COMPACT_THRESHOLD);
-        if self.estimated_transcript_tokens() > trigger || !self.transcript_fits(model) {
+        if needs_compaction(
+            self.estimated_transcript_tokens(),
+            trigger,
+            self.transcript_fits(model),
+        ) {
             // Cheap first: the pipeline's mutating phase — prune bulky OLD tool results in place
             // (no model call). Often reclaims enough that the LLM summarize below isn't needed.
             if prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT) > 0 {
                 self.emit_context_gauge(model);
             }
-            if !self.transcript_fits(model) {
+            if needs_compaction(
+                self.estimated_transcript_tokens(),
+                trigger,
+                self.transcript_fits(model),
+            ) {
                 let (before, after) = self.compact(true).await.unwrap_or_default();
                 // Continual Harness auto-refine gate (`harness.auto_refine = "compact"`,
                 // refinement.rs): only when this call actually folded something — `compact`
@@ -674,6 +682,21 @@ mod auth_failure_tests {
     }
 }
 
+/// Whether the transcript must be folded: over the configured ceiling, OR no longer fitting the
+/// model's window. Both call sites in [`Session::auto_compact_if_needed`] ask this same question —
+/// the one before the cheap prune, and the one after it that decides whether to spend a model call
+/// on summarizing.
+///
+/// That second call site used to ask only `transcript_fits`, i.e. the WINDOW, which made the
+/// ceiling decorative on any large-window model. The outer check let a 757k-token transcript
+/// through, the prune reclaimed what it could, and then the summarize step asked "does 757k fit in
+/// 1,048,576?", answered yes, and returned. So a ceiling could only ever trigger the cheap prune,
+/// never the compaction that actually bounds a transcript — and a session grew until it approached
+/// the window itself (832,307 tokens on a 1M-token model) no matter what the ceiling said.
+pub(crate) fn needs_compaction(transcript_tokens: u64, trigger: u64, fits_window: bool) -> bool {
+    transcript_tokens > trigger || !fits_window
+}
+
 /// The absolute token ceiling at which a session auto-compacts, before the model's own window is
 /// taken into account. Two different ceilings, because they answer two different questions.
 ///
@@ -703,6 +726,50 @@ mod compaction_cap_tests {
     /// The window of `meta::muse-spark-1.3-contributor` and every other muse-spark model, as
     /// OpenRouter publishes it and as the store records it.
     const MUSE_WINDOW: u64 = 1_048_576;
+
+    /// The measured failure, and why this PR's ceiling alone would have changed nothing.
+    /// `compact_cap_tokens` was restored to its 217_600 default on a real machine and the session
+    /// still sent 757,178 input tokens per request, because the step that would have folded it
+    /// asked about the WINDOW instead of the ceiling.
+    #[test]
+    fn the_ceiling_governs_the_summarize_step_not_only_the_prune() {
+        // The reserve for the default `max_output_tokens = 0` is
+        // UNBOUNDED_OUTPUT_PLANNING_RESERVE, and `transcript_fits` keeps 80% of what is left.
+        let fits_window_at = (MUSE_WINDOW - 8_192) * 8 / 10;
+        assert_eq!(fits_window_at, 832_307);
+
+        let mesh = forge_config::Config::default().mesh;
+        let trigger = auto_compact_trigger_tokens(
+            MUSE_WINDOW,
+            compaction_cap(false, &mesh),
+            AUTO_COMPACT_THRESHOLD,
+        );
+        assert_eq!(trigger, 217_600);
+
+        // What a real session was carrying, per request, with that 217_600 ceiling in force.
+        let observed = 757_178;
+        let fits_window = observed <= fits_window_at;
+        assert!(
+            fits_window,
+            "it fit the window — which is exactly why the old gate returned without compacting"
+        );
+        assert!(
+            needs_compaction(observed, trigger, fits_window),
+            "3.5x over the ceiling must compact even though it still fits the window"
+        );
+    }
+
+    #[test]
+    fn a_transcript_under_the_ceiling_that_fits_is_left_alone() {
+        assert!(!needs_compaction(100_000, 217_600, true));
+    }
+
+    /// The ceiling is an upper bound, never a licence to overflow: a model whose window is smaller
+    /// than the ceiling must still compact on the window alone.
+    #[test]
+    fn a_transcript_under_the_ceiling_that_no_longer_fits_still_compacts() {
+        assert!(needs_compaction(30_000, 217_600, false));
+    }
 
     #[test]
     fn a_free_model_still_has_a_ceiling_on_a_million_token_window() {
