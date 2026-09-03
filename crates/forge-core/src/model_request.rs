@@ -1,76 +1,10 @@
 //! Provider request, stream handling, and failover policy for a model-loop step.
 
 use super::*;
+use crate::failure_verdict::{
+    any_credentials_available, classify_attempt_failure, failure_verdict,
+};
 use crate::model_stream::handle_stream_event;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AttemptFailure {
-    NoCredentials,
-    RateLimited,
-    Capability,
-    Network,
-    Down,
-}
-
-fn classify_attempt_failure(error: &forge_provider::ProviderError) -> AttemptFailure {
-    match error {
-        forge_provider::ProviderError::Auth(_) => AttemptFailure::NoCredentials,
-        forge_provider::ProviderError::RateLimited { .. } => AttemptFailure::RateLimited,
-        forge_provider::ProviderError::Capability(_)
-        | forge_provider::ProviderError::NoModelAccess(_)
-        | forge_provider::ProviderError::Request(_) => AttemptFailure::Capability,
-        forge_provider::ProviderError::Unavailable(message) => {
-            let message = message.to_ascii_lowercase();
-            if [
-                "connect",
-                "connection",
-                "network",
-                "dns",
-                "timed out",
-                "timeout",
-                "no data",
-            ]
-            .iter()
-            .any(|needle| message.contains(needle))
-            {
-                AttemptFailure::Network
-            } else {
-                AttemptFailure::Down
-            }
-        }
-    }
-}
-
-fn failure_verdict(failures: &[AttemptFailure]) -> String {
-    let count = |kind| failures.iter().filter(|failure| **failure == kind).count();
-    if !failures.is_empty() && count(AttemptFailure::NoCredentials) == failures.len() {
-        return format!(
-            "No usable model: none of your configured providers have credentials.\n\
-             {NO_CREDENTIALS_GUIDANCE}\n\
-             Set one of ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY, or log in to the \
-             Claude or Codex CLI."
-        );
-    }
-    if !failures.is_empty() && count(AttemptFailure::RateLimited) == failures.len() {
-        return "No usable model: every attempted model was rate-limited.".to_string();
-    }
-    let labels = [
-        (AttemptFailure::NoCredentials, "missing credentials"),
-        (AttemptFailure::RateLimited, "rate-limited"),
-        (AttemptFailure::Capability, "capability errors"),
-        (AttemptFailure::Network, "network errors"),
-        (AttemptFailure::Down, "provider unavailable"),
-    ];
-    let observed = labels
-        .into_iter()
-        .filter_map(|(kind, label)| {
-            let n = count(kind);
-            (n > 0).then(|| format!("{n} {label}"))
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("No usable model: attempted providers failed for mixed reasons ({observed}).")
-}
 
 /// Advance `chain` to the next model this turn may dispatch, applying the live subscription
 /// pacing verdict: a model in `paced_held` is parked in `deferred_held` instead of dispatched,
@@ -738,7 +672,10 @@ pub(super) async fn request_provider_response(
                                     "{active_model} {reason} — model chain exhausted: {e}"
                                 )));
                                 return Err(CoreError::NoHealthyModel {
-                                    verdict: failure_verdict(&failures),
+                                    verdict: failure_verdict(
+                                        &failures,
+                                        any_credentials_available(),
+                                    ),
                                     model: active_model.clone(),
                                     reason,
                                     last_error: e.to_string(),
@@ -771,7 +708,7 @@ pub(super) async fn request_provider_response(
                                 "{active_model} {reason} — model chain exhausted: {e}"
                             )));
                             return Err(CoreError::NoHealthyModel {
-                                verdict: failure_verdict(&failures),
+                                verdict: failure_verdict(&failures, any_credentials_available()),
                                 model: active_model.clone(),
                                 reason,
                                 last_error: e.to_string(),
@@ -799,40 +736,7 @@ pub(super) async fn request_provider_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn verdict_for_all_missing_credentials_is_actionable_and_mentions_no_rate_limit() {
-        let verdict =
-            failure_verdict(&[AttemptFailure::NoCredentials, AttemptFailure::NoCredentials]);
-        assert!(verdict.contains("none of your configured providers have credentials"));
-        assert!(verdict.contains("forge setup"));
-        assert!(
-            verdict.contains(NO_CREDENTIALS_GUIDANCE),
-            "reuses the shared guidance so it cannot drift from the unroutable path"
-        );
-        assert!(!verdict.contains("rate-limit"));
-    }
-
-    #[test]
-    fn verdict_for_all_rate_limited_says_exactly_that() {
-        let verdict = failure_verdict(&[AttemptFailure::RateLimited, AttemptFailure::RateLimited]);
-        assert_eq!(
-            verdict,
-            "No usable model: every attempted model was rate-limited."
-        );
-    }
-
-    #[test]
-    fn verdict_for_mixed_chain_reports_each_observed_cause() {
-        let verdict = failure_verdict(&[
-            AttemptFailure::NoCredentials,
-            AttemptFailure::RateLimited,
-            AttemptFailure::Network,
-        ]);
-        assert!(verdict.contains("1 missing credentials"));
-        assert!(verdict.contains("1 rate-limited"));
-        assert!(verdict.contains("1 network errors"));
-    }
+    use crate::failure_verdict::AttemptFailure;
 
     fn test_session() -> Session {
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
