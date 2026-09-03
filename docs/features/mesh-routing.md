@@ -870,8 +870,14 @@ pressure, then candidate filtering and chain building.
   endpoint omits the field: Qwen 3.7 Max and Qwen 3.8 Max Preview are 1,000,000 tokens, and this
   value repairs a missing/stale persisted row. The CLI bridges have no queryable API, so their
   last-resort values remain in `context_limit`: `claude-cli` 1,000,000 tokens (200,000 for
-  haiku), `codex-cli` 272,000, `agy-cli` 1,000,000. Truly unknown models fall back to
-  `CONSERVATIVE_CONTEXT_WINDOW` = 32,000 only when the core must bound a request.
+  haiku), `codex-cli` 272,000, `agy-cli` 1,000,000. A gateway (OpenCode Zen and Go, custom
+  OpenAI-compatible endpoints) publishes no window in its model list, so a model with no row of
+  its own borrows the window stored for the SAME model under another namespace
+  (`cross_namespace_window`): `opencode::muse-spark-1.3-contributor-free` takes what OpenRouter
+  published for `meta/muse-spark-1.3-contributor`. Matching reduces both ids to the vendor-
+  independent name (after `provider::`, after the last `/`, minus the `-free` tier suffix), and
+  the LOWEST matching window wins, since a gateway may serve a smaller one. Truly unknown models
+  fall back to `CONSERVATIVE_CONTEXT_WINDOW` = 32,000 only when the core must bound a request.
 
 Then: the vision preference (§3.3) when the turn has images; a **stable** demotion of
 `Warning`-pressured subscriptions to the back of the list (`quota.is_pressured`, `lib.rs:837`) —

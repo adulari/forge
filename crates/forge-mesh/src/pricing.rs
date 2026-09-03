@@ -258,6 +258,40 @@ fn bare_model_name(id: &str) -> &str {
         .unwrap_or(id)
 }
 
+/// The window to assume for `id` when nothing is stored for that exact id, inferred from a window
+/// stored for the SAME model under another namespace: `opencode::muse-spark-1.3-contributor-free`
+/// borrows what OpenRouter published for `openrouter::meta/muse-spark-1.3-contributor`.
+///
+/// Gateways (OpenCode Zen and Go, and any custom OpenAI-compatible endpoint) publish no window in
+/// their model lists, so without this every model behind one falls to
+/// [`CONSERVATIVE_CONTEXT_WINDOW`] — and a 32k assumption on a million-token model makes long turns
+/// trim themselves for no reason. The lowest matching window wins, because a gateway may serve the
+/// model with a smaller window than its native vendor does and under-assuming only costs context.
+/// The `-free` suffix Forge appends to a gateway's free tier is not part of the model's name.
+/// Documented in docs/features/mesh-routing.md.
+pub fn cross_namespace_window(id: &str, windows: &HashMap<String, u32>) -> Option<u32> {
+    let want = normalized_bare_name(id);
+    if want.is_empty() {
+        return None;
+    }
+    windows
+        .iter()
+        .filter(|(other, _)| *other != id && normalized_bare_name(other) == want)
+        .map(|(_, window)| *window)
+        .filter(|window| *window > 0)
+        .min()
+}
+
+/// A model id reduced to the vendor-independent name used to match the same model across
+/// namespaces: the part after `provider::`, then after the last `/`, minus Forge's `-free` tier
+/// suffix, lowercased.
+fn normalized_bare_name(id: &str) -> String {
+    bare_model_name(id)
+        .strip_suffix("-free")
+        .unwrap_or(bare_model_name(id))
+        .to_lowercase()
+}
+
 fn estimate(rate: &ModelRate) -> f64 {
     (NOMINAL_INPUT_TOKENS as f64 / 1000.0) * rate.input_per_1k
         + (NOMINAL_OUTPUT_TOKENS as f64 / 1000.0) * rate.output_per_1k
@@ -324,6 +358,38 @@ pub fn context_limit(model: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_gateway_model_borrows_the_window_published_for_the_same_model_elsewhere() {
+        use std::collections::HashMap;
+        let mut windows = HashMap::new();
+        windows.insert(
+            "openrouter::meta/muse-spark-1.3-contributor".to_string(),
+            1_048_576_u32,
+        );
+        assert_eq!(
+            super::cross_namespace_window("opencode::muse-spark-1.3-contributor-free", &windows),
+            Some(1_048_576)
+        );
+    }
+
+    #[test]
+    fn the_lowest_published_window_wins_and_a_different_model_never_matches() {
+        use std::collections::HashMap;
+        let mut windows = HashMap::new();
+        windows.insert("openrouter::meta/muse-spark-1.3".to_string(), 1_048_576_u32);
+        windows.insert("somegateway::muse-spark-1.3".to_string(), 262_144_u32);
+        windows.insert("openrouter::meta/muse-spark-1.2".to_string(), 999_u32);
+        assert_eq!(
+            super::cross_namespace_window("opencode::muse-spark-1.3-free", &windows),
+            Some(262_144),
+            "a gateway may serve a smaller window than the native vendor"
+        );
+        assert_eq!(
+            super::cross_namespace_window("opencode::kimi-k3-free", &windows),
+            None
+        );
+    }
+
     #[test]
     fn explicit_zero_is_distinguished_from_an_absent_rate() {
         use std::collections::HashMap;
