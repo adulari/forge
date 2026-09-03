@@ -80,6 +80,12 @@ pub use workspace_context::WorkspaceContext;
 
 pub const AUTO_COMPACT_THRESHOLD: f64 = 0.80;
 
+/// Divisor applied to prompt-cache reads when charging a turn against
+/// `mesh.max_turn_input_tokens`. Providers bill a cache read at roughly a tenth of the fresh
+/// input rate, so a cached token is counted as a tenth of one. Not a pricing lookup: the ceiling
+/// is a coarse runaway guard, and the exact per-provider discount belongs to cost accounting.
+const CACHE_READ_BILLING_DIVISOR: u64 = 10;
+
 pub fn auto_compact_trigger_tokens(window: u64, cap: u64, fraction: f64) -> u64 {
     let frac = (window as f64 * fraction).max(0.0) as u64;
     frac.min(cap)
@@ -1581,6 +1587,11 @@ pub struct Session {
     /// spend, not just the current inner loop.
     turn_input_tokens: u64,
     turn_output_tokens: u64,
+    /// Input tokens for the active turn weighted by what the provider actually BILLS: fresh input
+    /// at full weight, cache reads at [`CACHE_READ_BILLING_WEIGHT`]. This — not
+    /// `turn_input_tokens` — is what `mesh.max_turn_input_tokens` bounds, because that ceiling
+    /// exists to stop runaway spend and a cache read is not spend at anything like full rate.
+    turn_billable_input_tokens: u64,
     /// Latched when a hard guard (unattended step ceiling or per-turn input-token ceiling) ended
     /// this turn. Every later re-drive pass must return immediately: the guards exist to stop
     /// spending, and a nudge/verification re-drive would restart the model loop with fresh
@@ -2736,6 +2747,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.mutations_this_turn = 0;
         self.turn_input_tokens = 0;
         self.turn_output_tokens = 0;
+        self.turn_billable_input_tokens = 0;
         self.turn_hard_guard_abort = false;
         self.turn_unfinished_tasks.clear();
         self.failure_tracker.reset_turn();
@@ -6657,6 +6669,7 @@ mod tests {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         input_tokens: u64,
         output_tokens: u64,
+        cached_input_tokens: Option<u64>,
     }
 
     impl EndlessToolProvider {
@@ -6667,6 +6680,25 @@ mod tests {
                     calls: Arc::clone(&calls),
                     input_tokens,
                     output_tokens: 1,
+                    cached_input_tokens: None,
+                },
+                calls,
+            )
+        }
+
+        /// Same shape, but the provider reports most of the prompt as a cache read — what a real
+        /// long agentic turn looks like once the system prompt and transcript are cached.
+        fn cached(
+            input_tokens: u64,
+            cached_input_tokens: u64,
+        ) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    calls: Arc::clone(&calls),
+                    input_tokens,
+                    output_tokens: 1,
+                    cached_input_tokens: Some(cached_input_tokens),
                 },
                 calls,
             )
@@ -6698,6 +6730,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: self.input_tokens,
                     output_tokens: self.output_tokens,
+                    cached_input_tokens: self.cached_input_tokens,
                     ..Usage::default()
                 },
                 quotas: Vec::new(),
@@ -6892,6 +6925,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cache_reads_do_not_burn_the_turn_input_ceiling() {
+        // A real session reported 24.1M input tokens of which 16.7M (69%) were prompt-cache
+        // reads, and the 10M ceiling cut the turn off while the conversation was healthy and
+        // productive. `cached_input_tokens` is a documented SUBSET of `input_tokens` that the
+        // provider bills at a fraction, so charging it at full weight made a well-cached turn
+        // look several times more expensive than it was.
+        //
+        // 6 input tokens per call of which 5 are cache reads: 1 fresh + 5/10 == 1 billable per
+        // call, so a cap of 10 is nowhere near reached in the 6 calls this provider allows,
+        // where charging the full prompt would have tripped it on the second.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        };
+        let events = capture.events.clone();
+        let mut config = Config::default();
+        config.mesh.max_steps = 6;
+        config.mesh.max_steps_unattended = 6;
+        config.mesh.max_turn_input_tokens = 10;
+        let (provider, _calls) = EndlessToolProvider::cached(6, 5);
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(provider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("keep reading").await.unwrap();
+
+        let events = events.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Error(w) if w.contains("input-token ceiling")
+            )),
+            "a cache-heavy turn must not trip a spend ceiling it has not spent"
+        );
+        assert!(
+            loop_steps(&events) > 2,
+            "the turn ran past the step where full-price cache accounting would have killed it"
+        );
+    }
+
+    #[tokio::test]
     async fn token_ceiling_errors_on_every_surface() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter {
@@ -6926,11 +7008,11 @@ mod tests {
         assert!(events.iter().any(|e| matches!(
             e,
             PresenterEvent::Error(w)
-                if w.contains("input-token ceiling")
-                    && w.contains("cap 10")
-                    && w.contains("input 12")
-                    && w.contains("output 2")
-                    && w.contains("work is uncommitted")
+                if w.contains("input-token ceiling") && w.contains("cap 10")
+                && w.contains("billable input 12")
+                && w.contains("total input 12")
+                && w.contains("output 2")
+                && w.contains("work is uncommitted")
         )));
         assert!(events.iter().any(|e| matches!(
             e,

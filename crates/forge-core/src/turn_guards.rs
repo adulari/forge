@@ -50,7 +50,7 @@ impl Session {
 
     pub(crate) fn turn_input_ceiling_hit(&self) -> bool {
         let cap = self.config.mesh.max_turn_input_tokens;
-        cap != 0 && self.turn_input_tokens >= cap
+        cap != 0 && self.turn_billable_input_tokens >= cap
     }
 
     /// End the turn for the per-turn input-token ceiling. Returns the final text to adopt.
@@ -58,9 +58,10 @@ impl Session {
         let cap = self.config.mesh.max_turn_input_tokens;
         let work = uncommitted_work_message(self.workspace.root());
         self.presenter.emit(PresenterEvent::Error(format!(
-            "ERROR: turn input-token ceiling exceeded (cap {cap}, input {}, output {}) — ending \
-             turn; work is uncommitted: {work}",
-            self.turn_input_tokens, self.turn_output_tokens
+            "ERROR: turn input-token ceiling exceeded (cap {cap}, billable input {}, total input \
+             {} incl. cache reads, output {}) — ending turn; raise `mesh.max_turn_input_tokens` \
+             for longer turns; work is uncommitted: {work}",
+            self.turn_billable_input_tokens, self.turn_input_tokens, self.turn_output_tokens
         )));
         self.turn_hard_guard_abort = true;
         format!("ERROR: turn input-token ceiling exceeded; work is uncommitted: {work}")
