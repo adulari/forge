@@ -449,13 +449,26 @@ impl DurableCommandClient<'_> {
             .context("validate durable command list metadata")?;
 
         let mut command_ids = HashSet::with_capacity(list.commands.len());
+        // One bad command must not stop the queue. `process` fails per command — an envelope that
+        // cannot be verified, a revoked sender, an unavailable key epoch — and a deterministic
+        // failure like that repeats on every poll for the command's full 24h expiry. Propagating
+        // it here aborted the whole batch, so a single poisoned command blocked every job queued
+        // behind it: they sat at "waiting for host" while the daemon logged one deduplicated line
+        // and `anywhere doctor` reported the host healthy.
+        let mut failures = Vec::new();
         for metadata in list.commands {
             if !command_ids.insert(metadata.command_id) {
                 bail!("service returned a duplicate durable command id");
             }
-            self.process(metadata).await?;
+            if let Err(error) = self.process(metadata).await {
+                failures.push(format!("{error:#}"));
+            }
         }
-        Ok(())
+        match failures.len() {
+            0 => Ok(()),
+            1 => bail!("{}", failures[0]),
+            n => bail!("{n} durable commands failed; first: {}", failures[0]),
+        }
     }
 
     async fn process(&self, metadata: QueuedCommandMetadata) -> Result<()> {
@@ -1870,6 +1883,67 @@ mod tests {
             3
         );
         assert!(verify_command_envelope(&metadata, &encoded, &identity, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn durable_command_sealed_at_millisecond_precision_never_matches_service_metadata() {
+        // The observed production failure: `forge anywhere job` sealed `created_at_ms` from
+        // `now_ms()`, the service recorded the same command at whole-second granularity, and this
+        // equality check rejected every job with a non-zero millisecond remainder — 999 in 1000.
+        // The queued job sat at "waiting for host" while the host logged "durable command
+        // envelope does not match its queue metadata" and `anywhere doctor` reported healthy.
+        let identity = durable_test_identity();
+        let sender_id = [0x64; 16];
+        let sender = SigningKey::from_bytes(&[0x74; 32]);
+        let devices = HashMap::from([(sender_id, sender.verifying_key())]);
+        let request =
+            serde_json::to_vec(&request(RouteId::Health, "GET", &[])).expect("encode request");
+
+        let seal_at = |created_at_ms: u64| {
+            Envelope::seal(
+                EnvelopeMetadata {
+                    kind: EnvelopeKind::Command,
+                    flags: 0,
+                    account_id: identity.account_id,
+                    sender_device_id: sender_id,
+                    recipient_kind: RecipientKind::Host,
+                    recipient_id: identity.host_id,
+                    key_epoch: identity.key_epoch,
+                    sequence: 1,
+                    created_at_ms,
+                    nonce: [0x84; 24],
+                },
+                &request,
+                &identity.data_key,
+                &sender,
+            )
+            .expect("seal command")
+            .encode()
+            .expect("encode command")
+        };
+
+        // A real instant carrying 23 ms, as `now_ms()` would have produced it.
+        let raw_ms = 1_788_433_039_023;
+        let service_ms = super::super::whole_second_ms(raw_ms);
+        assert_eq!(service_ms, 1_788_433_039_000);
+
+        let millisecond_precise = seal_at(raw_ms);
+        let metadata = queued_metadata(
+            [0xa7; 16],
+            sender_id,
+            service_ms,
+            millisecond_precise.len() as u64,
+        );
+        assert!(
+            verify_command_envelope(&metadata, &millisecond_precise, &identity, &devices).is_err(),
+            "a millisecond-precise envelope cannot match second-granularity queue metadata"
+        );
+
+        let whole_second = seal_at(service_ms);
+        let metadata =
+            queued_metadata([0xa8; 16], sender_id, service_ms, whole_second.len() as u64);
+        verify_command_envelope(&metadata, &whole_second, &identity, &devices)
+            .expect("a whole-second envelope matches what the service records");
     }
 
     #[test]
