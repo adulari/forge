@@ -16,6 +16,7 @@ tokio::task_local! {
     pub(crate) static SESSION_WORKSPACE: std::path::PathBuf;
 }
 
+mod browser;
 mod core_tools;
 mod discovery_tools;
 mod lattice_tool;
@@ -23,6 +24,7 @@ mod sandbox;
 mod shell;
 mod web;
 mod workspace;
+pub use browser::{BrowserNetworkTool, BrowserTool};
 pub use core_tools::{
     AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, MultiEditTool, NotebookEditTool,
     ReadFileTool, WriteFileTool,
@@ -137,6 +139,8 @@ impl ToolRegistry {
         r.register(Box::new(GlobTool));
         r.register(Box::new(WebFetchTool));
         r.register(Box::new(WebSearchTool::new()));
+        r.register(Box::new(BrowserTool));
+        r.register(Box::new(BrowserNetworkTool));
         r
     }
 
