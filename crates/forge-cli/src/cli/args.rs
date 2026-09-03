@@ -336,11 +336,13 @@ pub(crate) enum Command {
         /// Forge). Pair with `--mode bypass`/`--mode accept-edits` for autonomous tool use.
         #[arg(long, value_enum, default_value = "text")]
         output_format: OutputFormat,
-        /// Register this run with the local daemon so it appears in the Anywhere fleet (phone and
-        /// desktop apps). Overrides `[remote] publish_local_runs` for this run.
+        /// Run this one-shot in the local daemon so it appears in the Anywhere fleet (phone and
+        /// desktop apps). On by default; this forces it on for a run even when
+        /// `[remote] publish_local_runs = false`.
         #[arg(long, conflicts_with = "no_publish_to_fleet")]
         publish_to_fleet: bool,
-        /// Keep this run out of the Anywhere fleet even when `[remote] publish_local_runs` is on.
+        /// Keep this run purely local and out of the Anywhere fleet. `[remote]
+        /// publish_local_runs` is on by default, so this is how a single run opts out.
         #[arg(long = "no-publish-to-fleet", conflicts_with = "publish_to_fleet")]
         no_publish_to_fleet: bool,
     },
