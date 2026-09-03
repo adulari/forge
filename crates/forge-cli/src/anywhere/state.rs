@@ -29,8 +29,11 @@ pub(crate) enum LinkHealth {
 
 impl LinkState {
     pub(crate) fn health_at(&self, now_ms: u64, daemon_pid: Option<u32>) -> LinkHealth {
-        if daemon_pid != Some(self.daemon_pid) || !self.connected || self.last_exchange_ms == 0 {
+        if daemon_pid != Some(self.daemon_pid) || !self.connected {
             return LinkHealth::Disconnected;
+        }
+        if self.last_exchange_ms == 0 {
+            return LinkHealth::Unknown;
         }
         let age = Duration::from_millis(now_ms.saturating_sub(self.last_exchange_ms));
         if age > LINK_STALE_AFTER {
