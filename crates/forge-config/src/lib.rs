@@ -1661,6 +1661,19 @@ pub struct MeshConfig {
     /// window has been restored; keeping the cap conservative avoids unexpected usage burn.
     #[serde(default = "default_compact_cap_tokens")]
     pub compact_cap_tokens: u64,
+    /// The same absolute ceiling for a model that costs nothing. Free models skip
+    /// [`Self::compact_cap_tokens`] — that one is a spend control and there is no spend to
+    /// control — but they still need A ceiling: exempting them from the spend cap entirely left
+    /// the model's own window as the only limit, which on a 1M-window free model meant compaction
+    /// did not fire until 838,860 tokens.
+    ///
+    /// Free buys tokens, not attention. A turn carrying 800k of mostly-stale tool output is not
+    /// better than one carrying a compacted 400k, and every later turn in that session re-sends
+    /// the whole thing. Default 400_000: well above [`default_compact_cap_tokens`], so it never
+    /// second-guesses the spend cap for a paid model, while still halving the runaway that was
+    /// observed in practice. A backstop chosen from measured behaviour, not a benchmarked optimum.
+    #[serde(default = "default_free_model_cap_tokens")]
+    pub free_model_cap_tokens: u64,
     /// Longest rate-limit reset (seconds) Forge will WAIT OUT in-turn to retry the best model rather
     /// than degrade to a lower-ranked one (per-minute free tiers: NIM/Groq/Gemini). A reset longer
     /// than this falls through to failover. `0` disables in-turn waiting entirely.
@@ -1977,6 +1990,10 @@ fn default_stream_idle_timeout_secs() -> u64 {
 
 fn default_compact_cap_tokens() -> u64 {
     217_600
+}
+
+fn default_free_model_cap_tokens() -> u64 {
+    400_000
 }
 
 /// Subagent orchestration settings (RFC subagent-orchestration).
@@ -2410,6 +2427,7 @@ impl Default for Config {
                 rate_limit_wait_secs: default_rate_limit_wait_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
                 compact_cap_tokens: default_compact_cap_tokens(),
+                free_model_cap_tokens: default_free_model_cap_tokens(),
                 max_steps: default_max_steps(),
                 max_steps_unattended: default_max_steps_unattended(),
                 max_turn_input_tokens: default_max_turn_input_tokens(),
