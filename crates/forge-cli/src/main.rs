@@ -31,8 +31,8 @@ pub(crate) use cli::commands::mcp::{mcp_cmd, plugin_cmd};
 pub(crate) use cli::commands::memory::memory_cmd;
 pub(crate) use cli::commands::migrate::migrate_cmd;
 pub(crate) use cli::commands::models::{
-    benchmarks_cmd, build_provider_and_router, discover_catalog, load_cached_catalog, mesh_explain,
-    models, save_catalog,
+    benchmarks_cmd, build_provider_and_router, discover_catalog, mesh_explain, models,
+    read_cached_catalog, spawn_catalog_refresh,
 };
 pub(crate) use cli::commands::provider::provider_cmd;
 pub(crate) use cli::commands::queue::{queue_cmd, scoreboard_cmd};

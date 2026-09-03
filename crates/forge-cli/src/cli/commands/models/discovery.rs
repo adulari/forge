@@ -32,22 +32,46 @@ fn catalog_cache_path() -> Option<std::path::PathBuf> {
     forge_config::data_dir().map(|d| d.join("catalog.json"))
 }
 
-/// Load the on-disk catalog whatever its age, with the epoch second it was written and how many
+/// A catalog read from disk, with whether it is past its freshness window.
+pub(crate) struct CachedCatalog {
+    pub catalog: ModelCatalog,
+    pub stale: bool,
+}
+
+/// Read the on-disk catalog whatever its age, with the epoch second it was written and how many
 /// seconds ago that was.
 ///
-/// Age is not always a reason to discard: a remote surface is better served a stale catalog it can
-/// label than an empty list it cannot explain, and it needs the timestamp to say so.
+/// Routing must never block a turn on rediscovery when ANY catalog exists: the stale cache is a
+/// strictly better routing input than the built-in seed candidates, which carry no prices, no
+/// benchmarks and no burn weights. Freshness is restored by a background refresh, not by making
+/// the user wait (observed 2026-09-02: a 235-model cache one minute past its window cost a 15 s
+/// stall and then routed to a bare `claude-cli::` alias anyway).
+///
+/// A remote surface needs the same read plus the timestamp: it is better served a stale catalog it
+/// can label than an empty list it cannot explain.
 pub(crate) fn load_cached_catalog_aged() -> Option<(ModelCatalog, i64, u64)> {
     let path = catalog_cache_path()?;
     let meta = std::fs::metadata(&path).ok()?;
     let modified = meta.modified().ok()?;
-    let age = modified.elapsed().ok()?.as_secs();
+    let age = modified.elapsed().unwrap_or_default().as_secs();
     let epoch = modified
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs() as i64;
     let bytes = std::fs::read(&path).ok()?;
-    let catalog: ModelCatalog = serde_json::from_slice(&bytes).ok()?;
+    parse_cached_catalog(&bytes, epoch, age)
+}
+
+/// The cached catalog with a staleness verdict, for the routing path.
+pub(crate) fn read_cached_catalog() -> Option<CachedCatalog> {
+    load_cached_catalog_aged().map(|(catalog, _, age)| CachedCatalog {
+        catalog,
+        stale: age > CATALOG_CACHE_MAX_AGE_SECS,
+    })
+}
+
+fn parse_cached_catalog(bytes: &[u8], epoch: i64, age: u64) -> Option<(ModelCatalog, i64, u64)> {
+    let catalog: ModelCatalog = serde_json::from_slice(bytes).ok()?;
     // The cache was written when the bridge had a login; a logged-out one must not be routed to
     // for up to 24 h afterwards, one dead failover hop per alias it advertises.
     let catalog = catalog.retaining(|model| {
@@ -58,9 +82,37 @@ pub(crate) fn load_cached_catalog_aged() -> Option<(ModelCatalog, i64, u64)> {
 
 /// Load the on-disk catalog if it exists and is fresh (< 24 h old).
 pub(crate) fn load_cached_catalog() -> Option<ModelCatalog> {
-    load_cached_catalog_aged()
-        .filter(|(_, _, age)| *age <= CATALOG_CACHE_MAX_AGE_SECS)
-        .map(|(catalog, _, _)| catalog)
+    read_cached_catalog()
+        .filter(|cached| !cached.stale)
+        .map(|cached| cached.catalog)
+}
+
+static CATALOG_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Claim the single-flight background-refresh slot. `false` means a refresh is already running in
+/// this process and the caller must not start another — every session startup would otherwise fan
+/// out its own full provider sweep.
+pub(crate) fn try_begin_catalog_refresh() -> bool {
+    !CATALOG_REFRESH_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+fn end_catalog_refresh() {
+    CATALOG_REFRESH_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Rediscover the catalog off the turn's critical path and persist it. A refresh that lands
+/// mid-session takes effect on the NEXT startup; nothing waits on it.
+pub(crate) fn spawn_catalog_refresh(config: &forge_config::Config) {
+    if !try_begin_catalog_refresh() {
+        return;
+    }
+    let config = config.clone();
+    tokio::spawn(async move {
+        let fresh = discover_catalog(&config).await;
+        save_catalog(&fresh);
+        end_catalog_refresh();
+    });
 }
 
 /// Persist `catalog` to disk for the next startup to load instantly.
@@ -539,6 +591,37 @@ pub(crate) async fn drop_unaffordable_models(
                 balance::MIN_CREDIT_USD
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_cache_is_still_returned_for_routing() {
+        let json = serde_json::to_vec(&ModelCatalog::new(vec!["groq::a".to_string()])).unwrap();
+        let (_, epoch, age) = parse_cached_catalog(&json, 1_700_000_000, 60).unwrap();
+        assert_eq!(epoch, 1_700_000_000);
+        assert!(age <= CATALOG_CACHE_MAX_AGE_SECS);
+        // Two hours past the window: the old policy dropped this and blocked the turn on a full
+        // rediscovery. It must now still be handed to the router, flagged stale.
+        let (catalog, _, stale_age) =
+            parse_cached_catalog(&json, 1_700_000_000, CATALOG_CACHE_MAX_AGE_SECS + 7200).unwrap();
+        assert!(stale_age > CATALOG_CACHE_MAX_AGE_SECS);
+        assert_eq!(catalog.models(), ["groq::a".to_string()]);
+    }
+
+    #[test]
+    fn background_catalog_refresh_is_single_flight() {
+        assert!(try_begin_catalog_refresh());
+        assert!(
+            !try_begin_catalog_refresh(),
+            "a second startup must not launch a parallel provider sweep"
+        );
+        end_catalog_refresh();
+        assert!(try_begin_catalog_refresh());
+        end_catalog_refresh();
     }
 }
 
