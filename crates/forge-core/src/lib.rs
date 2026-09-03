@@ -9338,6 +9338,83 @@ mod tests {
         }
     }
 
+    /// A resumed session must show its persisted spend immediately, not "untracked" until the
+    /// first turn of the new process happens to finish. `session.total_cost_usd` accumulates
+    /// across processes and the store never lost it — only the display started at zero, which is
+    /// indistinguishable from the spend having been reset by the restart. Observed live: the store
+    /// held $1.69308 while the statusline read "untracked" for minutes into a long turn.
+    #[tokio::test]
+    async fn a_resumed_session_reports_its_persisted_spend_before_any_turn() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = Arc::clone(&capture.events);
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config = Config::default();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(forge_provider::MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(workspace),
+            Box::new(capture),
+            config,
+            workspace.to_str().unwrap(),
+        )
+        .unwrap();
+
+        // A fresh session has nothing to restore — emitting a zero frame on every startup would
+        // just be noise.
+        session.emit_restored_totals();
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, PresenterEvent::Cost { .. })),
+            "a brand-new session must emit no restored totals"
+        );
+
+        // Spend from an earlier process.
+        let msg = store
+            .add_message(session.session_id(), 0, forge_types::Role::User, "hi", None)
+            .unwrap();
+        store
+            .record_usage(
+                session.session_id(),
+                &msg,
+                &forge_types::Usage {
+                    input_tokens: 120,
+                    cached_input_tokens: Some(40),
+                    output_tokens: 30,
+                    cost_usd: 1.69308,
+                },
+                Some("meta::muse-spark-1.3-contributor"),
+            )
+            .unwrap();
+
+        session.emit_restored_totals();
+
+        let (usd, tokens_in, tokens_out) = events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                PresenterEvent::Cost {
+                    session_total_usd,
+                    session_in,
+                    session_out,
+                    ..
+                } => Some((*session_total_usd, *session_in, *session_out)),
+                _ => None,
+            })
+            .expect("resuming a session with spend must emit its persisted totals");
+        assert!(
+            (usd - 1.69308).abs() < 1e-9,
+            "got {usd}, expected the persisted total"
+        );
+        assert_eq!((tokens_in, tokens_out), (120, 30));
+    }
+
     #[tokio::test]
     async fn headless_terminal_cost_includes_awaited_memory_and_done_is_last() {
         let store = Arc::new(Store::open_in_memory().unwrap());
