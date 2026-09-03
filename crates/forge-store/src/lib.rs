@@ -1880,6 +1880,41 @@ mod tests {
     }
 
     #[test]
+    fn an_untitled_local_session_is_labelled_by_its_opening_prompt() {
+        // Only the daemon driver, the rename route, and subagents write `session.title`, so a
+        // plain `forge` chat session has none. It DID reach the fleet, but as a blank row —
+        // which is why terminal sessions looked like they were not being published at all.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp/local", "Default").unwrap();
+        store
+            .add_message(
+                &sid,
+                0,
+                forge_types::Role::User,
+                "Add a regression test to bench.rs\nand run the suite",
+                None,
+            )
+            .unwrap();
+        store.set_session_local_live(&sid, true).unwrap();
+
+        let rows = store.local_live_sessions().unwrap();
+        assert_eq!(
+            rows[0].title.as_deref(),
+            Some("Add a regression test to bench.rs and run the suite"),
+            "an untitled session is labelled by its first user message, newlines flattened"
+        );
+
+        // An explicit title always wins over the derived one.
+        store
+            .set_session_title(&sid, "Bench version guard")
+            .unwrap();
+        assert_eq!(
+            store.local_live_sessions().unwrap()[0].title.as_deref(),
+            Some("Bench version guard")
+        );
+    }
+
+    #[test]
     fn local_presence_upsert_reports_busy_state_and_model() {
         let store = Store::open_in_memory().unwrap();
         let sid = store.create_session("/tmp/local", "Default").unwrap();

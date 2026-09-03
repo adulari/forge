@@ -198,6 +198,16 @@ pub struct RemoteConfig {
     /// fleet (phone and desktop apps). Off by default: publishing a one-shot run is opt-in.
     #[serde(default)]
     pub publish_local_runs: bool,
+    /// Advertise terminal-local `forge` chat sessions in the fleet, so the phone and desktop apps
+    /// list what this machine is working on alongside `forge serve`-hosted sessions.
+    ///
+    /// ON by default, unlike [`Self::publish_local_runs`]: this only publishes presence — id,
+    /// title, cwd, busy — for sessions that are already in the shared store, and remote clients
+    /// see them read-only with no input path. `publish_local_runs` instead MOVES a run's
+    /// execution into the daemon, which is a behaviour change rather than visibility, so that
+    /// one stays opt-in. Set this to `false` to keep local chat out of the fleet entirely.
+    #[serde(default = "default_true")]
+    pub publish_local_sessions: bool,
 }
 
 /// `[anywhere]` config block for the optional managed companion.
@@ -3241,6 +3251,23 @@ pub fn inject_provider_keys() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_chat_sessions_are_published_to_the_fleet_unless_opted_out() {
+        // Publishing terminal-local chat presence is opt-OUT: a config with no `[remote]` block
+        // at all must still advertise it, or the phone and desktop apps show nothing of what
+        // this machine is working on.
+        let default: RemoteConfig = toml::from_str("").expect("an absent [remote] block parses");
+        assert!(default.publish_local_sessions);
+        assert!(
+            !default.publish_local_runs,
+            "moving a one-shot run's execution into the daemon stays opt-in"
+        );
+
+        let opted_out: RemoteConfig =
+            toml::from_str("publish_local_sessions = false\n").expect("opt-out parses");
+        assert!(!opted_out.publish_local_sessions);
+    }
 
     #[test]
     fn claude_aliases_cover_every_imported_permission_tool() {
