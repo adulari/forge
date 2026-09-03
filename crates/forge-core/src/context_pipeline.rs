@@ -26,6 +26,17 @@ const PRUNE_HEAD_KEEP: usize = 1500;
 pub(crate) const PRUNE_MARKER: &str =
     "\n…[older tool output pruned to save context; full text in replay]…";
 
+/// Smallest tool result worth deduplicating. Collapsing a 20-char "ok" saves nothing and costs a
+/// line of marker text; the waste that matters is a re-read file or a repeated command dump.
+const DEDUPE_MIN_CHARS: usize = 1000;
+
+/// Left in place of a REPEAT of a tool result whose text already appears, byte-identical, earlier
+/// in the same conversation. Deliberately states the RELATIONSHIP rather than just eliding:
+/// "identical, unchanged" is itself the answer to "did this change since I last looked", which a
+/// bare elision would throw away and the model would have to spend another tool call to recover.
+const DEDUPE_MARKER: &str =
+    "…[identical to an earlier result above — unchanged since, kept once there to save context]…";
+
 /// Marker used for older tool results in a provider request. Unlike [`PRUNE_MARKER`], this is a
 /// pure request-view transform: persistence and the newest tool batch remain intact.
 const TOOL_RESULT_ELISION_MARKER: &str =
@@ -63,7 +74,12 @@ pub(crate) fn to_llm(
         .cloned()
         .collect();
     let bounded_system_context = normalize_system_context(llm_only);
-    let normalized = normalize_tool_pairs(bounded_system_context);
+    let mut normalized = normalize_tool_pairs(bounded_system_context);
+    // Before elision, not after: a duplicate collapsed here frees budget that elision would
+    // otherwise have spent shortening a result the model has a verbatim copy of anyway. Rewrites
+    // content in place so `synthetic_tool_results` — a set of INDICES into these messages — stays
+    // valid; removing the messages instead would silently shift every index in it.
+    dedupe_repeated_tool_results(&mut normalized.messages, keep_recent_tool_results);
     let elided = elide_old_tool_results(
         &normalized.messages,
         &normalized.synthetic_tool_results,
@@ -203,6 +219,70 @@ fn normalize_tool_pairs(messages: Vec<Message>) -> NormalizedMessages {
         messages: out,
         synthetic_tool_results,
     }
+}
+
+/// Replace every REPEAT of a tool result with a short marker, keeping the FIRST copy verbatim.
+///
+/// Agents re-read the same file across a long session — the model asks again rather than trusting
+/// that nothing changed, which is reasonable behaviour that the harness should make cheap instead
+/// of punishing. Measured on one real day of a real session: 280 redundant copies across 84 groups,
+/// 1.10M characters of byte-identical tool output re-sent to the model, including one 84,521-char
+/// file carried five times in a single session.
+///
+/// **The first copy is kept, not the newest, and prompt caching is the whole reason.** Providers
+/// cache on a prefix: rewriting a message at position N invalidates every cached token from N
+/// onward. Keeping the newest would mean editing an OLD message each time a repeat appears —
+/// throwing away the cached prefix on exactly the requests that had the most of it to lose. Keeping
+/// the first leaves everything before the repeat byte-identical forever, so the collapse is free.
+/// (75-80% of the input tokens on the measured traffic were cache reads, so this is not a marginal
+/// consideration.)
+///
+/// The newest tool results are exempt regardless, using the same `keep_recent_tool_results` window
+/// [`elide_old_tool_results`] protects: a tool loop that just produced data must get that data
+/// back, not a pointer to something further up.
+///
+/// Identical text means the tool genuinely returned the same bytes, so nothing factual is lost —
+/// and the marker says "identical", which answers "has this changed since I last looked" outright.
+/// Request-view only: the persisted transcript and replay keep every copy.
+///
+/// Returns the number of characters reclaimed.
+fn dedupe_repeated_tool_results(messages: &mut [Message], keep_recent: usize) -> usize {
+    let is_candidate = |m: &Message| m.role == Role::Tool && m.content.len() >= DEDUPE_MIN_CHARS;
+    // The newest `keep_recent` REAL tool results are off limits, matching what elision protects.
+    let protected_from = if keep_recent == 0 {
+        messages.len()
+    } else {
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == Role::Tool)
+            .rev()
+            .nth(keep_recent - 1)
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    };
+
+    let mut first_seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut collapse: Vec<usize> = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        if !is_candidate(message) || index >= protected_from {
+            continue;
+        }
+        match first_seen.entry(message.content.as_str()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(index);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => collapse.push(index),
+        }
+    }
+
+    let mut reclaimed = 0;
+    for index in collapse {
+        let before = messages[index].content.len();
+        messages[index].content = DEDUPE_MARKER.to_string();
+        reclaimed += before.saturating_sub(DEDUPE_MARKER.len());
+    }
+    reclaimed
 }
 
 fn elide_old_tool_results(
@@ -967,6 +1047,132 @@ mod tests {
         ];
         let out = to_llm(&msgs, 100_000, 0, 0);
         assert_eq!(out[1].content, result);
+    }
+
+    /// The waste this removes, in the shape it was measured: one real day of one real session
+    /// carried 280 redundant copies across 84 groups — 1.10M characters of byte-identical tool
+    /// output re-sent to the model, including an 84,521-char file carried five times.
+    #[test]
+    fn a_file_read_five_times_is_sent_once() {
+        let body = "//! Forge Anywhere account, device, and host commands.\n".repeat(200);
+        assert!(body.len() > DEDUPE_MIN_CHARS);
+        let mut messages = Vec::new();
+        for _ in 0..5 {
+            messages.push(Message::new(Role::Assistant, "reading it again"));
+            messages.push(Message::new(Role::Tool, &body));
+        }
+        let before: usize = messages.iter().map(|m| m.content.len()).sum();
+
+        let reclaimed = dedupe_repeated_tool_results(&mut messages, 0);
+
+        let verbatim: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == Role::Tool && m.content == body)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(verbatim.len(), 1, "exactly one copy survives verbatim");
+        assert_eq!(reclaimed, (body.len() - DEDUPE_MARKER.len()) * 4);
+        let after: usize = messages.iter().map(|m| m.content.len()).sum();
+        assert!(after * 4 < before, "the bulk of the duplication is gone");
+    }
+
+    /// Prompt caches key on a PREFIX: rewriting a message at position N throws away every cached
+    /// token from N onward. Keeping the newest copy would edit an OLD message every time a repeat
+    /// appeared — discarding the cached prefix on exactly the requests that had the most of it to
+    /// lose. Keeping the FIRST leaves everything before the repeat byte-identical forever. On the
+    /// measured traffic 75-80% of input tokens were cache reads, so this is the difference between
+    /// the fix paying for itself and it costing more than the duplication did.
+    #[test]
+    fn the_surviving_copy_is_the_first_so_the_cached_prefix_never_moves() {
+        let body = "z".repeat(DEDUPE_MIN_CHARS + 1);
+        let mut messages = vec![
+            Message::new(Role::Tool, &body),
+            Message::new(Role::Assistant, "later"),
+            Message::new(Role::Tool, &body),
+            Message::new(Role::Assistant, "later still"),
+            Message::new(Role::Tool, &body),
+        ];
+        dedupe_repeated_tool_results(&mut messages, 0);
+        assert_eq!(messages[0].content, body, "the earliest copy is untouched");
+        assert_eq!(messages[2].content, DEDUPE_MARKER);
+        assert_eq!(messages[4].content, DEDUPE_MARKER);
+    }
+
+    /// A tool loop that just produced data must get that DATA back, not a pointer to something
+    /// further up the transcript. The newest results are exempt using the same window elision
+    /// protects, so the exemption cannot drift away from it.
+    #[test]
+    fn the_newest_results_are_never_collapsed() {
+        let body = "q".repeat(DEDUPE_MIN_CHARS + 1);
+        let mut messages = vec![
+            Message::new(Role::Tool, &body),
+            Message::new(Role::Tool, &body),
+            Message::new(Role::Tool, &body),
+        ];
+        dedupe_repeated_tool_results(&mut messages, 2);
+        assert_eq!(messages[0].content, body, "the first copy always survives");
+        assert_eq!(
+            messages[1].content, body,
+            "inside the protected window, so left verbatim"
+        );
+        assert_eq!(messages[2].content, body, "the newest is never collapsed");
+    }
+
+    /// The marker must state the RELATIONSHIP, not merely that something was dropped: "identical"
+    /// answers "has this changed since I last looked", which a bare elision throws away and the
+    /// model then spends another tool call to recover.
+    #[test]
+    fn a_collapsed_duplicate_says_it_was_identical() {
+        let body = "x".repeat(DEDUPE_MIN_CHARS + 1);
+        let mut messages = vec![
+            Message::new(Role::Tool, &body),
+            Message::new(Role::Tool, &body),
+        ];
+        dedupe_repeated_tool_results(&mut messages, 0);
+        assert_eq!(messages[0].content, body, "the first copy survives");
+        assert!(
+            messages[1].content.contains("identical"),
+            "{}",
+            messages[1].content
+        );
+        assert!(
+            messages[1].content.contains("unchanged"),
+            "the marker must answer \"has this changed since I last looked\""
+        );
+    }
+
+    #[test]
+    fn results_that_differ_are_all_kept_and_small_ones_are_never_touched() {
+        let big_a = "a".repeat(DEDUPE_MIN_CHARS + 1);
+        let big_b = "b".repeat(DEDUPE_MIN_CHARS + 1);
+        // Two identical SMALL results: collapsing these saves nothing and costs a marker line.
+        let mut messages = vec![
+            Message::new(Role::Tool, &big_a),
+            Message::new(Role::Tool, &big_b),
+            Message::new(Role::Tool, "ok"),
+            Message::new(Role::Tool, "ok"),
+        ];
+        let reclaimed = dedupe_repeated_tool_results(&mut messages, 0);
+        assert_eq!(reclaimed, 0);
+        assert_eq!(messages[0].content, big_a);
+        assert_eq!(messages[1].content, big_b);
+        assert_eq!(messages[2].content, "ok");
+        assert_eq!(messages[3].content, "ok");
+    }
+
+    /// Only tool results. Two user turns that happen to repeat a long quotation are the user
+    /// saying something twice, which is evidence about the conversation, not redundant data.
+    #[test]
+    fn identical_non_tool_messages_are_left_alone() {
+        let body = "y".repeat(DEDUPE_MIN_CHARS + 1);
+        let mut messages = vec![
+            Message::new(Role::User, &body),
+            Message::new(Role::Assistant, &body),
+            Message::new(Role::User, &body),
+        ];
+        assert_eq!(dedupe_repeated_tool_results(&mut messages, 0), 0);
+        assert!(messages.iter().all(|m| m.content == body));
     }
 
     #[test]
