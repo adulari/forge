@@ -60,6 +60,13 @@ pub struct SearchTool;
 
 const SEARCH_MATCH_CAP: usize = 200;
 
+/// Longest a single matched line may be in a `search` result. A match line exists to tell the
+/// model WHERE something is so it can open the file; past a few hundred bytes it stops being a
+/// signal and becomes a data dump. Minified bundles, single-line JSON, and log files routinely
+/// carry lines in the tens of kilobytes, and 200 of those is what turned one real `search` call
+/// into a 651 KB (~163k token) tool result.
+pub(crate) const SEARCH_LINE_MAX_BYTES: usize = 400;
+
 /// Directory names skipped by `search` and `glob` (in addition to all dot-dirs): heavy vendor /
 /// build / dependency trees that bury real results and aren't part of the source the agent edits.
 const SEARCH_SKIP_DIRS: &[&str] = &[
@@ -262,9 +269,17 @@ fn append_search_matches(
     }
     if context == 0 {
         for &i in &hits {
-            matches.push(format!("{label}:{}: {}", i + 1, lines[i].trim_end()));
+            matches.push(format!(
+                "{label}:{}: {}",
+                i + 1,
+                cap_line(lines[i].trim_end())
+            ));
             if matches.len() >= SEARCH_MATCH_CAP {
                 matches.push(format!("… (capped at {SEARCH_MATCH_CAP} matches)"));
+                return false;
+            }
+            if matches.iter().map(String::len).sum::<usize>() >= SEARCH_OUTPUT_MAX_BYTES {
+                matches.push("… (capped — narrow the query or file_pattern)".into());
                 return false;
             }
         }
@@ -274,7 +289,7 @@ fn append_search_matches(
                 matches.push("--".into());
             }
             matches.push(hunk);
-            if matches.iter().map(String::len).sum::<usize>() >= SEARCH_CONTEXT_OUTPUT_MAX_BYTES {
+            if matches.iter().map(String::len).sum::<usize>() >= SEARCH_OUTPUT_MAX_BYTES {
                 matches.push("… (capped — narrow the query or file_pattern)".into());
                 return false;
             }
@@ -283,9 +298,32 @@ fn append_search_matches(
     true
 }
 
-/// Total byte budget for a context-mode `search` result, so `context: N` over many hits can't flood
-/// the model's context window. Once exceeded, remaining hunks are dropped with a "narrow it" note.
-const SEARCH_CONTEXT_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+/// Total byte budget for a `search` result, so no single call can flood the model's context
+/// window. Once exceeded, remaining matches/hunks are dropped with a "narrow it" note.
+///
+/// This used to apply ONLY to the context mode, which left the DEFAULT mode (`context: 0`) bounded
+/// by [`SEARCH_MATCH_CAP`] alone — a count, which says nothing about size. A real
+/// `search{path: ".", query: "213"}` over a tree containing log files hit exactly 200 matches of
+/// ~3 KB log lines and returned 651,214 bytes (~163k tokens) in one tool result, more input than
+/// most whole sessions. A count cap cannot bound output; only a byte budget can.
+pub(crate) const SEARCH_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+
+/// Trim one matched line to [`SEARCH_LINE_MAX_BYTES`], on a char boundary, saying how much was
+/// dropped so the model can tell a truncated line from a genuinely short one.
+fn cap_line(line: &str) -> std::borrow::Cow<'_, str> {
+    if line.len() <= SEARCH_LINE_MAX_BYTES {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    let mut end = SEARCH_LINE_MAX_BYTES;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!(
+        "{}… (+{} bytes on this line)",
+        &line[..end],
+        line.len() - end
+    ))
+}
 
 /// Build grep -C-style context hunks for one file: merge each match's `[i-ctx, i+ctx]` window with
 /// adjacent/overlapping windows so a cluster of nearby hits prints as ONE block, then render with
