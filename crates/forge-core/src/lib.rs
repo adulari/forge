@@ -37,6 +37,7 @@ pub mod context_pack;
 pub(crate) mod context_pipeline;
 mod detached_subagents;
 pub mod duel;
+mod failure_verdict;
 pub mod fleet;
 pub mod heartbeat;
 pub mod hooks;
