@@ -965,10 +965,13 @@ pub(crate) async fn run_chat_tui(
             }
         }
 
-        // While the in-loop activity viewer is open during a running turn, tick the elapsed-time
-        // counter at 1 Hz (it shows whole seconds) and redraw only when it changes, instead of
-        // forcing a full repaint every 16 ms.
-        if app.viewer.is_some() && busy {
+        // Tick the elapsed-time counter at 1 Hz during a running turn (it shows whole seconds)
+        // and redraw only when it changes, instead of forcing a full repaint every 16 ms. This
+        // runs for the whole turn, not just while the activity viewer is open, because the
+        // statusline's throughput meter has to be able to STOP claiming a rate once generation
+        // pauses for a tool call — streamed deltas drive the redraw while text is arriving, but
+        // nothing drives one when the stream goes quiet.
+        if busy {
             let new_elapsed = busy_since.elapsed().as_secs();
             if new_elapsed != app.turn_elapsed_secs {
                 dirty = true;

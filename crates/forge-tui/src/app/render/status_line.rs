@@ -132,6 +132,12 @@ fn render_statusline_widget<'a>(
                     .bg(STATUSBG),
             )])
         }
+        W::Throughput => {
+            let shown = app
+                .throughput
+                .display(app.busy, std::time::Instant::now())?;
+            Some(vec![Span::styled(shown.label(), throughput_style(&shown))])
+        }
         W::SessionTokens => {
             if app.session_in == 0 && app.session_out == 0 {
                 return None;
@@ -494,6 +500,13 @@ pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
                     .fg(if app.busy { ACCENT } else { DIM })
                     .bg(STATUSBG),
             ));
+            // Throughput sits with the turn readout rather than in its own cluster: "how much"
+            // and "how fast" are the same question, and separating them costs a divider on a row
+            // that is already the first thing to be clipped on a narrow terminal.
+            if let Some(shown) = app.throughput.display(app.busy, std::time::Instant::now()) {
+                line2.push(Span::styled(" ", bg));
+                line2.push(Span::styled(shown.label(), throughput_style(&shown)));
+            }
         }
         // Context gauge next — it's the most important readout, so it comes before the session
         // totals and survives right-truncation on a narrow terminal.
@@ -563,4 +576,22 @@ pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         };
         frame.render_widget(Paragraph::new(TextLine::from(spans)).style(bg), row);
     }
+}
+
+/// Colour a throughput readout by band. A finished turn's average is always dim: it is a
+/// different measurement from the live rate (a turn is mostly tool calls, not generation) and
+/// must not read as the speed the model is running at right now.
+fn throughput_style(shown: &crate::throughput::Throughput) -> Style {
+    use crate::throughput::{FAST_TOK_PER_SEC, SLOW_TOK_PER_SEC};
+    if !shown.live {
+        return Style::default().fg(DIM).bg(STATUSBG);
+    }
+    let colour = if shown.tok_per_sec >= FAST_TOK_PER_SEC {
+        OKGREEN
+    } else if shown.tok_per_sec < SLOW_TOK_PER_SEC {
+        WARNYEL
+    } else {
+        ACCENT
+    };
+    Style::default().fg(colour).bg(STATUSBG)
 }
