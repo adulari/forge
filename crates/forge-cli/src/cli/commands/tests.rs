@@ -38,6 +38,41 @@ fn serve_prefers_tunnel_and_retains_deprecated_anywhere_flag() {
 }
 
 #[test]
+fn service_install_prefers_tunnel_and_retains_deprecated_anywhere_flag() {
+    // `forge serve` was renamed `--anywhere` -> `--tunnel`; `forge service install` was not, so
+    // its only name for "open a cloudflared quick tunnel" was the name of an unrelated product
+    // feature. Installing what read as the Anywhere daemon opened a public tunnel instead.
+    let tunnel =
+        Cli::try_parse_from(["forge", "service", "install", "--tunnel"]).expect("new tunnel flag");
+    assert!(matches!(
+        tunnel.command.unwrap(),
+        Command::Service {
+            cmd: ServiceCmd::Install {
+                tunnel: true,
+                anywhere: false,
+                ..
+            }
+        }
+    ));
+
+    let legacy = Cli::try_parse_from(["forge", "service", "install", "--anywhere"])
+        .expect("deprecated alias");
+    assert!(matches!(
+        legacy.command.unwrap(),
+        Command::Service {
+            cmd: ServiceCmd::Install {
+                tunnel: false,
+                anywhere: true,
+                ..
+            }
+        }
+    ));
+    assert!(
+        Cli::try_parse_from(["forge", "service", "install", "--tunnel", "--anywhere"]).is_err()
+    );
+}
+
+#[test]
 fn anywhere_lists_pending_approvals() {
     // The wizard promises the request "appears automatically in the Approval inbox" of an enrolled
     // device. When none does, there was no supported way to even see that the request had arrived.
