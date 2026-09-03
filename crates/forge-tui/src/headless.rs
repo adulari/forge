@@ -62,6 +62,7 @@ impl Presenter for HeadlessPresenter {
                 model,
                 rationale,
             } => {
+                let model = crate::display_model(&model);
                 println!("⚒ mesh → [{tier}] {model}  ({rationale})");
             }
             // Interactive surfaces use this exact request boundary for their live heartbeat.

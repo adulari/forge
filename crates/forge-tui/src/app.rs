@@ -1025,7 +1025,7 @@ impl App {
             } => {
                 self.routing = Some(RoutingView {
                     tier,
-                    model,
+                    model: crate::display_model(&model),
                     rationale,
                 });
                 self.set_turn_activity(
