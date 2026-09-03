@@ -6,6 +6,46 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.9] - 2026-09-03
+
+### Fixed
+- **A fresh install could fail its very first prompt with a usable model sitting right there.** With
+  no catalog yet the router only ever tried the classified tier's built-in seeds; the trivial tier
+  is a local ollama plus groq, so on a machine with no API keys and ollama not running the chain
+  exhausted and the turn failed — while a logged-in `codex` CLI could have served it. The seed chain
+  now carries the other tiers as a deduped tail (the tier's own candidates still lead, so the
+  primary pick is unchanged), and `codex-cli::` joins `claude-cli::` as a default seed: it was in no
+  tier list at all (`crates/forge-mesh/src/lib.rs`, `crates/forge-config/src/lib.rs`).
+- **A first-run failure named an adapter instead of a next step.** The verdict only offered setup
+  guidance when EVERY attempt reported missing credentials, and a keyless candidate fails as
+  "provider unavailable", so a machine with nothing configured was told "attempted providers failed
+  for mixed reasons". It now leads with `forge setup` / `forge auth` whenever no API key and no
+  logged-in CLI exist, keeping the failure mix after it. Neither "binary on PATH" nor "not known
+  logged out" proves a login, so the check requires positive evidence
+  (`crates/forge-core/src/failure_verdict.rs`).
+- **A read-only turn inside a build session is no longer re-driven to produce a diff.** #1266 fixed
+  which contract such a turn derives, but the empty-diff nudge and the code-change classification
+  still read the session-wide flag a worktree daemon session arms for its whole life, so the turn
+  was still pushed to "implement the fix now" against its own instruction
+  (`crates/forge-core/src/lib.rs`).
+- **The CLI-bridge terms notice reads like Forge**, not a raw timestamped log line wedged between
+  the routing line and the model's first token. It also survives the failover path, which is how a
+  keyless run reaches a bridge at all (`crates/forge-provider/src/lib.rs`).
+- **A bare bridge id reads as what it means.** `claude-cli::` is a valid pin for "whatever model
+  that CLI is configured to use" and the first built-in complex-tier default, but printed verbatim
+  it looked like a truncated id on a new user's first turn. It now renders as
+  `claude-cli (its default model)` (`crates/forge-tui/src/lib.rs`).
+- **A relay link that has never exchanged is no longer reported as disconnected.** The two states
+  call for different actions: one is still coming up, the other needs a `forge serve` restart
+  (`crates/forge-cli/src/anywhere/state.rs`).
+
+### Changed
+- **The `use_skill` listing costs about 626 fewer tokens on every tool-bearing turn.** It advertises
+  every skill in its own description — 64 skills at 100 characters was 7,438 characters riding every
+  request, a quarter of the whole tool payload and more than the system prompt. Each summary is
+  clipped to 60 characters; discovery is unchanged since every skill is still listed by name
+  (`crates/forge-core/src/lib.rs`).
+
 ## [2.13.8] - 2026-09-03
 
 ### Fixed
@@ -3964,7 +4004,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.8...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.9...HEAD
+[2.13.9]: https://github.com/Adulari/forge/compare/v2.13.8...v2.13.9
 [2.13.8]: https://github.com/Adulari/forge/compare/v2.13.7...v2.13.8
 [2.13.7]: https://github.com/Adulari/forge/compare/v2.13.6...v2.13.7
 [2.13.6]: https://github.com/Adulari/forge/compare/v2.13.5...v2.13.6
