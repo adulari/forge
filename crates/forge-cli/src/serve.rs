@@ -4371,11 +4371,17 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     }
 
+    /// The HTTP half of interrupt: the route exists, answers, and leaves the session in the fleet.
+    /// It does NOT drive a turn — an idle session has no turn to end, so asserting a stop reason
+    /// here would assert nothing. That the interrupt actually aborts a running turn and reports
+    /// `Interrupted` is covered at the driver, where a turn can be held open:
+    /// `cli::commands::run::driver::tests::aborting_a_busy_turn_does_not_retain_a_previous_success`.
+    ///
     /// Before this route existed, an HTTP client could only stop a running turn by ending the
     /// session. `--steer` is not a substitute: it lands at the next TURN boundary, which a session
     /// stuck in a tool loop never reaches.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn interrupt_ends_the_current_turn_and_keeps_the_session_alive() {
+    async fn interrupt_route_answers_and_leaves_the_session_in_the_fleet() {
         let _env = FORGE_DB_LOCK.lock().await;
         let dir =
             std::env::temp_dir().join(format!("forge-serve-interrupt-{}", std::process::id()));
