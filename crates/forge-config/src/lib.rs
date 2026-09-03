@@ -194,6 +194,10 @@ pub struct RemoteConfig {
     /// without exposing the rest of the host filesystem.
     #[serde(default)]
     pub project_roots: Vec<String>,
+    /// Register a standalone `forge run` with the local daemon so the run shows up in the Anywhere
+    /// fleet (phone and desktop apps). Off by default: publishing a one-shot run is opt-in.
+    #[serde(default)]
+    pub publish_local_runs: bool,
 }
 
 /// `[anywhere]` config block for the optional managed companion.

@@ -732,6 +732,11 @@ forge run --tui "debug the startup crash"      # with live TUI
 forge run --mode bypass "apply all the diffs"  # no prompts
 forge run --system "$ASSISTANT_CONTEXT" "How many tasks are due today?"
 # --system reaches the model but is excluded from mesh task classification
+forge run --publish-to-fleet "long migration"  # run IN the daemon; follow with `forge attach <id>`
+# --publish-to-fleet hands the prompt to `forge serve` so the run shows up in the Anywhere fleet
+# (phone/desktop apps) instead of running in this terminal; --no-publish-to-fleet opts out when
+# [remote] publish_local_runs is on. This terminal prints the session id and exits — output is
+# NOT streamed back here.
 ```
 
 ### Complete command map
@@ -779,6 +784,18 @@ still be entered under the advanced fallback:
 ```toml
 [remote]
 project_roots = ["~/Projects", "/srv/work"]
+```
+
+A standalone `forge run` normally executes in the terminal that started it. Set
+`publish_local_runs = true` to hand every run to the local daemon instead, so each run shows up
+in the Anywhere fleet (phone and desktop apps) under a title taken from the prompt's first line.
+`--publish-to-fleet` / `--no-publish-to-fleet` override the config value for one run. The
+handing terminal prints the daemon session id and exits — follow it with `forge attach <id>` or
+from the Anywhere apps; output is NOT streamed back to the terminal.
+
+```toml
+[remote]
+publish_local_runs = true
 ```
 
 Connecting a phone: open the printed URL (or scan the QR in the terminal), pick or create a

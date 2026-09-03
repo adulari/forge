@@ -17,6 +17,8 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             model,
             system,
             output_format,
+            publish_to_fleet,
+            no_publish_to_fleet,
         } => {
             // Unified continuity with `chat`: --continue / --resume <id> / bare --resume (picker).
             // The picker needs the interactive TUI, so treat the headless run as "plain".
@@ -38,6 +40,8 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 model,
                 system,
                 output_format,
+                publish_to_fleet,
+                no_publish_to_fleet,
             )
             .await
         }
@@ -227,5 +231,30 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Scoreboard => scoreboard_cmd(),
         Command::Tour { demo } => tour_cmd(demo),
         Command::Voice { op } => voice_cmd(op).await,
+    }
+}
+
+/// Whether this run publishes itself to the fleet: an explicit flag wins over
+/// `[remote] publish_local_runs`, and the config value applies when neither flag is given.
+pub(crate) fn resolve_publish_to_fleet(publish: bool, no_publish: bool, configured: bool) -> bool {
+    if publish {
+        return true;
+    }
+    if no_publish {
+        return false;
+    }
+    configured
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_publish_to_fleet_prefers_explicit_flags_over_config() {
+        assert!(resolve_publish_to_fleet(true, false, false));
+        assert!(!resolve_publish_to_fleet(false, true, true));
+        assert!(resolve_publish_to_fleet(false, false, true));
+        assert!(!resolve_publish_to_fleet(false, false, false));
     }
 }
