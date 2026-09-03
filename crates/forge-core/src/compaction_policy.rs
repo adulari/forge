@@ -187,11 +187,16 @@ impl Session {
     /// compact. Distinct from the failover consent path ([`admit_failover_model`]).
     pub(crate) async fn auto_compact_if_needed(&mut self, model: &str) {
         let window = self.base_context_window(model) as u64;
-        let trigger = auto_compact_trigger_tokens(
-            window,
-            self.config.mesh.compact_cap_tokens,
-            AUTO_COMPACT_THRESHOLD,
-        );
+        // `compact_cap_tokens` is a SPEND control — it exists to stop a large-window subscription
+        // model burning quota on an ever-growing prompt. A free model has no quota to burn, and
+        // applying the cap to one just throws away context for nothing: on a 1M-window free model
+        // the 217_600 default fired auto-compaction at ~21% of the window.
+        let cap = if self.router.model_is_free(model) {
+            u64::MAX
+        } else {
+            self.config.mesh.compact_cap_tokens
+        };
+        let trigger = auto_compact_trigger_tokens(window, cap, AUTO_COMPACT_THRESHOLD);
         if self.estimated_transcript_tokens() > trigger || !self.transcript_fits(model) {
             // Cheap first: the pipeline's mutating phase — prune bulky OLD tool results in place
             // (no model call). Often reclaims enough that the LLM summarize below isn't needed.
@@ -448,7 +453,11 @@ impl Session {
                 budget,
                 &health,
                 &quota,
-                Some(TaskTier::Trivial),
+                // Standard, not Trivial. A bad summary silently destroys everything the
+                // session knows and nothing downstream can recover it, so this is the wrong
+                // place to spend the cheapest model available. The shortlist below keeps it
+                // free/fast anyway.
+                Some(TaskTier::Standard),
                 self.pinned_effort,
                 &self.project,
             )
@@ -468,7 +477,7 @@ impl Session {
         let mut routed = vec![self.auxiliary_model(&decision)];
         routed.extend(decision.fallbacks.clone());
         let candidates =
-            compact_candidate_chain(self.router.trivial_candidates(), routed, &guaranteed, |m| {
+            compact_candidate_chain(self.router.compact_candidates(), routed, &guaranteed, |m| {
                 health.is_benched(m)
             });
         let mut chain = candidates.into_iter();

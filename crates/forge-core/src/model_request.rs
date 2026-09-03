@@ -463,7 +463,7 @@ pub(super) async fn request_provider_response(
                         session.presenter.emit(PresenterEvent::Warning(format!(
                             "{active_model}: still rate limited after \
                          {pinned_rl_attempts} backoff retries — failing the turn \
-                         (pinned model; cross-model failover disabled)"
+                         (pinned model; cross-model failover disabled). `/model a,b` pins a SET and fails over WITHIN it, `/model` alone unpins, or `mesh.pin_failover = true` allows full mesh fallback"
                         )));
                         return Err(e.into());
                     }
@@ -544,9 +544,7 @@ pub(super) async fn request_provider_response(
                         session.presenter.emit(PresenterEvent::Warning(format!(
                             "{active_model}: still unreachable after \
                          {pinned_outage_attempts} backoff retries — failing the turn \
-                         (pinned model; cross-model failover disabled; `/model` to \
-                         unpin, or set `mesh.pin_failover = true` to allow mesh \
-                         fallback)"
+                         (pinned model; cross-model failover disabled). `/model a,b` pins a SET and fails over WITHIN it, `/model` alone unpins, or `mesh.pin_failover = true` allows full mesh fallback"
                         )));
                         return Err(e.into());
                     }

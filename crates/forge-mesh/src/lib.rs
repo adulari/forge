@@ -1022,6 +1022,24 @@ pub trait Router: Send + Sync {
         Vec::new()
     }
 
+    /// Whether calls to `model` cost nothing — a free endpoint, not a subscription seat. Callers
+    /// use this to skip spend-conservation behaviour that has nothing to conserve. Defaults to
+    /// `false`: a router that cannot prove a model is free must not claim it is.
+    fn model_is_free(&self, model: &str) -> bool {
+        let _ = model;
+        false
+    }
+
+    /// Ordered shortlist for COMPACTION. Deliberately not [`Self::trivial_candidates`]: summarising
+    /// a transcript is the highest-leverage call in the session — a bad summary silently destroys
+    /// everything the session knows, and unlike a bad classification nothing downstream can
+    /// recover it. Wants a capable model that is still free/cheap and fast, which is exactly what
+    /// the classifier shortlist already selects for. Defaults to the trivial shortlist so a
+    /// router that does not override this is no worse off than before.
+    fn compact_candidates(&self) -> Vec<String> {
+        self.trivial_candidates()
+    }
+
     /// The model set pinned on this router, if any (`--model "a,b"` / `--model a`). `None` = no
     /// pin (classify normally). Defaults to `None`; [`HeuristicRouter`] reports its `pin`.
     /// Subagent pin inheritance uses this to know whether the mesh is pinned without reaching
@@ -1278,13 +1296,52 @@ impl HeuristicRouter {
         self.config.mesh.auto_discover && self.catalog.as_ref().is_some_and(|c| !c.is_empty())
     }
 
+    /// Ordered shortlist used for COMPACTION — capable free models, best FIRST.
+    ///
+    /// Deliberately not [`Self::classifier_candidates`], which ends by sorting known low-latency
+    /// providers to the front because classification has a hard 15s budget. Compaction has the
+    /// opposite priorities: it is one background call whose output silently becomes everything
+    /// the session still remembers, and nothing downstream can recover a bad summary. Trading
+    /// summary quality for a second of latency is the wrong trade, and making it is how a
+    /// thousand-message transcript ended up folded by the smallest fast model on the list.
+    ///
+    /// Ordered by measured benchmark intelligence, descending. Models with no measured score sort
+    /// after every model that has one rather than being guessed at.
+    pub fn compact_candidates(&self) -> Vec<String> {
+        let mut capable = self.capable_free_standard();
+        if capable.is_empty() {
+            return self.classifier_candidates();
+        }
+        capable.sort_by(|a, b| {
+            let score = |m: &str| {
+                self.catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.benchmark_for(m))
+                    .map(|(intelligence, _)| intelligence)
+            };
+            match (score(a), score(b)) {
+                (Some(x), Some(y)) => y.total_cmp(&x),
+                // Measured beats unmeasured: an unknown model is not evidence of quality.
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        });
+        capable.truncate(8);
+        capable
+    }
+
     /// Ordered shortlist used by the LLM classifier. It classifies with capable, FREE models —
     /// deliberately NOT the weakest trivial-tier models (which mislabel real code work as trivial,
     /// then route it to a model too weak to do it) and NOT subscription models (which would burn
     /// quota on every turn's classification). Ranked at the Standard tier and filtered to free, so
     /// the label is reliable at zero cost. Falls back to the trivial-tier shortlist if no free
     /// Standard model is available. Health is applied later because it changes between turns.
-    pub fn classifier_candidates(&self) -> Vec<String> {
+    /// Free, Standard-tier models that measure as capable — the shared base for the two cheap
+    /// side-call shortlists. Ordering here is the Standard-tier quality ordering; each caller
+    /// re-sorts for what IT actually needs (latency for classification, capability for
+    /// compaction), because those two wants pull in opposite directions.
+    fn capable_free_standard(&self) -> Vec<String> {
         let free: Vec<String> = self
             .candidates_for_tier(
                 TaskTier::Standard,
@@ -1314,6 +1371,17 @@ impl HeuristicRouter {
         if capable_free.is_empty() {
             capable_free = free;
         }
+        capable_free
+    }
+
+    /// Ordered shortlist used by the LLM classifier. It classifies with capable, FREE models —
+    /// deliberately NOT the weakest trivial-tier models (which mislabel real code work as trivial,
+    /// then route it to a model too weak to do it) and NOT subscription models (which would burn
+    /// quota on every turn's classification). Ranked at the Standard tier and filtered to free, so
+    /// the label is reliable at zero cost. Falls back to the trivial-tier shortlist if no free
+    /// Standard model is available. Health is applied later because it changes between turns.
+    pub fn classifier_candidates(&self) -> Vec<String> {
+        let mut capable_free = self.capable_free_standard();
         // Classification is latency-sensitive and has a hard 15s total budget. A high-quality
         // free NIM model is a poor first choice when it routinely spends that entire budget,
         // forcing the real route onto the heuristic. Keep the Standard-tier quality ordering
@@ -2905,6 +2973,14 @@ impl Router for HeuristicRouter {
     fn trivial_candidates(&self) -> Vec<String> {
         self.classifier_candidates()
     }
+
+    fn compact_candidates(&self) -> Vec<String> {
+        HeuristicRouter::compact_candidates(self)
+    }
+
+    fn model_is_free(&self, model: &str) -> bool {
+        catalog::is_free(model, self.pricing.estimated_cost(model), false)
+    }
 }
 
 #[cfg(test)]
@@ -3184,6 +3260,54 @@ mod tests {
             candidates.iter().any(|m| !m.starts_with("groq::")),
             "a non-groq free model must remain reachable: {candidates:?}"
         );
+    }
+
+    #[test]
+    fn compact_candidates_rank_by_capability_not_latency() {
+        // The observed failure: compaction reused the classifier shortlist, whose last step
+        // sorts known low-latency providers to the front for its 15s budget. A thousand-message
+        // transcript was folded to seven messages by the smallest fast model on the list.
+        // Compaction is one background call whose output becomes everything the session still
+        // remembers, so it ranks on measured capability instead.
+        let mut bench = BenchmarkScores::new();
+        bench.insert("gemma 4 31b it", 30.0, 28.0);
+        bench.insert("gemini 2.5 flash", 14.0, 16.0);
+        let catalog = ModelCatalog::new(vec![
+            // groq sorts FIRST in the classifier's latency ordering.
+            "groq::gemini-2.5-flash".to_string(),
+            "gemini::gemma-4-31b-it".to_string(),
+        ])
+        .with_benchmarks(Some(bench));
+        let router = HeuristicRouter::new(Config::default()).with_catalog(catalog);
+
+        let compact = router.compact_candidates();
+        assert_eq!(
+            compact.first().map(String::as_str),
+            Some("gemini::gemma-4-31b-it"),
+            "compaction must lead with the most capable free model: {compact:?}"
+        );
+
+        let classify = router.classifier_candidates();
+        assert_eq!(
+            classify.first().map(String::as_str),
+            Some("groq::gemini-2.5-flash"),
+            "classification keeps its latency-first ordering: {classify:?}"
+        );
+    }
+
+    #[test]
+    fn a_free_model_is_reported_free_and_a_paid_one_is_not() {
+        // Drives the compaction cap skip: charging a free model against a spend-conservation
+        // ceiling throws away context for nothing.
+        let router = HeuristicRouter::new(Config::default()).with_catalog(ModelCatalog::new(vec![
+            "openrouter::google/gemma-4-31b-it:free".to_string(),
+            "anthropic::claude-opus-5".to_string(),
+        ]));
+        assert!(Router::model_is_free(
+            &router,
+            "openrouter::google/gemma-4-31b-it:free"
+        ));
+        assert!(!Router::model_is_free(&router, "anthropic::claude-opus-5"));
     }
 
     #[test]
