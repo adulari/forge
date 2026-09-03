@@ -90,6 +90,59 @@ impl LinkStateStore {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CommandState {
+    pub(crate) updated_at_ms: u64,
+    #[serde(default)]
+    pub(crate) error: Option<String>,
+}
+
+pub(crate) struct CommandStateStore {
+    path: PathBuf,
+}
+
+impl CommandStateStore {
+    pub(crate) fn platform() -> Result<Self> {
+        let path = forge_config::data_dir()
+            .context("no Forge platform data directory is available")?
+            .join("anywhere")
+            .join("command-state.json");
+        Ok(Self { path })
+    }
+
+    pub(crate) fn load(&self) -> Result<Option<CommandState>> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .context("parse Forge Anywhere command state")
+                .map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("read Forge Anywhere command state"),
+        }
+    }
+
+    pub(crate) fn save(&self, state: &CommandState) -> Result<()> {
+        let parent = self
+            .path
+            .parent()
+            .context("Anywhere command state path has no parent")?;
+        std::fs::create_dir_all(parent).context("create Forge Anywhere state directory")?;
+        set_owner_directory_permissions(parent)?;
+        let temp = parent.join(format!(
+            ".command-state-{}-{:016x}.tmp",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let bytes = serde_json::to_vec(state).context("serialize Forge Anywhere command state")?;
+        std::fs::write(&temp, bytes).context("write Forge Anywhere command state")?;
+        set_owner_file_permissions(&temp)?;
+        if let Err(error) = std::fs::rename(&temp, &self.path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error).context("install Forge Anywhere command state");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct LocalState {
     pub(crate) version: u8,

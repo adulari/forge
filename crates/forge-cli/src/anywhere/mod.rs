@@ -1440,6 +1440,11 @@ async fn doctor() -> Result<()> {
             "not configured".to_string()
         }
     );
+    let command_error = current_command_error()?;
+    println!(
+        "  commands: {}",
+        command_error.as_deref().unwrap_or("ready")
+    );
 
     let health_url = service_health_url(config.anywhere.service_url());
     let service_ready = match client()?.get(health_url).send().await {
@@ -1455,19 +1460,14 @@ async fn doctor() -> Result<()> {
         }
     );
 
-    let next_action = if !state.is_logged_in() {
-        "run `forge anywhere setup`"
-    } else if state.host_id.is_none() {
-        "run `forge anywhere setup` to activate this host"
-    } else if !config.anywhere.enabled {
-        "run `forge anywhere enable`"
-    } else if !matches!(link_health, LinkHealth::Healthy { .. }) {
-        "restart `forge serve` if the connector does not reconnect shortly"
-    } else if !service_ready {
-        "keep using local/LAN Forge and retry when the service is available"
-    } else {
-        "none; setup is healthy"
-    };
+    let next_action = doctor_next_action(
+        state.is_logged_in(),
+        state.host_id.is_some(),
+        config.anywhere.enabled,
+        link_health,
+        command_error.as_deref(),
+        service_ready,
+    );
     println!("  next action: {next_action}");
     Ok(())
 }
@@ -1481,6 +1481,37 @@ fn current_link_health() -> Result<LinkHealth> {
         .map_or(LinkHealth::Unknown, |state| {
             state.health_at(now_ms(), daemon_pid)
         }))
+}
+
+fn current_command_error() -> Result<Option<String>> {
+    Ok(CommandStateStore::platform()?
+        .load()?
+        .and_then(|state| state.error))
+}
+
+fn doctor_next_action(
+    logged_in: bool,
+    host_activated: bool,
+    enabled: bool,
+    link_health: LinkHealth,
+    command_error: Option<&str>,
+    service_ready: bool,
+) -> &'static str {
+    if !logged_in {
+        "run `forge anywhere setup`"
+    } else if !host_activated {
+        "run `forge anywhere setup` to activate this host"
+    } else if !enabled {
+        "run `forge anywhere enable`"
+    } else if !matches!(link_health, LinkHealth::Healthy { .. }) {
+        "restart `forge serve` if the connector does not reconnect shortly"
+    } else if command_error.is_some() {
+        "inspect the durable command journal; remote jobs are failing while relay stays live"
+    } else if !service_ready {
+        "keep using local/LAN Forge and retry when the service is available"
+    } else {
+        "none; setup is healthy"
+    }
 }
 
 fn link_status_text(health: LinkHealth) -> String {
@@ -2203,6 +2234,28 @@ fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_command_error_makes_doctor_report_unhealthy() {
+        let healthy = LinkHealth::Healthy {
+            age: Duration::from_secs(1),
+        };
+        assert_eq!(
+            doctor_next_action(true, true, true, healthy, None, true),
+            "none; setup is healthy"
+        );
+        assert_ne!(
+            doctor_next_action(
+                true,
+                true,
+                true,
+                healthy,
+                Some("durable command envelope does not match its queue metadata"),
+                true,
+            ),
+            "none; setup is healthy"
+        );
+    }
 
     #[test]
     fn relay_link_liveness_drives_status_and_doctor_health() {
