@@ -512,6 +512,25 @@ dashboard's top row is always the session that needs a human NOW — red pulsing
 cost, token gauge, and last-activity age. Tap to attach. The page's existing 5-second list
 poll carries it; no extra protocol.
 
+**Driving a terminal session from the apps (`terminal` / `read_only`).** A plain `forge chat`
+running in a terminal is not in the daemon's registry — no driver task owns it, no input channel
+reaches it — so for a long time it appeared in the fleet as a read-only row: visible, but a
+permission prompt raised on the laptop could not be answered from the phone. It is, however,
+already running this entire protocol for its own `/remote` page. So it opens a *second*,
+token-gated copy of that server on loopback (independent of `/remote`, so toggling one never takes
+the other down), records the URL in the shared store's presence row, and `forge serve` splices an
+app's WebSocket onto it — see `serve/serve_local_control.rs`. The proxy is protocol-blind: opaque
+messages both ways, `?rev=` reconnect replay included, so a terminal session behaves identically to
+a daemon-hosted one and there is nothing to keep in step as `Snapshot` and `RemoteInput` grow.
+
+Two independent row flags fall out of that. `terminal` says the session runs in a terminal and this
+daemon owns none of its lifecycle — it gates archive/merge/discard, which stop a driver that does
+not exist here. `read_only` says there is no input path at all, and is now true only for a terminal
+whose Forge build predates the channel or whose user set `[remote] interactive_local_sessions =
+false`; the WS route still refuses those server-side (`reject_ws_if_local_read_only`). The endpoint
+is cleared on clean exit *and* on start (a killed predecessor's port is very likely someone else's
+by now), and ignored once the presence heartbeat goes stale.
+
 **Turn outcome (`last_turn_outcome` / `last_stop_reason`).** `busy: false` says a turn ended,
 never how. A session that did the work and one that burned a whole turn producing no assistant
 text and making no successful change were the same signal from the fleet API, the phone, and any

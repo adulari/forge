@@ -93,8 +93,12 @@ impl Store {
     /// looks like on the read side.
     pub fn set_session_local_live(&self, session_id: &str, live: bool) -> Result<()> {
         self.lock()?.execute(
+            // The endpoint is cleared here on BOTH transitions. On exit for the obvious reason,
+            // and on start because the row may still hold the dead port of a previous process
+            // that was killed before it could tidy up — handing that to a client would proxy an
+            // app straight into a connection refusal.
             "UPDATE session
-             SET local_live = ?2, local_busy = 0,
+             SET local_live = ?2, local_busy = 0, local_control_url = NULL,
                  local_last_seen = strftime('%s','now')
              WHERE id = ?1",
             rusqlite::params![session_id, i64::from(live)],
@@ -114,6 +118,44 @@ impl Store {
             rusqlite::params![session_id, i64::from(busy)],
         )?;
         Ok(())
+    }
+
+    /// Publish (or clear) the loopback control endpoint an interactive terminal session is
+    /// listening on, so `forge serve` can proxy a remote client's WebSocket into it and the
+    /// session becomes drivable from the phone and desktop apps instead of read-only.
+    ///
+    /// The URL embeds the channel's path token. That is not a new exposure: the server binds
+    /// loopback only, and anything that can read this column can already read the session's whole
+    /// transcript out of the same database. Gated by `local_live = 1` for the same reason as
+    /// [`Store::touch_session_local_presence`] — a session that has already exited must not have
+    /// an endpoint written back onto its row by a late call.
+    pub fn set_session_local_control_url(&self, session_id: &str, url: Option<&str>) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE session SET local_control_url = ?2 WHERE id = ?1 AND local_live = 1",
+            rusqlite::params![session_id, url],
+        )?;
+        Ok(())
+    }
+
+    /// The loopback control endpoint for `session_id`, or `None` when the session is not a
+    /// currently-live terminal session or has not published one (an older binary, or the user
+    /// setting `[remote] interactive_local_sessions = false`).
+    ///
+    /// Staleness is enforced here, not just in the fleet listing: a killed terminal never clears
+    /// its own row, and its port is very likely to have been reused by something else by the time
+    /// anyone asks. Past [`LOCAL_PRESENCE_STALE_SECS`] the endpoint is treated as gone.
+    pub fn local_session_control_url(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT local_control_url FROM session
+                 WHERE id = ?1 AND local_live = 1
+                   AND local_last_seen >= strftime('%s','now') - ?2
+                   AND local_control_url IS NOT NULL",
+                rusqlite::params![session_id, LOCAL_PRESENCE_STALE_SECS],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
     }
 
     /// Sessions currently open in an interactive terminal, most recently active first. This is the
@@ -147,7 +189,8 @@ impl Store {
                              s.created_at) AS last_activity,
                     (SELECT r.chosen_model FROM routing_decision r
                      JOIN message m ON m.id = r.message_id
-                     WHERE m.session_id = s.id ORDER BY m.seq DESC LIMIT 1) AS model
+                     WHERE m.session_id = s.id ORDER BY m.seq DESC LIMIT 1) AS model,
+                    s.local_control_url
              FROM session s
              WHERE s.local_live = 1
                AND s.local_last_seen >= strftime('%s','now') - ?1
@@ -165,6 +208,7 @@ impl Store {
                 created_at: row.get(5)?,
                 last_activity: row.get(6)?,
                 model: row.get(7)?,
+                control_url: row.get(8)?,
             })
         })?;
         let mut res = Vec::new();

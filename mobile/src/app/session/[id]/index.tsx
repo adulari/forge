@@ -213,10 +213,13 @@ export default function SessionChat() {
   const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer, draftText, setDraftText, focusComposer } = useSessionCtx();
 
   const historyQuery = useHistory(sessionId);
-  // Terminal-local sessions (SessionRow.read_only) have no driver on this daemon: no input path
-  // exists for them (the WS route 403s any attempt server-side too — see `serve.rs`'s
-  // `reject_ws_if_local_read_only`). The fleet list is the only place that carries the flag, so
-  // look this session up there rather than adding it to every other response shape.
+  // `read_only` means there is genuinely no input path: a terminal session whose Forge build
+  // predates the control channel, or whose user opted out of it. A terminal session that DID
+  // publish one reports `read_only: false` — the daemon proxies this WS straight into it — so the
+  // composer mounts and drives it exactly like a daemon-hosted session. The WS route 403s the
+  // input-less case server-side too (`reject_ws_if_local_read_only` in `serve.rs`). The fleet list
+  // is the only place that carries the flag, so look this session up there rather than adding it
+  // to every other response shape.
   const sessionsQuery = useSessions();
   const readOnly = sessionsQuery.data?.find((row) => row.id === sessionId)?.read_only ?? false;
   const [selectedMessage, setSelectedMessage] = useState<HistoryRow | null>(null);
@@ -815,10 +818,10 @@ export default function SessionChat() {
       <SubagentStrip subagents={snapshot?.subagents ?? []} onPress={() => router.push(`/session/${sessionId}/agents`)} />
 
       {readOnly ? (
-        // No driver exists for a terminal-local session on this daemon — never mount the
-        // interactive composer (send/interrupt) for one. The daemon refuses the WS input path
-        // server-side too (`reject_ws_if_local_read_only` in `serve.rs`); this is the UI half of
-        // that same "no command/prompt/interrupt/kill path" contract, not just cosmetic.
+        // No input path at all reaches this session — never mount the interactive composer
+        // (send/interrupt) for one. The daemon refuses the WS input path server-side too
+        // (`reject_ws_if_local_read_only` in `serve.rs`); this is the UI half of that same "no
+        // command/prompt/interrupt/kill path" contract, not just cosmetic.
         <View style={styles.readOnlyBar} accessibilityRole="text">
           <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>
             read-only — running in a terminal, view only

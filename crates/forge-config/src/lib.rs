@@ -208,11 +208,23 @@ pub struct RemoteConfig {
     /// list what this machine is working on alongside `forge serve`-hosted sessions.
     ///
     /// ON by default. This publishes presence only — id, title, cwd, busy — for sessions already
-    /// in the shared store, and remote clients see them read-only with no input path, so unlike
-    /// [`Self::publish_local_runs`] nothing about where a turn executes changes. Set this to
+    /// in the shared store. Whether those rows can also be *driven* from the apps is
+    /// [`Self::interactive_local_sessions`]; with that off they are listed read-only. Set this to
     /// `false` to keep local chat out of the fleet entirely.
     #[serde(default = "default_true")]
     pub publish_local_sessions: bool,
+    /// Let the phone and desktop apps watch and DRIVE a terminal `forge` chat session, not just
+    /// list it. Each terminal session opens a token-gated control channel on loopback and records
+    /// it in the shared store; `forge serve` proxies the app's WebSocket to it, so a remote prompt,
+    /// permission answer, or interrupt arrives exactly as if typed into that terminal.
+    ///
+    /// ON by default: a session you can see but not answer is the frustrating case, not the safe
+    /// one — a permission prompt raised on the laptop should be answerable from the phone. Nothing
+    /// is exposed beyond loopback by this setting; the daemon is the only thing that can reach the
+    /// channel, and it already requires its own authentication. Set to `false` to publish terminal
+    /// sessions read-only, as before.
+    #[serde(default = "default_true")]
+    pub interactive_local_sessions: bool,
 }
 
 // Hand-written, NOT derived. `Config` carries `#[serde(default)] pub remote: RemoteConfig`, so a
@@ -233,6 +245,7 @@ impl Default for RemoteConfig {
             project_roots: Vec::new(),
             publish_local_runs: default_true(),
             publish_local_sessions: default_true(),
+            interactive_local_sessions: default_true(),
         }
     }
 }
@@ -3316,6 +3329,11 @@ models = {}
             "Default must agree with the serde defaults"
         );
         assert!(RemoteConfig::default().publish_local_runs);
+        assert!(
+            whole.remote.interactive_local_sessions,
+            "an absent [remote] block must still make terminal sessions drivable from the apps"
+        );
+        assert!(RemoteConfig::default().interactive_local_sessions);
 
         let default: RemoteConfig = toml::from_str("").expect("an absent [remote] block parses");
         assert!(default.publish_local_sessions);
@@ -3324,11 +3342,15 @@ models = {}
             "a one-shot run nobody can see from the phone is the odd case, not the norm"
         );
 
-        let opted_out: RemoteConfig =
-            toml::from_str("publish_local_sessions = false\npublish_local_runs = false\n")
-                .expect("opt-out parses");
+        assert!(default.interactive_local_sessions);
+
+        let opted_out: RemoteConfig = toml::from_str(
+            "publish_local_sessions = false\npublish_local_runs = false\ninteractive_local_sessions = false\n",
+        )
+        .expect("opt-out parses");
         assert!(!opted_out.publish_local_sessions);
         assert!(!opted_out.publish_local_runs);
+        assert!(!opted_out.interactive_local_sessions);
     }
 
     #[test]

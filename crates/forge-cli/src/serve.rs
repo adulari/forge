@@ -553,13 +553,18 @@ pub(crate) struct DaemonState {
 /// (a permission prompt or question is blocking the turn until a human decides); the list is
 /// served with waiting sessions FIRST so the dashboard surfaces them without client-side logic.
 ///
-/// `read_only` (additive; absent/false on anything serialized before this field existed, so an
-/// older mobile client that doesn't know the key simply never shows the badge) marks a session
-/// this daemon is NOT driving: a plain terminal `forge` chat process published its presence into
-/// the shared store (see `forge_store::Store::local_live_sessions`). There is no input path for
-/// these — no driver task, no input queue — so remote clients must never offer to send one; the
-/// transcript/session-detail routes refuse writes server-side for these ids regardless of what a
-/// client tries (defense in depth, see `session_is_remote_writable`).
+/// Two independent flags describe a session this daemon does not host. `terminal` says WHERE it
+/// runs — a plain `forge` chat process that published its presence into the shared store (see
+/// `forge_store::Store::local_live_sessions`) — and is what gates the lifecycle actions
+/// (archive/merge/discard) that stop a driver this daemon does not have. `read_only` says whether
+/// it can be DRIVEN at all: false once that terminal publishes a control channel for the daemon to
+/// proxy into (`serve_local_control`), true when it publishes none — an older binary, or
+/// `[remote] interactive_local_sessions = false` — in which case remote clients must never offer
+/// an input box, and the WS route refuses one server-side regardless of what a client tries
+/// (defense in depth, see `reject_ws_if_local_read_only`).
+///
+/// Both are additive: absent/false on anything serialized before they existed, so an older client
+/// that knows neither key behaves exactly as it did.
 #[derive(serde::Serialize)]
 struct SessionRow {
     id: String,
@@ -590,22 +595,25 @@ struct SessionRow {
     permission_mode: Option<String>,
     created_at: i64,
     last_activity: i64,
-    /// `true` for a terminal-local session this daemon merely observes via the store, never
-    /// drives. See the struct doc comment.
+    /// `true` when this session has no remote input path at all. See the struct doc comment.
     #[serde(default)]
     read_only: bool,
+    /// `true` for a session running in a terminal rather than hosted by this daemon — drivable or
+    /// not. See the struct doc comment.
+    #[serde(default)]
+    terminal: bool,
 }
 
 /// Fleet ordering: waiting-on-decision first (they need a human NOW), then busy, then idle —
-/// drivable (daemon-hosted) sessions always sort ahead of `read_only` ones so the two groups stay
+/// daemon-hosted sessions always sort ahead of `terminal` ones so the two groups stay
 /// visually separated instead of interleaving by recency. Created-at (not last-activity) as the
 /// tiebreak keeps the list stable while sessions stream; the id breaks created-at ties (second
 /// granularity) so rows created in the same second don't shuffle between polls with the registry
 /// map's iteration order.
 fn sort_session_rows(rows: &mut [SessionRow]) {
     rows.sort_by(|a, b| {
-        a.read_only
-            .cmp(&b.read_only)
+        a.terminal
+            .cmp(&b.terminal)
             .then(b.waiting.cmp(&a.waiting))
             .then(b.busy.cmp(&a.busy))
             .then(b.created_at.cmp(&a.created_at))
@@ -1206,6 +1214,7 @@ impl Drop for AbortTask {
 mod serve_assets;
 mod serve_changelog;
 mod serve_config;
+mod serve_local_control;
 mod serve_mcp;
 mod serve_models;
 mod serve_projects;
@@ -1250,6 +1259,7 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             created_at: h.created_at,
             last_activity: h.last_activity.load(std::sync::atomic::Ordering::Relaxed),
             read_only: false,
+            terminal: false,
         });
     }
     let store = state.store.clone();
@@ -1278,7 +1288,12 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             permission_mode: None,
             created_at: local.created_at,
             last_activity: local.last_activity,
-            read_only: true,
+            // Drivable exactly when the terminal published a control channel for us to proxy
+            // into. An older binary, or `[remote] interactive_local_sessions = false`, publishes
+            // none — those rows stay read-only, so a client never offers an input box for a
+            // session whose input would be silently swallowed.
+            read_only: local.control_url.is_none(),
+            terminal: true,
         });
     }
     sort_session_rows(&mut rows);
@@ -2517,6 +2532,18 @@ async fn ws_handler(
         }
         Ok(false) => {}
     }
+    // A terminal-local session with a published control channel is proxied to it rather than
+    // looked up in the registry (it is not, and never will be, in there). This is what makes a
+    // terminal chat drivable from the apps instead of read-only.
+    if let Ok(Some(control_url)) = state.store.local_session_control_url(&params.session) {
+        let rev = params.rev;
+        return ws.on_upgrade(move |socket| {
+            serve_local_control::pump_proxy(
+                socket,
+                serve_local_control::upstream_ws_url(&control_url, rev),
+            )
+        });
+    }
     if let Some(rejection) = reject_ws_if_local_read_only(&state.store, &params.session) {
         return rejection;
     }
@@ -3519,12 +3546,62 @@ mod tests {
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["id"], local_id);
-        assert_eq!(rows[0]["read_only"], true);
+        assert_eq!(
+            rows[0]["terminal"], true,
+            "this daemon owns none of the session's lifecycle, wherever its input goes"
+        );
+        assert_eq!(
+            rows[0]["read_only"], true,
+            "no control channel published: the client must not offer an input box"
+        );
         assert_eq!(rows[0]["busy"], true);
         assert_eq!(
             rows[0]["waiting"], false,
             "local presence never reports waiting"
         );
+    }
+
+    /// The same route, for a terminal session that DID publish a control channel: it stays
+    /// `terminal` (nothing here drives its lifecycle) but stops being `read_only`, which is the
+    /// single flag the apps gate their composer on. Without this the phone renders a "read-only —
+    /// running in a terminal, view only" bar over a session it can now perfectly well drive.
+    #[tokio::test]
+    async fn a_terminal_session_with_a_control_channel_is_listed_drivable() {
+        use tower::ServiceExt;
+
+        let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let local_id = store.create_session("/tmp/local-chat", "default").unwrap();
+        store.set_session_local_live(&local_id, true).unwrap();
+        store
+            .set_session_local_control_url(&local_id, Some("http://127.0.0.1:45001/tok"))
+            .unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: "/tmp".into(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let response = daemon_router(state)
+            .oneshot(
+                axum::http::Request::get("/tok/api/sessions")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let rows = json_body(response).await;
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["read_only"], false);
+        assert_eq!(rows[0]["terminal"], true);
     }
 
     /// Defense in depth: a remote client that dials `/ws?session=<id>` for a terminal-local id
@@ -6142,6 +6219,7 @@ mod tests {
             created_at,
             last_activity: created_at,
             read_only: false,
+            terminal: false,
         };
         let mut rows = vec![
             mk("new-idle", false, 30),
@@ -6182,9 +6260,9 @@ mod tests {
     }
 
     #[test]
-    fn fleet_rows_sort_read_only_sessions_after_every_drivable_one() {
+    fn fleet_rows_sort_terminal_sessions_after_every_daemon_hosted_one() {
         let mk =
-            |id: &str, read_only: bool, waiting: bool, busy: bool, created_at: i64| SessionRow {
+            |id: &str, terminal: bool, waiting: bool, busy: bool, created_at: i64| SessionRow {
                 id: id.into(),
                 title: String::new(),
                 cwd: "/w".into(),
@@ -6197,18 +6275,20 @@ mod tests {
                 context_tokens: 0,
                 context_limit: None,
                 model: "m".into(),
-                permission_mode: if read_only {
+                permission_mode: if terminal {
                     None
                 } else {
                     Some("default".into())
                 },
                 created_at,
                 last_activity: created_at,
-                read_only,
+                read_only: false,
+                terminal,
             };
-        // A read-only local session that is BOTH waiting and newer than every drivable session
-        // must still sort last: remote clients can't act on it, so it must never crowd out a
-        // session they can actually drive.
+        // A terminal session that is BOTH waiting and newer than every daemon-hosted session must
+        // still sort last. It is drivable now, but the daemon publishes no `waiting` state for it
+        // and owns none of its lifecycle, so it must not crowd out the sessions this daemon does
+        // host and does report a decision-pending signal for.
         let mut rows = vec![
             mk("local-waiting", true, true, false, 999),
             mk("driven-idle", false, false, false, 1),
@@ -6218,10 +6298,10 @@ mod tests {
         assert_eq!(
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             vec!["driven-busy", "driven-idle", "local-waiting"],
-            "drivable sessions (waiting > busy > idle) sort ahead of every read_only one"
+            "daemon-hosted sessions (waiting > busy > idle) sort ahead of every terminal one"
         );
 
-        // Within the read_only tier, busy still beats idle.
+        // Within the terminal tier, busy still beats idle.
         let mut local_rows = vec![
             mk("local-idle", true, false, false, 5),
             mk("local-busy", true, false, true, 1),
