@@ -35,6 +35,7 @@ mod refine_args;
 mod render;
 pub mod select;
 mod stream_json;
+pub mod throughput;
 pub use stream_json::StreamJsonPresenter;
 mod surface;
 mod transcript;

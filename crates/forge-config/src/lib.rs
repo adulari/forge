@@ -2140,6 +2140,10 @@ pub enum StatuslineWidget {
     TokensOut,
     /// Session total tokens "Σ ↑N ↓N"
     SessionTokens,
+    /// Live output throughput with a trend sparkline, "⚡ 64 tok/s ▂▄▇█". Measured over a short
+    /// sliding window while the model generates, then the finished turn's average (dimmed).
+    /// Absent until there is enough signal to state a rate.
+    Throughput,
     /// Current git branch "⎇ branch"
     GitBranch,
     /// Claude.ai usage % "claude N%"

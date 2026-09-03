@@ -970,6 +970,7 @@ and keep going."
                     forge_config::StatuslineWidget::TokensIn => "tokens_in".into(),
                     forge_config::StatuslineWidget::TokensOut => "tokens_out".into(),
                     forge_config::StatuslineWidget::SessionTokens => "session_tokens".into(),
+                    forge_config::StatuslineWidget::Throughput => "throughput".into(),
                     forge_config::StatuslineWidget::GitBranch => "git_branch".into(),
                     forge_config::StatuslineWidget::RepoName => "repo_name".into(),
                     forge_config::StatuslineWidget::QuotaClaude => "quota_claude".into(),

@@ -204,6 +204,8 @@ pub struct App {
     pub turn_in: u64,
     pub turn_cached_in: Option<u64>,
     pub turn_out: u64,
+    /// Live output-token throughput for the statusline.
+    pub throughput: crate::throughput::ThroughputMeter,
     /// Session in/out totals captured at turn start, so `turn_in/out` are deltas from here.
     turn_base_in: u64,
     turn_base_cached_in: Option<u64>,
@@ -1101,6 +1103,8 @@ impl App {
                 self.model_search = None;
                 let delta = sanitize_terminal_text(&delta);
                 self.turn_activity.reasoning_chars += delta.chars().count();
+                self.throughput
+                    .on_delta(delta.chars().count(), std::time::Instant::now());
                 self.touch_turn_activity(TurnPhase::Reasoning);
                 self.reasoning.push_str(&delta)
             }
@@ -1108,6 +1112,8 @@ impl App {
                 let delta = sanitize_terminal_text(&delta);
                 self.model_search = None;
                 self.turn_activity.response_chars += delta.chars().count();
+                self.throughput
+                    .on_delta(delta.chars().count(), std::time::Instant::now());
                 self.touch_turn_activity(TurnPhase::Responding);
                 if !self.streaming_active {
                     self.flush_reasoning();
@@ -1234,6 +1240,8 @@ impl App {
                 self.turn_cached_in = session_cached_in
                     .map(|now| now.saturating_sub(self.turn_base_cached_in.unwrap_or(0)));
                 self.turn_out = session_out.saturating_sub(self.turn_base_out);
+                self.throughput
+                    .on_usage(self.turn_out, std::time::Instant::now());
             }
             PresenterEvent::SubagentStart {
                 id,
@@ -1467,6 +1475,7 @@ impl App {
             PresenterEvent::Done { stop_reason, .. } => {
                 self.model_search = None;
                 self.set_turn_activity(TurnPhase::Finalizing, "turn completed");
+                self.throughput.on_turn_end(std::time::Instant::now());
                 self.done = true;
                 self.last_stop_reason = Some(stop_reason);
             }
@@ -1702,6 +1711,7 @@ impl App {
         self.turn_in = 0;
         self.turn_cached_in = None;
         self.turn_out = 0;
+        self.throughput.on_turn_start(std::time::Instant::now());
         self.turn_base_in = self.session_in;
         self.turn_base_cached_in = self.session_cached_in;
         self.turn_base_out = self.session_out;
@@ -6770,6 +6780,36 @@ mod tests {
         assert!(
             out.contains('—') || out.contains("untracked"),
             "default statusline renders: {out:?}"
+        );
+    }
+
+    #[test]
+    fn statusline_shows_live_throughput_while_the_model_generates() {
+        // The meter has to be readable from streamed characters alone: usage lands only when a
+        // call finishes, which is exactly when the user no longer needs a speed readout.
+        let base = std::time::Instant::now();
+        let mut app = App {
+            busy: true,
+            turn_ran: true,
+            ..Default::default()
+        };
+        app.throughput.on_turn_start(base);
+        for step in 1..=8u64 {
+            app.throughput
+                .on_delta(50, base + std::time::Duration::from_millis(step * 125));
+        }
+        let out = screen(&app);
+        assert!(
+            out.contains("tok/s"),
+            "throughput missing from a streaming statusline: {out:?}"
+        );
+
+        // Idle with nothing measured: no glyph at all rather than a zero.
+        let idle = App::default();
+        let out = screen(&idle);
+        assert!(
+            !out.contains("tok/s"),
+            "throughput shown with nothing measured: {out:?}"
         );
     }
 
