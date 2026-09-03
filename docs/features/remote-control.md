@@ -296,6 +296,20 @@ a project from a phone.
 project_roots = ["~/Projects", "/srv/work"]
 ```
 
+### Published one-shot runs
+
+A standalone `forge run` normally executes in the terminal that started it. Set
+`publish_local_runs = true` to hand every run to the local daemon instead, so each run shows up
+in the fleet (phone and desktop apps) under a title taken from the prompt's first line.
+`--publish-to-fleet` / `--no-publish-to-fleet` override the config value for one run. The
+handing terminal prints the daemon session id and exits — follow it with `forge attach <id>` or
+from the companion apps; output is NOT streamed back to the terminal.
+
+```toml
+[remote]
+publish_local_runs = true
+```
+
 The desktop app can use the operating system folder picker when connected to a loopback daemon.
 Mobile and remote browsers browse the allowlisted server roots. A manually entered absolute path
 remains available as an advanced fallback because the daemon token already grants full agent
