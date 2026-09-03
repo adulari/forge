@@ -3041,7 +3041,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // A direct model that only emits a plan has `turn_tools_ran == 0`; that is still an empty
         // implementation for an explicit mutating contract and must be re-driven. The contract is
         // the safety gate, not prior tool activity. `mesh.nudge_empty_diff = false` disables it.
+        // A worktree-backed daemon session arms `expect_code_change` for its whole life, so the
+        // session flag alone must not decide this: a turn whose own contract is explicitly
+        // read-only produced no diff BY INSTRUCTION, and re-driving it with "implement the fix
+        // now" contradicts what the user asked for. #1266 fixed the contract's precedence but
+        // left this gate reading the session flag directly, so the nudge kept firing.
         if self.config.mesh.nudge_empty_diff
+            && self.last_turn_contract.intent() != TaskIntent::ReadOnlyReview
             && (self.expect_code_change || self.last_turn_contract.requires_changed_artifact())
             && self.edits_this_turn == 0
             && !halted_by_loop_guard
@@ -3203,9 +3209,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // with one of TurnContract's deliberately narrow imperative verbs. Keep the explicit
         // contract paths too: they preserve the intended audit when a provider changed the tree
         // through a mechanism that the per-turn write counter cannot observe.
+        // Same precedence as the empty-diff gate: an explicitly read-only turn is not a
+        // code-change turn just because the session it runs in was created to build something.
+        // A write that happened anyway still counts, which is what the first clause preserves.
         let code_change_turn = self.edits_this_turn > 0
-            || self.expect_code_change
-            || self.last_turn_contract.requires_changed_artifact();
+            || (self.last_turn_contract.intent() != TaskIntent::ReadOnlyReview
+                && (self.expect_code_change
+                    || self.last_turn_contract.requires_changed_artifact()));
         let primary_changed_paths =
             changed_paths_from_status(working_tree_status(Some(self.workspace.root())).as_deref());
         // Overflow compaction can replace the transcript with a shorter summary while the
@@ -11727,6 +11737,52 @@ mod tests {
             "a bridge turn that edited the tree must not be nudged"
         );
         assert_eq!(answer, "explored the repo — here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The gap #1266 left open: it fixed which contract a read-only prompt derives, but this gate
+    /// still read the session-level `expect_code_change` flag directly. A worktree-backed daemon
+    /// session arms that flag for its whole life, so an investigative turn kept collecting
+    /// "You have not modified any files. Implement the fix now" against its own instruction.
+    #[tokio::test]
+    async fn an_explicitly_read_only_turn_in_a_build_session_is_not_nudged() {
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: true,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+        // Exactly what `spawn_session_driver` does for a worktree-backed daemon session.
+        session.set_expect_code_change(true);
+        session.config.mesh.verify_completeness = false;
+
+        session
+            .run_turn("Do not edit anything. Read the relay loop and answer two questions.")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an answer-only turn must not be re-driven"
+        );
+        assert!(
+            !session
+                .transcript
+                .iter()
+                .any(|m| m.content == EMPTY_DIFF_NUDGE),
+            "the empty-diff nudge contradicts an explicitly read-only instruction"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
