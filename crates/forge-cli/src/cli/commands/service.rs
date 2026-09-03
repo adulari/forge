@@ -23,11 +23,21 @@ use super::service_report::{
 pub(crate) fn service_cmd(cmd: ServiceCmd) -> Result<()> {
     match cmd {
         ServiceCmd::Install {
+            tunnel,
             anywhere,
             lan,
             local,
             port,
-        } => install_cmd(Exposure::from_flags(anywhere, lan, local), port),
+        } => {
+            if anywhere {
+                eprintln!(
+                    "warning: `forge service install --anywhere` is deprecated; use `--tunnel`. \
+                     Managed Forge Anywhere is enabled with `forge anywhere` and needs no \
+                     exposure flag."
+                );
+            }
+            install_cmd(Exposure::from_flags(tunnel || anywhere, lan, local), port)
+        }
         ServiceCmd::Uninstall => uninstall_cmd(),
         ServiceCmd::Status { port } => status_cmd(port),
         ServiceCmd::Start => control_cmd(ServiceControl::Start),
@@ -39,20 +49,26 @@ pub(crate) fn service_cmd(cmd: ServiceCmd) -> Result<()> {
 
 // ---------------------------------------------------------------------------
 // Exposure — mirrors `forge serve`'s own `--local`/`--lan`/`--tunnel` (default: LAN).
+//
+// `Tunnel` is a cloudflared/ngrok quick tunnel and has nothing to do with managed Forge
+// Anywhere, which reaches the daemon over the relay from `[anywhere] enabled` and dials
+// 127.0.0.1 regardless of how the daemon is bound. The variant and its flag were once both
+// called `anywhere`, which read as "install the Anywhere daemon" and installed a public tunnel
+// nobody had asked for — `forge serve` had already been renamed, `forge service` had not.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exposure {
     Local,
     Lan,
-    Anywhere,
+    Tunnel,
 }
 
 impl Exposure {
-    fn from_flags(anywhere: bool, lan: bool, local: bool) -> Self {
+    fn from_flags(tunnel: bool, lan: bool, local: bool) -> Self {
         let _ = lan; // clap already rejects combining flags; `lan` is accepted for symmetry only.
-        if anywhere {
-            Exposure::Anywhere
+        if tunnel {
+            Exposure::Tunnel
         } else if local {
             Exposure::Local
         } else {
@@ -66,7 +82,7 @@ impl Exposure {
         match self {
             Exposure::Local => "--local",
             Exposure::Lan => "--lan",
-            Exposure::Anywhere => "--tunnel",
+            Exposure::Tunnel => "--tunnel",
         }
     }
 }
@@ -759,7 +775,7 @@ mod tests {
         assert_eq!(Exposure::from_flags(false, false, false), Exposure::Lan);
         assert_eq!(Exposure::from_flags(false, true, false), Exposure::Lan);
         assert_eq!(Exposure::from_flags(false, false, true), Exposure::Local);
-        assert_eq!(Exposure::from_flags(true, false, false), Exposure::Anywhere);
+        assert_eq!(Exposure::from_flags(true, false, false), Exposure::Tunnel);
     }
 
     #[test]
@@ -830,7 +846,7 @@ mod tests {
     fn systemd_service_unit_encodes_local_and_anywhere() {
         let local = render_systemd_service("/bin/forge", Exposure::Local, 1234);
         assert!(local.contains("serve --local --port 1234"));
-        let anywhere = render_systemd_service("/bin/forge", Exposure::Anywhere, 1234);
+        let anywhere = render_systemd_service("/bin/forge", Exposure::Tunnel, 1234);
         assert!(anywhere.contains("serve --tunnel --port 1234"));
     }
 

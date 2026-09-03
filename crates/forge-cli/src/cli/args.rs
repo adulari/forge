@@ -1203,19 +1203,23 @@ pub(crate) enum ScheduleCmd {
 pub(crate) enum ServiceCmd {
     /// Install and start a user-level background service running `forge serve`. Exposure
     /// defaults to `--lan` (same default as `forge serve` itself) when none of
-    /// `--anywhere`/`--lan`/`--local` is given.
+    /// `--tunnel`/`--lan`/`--local` is given.
     Install {
         /// Bind loopback and open a public tunnel (cloudflared/ngrok) — passed through to
         /// `forge serve --tunnel`.
-        #[arg(long, conflicts_with_all = ["lan", "local"])]
+        #[arg(long, conflicts_with_all = ["lan", "local", "anywhere"])]
+        tunnel: bool,
+        /// Deprecated alias for `--tunnel`; managed Forge Anywhere uses `forge anywhere` and
+        /// needs no exposure flag at all.
+        #[arg(long, hide = true, conflicts_with_all = ["lan", "local", "tunnel"])]
         anywhere: bool,
         /// Bind the LAN with self-signed HTTPS. This is already the default; accepted for
         /// symmetry with `forge serve --lan`.
-        #[arg(long, conflicts_with_all = ["anywhere", "local"])]
+        #[arg(long, conflicts_with_all = ["tunnel", "anywhere", "local"])]
         lan: bool,
         /// Bind loopback only (control from this machine) — passed through to
         /// `forge serve --local`.
-        #[arg(long, conflicts_with_all = ["anywhere", "lan"])]
+        #[arg(long, conflicts_with_all = ["tunnel", "anywhere", "lan"])]
         local: bool,
         /// Listen port. Defaults to `[remote] port` from config, else 7420 — same resolution as
         /// `forge serve --port`. The resolved value is baked into the installed unit.
