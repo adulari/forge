@@ -87,13 +87,18 @@ fn perf_seed_server() -> Result<Option<PerfSeedServer>, String> {
         .join("serve-state.json");
     let raw = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let state: serde_json::Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-    let base_url = state.get("base_url").and_then(serde_json::Value::as_str).ok_or_else(|| "serve state missing base_url".to_string())?;
     let token = state.get("token").and_then(serde_json::Value::as_str).ok_or_else(|| "serve state missing token".to_string())?;
     let port = state.get("port").and_then(serde_json::Value::as_u64).unwrap_or(7420);
+    // The LOOPBACK origin, never `serve-state.json`'s `base_url`. When the daemon runs with
+    // `--tunnel` that field is a cloudflared quick-tunnel URL whose hostname is regenerated on
+    // every launch, so seeding it (a) measured tunnel round-trips instead of local daemon
+    // performance, and (b) left a permanently dead "Local daemon" entry in the real server list
+    // once that tunnel process exited — the seed persists like any other paired server.
+    let base_url = format!("http://127.0.0.1:{port}/{token}");
     Ok(Some(PerfSeedServer {
         id: format!("perf-daemon-{port}"),
         name: "Local daemon".to_string(),
-        base_url: base_url.to_string(),
+        base_url,
         token: token.to_string(),
         host: format!("127.0.0.1:{port}"),
         added_at: 0,
