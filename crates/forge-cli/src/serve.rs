@@ -22,6 +22,7 @@
 //! - `POST /api/sessions/{id}/mode`    change a live session's permission mode
 //! - `GET  /api/projects`             daemon default + recent project directories + browse roots
 //! - `GET  /api/projects/browse?path=` allowlisted server-side directory browser
+//! - `POST /api/sessions/{id}/interrupt` end the CURRENT turn; the session stays live and idle
 //! - `POST /api/sessions/{id}/archive` stop + hide a session (history kept; worktree kept)
 //! - `POST /api/sessions/{id}/merge`   stop, snapshot the worktree, and merge its branch back
 //!   into the base repo (3-way patch; conflicts are reported, never auto-resolved)
@@ -927,6 +928,10 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(
             &format!("{base}/api/sessions/{{id}}/fork"),
             post(fork_session),
+        )
+        .route(
+            &format!("{base}/api/sessions/{{id}}/interrupt"),
+            post(interrupt_session),
         )
         .route(
             &format!("{base}/api/sessions/{{id}}/archive"),
@@ -3258,6 +3263,35 @@ struct SetSessionModeReq {
     mode: String,
 }
 
+/// `POST /api/sessions/{id}/interrupt` — end the session's current turn and leave it idle, its
+/// history and worktree intact. Queued prompts still drain FIFO, exactly as an interrupt from the
+/// TUI or an attached WebSocket client behaves.
+///
+/// Without this, an HTTP client could only stop a running turn by ending the session
+/// (archive/merge/discard). A `--steer` message is not a substitute: it is delivered at the next
+/// TURN boundary, which a session stuck in a long tool loop never reaches, so the operator had no
+/// way to correct a running session short of destroying it.
+async fn interrupt_session(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(handle) = state.registry.get(&id).await else {
+        return err_response(axum::http::StatusCode::NOT_FOUND, "session not found");
+    };
+    if handle
+        .input_tx
+        .send(remote::RemoteInput::Interrupt)
+        .await
+        .is_err()
+    {
+        return err_response(
+            axum::http::StatusCode::CONFLICT,
+            "session driver is no longer accepting input (it is shutting down)",
+        );
+    }
+    json_response(&serde_json::json!({ "id": id, "interrupted": true }))
+}
+
 async fn set_session_mode(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
@@ -4335,6 +4369,78 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Before this route existed, an HTTP client could only stop a running turn by ending the
+    /// session. `--steer` is not a substitute: it lands at the next TURN boundary, which a session
+    /// stuck in a tool loop never reaches.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interrupt_ends_the_current_turn_and_keeps_the_session_alive() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir =
+            std::env::temp_dir().join(format!("forge-serve-interrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("interrupt.db"));
+
+        let store = Arc::new(crate::open_store().unwrap());
+        let registry = Arc::new(SessionRegistry::new());
+        let live = registry
+            .insert(
+                spawn_session_driver(DriverSpec {
+                    cwd: dir.display().to_string(),
+                    worktree: None,
+                    title: "interruptible".into(),
+                    mock: true,
+                    model: None,
+                    resume: None,
+                    temper: None,
+                    push: None,
+                    apns: None,
+                    registry: None,
+                })
+                .await
+                .unwrap(),
+                &store,
+            )
+            .await;
+
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(post_req(&format!(
+                "/tok/api/sessions/{}/interrupt",
+                live.session_id
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(json_body(response).await["interrupted"], true);
+
+        // The session is still in the fleet: an interrupt ends a turn, not the session.
+        assert!(registry.get(&live.session_id).await.is_some());
+
+        let missing = router
+            .oneshot(post_req("/tok/api/sessions/does-not-exist/interrupt"))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), axum::http::StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
