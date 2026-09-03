@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["vendor/genai-0.6.5"]
 
 [workspace.package]
-version = "2.13.7"
+version = "2.13.8"
 edition = "2021"
 rust-version = "1.88"
 license = "AGPL-3.0-only"

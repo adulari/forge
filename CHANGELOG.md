@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.8] - 2026-09-03
+
 ### Fixed
 - **A long tool loop threw away the task it was working on.** When the transcript overflowed the
   model's window, the fit kept every system message and a newest-first suffix of history — and the
@@ -55,6 +57,22 @@ All notable changes to Forge are documented here. The format follows
   longer probed (`crates/forge-cli/src/cli/commands/run.rs`, `crates/forge-provider/src/lib.rs`).
 - **Claude quota is read from `unifiedWindows`**, and model reasoning is no longer printed as answer
   text on a non-tty (`crates/forge-provider/src/claude_quota.rs`, `crates/forge-tui/src/lib.rs`).
+
+- **Opt-in: a standalone `forge run` can execute in the daemon and show in the Anywhere fleet.**
+  `[remote] publish_local_runs` (default off) and per-run `--publish-to-fleet` /
+  `--no-publish-to-fleet` hand the prompt to the local daemon, which creates a session carrying the
+  cwd, model and a title from the prompt's first line. A one-shot run was previously invisible to
+  the phone however healthy the relay was. Failure is soft: no daemon means the run proceeds locally
+  exactly as before. Output is not streamed back to the handing terminal, which prints the session
+  id and the `forge attach <id>` command (`crates/forge-cli/src/cli/commands/run/one_shot.rs`).
+- **The empty-diff nudge and the code-change classification read the turn's contract**, not the
+  session-wide flag a worktree daemon session arms for its whole life, so an explicitly read-only
+  turn is no longer re-driven with "implement the fix now" (`crates/forge-core/src/lib.rs`).
+- **`forge run` no longer stalls on rediscovery when a cached catalog exists**, and one reader now
+  serves both the router and the daemon's models page
+  (`crates/forge-cli/src/cli/commands/models/discovery.rs`).
+- **The mesh explanation marks a rank a routing rule decided** instead of restating the score as
+  something it is not (`crates/forge-mesh/src/explain.rs`).
 
 ### Added
 - **`POST /api/sessions/{id}/interrupt`** ends a fleet session's current turn and leaves it live and
@@ -3946,7 +3964,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.7...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.8...HEAD
+[2.13.8]: https://github.com/Adulari/forge/compare/v2.13.7...v2.13.8
 [2.13.7]: https://github.com/Adulari/forge/compare/v2.13.6...v2.13.7
 [2.13.6]: https://github.com/Adulari/forge/compare/v2.13.5...v2.13.6
 [2.13.5]: https://github.com/Adulari/forge/compare/v2.13.4...v2.13.5
