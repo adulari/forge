@@ -907,16 +907,21 @@ pub(crate) async fn run_chat_tui(
         {
             local_presence_last_busy = Some(busy);
             local_presence_last_touch = std::time::Instant::now();
-            // `/new`/`/resume` retarget `session` to a different id in place; re-read it fresh
-            // each tick rather than trusting a value captured once. `try_lock`: same reasoning as
-            // the picker's `skip_model` — a turn parked in a permission/question prompt holds the
-            // session lock for the whole prompt, and this is the main render loop, so a busy
-            // session simply retargets/touches on its next idle tick instead of blocking here.
+            // Touch FIRST, unconditionally: this is the fleet-liveness heartbeat, and it must keep
+            // firing during a busy turn or the session ages out of the Anywhere fleet mid-work
+            // (`forge_store::LOCAL_PRESENCE_STALE_SECS` = 60s). `spawn_turn_with`'s task holds the
+            // session lock for the ENTIRE turn, so the `try_lock` below fails almost the whole time
+            // a turn runs — gating the touch on it (as this once did) meant a session actively
+            // working stopped heartbeating and vanished from the phone/desktop apps after a minute.
+            // `touch` needs no session lock: `LocalPresenceGuard` tracks the current id itself.
+            local_presence.touch(busy);
+            // Retarget only needs the lock, and only to catch a `/new`/`/resume` id change — a
+            // between-turns action, so a busy turn failing `try_lock` here loses nothing: the id it
+            // would read is the one already tracked.
             if let Ok(s) = session.try_lock() {
                 let current_id = s.session_id().to_string();
                 drop(s);
                 local_presence.retarget(&current_id);
-                local_presence.touch(busy);
             }
         }
         if let Some(obs) = &mut observer {
