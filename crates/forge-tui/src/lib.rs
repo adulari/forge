@@ -5,6 +5,17 @@
 
 pub use forge_types::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, ReplayItem, NO_ANSWER};
 
+/// How a model id reads to a person. A bare bridge id (`claude-cli::`) is a real, valid pin
+/// meaning "whatever model that CLI is configured to use" — it is the first entry in the built-in
+/// complex-tier defaults — but printed verbatim it looks like a truncated id or a bug, and it is
+/// what a user with no API keys sees on their very first turn.
+pub fn display_model(id: &str) -> String {
+    match id.strip_suffix("::") {
+        Some(provider) if !provider.is_empty() => format!("{provider} (its default model)"),
+        _ => id.to_string(),
+    }
+}
+
 pub mod answer;
 pub use answer::resolve_answer;
 pub mod app;
@@ -161,5 +172,42 @@ mod stream_json_tests {
         assert_eq!(usage["usage"]["input_tokens"], 1_200);
         assert_eq!(usage["usage"]["cached_input_tokens"], 900);
         assert_eq!(usage["usage"]["output_tokens"], 40);
+    }
+}
+
+#[cfg(test)]
+mod display_model_tests {
+    use super::display_model;
+
+    #[test]
+    fn a_bare_bridge_id_reads_as_the_cli_default_not_a_truncated_id() {
+        assert_eq!(
+            display_model("claude-cli::"),
+            "claude-cli (its default model)"
+        );
+        assert_eq!(
+            display_model("codex-cli::"),
+            "codex-cli (its default model)"
+        );
+    }
+
+    #[test]
+    fn a_named_model_is_left_exactly_as_it_is() {
+        for id in [
+            "claude-cli::opus",
+            "anthropic::claude-opus-5",
+            "openrouter::meta/muse-spark-1.3",
+            "ollama::llama3.2",
+        ] {
+            assert_eq!(display_model(id), id);
+        }
+    }
+
+    #[test]
+    fn a_degenerate_id_is_not_dressed_up() {
+        // Nothing before the separator is not a provider; leave it visible rather than
+        // printing " (its default model)".
+        assert_eq!(display_model("::"), "::");
+        assert_eq!(display_model(""), "");
     }
 }
