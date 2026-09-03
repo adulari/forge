@@ -764,6 +764,55 @@ mod tests {
     }
 
     #[test]
+    fn meta_and_opencode_pricing_is_read_instead_of_billing_as_zero() {
+        // The reported bug: `meta::muse-spark-1.3-contributor` showed "untracked" in the
+        // statusline while models.dev publishes its price ($0.10/$0.20 per 1M). The provider map
+        // simply skipped Meta's whole block, so cost_for_usage found no rate and returned $0 —
+        // a session that had genuinely spent several dollars reported nothing.
+        let body = serde_json::json!({
+            "meta": { "models": {
+                "muse-spark-1.3-contributor": {
+                    "cost": { "input": 0.1, "output": 0.2, "cache_read": 0.002 }
+                },
+                "muse-spark-1.3": { "cost": { "input": 1.25, "output": 4.25, "cache_read": 0.15 } }
+            }},
+            "opencode": { "models": {
+                // An EXPLICIT zero, which is the difference between "free" and "unpriced".
+                "muse-spark-1.3-contributor-free": {
+                    "cost": { "input": 0, "output": 0, "cache_read": 0 }
+                }
+            }},
+            "opencode-go": { "models": {
+                "kimi-k3": { "cost": { "input": 1.0, "output": 2.0 } }
+            }}
+        });
+        let rows = models_dev_pricing(&body);
+        let find = |id: &str| rows.iter().find(|(m, ..)| m == id).cloned();
+
+        let (_, input, output, cache) =
+            find("meta::muse-spark-1.3-contributor").expect("the metered contributor is priced");
+        assert!((input - 0.0001).abs() < 1e-12, "input per 1k");
+        assert!((output - 0.0002).abs() < 1e-12, "output per 1k");
+        assert!((cache.expect("cache rate") - 0.000002).abs() < 1e-15);
+
+        let (_, base_in, ..) = find("meta::muse-spark-1.3").expect("the base model is priced");
+        assert!(base_in > input, "the contributor tier is the cheaper one");
+
+        let (_, zero_in, zero_out, _) = find("opencode::muse-spark-1.3-contributor-free")
+            .expect("an explicit zero is a PRICE, not a missing row");
+        assert_eq!((zero_in, zero_out), (0.0, 0.0));
+
+        // opencode-go is deliberately unmapped: none of its ids match an `opencode_go::` id, so a
+        // row here would never be looked up while implying the gateway is priced.
+        assert!(
+            !rows
+                .iter()
+                .any(|(m, ..)| m.starts_with("opencode_go::") || m.starts_with("opencode-go::")),
+            "opencode-go must stay unmapped: {rows:?}"
+        );
+    }
+
+    #[test]
     fn openrouter_pricing_parses_correctly() {
         let prices = openrouter_pricing(&or_body());
         let opus = prices

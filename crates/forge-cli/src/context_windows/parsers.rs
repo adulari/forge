@@ -173,6 +173,11 @@ pub(super) fn openrouter_pricing(body: &serde_json::Value) -> Vec<(String, f64, 
 /// no `openai/gpt-5.6*` entries at all, so without this source the whole GPT-5.6 line priced as
 /// $0 and only a hardcoded (stale) ladder ordered codex-cli / codex-oauth decisions. The CLI
 /// bridges bill the same model as the API, so they get the same row.
+///
+/// A provider is listed only when models.dev's ids match Forge's for that namespace, measured
+/// against a real catalog rather than assumed. `opencode-go` is deliberately ABSENT: models.dev
+/// prices 34 models under it and not one id matches an `opencode_go::` id Forge routes to, so
+/// mapping it would add rows that can never be looked up while implying the gateway is priced.
 const MODELS_DEV_NAMESPACES: &[(&str, &[&str])] = &[
     ("openai", &["openai", "codex-cli", "codex-oauth"]),
     ("anthropic", &["anthropic"]),
@@ -181,6 +186,15 @@ const MODELS_DEV_NAMESPACES: &[(&str, &[&str])] = &[
     ("deepseek", &["deepseek"]),
     ("mistral", &["mistral"]),
     ("groq", &["groq"]),
+    // Meta's own API. Every one of its five priced ids matches a `meta::` id in the catalog, and
+    // without this row the whole Muse line — including the metered `-contributor` models people
+    // actually run — billed as $0 and the statusline read "untracked" while real money was spent.
+    ("meta", &["meta"]),
+    // OpenCode Zen. 66 of its 97 priced ids match. It also publishes EXPLICIT zeros for the
+    // `-free` tiers, which is what turns a "we have no idea" into a provable "free".
+    ("opencode", &["opencode"]),
+    ("nvidia", &["nvidia"]),
+    ("cerebras", &["cerebras"]),
 ];
 
 /// Extract pricing from models.dev's `api.json` (`{provider: {models: {id: {cost: {input,
