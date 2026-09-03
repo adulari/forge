@@ -315,9 +315,8 @@ mod tests {
     fn a_shared_major_digit_does_not_license_a_cross_minor_match() {
         let b = muse_feed();
         assert!(
-            b.source_score_for("opencode::muse-spark-1.3-contributor-free")
-                .is_none(),
-            "1.3 must not inherit 1.2's measured row through the fuzzy fallback"
+            b.source_score_for("opencode::muse-spark-1.4").is_none(),
+            "1.4 must not inherit 1.2's measured row through the fuzzy fallback"
         );
     }
 
