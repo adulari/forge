@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     client, decode_base64_array, decode_hex_array, ensure_access_token, idempotency_key, now_ms,
     refresh_account_epoch, send_json, set_owner_directory_permissions, set_owner_file_permissions,
-    sync_directory, LocalState, StateStore,
+    sync_directory, whole_second_ms, LocalState, StateStore,
 };
 
 const JOURNAL_VERSION: u8 = 1;
@@ -132,7 +132,13 @@ pub(super) async fn queue_create_session(
         body_blob: None,
     };
     let plaintext = serde_json::to_vec(&request).context("encode durable remote job")?;
-    let created_at_ms = now_ms();
+    // WHOLE SECONDS, not `now_ms()`. The service records a queued command's `created_at_ms` at
+    // second granularity (its `expires_at_ms` is always `created_at + COMMAND_EXPIRY_MS` with a
+    // zero millisecond remainder), while the sealed envelope carried full millisecond precision.
+    // The host compares the two for equality in `verify_command_envelope`, so every job whose
+    // creation instant had a non-zero millisecond remainder — 999 out of 1000 — was rejected with
+    // "durable command envelope does not match its queue metadata" and never ran.
+    let created_at_ms = whole_second_ms(now_ms());
     let identity = ProducerIdentity::from_state(&reserved)?;
     let host_id = decode_hex_array::<16>(&target.id, "destination host id")?;
     let envelope = Envelope::seal(

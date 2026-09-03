@@ -2177,6 +2177,15 @@ fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// A millisecond timestamp floored to a whole second.
+///
+/// Durable command envelopes must carry this rather than a raw `now_ms()`: the service stores a
+/// queued command's `created_at_ms` at second granularity, and the receiving host compares the
+/// sealed envelope's value to the service's for equality.
+fn whole_second_ms(ms: u64) -> u64 {
+    ms - (ms % 1_000)
+}
+
 fn idempotency_key() -> String {
     hex::encode(rand::random::<[u8; 16]>())
 }
