@@ -3875,15 +3875,22 @@ fn ask_user_spec() -> ToolSpec {
 /// The skill-loading virtual tool name.
 pub const USE_SKILL_TOOL: &str = "use_skill";
 
+/// How much of each skill's description rides in the `use_skill` listing.
+const SKILL_SUMMARY_CHARS: usize = 60;
+
 /// The `ToolSpec` advertised for [`USE_SKILL_TOOL`], listing the available Forge skills in its
 /// description so the model both *discovers* what exists and can *invoke* one. Shared by the
 /// direct path and the CLI-bridge `mcp-serve` handler so a bridged claude/codex sees it too.
 pub fn use_skill_spec(catalog: &forge_skills::Catalog, allow_project: bool) -> ToolSpec {
+    // This listing rides EVERY tool-bearing request, so its width is a per-turn tax on every
+    // session: 64 skills at 100 chars was 7.4k characters, about a quarter of the whole tool
+    // payload and more than the system prompt. 60 chars still carries what the model picks on —
+    // the subject of the skill — and the loaded skill supplies the detail.
     let listing = catalog
         .skill_listing(allow_project)
         .into_iter()
         .map(|(name, desc)| {
-            let desc: String = desc.chars().take(100).collect();
+            let desc: String = desc.chars().take(SKILL_SUMMARY_CHARS).collect();
             format!("- {name}: {desc}")
         })
         .collect::<Vec<_>>()
@@ -8221,6 +8228,42 @@ mod tests {
                 quotas: Vec::new(),
             })
         }
+    }
+
+    /// The listing rides every tool-bearing request, so its per-skill width is a per-turn cost on
+    /// every session. Measured on a real catalog: 64 skills at 100 chars was 7,438 characters,
+    /// about a quarter of the entire tool payload and larger than the system prompt.
+    #[test]
+    fn the_skill_listing_summary_stays_narrow() {
+        let dir = std::env::temp_dir().join(format!("forge-skillwidth-{}", forge_types::new_id()));
+        std::fs::create_dir_all(dir.join("skills/wordy")).unwrap();
+        let long = "x".repeat(400);
+        std::fs::write(
+            dir.join("skills/wordy/SKILL.md"),
+            format!("---\nname: wordy\ndescription: {long}\n---\nbody"),
+        )
+        .unwrap();
+        let catalog = forge_skills::Catalog::load(&forge_skills::Sources {
+            commands: vec![],
+            skills: vec![forge_skills::ScopedDir {
+                scope: forge_skills::Scope::User,
+                path: dir.join("skills"),
+            }],
+        });
+
+        let spec = use_skill_spec(&catalog, true);
+        let line = spec
+            .description
+            .lines()
+            .find(|l| l.starts_with("- wordy:"))
+            .expect("the skill is listed");
+        let summary = line.trim_start_matches("- wordy: ");
+        assert_eq!(
+            summary.chars().count(),
+            SKILL_SUMMARY_CHARS,
+            "a long description is clipped to the listing budget: {line}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
