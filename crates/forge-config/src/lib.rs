@@ -194,6 +194,10 @@ pub struct RemoteConfig {
     /// without exposing the rest of the host filesystem.
     #[serde(default)]
     pub project_roots: Vec<String>,
+    /// Register a standalone `forge run` with the local daemon so the run shows up in the Anywhere
+    /// fleet (phone and desktop apps). Off by default: publishing a one-shot run is opt-in.
+    #[serde(default)]
+    pub publish_local_runs: bool,
 }
 
 /// `[anywhere]` config block for the optional managed companion.
@@ -2315,6 +2319,11 @@ impl Default for Config {
             TaskTier::Complex.as_str().into(),
             many(&[
                 "claude-cli::",
+                // Both subscription bridges belong in the seed, not just one: on a fresh install
+                // with no API keys, whichever CLI the user is logged into is the only thing that
+                // can serve a turn, and an unavailable bridge is filtered by availability anyway.
+                // Listing only claude meant a codex-only machine failed its first prompt.
+                "codex-cli::",
                 "anthropic::claude-opus-5",
                 "groq::llama-3.3-70b-versatile",
             ]),

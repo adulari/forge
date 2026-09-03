@@ -359,12 +359,34 @@ fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Messa
         .filter(|m| m.role == Role::System)
         .map(message_tokens)
         .sum();
+    // The newest user message is the turn's task statement. Everything after it — the assistant's
+    // own reasoning and its tool results — is work done in service of it, and a long tool loop can
+    // fill the whole budget on its own. Walking newest-first without an anchor therefore evicts the
+    // instruction while keeping the output it produced, and the model, seeing only tool results,
+    // reports that no task text arrived and invents one. Reserve it up front like system context.
+    let anchor = messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .filter(|_| budget_tokens > system_cost);
+    let anchor_cost = anchor.map_or(0, |i| message_tokens(&messages[i]));
     let mut remaining = budget_tokens.saturating_sub(system_cost);
+    // An anchor that does not fit is clipped rather than dropped — a shortened objective still
+    // steers the turn, an absent one does not — and nothing else can fit beside it.
+    if let Some(i) = anchor.filter(|_| anchor_cost > remaining) {
+        let clipped = truncate_message_to_budget(messages[i].clone(), remaining);
+        let mut out: Vec<Message> = messages
+            .into_iter()
+            .filter(|message| message.role == Role::System)
+            .collect();
+        out.extend(clipped);
+        return out;
+    }
+    remaining -= anchor_cost;
     let mut keep_idx = std::collections::HashSet::new();
     let mut saw_overflow = false;
 
     for i in (0..messages.len()).rev() {
-        if messages[i].role == Role::System {
+        if messages[i].role == Role::System || Some(i) == anchor {
             continue;
         }
         let cost = message_tokens(&messages[i]);
@@ -391,9 +413,13 @@ fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Messa
             }
 
             let truncated = truncate_message_to_budget(messages[i].clone(), remaining);
+            // Keep the anchored task statement alongside the standing system context, so the
+            // last-resort path still tells the model what it was asked to do.
             let mut out: Vec<Message> = messages
                 .into_iter()
-                .filter(|message| message.role == Role::System)
+                .enumerate()
+                .filter(|(index, message)| message.role == Role::System || Some(*index) == anchor)
+                .map(|(_, message)| message)
                 .collect();
             if let Some(message) = truncated {
                 out.push(message);
@@ -409,6 +435,9 @@ fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Messa
         return messages;
     }
 
+    if let Some(i) = anchor {
+        keep_idx.insert(i);
+    }
     let mut ordered: Vec<usize> = keep_idx.iter().copied().collect();
     ordered.sort_unstable();
     for i in ordered {
@@ -506,6 +535,54 @@ pub(crate) fn clamp_chars(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The defect this pins: a Muse-driven fleet session on 2026-09-02 lost its brief mid-turn and
+    /// answered "No task text came through" for the rest of the run, inventing work from the tool
+    /// results still in the window.
+    #[test]
+    fn a_long_tool_loop_cannot_evict_the_task_statement() {
+        let mut messages = vec![
+            Message::system("standing system context"),
+            Message::user("TASK: add the opt-in publish flag"),
+        ];
+        for i in 0..40 {
+            messages.push(Message::assistant_tool_calls("", vec![tool_call("call-1")]));
+            messages.push(Message::tool_result(
+                "call-1",
+                format!("{i} {}", "x".repeat(4_000)),
+            ));
+        }
+
+        let output = to_llm(&messages, 2_000, 100_000, 60);
+
+        let task = output
+            .iter()
+            .find(|m| m.role == Role::User && m.content.contains("TASK:"));
+        assert!(
+            task.is_some(),
+            "the newest user message must survive a tool loop that fills the budget"
+        );
+        assert!(
+            output.len() < messages.len(),
+            "the fit still has to drop something, or the test proves nothing"
+        );
+    }
+
+    #[test]
+    fn an_oversized_task_statement_is_clipped_not_dropped() {
+        let messages = vec![
+            Message::system("standing system context"),
+            Message::user(format!("TASK: {}", "y".repeat(40_000))),
+            Message::tool_result("call-1", "z".repeat(4_000)),
+        ];
+
+        let output = to_llm(&messages, 500, 100_000, 4);
+
+        assert!(
+            output.iter().any(|m| m.role == Role::User),
+            "a task statement larger than the whole budget is truncated, never removed"
+        );
+    }
 
     fn tool_call(id: &str) -> forge_types::ToolCall {
         forge_types::ToolCall {

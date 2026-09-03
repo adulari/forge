@@ -1116,6 +1116,10 @@ pub struct HeuristicRouter {
     /// stable reorder over the ranked candidate list — a model that has won duels in THIS repo
     /// floats above an otherwise-equally-ranked peer; empty = no-op (today's behaviour).
     repo_boosts: std::collections::HashMap<String, f64>,
+    /// Auto-discovery is on but no catalog exists yet, so routing runs on the built-in seed
+    /// candidates. Named in every rationale: a seed pick has no price, benchmark or burn weight
+    /// behind it and must never read as a normal catalog decision.
+    seed_only: bool,
 }
 
 fn default_model_available(model: &str) -> bool {
@@ -1147,6 +1151,29 @@ const AFFINITY_MIN_SUCCESS_RATE: f64 = 0.90;
 const AFFINITY_LATENCY_MARGIN_MS: f64 = 5_000.0;
 const INITIAL_ANCHOR_LATENCY_MARGIN_MS: f64 = 1_000.0;
 
+/// Record that a routing rule, not the catalog score, decided where `model` sits. The last rule
+/// to touch a model is the one that decided its final position, so a later rule overwrites.
+fn record_reorder(reasons: &mut Vec<(String, &'static str)>, model: &str, reason: &'static str) {
+    match reasons.iter_mut().find(|(m, _)| m == model) {
+        Some(entry) => entry.1 = reason,
+        None => reasons.push((model.to_string(), reason)),
+    }
+}
+
+/// Record every model a sort actually moved.
+fn record_moved(
+    reasons: &mut Vec<(String, &'static str)>,
+    before: &[String],
+    after: &[String],
+    reason: &'static str,
+) {
+    for (i, model) in after.iter().enumerate() {
+        if before.get(i) != Some(model) {
+            record_reorder(reasons, model, reason);
+        }
+    }
+}
+
 /// Scale the minimum required context window by the active effort level. HIGH effort inflates it
 /// by 1.5×, XHIGH by 2×. No adjustment for Low/Medium or when no minimum is set.
 fn effective_min_context(min_tokens: Option<u32>, effort: Option<EffortLevel>) -> Option<u32> {
@@ -1169,6 +1196,7 @@ impl HeuristicRouter {
             catalog: None,
             context_windows: std::collections::HashMap::new(),
             repo_boosts: std::collections::HashMap::new(),
+            seed_only: false,
         }
     }
 
@@ -1185,6 +1213,13 @@ impl HeuristicRouter {
     /// Documented in docs/features/mesh-routing.md.
     pub fn with_catalog(mut self, catalog: ModelCatalog) -> Self {
         self.catalog = Some(catalog);
+        self
+    }
+
+    /// Mark that auto-discovery found NO catalog at all, so every decision comes from the
+    /// built-in seed candidates and says so.
+    pub fn with_seed_only_catalog(mut self) -> Self {
+        self.seed_only = true;
         self
     }
 
@@ -1213,6 +1248,32 @@ impl HeuristicRouter {
     }
 
     /// Whether auto-discovery routing is active (enabled + a non-empty catalog attached).
+    /// The tier's configured seeds, then the other tiers' as a tail, deduped.
+    ///
+    /// Only for the seed path — auto-discovery on, no catalog yet. The tier's own candidates still
+    /// lead, so the primary pick never changes; the tail only gives failover somewhere to go.
+    /// Without it a tier whose every candidate is unusable exhausts the chain and fails the turn
+    /// while a usable model sits one tier away: on a fresh install with no API keys and a
+    /// logged-in codex CLI, the trivial tier is ollama (not running) plus groq (no key), so a
+    /// one-word prompt died with "model chain exhausted" and never tried the bridge.
+    ///
+    /// A user who turned auto-discovery OFF and listed models per tier is NOT widened — that
+    /// configuration is a deliberate restriction, not a starting point.
+    fn widened_seed_candidates(&self, tier: TaskTier) -> Vec<String> {
+        let mut seeds = self.config.candidates_for(tier);
+        for other in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
+            if other == tier {
+                continue;
+            }
+            for model in self.config.candidates_for(other) {
+                if !seeds.contains(&model) {
+                    seeds.push(model);
+                }
+            }
+        }
+        seeds
+    }
+
     fn auto_active(&self) -> bool {
         self.config.mesh.auto_discover && self.catalog.as_ref().is_some_and(|c| !c.is_empty())
     }
@@ -1314,7 +1375,7 @@ impl HeuristicRouter {
             // failover. (The bug: a top-5 cap meant ~6 unique models across tiers, so a few dead
             // providers exhausted the chain while most of the catalog went untried.)
             let Some(catalog) = self.catalog.as_ref() else {
-                return self.apply_repo_boosts(self.config.candidates_for(tier));
+                return self.apply_repo_boosts(self.widened_seed_candidates(tier));
             };
             let ranked = catalog.ranked_seeded(
                 tier,
@@ -1330,6 +1391,8 @@ impl HeuristicRouter {
             } else {
                 ranked
             }
+        } else if self.seed_only {
+            self.widened_seed_candidates(tier)
         } else {
             self.config.candidates_for(tier)
         };
@@ -1532,18 +1595,6 @@ impl HeuristicRouter {
         ))
     }
 
-    fn apply_subscription_pacing(
-        &self,
-        usable: &mut Vec<String>,
-        candidates: &[String],
-        quota: &SubscriptionQuota,
-    ) {
-        for provider in Self::paced_providers(usable, quota) {
-            let (_, held) = self.pacing_partition(&provider, usable, candidates);
-            usable.retain(|model| !held.contains(model));
-        }
-    }
-
     /// Subscription providers among `models` whose strictest window is currently over pace.
     fn paced_providers(models: &[String], quota: &SubscriptionQuota) -> Vec<String> {
         let mut providers: Vec<String> = models
@@ -1566,7 +1617,7 @@ impl HeuristicRouter {
     /// Split one over-pace provider's models into the ones pacing keeps and the ones it holds.
     ///
     /// This is the single implementation of the "hold everything above the cheapest usable
-    /// sibling" rule: [`apply_subscription_pacing`](Self::apply_subscription_pacing) enforces it
+    /// sibling" rule: the ordering pass enforces it
     /// and [`pacing_holds`](Self::pacing_holds) reports it, so an inspector can never describe a
     /// hold the router did not actually apply.
     fn pacing_partition(
@@ -1599,17 +1650,15 @@ impl HeuristicRouter {
             .filter(|model| forge_config::provider_of(model) == provider)
             .map(|model| burn_weight(model))
             .max_by(f64::total_cmp);
-        let no_lower_sibling = max_catalog.is_some_and(|max| min_usable >= max && min_usable > 1.0);
-        let (mut kept, mut held) = (Vec::new(), Vec::new());
-        for model in mine {
-            if !no_lower_sibling && burn_weight(model) <= min_usable {
-                kept.push(model.clone());
-            } else {
-                held.push(model.clone());
-            }
-        }
+        // Every subscription window Forge paces is a SHARED pool (ChatGPT, Claude, OpenCode Go
+        // dollars): the cheapest sibling still drains it. Keeping one routable sibling let the
+        // six equal-weight OpenCode Go complex models stay routable at 67% weekly use and grok-4.6
+        // took 61 calls in 13 minutes (2026-09-02). Over pace now holds the whole provider; the
+        // failover loop may still reach it as a named, single-hop last resort.
+        let _ = (min_usable, max_catalog);
+        let kept: Vec<String> = Vec::new();
+        let mut held: Vec<String> = mine.into_iter().cloned().collect();
         // Ranking order is an implementation detail; a reported hold reads the same every run.
-        kept.sort();
         held.sort();
         (kept, held)
     }
@@ -1685,9 +1734,9 @@ impl HeuristicRouter {
         )
     }
 
-    /// Usable candidates for one tier, in preference order: the auto-discovered capability
-    /// ranking (cost folded in) when auto is active, else cheapest-first over the configured
-    /// candidates.
+    /// Usable candidates for one tier, in preference order — see
+    /// [`ordered_usable_for_tier_with_reasons`](Self::ordered_usable_for_tier_with_reasons), of
+    /// which this is the order-only view every routing caller wants.
     #[allow(clippy::too_many_arguments)]
     fn ordered_usable_for_tier(
         &self,
@@ -1699,6 +1748,37 @@ impl HeuristicRouter {
         min_context: Option<u32>,
         has_images: bool,
     ) -> Vec<String> {
+        self.ordered_usable_for_tier_with_reasons(
+            tier,
+            health,
+            hints,
+            quota,
+            effort,
+            min_context,
+            has_images,
+        )
+        .0
+    }
+
+    /// Usable candidates for one tier, in preference order: the auto-discovered capability
+    /// ranking (cost folded in) when auto is active, else cheapest-first over the configured
+    /// candidates.
+    ///
+    /// Alongside the order, this records which models a routing *rule* — rather than their
+    /// catalog score — put where they ended up, so an inspector can mark those rows instead of
+    /// inventing a number for them.
+    #[allow(clippy::too_many_arguments)]
+    fn ordered_usable_for_tier_with_reasons(
+        &self,
+        tier: TaskTier,
+        health: &ModelHealth,
+        hints: RouteHints,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        min_context: Option<u32>,
+        has_images: bool,
+    ) -> (Vec<String>, Vec<(String, &'static str)>) {
+        let mut reasons: Vec<(String, &'static str)> = Vec::new();
         let candidates = self.candidates_for_tier(tier, hints, quota, effort);
         let min = effective_min_context(min_context, effort);
         let mut usable: Vec<String> = candidates
@@ -1722,15 +1802,33 @@ impl HeuristicRouter {
                 usable = vision_only;
             }
         }
-        self.apply_subscription_pacing(&mut usable, &candidates, quota);
+        for provider in Self::paced_providers(&usable, quota) {
+            let (kept, held) = self.pacing_partition(&provider, &usable, &candidates);
+            // An empty `kept` is the degenerate case: the provider has no sibling cheaper than
+            // its own usable models, so pacing withholds the provider outright rather than
+            // picking a cheaper one within it.
+            let reason = if kept.is_empty() {
+                "pacing hold"
+            } else {
+                "cost-aware sibling"
+            };
+            for model in &held {
+                record_reorder(&mut reasons, model, reason);
+            }
+            usable.retain(|model| !held.contains(model));
+        }
         Self::suppress_usable_oauth_superseded_bridges(&mut usable);
         if !self.auto_active() {
             // Configured path: cost-aware order (auto path keeps the ranked order verbatim).
+            let before = usable.clone();
             usable.sort_by_key(|m| self.cost_rank(m));
+            record_moved(&mut reasons, &before, &usable, "cost-aware sibling");
         }
         // Demote a near-limit subscription (Warning, L3) to the back — still a fallback, but the
         // mesh tries everything else first. Stable, so it preserves the order within each group.
+        let before = usable.clone();
         usable.sort_by_key(|m| quota.is_pressured(forge_config::provider_of(m)));
+        record_moved(&mut reasons, &before, &usable, "quota pressure");
 
         // The first turn defines the implementation every later continuation inherits. On a
         // complex coding task, constrain the anchor to the strongest measured quality band.
@@ -1753,6 +1851,7 @@ impl HeuristicRouter {
                     .filter_map(|model| metric(model))
                     .max_by(f64::total_cmp)
                 {
+                    let before = usable.clone();
                     usable.sort_by(|a, b| {
                         let a_score = metric(a);
                         let b_score = metric(b);
@@ -1779,6 +1878,7 @@ impl HeuristicRouter {
                             (None, None) => std::cmp::Ordering::Equal,
                         }
                     });
+                    record_moved(&mut reasons, &before, &usable, "quality anchor");
                 }
             }
         }
@@ -1801,8 +1901,11 @@ impl HeuristicRouter {
                     .position(|e| e == m)
                     .unwrap_or(explicit.len())
             });
+            for m in usable.iter().filter(|m| explicit.contains(m)) {
+                reasons.push((m.clone(), "configured [mesh.models]"));
+            }
         }
-        usable
+        (usable, reasons)
     }
 
     /// Build the ordered failover chain for the routed tier: that tier's usable models first,
@@ -2299,6 +2402,38 @@ impl HeuristicRouter {
     /// `mesh.pin_failover`). Budget-override semantics are identical to a router-held pin.
     #[allow(clippy::too_many_arguments)]
     pub fn decide_with_pin(
+        &self,
+        pin: Option<&[String]>,
+        classified_tier: TaskTier,
+        classify_reason: String,
+        budget: BudgetState,
+        health: &ModelHealth,
+        hints: RouteHints,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        has_images: bool,
+    ) -> RoutingDecision {
+        let mut decision = self.decide_from_candidates(
+            pin,
+            classified_tier,
+            classify_reason,
+            budget,
+            health,
+            hints,
+            quota,
+            effort,
+            has_images,
+        );
+        if self.seed_only {
+            decision
+                .rationale
+                .push_str(" — no catalog yet: built-in seed");
+        }
+        decision
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decide_from_candidates(
         &self,
         pin: Option<&[String]>,
         classified_tier: TaskTier,
@@ -3520,7 +3655,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn over_pace_routes_to_the_cheapest_subscription_sibling() {
+    async fn over_pace_holds_the_whole_subscription_provider() {
         let r = HeuristicRouter::new(Config::default())
             .with_availability(|_| true)
             .with_catalog(ModelCatalog::new(vec![
@@ -3552,19 +3687,25 @@ mod tests {
                 &ProjectContext::default(),
             )
             .await;
-        assert_eq!(decision.model, "codex-cli::gpt-5.6-luna");
-        assert!(!decision.fallbacks.iter().any(|m| m.contains("gpt-5.6-sol")));
+        // An over-pace pool is shared by every sibling, so pacing holds the whole provider and
+        // the pick lands on the non-subscription alternative.
+        assert_eq!(decision.model, "groq::llama-3.3-70b-versatile");
+        assert!(!decision
+            .fallbacks
+            .iter()
+            .any(|m| m.starts_with("codex-cli::")));
         // The rationale must NAME what pacing held, not merely report that a pace was exceeded:
         // an operator otherwise cannot tell a pacing downgrade from a coincidental ranking.
         assert!(
-            decision
-                .rationale
-                .contains("codex-cli::gpt-5.6-sol, codex-cli::gpt-5.6-terra held: weekly 37% > 21% allowed at 29% elapsed"),
+            decision.rationale.contains(
+                "codex-cli::gpt-5.6-luna, codex-cli::gpt-5.6-sol, codex-cli::gpt-5.6-terra held: \
+                 weekly 37% > 21% allowed at 29% elapsed"
+            ),
             "{}",
             decision.rationale
         );
         assert!(
-            decision.rationale.contains("codex-cli::gpt-5.6-luna kept"),
+            !decision.rationale.contains(" kept"),
             "{}",
             decision.rationale
         );
@@ -4954,6 +5095,68 @@ mod tests {
         assert_eq!(d.tier, TaskTier::Standard);
         assert_eq!(d.model, "openai::gpt-4o-mini");
         assert!(d.rationale.contains("cheapest of 2"), "{}", d.rationale);
+    }
+
+    /// A fresh install with no API keys and a logged-in codex CLI: the trivial tier is ollama
+    /// (not running) plus groq (no key), so a one-word prompt exhausted the chain and failed the
+    /// turn while a usable bridge sat one tier away, unlisted and untried.
+    #[tokio::test]
+    async fn a_seed_tier_falls_back_to_models_from_the_other_tiers() {
+        let router = HeuristicRouter::new(Config::default()).with_seed_only_catalog();
+        let chain = router.candidates_for_tier(
+            TaskTier::Trivial,
+            RouteHints::default(),
+            &SubscriptionQuota::default(),
+            None,
+        );
+
+        let trivial = Config::default().candidates_for(TaskTier::Trivial);
+        assert_eq!(
+            chain
+                .iter()
+                .take(trivial.len())
+                .cloned()
+                .collect::<Vec<_>>(),
+            trivial,
+            "the tier's own candidates still lead, so the primary pick is unchanged"
+        );
+        assert!(
+            chain.iter().any(|m| m.starts_with("claude-cli::")),
+            "the bridge from another tier is reachable as failover: {chain:?}"
+        );
+        let mut seen = chain.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), chain.len(), "no duplicates: {chain:?}");
+    }
+
+    #[tokio::test]
+    async fn seed_only_routing_says_there_is_no_catalog_yet() {
+        // No cached catalog at all: the pick comes from the configured seeds, which carry no
+        // price, benchmark or burn weight — the rationale must not read like a catalog decision.
+        let c = list_config(
+            "standard",
+            &["deepseek::deepseek-chat", "openai::gpt-4o-mini"],
+        );
+        let r = HeuristicRouter::new(c)
+            .with_availability(|_| true)
+            .with_seed_only_catalog();
+        let d = r
+            .route(
+                &"add a new endpoint that returns the list of users as json".repeat(2),
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert!(
+            d.rationale.contains("no catalog yet: built-in seed"),
+            "{}",
+            d.rationale
+        );
     }
 
     #[tokio::test]

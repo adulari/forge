@@ -296,6 +296,20 @@ a project from a phone.
 project_roots = ["~/Projects", "/srv/work"]
 ```
 
+### Published one-shot runs
+
+A standalone `forge run` normally executes in the terminal that started it. Set
+`publish_local_runs = true` to hand every run to the local daemon instead, so each run shows up
+in the fleet (phone and desktop apps) under a title taken from the prompt's first line.
+`--publish-to-fleet` / `--no-publish-to-fleet` override the config value for one run. The
+handing terminal prints the daemon session id and exits — follow it with `forge attach <id>` or
+from the companion apps; output is NOT streamed back to the terminal.
+
+```toml
+[remote]
+publish_local_runs = true
+```
+
 The desktop app can use the operating system folder picker when connected to a loopback daemon.
 Mobile and remote browsers browse the allowlisted server roots. A manually entered absolute path
 remains available as an advanced fallback because the daemon token already grants full agent
@@ -611,6 +625,42 @@ WebSocket. Disconnecting a browser therefore detaches a client without killing t
 an explicit terminal close or session shutdown sends a bounded kill command, marks the terminal
 exited, and removes it from the registry. Reconnects reuse the same handle and replay its bounded
 history; a close never leaves an orphaned child behind.
+
+## 2g'. The model catalog is the daemon's, not the last terminal's
+
+`GET /api/models` used to project one thing: the on-disk discovery cache
+(`~/.local/share/forge/catalog.json`). Nothing in `forge serve` ever wrote that file — only an
+interactive `forge models` or a `forge run` startup on the host did — so a phone-only operator's
+model list froze at whatever the host last happened to discover from a terminal, and past the
+24 h cache TTL it emptied out into "no recent model catalog" entirely. A bridge alias the mesh had
+already made its top complex candidate (`claude-cli::fable`) was therefore invisible in the app
+while `forge models` on the same machine listed and routed to it.
+
+The endpoint now owns freshness:
+
+- A cache younger than 15 minutes is served as-is.
+- An older one is served *immediately* and a rediscovery runs behind the response (one at a time,
+  daemon-wide) — the list is never blocked on a slow provider, and the next poll is current.
+- With nothing usable cached, the request pays for a bounded (20 s) discovery rather than
+  answering "unavailable". Age is no longer a reason to discard: a stale catalog labelled with its
+  age beats an empty one.
+- `GET /api/models?refresh=true` forces a live discovery — what pull-to-refresh on a model list
+  should mean. Reachable over Forge Anywhere too; the bridge forwards query strings verbatim.
+
+Two additive response fields carry the freshness the surfaces need (no `PROTOCOL_VERSION` bump —
+this is a REST projection, not the snapshot wire, and every field is optional on the client):
+`refreshed_at` (epoch second the served catalog was discovered, null when the host has never
+discovered) and `refreshing` (a rediscovery is in flight).
+
+Clients refetch on mount, focus and reconnect, and when a session's routed model is one the served
+catalog cannot name — a routing decision naming an unknown id means the host discovered it after
+the snapshot, and each unknown id triggers at most one forced refresh so a pinned id the host does
+not serve cannot become a polling loop.
+
+Provider-wide exclusions are part of "unusable", the same way `forge models` prints them: the
+per-provider `excluded` field benches every alias of a provider whose credential was rejected. It
+is keyed by provider and matches no model id, so surfaces must fold it into each row's health
+(`mobile/src/lib/modelCatalog.ts`) instead of reading `model.health` alone.
 
 ## 2h. Run as a background service — `forge service`
 

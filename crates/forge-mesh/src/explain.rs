@@ -32,6 +32,13 @@ pub struct CandidateRow {
     pub usable: bool,
     /// The model the mesh actually routed this prompt to.
     pub selected: bool,
+    /// Set when a routing rule — not this row's catalog score — decided where it ranks, naming
+    /// that rule (`cost-aware sibling`, `pacing hold`, `quota pressure`, `quality anchor`).
+    /// `row.final_score` stays the catalog score throughout; the ordering adjustments are
+    /// structural, so the honest presentation is to mark the row rather than invent a number for
+    /// it. Without this the table looked like it contradicted its own ranking — rank #1 above a
+    /// rank #2 with a higher score.
+    pub reorder_reason: Option<&'static str>,
 }
 
 /// A subscription provider's quota pressure + the spread probability for the explained tier.
@@ -234,7 +241,7 @@ impl HeuristicRouter {
         // context window doesn't fit, is something `decide()` would NEVER actually pick; showing
         // it as `usable: true` here made the real pick (further down the list, first genuinely
         // eligible row) look inconsistent with the table, when the pick was correct all along.
-        let ordered_visible = self.ordered_usable_for_tier(
+        let (ordered_visible, reorder_reasons) = self.ordered_usable_for_tier_with_reasons(
             routed_tier,
             health,
             hints,
@@ -276,9 +283,13 @@ impl HeuristicRouter {
                 rank: i + 1,
                 usable: visible_models.contains(row.model.as_str()),
                 selected: row.model == decision.model,
+                reorder_reason: reorder_reasons
+                    .iter()
+                    .find(|(model, _)| *model == row.model)
+                    .map(|(_, reason)| *reason),
                 row,
             })
-            .collect();
+            .collect::<Vec<CandidateRow>>();
 
         // Quota views for each subscription provider present in the catalog.
         let mut sub_providers: Vec<String> = self
@@ -543,6 +554,66 @@ mod tests {
             "{}",
             e.rationale
         );
+    }
+
+    #[test]
+    fn a_rule_decided_rank_is_marked_with_that_rule() {
+        // Live 2026-09-02 (v2.13.7): the table showed `#1 claude-cli::opus[1m] score 7.45` above
+        // `#2 claude-cli::fable score 8.63` — the ordering was correct (a cost-aware sibling pick
+        // inside claude-cli over its pace) but the printed column looked like it contradicted it.
+        let r = HeuristicRouter::new(Config::default())
+            .with_availability(|_| true)
+            .with_catalog(ModelCatalog::new(vec![
+                "claude-cli::opus".into(),
+                "claude-cli::fable".into(),
+                "nvidia::moonshotai/kimi-k3".into(),
+                "groq::llama-3.3-70b-versatile".into(),
+            ]));
+        let quota = SubscriptionQuota::default().with_pacing(std::collections::HashMap::from([(
+            "claude-cli".to_string(),
+            forge_types::SubscriptionPacing {
+                window: "weekly".to_string(),
+                fraction_used: 0.37,
+                allowed_fraction: 0.21,
+                elapsed_secs: 2 * 24 * 60 * 60,
+                total_secs: 7 * 24 * 60 * 60,
+                resets_at: Some(1_000_000),
+                used_nominal_fallback: false,
+            },
+        )]));
+        let e = r.explain(
+            "refactor the failover loop in model_request.rs and add tests",
+            BudgetState::default(),
+            &ModelHealth::default(),
+            &quota,
+            None,
+            &ProjectContext::default(),
+        );
+
+        let printed: Vec<(usize, &str, f64, Option<&str>)> = e
+            .candidates
+            .iter()
+            .map(|c| {
+                (
+                    c.rank,
+                    c.row.model.as_str(),
+                    c.row.final_score,
+                    c.reorder_reason,
+                )
+            })
+            .collect();
+        // Held models rank below models with lower catalog scores; the row says which rule put
+        // them there instead of restating the score as something it isn't. Pacing holds the WHOLE
+        // over-pace provider (#1261), so every claude-cli row carries the tag, not just the
+        // costlier sibling.
+        for c in &e.candidates {
+            let expected = c
+                .row
+                .model
+                .starts_with("claude-cli::")
+                .then_some("pacing hold");
+            assert_eq!(c.reorder_reason, expected, "{printed:?}");
+        }
     }
 
     #[test]

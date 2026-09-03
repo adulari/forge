@@ -1025,7 +1025,7 @@ impl App {
             } => {
                 self.routing = Some(RoutingView {
                     tier,
-                    model,
+                    model: crate::display_model(&model),
                     rationale,
                 });
                 self.set_turn_activity(
@@ -4536,6 +4536,7 @@ mod tests {
                 usable: true,
                 selected: true,
                 penalty: 0.0,
+                reorder_reason: None,
             },
             MeshCandRow {
                 rank: 2,
@@ -6110,6 +6111,7 @@ mod tests {
                     usable: true,
                     selected: true,
                     penalty: 0.0,
+                    reorder_reason: None,
                 },
                 MeshCandRow {
                     rank: 2,
@@ -6120,6 +6122,7 @@ mod tests {
                     usable: true,
                     selected: false,
                     penalty: 4.0,
+                    reorder_reason: None,
                 },
             ],
             pick: "groq::llama-3.3-70b-versatile".into(),

@@ -538,10 +538,21 @@ pub(crate) fn build_client_full(
                     } else {
                         AuthData::from_single(LOCAL_PLACEHOLDER_KEY)
                     };
+                    // OpenCode Zen serves the same per-model wire formats as OpenCode Go
+                    // (muse-*/gpt-*/grok-* answer only on `/responses`; chat/completions is an
+                    // instant 500). The Go adapter already carries that matrix and honours a
+                    // custom base URL, so Zen borrows it for exactly those models.
+                    let kind = if cp.namespace == "opencode"
+                        && genai::opencode_go::is_responses_model(&bare)
+                    {
+                        AdapterKind::OpenCodeGo
+                    } else {
+                        AdapterKind::OpenAI
+                    };
                     return Ok(ServiceTarget {
                         endpoint: Endpoint::from_owned(cp.endpoint.to_string()),
                         auth,
-                        model: ModelIden::new(AdapterKind::OpenAI, bare),
+                        model: ModelIden::new(kind, bare),
                     });
                 }
             }
@@ -975,7 +986,10 @@ impl Provider for GenAiProvider {
         // anything it does not know yet is learned here from that failure shape, once, and
         // kept only if the Responses path actually answers — a genuine outage on a
         // chat-only model must not flip it onto a path that would then fail forever.
-        if let Some(bare) = model.strip_prefix("opencode_go::") {
+        if let Some(bare) = model
+            .strip_prefix("opencode_go::")
+            .or_else(|| model.strip_prefix("opencode::"))
+        {
             if first.as_ref().is_err_and(opencode_go_wrong_endpoint)
                 && !genai::opencode_go::is_responses_model(bare)
             {

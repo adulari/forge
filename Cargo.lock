@@ -42,16 +42,16 @@ dependencies = [
 
 [[package]]
 name = "aes-gcm"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdf011db2e21ce0d575593d749db5554b47fed37aff429e4dc50bc91ac93a028"
+checksum = "7f2b8006a0c83f52b62ba44a97b58bf76fe2f70a329e588f67f89691d93d498f"
 dependencies = [
  "aead",
  "aes 0.9.1",
  "cipher 0.5.2",
  "ctr",
+ "ctutils",
  "ghash",
- "subtle",
 ]
 
 [[package]]
@@ -1987,12 +1987,12 @@ checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
 name = "flate2"
-version = "1.1.9"
+version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
- "miniz_oxide",
+ "miniz_oxide 0.9.1",
  "zlib-rs",
 ]
 
@@ -2010,7 +2010,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forge-agent"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-anywhere-protocol"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "base64 0.23.1",
  "bip39",
@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-config"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
@@ -2113,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-core"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "async-trait",
  "flate2",
@@ -2173,7 +2173,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-index"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "async-trait",
  "forge-agent-config",
@@ -2212,7 +2212,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-lsp"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "forge-agent-config",
  "serde",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-mcp"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "forge-agent-config",
  "forge-agent-types",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-mesh"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "async-trait",
  "forge-agent-config",
@@ -2255,7 +2255,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-provider"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-skills"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "forge-agent-types",
  "tracing",
@@ -2288,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-store"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "chrono",
  "forge-agent-types",
@@ -2303,7 +2303,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-tools"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "async-trait",
  "forge-agent-index",
@@ -2324,7 +2324,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-tui"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "crossterm",
  "forge-agent-config",
@@ -2343,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-types"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -2352,7 +2352,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-voice"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "cpal",
  "futures",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-workflow"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "rquickjs",
  "serde_json",
@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "forge-relay"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -3624,6 +3624,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "miniz_oxide"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
 name = "mio"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4234,11 +4244,11 @@ dependencies = [
 
 [[package]]
 name = "pem"
-version = "3.0.6"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "serde_core",
 ]
 
@@ -4418,7 +4428,7 @@ dependencies = [
  "crc32fast",
  "fdeflate",
  "flate2",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -4933,9 +4943,9 @@ dependencies = [
 
 [[package]]
 name = "rcgen"
-version = "0.14.9"
+version = "0.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "091e7a8e7d86e6feb87a27ce8e2cba29d49eff9507afeebefab7eeb2ca667fb4"
+checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
 dependencies = [
  "pem",
  "ring",
@@ -5100,9 +5110,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.1.2"
+version = "3.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8dddc5b1924b9a59fba420166160ca2c4663a4e01803e52eda33070f56d63c8"
+checksum = "1a15bc53261a9dc37e105df006e4656c598379a8f9581f8950debb130f27a7cf"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5112,6 +5122,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "indexmap 2.14.0",
  "pastey",
  "pin-project-lite",
  "process-wrap",
@@ -5133,9 +5144,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.1.2"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6898e24cd16342b59bfa8a53c2c04b9cf62fc8a2cfea57b9c038b09984bfc521"
+checksum = "cdf1c49bd4d52014b94db0877410db273c2008f01628b0252a2e9460ad9b7fda"
 dependencies = [
  "darling 0.24.0",
  "proc-macro2",
@@ -5505,11 +5516,10 @@ dependencies = [
 
 [[package]]
 name = "self_update"
-version = "1.0.0-rc.6"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b7cc0b87814417b0e0697ae582dfc5f614f469fbac9b138e40457d88913187d"
+checksum = "93cd09e191f38e790e4ac967e7e6725c3331524689e5e5f14196a2b99bea8ad1"
 dependencies = [
- "either",
  "flate2",
  "http",
  "log",
@@ -6289,7 +6299,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -7255,9 +7265,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.25.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "atomic",
  "getrandom 0.4.3",
@@ -7987,7 +7997,7 @@ dependencies = [
 
 [[package]]
 name = "xtasks"
-version = "2.13.7"
+version = "2.13.9"
 dependencies = [
  "anyhow",
  "clap",

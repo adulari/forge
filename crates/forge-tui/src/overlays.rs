@@ -154,6 +154,9 @@ pub struct MeshCandRow {
     pub selected: bool,
     /// Conservation demotion applied (0.0 = none).
     pub penalty: f64,
+    /// Set when a routing rule, not `score` (the catalog score), decided this rank — the rule's
+    /// name, e.g. `cost-aware sibling`.
+    pub reorder_reason: Option<String>,
 }
 
 /// Data for the `/mesh` overlay — a legible, animated trace of one routing decision (or the

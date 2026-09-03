@@ -176,6 +176,14 @@ impl Session {
                     .filter(|w| *w > 0)
             })
             .or_else(|| forge_mesh::pricing::context_limit(model))
+            // A gateway's model list carries no window, so the same model reached through
+            // OpenCode or a custom endpoint would fall to the conservative floor while its
+            // OpenRouter row says a million tokens. Borrow that figure rather than trim a long
+            // turn for no reason.
+            .or_else(|| {
+                let windows = self.store.all_model_contexts().ok()?;
+                forge_mesh::pricing::cross_namespace_window(model, &windows)
+            })
             .unwrap_or(forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW)
     }
 

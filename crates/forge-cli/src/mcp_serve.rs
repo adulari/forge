@@ -6,8 +6,9 @@
 //!
 //! Permission: each call runs `permission::decide` before executing; a `Deny` (e.g. the
 //! `rm -rf`/secret-read denylist) returns an MCP tool error the model sees and adapts to.
-//! Interactive `Ask` is auto-allowed in this non-interactive context (the bridge can't prompt
-//! mid-run) — the unoverridable denylist still protects. Forge never sees the CLI's auth.
+//! An interactive `Ask` also returns an error here: there is no TTY on this path, so the honest
+//! resolution of "confirm with the user first" is a refusal, not a silent allow (see
+//! [`gate_decision`]). Forge never sees the CLI's auth.
 //!
 //! Subagents (RFC subagent-orchestration Phase 3): when subagents are enabled this server also
 //! exposes the `spawn_agents` virtual tool, so a subscription model can fan work out to
@@ -377,10 +378,8 @@ impl ForgeMcp {
 
         // Forge's permission gate — the unoverridable denylist always applies here.
         let decision = permission::decide(self.mode, tool.side_effect(), &name, &args, &self.rules);
-        if decision == PermissionDecision::Deny {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "denied by Forge permission policy: {name}"
-            ))]));
+        if let Err(refusal) = gate_decision(decision, &name, self.mode) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(refusal)]));
         }
 
         // Snapshot the target's pre-edit bytes into the parent turn's checkpoint dir (read from
@@ -445,6 +444,29 @@ impl ForgeMcp {
     }
 }
 
+/// Resolve a broker decision on the bridge path, which has no TTY and no presenter.
+///
+/// `Deny` refuses, and so does `Ask`: this process cannot prompt, and running the call anyway
+/// would make the Ask tempers (`default`, and `plan`'s residual asks) behave exactly like
+/// `bypass` — a silent privilege escalation for anyone who deliberately picked a stricter
+/// posture. The refusal text names the temper so the user can escalate on purpose.
+fn gate_decision(
+    decision: PermissionDecision,
+    tool: &str,
+    mode: PermissionMode,
+) -> Result<(), String> {
+    match decision {
+        PermissionDecision::Allow => Ok(()),
+        PermissionDecision::Deny => Err(format!("denied by Forge permission policy: {tool}")),
+        PermissionDecision::Ask => Err(format!(
+            "denied by Forge permission policy: {tool} needs confirmation in the `{}` temper and \
+             this bridged session has no way to prompt. Ask the user to switch to auto-edit or \
+             full, or add an allow rule for this tool.",
+            mode.key()
+        )),
+    }
+}
+
 impl ForgeMcp {
     /// Dispatch one external MCP meta-tool through the same hook and permission path used by the
     /// stdio bridge. Keeping this seam separate makes the bridge path testable with an in-process
@@ -484,10 +506,8 @@ impl ForgeMcp {
 
         let decision =
             permission::decide(self.mode, side_effect, name, &effective_args, &self.rules);
-        if decision == PermissionDecision::Deny {
-            return Some(CallToolResult::error(vec![ContentBlock::text(format!(
-                "denied by Forge permission policy: {name}"
-            ))]));
+        if let Err(refusal) = gate_decision(decision, name, self.mode) {
+            return Some(CallToolResult::error(vec![ContentBlock::text(refusal)]));
         }
         let out = m.call(name, &effective_args).await;
 
@@ -1078,6 +1098,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ask_tempers_refuse_on_the_bridge_instead_of_silently_allowing() {
+        // The bridge has no TTY. Before this gate, `mcp-serve` only acted on `Deny`, so every
+        // `Ask` ran — making the `default` (Guarded) temper behave exactly like `bypass`: writes,
+        // shell mutations and untrusted MCP calls all landed on disk with no prompt.
+        let write = serde_json::json!({"path": "file.txt", "content": "x"});
+        for (mode, effect) in [
+            (PermissionMode::Default, forge_types::SideEffect::Write),
+            (PermissionMode::Default, forge_types::SideEffect::Shell),
+            (PermissionMode::Default, forge_types::SideEffect::Network),
+            (PermissionMode::Default, forge_types::SideEffect::External),
+            (
+                PermissionMode::AcceptEdits,
+                forge_types::SideEffect::External,
+            ),
+        ] {
+            let decision = permission::decide(mode, effect, "write_file", &write, &[]);
+            assert_eq!(decision, PermissionDecision::Ask, "{mode:?}/{effect:?}");
+            let refusal = gate_decision(decision, "write_file", mode)
+                .expect_err("an Ask must not be dispatched on the bridge");
+            assert!(refusal.contains("needs confirmation"), "{refusal}");
+            assert!(refusal.contains(mode.key()), "{refusal}");
+        }
+
+        // Allow still runs, and Deny keeps its existing wording.
+        assert!(gate_decision(
+            PermissionDecision::Allow,
+            "write_file",
+            PermissionMode::Bypass
+        )
+        .is_ok());
+        assert_eq!(
+            gate_decision(PermissionDecision::Deny, "shell", PermissionMode::Bypass).unwrap_err(),
+            "denied by Forge permission policy: shell"
+        );
+    }
+
     /// Like [`test_server`] but lets a test inject an [`McpManager`] to exercise the external-MCP
     /// surface (meta-tools) the same way `run()`'s gate would when opted in.
     fn test_server_with_mcp(lean: bool, mcp: Option<Arc<forge_mcp::McpManager>>) -> ForgeMcp {
@@ -1193,6 +1250,9 @@ mod tests {
             forge_mcp::testsupport::manager_with_echo(&forge_config::McpConfig::default()).await,
         );
         let mut server = test_server_with_mcp(false, Some(mgr));
+        // Under test here is the hook seam, not the gate: an external MCP call only auto-runs in
+        // the `bypass` temper (every other temper resolves to Ask, which the bridge refuses).
+        server.mode = PermissionMode::Bypass;
         server.config.hooks = vec![
             hook(
                 forge_config::HookEvent::PreToolUse,
@@ -1234,6 +1294,7 @@ mod tests {
             forge_mcp::testsupport::manager_with_echo(&forge_config::McpConfig::default()).await,
         );
         let mut server = test_server_with_mcp(false, Some(mgr));
+        server.mode = PermissionMode::Bypass;
         server.config.hooks = vec![hook(
             forge_config::HookEvent::PreToolUse,
             "mcp_call",

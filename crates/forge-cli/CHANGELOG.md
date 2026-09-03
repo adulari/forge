@@ -6,6 +6,127 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.13.9] - 2026-09-03
+
+### Fixed
+- **A fresh install could fail its very first prompt with a usable model sitting right there.** With
+  no catalog yet the router only ever tried the classified tier's built-in seeds; the trivial tier
+  is a local ollama plus groq, so on a machine with no API keys and ollama not running the chain
+  exhausted and the turn failed — while a logged-in `codex` CLI could have served it. The seed chain
+  now carries the other tiers as a deduped tail (the tier's own candidates still lead, so the
+  primary pick is unchanged), and `codex-cli::` joins `claude-cli::` as a default seed: it was in no
+  tier list at all (`crates/forge-mesh/src/lib.rs`, `crates/forge-config/src/lib.rs`).
+- **A first-run failure named an adapter instead of a next step.** The verdict only offered setup
+  guidance when EVERY attempt reported missing credentials, and a keyless candidate fails as
+  "provider unavailable", so a machine with nothing configured was told "attempted providers failed
+  for mixed reasons". It now leads with `forge setup` / `forge auth` whenever no API key and no
+  logged-in CLI exist, keeping the failure mix after it. Neither "binary on PATH" nor "not known
+  logged out" proves a login, so the check requires positive evidence
+  (`crates/forge-core/src/failure_verdict.rs`).
+- **A read-only turn inside a build session is no longer re-driven to produce a diff.** #1266 fixed
+  which contract such a turn derives, but the empty-diff nudge and the code-change classification
+  still read the session-wide flag a worktree daemon session arms for its whole life, so the turn
+  was still pushed to "implement the fix now" against its own instruction
+  (`crates/forge-core/src/lib.rs`).
+- **The CLI-bridge terms notice reads like Forge**, not a raw timestamped log line wedged between
+  the routing line and the model's first token. It also survives the failover path, which is how a
+  keyless run reaches a bridge at all (`crates/forge-provider/src/lib.rs`).
+- **A bare bridge id reads as what it means.** `claude-cli::` is a valid pin for "whatever model
+  that CLI is configured to use" and the first built-in complex-tier default, but printed verbatim
+  it looked like a truncated id on a new user's first turn. It now renders as
+  `claude-cli (its default model)` (`crates/forge-tui/src/lib.rs`).
+- **A relay link that has never exchanged is no longer reported as disconnected.** The two states
+  call for different actions: one is still coming up, the other needs a `forge serve` restart
+  (`crates/forge-cli/src/anywhere/state.rs`).
+
+### Changed
+- **The `use_skill` listing costs about 626 fewer tokens on every tool-bearing turn.** It advertises
+  every skill in its own description — 64 skills at 100 characters was 7,438 characters riding every
+  request, a quarter of the whole tool payload and more than the system prompt. Each summary is
+  clipped to 60 characters; discovery is unchanged since every skill is still listed by name
+  (`crates/forge-core/src/lib.rs`).
+
+## [2.13.8] - 2026-09-03
+
+### Fixed
+- **A long tool loop threw away the task it was working on.** When the transcript overflowed the
+  model's window, the fit kept every system message and a newest-first suffix of history — and the
+  user's own message was neither, so a tool loop that filled the budget evicted the instruction
+  while keeping the output it produced. The model then reported that no task had arrived and
+  invented work from what was left. The newest user message is now reserved before the walk, and
+  clipped rather than dropped when it alone exceeds the budget (`crates/forge-core/src/context_pipeline.rs`).
+- **A model behind a gateway assumed a 32k window when its real one is a million tokens.** OpenCode
+  Zen and Go list models without a context length, as do most custom OpenAI-compatible endpoints, so
+  every model behind one fell to the conservative floor and trimmed long turns for no reason. A
+  model with no window row of its own now inherits the window published for the same model under
+  another namespace, lowest match winning (`crates/forge-mesh/src/pricing.rs`,
+  `crates/forge-core/src/routing_policy.rs`).
+- **An explicitly read-only turn was re-driven to produce a diff.** A worktree-backed daemon session
+  arms a code-change expectation for its whole life, and that beat the prompt, so a turn that said
+  "do not edit anything" ended with no edits, tripped the empty-diff guard, and was pushed to
+  "implement the fix now". An imperative read-only instruction in the prompt now wins, and the
+  phrase list recognises what an operator actually types (`crates/forge-core/src/turn_contract.rs`).
+- **OpenCode Zen's Responses-only models could not be called at all.** `muse-*`, `gpt-*` and `grok-*`
+  answer only on `/responses` there, while Forge always built an OpenAI-chat request and got an
+  instant 500. Zen now reuses the per-model wire-format matrix the Go adapter already carries
+  (`crates/forge-provider/src/genai_provider.rs`).
+- **A new model silently inherited an older sibling's benchmark score.** The cross-version guard
+  compared version numbers by membership, so a shared major digit let a different minor through:
+  `muse-spark-1.3` matched "Muse Spark 1.2" on the shared `1`. Comparison is positional now, and a
+  benchmark row missing one of its two indices is kept on the index it has rather than dropped
+  (`crates/forge-mesh/src/bench.rs`, `crates/forge-cli/src/benchmarks.rs`).
+
+- **An Ask temper on the CLI bridge approved silently instead of refusing.** A bridged turn had no
+  one to answer a permission prompt, so the gate resolved the wrong way
+  (`crates/forge-core/src/permission.rs`).
+- **Routing stalled on rediscovery when a cached catalog already existed**, and the daemon's models
+  page served the last terminal's catalog rather than its own
+  (`crates/forge-cli/src/cli/commands/models/discovery.rs`, `crates/forge-cli/src/serve/serve_models.rs`).
+- **An over-pace subscription pool is now held entirely**, and the last-resort override is
+  re-checked per failover hop instead of being spent once and left open
+  (`crates/forge-mesh/src/lib.rs`, `crates/forge-core/src/model_request.rs`).
+- **An unattended bridge turn that stalled with tasks still open now fails** instead of reporting
+  success (`crates/forge-core/src/turn_guards.rs`).
+- **An explicitly configured `[mesh.models]` tier is honoured** over an auto-discovered one
+  (`crates/forge-mesh/src/catalog.rs`).
+- **`forge doctor` reports a provider-rejected key as invalid** rather than unreachable, and
+  `forge models` says which listed models have no key
+  (`crates/forge-cli/src/doctor_health.rs`, `crates/forge-cli/src/cli/commands/models.rs`).
+- **A keyless first run skips network enrichment**, bare `forge` shows a first-run panel instead of
+  the full command list, non-tty setup is actionable, and CLI bridges known to be logged out are no
+  longer probed (`crates/forge-cli/src/cli/commands/run.rs`, `crates/forge-provider/src/lib.rs`).
+- **Claude quota is read from `unifiedWindows`**, and model reasoning is no longer printed as answer
+  text on a non-tty (`crates/forge-provider/src/claude_quota.rs`, `crates/forge-tui/src/lib.rs`).
+
+- **Opt-in: a standalone `forge run` can execute in the daemon and show in the Anywhere fleet.**
+  `[remote] publish_local_runs` (default off) and per-run `--publish-to-fleet` /
+  `--no-publish-to-fleet` hand the prompt to the local daemon, which creates a session carrying the
+  cwd, model and a title from the prompt's first line. A one-shot run was previously invisible to
+  the phone however healthy the relay was. Failure is soft: no daemon means the run proceeds locally
+  exactly as before. Output is not streamed back to the handing terminal, which prints the session
+  id and the `forge attach <id>` command (`crates/forge-cli/src/cli/commands/run/one_shot.rs`).
+- **The empty-diff nudge and the code-change classification read the turn's contract**, not the
+  session-wide flag a worktree daemon session arms for its whole life, so an explicitly read-only
+  turn is no longer re-driven with "implement the fix now" (`crates/forge-core/src/lib.rs`).
+- **`forge run` no longer stalls on rediscovery when a cached catalog exists**, and one reader now
+  serves both the router and the daemon's models page
+  (`crates/forge-cli/src/cli/commands/models/discovery.rs`).
+- **The mesh explanation marks a rank a routing rule decided** instead of restating the score as
+  something it is not (`crates/forge-mesh/src/explain.rs`).
+
+### Added
+- **`POST /api/sessions/{id}/interrupt`** ends a fleet session's current turn and leaves it live and
+  idle. The daemon accepted an interrupt over its WebSocket but had no HTTP route, so a script could
+  only stop a runaway turn by ending the session; `--steer` is no substitute, since it lands at the
+  next turn boundary and a session stuck in a tool loop never reaches one (`crates/forge-cli/src/serve.rs`).
+
+### Changed
+- **`release-build` no longer gates pull requests.** The release compile plus its upgrade,
+  reconnect and rollback end-to-end is the longest job in the pipeline, and every heavy job
+  serializes on one runner, so running it per pull request set the merge throughput of the project.
+  It runs on the push to main after a merge, on the weekly schedule, and on the dispatch the release
+  workflow fires — still before anything ships (`.github/workflows/ci.yml`).
+
 ## [2.13.7] - 2026-09-02
 
 ### Fixed
@@ -3883,7 +4004,9 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.7...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.9...HEAD
+[2.13.9]: https://github.com/Adulari/forge/compare/v2.13.8...v2.13.9
+[2.13.8]: https://github.com/Adulari/forge/compare/v2.13.7...v2.13.8
 [2.13.7]: https://github.com/Adulari/forge/compare/v2.13.6...v2.13.7
 [2.13.6]: https://github.com/Adulari/forge/compare/v2.13.5...v2.13.6
 [2.13.5]: https://github.com/Adulari/forge/compare/v2.13.4...v2.13.5

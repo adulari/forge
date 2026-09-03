@@ -37,6 +37,7 @@ pub mod context_pack;
 pub(crate) mod context_pipeline;
 mod detached_subagents;
 pub mod duel;
+mod failure_verdict;
 pub mod fleet;
 pub mod heartbeat;
 pub mod hooks;
@@ -1585,11 +1586,16 @@ pub struct Session {
     /// spending, and a nudge/verification re-drive would restart the model loop with fresh
     /// counters and defeat them.
     turn_hard_guard_abort: bool,
+    /// Tracked tasks still open when this turn ended, if any. Latched by the halt paths so the
+    /// turn is recorded as `TasksUnfinished` instead of a clean final answer.
+    turn_unfinished_tasks: Vec<String>,
     /// Headless code-change mode (harness-robustness wave 2): the caller KNOWS each prompt
     /// demands a code change (`bench swe` sets it — an explicit option, not prompt sniffing).
     /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
     /// tree clean gets ONE "implement it, don't describe it" push-back. Never set interactively.
     expect_code_change: bool,
+    /// Whether this session already showed the CLI-bridge terms notice (once per session).
+    cli_bridge_notice_shown: bool,
     /// Set by the last [`Session::run_turn`] on an `expect_code_change` bridge turn that was
     /// classified TOOLS-UNAVAILABLE (wave 7): Forge's `mcp-serve` tool server failed to start, so
     /// the model ran with no write tools and produced an empty tree. Read by the harness
@@ -2260,6 +2266,21 @@ impl Session {
         Ok(())
     }
 
+    /// Show the CLI-bridge terms notice once per session, the first time a turn is about to run
+    /// on `claude-cli`/`codex-cli` — including when failover lands there, which is how a keyless
+    /// first run reaches a bridge. The provider layer keeps the same text at debug level for the
+    /// log; emitting it there as a `warn` printed a timestamped, module-prefixed line between the
+    /// routing line and the model's first token, unlike every other user-facing line.
+    pub(crate) fn note_cli_bridge_once(&mut self, model: &str) {
+        if self.cli_bridge_notice_shown || !forge_provider::is_cli_bridge(model) {
+            return;
+        }
+        self.cli_bridge_notice_shown = true;
+        self.presenter.emit(PresenterEvent::Warning(
+            forge_provider::CLI_BRIDGE_NOTICE.to_string(),
+        ));
+    }
+
     /// Load the persisted replay entries for any session (not just this one) — used by the
     /// `/replay` chat command to show a transcript inline.
     pub fn load_replay(
@@ -2576,6 +2597,7 @@ impl Session {
             model: routed_model.clone(),
             rationale: decision.rationale.clone(),
         });
+        self.note_cli_bridge_once(&routed_model);
 
         // Prepend any command/skill guidance as persisted system messages, so the methodology
         // is in context for this turn and rehydrates verbatim on resume (the skill file is not
@@ -2715,6 +2737,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.turn_input_tokens = 0;
         self.turn_output_tokens = 0;
         self.turn_hard_guard_abort = false;
+        self.turn_unfinished_tasks.clear();
         self.failure_tracker.reset_turn();
         self.env_fight = EnvFightTracker::default();
 
@@ -3037,7 +3060,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // A direct model that only emits a plan has `turn_tools_ran == 0`; that is still an empty
         // implementation for an explicit mutating contract and must be re-driven. The contract is
         // the safety gate, not prior tool activity. `mesh.nudge_empty_diff = false` disables it.
+        // A worktree-backed daemon session arms `expect_code_change` for its whole life, so the
+        // session flag alone must not decide this: a turn whose own contract is explicitly
+        // read-only produced no diff BY INSTRUCTION, and re-driving it with "implement the fix
+        // now" contradicts what the user asked for. #1266 fixed the contract's precedence but
+        // left this gate reading the session flag directly, so the nudge kept firing.
         if self.config.mesh.nudge_empty_diff
+            && self.last_turn_contract.intent() != TaskIntent::ReadOnlyReview
             && (self.expect_code_change || self.last_turn_contract.requires_changed_artifact())
             && self.edits_this_turn == 0
             && !halted_by_loop_guard
@@ -3199,9 +3228,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // with one of TurnContract's deliberately narrow imperative verbs. Keep the explicit
         // contract paths too: they preserve the intended audit when a provider changed the tree
         // through a mechanism that the per-turn write counter cannot observe.
+        // Same precedence as the empty-diff gate: an explicitly read-only turn is not a
+        // code-change turn just because the session it runs in was created to build something.
+        // A write that happened anyway still counts, which is what the first clause preserves.
         let code_change_turn = self.edits_this_turn > 0
-            || self.expect_code_change
-            || self.last_turn_contract.requires_changed_artifact();
+            || (self.last_turn_contract.intent() != TaskIntent::ReadOnlyReview
+                && (self.expect_code_change
+                    || self.last_turn_contract.requires_changed_artifact()));
         let primary_changed_paths =
             changed_paths_from_status(working_tree_status(Some(self.workspace.root())).as_deref());
         // Overflow compaction can replace the transcript with a shorter summary while the
@@ -3765,6 +3798,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     .to_string(),
             ));
             StopReason::NoOutput
+        } else if !self.turn_unfinished_tasks.is_empty() {
+            // Tracked work is still open: the turn is incomplete, whatever text it ended with.
+            // `forge status` and the fleet view read this outcome, so it must not say success.
+            StopReason::TasksUnfinished
         } else if hit_step_cap {
             StopReason::MaxSteps
         } else {
@@ -3857,15 +3894,22 @@ fn ask_user_spec() -> ToolSpec {
 /// The skill-loading virtual tool name.
 pub const USE_SKILL_TOOL: &str = "use_skill";
 
+/// How much of each skill's description rides in the `use_skill` listing.
+const SKILL_SUMMARY_CHARS: usize = 60;
+
 /// The `ToolSpec` advertised for [`USE_SKILL_TOOL`], listing the available Forge skills in its
 /// description so the model both *discovers* what exists and can *invoke* one. Shared by the
 /// direct path and the CLI-bridge `mcp-serve` handler so a bridged claude/codex sees it too.
 pub fn use_skill_spec(catalog: &forge_skills::Catalog, allow_project: bool) -> ToolSpec {
+    // This listing rides EVERY tool-bearing request, so its width is a per-turn tax on every
+    // session: 64 skills at 100 chars was 7.4k characters, about a quarter of the whole tool
+    // payload and more than the system prompt. 60 chars still carries what the model picks on —
+    // the subject of the skill — and the loaded skill supplies the detail.
     let listing = catalog
         .skill_listing(allow_project)
         .into_iter()
         .map(|(name, desc)| {
-            let desc: String = desc.chars().take(100).collect();
+            let desc: String = desc.chars().take(SKILL_SUMMARY_CHARS).collect();
             format!("- {name}: {desc}")
         })
         .collect::<Vec<_>>()
@@ -4383,6 +4427,9 @@ mod tests {
 
     #[path = "no_op_turn.rs"]
     mod no_op_turn_tests;
+
+    #[path = "bridge_stall.rs"]
+    mod bridge_stall_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {
@@ -7097,18 +7144,17 @@ mod tests {
 
         let answer = session.run_turn("do the thing").await.unwrap();
 
-        // The stall (call 1) made no progress, so the turn ends there — NOT driven into a loop.
-        assert_eq!(answer, "I'll keep going on this.");
-        assert_eq!(session.tasks()[0].status, TodoStatus::InProgress);
-        // ...but it halted LOUDLY: an honest "stopped with unfinished tasks" warning was surfaced.
-        let warned_unfinished = events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("unfinished")));
+        // The stall (call 1) made no progress: it earns ONE escalation demanding a concrete tool
+        // call, which recovers the turn (call 2 closes the task) instead of ending it half-done.
+        assert_eq!(answer, "all done");
+        assert_eq!(session.tasks()[0].status, TodoStatus::Done);
+        // ...and the stall was surfaced LOUDLY rather than accepted as a final answer.
+        let warned_stall = events.lock().unwrap().iter().any(
+            |e| matches!(e, PresenterEvent::Warning(w) if w.contains("without calling any tool")),
+        );
         assert!(
-            warned_unfinished,
-            "a half-done bridge turn must stop loudly, not silently report success"
+            warned_stall,
+            "a prose-only bridge stall must be called out, not silently accepted"
         );
     }
 
@@ -8201,6 +8247,42 @@ mod tests {
                 quotas: Vec::new(),
             })
         }
+    }
+
+    /// The listing rides every tool-bearing request, so its per-skill width is a per-turn cost on
+    /// every session. Measured on a real catalog: 64 skills at 100 chars was 7,438 characters,
+    /// about a quarter of the entire tool payload and larger than the system prompt.
+    #[test]
+    fn the_skill_listing_summary_stays_narrow() {
+        let dir = std::env::temp_dir().join(format!("forge-skillwidth-{}", forge_types::new_id()));
+        std::fs::create_dir_all(dir.join("skills/wordy")).unwrap();
+        let long = "x".repeat(400);
+        std::fs::write(
+            dir.join("skills/wordy/SKILL.md"),
+            format!("---\nname: wordy\ndescription: {long}\n---\nbody"),
+        )
+        .unwrap();
+        let catalog = forge_skills::Catalog::load(&forge_skills::Sources {
+            commands: vec![],
+            skills: vec![forge_skills::ScopedDir {
+                scope: forge_skills::Scope::User,
+                path: dir.join("skills"),
+            }],
+        });
+
+        let spec = use_skill_spec(&catalog, true);
+        let line = spec
+            .description
+            .lines()
+            .find(|l| l.starts_with("- wordy:"))
+            .expect("the skill is listed");
+        let summary = line.trim_start_matches("- wordy: ");
+        assert_eq!(
+            summary.chars().count(),
+            SKILL_SUMMARY_CHARS,
+            "a long description is clipped to the listing budget: {line}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -11720,6 +11802,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The gap #1266 left open: it fixed which contract a read-only prompt derives, but this gate
+    /// still read the session-level `expect_code_change` flag directly. A worktree-backed daemon
+    /// session arms that flag for its whole life, so an investigative turn kept collecting
+    /// "You have not modified any files. Implement the fix now" against its own instruction.
+    #[tokio::test]
+    async fn an_explicitly_read_only_turn_in_a_build_session_is_not_nudged() {
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: true,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+        // Exactly what `spawn_session_driver` does for a worktree-backed daemon session.
+        session.set_expect_code_change(true);
+        session.config.mesh.verify_completeness = false;
+
+        session
+            .run_turn("Do not edit anything. Read the relay loop and answer two questions.")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an answer-only turn must not be re-driven"
+        );
+        assert!(
+            !session
+                .transcript
+                .iter()
+                .any(|m| m.content == EMPTY_DIFF_NUDGE),
+            "the empty-diff nudge contradicts an explicitly read-only instruction"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn bridge_empty_diff_with_no_surfaced_tool_still_nudges() {
         // Wave-6 bridge-path robustness: a bridge that yields an empty diff having surfaced NO
@@ -13060,8 +13188,8 @@ mod tests {
     #[tokio::test]
     async fn bridge_with_unfinished_tasks_but_no_progress_halts_without_spiraling() {
         // The anti-spiral guarantee: a bridge that yields with a task still open but did NOTHING
-        // this run (no tool, no task closed) must STOP, not be re-driven into a narration loop
-        // (the old bridge-nudge bug). Exactly one invocation.
+        // this run (no tool, no task closed) gets ONE stronger "call a tool now" escalation and
+        // then STOPS — it is never re-driven into a narration loop (the old bridge-nudge bug).
         let provider = Arc::new(BridgeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
             inspect_calls: 0,
@@ -13069,11 +13197,16 @@ mod tests {
         let (store, mut session) = bridge_session(provider.clone());
         seed_tasks(&store, &session.id, &[("ship the release", false)]);
         let answer = session.run_turn("release it").await.unwrap();
-        assert_eq!(answer, "working");
+        assert!(
+            answer.text.starts_with("ERROR:"),
+            "an unattended half-done turn must fail loudly: {}",
+            answer.text
+        );
+        assert_eq!(answer.stop_reason, StopReason::TasksUnfinished);
         assert_eq!(
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "no-progress bridge must not be re-driven — it would spiral"
+            2,
+            "one escalation, then a hard stop — never a spiral"
         );
     }
 

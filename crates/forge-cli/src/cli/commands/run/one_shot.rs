@@ -12,6 +12,8 @@ pub(crate) async fn run(
     pin: Option<String>,
     system: Vec<String>,
     output_format: OutputFormat,
+    publish_to_fleet: bool,
+    no_publish_to_fleet: bool,
 ) -> Result<()> {
     if prompt.trim().is_empty() {
         anyhow::bail!("empty prompt — usage: forge run \"<your task>\"");
@@ -28,6 +30,19 @@ pub(crate) async fn run(
     let mut guidance = system;
     guidance.extend(command_guidance);
 
+    if let Some(session_id) = maybe_publish_run_to_fleet(
+        &prompt,
+        pin.as_deref(),
+        publish_to_fleet,
+        no_publish_to_fleet,
+    )
+    .await
+    {
+        println!("run executing in daemon session {session_id}");
+        println!("follow it with `forge attach {session_id}` or from the Anywhere apps");
+        return Ok(());
+    }
+
     // stream-json: emit NDJSON events on stdout via the StreamJsonPresenter (no TUI, no heartbeat —
     // stdout stays a clean machine-readable event stream). Ctrl-C still returns partial output.
     if output_format == OutputFormat::StreamJson {
@@ -36,7 +51,7 @@ pub(crate) async fn run(
         let turn = session.run_turn_with(&prompt, &guidance, tier);
         tokio::pin!(turn);
         let result = tokio::select! {
-            r = &mut turn => r.map(|_| ()).context("running agent turn"),
+            r = &mut turn => r.context("running agent turn").and_then(fail_if_incomplete),
             _ = tokio::signal::ctrl_c() => Ok(()),
         };
         result?;
@@ -77,7 +92,7 @@ pub(crate) async fn run(
         let turn = session.run_turn_with(&prompt, &guidance, tier);
         tokio::pin!(turn);
         tokio::select! {
-            r = &mut turn => r.map(|_| ()).context("running agent turn"),
+            r = &mut turn => r.context("running agent turn").and_then(fail_if_incomplete),
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — stopping turn (partial output kept)\x1b[0m");
                 Ok(())
@@ -91,6 +106,96 @@ pub(crate) async fn run(
     }
     result?;
     Ok(())
+}
+
+/// A headless one-shot run is unattended: a turn that stopped with tracked tasks still open has
+/// NOT done the job, and exiting 0 makes an orchestrator (or a human reading `$?`) treat it as if
+/// it had. Turn it into a process failure carrying the harness's ERROR line.
+fn fail_if_incomplete(outcome: forge_types::LoopOutcome) -> Result<()> {
+    if outcome.stop_reason == forge_types::StopReason::TasksUnfinished {
+        anyhow::bail!(outcome.text);
+    }
+    Ok(())
+}
+
+/// Run this one-shot prompt IN the local daemon so the fleet entry IS the run. Returns the
+/// new daemon session id on success. Fail-soft: any failure (publishing off, daemon down,
+/// non-2xx, malformed body) logs once at debug level and returns None, and the caller runs the
+/// turn locally exactly as if publishing were off.
+async fn maybe_publish_run_to_fleet(
+    prompt: &str,
+    model: Option<&str>,
+    publish_to_fleet: bool,
+    no_publish_to_fleet: bool,
+) -> Option<String> {
+    let configured = forge_config::load()
+        .map(|c| c.remote.publish_local_runs)
+        .unwrap_or(false);
+    if !crate::cli::dispatch::resolve_publish_to_fleet(
+        publish_to_fleet,
+        no_publish_to_fleet,
+        configured,
+    ) {
+        return None;
+    }
+    let base = crate::attach::resolve_base_url(None);
+    let Ok(token) = crate::attach::resolve_token(None) else {
+        return None;
+    };
+    match publish_run_to_fleet(prompt, model, &base, &token).await {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::debug!("fleet publish of `forge run` failed: {e:#}");
+            None
+        }
+    }
+}
+
+async fn publish_run_to_fleet(
+    prompt: &str,
+    model: Option<&str>,
+    base: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    let title: String = prompt
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(60)
+        .collect();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{base}/{token}/api/sessions"))
+        .json(&serde_json::json!({
+            "cwd": cwd,
+            "title": title,
+            "model": model,
+        }))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("daemon returned {}", resp.status());
+    }
+    let created: serde_json::Value = resp.json().await?;
+    let id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("daemon create-session response had no id"))?
+        .to_string();
+    let resp = http
+        .post(format!("{base}/{token}/api/sessions/{id}/message"))
+        .json(&serde_json::json!({ "text": prompt }))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("daemon returned {}", resp.status());
+    }
+    resp.json::<serde_json::Value>().await?;
+    Ok(id)
 }
 
 /// Resolve a one-shot `/command` or skill prompt against the file catalog (the same
@@ -169,5 +274,21 @@ pub(super) fn expand_one_shot_slash(
         // Unreachable here (the early returns above cover non-slash + `//` escapes), but the
         // catalog's own contract for it is "pass straight to run_turn" — honor that.
         Resolved::Plain(p) => Ok((p, Vec::new(), None)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn publish_run_to_fleet_errors_when_no_daemon_listens() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let base = format!("http://127.0.0.1:{port}");
+        assert!(publish_run_to_fleet("hello", None, &base, "tok")
+            .await
+            .is_err());
     }
 }
