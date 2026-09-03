@@ -88,6 +88,20 @@ impl Session {
         self.turn_output_tokens = self
             .turn_output_tokens
             .saturating_add(resp.usage.output_tokens);
+        // Weight this call the way the provider bills it. `cached_input_tokens` is a SUBSET of
+        // `input_tokens`, so charging the whole prompt against the ceiling made a well-cached
+        // turn look ~3x more expensive than it was: one real session reported 24.1M input of
+        // which 16.7M (69%) were cache reads, and it was cut off by the 10M ceiling despite the
+        // conversation being healthy and productive.
+        let cached = resp
+            .usage
+            .cached_input_tokens_or_zero()
+            .min(resp.usage.input_tokens);
+        let fresh = resp.usage.input_tokens.saturating_sub(cached);
+        self.turn_billable_input_tokens = self
+            .turn_billable_input_tokens
+            .saturating_add(fresh)
+            .saturating_add(cached / CACHE_READ_BILLING_DIVISOR);
         // Accumulate this bridge completion's input toward the per-turn ceiling (wave 5, fix 1).
         if forge_provider::is_cli_bridge(active_model) {
             *bridge_input_accum = bridge_input_accum.saturating_add(resp.usage.input_tokens);

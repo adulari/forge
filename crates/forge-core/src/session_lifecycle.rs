@@ -214,6 +214,7 @@ impl Session {
             edits_this_turn: 0,
             mutations_this_turn: 0,
             turn_input_tokens: 0,
+            turn_billable_input_tokens: 0,
             turn_output_tokens: 0,
             turn_hard_guard_abort: false,
             turn_unfinished_tasks: Vec::new(),
