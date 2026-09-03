@@ -116,3 +116,65 @@ cargo test -p forge-agent-browser --test live_chrome -- --ignored --nocapture
 
 They serve a fixture page from a local socket, so they need no network and cannot break because a
 third-party site changed.
+
+## Reverse-engineering an API
+
+Three capabilities turn the browser from a viewer into a reverse-engineering tool.
+
+### Replay
+
+`browser` action `replay` re-issues a request **from inside the page**, reusing its cookies and
+origin, and returns the response. This is the core loop: capture what the page sent
+(`browser_network list`), change one thing, and see what the server does.
+
+| argument | meaning |
+| --- | --- |
+| `method` | HTTP method (default GET) |
+| `url` | target URL |
+| `headers` | name→value map |
+| `body` | request body |
+
+Because it runs as an in-page `fetch` with `credentials: 'include'`, it carries the session you are
+logged into — the point — but it is subject to the page's CORS rules. Same-origin always works; a
+cross-origin target the server does not allow fails as it would for any script on that page, and
+that failure is reported rather than hidden.
+
+### Interception
+
+`browser` action `intercept` blocks or rewrites requests; `intercept_clear` turns it off.
+
+| argument | meaning |
+| --- | --- |
+| `block` | URL substrings whose requests are failed (kill analytics, force a fallback path) |
+| `headers` | headers to set on every request (inject or replace an auth header) |
+
+While interception is active Chrome pauses every request, and the session resolves each one against
+the rules. The rules are declarative and evaluated synchronously — not a per-request round trip to
+the model, which would block the page on an agent turn for every one of the dozens a page makes.
+
+### HAR export
+
+`browser_network` action `har` writes the whole capture as a HAR 1.2 file (`path` optional, default
+a temp path) — the same format as DevTools' "Save all as HAR". Import it into DevTools, Charles, or
+Postman, or diff it against a reimplementation. Response *bodies* are not in the HAR (they live in
+the renderer and are fetched on demand via `body`), but every request, header, status, and timing
+is.
+
+## Proxy and device emulation
+
+`browser` action `open` accepts a per-session proxy and a device fingerprint:
+
+| argument | meaning |
+| --- | --- |
+| `proxy` | `http://user:pass@host:port` or `socks5://host:port`. Set at launch |
+| `user_agent`, `accept_language`, `platform` | moved together via CDP so they stay consistent |
+| `timezone` | IANA timezone; pair with the proxy's region |
+| `viewport_width`, `viewport_height`, `mobile` | emulate a device |
+
+Setting a proxy or fingerprint forces a fresh launch even if a browser is already open on the
+profile, because the caller is asking for a specific identity.
+
+This is device *emulation* via the same CDP overrides DevTools' device toolbar uses — enough to
+present a chosen, consistent device. It is not a binary-patched anti-detect build (gologin and
+similar patch Chrome itself); a site that fingerprints at that depth can still tell. The browser is
+a real profile, which is most of what matters, but that limit is real.

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use serde_json::Value;
 
 /// How long to wait for Chrome to write `DevToolsActivePort` after launch.
 const PORT_FILE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -48,12 +49,51 @@ pub enum Display {
     Headless,
 }
 
+/// Identity overrides applied to a session so a specific device can be emulated.
+///
+/// This is NOT the profile's real fingerprint (that comes from the OS and the Chrome build). It is
+/// a set of CDP overrides — the same ones DevTools' device toolbar sets — enough to present a
+/// consistent, chosen device to a server rather than the host's defaults. It does not reach the
+/// depth of a dedicated anti-detect build (gologin and friends patch the binary), and that limit
+/// is stated where a caller will see it rather than discovered when a site sees through it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Fingerprint {
+    /// `navigator.userAgent`. Set via CDP so `platform` and `accept_language` move with it, rather
+    /// than a launch-flag UA that leaves `navigator.platform` contradicting it.
+    pub user_agent: Option<String>,
+    /// `Accept-Language` header and `navigator.language`.
+    pub accept_language: Option<String>,
+    /// `navigator.platform`, e.g. `Win32`, `MacIntel`, `Linux x86_64`.
+    pub platform: Option<String>,
+    /// IANA timezone, e.g. `Europe/Amsterdam`. A timezone that contradicts the proxy's exit IP is
+    /// a classic tell, so this pairs with `proxy`.
+    pub timezone: Option<String>,
+    /// Viewport as `(width, height)` in CSS pixels.
+    pub viewport: Option<(u32, u32)>,
+    /// Device scale factor (Retina = 2.0). Ignored unless `viewport` is set.
+    pub device_scale_factor: Option<f64>,
+    /// Present as a mobile device (touch, mobile UA hints). Ignored unless `viewport` is set.
+    pub mobile: bool,
+}
+
+impl Fingerprint {
+    pub fn is_empty(&self) -> bool {
+        *self == Fingerprint::default()
+    }
+}
+
 /// Everything needed to start or re-attach to a browser.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LaunchConfig {
     /// Profile directory. Persistent, so a login survives until the user clears it.
     pub profile_dir: PathBuf,
     pub display: Display,
+    /// Upstream proxy, e.g. `http://user:pass@host:port` or `socks5://host:port`. Applied at
+    /// launch (`--proxy-server`) because Chrome cannot change its proxy after start. A per-account
+    /// proxy is why this exists: the ss-ultimate flow assigns one proxy per identity.
+    pub proxy: Option<String>,
+    /// Device/identity overrides. Applied via CDP after attach.
+    pub fingerprint: Fingerprint,
     /// Extra Chrome flags, appended last so they win.
     pub extra_args: Vec<String>,
     /// Explicit binary; otherwise discovered.
@@ -64,9 +104,7 @@ impl LaunchConfig {
     pub fn new(profile_dir: impl Into<PathBuf>) -> Self {
         Self {
             profile_dir: profile_dir.into(),
-            display: Display::default(),
-            extra_args: Vec::new(),
-            binary: None,
+            ..Self::default()
         }
     }
 
@@ -76,6 +114,11 @@ impl LaunchConfig {
         } else {
             Display::Windowed
         };
+        self
+    }
+
+    pub fn proxy(mut self, proxy: impl Into<String>) -> Self {
+        self.proxy = Some(proxy.into());
         self
     }
 }
@@ -129,12 +172,77 @@ pub fn chrome_args(config: &LaunchConfig) -> Vec<String> {
         "--disable-blink-features=AutomationControlled".to_string(),
         "--disable-features=Translate,MediaRouter".to_string(),
     ];
+    if let Some(proxy) = &config.proxy {
+        // Must be a launch flag: Chrome resolves its proxy once, at start. A later CDP override
+        // does not exist for the browser-wide proxy.
+        args.push(format!("--proxy-server={proxy}"));
+    }
+    if let Some((width, height)) = config.fingerprint.viewport {
+        // A window that matches the emulated viewport avoids a headful browser reporting an
+        // outer size that contradicts the metrics override.
+        args.push(format!("--window-size={width},{height}"));
+    }
     if config.display == Display::Headless {
         args.push("--headless=new".to_string());
     }
     args.extend(config.extra_args.iter().cloned());
     args.push("about:blank".to_string());
     args
+}
+
+/// The CDP commands that apply a fingerprint, in order. Returned as data — `(method, params)` —
+/// so the exact overrides are unit-testable without a browser, and applied by the session after
+/// attach. Empty when the fingerprint is empty, so a caller pays nothing for not using it.
+pub fn fingerprint_commands(fingerprint: &Fingerprint) -> Vec<(&'static str, serde_json::Value)> {
+    use serde_json::json;
+    let mut commands = Vec::new();
+
+    if fingerprint.user_agent.is_some()
+        || fingerprint.accept_language.is_some()
+        || fingerprint.platform.is_some()
+    {
+        let mut params = serde_json::Map::new();
+        // A UA override with no userAgent is invalid; fall back to a neutral one so platform and
+        // language can still be set on their own.
+        params.insert(
+            "userAgent".into(),
+            json!(fingerprint.user_agent.clone().unwrap_or_default()),
+        );
+        if let Some(language) = &fingerprint.accept_language {
+            params.insert("acceptLanguage".into(), json!(language));
+        }
+        if let Some(platform) = &fingerprint.platform {
+            params.insert("platform".into(), json!(platform));
+        }
+        commands.push(("Network.setUserAgentOverride", Value::Object(params)));
+    }
+
+    if let Some(timezone) = &fingerprint.timezone {
+        commands.push((
+            "Emulation.setTimezoneOverride",
+            json!({ "timezoneId": timezone }),
+        ));
+    }
+
+    if let Some(language) = &fingerprint.accept_language {
+        // Keeps `navigator.language` consistent with the Accept-Language header above; a mismatch
+        // between the two is a cheap bot tell.
+        commands.push(("Emulation.setLocaleOverride", json!({ "locale": language })));
+    }
+
+    if let Some((width, height)) = fingerprint.viewport {
+        commands.push((
+            "Emulation.setDeviceMetricsOverride",
+            json!({
+                "width": width,
+                "height": height,
+                "deviceScaleFactor": fingerprint.device_scale_factor.unwrap_or(1.0),
+                "mobile": fingerprint.mobile
+            }),
+        ));
+    }
+
+    commands
 }
 
 /// What Chrome wrote to `DevToolsActivePort`: the bound port and the browser-level WS path.
@@ -309,6 +417,77 @@ mod tests {
         assert!(
             !args.iter().any(|a| a == "--headless=new"),
             "a windowed browser is the default: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_proxy_is_a_launch_flag_because_chrome_cannot_change_it_later() {
+        let config = LaunchConfig::new("/tmp/p").proxy("socks5://127.0.0.1:9050");
+        let args = chrome_args(&config);
+        assert!(
+            args.iter()
+                .any(|a| a == "--proxy-server=socks5://127.0.0.1:9050"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_fingerprint_costs_nothing() {
+        assert!(Fingerprint::default().is_empty());
+        assert!(fingerprint_commands(&Fingerprint::default()).is_empty());
+    }
+
+    #[test]
+    fn a_user_agent_override_carries_platform_and_language_together() {
+        // Setting the UA via a launch flag leaves navigator.platform contradicting it — a tell.
+        // The CDP override moves all three as one.
+        let fingerprint = Fingerprint {
+            user_agent: Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64)".into()),
+            accept_language: Some("nl-NL".into()),
+            platform: Some("Win32".into()),
+            ..Fingerprint::default()
+        };
+        let commands = fingerprint_commands(&fingerprint);
+        let ua = commands
+            .iter()
+            .find(|(method, _)| *method == "Network.setUserAgentOverride")
+            .expect("a UA override");
+        assert_eq!(ua.1["platform"], "Win32");
+        assert_eq!(ua.1["acceptLanguage"], "nl-NL");
+        assert!(ua.1["userAgent"].as_str().unwrap().contains("Windows"));
+        // Locale is set too, so navigator.language matches the header.
+        assert!(
+            commands
+                .iter()
+                .any(|(method, params)| *method == "Emulation.setLocaleOverride"
+                    && params["locale"] == "nl-NL"),
+            "{commands:?}"
+        );
+    }
+
+    #[test]
+    fn a_viewport_emulates_a_device_and_sizes_the_window() {
+        let fingerprint = Fingerprint {
+            viewport: Some((390, 844)),
+            device_scale_factor: Some(3.0),
+            mobile: true,
+            ..Fingerprint::default()
+        };
+        let metrics = fingerprint_commands(&fingerprint)
+            .into_iter()
+            .find(|(method, _)| *method == "Emulation.setDeviceMetricsOverride")
+            .expect("device metrics");
+        assert_eq!(metrics.1["width"], 390);
+        assert_eq!(metrics.1["deviceScaleFactor"], 3.0);
+        assert_eq!(metrics.1["mobile"], true);
+
+        let args = chrome_args(&LaunchConfig {
+            fingerprint,
+            ..LaunchConfig::new("/tmp/p")
+        });
+        assert!(
+            args.iter().any(|a| a == "--window-size=390,844"),
+            "{args:?}"
         );
     }
 

@@ -80,8 +80,11 @@ impl Tool for BrowserTool {
          pages behind authentication, pages built by JavaScript, and any flow you need to observe \
          rather than guess at. Pair it with `browser_network` to see every request the page makes. \
          Set headless=true only when nobody needs to watch or interact; sites that fingerprint \
-         automation commonly block headless. Actions: open, navigate, click, type, eval, html, \
-         screenshot, cookies, close."
+         automation commonly block headless. On open you can set a proxy and a device fingerprint \
+         (user_agent, platform, timezone, viewport). \"replay\" re-issues a request from inside \
+         the page with your changes, reusing its login — the core loop for reverse-engineering an \
+         API. \"intercept\" blocks or rewrites requests. Actions: open, navigate, click, type, \
+         eval, html, screenshot, cookies, replay, intercept, intercept_clear, close."
     }
 
     fn side_effect(&self) -> SideEffect {
@@ -95,13 +98,26 @@ impl Tool for BrowserTool {
                 "action": {
                     "type": "string",
                     "enum": ["open", "navigate", "click", "type", "eval", "html",
-                             "screenshot", "cookies", "close"],
+                             "screenshot", "cookies", "replay", "intercept", "intercept_clear",
+                             "close"],
                     "description": "What to do."
                 },
-                "url": {"type": "string", "description": "For open/navigate."},
+                "url": {"type": "string", "description": "For open/navigate/replay."},
                 "selector": {"type": "string", "description": "CSS selector, for click/type."},
                 "text": {"type": "string", "description": "Text to type, for type."},
                 "expression": {"type": "string", "description": "JavaScript, for eval."},
+                "method": {"type": "string", "description": "HTTP method, for replay. Default GET."},
+                "headers": {
+                    "type": "object",
+                    "description": "Header name→value map, for replay (the request's headers) or \
+                                    intercept (headers to set on every request)."
+                },
+                "body": {"type": "string", "description": "Request body, for replay."},
+                "block": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "For intercept: URL substrings whose requests are failed \
+                                    (block analytics, force a fallback path)."
+                },
                 "headless": {
                     "type": "boolean",
                     "description": "Open without a window. Default false — a real window is the \
@@ -112,6 +128,18 @@ impl Tool for BrowserTool {
                     "description": "Named persistent profile. Default \"default\". Use a separate \
                                     name to keep logins for different accounts apart."
                 },
+                "proxy": {
+                    "type": "string",
+                    "description": "For open: upstream proxy, e.g. http://user:pass@host:port or \
+                                    socks5://host:port. Set at launch; a per-account proxy."
+                },
+                "user_agent": {"type": "string", "description": "For open: navigator.userAgent override."},
+                "accept_language": {"type": "string", "description": "For open: Accept-Language / navigator.language."},
+                "platform": {"type": "string", "description": "For open: navigator.platform, e.g. Win32, MacIntel."},
+                "timezone": {"type": "string", "description": "For open: IANA timezone, e.g. Europe/Amsterdam. Pair with proxy."},
+                "viewport_width": {"type": "integer", "description": "For open: emulated viewport width."},
+                "viewport_height": {"type": "integer", "description": "For open: emulated viewport height."},
+                "mobile": {"type": "boolean", "description": "For open: present as a mobile device (needs viewport)."},
                 "max_chars": {"type": "integer", "description": "Cap for html output."}
             },
             "required": ["action"]
@@ -183,11 +211,78 @@ impl Tool for BrowserTool {
                 let cookies = session.cookies().await.map_err(message)?;
                 Ok(serde_json::to_string_pretty(&cookies).unwrap_or_else(|_| cookies.to_string()))
             }
+            "replay" => {
+                let request = forge_browser::ReplayRequest {
+                    method: args
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .unwrap_or("GET")
+                        .to_string(),
+                    url: str_arg(args, "url")?.to_string(),
+                    headers: header_map(args.get("headers")),
+                    body: args.get("body").and_then(Value::as_str).map(str::to_string),
+                };
+                let response = session.replay(&request).await.map_err(message)?;
+                Ok(
+                    serde_json::to_string_pretty(&response)
+                        .unwrap_or_else(|_| response.to_string()),
+                )
+            }
+            "intercept" => {
+                let rules = forge_browser::InterceptionRules {
+                    block: args
+                        .get("block")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    set_request_headers: header_map(args.get("headers")),
+                };
+                if rules.is_empty() {
+                    return Err(ToolError::Failed(
+                        "intercept needs at least one of `block` or `headers`; use \
+                         intercept_clear to turn interception off"
+                            .into(),
+                    ));
+                }
+                let summary = format!(
+                    "interception active: {} block pattern(s), {} header override(s)",
+                    rules.block.len(),
+                    rules.set_request_headers.len()
+                );
+                session.set_interception(rules).await.map_err(message)?;
+                Ok(summary)
+            }
+            "intercept_clear" => {
+                session.clear_interception().await.map_err(message)?;
+                Ok("interception cleared".to_string())
+            }
             other => Err(ToolError::Failed(format!(
                 "unknown browser action '{other}'"
             ))),
         }
     }
+}
+
+/// A JSON object argument as header pairs. Values are stringified so a numeric header value is
+/// kept rather than dropped.
+fn header_map(value: Option<&Value>) -> Vec<(String, String)> {
+    let Some(Value::Object(map)) = value else {
+        return Vec::new();
+    };
+    map.iter()
+        .map(|(name, value)| {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            (name.clone(), text)
+        })
+        .collect()
 }
 
 async fn open(args: &Value, profile: &str) -> Result<String, ToolError> {
@@ -200,11 +295,24 @@ async fn open(args: &Value, profile: &str) -> Result<String, ToolError> {
     let mut map = sessions().lock().await;
     if !map.contains_key(profile) {
         // Prefer re-attaching: a browser the user already logged into by hand is worth far more
-        // than a fresh one, and relaunching would discard the window they are looking at.
-        let session = match BrowserSession::reattach(dir.clone()).await {
-            Ok(session) => session,
-            Err(_) => {
-                let config = LaunchConfig::new(dir.clone()).headless(headless);
+        // than a fresh one, and relaunching would discard the window they are looking at. A
+        // re-attach ignores proxy/fingerprint — those are launch-time — so an explicit proxy or
+        // fingerprint forces a fresh launch, since the caller is asking for a specific identity.
+        let wants_launch_identity =
+            args.get("proxy").is_some() || !fingerprint_from(args).is_empty();
+        let reattached = if wants_launch_identity {
+            None
+        } else {
+            BrowserSession::reattach(dir.clone()).await.ok()
+        };
+        let session = match reattached {
+            Some(session) => session,
+            None => {
+                let mut config = LaunchConfig::new(dir.clone()).headless(headless);
+                if let Some(proxy) = args.get("proxy").and_then(Value::as_str) {
+                    config.proxy = Some(proxy.to_string());
+                }
+                config.fingerprint = fingerprint_from(args);
                 BrowserSession::open(&config).await.map_err(message)?
             }
         };
@@ -225,6 +333,38 @@ async fn open(args: &Value, profile: &str) -> Result<String, ToolError> {
     Ok(report)
 }
 
+/// Build a fingerprint from the open arguments.
+fn fingerprint_from(args: &Value) -> forge_browser::Fingerprint {
+    let viewport = match (
+        args.get("viewport_width").and_then(Value::as_u64),
+        args.get("viewport_height").and_then(Value::as_u64),
+    ) {
+        (Some(w), Some(h)) => Some((w as u32, h as u32)),
+        _ => None,
+    };
+    forge_browser::Fingerprint {
+        user_agent: args
+            .get("user_agent")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        accept_language: args
+            .get("accept_language")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        platform: args
+            .get("platform")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        timezone: args
+            .get("timezone")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        viewport,
+        device_scale_factor: None,
+        mobile: args.get("mobile").and_then(Value::as_bool).unwrap_or(false),
+    }
+}
+
 pub struct BrowserNetworkTool;
 
 #[async_trait]
@@ -241,6 +381,7 @@ impl Tool for BrowserNetworkTool {
          EventSource, and anything issued before a hook could install. Use it to reverse-engineer \
          an API, find which request carries a token or cookie, or check what a page actually sent. \
          action \"list\" queries with filters, \"body\" fetches one response body by request id, \
+         \"har\" writes the whole capture as a HAR file you can diff or import into DevTools, \
          \"clear\" empties the log before a fresh interaction."
     }
 
@@ -252,8 +393,9 @@ impl Tool for BrowserNetworkTool {
         json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["list", "body", "clear"]},
+                "action": {"type": "string", "enum": ["list", "body", "har", "clear"]},
                 "request_id": {"type": "string", "description": "For body — the id from list."},
+                "path": {"type": "string", "description": "For har — where to write the HAR file. Default a temp path."},
                 "url_contains": {"type": "string", "description": "Case-insensitive URL filter."},
                 "method": {"type": "string", "description": "GET, POST, ..."},
                 "resource_type": {
@@ -287,6 +429,31 @@ impl Tool for BrowserNetworkTool {
             "body" => {
                 let id = str_arg(args, "request_id")?;
                 session.response_body(id).await.map_err(message)
+            }
+            "har" => {
+                // A full HAR is far too large for the transcript, so it goes to disk and the tool
+                // hands back the path — same shape as a screenshot.
+                let har = session.to_har();
+                let path = args
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        std::env::temp_dir().join(format!(
+                            "forge-browser-{}-{}.har",
+                            profile,
+                            std::process::id()
+                        ))
+                    });
+                let json = serde_json::to_string_pretty(&har)
+                    .map_err(|e| ToolError::Failed(format!("serialize HAR: {e}")))?;
+                std::fs::write(&path, json)
+                    .map_err(|e| ToolError::Failed(format!("write HAR: {e}")))?;
+                Ok(format!(
+                    "HAR with {} exchange(s) written to {}",
+                    session.network_len(),
+                    path.display()
+                ))
             }
             "list" => {
                 let filter = build_filter(args);
@@ -498,5 +665,42 @@ mod tests {
     fn both_tools_are_gated_as_network_egress() {
         assert_eq!(BrowserTool.side_effect(), SideEffect::Network);
         assert_eq!(BrowserNetworkTool.side_effect(), SideEffect::Network);
+    }
+
+    #[test]
+    fn a_fingerprint_is_built_only_from_the_fields_given() {
+        let none = fingerprint_from(&json!({"action": "open"}));
+        assert!(none.is_empty(), "no identity fields means no fingerprint");
+
+        let some = fingerprint_from(&json!({
+            "action": "open",
+            "user_agent": "UA",
+            "timezone": "Europe/Amsterdam",
+            "viewport_width": 390,
+            "viewport_height": 844,
+            "mobile": true
+        }));
+        assert_eq!(some.user_agent.as_deref(), Some("UA"));
+        assert_eq!(some.timezone.as_deref(), Some("Europe/Amsterdam"));
+        assert_eq!(some.viewport, Some((390, 844)));
+        assert!(some.mobile);
+    }
+
+    #[test]
+    fn a_viewport_needs_both_dimensions_to_count() {
+        // A width with no height is not a viewport; silently emulating a 0-height device would be
+        // worse than ignoring the half-given value.
+        let half = fingerprint_from(&json!({"action": "open", "viewport_width": 800}));
+        assert_eq!(half.viewport, None);
+    }
+
+    #[test]
+    fn header_map_stringifies_a_numeric_value_rather_than_dropping_it() {
+        let headers = header_map(Some(&json!({"X-Count": 5, "Authorization": "Bearer x"})));
+        assert!(headers.iter().any(|(n, v)| n == "X-Count" && v == "5"));
+        assert!(headers
+            .iter()
+            .any(|(n, v)| n == "Authorization" && v == "Bearer x"));
+        assert!(header_map(None).is_empty());
     }
 }

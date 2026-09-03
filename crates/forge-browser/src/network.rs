@@ -194,7 +194,7 @@ impl NetworkLog {
             status: None,
             status_text: None,
             mime_type: None,
-            request_headers: headers(request.get("headers")),
+            request_headers: header_pairs(request.get("headers")),
             response_headers: Vec::new(),
             post_data: request
                 .get("postData")
@@ -286,6 +286,11 @@ impl NetworkLog {
     pub fn get(&self, id: &str) -> Option<&Exchange> {
         self.exchanges.iter().find(|exchange| exchange.id == id)
     }
+
+    /// Every exchange, oldest first. Used by HAR export.
+    pub fn iter(&self) -> impl Iterator<Item = &Exchange> {
+        self.exchanges.iter()
+    }
 }
 
 fn apply_response_fields(exchange: &mut Exchange, response: &Value) {
@@ -306,12 +311,13 @@ fn apply_response_fields(exchange: &mut Exchange, response: &Value) {
         .get("remoteIPAddress")
         .and_then(Value::as_str)
         .map(str::to_string);
-    exchange.response_headers = headers(response.get("headers"));
+    exchange.response_headers = header_pairs(response.get("headers"));
 }
 
 /// CDP delivers headers as a flat object. Values are stringified rather than dropped: a numeric
-/// `Content-Length` is a number in JSON and would otherwise vanish.
-fn headers(value: Option<&Value>) -> Vec<(String, String)> {
+/// `Content-Length` is a number in JSON and would otherwise vanish. Public as `header_pairs` for
+/// interception, which reads a paused request's headers from the same shape.
+pub fn header_pairs(value: Option<&Value>) -> Vec<(String, String)> {
     let Some(Value::Object(map)) = value else {
         return Vec::new();
     };
