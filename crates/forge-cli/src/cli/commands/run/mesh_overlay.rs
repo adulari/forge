@@ -38,6 +38,7 @@ pub(crate) fn build_mesh_overlay(
                 rank: c.rank,
                 model: c.row.model.clone(),
                 score: c.row.final_score,
+                reorder_reason: c.reorder_reason.map(str::to_string),
                 cost_tag: match c.row.cost_class {
                     0 => "free",
                     1 => "subscription",
