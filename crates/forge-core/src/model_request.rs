@@ -41,8 +41,27 @@ fn classify_attempt_failure(error: &forge_provider::ProviderError) -> AttemptFai
     }
 }
 
-fn failure_verdict(failures: &[AttemptFailure]) -> String {
+/// Whether this machine has ANY way to reach a model: an API key for a keyed provider, or a
+/// logged-in CLI bridge. Same test the unroutable path uses, so the two answers cannot disagree.
+fn any_credentials_available() -> bool {
+    forge_config::known_key_providers().any(forge_config::has_api_key)
+        || forge_provider::CliKind::all().iter().any(|k| k.available())
+}
+
+fn failure_verdict(failures: &[AttemptFailure], has_credentials: bool) -> String {
     let count = |kind| failures.iter().filter(|failure| **failure == kind).count();
+    // A zero-credential install is the actionable cause whatever the individual attempts said.
+    // The seed chain can be a single KEYLESS candidate — a local ollama that is not running —
+    // which fails as "provider unavailable", not "no credentials", so the useful setup guidance
+    // was skipped and a first-time user got: "attempted providers failed for mixed reasons
+    // (1 provider unavailable). Last error from ollama::llama3.2: provider unavailable:
+    // 'llama3.2 (adapter: OpenAI)'." That names an adapter, not a next step.
+    if !failures.is_empty() && !has_credentials {
+        return format!(
+            "{NO_CREDENTIALS_GUIDANCE}\nAttempts this turn: {}.",
+            attempt_summary(failures)
+        );
+    }
     if !failures.is_empty() && count(AttemptFailure::NoCredentials) == failures.len() {
         return format!(
             "No usable model: none of your configured providers have credentials.\n\
@@ -54,22 +73,29 @@ fn failure_verdict(failures: &[AttemptFailure]) -> String {
     if !failures.is_empty() && count(AttemptFailure::RateLimited) == failures.len() {
         return "No usable model: every attempted model was rate-limited.".to_string();
     }
-    let labels = [
+    format!(
+        "No usable model: attempted providers failed for mixed reasons ({}).",
+        attempt_summary(failures)
+    )
+}
+
+/// "2 rate-limited, 1 provider unavailable" — the failure mix, counted by kind.
+fn attempt_summary(failures: &[AttemptFailure]) -> String {
+    let count = |kind| failures.iter().filter(|failure| **failure == kind).count();
+    [
         (AttemptFailure::NoCredentials, "missing credentials"),
         (AttemptFailure::RateLimited, "rate-limited"),
         (AttemptFailure::Capability, "capability errors"),
         (AttemptFailure::Network, "network errors"),
         (AttemptFailure::Down, "provider unavailable"),
-    ];
-    let observed = labels
-        .into_iter()
-        .filter_map(|(kind, label)| {
-            let n = count(kind);
-            (n > 0).then(|| format!("{n} {label}"))
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("No usable model: attempted providers failed for mixed reasons ({observed}).")
+    ]
+    .into_iter()
+    .filter_map(|(kind, label)| {
+        let n = count(kind);
+        (n > 0).then(|| format!("{n} {label}"))
+    })
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 /// Advance `chain` to the next model this turn may dispatch, applying the live subscription
@@ -737,7 +763,10 @@ pub(super) async fn request_provider_response(
                                     "{active_model} {reason} — model chain exhausted: {e}"
                                 )));
                                 return Err(CoreError::NoHealthyModel {
-                                    verdict: failure_verdict(&failures),
+                                    verdict: failure_verdict(
+                                        &failures,
+                                        any_credentials_available(),
+                                    ),
                                     model: active_model.clone(),
                                     reason,
                                     last_error: e.to_string(),
@@ -770,7 +799,7 @@ pub(super) async fn request_provider_response(
                                 "{active_model} {reason} — model chain exhausted: {e}"
                             )));
                             return Err(CoreError::NoHealthyModel {
-                                verdict: failure_verdict(&failures),
+                                verdict: failure_verdict(&failures, any_credentials_available()),
                                 model: active_model.clone(),
                                 reason,
                                 last_error: e.to_string(),
@@ -799,10 +828,40 @@ pub(super) async fn request_provider_response(
 mod tests {
     use super::*;
 
+    /// A first-time install: no API key anywhere, no logged-in CLI. The seed chain can hold a
+    /// single KEYLESS candidate (a local ollama that is not running), which fails as "provider
+    /// unavailable" rather than "no credentials" — so the setup guidance was skipped and the user
+    /// was told an adapter name instead of a next step.
+    #[test]
+    fn a_zero_credential_install_is_told_how_to_set_up_whatever_failed() {
+        let verdict = failure_verdict(&[AttemptFailure::Down], false);
+        assert!(
+            verdict.contains(NO_CREDENTIALS_GUIDANCE),
+            "leads with the setup guidance: {verdict}"
+        );
+        assert!(
+            verdict.contains("1 provider unavailable"),
+            "keeps what actually happened for diagnosis: {verdict}"
+        );
+        assert!(
+            !verdict.contains("mixed reasons"),
+            "does not bury the cause behind a failure-mix summary: {verdict}"
+        );
+    }
+
+    #[test]
+    fn a_credentialed_install_still_gets_the_failure_mix() {
+        let verdict = failure_verdict(&[AttemptFailure::Down, AttemptFailure::RateLimited], true);
+        assert!(verdict.contains("mixed reasons"), "{verdict}");
+        assert!(!verdict.contains(NO_CREDENTIALS_GUIDANCE), "{verdict}");
+    }
+
     #[test]
     fn verdict_for_all_missing_credentials_is_actionable_and_mentions_no_rate_limit() {
-        let verdict =
-            failure_verdict(&[AttemptFailure::NoCredentials, AttemptFailure::NoCredentials]);
+        let verdict = failure_verdict(
+            &[AttemptFailure::NoCredentials, AttemptFailure::NoCredentials],
+            true,
+        );
         assert!(verdict.contains("none of your configured providers have credentials"));
         assert!(verdict.contains("forge setup"));
         assert!(
@@ -814,7 +873,10 @@ mod tests {
 
     #[test]
     fn verdict_for_all_rate_limited_says_exactly_that() {
-        let verdict = failure_verdict(&[AttemptFailure::RateLimited, AttemptFailure::RateLimited]);
+        let verdict = failure_verdict(
+            &[AttemptFailure::RateLimited, AttemptFailure::RateLimited],
+            true,
+        );
         assert_eq!(
             verdict,
             "No usable model: every attempted model was rate-limited."
@@ -823,11 +885,14 @@ mod tests {
 
     #[test]
     fn verdict_for_mixed_chain_reports_each_observed_cause() {
-        let verdict = failure_verdict(&[
-            AttemptFailure::NoCredentials,
-            AttemptFailure::RateLimited,
-            AttemptFailure::Network,
-        ]);
+        let verdict = failure_verdict(
+            &[
+                AttemptFailure::NoCredentials,
+                AttemptFailure::RateLimited,
+                AttemptFailure::Network,
+            ],
+            true,
+        );
         assert!(verdict.contains("1 missing credentials"));
         assert!(verdict.contains("1 rate-limited"));
         assert!(verdict.contains("1 network errors"));
