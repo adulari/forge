@@ -241,17 +241,35 @@ async fn command_worker_loop(local_base_url: &str) {
     loop {
         interval.tick().await;
         match poll_durable_commands(local_base_url, &worker_id).await {
-            Ok(()) => last_error.clear(),
+            Ok(()) => {
+                if !last_error.is_empty() {
+                    last_error.clear();
+                    record_command_state(None);
+                }
+            }
             Err(error) => {
                 let message = format!("{error:#}");
                 if message != last_error {
                     eprintln!(
                         "⚠ Forge Anywhere remote jobs unavailable — live relay and local/direct Forge are unaffected: {message}"
                     );
-                    last_error = message;
+                    last_error = message.clone();
+                    record_command_state(Some(message));
                 }
             }
         }
+    }
+}
+
+fn record_command_state(error: Option<String>) {
+    let result = super::CommandStateStore::platform().and_then(|store| {
+        store.save(&super::CommandState {
+            updated_at_ms: now_ms(),
+            error,
+        })
+    });
+    if let Err(error) = result {
+        eprintln!("⚠ Forge Anywhere could not persist command worker state: {error:#}");
     }
 }
 
