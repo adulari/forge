@@ -10,8 +10,10 @@ use crate::bench;
     after_help = AFTER_HELP
 )]
 pub(crate) struct Cli {
+    /// Optional: bare `forge` prints a short first-run/common-commands panel instead of the
+    /// full help wall (see `first_run.rs`).
     #[command(subcommand)]
-    pub(crate) command: Command,
+    pub(crate) command: Option<Command>,
 }
 
 /// Orientation block appended to `forge --help` so the (large) subcommand list reads as a few
@@ -334,6 +336,13 @@ pub(crate) enum Command {
         /// Forge). Pair with `--mode bypass`/`--mode accept-edits` for autonomous tool use.
         #[arg(long, value_enum, default_value = "text")]
         output_format: OutputFormat,
+        /// Register this run with the local daemon so it appears in the Anywhere fleet (phone and
+        /// desktop apps). Overrides `[remote] publish_local_runs` for this run.
+        #[arg(long, conflicts_with = "no_publish_to_fleet")]
+        publish_to_fleet: bool,
+        /// Keep this run out of the Anywhere fleet even when `[remote] publish_local_runs` is on.
+        #[arg(long = "no-publish-to-fleet", conflicts_with = "publish_to_fleet")]
+        no_publish_to_fleet: bool,
     },
     /// Start an interactive multi-turn chat session.
     ///

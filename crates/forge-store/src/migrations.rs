@@ -680,7 +680,24 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0028,
     migration_0029,
     migration_0030,
+    migration_0031,
 ];
+
+/// Migration #31: give existing stores the `model_pricing.cache_read_per_1k` column.
+///
+/// The column was added to `schema::SCHEMA`'s `CREATE TABLE IF NOT EXISTS model_pricing` (the
+/// Codex cached-input work) but never to a migration, so a store created before it — every real
+/// install — kept the old three-column table while `set_model_pricing` began inserting four.
+/// SQLite rejected each upsert ("table model_pricing has no column named cache_read_per_1k"),
+/// the caller discarded the error, and prices froze at the last successful fetch: on the
+/// reference machine 2026-06-18, discovered 2026-09-02 when a $12/5h subscription pool was spent
+/// in minutes because no model on it had a price and therefore no burn penalty.
+pub(super) fn migration_0031(conn: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE model_pricing ADD COLUMN cache_read_per_1k REAL",
+    )
+}
 
 /// Create the singleton rows the Anywhere sync state machine expects, if they are missing.
 ///

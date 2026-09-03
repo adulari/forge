@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use forge_types::{Message, PermissionMode, Role, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::{
@@ -131,6 +131,26 @@ fn humanize_age(secs: u64) -> String {
     }
 }
 
+struct BridgeIdleBudget {
+    kind: CliKind,
+    duration: Duration,
+}
+
+impl BridgeIdleBudget {
+    fn new(kind: CliKind, duration: Duration) -> Self {
+        Self { kind, duration }
+    }
+
+    fn description(&self) -> String {
+        let label = match self.kind {
+            CliKind::Antigravity => "agy stream-json idle budget",
+            CliKind::ClaudeCode => "claude-cli idle budget",
+            CliKind::Codex => "codex-cli idle budget",
+        };
+        format!("{label}: {}s", self.duration.as_secs())
+    }
+}
+
 /// Sanitized model/capability record returned by Claude Code's authoritative streaming
 /// `initialize` control request. Deliberately excludes the response's `account`, process and
 /// user-configuration fields so callers can safely persist this in benchmark artifacts.
@@ -219,6 +239,18 @@ impl CliKind {
         resolve_on_path(self.default_binary()).is_some()
     }
 
+    /// Whether this bridge is worth routing to at all: installed AND not already known — from its
+    /// own credential file or its own "not signed in" output this process — to have no login.
+    ///
+    /// This is what keeps a keyless first run from paying a full failover sweep (three CLIs, one
+    /// of which sits on an interactive OAuth prompt) to discover what the credential check answers
+    /// instantly. It only ever removes a bridge on POSITIVE evidence of no credentials
+    /// ([`credentials::CliCredentials::Absent`]); `Unknown` stays routable, so a rate-limited or
+    /// briefly-down credentialed bridge still fails over normally.
+    pub fn routable(self) -> bool {
+        self.available() && credentials::credentials(self) != credentials::CliCredentials::Absent
+    }
+
     /// The bare Forge model id for this bridge (`claude-cli::` / `codex-cli::`), which resolves to
     /// the CLI's own default model.
     pub fn default_model_id(self) -> String {
@@ -276,7 +308,16 @@ impl CliKind {
                     .filter(|value| value != "default" && !value.is_empty())
                     .collect::<Vec<_>>();
                 if !advertised.is_empty() {
-                    return Ok(advertised);
+                    // The initialize response is the picker's list, not the CLI's full
+                    // inventory: claude 2.1.257 advertises `opus[1m]`, `sonnet`, `haiku` and
+                    // NOTHING for Fable, while `claude --model fable` answers on the same
+                    // install. `--help` is the CLI's own documentation of `--model` and does
+                    // name it, so the two are unioned; both are non-billing.
+                    let documented = run_model_probe(self.default_binary(), &["--help"])
+                        .await
+                        .map(|out| parse_claude_model_aliases(&out))
+                        .unwrap_or_default();
+                    return Ok(merge_claude_aliases(advertised, &documented));
                 }
             }
         }
@@ -351,11 +392,23 @@ impl CliKind {
                 }
             }
             Err(error) => {
-                tracing::warn!(
-                    "{} model discovery failed: {error} — the mesh will use an unverified model \
-                     list for this bridge",
-                    self.prefix()
-                );
+                // The CLI answering "please sign in" to a model listing is the earliest and
+                // cheapest proof that a turn on this bridge cannot work. Record it so routing
+                // skips the bridge instead of rediscovering it one 60s OAuth prompt later.
+                if error_policy::is_auth_failure(&error.to_ascii_lowercase()) {
+                    credentials::note_unauthenticated(self, &error);
+                    tracing::warn!(
+                        "{} — skipping this bridge for now",
+                        not_logged_in_message(self.default_binary())
+                    );
+                } else {
+                    tracing::warn!(
+                        "{} model discovery failed: {} — the mesh will use an unverified model \
+                         list for this bridge",
+                        self.prefix(),
+                        collapse_oauth_urls(self.default_binary(), &error)
+                    );
+                }
                 match recall_bridge_models(self) {
                     Some((models, age_secs)) => BridgeModels {
                         models,
@@ -403,7 +456,13 @@ impl CliKind {
     fn max_input_chars(self) -> Option<usize> {
         match self {
             CliKind::Codex => Some(1_048_576),
-            CliKind::ClaudeCode | CliKind::Antigravity => None,
+            // agy takes the prompt as ONE argv element (`-p <prompt>`, stdin is nulled — see the
+            // spawn), and Linux caps a single argument at MAX_ARG_STRLEN = 128 KiB. Two Forge
+            // sessions at ~100 KB of transcript died with `failed to start agy: Argument list too
+            // long (os error 7)` on 2026-09-02. Clamp under that limit with headroom for the rest
+            // of the argument list; the clamp keeps the newest context (`clamp_to_chars`).
+            CliKind::Antigravity => Some(100_000),
+            CliKind::ClaudeCode => None,
         }
     }
 }
@@ -634,6 +693,26 @@ fn windows_cmd_line(program: &std::path::Path, args: &[String]) -> String {
     format!("\"{inner}\"")
 }
 
+/// Union of what the initialize protocol advertised and what `--help` documents, advertised
+/// entries first. A documented alias is added only when no advertised value already names that
+/// family — `opus` is covered by `opus[1m]`, so the picker's context-suffixed spelling is kept
+/// and not duplicated by the bare alias.
+fn merge_claude_aliases(advertised: Vec<String>, documented: &[String]) -> Vec<String> {
+    let family = |value: &str| {
+        value
+            .split_once('[')
+            .map(|(base, _)| base.to_string())
+            .unwrap_or_else(|| value.to_string())
+    };
+    let mut merged = advertised;
+    for alias in documented {
+        if !merged.iter().any(|m| family(m) == *alias || m == alias) {
+            merged.push(alias.clone());
+        }
+    }
+    merged
+}
+
 /// The model aliases `claude --help` documents for `--model`: its help names them in single
 /// quotes ("Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet')"). Only
 /// purely-alphabetic quoted tokens count — full ids like 'claude-fable-5' are also quoted but
@@ -839,7 +918,29 @@ fn recall_bridge_models(kind: CliKind) -> Option<(Vec<String>, u64)> {
 /// ("gemini-3.5-flash" — the same slugs verified accepted live for the static defaults).
 fn parse_agy_models(out: &str) -> Vec<String> {
     let mut slugs = Vec::new();
+    // When the two-column format is present, ONLY those lines are model rows; the rest is chatter
+    // ("Fetching available models...") that the legacy slugifier would otherwise turn into a fake
+    // model id.
+    let two_column = out.lines().any(|line| line.contains('\t'));
     for line in out.lines() {
+        if two_column && !line.contains('\t') {
+            continue;
+        }
+        // agy ≥ 1.1 prints two tab-separated columns: the exact `--model` slug, then the display
+        // name with its effort parenthetical ("gemini-3.7-flash-high\tGemini 3.7 Flash (High)").
+        // Slugifying the whole line produced "gemini-3.7-flash-high-gemini-3.7-flash", which agy
+        // rejects with `invalid model selection` — and because that answer was classified as a
+        // plain request error, every turn that failed over onto the bridge died there instead of
+        // moving on (three Forge sessions, 2026-09-02). The slug column is authoritative.
+        if let Some((slug, _display)) = line.split_once('\t') {
+            let slug = slug.trim();
+            if slug.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && !slugs.contains(&slug.to_string())
+            {
+                slugs.push(slug.to_string());
+            }
+            continue;
+        }
         let name = line.split('(').next().unwrap_or("").trim();
         if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
             continue;
@@ -863,6 +964,9 @@ fn parse_agy_models(out: &str) -> Vec<String> {
 /// IDLE window (seconds) for a bridged CLI: kill only after this long with NO output. Not a total
 /// cap — a turn streaming events stays alive indefinitely, so long hard tasks aren't truncated.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// agy `--output-format stream-json` still exits after its own print-mode wait. Keep it above
+/// Forge's bridge idle windows so Forge owns stall classification and records the watchdog reason.
+const ANTIGRAVITY_PRINT_TIMEOUT_SECS: u64 = 600;
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
 /// Cap on captured stderr (for error messages) so a chatty CLI can't blow memory.
@@ -1236,10 +1340,18 @@ fn build_args(
         ],
         // Antigravity (`agy`) has no MCP/`--tools` wiring, so it ALWAYS runs as its own agent
         // (text mode), regardless of `harness`. `build_oneshot_args` attaches the prompt to `-p`;
-        // otherwise agy consumes the next flag as the prompt. `--dangerously-skip-permissions`
-        // auto-approves agy's own tools so it doesn't block headless. `--model` is appended below.
+        // otherwise agy consumes the next flag as the prompt. Use agy's stream-json output so long
+        // healthy turns emit progress before the final answer; keep its own print timeout longer
+        // than Forge's watchdog so stalls are attributed consistently here.
         (CliKind::Antigravity, _) => {
-            vec!["-p".into(), "--dangerously-skip-permissions".into()]
+            vec![
+                "-p".into(),
+                "--dangerously-skip-permissions".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--print-timeout".into(),
+                format!("{}s", ANTIGRAVITY_PRINT_TIMEOUT_SECS),
+            ]
         }
     };
     if kind == CliKind::ClaudeCode {
@@ -1523,6 +1635,7 @@ fn clamp_to_chars(prompt: &str, max_chars: usize) -> String {
 /// are handled by `complete`; the rest map to [`StreamEvent`]s.
 #[derive(Debug, PartialEq)]
 enum Parsed {
+    Activity,
     Reasoning(String),
     Text(String),
     ToolStarted {
@@ -1608,9 +1721,12 @@ struct ClaudeStreamState {
 }
 
 mod cli_stream;
+pub mod credentials;
 mod empty_turn;
 mod error_policy;
+mod sign_in;
 use cli_stream::*;
+use sign_in::{collapse_oauth_urls, not_logged_in_message, read_to_cap_watching};
 
 #[async_trait]
 impl Provider for CliProvider {
@@ -1810,7 +1926,11 @@ impl CliProvider {
                     self.kind.setup_hint()
                 ))
             } else {
-                ProviderError::Request(format!("failed to start `{}`: {e}", self.binary))
+                // A bridge that cannot be STARTED (E2BIG, EAGAIN, a broken interpreter) says
+                // nothing about the prompt and everything about this provider right now. Keep it
+                // retryable so the mesh benches the bridge and continues down the chain — as a
+                // non-retryable `Request` it ended the whole turn on the third failover hop.
+                ProviderError::Unavailable(format!("failed to start `{}`: {e}", self.binary))
             }
         })?;
 
@@ -1845,7 +1965,13 @@ impl CliProvider {
         }
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let err_task = tokio::spawn(read_to_cap(stderr));
+        // Fires the moment the CLI's stderr becomes an interactive sign-in prompt, so the turn
+        // ends on the CLI's own verdict instead of waiting out its login timeout.
+        let auth_prompt = std::sync::Arc::new(tokio::sync::Notify::new());
+        let err_task = tokio::spawn(read_to_cap_watching(
+            stderr,
+            Some(std::sync::Arc::clone(&auth_prompt)),
+        ));
 
         // Tail the sink concurrently so task / subagent events surface live. They arrive while the
         // CLI is silent (mid-tool, or waiting on a spawn_agents result), so they must be drained live.
@@ -1881,9 +2007,12 @@ impl CliProvider {
         enum BridgeEvent {
             Line(std::io::Result<Option<String>>),
             Sub(StreamEvent),
+            /// The CLI is asking a human to sign in; nothing this turn can answer it.
+            AuthPrompt,
         }
         let idle = self.timeout;
         let mut stalled = false;
+        let mut interactive_auth = false;
         let read = async {
             let mut lines = BufReader::new(stdout).lines();
             loop {
@@ -1893,12 +2022,17 @@ impl CliProvider {
                         biased;
                         line = lines.next_line() => BridgeEvent::Line(line),
                         Some(ev) = sub_rx.recv() => BridgeEvent::Sub(ev),
+                        _ = auth_prompt.notified() => BridgeEvent::AuthPrompt,
                     }
                 })
                 .await;
                 match tick {
                     Err(_) => {
                         stalled = true;
+                        break;
+                    }
+                    Ok(BridgeEvent::AuthPrompt) => {
+                        interactive_auth = true;
                         break;
                     }
                     Ok(BridgeEvent::Sub(ev)) => on_event(ev),
@@ -1911,6 +2045,7 @@ impl CliProvider {
                         }
                         for item in parse_stream_line(self.kind, &line, &mut claude_stream) {
                             match item {
+                                Parsed::Activity => on_event(StreamEvent::ProviderActivity),
                                 Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                                 Parsed::Text(t) => {
                                     if !is_cli_auth_instruction(&t) {
@@ -1956,6 +2091,7 @@ impl CliProvider {
             Ok::<(), std::io::Error>(())
         }
         .await;
+        let idle_budget = BridgeIdleBudget::new(self.kind, idle);
         // The read future completed (was NOT dropped mid-stream), so the explicit cleanup below owns
         // teardown — cancel the drop-time group kill.
         kill_guard.disarm();
@@ -1975,6 +2111,17 @@ impl CliProvider {
             self.reset_session();
         }
 
+        if interactive_auth {
+            terminate(&mut child, pgid).await;
+            let stderr_text = err_task.await.unwrap_or_default();
+            // The CLI is the authority on its own login: skip this bridge for the rest of the
+            // process rather than making every later hop re-learn it.
+            credentials::note_unauthenticated(self.kind, &stderr_text);
+            return Err(ProviderError::Auth(collapse_oauth_urls(
+                &self.binary,
+                &stderr_text,
+            )));
+        }
         if stalled {
             terminate(&mut child, pgid).await;
             // A stalled bridge is retryable (fail over), like a stalled genai stream — distinct from
@@ -1989,10 +2136,11 @@ impl CliProvider {
                 None => String::new(),
             };
             return Err(ProviderError::Unavailable(format!(
-                "`{}` produced no output for {}s — killed (stalled){write_suffix}{}",
+                "`{}` produced no output for {}s — killed (stalled; {}){write_suffix}{}",
                 self.binary,
                 idle.as_secs(),
-                stderr_suffix(&stderr_text)
+                idle_budget.description(),
+                stderr_suffix_for(&self.binary, &stderr_text)
             )));
         }
         if let Err(e) = read {
@@ -2001,7 +2149,7 @@ impl CliProvider {
             return Err(ProviderError::Request(format!(
                 "reading `{}` output failed: {e}{}",
                 self.binary,
-                stderr_suffix(&stderr_text)
+                stderr_suffix_for(&self.binary, &stderr_text)
             )));
         }
 
@@ -2060,7 +2208,7 @@ impl CliProvider {
             // CLI's stderr often carries the actionable cause.
             return Err(classify_in_band_error(
                 &self.binary,
-                &format!("{e}{}", stderr_suffix(&stderr_text)),
+                &format!("{e}{}", stderr_suffix_for(&self.binary, &stderr_text)),
             ));
         }
 
@@ -2104,7 +2252,17 @@ impl CliProvider {
                 return Err(if tail.is_empty() {
                     ProviderError::Request(msg)
                 } else {
-                    classify_in_band_error(&self.binary, tail)
+                    // Classify on the raw stderr, report the collapsed form: an OAuth consent URL
+                    // is evidence to the classifier and noise to the reader.
+                    classify_in_band_error_with_message(
+                        &self.binary,
+                        tail,
+                        format!(
+                            "{} error: {}",
+                            self.binary,
+                            collapse_oauth_urls(&self.binary, tail)
+                        ),
+                    )
                 });
             }
         }
@@ -2244,6 +2402,16 @@ fn classify_in_band_error_with_message(
             message: msg,
             retry_after: None,
         }
+    } else if lower.contains("invalid model selection")
+        || lower.contains("unknown model")
+        || lower.contains("model not found")
+        || lower.contains("no such model")
+    {
+        // The CLI rejected the MODEL id itself — a permanent fact about that model on this bridge
+        // (bench it, move on), never a reason to end the turn. Ahead of the auth branch: agy's
+        // rejection text also mentions the model's effort, which contains no auth words today,
+        // but the ordering keeps a future wording from being mistaken for a login failure.
+        ProviderError::NoModelAccess(msg)
     } else if mentions_status_code(&lower, "401")
         || mentions_status_code(&lower, "403")
         || error_policy::is_auth_failure(&lower)
@@ -2638,6 +2806,7 @@ impl LiveSession {
             let mut turn_done = false;
             for item in parse_stream_line(kind, &line, &mut claude_stream) {
                 match item {
+                    Parsed::Activity => on_event(StreamEvent::ProviderActivity),
                     Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                     Parsed::Text(t) => {
                         if !is_cli_auth_instruction(&t) {
@@ -3043,6 +3212,12 @@ async fn tail_subagent_sink(
 
 /// Format a bridge's captured stderr as a trailing ` — stderr: …` clause for an error message
 /// (empty when there's nothing). Trimmed and tail-capped so a noisy CLI can't bloat the error.
+/// An interactive sign-in prompt is collapsed to one line first — a bridge waiting on a Google
+/// consent URL must read as "not logged in", not as 500 characters of query string.
+fn stderr_suffix_for(binary: &str, stderr: &str) -> String {
+    stderr_suffix(&collapse_oauth_urls(binary, stderr))
+}
+
 fn stderr_suffix(stderr: &str) -> String {
     let t = stderr.trim();
     if t.is_empty() {
@@ -3065,7 +3240,7 @@ fn stderr_suffix(stderr: &str) -> String {
 fn child_wait_failure(binary: &str, error: &str, stderr: &str) -> ProviderError {
     ProviderError::Request(format!(
         "waiting for `{binary}` failed: {error}{}",
-        stderr_suffix(stderr)
+        stderr_suffix_for(binary, stderr)
     ))
 }
 
@@ -3074,17 +3249,8 @@ async fn create_sink_file_at(path: &std::path::Path) -> std::io::Result<std::pat
     Ok(path.to_path_buf())
 }
 
-async fn read_to_cap<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> String {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    while let Ok(n) = r.read(&mut chunk).await {
-        if n == 0 || buf.len() >= STDERR_CAP {
-            break;
-        }
-        let take = n.min(STDERR_CAP - buf.len());
-        buf.extend_from_slice(&chunk[..take]);
-    }
-    String::from_utf8_lossy(&buf).into_owned()
+async fn read_to_cap<R: tokio::io::AsyncRead + Unpin>(r: R) -> String {
+    read_to_cap_watching(r, None).await
 }
 
 fn put_in_own_process_group(cmd: &mut Command) {
@@ -3113,7 +3279,7 @@ fn apply_claude_bridge_home(kind: CliKind, cmd: &mut Command) {
     let Some(base) = forge_config::config_dir() else {
         return;
     };
-    let isolated_dir = base.join("claude-bridge-home");
+    let isolated_dir = base.join(crate::claude_bridge_home::BRIDGE_HOME_DIR_NAME);
     match crate::claude_bridge_home::prepare_claude_bridge_home(&real_home, &isolated_dir) {
         Ok(()) => {
             cmd.env("CLAUDE_CONFIG_DIR", &isolated_dir);
@@ -3477,6 +3643,23 @@ mod tests {
         assert!(parse_claude_model_aliases("no model flag here").is_empty());
     }
 
+    /// claude 2.1.257 advertises `opus[1m]`/`sonnet`/`haiku` over the initialize protocol and
+    /// nothing for Fable, while `claude --model fable` answers on the same install and `--help`
+    /// names it. The union keeps the picker's spellings and adds only what they do not cover.
+    #[test]
+    fn documented_aliases_fill_the_families_the_initializer_omits() {
+        let advertised = vec!["opus[1m]".to_string(), "sonnet".into(), "haiku".into()];
+        let documented = ["fable".to_string(), "opus".into(), "sonnet".into()];
+        assert_eq!(
+            merge_claude_aliases(advertised, &documented),
+            ["opus[1m]", "sonnet", "haiku", "fable"]
+        );
+        assert_eq!(
+            merge_claude_aliases(vec![], &documented),
+            ["fable", "opus", "sonnet"]
+        );
+    }
+
     #[test]
     fn failed_probe_prefers_the_actionable_error_over_progress_output() {
         let stderr =
@@ -3531,6 +3714,39 @@ mod tests {
         );
         assert!(parse_agy_models("").is_empty());
         assert!(parse_agy_models("  (weird)\n---\n").is_empty());
+    }
+
+    /// agy 1.1.24 prints `<slug>\t<display name (effort)>`. The slug column is what `--model`
+    /// accepts; slugifying the whole line yielded `gemini-3.7-flash-high-gemini-3.7-flash`, which
+    /// agy rejects — and killed three Forge sessions on failover (2026-09-02).
+    #[test]
+    fn agy_models_two_column_output_keeps_the_slug_column_verbatim() {
+        let out = "Fetching available models...\n\
+                   gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n\
+                   gemini-3.1-pro-low\tGemini 3.1 Pro (Low)\n\
+                   claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n\
+                   gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n";
+        assert_eq!(
+            parse_agy_models(out),
+            [
+                "gemini-3.7-flash-high",
+                "gemini-3.1-pro-low",
+                "claude-opus-4-6-thinking",
+                "gpt-oss-120b-medium"
+            ]
+        );
+    }
+
+    /// A CLI rejecting the model id is a permanent fact about that model on this bridge: bench
+    /// it and continue the failover chain. As a plain `Request` it ended the whole turn.
+    #[test]
+    fn invalid_model_selection_classifies_as_no_model_access_not_a_dead_turn() {
+        let err = classify_in_band_error(
+            "agy",
+            "Error: invalid model selection (--model \"gemini-3.7-flash-high-gemini-3.7-flash\" --effort \"\"): model not available",
+        );
+        assert!(matches!(err, ProviderError::NoModelAccess(_)), "{err:?}");
+        assert!(err.is_retryable() && err.is_permanent());
     }
 
     #[test]
@@ -3888,6 +4104,10 @@ mod tests {
                 "non-interactive print mode"
             );
             assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+            assert!(args.contains(&"--output-format".to_string()));
+            assert!(args.contains(&"stream-json".to_string()));
+            assert!(args.contains(&"--print-timeout".to_string()));
+            assert!(args.contains(&format!("{}s", ANTIGRAVITY_PRINT_TIMEOUT_SECS)));
             // Never wires Forge's MCP server (agy can't host it).
             assert!(!args.iter().any(|a| a.contains("mcp")));
             assert!(!args.iter().any(|a| a == "--tools"));
@@ -3954,6 +4174,10 @@ mod tests {
             [
                 "-p=hello --from-forge",
                 "--dangerously-skip-permissions",
+                "--output-format",
+                "stream-json",
+                "--print-timeout",
+                "600s",
                 "--model",
                 "gemini-3.5-flash",
             ]
@@ -3966,6 +4190,44 @@ mod tests {
         assert_eq!(
             parse_antigravity_line("hello world"),
             vec![Parsed::Text("hello world\n".to_string())]
+        );
+    }
+
+    #[test]
+    fn antigravity_parse_line_handles_stream_json_progress_result_and_usage() {
+        assert_eq!(
+            parse_antigravity_line(
+                r#"{"event":"step_update","step_update":{"text_delta":"hello"}}"#
+            ),
+            vec![Parsed::Text("hello".to_string())]
+        );
+        assert_eq!(
+            parse_antigravity_line(r#"{"event":"init","conversation_id":"abc"}"#),
+            vec![Parsed::Activity]
+        );
+        assert_eq!(
+            parse_antigravity_line(
+                r#"{"event":"result","result":{"status":"SUCCESS","response":"hello","usage":{"input_tokens":2,"output_tokens":3,"thinking_tokens":4,"cache_read_tokens":5,"total_tokens":14}}}"#,
+            ),
+            vec![
+                Parsed::Usage(Usage {
+                    input_tokens: 2,
+                    output_tokens: 3,
+                    cached_input_tokens: Some(5),
+                    cost_usd: 0.0,
+                }),
+                Parsed::Final("hello".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn antigravity_parse_line_handles_stream_json_failure() {
+        assert_eq!(
+            parse_antigravity_line(
+                r#"{"event":"result","result":{"status":"FAILED","error":"no output"}}"#
+            ),
+            vec![Parsed::Error("no output".to_string())]
         );
     }
 
@@ -4744,6 +5006,46 @@ mod tests {
     }
 
     #[test]
+    fn claude_rate_limit_event_reads_every_unified_window() {
+        use forge_types::QuotaStatus;
+        // Captured live 2026-09-02 from `claude -p --output-format stream-json --verbose`: no
+        // top-level `utilization` at all — it moved under `unifiedWindows`. The old parser
+        // yielded `fraction: None` for every real event, so stream-driven quota was blind.
+        let live = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1788360600,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.25,"resetsAt":1788360600},"seven_day":{"utilization":0.23,"resetsAt":1788595200},"seven_day_overage_included":{"utilization":0.39,"resetsAt":1788595200}}}}"#;
+        let parsed = parse_claude_line(live);
+        let quotas: Vec<(String, Option<f64>, Option<i64>, QuotaStatus)> = parsed
+            .iter()
+            .filter_map(|p| match p {
+                Parsed::Quota {
+                    window,
+                    fraction,
+                    resets_at,
+                    status,
+                } => Some((window.clone(), *fraction, *resets_at, *status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            quotas,
+            vec![
+                (
+                    "five_hour".into(),
+                    Some(0.25),
+                    Some(1788360600),
+                    QuotaStatus::Ok
+                ),
+                (
+                    "weekly".into(),
+                    Some(0.23),
+                    Some(1788595200),
+                    QuotaStatus::Ok
+                ),
+            ],
+            "both real windows, and the overage-included meter never overwrites weekly"
+        );
+    }
+
+    #[test]
     fn codex_thread_started_is_captured() {
         let line =
             r#"{"type":"thread.started","thread_id":"019eccdc-9390-72d2-b798-5134cceb95fe"}"#;
@@ -4868,6 +5170,40 @@ mod tests {
         with_fake_codex_home(Some(auth_json), || {
             assert_eq!(codex_cli_detected_plan(), None);
         });
+    }
+
+    /// Captured live from `claude -p --output-format stream-json --verbose
+    /// --include-partial-messages --model haiku` (2026-09-02): a thinking block streams first,
+    /// each block gets its own consolidated `assistant` snapshot, then the answer. The thinking
+    /// must reach the caller as reasoning only — never as answer text.
+    #[test]
+    fn claude_thinking_block_never_becomes_answer_text() {
+        let sample = [
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant","content":[]}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user has asked"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" me to reply with OK."}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"Er8F"}}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"The user has asked me to reply with OK.","signature":"Er8F"}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"OK"}}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"OK"}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+            r#"{"type":"result","is_error":false,"result":"OK","usage":{"input_tokens":9,"output_tokens":116}}"#,
+        ];
+        let mut state = ClaudeStreamState::default();
+        let parsed: Vec<Parsed> = sample.iter().flat_map(|l| state.parse_line(l)).collect();
+
+        assert_eq!(texts(&parsed), "OK", "answer text is the answer only");
+        let reasoning: String = parsed
+            .iter()
+            .filter_map(|p| match p {
+                Parsed::Reasoning(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, "The user has asked me to reply with OK.");
+        assert!(parsed.contains(&Parsed::Final("OK".into())));
     }
 
     #[test]
@@ -5246,6 +5582,64 @@ mod tests {
         );
     }
 
+    use sign_in::tests::AGY_SIGN_IN_STDERR;
+
+    /// The stderr clause is the path a consent URL reached the user through.
+    #[test]
+    fn a_sign_in_prompt_never_reaches_the_stderr_clause_of_an_error() {
+        let suffix = stderr_suffix_for("agy", AGY_SIGN_IN_STDERR);
+        assert!(!suffix.contains("accounts.google.com"), "{suffix}");
+        assert!(suffix.contains("not logged in"), "{suffix}");
+    }
+
+    /// The whole point of the collapse: the CLI's own words still decide the error VARIANT, so
+    /// the mesh keeps benching the provider even though the message is now one line.
+    #[test]
+    fn a_collapsed_sign_in_message_still_classifies_as_auth() {
+        let err = classify_in_band_error_with_message(
+            "agy",
+            AGY_SIGN_IN_STDERR,
+            format!(
+                "agy error: {}",
+                collapse_oauth_urls("agy", AGY_SIGN_IN_STDERR)
+            ),
+        );
+        assert!(
+            matches!(err, ProviderError::Auth(_)),
+            "classified on the raw stderr: {err:?}"
+        );
+        assert!(!format!("{err:?}").contains("accounts.google.com"));
+    }
+
+    /// A logged-out bridge must be dropped from routing on the credential check alone — this is
+    /// the difference between a 3-second keyless run and a 3-minute one.
+    #[test]
+    fn a_bridge_that_reported_no_login_stops_being_routable() {
+        let _guard = credentials::test_guard();
+        credentials::reset_live_verdicts();
+        let kind = CliKind::Antigravity;
+        assert_ne!(
+            credentials::credentials(kind),
+            credentials::CliCredentials::Absent,
+            "agy's credential store is not locatable, so it starts Unknown"
+        );
+        credentials::note_unauthenticated(kind, AGY_SIGN_IN_STDERR);
+        assert_eq!(
+            credentials::credentials(kind),
+            credentials::CliCredentials::Absent
+        );
+        assert!(!kind.routable(), "installed or not, it cannot serve a turn");
+        assert!(
+            crate::bridge_credentials_known_absent(kind.prefix()),
+            "the failover chain reads the verdict through the crate-level filter"
+        );
+        assert!(
+            !crate::bridge_credentials_known_absent("groq"),
+            "a non-bridge provider is never 'known absent' here"
+        );
+        credentials::reset_live_verdicts();
+    }
+
     #[test]
     fn cli_specific_login_instruction_is_not_streamed_as_assistant_text() {
         assert!(is_cli_auth_instruction("Not logged in · Please run /login"));
@@ -5277,6 +5671,22 @@ mod tests {
             classify_in_band_error("claude", "login required before continuing"),
             ProviderError::Auth(_)
         ));
+        // Claude Code's own permission gate and OS/file errors say "permission denied"; keychain
+        // notices say "credentials". Neither names the login, and an auth verdict benches the
+        // model (then the account) — this is the shape that benched a healthy opus[1m].
+        for not_auth in [
+            "Permission denied: Bash(rm -rf) was not allowed by the permission system",
+            "EACCES: permission denied, open '/tmp/x'",
+            "Reading credentials from keychain",
+        ] {
+            assert!(
+                !matches!(
+                    classify_in_band_error("claude", not_auth),
+                    ProviderError::Auth(_)
+                ),
+                "{not_auth:?} must not classify as auth"
+            );
+        }
         // The bare substring "auth" is not evidence of an auth failure. These are the shapes that
         // reached the classifier as stderr tails and turned an unrelated bridge failure into a
         // permanent, provider-wide exclusion of a healthy subscription.
@@ -6018,6 +6428,29 @@ esac
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn antigravity_stall_error_names_watchdog_budget() {
+        let fake = make_fake_cli_sleep(5);
+        let provider = CliProvider::new(CliKind::Antigravity)
+            .with_binary(&fake)
+            .with_timeout(Duration::from_millis(50));
+        let mut on_event = |_: StreamEvent| {};
+        let err = provider
+            .complete(
+                "agy-cli::gemini-3.1-pro",
+                &[Message::user("hi")],
+                &[],
+                &mut on_event,
+            )
+            .await
+            .expect_err("silent agy must trip the watchdog");
+        assert!(
+            matches!(err, ProviderError::Unavailable(ref msg) if msg.contains("produced no output for 0s") && msg.contains("agy stream-json idle budget")),
+            "got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn nonzero_exit_with_agy_argv_stderr_is_request_error() {
         let stderr = "Error: -p took --dangerously-skip-permissions as its prompt";
         let fake = make_fake_cli_exit_with_stderr("", stderr, 2);
@@ -6058,6 +6491,14 @@ esac
         }
         script.push_str(&format!("exit {code}\n"));
         install_fake_cli("forge-fake-cli", &script)
+    }
+
+    #[cfg(unix)]
+    fn make_fake_cli_sleep(seconds: u64) -> String {
+        install_fake_cli(
+            "forge-fake-cli-sleep",
+            &format!("#!/bin/sh\nsleep {seconds}\n"),
+        )
     }
 
     /// Deterministic fuzz for `clamp_to_chars` — the function that trims an over-long prompt to

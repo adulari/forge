@@ -78,10 +78,21 @@ pub async fn run() -> anyhow::Result<usize> {
 
     let mut sections: Vec<(&str, Vec<Check>)> = Vec::new();
     sections.push(("Config", config_checks()));
-    let (mut provider_v, has_usable_provider) = provider_checks();
+    let (mut provider_v, mut has_usable_provider) = provider_checks();
     // Reachability is evidence for the routing verdict, not the verdict itself. A provider can
     // answer discovery while the mesh has excluded it or exhausted its subscription.
     let reachability = provider_reachability_checks().await;
+    // OpenCode Go's windows are poll-only, so without this the routing verdict below would report
+    // whatever a previous command happened to leave behind (or nothing at all).
+    if let Ok(store) = crate::open_store() {
+        crate::cli::commands::models::refresh_opencode_go_quota(&store).await;
+    }
+    mark_rejected_keys(&mut provider_v, &reachability);
+    if provider_v.iter().any(|c| c.status == Status::Fail) {
+        has_usable_provider = provider_v.iter().any(|c| {
+            c.status == Status::Ok && (c.label.ends_with(" key") || c.label.ends_with(" bridge"))
+        });
+    }
     let routing = crate::doctor_health::provider_routing_checks(&reachability);
     let has_usable_provider = if routing.is_empty() {
         has_usable_provider
@@ -192,7 +203,63 @@ fn store_checks() -> Vec<Check> {
             None,
         )];
     };
-    vec![store_check_at(&path)]
+    vec![store_check_at(&path), price_feed_check_at(&path)]
+}
+
+/// How current the fetched price feed is. Cost-aware routing derives subscription burn weights
+/// from `model_pricing`; a feed that stopped refreshing is invisible everywhere else and its
+/// symptom — a heavy model winning a shared pool at zero penalty — looks like a routing bug.
+/// Live case: a schema hole failed every price upsert from 2026-06-18 to 2026-09-02.
+fn price_feed_check_at(path: &std::path::Path) -> Check {
+    const STALE_AFTER_SECS: i64 = 7 * 24 * 60 * 60;
+    let Ok(store) = forge_store::Store::open(path) else {
+        return check(Status::Warn, "price feed", "store not readable", None);
+    };
+    match store.model_pricing_freshness() {
+        Ok((rows, Some(newest))) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            let age = now - newest;
+            let age_text = if age < 3600 {
+                format!("{}m ago", age / 60)
+            } else if age < 86_400 {
+                format!("{}h ago", age / 3600)
+            } else {
+                format!("{}d ago", age / 86_400)
+            };
+            if age > STALE_AFTER_SECS {
+                check(
+                    Status::Warn,
+                    "price feed",
+                    format!("{rows} model price(s), last refreshed {age_text} — stale"),
+                    Some(
+                        "run `forge models` to refresh; if it stays stale, check `forge models` \
+                         output for a 'could not persist a fetched model price' warning",
+                    ),
+                )
+            } else {
+                check(
+                    Status::Ok,
+                    "price feed",
+                    format!("{rows} model price(s), refreshed {age_text}"),
+                    None,
+                )
+            }
+        }
+        Ok((_, None)) => check(
+            Status::Warn,
+            "price feed",
+            "no model prices fetched yet",
+            Some("run `forge models` once online so cost-aware routing has real prices"),
+        ),
+        Err(error) => check(
+            Status::Warn,
+            "price feed",
+            format!("could not read model_pricing: {error}"),
+            None,
+        ),
+    }
 }
 
 fn store_check_at(path: &std::path::Path) -> Check {
@@ -239,6 +306,21 @@ fn config_checks() -> Vec<Check> {
             Some("fix the syntax in your config.toml (see `forge doctor` detail above)"),
         )),
     }
+    // Which store the key checks below read. A `forge` bin built by `cargo test` carries the
+    // in-memory `test-secrets` store, so "no keys" from it says nothing about the user's setup.
+    let backend = forge_config::secret_store::backend();
+    out.push(check(
+        if backend.is_blind() {
+            Status::Warn
+        } else {
+            Status::Ok
+        },
+        "secret store",
+        backend.describe(),
+        backend.is_blind().then_some(
+            "rebuild with `cargo build --bin forge` — this binary cannot see any stored key",
+        ),
+    ));
     let user = forge_config::config_dir().map(|d| d.join("config.toml"));
     let user_exists = user.as_ref().is_some_and(|p| p.exists());
     out.push(check(
@@ -282,6 +364,13 @@ fn config_checks() -> Vec<Check> {
         )),
     }
     out
+}
+
+/// Credential-side readiness only: does any API key, CLI bridge, or local model exist? Same
+/// evidence doctor's "No usable model provider configured" gate starts from, with no network
+/// probe — cheap enough for bare `forge` to consult on every invocation.
+pub(crate) fn provider_credentials_present() -> bool {
+    provider_checks().1
 }
 
 /// Provider checks + whether at least one routable provider exists.
@@ -466,87 +555,7 @@ async fn daemon_checks() -> Vec<Check> {
             .ok()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        out.extend(unit_drift_checks(&unit, &exe));
-    }
-    out
-}
-
-/// Does the installed unit match what THIS binary would render?
-///
-/// `forge service install` writes the unit once; upgrading Forge never rewrites it. So a fix that
-/// lives in the unit rather than the binary silently never reaches an existing install. That is not
-/// hypothetical: #996 stops the daemon restart-looping on an unfixable failure via BOTH an exit code
-/// (binary) and `RestartPreventExitStatus=78` (unit). Upgrade alone delivers half of it, and the
-/// daemon keeps looping — 25,218 consecutive restarts on the author's machine, silently.
-///
-/// Pure so every branch is testable without installing or breaking a real service.
-fn unit_drift_checks(unit: &str, current_exe: &str) -> Vec<Check> {
-    unit_drift_checks_at(unit, current_exe, env!("CARGO_PKG_VERSION"))
-}
-
-fn unit_drift_checks_at(unit: &str, current_exe: &str, running_version: &str) -> Vec<Check> {
-    use crate::cli::commands::service::UNIT_VERSION_PREFIX;
-    let mut out = Vec::new();
-
-    // The general case: any future change to the rendered unit becomes visible, not just the
-    // directives someone thought to grep for. A unit with no marker predates the stamp entirely.
-    let unit_version = unit
-        .lines()
-        .find_map(|l| l.trim().strip_prefix(UNIT_VERSION_PREFIX))
-        .map(str::trim);
-    if let Some(v) = unit_version {
-        if v != running_version {
-            out.push(check(
-                Status::Warn,
-                "daemon unit",
-                format!("rendered by Forge {v}, running {running_version}"),
-                Some("`forge service install` to re-render it (installing a new Forge does not)"),
-            ));
-        }
-    }
-
-    if !unit.contains("RestartPreventExitStatus") {
-        out.push(check(
-            Status::Warn,
-            "daemon unit",
-            "predates the permanent-failure guard — a failure retrying cannot fix will restart forever",
-            Some("`forge service install` to re-render the unit (it is rewritten only on install)"),
-        ));
-    }
-
-    // ExecStart pins an absolute path. Install Forge somewhere else afterwards (brew, cargo) and
-    // systemd keeps launching the OLD binary, so `forge --version` in a terminal can disagree with
-    // what the daemon is actually running, with nothing anywhere saying so.
-    let unit_exe = unit
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("ExecStart="))
-        .and_then(|cmd| cmd.split_whitespace().next())
-        .unwrap_or_default();
-    // A dev build is EXPECTED to differ from the installed unit — warning about it every time
-    // someone runs `cargo run -- doctor` would be pure noise, and noise is how the real signal
-    // above gets ignored.
-    let from_build_tree =
-        current_exe.contains("/target/debug/") || current_exe.contains("/target/release/");
-    if !unit_exe.is_empty()
-        && !current_exe.is_empty()
-        && unit_exe != current_exe
-        && !from_build_tree
-    {
-        out.push(check(
-            Status::Warn,
-            "daemon binary",
-            format!("unit runs {unit_exe}, but this is {current_exe}"),
-            Some("`forge service install` to point the unit at this binary"),
-        ));
-    }
-
-    if out.is_empty() {
-        out.push(check(
-            Status::Ok,
-            "daemon unit",
-            "matches this binary",
-            None,
-        ));
+        out.extend(crate::doctor_daemon::unit_drift_checks(&unit, &exe, port).await);
     }
     out
 }
@@ -580,6 +589,61 @@ fn daemon_state_check(state: &str) -> Check {
     }
 }
 
+/// The one wording for "this provider read the stored key and refused it", shared by the key row,
+/// the reachability row and (by prefix match) the routing verdict.
+pub(crate) fn auth_rejected_detail(provider: &str, code: u16) -> String {
+    format!("rejected by {provider} (HTTP {code}): the stored key is invalid")
+}
+
+pub(crate) const AUTH_REJECTED_PREFIX: &str = "rejected by ";
+
+/// Is this listing failure the provider REFUSING the credential (vs. a network/endpoint blip)?
+/// Returns the HTTP status to report. The typed [`ProviderError::Auth`] variant is authoritative;
+/// the text scan is a backstop for adapters that stringify a status before we can classify it.
+///
+/// Deliberately narrow: only 401/403 and unambiguous "invalid/unauthorized key" prose count, so a
+/// connection refusal, a 5xx or a missing listing endpoint keeps the old, softer wording.
+pub(crate) fn auth_rejection_status(err: &forge_provider::ProviderError) -> Option<u16> {
+    let text = err.to_string();
+    let lower = text.to_lowercase();
+    let code = if lower.contains("403") || lower.contains("forbidden") {
+        403
+    } else {
+        401
+    };
+    if matches!(err, forge_provider::ProviderError::Auth(_)) {
+        return Some(code);
+    }
+    let names_401 = lower.contains("401") || lower.contains("unauthorized");
+    let names_403 = lower.contains("403") || lower.contains("forbidden");
+    let names_bad_key = lower.contains("invalid api key")
+        || lower.contains("invalid_api_key")
+        || lower.contains("incorrect api key")
+        || lower.contains("authentication_error")
+        || lower.contains("invalid authentication");
+    (names_401 || names_403 || names_bad_key).then_some(code)
+}
+
+/// Downgrade the `<provider> key` rows for providers whose credential the provider itself
+/// rejected. The key rows are built from key PRESENCE, which cannot see a 401.
+pub(crate) fn mark_rejected_keys(checks: &mut [Check], reachability: &[Check]) {
+    for reach in reachability {
+        let Some(provider) = reach.label.strip_suffix(" reachability") else {
+            continue;
+        };
+        if reach.status != Status::Fail || !reach.detail.starts_with(AUTH_REJECTED_PREFIX) {
+            continue;
+        }
+        for row in checks.iter_mut() {
+            if row.label == format!("{provider} key") {
+                row.status = Status::Fail;
+                row.detail = reach.detail.clone();
+                row.fix = Some(format!("`forge auth {provider}` to replace the stored key"));
+            }
+        }
+    }
+}
+
 /// LIVE: for each KEYED provider, can we actually list its models within a timeout? A keyed
 /// provider whose discovery times out silently drops out of routing and the mesh falls back to a
 /// keyless default (the "groq for everything" churn) — a key-PRESENCE check can't see this.
@@ -606,17 +670,25 @@ async fn provider_reachability_checks() -> Vec<Check> {
                 "responded, but listed no models",
                 None,
             ),
-            // An Err from list_models is NOT a reliable usability signal: several adapters (Gemini,
-            // Groq, the cerebras custom endpoint) have no listing endpoint or key it differently
-            // than chat, so they error here while chat works fine. Surface it as Info, not a
-            // failure — the robust "this provider is dead" signal is the TIMEOUT branch below, and
-            // real credential validation would need a paid chat call doctor won't make by default.
-            Ok(Err(_)) => check(
-                Status::Info,
-                &format!("{p} reachability"),
-                "model listing unavailable — chat unaffected",
-                None,
-            ),
+            // An authentication rejection IS a reliable usability signal: the provider read the
+            // stored key and refused it, so every chat call fails the same way. Anything else
+            // (no listing endpoint, a keying difference, a 5xx, a refused connection) is not —
+            // several adapters (Gemini, Groq, the cerebras custom endpoint) error here while chat
+            // works fine, so those stay Info.
+            Ok(Err(e)) => match auth_rejection_status(&e) {
+                Some(code) => check(
+                    Status::Fail,
+                    &format!("{p} reachability"),
+                    auth_rejected_detail(p, code),
+                    Some(&format!("`forge auth {p}` to replace the stored key")),
+                ),
+                None => check(
+                    Status::Info,
+                    &format!("{p} reachability"),
+                    "model listing unavailable — chat unaffected",
+                    None,
+                ),
+            },
             // The churn cause: keyed but unreachable. Its models won't route.
             Err(_) => check(
                 Status::Fail,
@@ -765,104 +837,6 @@ mod store_check_tests {
 }
 
 #[cfg(test)]
-mod unit_drift_tests {
-    use super::{unit_drift_checks, Status};
-
-    /// The unit actually installed on the author's machine on 2026-08-10, verbatim. Its daemon had
-    /// restarted 25,218 times; #996's exit-code half would have arrived with an upgrade and changed
-    /// nothing, because this unit has no `RestartPreventExitStatus`.
-    const REAL_STALE_UNIT: &str = "[Unit]\nDescription=Forge serve\n\n[Service]\n\
-        ExecStart=/home/floris/.local/bin/forge serve --tunnel --port 7420\nRestart=on-failure\n";
-
-    #[test]
-    fn a_unit_without_the_permanent_failure_guard_is_flagged() {
-        let out = unit_drift_checks(REAL_STALE_UNIT, "/home/floris/.local/bin/forge");
-        let guard = out
-            .iter()
-            .find(|c| c.label == "daemon unit")
-            .expect("the missing guard must be reported");
-        assert_eq!(guard.status, Status::Warn);
-        assert!(guard.fix.is_some(), "must say how to fix it");
-        // Same binary path, so only the guard should be reported — not a spurious binary mismatch.
-        assert!(out.iter().all(|c| c.label != "daemon binary"));
-    }
-
-    #[test]
-    fn a_unit_pointing_at_another_binary_is_flagged() {
-        let unit = "[Service]\nExecStart=/usr/bin/forge serve --port 7420\n\
-            RestartPreventExitStatus=78\nRestart=on-failure\n";
-        let out = unit_drift_checks(unit, "/home/floris/.cargo/bin/forge");
-        let drift = out
-            .iter()
-            .find(|c| c.label == "daemon binary")
-            .expect("a different ExecStart path must be reported");
-        assert_eq!(drift.status, Status::Warn);
-        assert!(drift.detail.contains("/usr/bin/forge"), "{}", drift.detail);
-        assert!(drift.detail.contains("cargo"), "{}", drift.detail);
-    }
-
-    #[test]
-    fn a_current_unit_reports_ok_and_nothing_else() {
-        let unit = "[Service]\nExecStart=/usr/bin/forge serve --port 7420\n\
-            RestartPreventExitStatus=78\nRestart=on-failure\n";
-        let out = unit_drift_checks(unit, "/usr/bin/forge");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].status, Status::Ok);
-    }
-
-    /// An unknown current-exe path must not manufacture a mismatch — reporting drift against an
-    /// empty string would fire on every install that cannot resolve its own binary.
-    #[test]
-    fn an_unresolvable_current_binary_does_not_report_drift() {
-        let unit = "[Service]\nExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
-        let out = unit_drift_checks(unit, "");
-        assert!(out.iter().all(|c| c.label != "daemon binary"));
-    }
-
-    /// A unit rendered by an older Forge is reported even when it carries every directive this
-    /// version happens to check for — the point of the stamp is catching drift nobody grepped for.
-    #[test]
-    fn a_unit_stamped_by_an_older_forge_is_reported() {
-        let unit = "[Unit]\n# forge-unit-version: 2.9.0\n[Service]\n\
-            ExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
-        let out = super::unit_drift_checks_at(unit, "/usr/bin/forge", "2.13.0");
-        let stale = out
-            .iter()
-            .find(|c| c.label == "daemon unit")
-            .expect("a version gap must be reported");
-        assert_eq!(stale.status, Status::Warn);
-        assert!(stale.detail.contains("2.9.0"), "{}", stale.detail);
-        assert!(stale.detail.contains("2.13.0"), "{}", stale.detail);
-    }
-
-    #[test]
-    fn a_unit_stamped_by_this_forge_is_not_reported() {
-        let unit = "[Unit]\n# forge-unit-version: 2.13.0\n[Service]\n\
-            ExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
-        let out = super::unit_drift_checks_at(unit, "/usr/bin/forge", "2.13.0");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].status, Status::Ok);
-    }
-
-    /// A dev build always differs from the installed unit. Warning every `cargo run -- doctor` is
-    /// noise, and noise is how the genuine warning above gets ignored.
-    #[test]
-    fn a_build_tree_binary_does_not_report_drift() {
-        let unit = "[Service]\nExecStart=/usr/bin/forge serve\nRestartPreventExitStatus=78\n";
-        for exe in [
-            "/home/me/src/forge/target/debug/forge",
-            "/home/me/src/forge/target/release/forge",
-        ] {
-            let out = unit_drift_checks(unit, exe);
-            assert!(
-                out.iter().all(|c| c.label != "daemon binary"),
-                "{exe} must not warn"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
 mod daemon_tests {
     use super::{daemon_state_check, Status};
 
@@ -899,5 +873,95 @@ mod daemon_tests {
         let c = daemon_state_check("reloading");
         assert_eq!(c.status, Status::Warn);
         assert_eq!(c.detail, "reloading");
+    }
+}
+
+#[cfg(test)]
+mod auth_rejection_tests {
+    use super::*;
+    use forge_provider::ProviderError;
+
+    /// Captured from a real groq listing call with a key that was stored but invalid — the exact
+    /// case doctor used to call "usable" and "chat unaffected".
+    const GROQ_401: &str = "provider request failed: HttpError status: 401 Unauthorized, body: \
+        {\"error\":{\"message\":\"Invalid API Key\",\"type\":\"invalid_request_error\",\"code\":\"invalid_api_key\"}}";
+    const OPENAI_403: &str = "provider request failed: HttpError status: 403 Forbidden, body: \
+        {\"error\":{\"message\":\"Country, region, or territory not supported\",\"code\":null}}";
+    const CONN_REFUSED: &str =
+        "error sending request for url (https://api.groq.com/openai/v1/models): \
+        tcp connect error: Connection refused (os error 111)";
+    const UPSTREAM_5XX: &str =
+        "HttpError status: 503 Service Unavailable, body: upstream connect error";
+
+    #[test]
+    fn a_401_listing_failure_is_an_auth_rejection() {
+        assert_eq!(
+            auth_rejection_status(&ProviderError::Auth(GROQ_401.into())),
+            Some(401)
+        );
+        // Backstop path: same body reaching us as an unclassified request error.
+        assert_eq!(
+            auth_rejection_status(&ProviderError::Request(GROQ_401.into())),
+            Some(401)
+        );
+    }
+
+    #[test]
+    fn a_403_listing_failure_is_an_auth_rejection() {
+        assert_eq!(
+            auth_rejection_status(&ProviderError::Request(OPENAI_403.into())),
+            Some(403)
+        );
+    }
+
+    #[test]
+    fn a_connection_refusal_is_not_an_auth_rejection() {
+        assert_eq!(
+            auth_rejection_status(&ProviderError::Unavailable(CONN_REFUSED.into())),
+            None
+        );
+    }
+
+    #[test]
+    fn a_5xx_is_not_an_auth_rejection() {
+        assert_eq!(
+            auth_rejection_status(&ProviderError::Unavailable(UPSTREAM_5XX.into())),
+            None
+        );
+    }
+
+    #[test]
+    fn a_rejected_key_row_names_the_provider_and_the_replacement_command() {
+        let mut keys = vec![check(Status::Ok, "groq key", "configured", None)];
+        let reachability = vec![check(
+            Status::Fail,
+            "groq reachability",
+            auth_rejected_detail("groq", 401),
+            Some("`forge auth groq` to replace the stored key"),
+        )];
+        mark_rejected_keys(&mut keys, &reachability);
+        assert_eq!(keys[0].status, Status::Fail);
+        assert_eq!(
+            keys[0].detail,
+            "rejected by groq (HTTP 401): the stored key is invalid"
+        );
+        assert_eq!(
+            keys[0].fix.as_deref(),
+            Some("`forge auth groq` to replace the stored key")
+        );
+    }
+
+    #[test]
+    fn a_network_blip_leaves_the_key_row_alone() {
+        let mut keys = vec![check(Status::Ok, "groq key", "configured", None)];
+        let reachability = vec![check(
+            Status::Info,
+            "groq reachability",
+            "model listing unavailable — chat unaffected",
+            None,
+        )];
+        mark_rejected_keys(&mut keys, &reachability);
+        assert_eq!(keys[0].status, Status::Ok);
+        assert_eq!(keys[0].detail, "configured");
     }
 }

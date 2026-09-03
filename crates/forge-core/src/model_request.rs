@@ -1,74 +1,98 @@
 //! Provider request, stream handling, and failover policy for a model-loop step.
 
 use super::*;
+use crate::failure_verdict::{
+    any_credentials_available, classify_attempt_failure, failure_verdict,
+};
 use crate::model_stream::handle_stream_event;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AttemptFailure {
-    NoCredentials,
-    RateLimited,
-    Capability,
-    Network,
-    Down,
-}
-
-fn classify_attempt_failure(error: &forge_provider::ProviderError) -> AttemptFailure {
-    match error {
-        forge_provider::ProviderError::Auth(_) => AttemptFailure::NoCredentials,
-        forge_provider::ProviderError::RateLimited { .. } => AttemptFailure::RateLimited,
-        forge_provider::ProviderError::Capability(_)
-        | forge_provider::ProviderError::NoModelAccess(_)
-        | forge_provider::ProviderError::Request(_) => AttemptFailure::Capability,
-        forge_provider::ProviderError::Unavailable(message) => {
-            let message = message.to_ascii_lowercase();
-            if [
-                "connect",
-                "connection",
-                "network",
-                "dns",
-                "timed out",
-                "timeout",
-                "no data",
-            ]
-            .iter()
-            .any(|needle| message.contains(needle))
-            {
-                AttemptFailure::Network
-            } else {
-                AttemptFailure::Down
+/// Advance `chain` to the next model this turn may dispatch, applying the live subscription
+/// pacing verdict: a model in `paced_held` is parked in `deferred_held` instead of dispatched,
+/// so failover exhausts every non-held candidate (free or on-pace subscription, in rank order)
+/// first. Returns `None` when only held models remain.
+async fn advance_to_next_usable(
+    session: &mut Session,
+    chain: &mut std::vec::IntoIter<String>,
+    paced_held: &[String],
+    skip_provider: Option<&str>,
+    freshly_benched: Option<&forge_types::ModelHealth>,
+    skip_reserved: bool,
+    deferred_held: &mut Vec<String>,
+) -> Result<Option<String>, CoreError> {
+    for next in chain.by_ref() {
+        if forge_config::is_model_disabled(&next, &session.config.mesh.disabled) {
+            continue;
+        }
+        if skip_provider.is_some_and(|p| forge_config::provider_of(&next) == p) {
+            continue;
+        }
+        // A CLI bridge already known to have no credentials — from its own credential file, or
+        // because it printed its own sign-in prompt earlier in this process — cannot serve this
+        // hop. Skipping it saves a subprocess launch that can only fail the same way.
+        //
+        // Set only by the CLI's own login machinery ("please sign in", an OAuth prompt), never by
+        // this loop's auth classification (`one_auth_error_benches_only_the_model_not_the_whole_provider`).
+        if forge_provider::bridge_credentials_known_absent(forge_config::provider_of(&next)) {
+            continue;
+        }
+        if skip_reserved && session.store.is_model_reserved(&next) {
+            continue;
+        }
+        // The original chain was built before this failure. Re-read health so an auth failure's
+        // new provider-wide bench immediately skips its sibling aliases in THIS turn.
+        if freshly_benched.is_some_and(|health| health.is_benched(&next)) {
+            continue;
+        }
+        if paced_held.iter().any(|held| held == &next) {
+            deferred_held.push(next);
+            continue;
+        }
+        match session.admit_failover_model(&next).await {
+            Ok(true) => return Ok(Some(next)),
+            Ok(false) => {
+                session.presenter.emit(PresenterEvent::Warning(format!(
+                    "skipped {next} (declined compaction) — trying the next model"
+                )));
             }
+            Err(e) => return Err(e),
         }
     }
+    Ok(None)
 }
 
-fn failure_verdict(failures: &[AttemptFailure]) -> String {
-    let count = |kind| failures.iter().filter(|failure| **failure == kind).count();
-    if !failures.is_empty() && count(AttemptFailure::NoCredentials) == failures.len() {
-        return "No usable model: none of your configured providers have credentials.\n\
-Run `forge setup` for guided setup, or `forge doctor` to see which providers need attention.\n\
-Set one of ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY, or log in to the Claude or Codex CLI."
-            .to_string();
+/// Take the best held model as a genuine LAST RESORT, once nothing non-held is left. Named as
+/// such in the routing rationale so the operator can see the pacing hold was overridden rather
+/// than ignored.
+async fn admit_paced_held(
+    session: &mut Session,
+    deferred_held: &mut Vec<String>,
+) -> Result<Option<String>, CoreError> {
+    while !deferred_held.is_empty() {
+        let next = deferred_held.remove(0);
+        match session.admit_failover_model(&next).await {
+            Ok(true) => return Ok(Some(next)),
+            Ok(false) => {}
+            Err(e) => return Err(e),
+        }
     }
-    if !failures.is_empty() && count(AttemptFailure::RateLimited) == failures.len() {
-        return "No usable model: every attempted model was rate-limited.".to_string();
-    }
-    let labels = [
-        (AttemptFailure::NoCredentials, "missing credentials"),
-        (AttemptFailure::RateLimited, "rate-limited"),
-        (AttemptFailure::Capability, "capability errors"),
-        (AttemptFailure::Network, "network errors"),
-        (AttemptFailure::Down, "provider unavailable"),
-    ];
-    let observed = labels
-        .into_iter()
-        .filter_map(|(kind, label)| {
-            let n = count(kind);
-            (n > 0).then(|| format!("{n} {label}"))
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("No usable model: attempted providers failed for mixed reasons ({observed}).")
+    Ok(None)
 }
+
+/// One per-turn line naming what pacing kept the failover chain away from, so a hop that skipped
+/// an over-pace subscription is explainable after the fact.
+fn warn_paced_held_skips(session: &mut Session, deferred_held: &[String], warned: &mut bool) {
+    if *warned || deferred_held.is_empty() {
+        return;
+    }
+    *warned = true;
+    session.presenter.emit(PresenterEvent::Warning(format!(
+        "subscription pacing: skipped {} in failover — over pace on its window; \
+         trying non-held models first",
+        deferred_held.join(", ")
+    )));
+}
+
+pub(super) const PACING_LAST_RESORT_RATIONALE: &str = "last resort: pacing hold overridden";
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn request_provider_response(
@@ -97,6 +121,8 @@ pub(super) async fn request_provider_response(
     failover_enabled: bool,
     default_cooldown: std::time::Duration,
     chain: &mut std::vec::IntoIter<String>,
+    paced_held: &[String],
+    paced_held_warned: &mut bool,
     last_resort_used: &mut bool,
     compact_retries: &mut usize,
     transient_retries: &mut u32,
@@ -107,11 +133,15 @@ pub(super) async fn request_provider_response(
     pinned_outage_attempts: &mut u32,
     pinned_outage_waited: &mut std::time::Duration,
     pinned_outage_warned_halfway: &mut bool,
+    pinned_outage_last_error: &mut Option<String>,
     step: usize,
 ) -> Result<(u64, forge_provider::ModelResponse), CoreError> {
     let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
     let mut attempted = std::collections::HashSet::new();
     let mut failures = Vec::new();
+    // Models the chain reached while subscription pacing holds them: parked here, tried only
+    // once every non-held candidate is exhausted (see `admit_paced_held`).
+    let mut deferred_held: Vec<String> = Vec::new();
     // Stream the reply, with transparent failover for this step's completion.
     let mut failover_hop = 0u32;
     let resp = loop {
@@ -263,25 +293,22 @@ pub(super) async fn request_provider_response(
                 // Another session owns this model's reservation. This is scheduling
                 // pressure, not provider health: immediately advance the existing chain
                 // without benching a healthy shared model.
-                let mut picked = None;
-                for next in chain.by_ref() {
-                    if forge_config::is_model_disabled(&next, &session.config.mesh.disabled)
-                        || session.store.is_model_reserved(&next)
-                    {
-                        continue;
-                    }
-                    match session.admit_failover_model(&next).await {
-                        Ok(true) => {
-                            picked = Some(next);
-                            break;
-                        }
-                        Ok(false) => {
-                            session.presenter.emit(PresenterEvent::Warning(format!(
-                                "skipped {next} (declined compaction) — trying the next model"
-                            )));
-                        }
-                        Err(e) => return Err(e),
-                    }
+                let mut picked = advance_to_next_usable(
+                    session,
+                    chain,
+                    paced_held,
+                    None,
+                    None,
+                    true,
+                    &mut deferred_held,
+                )
+                .await?;
+                warn_paced_held_skips(session, &deferred_held, paced_held_warned);
+                let mut pacing_override = false;
+                if picked.is_none() && !*last_resort_used {
+                    picked = admit_paced_held(session, &mut deferred_held).await?;
+                    pacing_override = picked.is_some();
+                    *last_resort_used |= pacing_override;
                 }
                 match picked {
                     Some(next) => {
@@ -290,7 +317,11 @@ pub(super) async fn request_provider_response(
                                 .map(|d| d.tier.as_str().to_string())
                                 .unwrap_or_default(),
                             model: next.clone(),
-                            rationale: format!("model busy: {active_model}"),
+                            rationale: if pacing_override {
+                                format!("{PACING_LAST_RESORT_RATIONALE}: {active_model} busy")
+                            } else {
+                                format!("model busy: {active_model}")
+                            },
                         });
                         *active_model = next;
                         failover_hop = failover_hop.saturating_add(1);
@@ -445,6 +476,27 @@ pub(super) async fn request_provider_response(
                     // above already gated `mesh.pin_outage_wait_secs > 0` into
                     // `transient_outage`, so this arm never runs with the budget disabled.
                     FailoverPolicy::BackoffSameModel => {
+                        // An outage is worth waiting minutes for; a REJECTION is not. A provider
+                        // that answers the same error text twice in a row, each time within
+                        // `DETERMINISTIC_REJECTION_WINDOW` of the request, is not unreachable —
+                        // it is refusing this model (live case: OpenCode Go returned an identical
+                        // `500 Internal server error` in 0.4s for a model served on a different
+                        // endpoint, and a pinned turn sat in "recovering provider" for 6m47s).
+                        // Surface the real text and fail the turn instead of burning the budget.
+                        let message = e.to_string();
+                        let fast = attempt_started.elapsed() <= DETERMINISTIC_REJECTION_WINDOW;
+                        let repeated =
+                            pinned_outage_last_error.as_deref() == Some(message.as_str());
+                        *pinned_outage_last_error = fast.then(|| message.clone());
+                        if fast && repeated {
+                            session.presenter.emit(PresenterEvent::Warning(format!(
+                                "{active_model}: the provider rejected this model twice in a \
+                                 row ({message}) — not waiting for an outage that isn't one \
+                                 (pinned model; `/model` to unpin, or set \
+                                 `mesh.pin_failover = true` to allow mesh fallback)"
+                            )));
+                            return Err(e.into());
+                        }
                         let attempt = *pinned_outage_attempts + 1;
                         // Cheap jitter without a rand dependency: sub-second wall-clock
                         // nanos.
@@ -564,35 +616,17 @@ pub(super) async fn request_provider_response(
                 // a switch that needs (lossy) compaction, so it's gated by consent
                 // (Yes/No/Always) — "No" skips it and we keep looking for one that fits.
                 let freshly_benched = session.store.current_benched().unwrap_or_default();
-                let mut picked = None;
-                for next in chain.by_ref() {
-                    if forge_config::is_model_disabled(&next, &session.config.mesh.disabled) {
-                        continue;
-                    }
-                    if let Some(p) = &skip_provider {
-                        if forge_config::provider_of(&next) == p.as_str() {
-                            continue;
-                        }
-                    }
-                    // The original chain was built before this failure. Re-read health
-                    // so an auth failure's new provider-wide bench immediately skips its
-                    // sibling aliases in THIS turn, not only on the next one.
-                    if freshly_benched.is_benched(&next) {
-                        continue;
-                    }
-                    match session.admit_failover_model(&next).await {
-                        Ok(true) => {
-                            picked = Some(next);
-                            break;
-                        }
-                        Ok(false) => {
-                            session.presenter.emit(PresenterEvent::Warning(format!(
-                                "skipped {next} (declined compaction) — trying the next model"
-                            )));
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
+                let picked = advance_to_next_usable(
+                    session,
+                    chain,
+                    paced_held,
+                    skip_provider.as_deref(),
+                    Some(&freshly_benched),
+                    false,
+                    &mut deferred_held,
+                )
+                .await?;
+                warn_paced_held_skips(session, &deferred_held, paced_held_warned);
                 let Some(d) = decision else {
                     return Err(CoreError::Internal(
                         "failover engaged without a routing decision".into(),
@@ -605,17 +639,50 @@ pub(super) async fn request_provider_response(
                             model: next.clone(),
                             rationale: format!("failover from {active_model}"),
                         });
+                        session.note_cli_bridge_once(&next);
                         *active_model = next;
                         failover_hop = failover_hop.saturating_add(1);
                         *transient_retries = 0;
                         continue;
                     }
-                    // The routed chain is exhausted. Rather than hard-fail, make ONE
-                    // last-resort attempt on the "least dead" model — the non-excluded
-                    // model whose transient bench expires soonest. This keeps a turn
-                    // working when every model is briefly rate-limited but none is
-                    // permanently incapable. Guarded by `last_resort_used` so a model that
-                    // fails again can't loop.
+                    // Chain exhausted: ONE last-resort attempt, guarded by `last_resort_used`.
+                    // A pacing-HELD model (healthy, merely over pace) comes before the
+                    // least-dead benched model, with the override named in the rationale.
+                    None if !deferred_held.is_empty() && !*last_resort_used => {
+                        // One hop per turn: 126 codex calls ran under this override (2026-09-02).
+                        *last_resort_used = true;
+                        match admit_paced_held(session, &mut deferred_held).await? {
+                            Some(next) => {
+                                session.presenter.emit(PresenterEvent::Routing {
+                                    tier: d.tier.as_str().to_string(),
+                                    model: next.clone(),
+                                    rationale: format!(
+                                        "{PACING_LAST_RESORT_RATIONALE}: failover from \
+                                         {active_model}, every non-held model exhausted"
+                                    ),
+                                });
+                                *active_model = next;
+                                failover_hop = failover_hop.saturating_add(1);
+                                *transient_retries = 0;
+                                continue;
+                            }
+                            None => {
+                                let reason = e.reason();
+                                session.presenter.emit(PresenterEvent::Warning(format!(
+                                    "{active_model} {reason} — model chain exhausted: {e}"
+                                )));
+                                return Err(CoreError::NoHealthyModel {
+                                    verdict: failure_verdict(
+                                        &failures,
+                                        any_credentials_available(),
+                                    ),
+                                    model: active_model.clone(),
+                                    reason,
+                                    last_error: e.to_string(),
+                                });
+                            }
+                        }
+                    }
                     None => match session.last_resort_model(&attempted, *last_resort_used) {
                         Some(m) => {
                             *last_resort_used = true;
@@ -641,7 +708,7 @@ pub(super) async fn request_provider_response(
                                 "{active_model} {reason} — model chain exhausted: {e}"
                             )));
                             return Err(CoreError::NoHealthyModel {
-                                verdict: failure_verdict(&failures),
+                                verdict: failure_verdict(&failures, any_credentials_available()),
                                 model: active_model.clone(),
                                 reason,
                                 last_error: e.to_string(),
@@ -669,36 +736,7 @@ pub(super) async fn request_provider_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn verdict_for_all_missing_credentials_is_actionable_and_mentions_no_rate_limit() {
-        let verdict =
-            failure_verdict(&[AttemptFailure::NoCredentials, AttemptFailure::NoCredentials]);
-        assert!(verdict.contains("none of your configured providers have credentials"));
-        assert!(verdict.contains("forge setup"));
-        assert!(!verdict.contains("rate-limit"));
-    }
-
-    #[test]
-    fn verdict_for_all_rate_limited_says_exactly_that() {
-        let verdict = failure_verdict(&[AttemptFailure::RateLimited, AttemptFailure::RateLimited]);
-        assert_eq!(
-            verdict,
-            "No usable model: every attempted model was rate-limited."
-        );
-    }
-
-    #[test]
-    fn verdict_for_mixed_chain_reports_each_observed_cause() {
-        let verdict = failure_verdict(&[
-            AttemptFailure::NoCredentials,
-            AttemptFailure::RateLimited,
-            AttemptFailure::Network,
-        ]);
-        assert!(verdict.contains("1 missing credentials"));
-        assert!(verdict.contains("1 rate-limited"));
-        assert!(verdict.contains("1 network errors"));
-    }
+    use crate::failure_verdict::AttemptFailure;
 
     fn test_session() -> Session {
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -717,6 +755,25 @@ mod tests {
 
     const DEAD: &str = "groq::llama-3.3-70b-versatile";
     const SIBLING: &str = "groq::groq/compound-mini";
+
+    /// The predicate `advance_to_next_usable` skips a candidate on. Asserted here rather than by
+    /// driving a chain: the verdict is process-global, and this crate's test binary shares it with
+    /// many fixtures that route to bridge ids, so a test that recorded one would change their
+    /// failover. The verdict's own behaviour is covered in `forge_provider::cli_provider`.
+    #[test]
+    fn the_failover_skip_never_applies_to_a_non_bridge_provider() {
+        for model in [
+            DEAD,
+            SIBLING,
+            "anthropic::claude-opus-4-8",
+            "ollama::llama3",
+        ] {
+            assert!(
+                !forge_provider::bridge_credentials_known_absent(forge_config::provider_of(model)),
+                "{model} has no CLI bridge, so the bridge filter must never remove it"
+            );
+        }
+    }
 
     /// The reported defect: after the turn failed, `select count(*) from model_health where model
     /// like '%llama%'` was 0, so ranking and failover were free to pick the model again — and did.
@@ -808,6 +865,23 @@ mod tests {
             Some(DEAD),
             "a transient bench stays eligible for the last-resort model; an exclusion does not"
         );
+    }
+
+    #[test]
+    fn watchdog_stalls_record_no_output_reason_in_health() {
+        let session = test_session();
+        session.record_model_failure(
+            DEAD,
+            &forge_provider::ProviderError::Unavailable(
+                "`agy` produced no output for 120s — killed (stalled; agy stream-json idle budget)"
+                    .into(),
+            ),
+            std::time::Duration::from_secs(120),
+        );
+
+        let rows = session.store.current_benched_report().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].2, "produced no output for 120s");
     }
 
     #[test]

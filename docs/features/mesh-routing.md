@@ -184,9 +184,19 @@ chain). When inactive (or the ranking comes back empty), the configured `[mesh.m
 are used verbatim (`Config::candidates_for`, `crates/forge-config/src/lib.rs:2008`; a tier with
 no entry falls back to the `standard` list).
 
-> Note: when auto-discovery is active, `[mesh.models]` is **not** consulted per-tier — the
-> catalog ranking replaces it wholesale. To route strictly from `[mesh.models]`, set
-> `mesh.auto_discover = false`.
+A tier a **config file** pins under `[mesh.models]` overrides auto-discovery for that tier: its
+models lead the candidate list, in the order written, and the routing rationale reads
+`configured [mesh.models].<tier>: <model>`. Only tiers present in a loaded `config.toml` count —
+the shipped cold-start seed in `Config::default()` does not (`Config::explicit_candidates_for`,
+`crates/forge-config/src/lib.rs`; the file-set tiers are recorded as `mesh.explicit_models` by
+`load()`). Tiers you did not configure keep auto-routing normally.
+
+The override is a preference, not a pin: the configured model still passes the usual usable /
+credit-mode / context filters, so one that is keyless, benched or disabled falls through to the
+auto-discovered ranking and the rationale says
+`configured [mesh.models].<tier> <model> skipped (<reason>), fell through to auto-discovery`.
+For a hard pin with no substitution, use `--model`; to route strictly from `[mesh.models]` for
+*every* tier, set `mesh.auto_discover = false`.
 
 ### 3.2 The routability filter
 
@@ -329,9 +339,9 @@ all resolve identically:
 
 | Family | List price (per 1M in/out) | Burn weight |
 |---|---|---|
-| GPT-5.6 Sol | $5 / $30 | weight 5.0 |
-| GPT-5.6 Terra | $2.50 / $15 | weight 2.5 |
-| GPT-5.6 Luna | $1 / $6 | weight 1.0 |
+| GPT-5.6 Sol | $4 / $20 | weight 17.5 |
+| GPT-5.6 Terra | $2 / $12 | weight 10.0 |
+| GPT-5.6 Luna | $0.20 / $1.20 | weight 1.0 |
 | Claude Fable 5 | $10 / $50 | weight 10.0 |
 | Claude Mythos 5 | $10 / $50 | weight 10.0 |
 | Claude Opus 4.8 | $5 / $25 | weight 5.0 |
@@ -340,6 +350,15 @@ all resolve identically:
 
 Any model not in this table gets weight 1.0 (`subscription_burn_weight`, `capability.rs:244`).
 Config overrides win: `[mesh.burn_weights]` is keyed by the **bare** model name (§13.1).
+
+**OpenCode Go weekly-quota multiplier** — `subscription_cost::opencode_go_quota_multiplier`.
+Go's price-derived weight is multiplied by `largest weekly quota / the model's weekly quota`.
+The Go dashboard (2026-09-02) shows each model has its own weekly dollar quota ($7.50, $15 or
+$30) and the pool percentage is the sum of the per-model percentages, so a dollar on Grok 4.6 or
+Kimi K3 ($7.50/wk) drains the pool 4x as fast as a dollar on Muse Spark or GLM 5.x ($30/wk).
+The usage endpoint exposes no per-model split, so the quotas are a bundled table keyed by bare
+model id; a model absent from it stays at x1.0. `forge mesh` shows the multiplier per Go model
+(`quota $7.50/wk → x4.0`) and the quota buckets under the `opencode_go` block.
 
 **Why `ln(weight)`:** the penalty must tie-break, not dominate. A 10× burn difference is
 `ln(10) ≈ 2.30`, a 5× one `ln(5) ≈ 1.61` — big enough to matter between near-equal siblings,
@@ -676,6 +695,38 @@ spent. Both the burn-penalty pressure multiplier (§4.6) and conservation (§6) 
 pace-projected value, so protection ramps up *ahead of* a projected overrun instead of reacting
 to one already at Warning.
 
+### 5.5 Subscription pacing, and where it is shown
+
+Separate from the burn-rate projection above, `SubscriptionPacing`
+(`crates/forge-types/src/subscription_pacing.rs`) compares each observed window against a
+linear allowance: `elapsed / total × SUBSCRIPTION_PACE_SPEND_FRACTION` (0.75 — the final quarter
+of every window is reserve). The store builds one per provider from its most constrained window
+(`Store::subscription_pacing`); the router's `apply_subscription_pacing` then holds every model of
+an over-pace provider above its cheapest usable sibling (sol/terra held, luna kept). The
+hold is computed once, by `HeuristicRouter::pacing_partition`, and reported by
+`pacing_holds` — so an inspector can only describe a hold the router actually applied.
+
+Every surface quotes that decision verbatim (`forge_mesh::pacing_summary`), never a display-side
+re-derivation from fraction and reset time:
+
+- `forge mesh` provider line: `codex-cli … · plan plus · Ok · weekly 32% used · 22% allowed ·
+  OVER PACE → gpt-5.6-sol/gpt-5.6-terra held, gpt-5.6-luna · spread …`, or `… · on pace`.
+  `--json` carries the same under `pacing` (`fraction_used`, `allowed_fraction`,
+  `elapsed_fraction`, `over_pace`, `used_nominal_fallback`, `held`, `kept`).
+- `forge mesh "<task>"` rationale names what was held:
+  `codex-oauth::gpt-5.6-sol, codex-oauth::gpt-5.6-terra held: weekly 32% > 22% allowed at 29%
+  elapsed → codex-oauth::gpt-5.6-luna kept`. The `/mesh` overlay shows the same marker per
+  quota row.
+- `/usage` overlay: one `Pace` line per observed subscription. The serve `/usage` endpoint
+  attaches `pacing` to the window the verdict was judged by, and the companion app's usage
+  screen renders that summary under the bar.
+
+Honesty rule: when a window has no provider-authoritative `resets_at`, timing starts at the
+oldest observation and `used_nominal_fallback` is set. Every surface then prints `pace unknown
+(no reset time — used_nominal_fallback …)` instead of an allowance, and the over-pace colouring
+is suppressed — a guessed window start must never read as a verdict. `codex-oauth` folds into
+the `codex-cli` row (one account), so a hold recorded under either alias lands on that row.
+
 ## 6. Conservation: spreading whole prompts off the subscriptions
 
 Independently of per-model scoring, the mesh decides per prompt whether to route *off* the
@@ -819,8 +870,14 @@ pressure, then candidate filtering and chain building.
   endpoint omits the field: Qwen 3.7 Max and Qwen 3.8 Max Preview are 1,000,000 tokens, and this
   value repairs a missing/stale persisted row. The CLI bridges have no queryable API, so their
   last-resort values remain in `context_limit`: `claude-cli` 1,000,000 tokens (200,000 for
-  haiku), `codex-cli` 272,000, `agy-cli` 1,000,000. Truly unknown models fall back to
-  `CONSERVATIVE_CONTEXT_WINDOW` = 32,000 only when the core must bound a request.
+  haiku), `codex-cli` 272,000, `agy-cli` 1,000,000. A gateway (OpenCode Zen and Go, custom
+  OpenAI-compatible endpoints) publishes no window in its model list, so a model with no row of
+  its own borrows the window stored for the SAME model under another namespace
+  (`cross_namespace_window`): `opencode::muse-spark-1.3-contributor-free` takes what OpenRouter
+  published for `meta/muse-spark-1.3-contributor`. Matching reduces both ids to the vendor-
+  independent name (after `provider::`, after the last `/`, minus the `-free` tier suffix), and
+  the LOWEST matching window wins, since a gateway may serve a smaller one. Truly unknown models
+  fall back to `CONSERVATIVE_CONTEXT_WINDOW` = 32,000 only when the core must bound a request.
 
 Then: the vision preference (§3.3) when the turn has images; a **stable** demotion of
 `Warning`-pressured subscriptions to the back of the list (`quota.is_pressured`, `lib.rs:837`) —
@@ -1047,8 +1104,8 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 
 | Key | Default | Effect |
 |---|---|---|
-| `models` | shipped free-first lists | Per-tier candidate lists; used verbatim when auto-discovery is off/empty (§3.1) |
-| `auto_discover` | `true` | Rank the discovered catalog instead of `[mesh.models]` (`lib.rs:1279`) |
+| `models` | shipped free-first lists | Per-tier candidate lists; a tier set in a config file leads that tier's candidates even under auto-discovery, and is used verbatim when auto-discovery is off/empty (§3.1) |
+| `auto_discover` | `true` | Rank the discovered catalog for tiers `[mesh.models]` does not explicitly configure (`lib.rs:1279`) |
 | `benchmark_ranking` | `true` | Use AA indices when cached (`lib.rs:1336`) |
 | `classifier` / `classifier_model` | `llm` / `groq::openai/gpt-oss-20b` | Fixed task classifier; §2.3 |
 | `classifier_activity_focused` | `false` | Legacy unstructured-prompt compatibility: classify the final non-empty paragraph; §2.3 |

@@ -37,6 +37,7 @@ pub mod context_pack;
 pub(crate) mod context_pipeline;
 mod detached_subagents;
 pub mod duel;
+mod failure_verdict;
 pub mod fleet;
 pub mod heartbeat;
 pub mod hooks;
@@ -64,6 +65,7 @@ mod text_policy;
 pub mod tokens;
 mod tool_dispatch;
 pub mod turn_contract;
+mod turn_guards;
 pub mod workflow;
 mod workspace_context;
 pub mod worktree;
@@ -240,6 +242,12 @@ pub async fn embed_one(cfg: &forge_config::EmbeddingsConfig, text: &str) -> Opti
 /// reaches failover quickly, but a one-off blip doesn't needlessly switch models.
 const MAX_TRANSIENT_RETRIES: u32 = 2;
 
+/// How quickly a provider must answer for its error to count as a REJECTION rather than an
+/// outage in the pinned-outage backoff: two identical error texts, each back within this window,
+/// mean the provider is refusing the model, not unreachable. Well above a real round trip
+/// (the live case answered in 0.4 s), well below any backoff step (5 s minimum).
+const DETERMINISTIC_REJECTION_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Max times per turn Forge will WAIT for a rate-limited model to reset and retry it (rather than
 /// failing over to a lower-ranked model). Bounds total in-turn blocking. The per-wait length cap is
 /// `mesh.rate_limit_wait_secs` (0 disables waiting).
@@ -414,6 +422,18 @@ const BRIDGE_BUILD_FIGHT_THRESHOLD: u64 = 8;
 /// past the cap.
 const fn bridge_turn_over_budget(accumulated_input: u64, cap: u64) -> bool {
     cap != 0 && accumulated_input >= cap
+}
+
+/// Hard step ceiling for one model loop. An unattended turn treats `mesh.max_steps` as a
+/// checkpoint (nobody can type `continue`) and runs on to `mesh.max_steps_unattended`; an attended
+/// turn stops at the soft cap and asks. Never below the soft cap, so lowering the unattended
+/// ceiling can't silently shorten a turn.
+const fn effective_step_ceiling(soft_cap: usize, unattended_cap: usize, unattended: bool) -> usize {
+    if unattended && unattended_cap > soft_cap {
+        unattended_cap
+    } else {
+        soft_cap
+    }
 }
 
 /// Best-effort extraction of a shell command from a bridge tool's serialized args (wave 5, fix 2).
@@ -700,6 +720,24 @@ fn working_tree_changed_since(root: Option<&std::path::Path>, baseline: Option<&
         (Some(before), Some(after)) => before != after,
         _ => true,
     }
+}
+
+fn uncommitted_work_message(root: &std::path::Path) -> String {
+    let status = working_tree_status(Some(root))
+        .map(|bytes| {
+            let text = String::from_utf8_lossy(&bytes);
+            let lines: Vec<&str> = text.lines().collect();
+            // A long-running turn can touch dozens of files; name the first few and count the rest
+            // so the error line stays readable in a log stream.
+            match lines.len() {
+                0 => String::new(),
+                n if n <= 10 => lines.join("; "),
+                n => format!("{}; … and {} more", lines[..10].join("; "), n - 10),
+            }
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "git status unavailable or clean".to_string());
+    format!("uncommitted work in {}: {status}", root.display())
 }
 
 fn git_head(root: Option<&std::path::Path>) -> Option<String> {
@@ -1360,6 +1398,10 @@ struct ModelLoopOutcome {
     /// (wave 7). Combined with a zero-tool, empty-tree turn this is the toolless-bridge signal the
     /// harness retries on — distinct from a normal empty completion (the wave-2 nudge's job).
     mcp_tools_unavailable: bool,
+    /// The turn was ENDED by a hard guard (the unattended step ceiling or the per-turn input-token
+    /// ceiling) and already reported it as an error. The caller must not also emit the interactive
+    /// "paused — send `continue`" note.
+    hard_guard_abort: bool,
 }
 
 /// A short-lived snapshot used by the mesh inspector. It owns the live router but snapshots the
@@ -1534,11 +1576,26 @@ pub struct Session {
     /// product was a `git commit` still did work. Reset at the start of each turn; the turn's
     /// no-output classification reads it.
     mutations_this_turn: u64,
+    /// Cumulative provider-reported input/output tokens for the active turn. Reset at turn start
+    /// and shared across primary/re-drive model loops so safety warnings report the whole turn's
+    /// spend, not just the current inner loop.
+    turn_input_tokens: u64,
+    turn_output_tokens: u64,
+    /// Latched when a hard guard (unattended step ceiling or per-turn input-token ceiling) ended
+    /// this turn. Every later re-drive pass must return immediately: the guards exist to stop
+    /// spending, and a nudge/verification re-drive would restart the model loop with fresh
+    /// counters and defeat them.
+    turn_hard_guard_abort: bool,
+    /// Tracked tasks still open when this turn ended, if any. Latched by the halt paths so the
+    /// turn is recorded as `TasksUnfinished` instead of a clean final answer.
+    turn_unfinished_tasks: Vec<String>,
     /// Headless code-change mode (harness-robustness wave 2): the caller KNOWS each prompt
     /// demands a code change (`bench swe` sets it — an explicit option, not prompt sniffing).
     /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
     /// tree clean gets ONE "implement it, don't describe it" push-back. Never set interactively.
     expect_code_change: bool,
+    /// Whether this session already showed the CLI-bridge terms notice (once per session).
+    cli_bridge_notice_shown: bool,
     /// Set by the last [`Session::run_turn`] on an `expect_code_change` bridge turn that was
     /// classified TOOLS-UNAVAILABLE (wave 7): Forge's `mcp-serve` tool server failed to start, so
     /// the model ran with no write tools and produced an empty tree. Read by the harness
@@ -2209,6 +2266,21 @@ impl Session {
         Ok(())
     }
 
+    /// Show the CLI-bridge terms notice once per session, the first time a turn is about to run
+    /// on `claude-cli`/`codex-cli` — including when failover lands there, which is how a keyless
+    /// first run reaches a bridge. The provider layer keeps the same text at debug level for the
+    /// log; emitting it there as a `warn` printed a timestamped, module-prefixed line between the
+    /// routing line and the model's first token, unlike every other user-facing line.
+    pub(crate) fn note_cli_bridge_once(&mut self, model: &str) {
+        if self.cli_bridge_notice_shown || !forge_provider::is_cli_bridge(model) {
+            return;
+        }
+        self.cli_bridge_notice_shown = true;
+        self.presenter.emit(PresenterEvent::Warning(
+            forge_provider::CLI_BRIDGE_NOTICE.to_string(),
+        ));
+    }
+
     /// Load the persisted replay entries for any session (not just this one) — used by the
     /// `/replay` chat command to show a transcript inline.
     pub fn load_replay(
@@ -2409,7 +2481,8 @@ impl Session {
             .with_session_affinity(
                 self.route_affinity.clone(),
                 self.estimated_reusable_prefix_tokens(),
-            );
+            )
+            .with_prior_tier(self.inheritable_prior_tier(effective_tier));
         let decision = match self.pinned_model.as_deref() {
             // `/model <id>`/`/model a,b` override: route restricted to the pinned set. The mesh
             // still classifies (for tier stats) but the actual call + failover chain stay within
@@ -2468,7 +2541,10 @@ impl Session {
         }
         let decision = decision;
         if decision.unroutable {
-            let msg = decision.rationale.clone();
+            let has_credentials = forge_config::known_key_providers()
+                .any(forge_config::has_api_key)
+                || forge_provider::CliKind::all().iter().any(|k| k.available());
+            let msg = unroutable_message(&decision.rationale, has_credentials);
             self.presenter.emit(PresenterEvent::Error(msg.clone()));
             let seq = self.next_seq();
             self.store
@@ -2521,6 +2597,7 @@ impl Session {
             model: routed_model.clone(),
             rationale: decision.rationale.clone(),
         });
+        self.note_cli_bridge_once(&routed_model);
 
         // Prepend any command/skill guidance as persisted system messages, so the methodology
         // is in context for this turn and rehydrates verbatim on resume (the skill file is not
@@ -2657,6 +2734,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // something (not a carry-over from a prior turn).
         self.edits_this_turn = 0;
         self.mutations_this_turn = 0;
+        self.turn_input_tokens = 0;
+        self.turn_output_tokens = 0;
+        self.turn_hard_guard_abort = false;
+        self.turn_unfinished_tasks.clear();
         self.failure_tracker.reset_turn();
         self.env_fight = EnvFightTracker::default();
 
@@ -2881,6 +2962,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // 3. Model <-> tool loop. The cap is a runaway guard, not a functional limit — the loop
         // ends naturally when the model stops calling tools.
         let max_steps = self.config.mesh.max_steps.max(1);
+        let unattended = !self.presenter.is_attended() || self.mode == PermissionMode::Bypass;
+        let effective_max_steps = effective_step_ceiling(
+            max_steps,
+            self.config.mesh.max_steps_unattended.max(1),
+            unattended,
+        );
 
         // Primary turn: pass the routing decision so failover, step-0 routing record, and quota
         // hints are all active — EXCEPT when architect mode swapped in a different editor model. The
@@ -2900,7 +2987,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 &specs,
                 primary_decision,
                 reuse_response_chain,
-                max_steps,
+                effective_max_steps,
                 stream_idle,
             )
             .await?;
@@ -2910,6 +2997,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let mut active_model = outcome.active_model;
         let mut hit_step_cap = outcome.hit_step_cap;
         let mut halted_by_loop_guard = outcome.halted_by_loop_guard;
+        let mut hard_guard_abort = outcome.hard_guard_abort;
         // Wave 7: did ANY bridge completion this turn (primary or a guard re-drive) report that
         // `mcp-serve` failed to start? OR-ed across the re-drives below, then combined with the
         // final tree/tool state to classify a toolless-bridge turn (see below the guards).
@@ -2925,7 +3013,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Ran the full step budget while the model still wanted tools: pause loudly instead of
         // ending silently mid-task (the #1 "stops responding" bug). The work so far is persisted,
         // so the user can resume by sending `continue`.
-        if outcome.hit_step_cap {
+        if outcome.hit_step_cap && !outcome.hard_guard_abort {
             self.presenter.emit(PresenterEvent::Warning(format!(
                 "reached the {max_steps}-step limit — turn paused mid-task; send `continue` to keep going \
                  (raise `mesh.max_steps` in config to allow longer turns)"
@@ -2972,7 +3060,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // A direct model that only emits a plan has `turn_tools_ran == 0`; that is still an empty
         // implementation for an explicit mutating contract and must be re-driven. The contract is
         // the safety gate, not prior tool activity. `mesh.nudge_empty_diff = false` disables it.
+        // A worktree-backed daemon session arms `expect_code_change` for its whole life, so the
+        // session flag alone must not decide this: a turn whose own contract is explicitly
+        // read-only produced no diff BY INSTRUCTION, and re-driving it with "implement the fix
+        // now" contradicts what the user asked for. #1266 fixed the contract's precedence but
+        // left this gate reading the session flag directly, so the nudge kept firing.
         if self.config.mesh.nudge_empty_diff
+            && self.last_turn_contract.intent() != TaskIntent::ReadOnlyReview
             && (self.expect_code_change || self.last_turn_contract.requires_changed_artifact())
             && self.edits_this_turn == 0
             && !halted_by_loop_guard
@@ -3036,7 +3130,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                 &nudge_specs,
                                 primary_decision,
                                 reuse_response_chain,
-                                max_steps,
+                                effective_max_steps,
                                 stream_idle,
                             )
                             .await?;
@@ -3045,6 +3139,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         active_model = nudge_outcome.active_model;
                         hit_step_cap = nudge_outcome.hit_step_cap;
                         halted_by_loop_guard = nudge_outcome.halted_by_loop_guard;
+                        hard_guard_abort |= nudge_outcome.hard_guard_abort;
                         // The nudge re-drive spawns a FRESH bridge process (a new `mcp-serve`); if it
                         // too failed to start, this stays a toolless turn — carry the signal into the
                         // classification below.
@@ -3102,7 +3197,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &guard_specs,
                         primary_decision,
                         reuse_response_chain,
-                        max_steps,
+                        effective_max_steps,
                         stream_idle,
                     )
                     .await?;
@@ -3112,6 +3207,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = guard_outcome.active_model;
                 hit_step_cap = guard_outcome.hit_step_cap;
                 halted_by_loop_guard = guard_outcome.halted_by_loop_guard;
+                hard_guard_abort |= guard_outcome.hard_guard_abort;
             }
         }
 
@@ -3132,9 +3228,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // with one of TurnContract's deliberately narrow imperative verbs. Keep the explicit
         // contract paths too: they preserve the intended audit when a provider changed the tree
         // through a mechanism that the per-turn write counter cannot observe.
+        // Same precedence as the empty-diff gate: an explicitly read-only turn is not a
+        // code-change turn just because the session it runs in was created to build something.
+        // A write that happened anyway still counts, which is what the first clause preserves.
         let code_change_turn = self.edits_this_turn > 0
-            || self.expect_code_change
-            || self.last_turn_contract.requires_changed_artifact();
+            || (self.last_turn_contract.intent() != TaskIntent::ReadOnlyReview
+                && (self.expect_code_change
+                    || self.last_turn_contract.requires_changed_artifact()));
         let primary_changed_paths =
             changed_paths_from_status(working_tree_status(Some(self.workspace.root())).as_deref());
         // Overflow compaction can replace the transcript with a shorter summary while the
@@ -3197,7 +3297,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     &review_specs,
                     None,
                     reuse_response_chain,
-                    max_steps,
+                    effective_max_steps,
                     stream_idle,
                 )
                 .await?;
@@ -3206,6 +3306,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             active_model = review.active_model;
             hit_step_cap = review.hit_step_cap;
             halted_by_loop_guard = review.halted_by_loop_guard;
+            hard_guard_abort |= review.hard_guard_abort;
 
             let audit_messages = &self.transcript[audit_transcript_start..];
             let repository_search_ran = completeness_repository_search_ran(audit_messages);
@@ -3238,7 +3339,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &retry_specs,
                         None,
                         reuse_response_chain,
-                        max_steps,
+                        effective_max_steps,
                         stream_idle,
                     )
                     .await?;
@@ -3247,6 +3348,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = retry.active_model;
                 hit_step_cap = retry.hit_step_cap;
                 halted_by_loop_guard = retry.halted_by_loop_guard;
+                hard_guard_abort |= retry.hard_guard_abort;
             } else if empty_search
                 && !self.past_turn_deadline()
                 && !hit_step_cap
@@ -3275,7 +3377,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &retry_specs,
                         None,
                         reuse_response_chain,
-                        max_steps,
+                        effective_max_steps,
                         stream_idle,
                     )
                     .await?;
@@ -3284,6 +3386,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = retry.active_model;
                 hit_step_cap = retry.hit_step_cap;
                 halted_by_loop_guard = retry.halted_by_loop_guard;
+                hard_guard_abort |= retry.hard_guard_abort;
             }
 
             let changed_paths = changed_paths_from_status(
@@ -3321,7 +3424,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &path_specs,
                         None,
                         reuse_response_chain,
-                        max_steps,
+                        effective_max_steps,
                         stream_idle,
                     )
                     .await?;
@@ -3330,6 +3433,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = path_review.active_model;
                 hit_step_cap = path_review.hit_step_cap;
                 halted_by_loop_guard = path_review.halted_by_loop_guard;
+                hard_guard_abort |= path_review.hard_guard_abort;
 
                 let post_review_changed_paths = changed_paths_from_status(
                     working_tree_status(Some(self.workspace.root())).as_deref(),
@@ -3365,7 +3469,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                             &retry_specs,
                             None,
                             reuse_response_chain,
-                            max_steps,
+                            effective_max_steps,
                             stream_idle,
                         )
                         .await?;
@@ -3444,7 +3548,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     &rv_specs,
                     None,
                     reuse_response_chain,
-                    max_steps,
+                    effective_max_steps,
                     stream_idle,
                 )
                 .await?;
@@ -3453,6 +3557,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             active_model = rv.active_model;
             hit_step_cap = rv.hit_step_cap;
             halted_by_loop_guard = rv.halted_by_loop_guard;
+            hard_guard_abort |= rv.hard_guard_abort;
         }
 
         // ── Autofix self-healing loop (autofix.md) ────────────────────────────────────────────
@@ -3534,7 +3639,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                 &fix_specs,
                                 None,
                                 reuse_response_chain,
-                                max_steps,
+                                effective_max_steps,
                                 stream_idle,
                             )
                             .await?;
@@ -3543,6 +3648,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         active_model = fix_outcome.active_model;
                         hit_step_cap = fix_outcome.hit_step_cap;
                         halted_by_loop_guard = fix_outcome.halted_by_loop_guard;
+                        hard_guard_abort |= fix_outcome.hard_guard_abort;
                         if halted_by_loop_guard {
                             break;
                         }
@@ -3655,7 +3761,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     &cont_specs,
                     None,
                     reuse_response_chain,
-                    max_steps,
+                    effective_max_steps,
                     stream_idle,
                 )
                 .await?;
@@ -3664,6 +3770,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             active_model = cont_outcome.active_model;
             hit_step_cap = cont_outcome.hit_step_cap;
             halted_by_loop_guard = cont_outcome.halted_by_loop_guard;
+            hard_guard_abort |= cont_outcome.hard_guard_abort;
             if halted_by_loop_guard {
                 break;
             }
@@ -3680,8 +3787,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Checked BEFORE the step cap: a step-capped turn already warned about the cap and told
         // the user to send `continue`, so the fact worth reporting here is the rarer one — that
         // the whole turn produced nothing.
-        let produced_nothing =
-            final_text.trim().is_empty() && self.mutations_this_turn == 0 && !presented_plan;
+        let produced_nothing = final_text.trim().is_empty()
+            && self.mutations_this_turn == 0
+            && !presented_plan
+            && !hard_guard_abort;
         let stop_reason = if produced_nothing {
             self.presenter.emit(PresenterEvent::Error(
                 "the turn produced NO answer and made no successful change — reporting it as a \
@@ -3689,6 +3798,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     .to_string(),
             ));
             StopReason::NoOutput
+        } else if !self.turn_unfinished_tasks.is_empty() {
+            // Tracked work is still open: the turn is incomplete, whatever text it ended with.
+            // `forge status` and the fleet view read this outcome, so it must not say success.
+            StopReason::TasksUnfinished
         } else if hit_step_cap {
             StopReason::MaxSteps
         } else {
@@ -3781,15 +3894,22 @@ fn ask_user_spec() -> ToolSpec {
 /// The skill-loading virtual tool name.
 pub const USE_SKILL_TOOL: &str = "use_skill";
 
+/// How much of each skill's description rides in the `use_skill` listing.
+const SKILL_SUMMARY_CHARS: usize = 60;
+
 /// The `ToolSpec` advertised for [`USE_SKILL_TOOL`], listing the available Forge skills in its
 /// description so the model both *discovers* what exists and can *invoke* one. Shared by the
 /// direct path and the CLI-bridge `mcp-serve` handler so a bridged claude/codex sees it too.
 pub fn use_skill_spec(catalog: &forge_skills::Catalog, allow_project: bool) -> ToolSpec {
+    // This listing rides EVERY tool-bearing request, so its width is a per-turn tax on every
+    // session: 64 skills at 100 chars was 7.4k characters, about a quarter of the whole tool
+    // payload and more than the system prompt. 60 chars still carries what the model picks on —
+    // the subject of the skill — and the loaded skill supplies the detail.
     let listing = catalog
         .skill_listing(allow_project)
         .into_iter()
         .map(|(name, desc)| {
-            let desc: String = desc.chars().take(100).collect();
+            let desc: String = desc.chars().take(SKILL_SUMMARY_CHARS).collect();
             format!("- {name}: {desc}")
         })
         .collect::<Vec<_>>()
@@ -4153,6 +4273,23 @@ fn over_budget_message(b: &BudgetState) -> String {
     )
 }
 
+/// One plain sentence naming the commands that fix a zero-credential install. Shared by the
+/// failover verdict and the unroutable-route path so the two cannot drift.
+pub(crate) const NO_CREDENTIALS_GUIDANCE: &str =
+    "No model provider is configured yet. Run `forge setup` for guided setup, or `forge auth \
+     <provider>` to add a key (`forge doctor` shows which providers need attention).";
+
+/// Message for a routing decision the mesh could not fulfil. On a keyless install the routing
+/// internals alone are unactionable (they name a model, never a command), so lead with the setup
+/// guidance and keep the rationale after it.
+fn unroutable_message(rationale: &str, has_credentials: bool) -> String {
+    if has_credentials {
+        rationale.to_string()
+    } else {
+        format!("{NO_CREDENTIALS_GUIDANCE}\n{rationale}")
+    }
+}
+
 /// Actionable message when the mesh routed to a model whose provider has no API key and nothing
 /// else was usable — instead of silently calling it and auth-failing every turn. Names the dead
 /// provider, lists the providers that DO have a usable key, and gives the concrete fixes.
@@ -4290,6 +4427,77 @@ mod tests {
 
     #[path = "no_op_turn.rs"]
     mod no_op_turn_tests;
+
+    #[path = "bridge_stall.rs"]
+    mod bridge_stall_tests;
+
+    #[test]
+    fn inheritable_prior_tier_reads_latest_active_routing_decision() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let session_id = store.create_session("/tmp", "default").unwrap();
+        let first = store
+            .add_message(&session_id, 0, Role::Assistant, "first", Some("m1"))
+            .unwrap();
+        store
+            .record_routing(&first, TaskTier::Complex, "m1", "complex turn")
+            .unwrap();
+        let second = store
+            .add_message(&session_id, 1, Role::Assistant, "second", Some("m2"))
+            .unwrap();
+        store
+            .record_routing(&second, TaskTier::Standard, "m2", "standard turn")
+            .unwrap();
+
+        let session = Session::resume(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            Config::default(),
+            &session_id,
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.inheritable_prior_tier(None),
+            Some(TaskTier::Standard)
+        );
+    }
+
+    #[test]
+    fn model_pin_and_explicit_effort_disable_prior_tier_inheritance() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let session_id = store.create_session("/tmp", "default").unwrap();
+        let message = store
+            .add_message(&session_id, 0, Role::Assistant, "first", Some("m1"))
+            .unwrap();
+        store
+            .record_routing(&message, TaskTier::Complex, "m1", "complex turn")
+            .unwrap();
+
+        let mut session = Session::resume(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            Config::default(),
+            &session_id,
+        )
+        .unwrap();
+
+        session.pin_model(Some("ollama::tiny".into()));
+        assert_eq!(session.inheritable_prior_tier(None), None);
+        session.pin_model(None);
+        session.set_effort(Some(EffortLevel::Low));
+        assert_eq!(session.inheritable_prior_tier(None), None);
+        session.set_effort(None);
+        assert_eq!(
+            session.inheritable_prior_tier(Some(TaskTier::Trivial)),
+            None
+        );
+    }
 
     #[test]
     fn response_chain_reuse_is_scoped_to_dependent_same_model_continuations() {
@@ -4966,6 +5174,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct CapturePresenter {
         events: Arc<Mutex<Vec<PresenterEvent>>>,
+        attended: bool,
     }
     impl Presenter for CapturePresenter {
         fn emit(&mut self, event: PresenterEvent) {
@@ -4989,6 +5198,9 @@ mod tests {
         }
         fn read_line(&mut self) -> Option<String> {
             None
+        }
+        fn is_attended(&self) -> bool {
+            self.attended
         }
     }
 
@@ -5070,6 +5282,18 @@ mod tests {
         assert_eq!(*asks.lock().unwrap(), 1, "asked exactly once");
     }
 
+    #[tokio::test]
+    async fn unattended_session_compacts_instead_of_skipping_every_fallback() {
+        let asks = Arc::new(Mutex::new(0));
+        let mut s = scripted_session(forge_types::NO_ANSWER, asks.clone());
+        s.transcript.push(Message::user("data ".repeat(40_000)));
+        assert!(
+            s.admit_failover_model("ollama::tiny").await.unwrap(),
+            "a non-interactive presenter's non-answer admits the model (headless turns must not die)"
+        );
+        assert!(!s.always_compact_on_switch, "not promoted to Always");
+        assert_eq!(*asks.lock().unwrap(), 1);
+    }
     #[tokio::test]
     async fn always_answer_silences_further_prompts() {
         let asks = Arc::new(Mutex::new(0));
@@ -6429,7 +6653,26 @@ mod tests {
 
     /// Yields a tool call every single step forever (unique args so no doom/failure guard fires) —
     /// only the step cap can stop it.
-    struct EndlessToolProvider;
+    struct EndlessToolProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        input_tokens: u64,
+        output_tokens: u64,
+    }
+
+    impl EndlessToolProvider {
+        fn new(input_tokens: u64) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    calls: Arc::clone(&calls),
+                    input_tokens,
+                    output_tokens: 1,
+                },
+                calls,
+            )
+        }
+    }
+
     #[async_trait::async_trait]
     impl Provider for EndlessToolProvider {
         async fn complete(
@@ -6440,6 +6683,9 @@ mod tests {
             _on_event: &mut forge_provider::EventSink<'_>,
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             use forge_types::{new_id, ToolCall, Usage};
+            let n = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(forge_provider::ModelResponse {
                 content: "still working".into(),
                 tool_calls: vec![ToolCall {
@@ -6447,26 +6693,87 @@ mod tests {
                     // A real successful read each step with a UNIQUE range → no doom/failure guard,
                     // forcing the step cap to be the thing that stops the turn.
                     name: "read_file".into(),
-                    args: serde_json::json!({"path": "Cargo.toml", "start_line": 1, "end_line": 1}),
+                    args: serde_json::json!({"path": "Cargo.toml", "start_line": n + 1, "end_line": n + 1}),
                 }],
-                usage: Usage::default(),
+                usage: Usage {
+                    input_tokens: self.input_tokens,
+                    output_tokens: self.output_tokens,
+                    ..Usage::default()
+                },
                 quotas: Vec::new(),
             })
         }
     }
 
+    /// Wants a tool call for the first `tool_steps` responses, then answers with plain text —
+    /// so a turn that is allowed to run past the soft cap finishes on its own.
+    struct FiniteToolProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        tool_steps: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for FiniteToolProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_types::{new_id, ToolCall, Usage};
+            let n = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tool_calls = if n < self.tool_steps {
+                vec![ToolCall {
+                    id: new_id(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": "Cargo.toml", "start_line": 1, "end_line": 1}),
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(forge_provider::ModelResponse {
+                content: "all done".into(),
+                tool_calls,
+                usage: Usage {
+                    input_tokens: 3,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    /// How many model/tool loop steps actually ran, from the events the core emitted. Counting
+    /// provider calls directly would also count auxiliary side calls (recap, titling), which are
+    /// not loop steps.
+    fn loop_steps(events: &[PresenterEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, PresenterEvent::ProviderRequest { .. }))
+            .count()
+    }
+
     #[tokio::test]
-    async fn step_cap_halts_a_runaway_turn() {
-        // The step cap is the primary infinite-loop backstop. Pin it: with max_steps=2 and a model
-        // that always wants another tool call, the turn must stop at the cap (not spin to default 100).
+    async fn headless_continues_past_the_soft_cap_and_finishes() {
+        // An unattended turn must NOT die at the soft cap: it warns once and runs to completion
+        // well inside the hard ceiling.
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
         let mut config = Config::default();
         config.mesh.max_steps = 2;
+        config.mesh.max_steps_unattended = 50;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut session = Session::start(
             Arc::clone(&store),
-            Arc::new(EndlessToolProvider),
+            Arc::new(FiniteToolProvider {
+                calls: Arc::clone(&calls),
+                tool_steps: 4,
+            }),
             Arc::new(HeuristicRouter::new(Config::default())),
             ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
@@ -6475,22 +6782,163 @@ mod tests {
         )
         .unwrap();
 
-        // Must RETURN (the cap stops it) rather than loop forever.
         session.run_turn("keep reading").await.unwrap();
 
-        let warnings: Vec<String> = events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|e| match e {
-                PresenterEvent::Warning(w) => Some(w.clone()),
-                _ => None,
-            })
-            .collect();
         assert!(
-            warnings.iter().any(|w| w.contains("step limit")),
-            "the step cap should stop a runaway turn; warnings: {warnings:?}"
+            calls.load(std::sync::atomic::Ordering::Relaxed) > 2,
+            "the unattended turn must run past the soft cap"
         );
+        let events = events.lock().unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("soft step cap 2"))));
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Warning(w) if w.contains("send `continue`")
+            )),
+            "unattended turns must never be told to send `continue`"
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_step_cap_pauses_a_runaway_turn() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        };
+        let events = capture.events.clone();
+        let mut config = Config::default();
+        config.mesh.max_steps = 2;
+        config.mesh.max_steps_unattended = 5;
+        let (provider, calls) = EndlessToolProvider::new(7);
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(provider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("keep reading").await.unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Warning(w)
+                if w.contains("2-step limit") && w.contains("send `continue`")
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PresenterEvent::Error(w) if w.contains("step ceiling"))),
+            "an attended turn pauses at the soft cap; it must not hit the unattended hard ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_step_cap_warns_and_continues_to_hard_ceiling() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut config = Config::default();
+        config.mesh.max_steps = 2;
+        config.mesh.max_steps_unattended = 5;
+        let (provider, _calls) = EndlessToolProvider::new(7);
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(provider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("keep reading").await.unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            loop_steps(&events),
+            5,
+            "the unattended turn runs from the soft cap up to the hard ceiling"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Warning(w)
+                if w.contains("soft step cap 2")
+                    && w.contains("hard cap 5")
+                    && w.contains("input=14")
+                    && w.contains("output=2")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Error(w)
+                if w.contains("hard step ceiling 5") && w.contains("work is uncommitted")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Done {
+                stop_reason: StopReason::MaxSteps,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn token_ceiling_errors_on_every_surface() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        };
+        let events = capture.events.clone();
+        let mut config = Config::default();
+        config.mesh.max_steps = 5;
+        config.mesh.max_steps_unattended = 5;
+        config.mesh.max_turn_input_tokens = 10;
+        let (provider, _calls) = EndlessToolProvider::new(6);
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(provider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("keep reading").await.unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            loop_steps(&events),
+            2,
+            "the token ceiling ends the turn well before the step cap"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Error(w)
+                if w.contains("input-token ceiling")
+                    && w.contains("cap 10")
+                    && w.contains("input 12")
+                    && w.contains("output 2")
+                    && w.contains("work is uncommitted")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Done {
+                stop_reason: StopReason::FinalAnswer,
+                ..
+            }
+        )));
     }
 
     /// Stalls on the 2nd call (text, no tool call) while a task is still in_progress, then — once
@@ -6696,18 +7144,17 @@ mod tests {
 
         let answer = session.run_turn("do the thing").await.unwrap();
 
-        // The stall (call 1) made no progress, so the turn ends there — NOT driven into a loop.
-        assert_eq!(answer, "I'll keep going on this.");
-        assert_eq!(session.tasks()[0].status, TodoStatus::InProgress);
-        // ...but it halted LOUDLY: an honest "stopped with unfinished tasks" warning was surfaced.
-        let warned_unfinished = events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("unfinished")));
+        // The stall (call 1) made no progress: it earns ONE escalation demanding a concrete tool
+        // call, which recovers the turn (call 2 closes the task) instead of ending it half-done.
+        assert_eq!(answer, "all done");
+        assert_eq!(session.tasks()[0].status, TodoStatus::Done);
+        // ...and the stall was surfaced LOUDLY rather than accepted as a final answer.
+        let warned_stall = events.lock().unwrap().iter().any(
+            |e| matches!(e, PresenterEvent::Warning(w) if w.contains("without calling any tool")),
+        );
         assert!(
-            warned_unfinished,
-            "a half-done bridge turn must stop loudly, not silently report success"
+            warned_stall,
+            "a prose-only bridge stall must be called out, not silently accepted"
         );
     }
 
@@ -7800,6 +8247,42 @@ mod tests {
                 quotas: Vec::new(),
             })
         }
+    }
+
+    /// The listing rides every tool-bearing request, so its per-skill width is a per-turn cost on
+    /// every session. Measured on a real catalog: 64 skills at 100 chars was 7,438 characters,
+    /// about a quarter of the entire tool payload and larger than the system prompt.
+    #[test]
+    fn the_skill_listing_summary_stays_narrow() {
+        let dir = std::env::temp_dir().join(format!("forge-skillwidth-{}", forge_types::new_id()));
+        std::fs::create_dir_all(dir.join("skills/wordy")).unwrap();
+        let long = "x".repeat(400);
+        std::fs::write(
+            dir.join("skills/wordy/SKILL.md"),
+            format!("---\nname: wordy\ndescription: {long}\n---\nbody"),
+        )
+        .unwrap();
+        let catalog = forge_skills::Catalog::load(&forge_skills::Sources {
+            commands: vec![],
+            skills: vec![forge_skills::ScopedDir {
+                scope: forge_skills::Scope::User,
+                path: dir.join("skills"),
+            }],
+        });
+
+        let spec = use_skill_spec(&catalog, true);
+        let line = spec
+            .description
+            .lines()
+            .find(|l| l.starts_with("- wordy:"))
+            .expect("the skill is listed");
+        let summary = line.trim_start_matches("- wordy: ");
+        assert_eq!(
+            summary.chars().count(),
+            SKILL_SUMMARY_CHARS,
+            "a long description is clipped to the listing budget: {line}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -8983,6 +9466,7 @@ mod tests {
             ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter {
                 events: events.clone(),
+                ..CapturePresenter::default()
             }),
             config,
             test_workspace().to_str().expect("workspace path is UTF-8"),
@@ -9076,6 +9560,7 @@ mod tests {
             ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter {
                 events: events.clone(),
+                ..CapturePresenter::default()
             }),
             config,
             test_workspace().to_str().expect("workspace path is UTF-8"),
@@ -9149,6 +9634,24 @@ mod tests {
             completed_tasks_recap(&[], &done, "I could not complete the task"),
             None,
             "a negative final answer must not be rewritten as success"
+        );
+    }
+
+    #[test]
+    fn an_unroutable_turn_without_credentials_leads_with_setup_guidance() {
+        let rationale = "short prompt — unroutable: no usable candidate for trivial tier";
+        let msg = unroutable_message(rationale, false);
+        let first_line = msg.lines().next().unwrap();
+        assert!(first_line.contains("forge setup"), "{msg}");
+        assert!(first_line.contains("forge auth"), "{msg}");
+        assert!(
+            msg.contains(rationale),
+            "keeps the routing internals: {msg}"
+        );
+        assert_eq!(
+            unroutable_message(rationale, true),
+            rationale,
+            "a keyed install keeps the bare rationale"
         );
     }
 
@@ -10222,6 +10725,184 @@ mod tests {
         );
     }
 
+    /// A [`FixedRouter`] whose subscription-pacing verdict HOLDS `held` — the state a live
+    /// over-pace ChatGPT/OpenCode Go plan puts the mesh in.
+    struct HeldRouter {
+        model: String,
+        fallbacks: Vec<String>,
+        held: Vec<String>,
+    }
+    #[async_trait::async_trait]
+    impl Router for HeldRouter {
+        async fn route(
+            &self,
+            _prompt: &str,
+            _has_images: bool,
+            _budget: BudgetState,
+            _health: &forge_types::ModelHealth,
+            _quota: &forge_types::SubscriptionQuota,
+            _effort: Option<forge_types::EffortLevel>,
+            _project: &forge_types::ProjectContext,
+        ) -> forge_mesh::RoutingDecision {
+            forge_mesh::RoutingDecision {
+                tier: forge_types::TaskTier::Complex,
+                model: self.model.clone(),
+                rationale: "test".into(),
+                fallbacks: self.fallbacks.clone(),
+                pinned: false,
+                unroutable: false,
+            }
+        }
+        fn pacing_held(
+            &self,
+            _tier: forge_types::TaskTier,
+            models: &[String],
+            _quota: &forge_types::SubscriptionQuota,
+        ) -> Vec<String> {
+            models
+                .iter()
+                .filter(|m| self.held.contains(m))
+                .cloned()
+                .collect()
+        }
+    }
+
+    /// Answers with the model id, except for `rate_limited` models which always 429.
+    struct EchoUnlessRateLimited {
+        rate_limited: std::collections::HashSet<String>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for EchoUnlessRateLimited {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            if self.rate_limited.contains(model) {
+                return Err(forge_provider::ProviderError::RateLimited {
+                    message: "429 rate limited".into(),
+                    retry_after: None,
+                });
+            }
+            on_event(StreamEvent::Text(model.into()));
+            Ok(forge_provider::ModelResponse {
+                content: model.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    const HELD_SUB: &str = "codex-oauth::gpt-5.6-sol";
+    /// Stand-in for the rate-limited primary and the free alternative. Both providers are KEYLESS
+    /// (`ollama`/`agy-cli`/`codex-oauth` own their auth), so the routed pick clears the
+    /// no-usable-model key gate: under `cargo test` `forge-config` carries `test-secrets`, whose
+    /// in-memory store holds no key for a keyed provider like `nvidia`/`gemini`. They are on three
+    /// DIFFERENT providers because failover skips the whole provider that just failed. The pacing
+    /// verdict under test comes from [`HeldRouter`], not from the provider identity.
+    const PRIMARY: &str = "ollama::kimi-k3";
+    const FREE_ALT: &str = "agy-cli::gemini-flash";
+
+    fn keyless_precondition() {
+        for m in [PRIMARY, FREE_ALT, HELD_SUB] {
+            assert!(
+                forge_config::has_api_key(forge_config::provider_of(m)),
+                "test precondition: '{m}' must be keyless so the key gate never fires"
+            );
+        }
+    }
+
+    /// (a) Failover must apply the SAME pacing verdict as the primary pick: an over-pace
+    /// subscription is skipped while any non-held model remains. Two unattended sessions failed
+    /// over onto a held ChatGPT plan and burned ~6M input tokens each (2026-09-02).
+    #[tokio::test]
+    async fn failover_skips_a_pacing_held_model_while_a_non_held_one_remains() {
+        keyless_precondition();
+        let provider = Arc::new(EchoUnlessRateLimited {
+            rate_limited: [PRIMARY.to_string()].into_iter().collect(),
+        });
+        let router = Arc::new(HeldRouter {
+            model: PRIMARY.into(),
+            fallbacks: vec![HELD_SUB.into(), FREE_ALT.into()],
+            held: vec![HELD_SUB.into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        let answer = session.run_turn("build the thing").await.unwrap();
+        assert_eq!(
+            answer, FREE_ALT,
+            "a held subscription must not be reached while a non-held model remains"
+        );
+    }
+
+    /// (b) …but a hold is not a refusal to work: with everything else exhausted the held model
+    /// still runs, and the rationale says the hold was overridden.
+    #[tokio::test]
+    async fn an_exhausted_chain_reaches_the_held_model_and_says_the_hold_was_overridden() {
+        keyless_precondition();
+        let provider = Arc::new(EchoUnlessRateLimited {
+            rate_limited: [PRIMARY.to_string()].into_iter().collect(),
+        });
+        let router = Arc::new(HeldRouter {
+            model: PRIMARY.into(),
+            fallbacks: vec![HELD_SUB.into()],
+            held: vec![HELD_SUB.into()],
+        });
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let presenter = CapturePresenter::default();
+        let events = Arc::clone(&presenter.events);
+        let mut config = Config::default();
+        config.mesh.rate_limit_wait_secs = 0;
+        let mut session = Session::start(
+            store,
+            provider,
+            router,
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(presenter),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+        let answer = session.run_turn("build the thing").await.unwrap();
+        assert_eq!(answer, HELD_SUB, "a hold is a last resort, not a dead end");
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Routing { model, rationale, .. }
+                    if model == HELD_SUB
+                        && rationale.contains("last resort: pacing hold overridden")
+            )),
+            "the override must be visible to the operator: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Warning(w)
+                    if w.contains("subscription pacing: skipped") && w.contains(HELD_SUB)
+            )),
+            "the skipped held models must be logged once: {events:?}"
+        );
+    }
+
+    /// (c) With no pacing verdict the chain keeps strict rank order.
+    #[tokio::test]
+    async fn without_a_pacing_hold_failover_keeps_rank_order() {
+        keyless_precondition();
+        let provider = Arc::new(EchoUnlessRateLimited {
+            rate_limited: [PRIMARY.to_string()].into_iter().collect(),
+        });
+        let router = Arc::new(HeldRouter {
+            model: PRIMARY.into(),
+            fallbacks: vec![HELD_SUB.into(), FREE_ALT.into()],
+            held: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        assert_eq!(session.run_turn("build the thing").await.unwrap(), HELD_SUB);
+    }
+
     /// Rate-limits the first `fail_first` calls with a tiny `retry_after`, then answers — to prove
     /// the in-turn wait-for-reset retries an explicitly pinned model instead of degrading to a fallback.
     struct RateLimitThenOkProvider {
@@ -10371,7 +11052,11 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.outage_calls {
-                return Err(forge_provider::ProviderError::Unavailable("502".into()));
+                // Varying text: a genuine outage, not the identical instant rejection that
+                // short-circuits the outage budget (`DETERMINISTIC_REJECTION_WINDOW`).
+                return Err(forge_provider::ProviderError::Unavailable(format!(
+                    "502 bad gateway (request {n})"
+                )));
             }
             if n < self.outage_calls + self.rl_calls {
                 return Err(forge_provider::ProviderError::RateLimited {
@@ -10460,6 +11145,72 @@ mod tests {
         );
     }
 
+    /// Always `Unavailable`, never the same text twice — the shape of a real outage (gateway
+    /// request ids, varying upstream messages), as opposed to a deterministic rejection.
+    #[derive(Default)]
+    struct VaryingUnavailableProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for VaryingUnavailableProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(forge_provider::ProviderError::Unavailable(format!(
+                "502 bad gateway (request {n})"
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_model_fails_fast_on_an_identical_instant_rejection() {
+        // Live case (OpenCode Go, 2026-09-02): a model served on a different endpoint answered
+        // an identical `500 Internal server error` in 0.4 s on every request, and the pinned turn
+        // sat in "recovering provider" for 6m47s of outage backoff. Two identical instant errors
+        // are a rejection: surface the real text and fail the turn inside the first backoff
+        // step, without spending the outage budget.
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: unavailable, // identical "502", answered instantly, every call
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_outage_wait_secs = 600; // the default budget: must NOT be spent
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        let started = std::time::Instant::now();
+        let err = session.run_turn("fix the bug").await.unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "an identical instant rejection must fail inside the first backoff step, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("502"),
+            "the REAL provider error must surface, got: {err}"
+        );
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("rejected this model twice") && w.contains("502"))),
+            "the warning must say the provider rejected the model and quote the error"
+        );
+        assert!(
+            !events.iter().any(
+                |e| matches!(e, PresenterEvent::Warning(w) if w.contains("still unreachable"))
+            ),
+            "must not run to outage-budget exhaustion"
+        );
+    }
+
     #[tokio::test]
     async fn pinned_outage_backoff_warns_once_at_halfway_then_fails_on_exhaustion() {
         // A small budget (6s) so the halfway warning and exhaustion are both reachable without a
@@ -10467,10 +11218,12 @@ mod tests {
         // 50% of a 6s budget regardless of jitter, and attempt 2's delay (jittered 12-18s off the
         // 15s base) always exceeds whatever budget remains, so exhaustion follows without needing
         // a second real sleep.
-        let provider = Arc::new(EchoProvider {
-            bad: ["pin::model".to_string()].into_iter().collect(),
-            err: unavailable,
-        });
+        //
+        // A genuine outage answers DIFFERENTLY each time (gateway ids, timestamps, timeouts);
+        // an identical instant error twice in a row is a rejection and short-circuits the
+        // budget (see `pinned_model_fails_fast_on_an_identical_instant_rejection`), so this
+        // fixture varies the message to stay on the outage path it exercises.
+        let provider = Arc::new(VaryingUnavailableProvider::default());
         let router = Arc::new(PinnedRouter {
             model: "pin::model".into(),
             fallbacks: vec!["worse::model".into()],
@@ -11046,6 +11799,52 @@ mod tests {
             "a bridge turn that edited the tree must not be nudged"
         );
         assert_eq!(answer, "explored the repo — here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The gap #1266 left open: it fixed which contract a read-only prompt derives, but this gate
+    /// still read the session-level `expect_code_change` flag directly. A worktree-backed daemon
+    /// session arms that flag for its whole life, so an investigative turn kept collecting
+    /// "You have not modified any files. Implement the fix now" against its own instruction.
+    #[tokio::test]
+    async fn an_explicitly_read_only_turn_in_a_build_session_is_not_nudged() {
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: true,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+        // Exactly what `spawn_session_driver` does for a worktree-backed daemon session.
+        session.set_expect_code_change(true);
+        session.config.mesh.verify_completeness = false;
+
+        session
+            .run_turn("Do not edit anything. Read the relay loop and answer two questions.")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an answer-only turn must not be re-driven"
+        );
+        assert!(
+            !session
+                .transcript
+                .iter()
+                .any(|m| m.content == EMPTY_DIFF_NUDGE),
+            "the empty-diff nudge contradicts an explicitly read-only instruction"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -11738,6 +12537,7 @@ mod tests {
         session.config.mesh.auto_memory = false;
         session.config.mesh.deadline_reconcile = false;
         session.config.mesh.max_steps = 3;
+        session.config.mesh.max_steps_unattended = 3;
         session.set_turn_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
         session
             .run_turn("How would you fix the bug?")
@@ -11766,6 +12566,7 @@ mod tests {
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.config.mesh.max_steps = 3;
+        session.config.mesh.max_steps_unattended = 3;
         session
             .run_turn("How would you fix the bug?")
             .await
@@ -12387,8 +13188,8 @@ mod tests {
     #[tokio::test]
     async fn bridge_with_unfinished_tasks_but_no_progress_halts_without_spiraling() {
         // The anti-spiral guarantee: a bridge that yields with a task still open but did NOTHING
-        // this run (no tool, no task closed) must STOP, not be re-driven into a narration loop
-        // (the old bridge-nudge bug). Exactly one invocation.
+        // this run (no tool, no task closed) gets ONE stronger "call a tool now" escalation and
+        // then STOPS — it is never re-driven into a narration loop (the old bridge-nudge bug).
         let provider = Arc::new(BridgeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
             inspect_calls: 0,
@@ -12396,11 +13197,16 @@ mod tests {
         let (store, mut session) = bridge_session(provider.clone());
         seed_tasks(&store, &session.id, &[("ship the release", false)]);
         let answer = session.run_turn("release it").await.unwrap();
-        assert_eq!(answer, "working");
+        assert!(
+            answer.text.starts_with("ERROR:"),
+            "an unattended half-done turn must fail loudly: {}",
+            answer.text
+        );
+        assert_eq!(answer.stop_reason, StopReason::TasksUnfinished);
         assert_eq!(
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "no-progress bridge must not be re-driven — it would spiral"
+            2,
+            "one escalation, then a hard stop — never a spiral"
         );
     }
 
@@ -13703,6 +14509,7 @@ mod tests {
             ToolRegistry::with_core_tools_in(&dir),
             Box::new(CapturePresenter {
                 events: events.clone(),
+                ..CapturePresenter::default()
             }),
             config,
             dir.to_str().unwrap(),

@@ -277,7 +277,10 @@ pub async fn list_models(namespace: &str) -> Result<Vec<String>, ProviderError> 
             .build()
             .all_model_names(kind, None)
             .await
-            .map_err(|e| ProviderError::Request(e.to_string()))
+            // Classify instead of collapsing to `Request`: a listing rejected with 401/403 means
+            // the stored credential is bad, and callers (doctor) must be able to tell that apart
+            // from a provider that simply has no usable listing endpoint.
+            .map_err(|e| error_policy::classify_genai_error(&e))
     })
     .await?;
     // Re-namespace with Forge's provider name (so `openrouter` stays `openrouter::…`).
@@ -326,10 +329,14 @@ async fn list_custom_models_at(
             .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(ProviderError::Request(format!(
-                "{namespace} `/models` returned HTTP {}",
-                resp.status()
-            )));
+            let status = resp.status();
+            let message = format!("{namespace} `/models` returned HTTP {status}");
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(ProviderError::Auth(message));
+            }
+            return Err(ProviderError::Request(message));
         }
         let body: serde_json::Value = resp
             .json()
@@ -531,10 +538,21 @@ pub(crate) fn build_client_full(
                     } else {
                         AuthData::from_single(LOCAL_PLACEHOLDER_KEY)
                     };
+                    // OpenCode Zen serves the same per-model wire formats as OpenCode Go
+                    // (muse-*/gpt-*/grok-* answer only on `/responses`; chat/completions is an
+                    // instant 500). The Go adapter already carries that matrix and honours a
+                    // custom base URL, so Zen borrows it for exactly those models.
+                    let kind = if cp.namespace == "opencode"
+                        && genai::opencode_go::is_responses_model(&bare)
+                    {
+                        AdapterKind::OpenCodeGo
+                    } else {
+                        AdapterKind::OpenAI
+                    };
                     return Ok(ServiceTarget {
                         endpoint: Endpoint::from_owned(cp.endpoint.to_string()),
                         auth,
-                        model: ModelIden::new(AdapterKind::OpenAI, bare),
+                        model: ModelIden::new(kind, bare),
                     });
                 }
             }
@@ -816,6 +834,16 @@ fn normalize_tool_arguments(
     crate::repair_malformed_args(raw)
 }
 
+/// The failure shape OpenCode Go returns when a model is sent to the wrong wire format: an
+/// immediate 5xx (`Unavailable`) or 401 (`Auth`) with no useful body. Rate limits, capability
+/// and access failures are real answers about the model and must not trigger endpoint learning.
+fn opencode_go_wrong_endpoint(error: &ProviderError) -> bool {
+    matches!(
+        error,
+        ProviderError::Unavailable(_) | ProviderError::Auth(_)
+    )
+}
+
 #[async_trait]
 impl Provider for GenAiProvider {
     async fn complete(
@@ -901,10 +929,14 @@ impl Provider for GenAiProvider {
             }
         }
 
-        if !reasoning_engaged {
+        // Low temperature for deterministic edits/patches — but ONLY for a model that takes one.
+        // A reasoning model rejects (or ignores) a custom temperature whether or not an effort
+        // hint engaged it this turn: OpenCode Go's Responses-served `gpt-5.6-luna` answers
+        // `[invalid_request_error] Unsupported parameter: 'temperature' is not supported with
+        // this model` and the turn dies (2026-09-02), and OpenAI's own reasoning line documents
+        // the same restriction. So the gate is the model family, not the effort flag.
+        if !reasoning_engaged && !model_benefits_from_effort(&model_name) {
             if let Some(temp) = opts.temperature {
-                // Low temperature for deterministic edits/patches — but ONLY when reasoning isn't
-                // engaged: thinking models reject (or ignore) a custom temperature, so effort wins.
                 options = options.with_temperature(crate::wire_params::temperature_for_wire(temp));
             }
         }
@@ -947,6 +979,41 @@ impl Provider for GenAiProvider {
         // them. Keep caching opportunistic and compatibility universal: retry once without only
         // that hint when the provider names it as an unsupported request parameter. This occurs
         // before a stream is accepted, so no text/tool event can be duplicated.
+        // OpenCode Go serves each model on ONE wire format and `/models` does not say which:
+        // a model sent to the wrong one answers an instant, deterministic 5xx/401 (measured
+        // 2026-09-02: gpt-5.6-luna 500, grok-4.6 401, grok-4.5 503, muse-spark 500 on
+        // chat/completions; all fine on responses). The adapter seeds the known families;
+        // anything it does not know yet is learned here from that failure shape, once, and
+        // kept only if the Responses path actually answers — a genuine outage on a
+        // chat-only model must not flip it onto a path that would then fail forever.
+        if let Some(bare) = model
+            .strip_prefix("opencode_go::")
+            .or_else(|| model.strip_prefix("opencode::"))
+        {
+            if first.as_ref().is_err_and(opencode_go_wrong_endpoint)
+                && !genai::opencode_go::is_responses_model(bare)
+            {
+                genai::opencode_go::mark_responses_model(bare);
+                tracing::info!(
+                    model,
+                    "opencode_go rejected the chat/completions path; retrying on the Responses API"
+                );
+                let retry = tokio::time::timeout(
+                    CONNECT_TIMEOUT,
+                    self.client
+                        .exec_chat_stream(model_name.as_str(), req.clone(), Some(&options)),
+                )
+                .await
+                .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
+                .map_err(|e| classify_genai_error(&e));
+                if retry.is_ok() {
+                    first = retry;
+                } else {
+                    genai::opencode_go::unmark_responses_model(bare);
+                }
+            }
+        }
+
         if options.prompt_cache_key.is_some()
             && first
                 .as_ref()
@@ -1280,6 +1347,34 @@ fn is_phantom_truncation(saw_end: bool, has_tool_calls: bool, usage: &Usage) -> 
 
 #[cfg(test)]
 mod tests {
+    /// The temperature gate is the model family, not the effort flag: a reasoning model rejects a
+    /// custom temperature whether or not an effort hint engaged it this turn. Live failure this
+    /// pins: OpenCode Go's Responses-served `gpt-5.6-luna` answered `Unsupported parameter:
+    /// 'temperature' is not supported with this model` and the turn died (2026-09-02).
+    #[test]
+    fn reasoning_families_are_recognised_under_every_namespace() {
+        for id in [
+            "opencode_go::gpt-5.6-luna",
+            "codex-oauth::gpt-5.6-sol",
+            "openai::o3-mini",
+            "nvidia::deepseek-ai/deepseek-r1",
+        ] {
+            assert!(
+                super::model_benefits_from_effort(id),
+                "{id} is a reasoning model"
+            );
+        }
+        for id in [
+            "opencode_go::glm-5.3-flash",
+            "groq::llama-3.3-70b-versatile",
+        ] {
+            assert!(
+                !super::model_benefits_from_effort(id),
+                "{id} takes a temperature"
+            );
+        }
+    }
+
     /// Qwen3.8's chat template raises "System message must be at the beginning", which llama.cpp
     /// reports as `Unable to generate parser for this template` — failing EVERY tool-bearing turn.
     /// Forge injects system content mid-transcript (lattice symbols, command guidance), so the
@@ -1968,6 +2063,32 @@ mod tests {
             );
             assert!(e.is_permanent());
         }
+
+        // Gemini 3 rejecting a transcript whose tool calls came from another model family:
+        // permanent for this model, but the turn must fail over instead of dying.
+        let sig = classify_status(
+            400,
+            "HTTP error".into(),
+            r#"{"error":{"code":400,"message":"Function call is missing a thought_signature in functionCall parts. This is required for tools to work correctly."}}"#,
+            None,
+        );
+        assert!(matches!(sig, ProviderError::Capability(_)), "got {sig:?}");
+        assert!(sig.is_retryable() && sig.is_permanent());
+        for body in [
+            "unsupported content part in message",
+            "assistant message is missing signature",
+        ] {
+            let e = classify_status(400, "x".into(), body, None);
+            assert!(
+                matches!(e, ProviderError::Capability(_)),
+                "expected Capability for {body:?}, got {e:?}"
+            );
+            let e = classify_text(body, body.to_string());
+            assert!(matches!(e, ProviderError::Capability(_)), "got {e:?}");
+        }
+        // An ordinary malformed request is still a turn-ending Request.
+        let plain = classify_status(400, "x".into(), "invalid json payload", None);
+        assert!(matches!(plain, ProviderError::Request(_)));
 
         // A genuine dropped stream is still transient (not permanent).
         let dropped = classify_text("connection reset by peer", "stream dropped".into());

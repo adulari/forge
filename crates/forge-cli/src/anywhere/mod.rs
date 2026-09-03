@@ -2233,6 +2233,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn relay_link_reports_each_liveness_state() {
+        let now = 1_000_000;
+        let live = LinkState {
+            daemon_pid: 42,
+            connected: true,
+            last_exchange_ms: now - 10_000,
+            updated_at_ms: now,
+            error: None,
+        };
+        assert!(matches!(
+            live.health_at(now, Some(42)),
+            LinkHealth::Healthy { .. }
+        ));
+
+        let stale_at = live.last_exchange_ms + LINK_STALE_AFTER.as_millis() as u64 + 1;
+        assert!(matches!(
+            live.health_at(stale_at, Some(42)),
+            LinkHealth::Stale { .. }
+        ));
+
+        let never_exchanged = LinkState {
+            last_exchange_ms: 0,
+            ..live.clone()
+        };
+        // A link that has never exchanged is not the same as one that dropped:
+        // the former is still coming up, the latter needs a `forge serve` restart.
+        assert_eq!(
+            never_exchanged.health_at(now, Some(42)),
+            LinkHealth::Unknown
+        );
+
+        assert_eq!(live.health_at(now, Some(41)), LinkHealth::Disconnected);
+    }
+
     fn pairing_challenge(now: u64) -> PairingChallenge {
         PairingChallenge {
             version: PAIRING_VERSION,

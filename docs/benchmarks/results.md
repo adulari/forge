@@ -126,7 +126,7 @@ bug (the direct-path verification gate silently failing, fixed in v0.4.6).
 | Doom-loop halt | identical tool call repeated → nudge then HALT, not run to the cap | `doom_loop_halts_a_model_repeating_the_same_call` |
 | Oscillation halt | a non-consecutive `A,B,A,B` tool-call ping-pong (evades the consecutive doom-loop AND the failure-loop) → halt | `doom_loop_halts_a_model_oscillating_between_two_calls` |
 | Failure-loop halt (serial **and** concurrent) | same error KIND across differing args → halt; now also when the calls run as a concurrent read-only batch | `failure_loop_halts_a_model_failing_the_same_way`, `concurrent_batch_failure_loop_is_caught` |
-| Step cap | a runaway turn that always wants another tool call stops at `max_steps`, never spins | `step_cap_halts_a_runaway_turn` |
+| Step/token caps | a runaway turn that always wants another tool pauses at `max_steps` when attended; unattended runs warn with turn input/output tokens, continue to `mesh.max_steps_unattended`, then error loudly; `mesh.max_turn_input_tokens` errors on every surface | `interactive_step_cap_pauses_a_runaway_turn`, `headless_step_cap_warns_and_continues_to_hard_ceiling`, `token_ceiling_errors_on_every_surface` |
 | Autofix self-heal cap | the lint/test self-heal loop stops at `max_iterations` when checks never pass, never spins | `autofix_iteration_cap_halts_the_self_heal_loop` |
 | Empty-response | bounded nudges then stop — never spin forever | `empty_response_is_nudged_then_stops_not_loops` |
 | Tool-call-as-text (direct) | narrated `<invoke>` that didn't execute → nudge, then end loudly (no phantom success) | `tool_call_written_as_text_never_silently_succeeds` |

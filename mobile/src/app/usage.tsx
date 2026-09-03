@@ -10,7 +10,7 @@ import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
 import { BoundedList } from "../components/ds/BoundedList";
 import { Segmented } from "../components/ds/Segmented";
-import { type UsageProvider } from "../lib/api";
+import { type UsagePacing, type UsageProvider } from "../lib/api";
 import { useSessions, useUsage } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
@@ -20,15 +20,16 @@ import { SettingsShell } from "./(tabs)/settings";
 const compact = (value: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value).toLowerCase();
 const kindTone = (kind: string) => kind === "api" ? "neutral" : "success";
 // Quota window names on the wire -> the prototype's short mono labels.
-const WINDOW_LABEL: Record<string, string> = { five_hour: "5h", weekly: "week", secondary: "2nd" };
+const WINDOW_LABEL: Record<string, string> = { five_hour: "5h", weekly: "week", monthly: "month", secondary: "2nd" };
 const resetLabel = (resetsAt: number | null) => resetsAt == null ? null : `resets ${new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date(resetsAt * 1000))}`;
 const observationLabel = (updatedAt: number | undefined, nowSec: number) => updatedAt == null ? null : `as of ${formatDurationShort(nowSec - updatedAt)} ago`;
 
-type QuotaRow = { kind: string; windowKind: string; status: string; fraction: number | null; resetsAt: number | null; updatedAt?: number };
+type QuotaRow = { kind: string; windowKind: string; status: string; fraction: number | null; resetsAt: number | null; updatedAt?: number; pacing?: UsagePacing | null };
 
-// Fixed window durations for the two quota kinds the wire actually sends (api.ts UsageQuota;
-// "secondary" has no known fixed length, so it's excluded from pace projection).
-const WINDOW_DURATION_SEC: Record<string, number> = { five_hour: 5 * 3600, weekly: 7 * 24 * 3600 };
+// Fixed window durations for the quota kinds the wire actually sends (api.ts UsageQuota;
+// "secondary" has no known fixed length, so it's excluded from pace projection). "monthly" is
+// OpenCode Go's calendar window — 30 days nominal, matching nominal_window_secs in Rust.
+const WINDOW_DURATION_SEC: Record<string, number> = { five_hour: 5 * 3600, weekly: 7 * 24 * 3600, monthly: 30 * 24 * 3600 };
 
 function formatDurationShort(totalSec: number): string {
   const sec = Math.max(0, Math.round(totalSec));
@@ -66,6 +67,19 @@ function paceAnnotation(quota: QuotaRow, nowSec: number): { text: string; tone: 
   const projected = rate * duration;
   return { text: `≈${Math.round(Math.min(999, projected * 100))}% by reset`, tone: "warn" };
 }
+/**
+ * The pacing verdict the mesh acts on, quoted verbatim from the daemon so the phone tells the
+ * same story as `forge mesh`: used vs allowed, and whether routing is holding models back. The
+ * daemon only attaches it to the window pacing is judged by, and its summary already reads
+ * "pace unknown" when no reset time was known (`usedNominalFallback`), so nothing is
+ * re-derived here from `fraction` and `resetsAt`.
+ */
+function pacingAnnotation(quota: QuotaRow): { text: string; over: boolean } | null {
+  const pacing = quota.pacing;
+  if (!pacing) return null;
+  return { text: pacing.summary, over: pacing.overPace && !pacing.usedNominalFallback };
+}
+
 /** One rendered provider block: token usage (when any), quota windows (when any) — a
  * provider with live quota but no recorded tokens still shows, bars visible. */
 interface ProviderItem {
@@ -96,6 +110,7 @@ const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: {
         const barColor = quota.status === "exhausted" ? tokens.danger : quota.status === "warning" ? tokens.warn : tokens.accent;
         const right = [pct == null ? "—" : `${pct}%`, resetLabel(quota.resetsAt), observationLabel(quota.updatedAt, nowSec)].filter(Boolean).join(" · ");
         const pace = paceAnnotation(quota, nowSec);
+        const pacing = pacingAnnotation(quota);
         return (
           <View key={quota.windowKind}>
             <View style={styles.quota} accessibilityLabel={`${WINDOW_LABEL[quota.windowKind] ?? quota.windowKind} window ${right}`}>
@@ -109,6 +124,12 @@ const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: {
               <View style={styles.paceRow}>
                 <View style={[styles.paceDot, { backgroundColor: pace.tone === "danger" ? tokens.danger : tokens.warn }]} />
                 <Text style={[type.monoMeta, tabularNums, { color: pace.tone === "danger" ? tokens.danger : tokens.warn }]}>{pace.text}</Text>
+              </View>
+            ) : null}
+            {pacing ? (
+              <View style={styles.paceRow}>
+                <View style={[styles.paceDot, { backgroundColor: pacing.over ? tokens.warn : tokens.ink3 }]} />
+                <Text style={[type.monoMeta, tabularNums, { color: pacing.over ? tokens.warn : tokens.ink3 }]}>{pacing.text}</Text>
               </View>
             ) : null}
           </View>

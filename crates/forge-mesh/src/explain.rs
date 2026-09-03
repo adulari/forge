@@ -13,6 +13,15 @@ use crate::catalog::{self, ConserveDecision, ScoreRow};
 use crate::classification::score_prompt;
 use crate::{BudgetState, HeuristicRouter, RouteHints, RoutingContext};
 
+/// The provider name surfaces display for one whose aliases share a single account: the Codex
+/// OAuth surface and the Codex CLI bridge are one subscription, so they are one row.
+pub fn display_provider(provider: &str) -> &str {
+    match provider {
+        "codex-oauth" => "codex-cli",
+        provider => provider,
+    }
+}
+
 /// One model in the ranked candidate table, with the router's usability overlay.
 #[derive(Debug, Clone)]
 /// Documented in docs/features/mesh-routing.md.
@@ -23,6 +32,13 @@ pub struct CandidateRow {
     pub usable: bool,
     /// The model the mesh actually routed this prompt to.
     pub selected: bool,
+    /// Set when a routing rule — not this row's catalog score — decided where it ranks, naming
+    /// that rule (`cost-aware sibling`, `pacing hold`, `quota pressure`, `quality anchor`).
+    /// `row.final_score` stays the catalog score throughout; the ordering adjustments are
+    /// structural, so the honest presentation is to mark the row rather than invent a number for
+    /// it. Without this the table looked like it contradicted its own ranking — rank #1 above a
+    /// rank #2 with a higher score.
+    pub reorder_reason: Option<&'static str>,
 }
 
 /// A subscription provider's quota pressure + the spread probability for the explained tier.
@@ -44,6 +60,11 @@ pub struct ProviderQuotaView {
     /// True when that projection would exceed the window before it resets — mirrors
     /// [`forge_types::QuotaPace::exhaustion_warning`].
     pub exhaustion_warning: bool,
+    /// The pacing decision the router acted on for this provider, verbatim. `None` when no quota
+    /// window was observed at all.
+    pub pacing: Option<forge_types::SubscriptionPacing>,
+    /// What pacing withholds from routing right now, when this provider is over pace.
+    pub hold: Option<crate::PacingHold>,
 }
 
 /// The full explanation of one routing decision.
@@ -220,7 +241,7 @@ impl HeuristicRouter {
         // context window doesn't fit, is something `decide()` would NEVER actually pick; showing
         // it as `usable: true` here made the real pick (further down the list, first genuinely
         // eligible row) look inconsistent with the table, when the pick was correct all along.
-        let ordered_visible = self.ordered_usable_for_tier(
+        let (ordered_visible, reorder_reasons) = self.ordered_usable_for_tier_with_reasons(
             routed_tier,
             health,
             hints,
@@ -262,9 +283,13 @@ impl HeuristicRouter {
                 rank: i + 1,
                 usable: visible_models.contains(row.model.as_str()),
                 selected: row.model == decision.model,
+                reorder_reason: reorder_reasons
+                    .iter()
+                    .find(|(model, _)| *model == row.model)
+                    .map(|(_, reason)| *reason),
                 row,
             })
-            .collect();
+            .collect::<Vec<CandidateRow>>();
 
         // Quota views for each subscription provider present in the catalog.
         let mut sub_providers: Vec<String> = self
@@ -275,10 +300,7 @@ impl HeuristicRouter {
                     .models()
                     .iter()
                     .filter(|m| catalog::is_subscription(m))
-                    .map(|m| match catalog::provider_of(m) {
-                        "codex-oauth" => "codex-cli".to_string(),
-                        provider => provider.to_string(),
-                    })
+                    .map(|m| display_provider(catalog::provider_of(m)).to_string())
                     .collect();
                 v.sort();
                 v.dedup();
@@ -286,12 +308,23 @@ impl HeuristicRouter {
             })
             .unwrap_or_default();
         sub_providers.retain(|p| !p.is_empty());
+        // Pacing is a property of the candidate set for the tier that actually routed, so it is
+        // computed once here from the same list `decide()` filtered.
+        let paced_candidates = self.candidates_for_tier(routed_tier, hints, quota, effort);
+        let holds = self.pacing_holds(&paced_candidates, quota);
         let quota_views = sub_providers
             .into_iter()
             .map(|p| {
                 let fraction = quota.observed_fraction_for(&p);
                 let plan = quota.plan_for(&p).to_string();
                 let pace = quota.pace_for(&p);
+                // Views are keyed by the display provider (`codex-oauth` folds into
+                // `codex-cli`), so a hold recorded under either alias belongs on this row — and
+                // carries the pacing decision when only the alias key has one.
+                let hold = holds
+                    .iter()
+                    .find(|hold| display_provider(&hold.provider) == p)
+                    .cloned();
                 ProviderQuotaView {
                     // Feed the inspector the same pace-projected fraction real routing uses, so
                     // `spread_probability` here matches what `conserve_decision` actually computes
@@ -307,6 +340,11 @@ impl HeuristicRouter {
                     plan,
                     projected_fraction_at_reset: pace.and_then(|p| p.projected_fraction_at_reset),
                     exhaustion_warning: pace.is_some_and(|p| p.exhaustion_warning),
+                    pacing: quota
+                        .pacing_for(&p)
+                        .cloned()
+                        .or_else(|| hold.as_ref().map(|hold| hold.pacing.clone())),
+                    hold,
                     provider: p,
                 }
             })
@@ -467,6 +505,115 @@ mod tests {
                 .map(|candidate| &candidate.row.model)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn explanation_names_the_models_pacing_holds() {
+        let r = HeuristicRouter::new(Config::default())
+            .with_availability(|_| true)
+            .with_catalog(ModelCatalog::new(vec![
+                "codex-oauth::gpt-5.6-sol".into(),
+                "codex-oauth::gpt-5.6-terra".into(),
+                "codex-oauth::gpt-5.6-luna".into(),
+                "groq::llama-3.3-70b-versatile".into(),
+            ]));
+        let quota = SubscriptionQuota::default().with_pacing(std::collections::HashMap::from([(
+            "codex-oauth".to_string(),
+            forge_types::SubscriptionPacing {
+                window: "weekly".to_string(),
+                fraction_used: 0.27,
+                allowed_fraction: 0.21,
+                elapsed_secs: 2 * 24 * 60 * 60,
+                total_secs: 7 * 24 * 60 * 60,
+                resets_at: Some(1_000_000),
+                used_nominal_fallback: false,
+            },
+        )]));
+        let e = r.explain(
+            "design and prove correct a lock-free queue",
+            BudgetState::default(),
+            &ModelHealth::default(),
+            &quota,
+            None,
+            &ProjectContext::default(),
+        );
+        let row = e
+            .quota
+            .iter()
+            .find(|row| row.provider == "codex-cli")
+            .expect("the codex account is one row under its display name");
+        let hold = row.hold.as_ref().expect("an over-pace provider is held");
+        assert!(
+            hold.held.contains(&"codex-oauth::gpt-5.6-sol".to_string()),
+            "{:?}",
+            hold.held
+        );
+        assert!(row.pacing.as_ref().is_some_and(|p| p.is_over_pace()));
+        assert!(
+            e.rationale.contains("held: weekly 27% > 21% allowed"),
+            "{}",
+            e.rationale
+        );
+    }
+
+    #[test]
+    fn a_rule_decided_rank_is_marked_with_that_rule() {
+        // Live 2026-09-02 (v2.13.7): the table showed `#1 claude-cli::opus[1m] score 7.45` above
+        // `#2 claude-cli::fable score 8.63` — the ordering was correct (a cost-aware sibling pick
+        // inside claude-cli over its pace) but the printed column looked like it contradicted it.
+        let r = HeuristicRouter::new(Config::default())
+            .with_availability(|_| true)
+            .with_catalog(ModelCatalog::new(vec![
+                "claude-cli::opus".into(),
+                "claude-cli::fable".into(),
+                "nvidia::moonshotai/kimi-k3".into(),
+                "groq::llama-3.3-70b-versatile".into(),
+            ]));
+        let quota = SubscriptionQuota::default().with_pacing(std::collections::HashMap::from([(
+            "claude-cli".to_string(),
+            forge_types::SubscriptionPacing {
+                window: "weekly".to_string(),
+                fraction_used: 0.37,
+                allowed_fraction: 0.21,
+                elapsed_secs: 2 * 24 * 60 * 60,
+                total_secs: 7 * 24 * 60 * 60,
+                resets_at: Some(1_000_000),
+                used_nominal_fallback: false,
+            },
+        )]));
+        let e = r.explain(
+            "refactor the failover loop in model_request.rs and add tests",
+            BudgetState::default(),
+            &ModelHealth::default(),
+            &quota,
+            None,
+            &ProjectContext::default(),
+        );
+
+        let printed: Vec<(usize, &str, f64, Option<&str>)> = e
+            .candidates
+            .iter()
+            .map(|c| {
+                (
+                    c.rank,
+                    c.row.model.as_str(),
+                    c.row.final_score,
+                    c.reorder_reason,
+                )
+            })
+            .collect();
+        // Held models rank below models with lower catalog scores; the row says which rule put
+        // them there instead of restating the score as something it isn't. Pacing holds the WHOLE
+        // over-pace provider (#1261), so every claude-cli row carries the tag, not just the
+        // costlier sibling.
+        for c in &e.candidates {
+            let expected = c
+                .row
+                .model
+                .starts_with("claude-cli::")
+                .then_some("pacing hold");
+            assert_eq!(c.reorder_reason, expected, "{printed:?}");
+        }
     }
 
     #[test]

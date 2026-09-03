@@ -26,6 +26,32 @@ pub use cli_provider::{
     codex_cli_detected_plan, codex_rollout_is_account_wide, BridgeModelSource, BridgeModels,
     ClaudeInitialization, ClaudeModelCapability, CliKind, CliProvider, SUBAGENT_SINK_ENV,
 };
+
+/// Whether `provider` is a CLI bridge that is known to have no credentials right now, so routing
+/// can drop it instead of spawning it to be told. Non-bridge providers are never "known absent"
+/// here — their key check lives in `forge_config` — so this is a pure filter, not a policy about
+/// which providers exist.
+/// Whether ANY installed CLI bridge has POSITIVE evidence of a login. Distinct from
+/// [`CliKind::routable`], which deliberately treats `Unknown` as routable so an unproven bridge
+/// still gets a turn: for "does this machine have any way to reach a model at all", an unproven
+/// login is not a credential, and answering yes hides the setup guidance from the person who most
+/// needs it.
+pub fn any_bridge_logged_in() -> bool {
+    CliKind::all().into_iter().any(|kind| {
+        kind.available()
+            && cli_provider::credentials::credentials(kind)
+                == cli_provider::credentials::CliCredentials::Present
+    })
+}
+
+pub fn bridge_credentials_known_absent(provider: &str) -> bool {
+    CliKind::all().into_iter().any(|kind| {
+        kind.prefix() == provider
+            && cli_provider::credentials::credentials(kind)
+                == cli_provider::credentials::CliCredentials::Absent
+    })
+}
+
 pub use codex_oauth::{
     detected_plan as codex_oauth_detected_plan, exchange_code as exchange_codex_oauth_code,
     has_session as has_codex_oauth_session, is_pinned_codex_url,
@@ -76,6 +102,13 @@ pub fn normalize_model_id(model: &str) -> std::borrow::Cow<'_, str> {
 /// whole bridge in confusion. `xai-oauth::…` is deliberately EXCLUDED: it's subscription-billed
 /// like a bridge, but it's a normal single-turn API call whose tool calls DO surface to the
 /// parent's own loop.
+/// The one-time notice shown before a turn first runs on a CLI bridge. Exported so the session
+/// can present it in Forge's own voice while the provider layer keeps a copy for the log.
+pub const CLI_BRIDGE_NOTICE: &str = "CLI-bridge runs your locally-installed claude/codex; Forge \
+     never sees your login. Using subscription CLIs from third-party tools may be restricted by \
+     Anthropic/OpenAI terms — you run this at your own discretion. See \
+     docs/features/provider-integrations.md.";
+
 pub fn is_cli_bridge(model: &str) -> bool {
     let m = normalize_model_id(model);
     m.starts_with("claude-cli::") || m.starts_with("codex-cli::") || m.starts_with("agy-cli::")
@@ -815,9 +848,14 @@ impl DispatchProvider {
         self
     }
 
+    /// The CLI-bridge terms notice. It goes to the LOG, not the user's turn output: a
+    /// `tracing::warn!` in the middle of a run renders with a timestamp and module path, unlike
+    /// every other user-facing line, and it lands mid-stream between the routing line and the
+    /// model's first token. The session emits the same text once through the presenter instead,
+    /// so it reads like the rest of Forge and appears before the turn starts.
     fn cli_notice(&self) {
         self.notice.call_once(|| {
-            tracing::warn!(
+            tracing::debug!(
                 "CLI-bridge runs your locally-installed claude/codex; Forge never sees your \
                  login. Using subscription CLIs from third-party tools may be restricted by \
                  Anthropic/OpenAI terms — you run this at your own discretion. See \

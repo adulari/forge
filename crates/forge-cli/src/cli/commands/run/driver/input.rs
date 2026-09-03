@@ -667,12 +667,16 @@ impl DriverState {
         if let Some(rx) = &mut self.usage_load_rx {
             match rx.try_recv() {
                 Ok(bstats) => {
-                    let (fracs, claude_store_age_secs) = self
+                    let (fracs, pacing, claude_store_age_secs) = self
                         .session
                         .try_lock()
                         .map(|s| {
                             seed_subscription_stats(&s, &bstats);
-                            (s.bridge_fractions(), s.claude_quota_age_secs())
+                            (
+                                s.bridge_fractions(),
+                                s.subscription_pacing(),
+                                s.claude_quota_age_secs(),
+                            )
                         })
                         .unwrap_or_default();
                     self.app.usage_overlay.claude_5h_in = bstats.claude_5h_in;
@@ -682,6 +686,7 @@ impl DriverState {
                     fill_subscription_pcts(
                         &mut self.app.usage_overlay,
                         &fracs,
+                        &pacing,
                         claude_store_age_secs,
                     );
                     self.app.usage_overlay.loading = false;

@@ -194,6 +194,10 @@ pub struct RemoteConfig {
     /// without exposing the rest of the host filesystem.
     #[serde(default)]
     pub project_roots: Vec<String>,
+    /// Register a standalone `forge run` with the local daemon so the run shows up in the Anywhere
+    /// fleet (phone and desktop apps). Off by default: publishing a one-shot run is opt-in.
+    #[serde(default)]
+    pub publish_local_runs: bool,
 }
 
 /// `[anywhere]` config block for the optional managed companion.
@@ -1481,6 +1485,12 @@ pub struct MeshConfig {
     /// list, the router picks the cheapest *usable* candidate (cost-aware routing); a single
     /// string behaves as a one-element list (back-compat).
     pub models: HashMap<String, OneOrMany>,
+    /// Tier names that a *loaded config file* set under `[mesh.models]`, as opposed to the
+    /// shipped cold-start seed. Only these count as an explicit user instruction and therefore
+    /// override auto-discovery for their tier (`Config::explicit_candidates_for`). Never
+    /// (de)serialized — `load()` fills it from the raw TOML of each layer.
+    #[serde(skip)]
+    pub explicit_models: Vec<String>,
     /// Prefer an already-paid subscription (the `claude-cli::`/`codex-cli::` bridges, $0
     /// marginal cost) over a metered API model when both are usable candidates. Default true.
     #[serde(default = "default_prefer_subscription")]
@@ -1612,6 +1622,18 @@ pub struct MeshConfig {
     /// (type `continue` to resume), never a silent stop. Raise for very long agentic turns.
     #[serde(default = "default_max_steps")]
     pub max_steps: usize,
+    /// Hard step ceiling for an UNATTENDED turn (headless `forge run`, a detached session, or
+    /// `--mode bypass`). Nobody can type `continue` there, so `max_steps` is a checkpoint — the
+    /// turn logs a warning with its token spend and keeps going until this ceiling, then ends with
+    /// an error naming the uncommitted work. Interactive sessions ignore this and pause at
+    /// `max_steps` as before.
+    #[serde(default = "default_max_steps_unattended")]
+    pub max_steps_unattended: usize,
+    /// Cumulative input tokens a single turn may consume before it is ended with an error, on any
+    /// surface. The step cap alone does not bound cost (one runaway turn burned 7.0M input tokens
+    /// inside 100 steps). `0` disables the ceiling.
+    #[serde(default = "default_max_turn_input_tokens")]
+    pub max_turn_input_tokens: u64,
     /// Proactively spread complex/standard tasks off the subscription bridges (claude-cli/
     /// codex-cli) onto the free-frontier pool, scaling with how full the weekly/session window is
     /// and how much headroom the plan has (subscription-conservation routing). When true (default)
@@ -1796,6 +1818,17 @@ fn default_max_output_tokens() -> u32 {
 /// bounding a model stuck in a tool-call loop. Configurable via `mesh.max_steps`.
 fn default_max_steps() -> usize {
     100
+}
+
+/// Default hard step ceiling for unattended turns (4× the soft cap). Configurable via
+/// `mesh.max_steps_unattended`.
+fn default_max_steps_unattended() -> usize {
+    400
+}
+
+/// Default per-turn cumulative input-token ceiling. Configurable via `mesh.max_turn_input_tokens`.
+fn default_max_turn_input_tokens() -> u64 {
+    10_000_000
 }
 
 fn default_subscription_conserve() -> bool {
@@ -2098,6 +2131,10 @@ pub enum StatuslineWidget {
     QuotaClaude,
     /// Codex usage % "codex N%" (only when data is available)
     QuotaCodex,
+    /// OpenCode Go usage % for its MOST CONSTRAINED window, e.g. "go 5h 42%". The provider reports
+    /// three simultaneous windows (5-hour / weekly / monthly) and the statusline has room for one,
+    /// so the window is named alongside the percentage rather than left ambiguous.
+    QuotaOpencodeGo,
     /// Consumption-pace meter (mesh-routing.md) for whichever subscription window is
     /// projected closest to exhaustion, e.g. "⏱ claude 5h → 120%" — only renders once enough
     /// usage history has built up to derive a rate (silently absent otherwise, never a guess).
@@ -2282,6 +2319,11 @@ impl Default for Config {
             TaskTier::Complex.as_str().into(),
             many(&[
                 "claude-cli::",
+                // Both subscription bridges belong in the seed, not just one: on a fresh install
+                // with no API keys, whichever CLI the user is logged into is the only thing that
+                // can serve a turn, and an unavailable bridge is filtered by availability anyway.
+                // Listing only claude meant a codex-only machine failed its first prompt.
+                "codex-cli::",
                 "anthropic::claude-opus-5",
                 "groq::llama-3.3-70b-versatile",
             ]),
@@ -2315,6 +2357,8 @@ impl Default for Config {
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
                 compact_cap_tokens: default_compact_cap_tokens(),
                 max_steps: default_max_steps(),
+                max_steps_unattended: default_max_steps_unattended(),
+                max_turn_input_tokens: default_max_turn_input_tokens(),
                 subscription_conserve: default_subscription_conserve(),
                 benchmark_ranking: default_benchmark_ranking(),
                 verify_completeness: default_verify_completeness(),
@@ -2326,6 +2370,7 @@ impl Default for Config {
                 tool_result_context_token_budget: default_tool_result_context_token_budget(),
                 tool_result_context_keep_recent: default_tool_result_context_keep_recent(),
                 bridge_turn_token_cap: default_bridge_turn_token_cap(),
+                explicit_models: Vec::new(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),
@@ -2377,6 +2422,20 @@ impl Config {
             .get(tier.as_str())
             .or_else(|| self.mesh.models.get(TaskTier::Standard.as_str()))
             .map(OneOrMany::first)
+    }
+
+    /// The candidates a config *file* explicitly set for `tier`, in the order written. Empty
+    /// when the tier only carries the shipped seed (or nothing) — no standard-tier fallback,
+    /// because an override is a statement about that one tier.
+    pub fn explicit_candidates_for(&self, tier: TaskTier) -> Vec<String> {
+        if !self.mesh.explicit_models.iter().any(|t| t == tier.as_str()) {
+            return Vec::new();
+        }
+        self.mesh
+            .models
+            .get(tier.as_str())
+            .map(OneOrMany::all)
+            .unwrap_or_default()
     }
 
     /// All candidate model ids configured for a tier (one element for the single-string form),
@@ -2504,11 +2563,10 @@ pub fn load() -> Result<Config, ConfigError> {
         }
     }
 
-    // Honest-config guard: `[mesh.models]` per-tier pins are silently replaced by auto-discovery
-    // ranking whenever `mesh.auto_discover` is on (the default) — documented behaviour
-    // (docs/features/mesh-routing.md §3.1), but a user who hand-writes a tier pin to route around
-    // a live problem (e.g. a near-exhausted subscription) has no way to notice it was never
-    // consulted. Warn once at load time rather than leave that substitution silent.
+    // Record which tiers a real config FILE pinned under `[mesh.models]`. The merged struct
+    // cannot tell those apart from the shipped cold-start seed, and only a file-set tier is an
+    // explicit user instruction strong enough to override auto-discovery (forge-mesh
+    // `candidates_for_tier`; docs/features/mesh-routing.md §3.1).
     let mut model_config_paths = Vec::new();
     if let Some(dir) = config_dir() {
         model_config_paths.push(dir.join("config.toml"));
@@ -2516,10 +2574,10 @@ pub fn load() -> Result<Config, ConfigError> {
     model_config_paths.push(PathBuf::from("./.forge/config.toml"));
     for path in model_config_paths {
         if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Some(warning) =
-                configured_models_ignored_warning(&text, config.mesh.auto_discover)
-            {
-                tracing::warn!("{}: {warning}", path.display());
+            for tier in configured_model_tiers(&text) {
+                if !config.mesh.explicit_models.contains(&tier) {
+                    config.mesh.explicit_models.push(tier);
+                }
             }
         }
     }
@@ -2527,29 +2585,18 @@ pub fn load() -> Result<Config, ConfigError> {
     Ok(config)
 }
 
-/// Pure check behind the "honest-config guard" above: `raw_toml` is one config file's text,
-/// `auto_discover` is the FINAL merged value (a later layer may still flip it back off). Returns
-/// the warning to log, or `None` when there's nothing to warn about.
-fn configured_models_ignored_warning(raw_toml: &str, auto_discover: bool) -> Option<String> {
-    if !auto_discover {
-        return None;
-    }
-    let value: toml::Value = toml::from_str(raw_toml).ok()?;
-    let tiers: Vec<&str> = value
-        .get("mesh")?
-        .get("models")?
-        .as_table()?
-        .keys()
-        .map(String::as_str)
-        .collect();
-    if tiers.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "[mesh.models] sets {tiers:?} but mesh.auto_discover is true (the default) — \
-         auto-discovery ranks the full discovered catalog instead and these per-tier models are \
-         never consulted. Set mesh.auto_discover = false to route strictly from [mesh.models]."
-    ))
+/// The `[mesh.models]` tier keys one config file's text sets, in file order. Empty for a file
+/// with no such table (or unparseable text — `load` has already surfaced that failure).
+fn configured_model_tiers(raw_toml: &str) -> Vec<String> {
+    let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
+        return Vec::new();
+    };
+    value
+        .get("mesh")
+        .and_then(|m| m.get("models"))
+        .and_then(toml::Value::as_table)
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Whether the user has a persisted config file (the onboarding "first run" signal — combined
@@ -3210,33 +3257,48 @@ mod tests {
     }
 
     #[test]
-    fn warns_when_mesh_models_would_be_silently_ignored() {
-        let warning = configured_models_ignored_warning(
-            "[mesh]\nmodels = { complex = \"claude-cli::sonnet\" }\n",
-            true,
+    fn file_set_mesh_models_tiers_are_recorded_as_explicit() {
+        let tiers = configured_model_tiers(
+            "[mesh.models]\ntrivial = \"claude-cli::haiku\"\ncomplex = \"claude-cli::opus\"\n",
         );
-        assert!(
-            warning.is_some(),
-            "an explicit tier pin under auto_discover must warn"
-        );
-        assert!(warning.unwrap().contains("complex"));
+        assert!(tiers.contains(&"trivial".to_string()));
+        assert!(tiers.contains(&"complex".to_string()));
     }
 
     #[test]
-    fn no_warning_when_auto_discover_is_off() {
-        assert!(configured_models_ignored_warning(
-            "[mesh]\nmodels = { complex = \"claude-cli::sonnet\" }\n",
-            false,
-        )
-        .is_none());
+    fn no_explicit_tiers_without_a_mesh_models_table() {
+        assert!(configured_model_tiers("[mesh]\nauto_discover = true\n").is_empty());
+        assert!(configured_model_tiers("").is_empty());
     }
 
     #[test]
-    fn no_warning_when_mesh_models_is_not_set() {
+    fn default_seed_models_are_not_explicit() {
+        let cfg = Config::default();
         assert!(
-            configured_models_ignored_warning("[mesh]\nauto_discover = true\n", true).is_none()
+            !cfg.mesh.models.is_empty(),
+            "the cold-start seed should populate [mesh.models]"
         );
-        assert!(configured_models_ignored_warning("", true).is_none());
+        for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
+            assert!(
+                cfg.explicit_candidates_for(tier).is_empty(),
+                "seed entries must not count as an explicit override ({tier:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_candidates_honour_list_order_and_do_not_fall_back_to_standard() {
+        let mut cfg = Config::default();
+        cfg.mesh.models.insert(
+            "trivial".into(),
+            OneOrMany::Many(vec!["claude-cli::haiku".into(), "groq::llama".into()]),
+        );
+        cfg.mesh.explicit_models = vec!["trivial".into()];
+        assert_eq!(
+            cfg.explicit_candidates_for(TaskTier::Trivial),
+            vec!["claude-cli::haiku".to_string(), "groq::llama".to_string()]
+        );
+        assert!(cfg.explicit_candidates_for(TaskTier::Complex).is_empty());
     }
 
     static TEST_CWD_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();

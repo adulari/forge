@@ -223,6 +223,34 @@ pub(super) fn is_transient_throttle(text: &str) -> bool {
         || l.contains("throttling.ratequota")
 }
 
+/// Markers of a provider rejecting the SHAPE OF THE TRANSCRIPT rather than reporting anything
+/// about its own health: it cannot accept a conversation whose earlier turns were produced by a
+/// different model family.
+///
+/// The live defect: Gemini 3 requires a `thoughtSignature` on every `functionCall` part it is sent
+/// back, and answers a replayed transcript whose tool calls came from claude/gpt/agy with HTTP 400
+/// "Function call is missing a thought_signature in functionCall parts". A generic 400 falls
+/// through [`classify_status`] to the non-retryable [`ProviderError::Request`], which ENDS THE TURN
+/// — a mid-turn failover into Gemini killed a running agent turn outright. Retrying this model
+/// with the same transcript fails identically, but every other model is still fine, so this is a
+/// per-model [`ProviderError::Capability`]: exclude the model, keep failing over.
+pub(super) fn is_transcript_compat_failure(text: &str) -> bool {
+    let l = text.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "thought_signature",
+        "thoughtsignature",
+        "thought signature",
+        "missing signature",
+        "invalid signature",
+        "signature is required",
+        "unsupported content part",
+        "unsupported part type",
+        "unsupported message part",
+        "unsupported content block",
+    ];
+    MARKERS.iter().any(|m| l.contains(m))
+}
+
 /// Markers of a PERMANENT, model-specific incapability — this model can never serve Forge's
 /// tool-using turns, or the account can't afford it. These errors recur identically on every
 /// call, so the model is *excluded* rather than benched-and-retried (the source of the
@@ -385,6 +413,8 @@ pub(super) fn classify_status(
         || model_endpoint_is_missing(code, body)
         || is_capability_failure(body)
         || is_capability_failure(&message)
+        || is_transcript_compat_failure(body)
+        || is_transcript_compat_failure(&message)
     {
         return ProviderError::Capability(message);
     }
@@ -432,7 +462,7 @@ pub(super) fn classify_text(text: &str, message: String) -> ProviderError {
     // Permanent incapability first — a streamed "tool calling is not supported" / "402 requires
     // more credits" must NOT be mistaken for a transient dropped stream (the misclassification
     // bug that benched-and-retried dead models forever).
-    if is_capability_failure(text) {
+    if is_capability_failure(text) || is_transcript_compat_failure(text) {
         ProviderError::Capability(message)
     } else if is_model_access_failure(text) {
         ProviderError::NoModelAccess(message)

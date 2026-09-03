@@ -31,8 +31,8 @@ pub(crate) use cli::commands::mcp::{mcp_cmd, plugin_cmd};
 pub(crate) use cli::commands::memory::memory_cmd;
 pub(crate) use cli::commands::migrate::migrate_cmd;
 pub(crate) use cli::commands::models::{
-    benchmarks_cmd, build_provider_and_router, discover_catalog, load_cached_catalog, mesh_explain,
-    models, save_catalog,
+    benchmarks_cmd, build_provider_and_router, discover_catalog, mesh_explain, models,
+    read_cached_catalog, spawn_catalog_refresh,
 };
 pub(crate) use cli::commands::provider::provider_cmd;
 pub(crate) use cli::commands::queue::{queue_cmd, scoreboard_cmd};
@@ -64,8 +64,10 @@ mod cli;
 mod context_windows;
 mod daemon_cwd;
 mod doctor;
+mod doctor_daemon;
 mod doctor_environment;
 mod doctor_health;
+mod first_run;
 mod image_input;
 pub(crate) mod live_observer;
 mod local;
@@ -150,14 +152,22 @@ async fn main() {
     init_tracing();
 
     let cli = Cli::parse();
-    let telemetry_run = telemetry::start(&cli.command);
+    let Some(command) = cli.command else {
+        let interactive = std::io::stdout().is_terminal();
+        print!(
+            "{}",
+            first_run::welcome_text(first_run::provider_configured(), interactive)
+        );
+        return;
+    };
+    let telemetry_run = telemetry::start(&command);
     if telemetry_run.show_notice() && std::io::stdout().is_terminal() {
         println!(
             "note: Forge sends anonymous usage counts (never code, prompts, paths, or device IDs).\n\
              Disable with `[telemetry] enabled = false` or `DO_NOT_TRACK=1`."
         );
     }
-    let result = cli::dispatch::dispatch(cli.command).await;
+    let result = cli::dispatch::dispatch(command).await;
     telemetry::finish(telemetry_run, result.is_ok());
     if let Err(e) = result {
         print_top_level_error(&e);

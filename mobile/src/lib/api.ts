@@ -126,8 +126,22 @@ export interface WorkflowRun {
  * authors an anonymous script belonging to no library entry). */
 export interface WorkflowRow { name: string; description: string; when_to_use: string | null; phases: string[]; args: WorkflowArg[]; runs: WorkflowRun[]; }
 export interface HookRow { event: string; matcher: string | null; command: string; timeout_secs: number; cc_compat: boolean; }
-export interface ModelsResponse { catalog: "available" | "unavailable"; providers: ModelProvider[]; }
-export interface ModelProvider { provider: string; models: ModelRow[]; }
+export interface ModelsResponse {
+  catalog: "available" | "unavailable";
+  providers: ModelProvider[];
+  /** Epoch second the served catalog was discovered on the host. Absent from a daemon older than
+   * this field — treat as "age unknown", not "stale". */
+  refreshed_at?: number | null;
+  /** The daemon is rediscovering behind this answer; a follow-up fetch returns a newer catalog. */
+  refreshing?: boolean;
+}
+export interface ModelProvider {
+  provider: string;
+  models: ModelRow[];
+  /** Set when the WHOLE provider is excluded from routing (a bad credential benches every alias
+   * at once). Keyed by provider, so it matches no model id — see `catalogModels`. */
+  excluded?: { until_epoch: number; reason: string } | null;
+}
 export interface ModelRow { id: string; name: string; frontier: boolean; free: boolean; paid: boolean; subscription: boolean; estimated_cost_usd: number; health: { until_epoch: number; reason: string } | null; tier?: "trivial" | "standard" | "complex"; benchmark_intelligence?: number | null; benchmark_coding?: number | null; context_window?: number | null; }
 export interface SessionTreeRow { id: string; title: string | null; forked_from: string | null; forked_at_seq: number | null; created_at: number; }
 export interface PlanRow { session_id: string; session_title: string; title: string; steps: { title: string; detail: string }[]; notes: string | null; }
@@ -284,6 +298,19 @@ export interface UsageQuota {
   fraction: number | null;
   /** Optional for compatibility with older daemons that predate quota observation timestamps. */
   updatedAt?: number;
+  /** The mesh's own pacing verdict, only on the window routing is currently paced by. Absent on
+   * the other windows and on daemons that predate it. */
+  pacing?: UsagePacing | null;
+}
+/** Mirrors `SubscriptionPacing` in Rust: quoted verbatim, never re-derived on the client. */
+export interface UsagePacing {
+  fractionUsed: number;
+  allowedFraction: number;
+  elapsedFraction: number;
+  overPace: boolean;
+  /** No reset time was known, so the allowance is a guess and `summary` says "pace unknown". */
+  usedNominalFallback: boolean;
+  summary: string;
 }
 export interface SessionRow {
   id: string;
@@ -724,8 +751,10 @@ export function getWorkflows(baseUrl: string, session?: string): Promise<Workflo
   return request(baseUrl, `/api/workflows${qs({ session })}`);
 }
 
-export function getModels(baseUrl: string): Promise<ModelsResponse> {
-  return request(baseUrl, "/api/models");
+/** `refresh` makes the daemon discover live before answering (slower, up to ~20s) instead of
+ * projecting its cached catalog — what a pull-to-refresh should mean. */
+export function getModels(baseUrl: string, refresh = false): Promise<ModelsResponse> {
+  return request(baseUrl, refresh ? "/api/models?refresh=true" : "/api/models");
 }
 
 export function getProviders(baseUrl: string): Promise<ProvidersResponse> {

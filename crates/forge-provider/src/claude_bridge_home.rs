@@ -36,11 +36,46 @@ const STRIPPED_KEYS: &[&str] = &["hooks", "enabledPlugins", "extraKnownMarketpla
 /// The REAL claude config dir to mirror: `$CLAUDE_CONFIG_DIR` if the user already has one set
 /// (respect it rather than silently ignoring it), else `<home>/.claude`.
 pub fn real_claude_config_dir() -> Option<std::path::PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        return Some(std::path::PathBuf::from(dir));
+    let inherited = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from);
+    let bridge_home = forge_config::config_dir().map(|base| base.join(BRIDGE_HOME_DIR_NAME));
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    resolve_real_config_dir(
+        inherited,
+        bridge_home.as_deref(),
+        home.map(std::path::PathBuf::from),
+    )
+}
+
+/// Directory name of Forge's isolated mirror under the Forge config dir.
+pub const BRIDGE_HOME_DIR_NAME: &str = "claude-bridge-home";
+
+/// The pure core of [`real_claude_config_dir`]. An inherited `CLAUDE_CONFIG_DIR` is honoured —
+/// UNLESS it is Forge's own isolated mirror. A Forge process launched from inside a bridged
+/// `claude` (its `forge mcp-serve` MCP server, and any child session that spawns) inherits the
+/// bridge's `CLAUDE_CONFIG_DIR=<bridge home>`; mirroring that dir onto itself replaces every
+/// entry with a symlink to itself, and every claude bridge on the machine is "Not logged in"
+/// until a spawn with a clean environment rebuilds it (observed 2026-09-02: `.credentials.json ->
+/// <bridge home>/.credentials.json`, rebuilt 41 s before opus was excluded for 30 minutes).
+fn resolve_real_config_dir(
+    inherited: Option<std::path::PathBuf>,
+    bridge_home: Option<&Path>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if let Some(dir) = inherited {
+        let is_own_mirror = bridge_home.is_some_and(|b| same_path(b, &dir));
+        if !is_own_mirror {
+            return Some(dir);
+        }
     }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(std::path::PathBuf::from(home).join(".claude"))
+    Some(home?.join(".claude"))
+}
+
+/// Path equality that survives symlinks and trailing slashes when both sides exist.
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Build (or refresh) `isolated_dir` as a mirror of `real_home` (the user's real claude config
@@ -76,6 +111,13 @@ pub fn real_claude_config_dir() -> Option<std::path::PathBuf> {
 pub fn prepare_claude_bridge_home(real_home: &Path, isolated_dir: &Path) -> anyhow::Result<()> {
     if !real_home.is_dir() {
         return Ok(());
+    }
+    if same_path(real_home, isolated_dir) {
+        anyhow::bail!(
+            "refusing to mirror the claude bridge home onto itself ({}); CLAUDE_CONFIG_DIR was \
+             inherited from a bridged claude",
+            isolated_dir.display()
+        );
     }
     let _guard = BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if mirror_is_current(real_home, isolated_dir) {
@@ -321,6 +363,47 @@ mod tests {
 
     fn write_json(path: &Path, value: &serde_json::Value) {
         std::fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_inherited_bridge_home_is_not_treated_as_the_real_config_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let bridge = root.path().join("forge").join(BRIDGE_HOME_DIR_NAME);
+        std::fs::create_dir_all(&bridge).unwrap();
+        let home = root.path().join("home");
+        let resolved =
+            resolve_real_config_dir(Some(bridge.clone()), Some(&bridge), Some(home.clone()))
+                .unwrap();
+        assert_eq!(
+            resolved,
+            home.join(".claude"),
+            "falls back to the real home"
+        );
+        // A trailing slash or a different spelling of the same dir is still the mirror.
+        let spelled = root.path().join("forge").join("./claude-bridge-home/");
+        let resolved =
+            resolve_real_config_dir(Some(spelled), Some(&bridge), Some(home.clone())).unwrap();
+        assert_eq!(resolved, home.join(".claude"));
+        // A user's own CLAUDE_CONFIG_DIR elsewhere is still honoured.
+        let theirs = root.path().join("their-claude");
+        let resolved =
+            resolve_real_config_dir(Some(theirs.clone()), Some(&bridge), Some(home)).unwrap();
+        assert_eq!(resolved, theirs);
+    }
+
+    #[test]
+    fn prepare_refuses_to_mirror_the_bridge_home_onto_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let bridge = root.path().join(BRIDGE_HOME_DIR_NAME);
+        std::fs::create_dir_all(&bridge).unwrap();
+        std::fs::write(bridge.join(".credentials.json"), "{}").unwrap();
+        let err = prepare_claude_bridge_home(&bridge, &bridge).unwrap_err();
+        assert!(err.to_string().contains("onto itself"), "{err}");
+        let meta = std::fs::symlink_metadata(bridge.join(".credentials.json")).unwrap();
+        assert!(
+            meta.is_file(),
+            "the live credentials file is untouched, not a self-link"
+        );
     }
 
     #[test]

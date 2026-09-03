@@ -32,16 +32,87 @@ fn catalog_cache_path() -> Option<std::path::PathBuf> {
     forge_config::data_dir().map(|d| d.join("catalog.json"))
 }
 
-/// Load the on-disk catalog if it exists and is fresh (< 24 h old).
-pub(crate) fn load_cached_catalog() -> Option<ModelCatalog> {
+/// A catalog read from disk, with whether it is past its freshness window.
+pub(crate) struct CachedCatalog {
+    pub catalog: ModelCatalog,
+    pub stale: bool,
+}
+
+/// Read the on-disk catalog whatever its age, with the epoch second it was written and how many
+/// seconds ago that was.
+///
+/// Routing must never block a turn on rediscovery when ANY catalog exists: the stale cache is a
+/// strictly better routing input than the built-in seed candidates, which carry no prices, no
+/// benchmarks and no burn weights. Freshness is restored by a background refresh, not by making
+/// the user wait (observed 2026-09-02: a 235-model cache one minute past its window cost a 15 s
+/// stall and then routed to a bare `claude-cli::` alias anyway).
+///
+/// A remote surface needs the same read plus the timestamp: it is better served a stale catalog it
+/// can label than an empty list it cannot explain.
+pub(crate) fn load_cached_catalog_aged() -> Option<(ModelCatalog, i64, u64)> {
     let path = catalog_cache_path()?;
     let meta = std::fs::metadata(&path).ok()?;
-    let age = meta.modified().ok()?.elapsed().ok()?;
-    if age.as_secs() > CATALOG_CACHE_MAX_AGE_SECS {
-        return None;
-    }
+    let modified = meta.modified().ok()?;
+    let age = modified.elapsed().unwrap_or_default().as_secs();
+    let epoch = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
     let bytes = std::fs::read(&path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    parse_cached_catalog(&bytes, epoch, age)
+}
+
+/// The cached catalog with a staleness verdict, for the routing path.
+pub(crate) fn read_cached_catalog() -> Option<CachedCatalog> {
+    load_cached_catalog_aged().map(|(catalog, _, age)| CachedCatalog {
+        catalog,
+        stale: age > CATALOG_CACHE_MAX_AGE_SECS,
+    })
+}
+
+fn parse_cached_catalog(bytes: &[u8], epoch: i64, age: u64) -> Option<(ModelCatalog, i64, u64)> {
+    let catalog: ModelCatalog = serde_json::from_slice(bytes).ok()?;
+    // The cache was written when the bridge had a login; a logged-out one must not be routed to
+    // for up to 24 h afterwards, one dead failover hop per alias it advertises.
+    let catalog = catalog.retaining(|model| {
+        !forge_provider::bridge_credentials_known_absent(forge_config::provider_of(model))
+    });
+    Some((catalog, epoch, age))
+}
+
+/// Load the on-disk catalog if it exists and is fresh (< 24 h old).
+pub(crate) fn load_cached_catalog() -> Option<ModelCatalog> {
+    read_cached_catalog()
+        .filter(|cached| !cached.stale)
+        .map(|cached| cached.catalog)
+}
+
+static CATALOG_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Claim the single-flight background-refresh slot. `false` means a refresh is already running in
+/// this process and the caller must not start another — every session startup would otherwise fan
+/// out its own full provider sweep.
+pub(crate) fn try_begin_catalog_refresh() -> bool {
+    !CATALOG_REFRESH_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+fn end_catalog_refresh() {
+    CATALOG_REFRESH_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Rediscover the catalog off the turn's critical path and persist it. A refresh that lands
+/// mid-session takes effect on the NEXT startup; nothing waits on it.
+pub(crate) fn spawn_catalog_refresh(config: &forge_config::Config) {
+    if !try_begin_catalog_refresh() {
+        return;
+    }
+    let config = config.clone();
+    tokio::spawn(async move {
+        let fresh = discover_catalog(&config).await;
+        save_catalog(&fresh);
+        end_catalog_refresh();
+    });
 }
 
 /// Persist `catalog` to disk for the next startup to load instantly.
@@ -337,7 +408,10 @@ pub(crate) async fn discover_catalog_with_status(
     let bridge_lists = futures::future::join_all(
         forge_provider::CliKind::all()
             .into_iter()
-            .filter(|k| k.available())
+            // `routable`, not `available`: a bridge whose CLI is installed but has no login
+            // contributes only failover hops that cannot succeed — on a keyless install that was
+            // three CLIs and ~3.5 minutes before the one correct message appeared.
+            .filter(|k| k.routable())
             .map(|k| async move {
                 let prefix = k.prefix();
                 let discovered = match config.mesh.bridge_models.get(prefix) {
@@ -347,9 +421,13 @@ pub(crate) async fn discover_catalog_with_status(
                     _ => k.bridge_models_detailed().await,
                 };
                 let status = bridge_discovery_status(prefix, &discovered);
+                // The probe just above is itself a credential check: a CLI that answers "please
+                // sign in" to a model listing has told us its aliases are all dead. Without this
+                // the fallback table still seeded the catalog and the turn routed to it anyway.
                 let models = discovered
                     .models
                     .into_iter()
+                    .filter(|_| k.routable())
                     .filter(|m| !m.is_empty())
                     .map(|m| format!("{prefix}::{m}"))
                     .collect::<Vec<_>>();
@@ -361,6 +439,7 @@ pub(crate) async fn discover_catalog_with_status(
         models.extend(list);
         statuses.push(status);
     }
+    let live_models = models.len();
     // Keep the configured tier candidates as a cold-start safety net. A provider's model-list
     // endpoint can be unavailable while its completion endpoint still works (the doctor output
     // calls this out); without these seeds, a transient listing failure silently removed that
@@ -388,6 +467,17 @@ pub(crate) async fn discover_catalog_with_status(
     // Drop any model/provider the user disabled (`[mesh] disabled`), so the mesh never routes to
     // or fails over onto it (known-issues.md: disable a flaky model without deleting its key).
     models.retain(|m| !forge_config::is_model_disabled(m, &config.mesh.disabled));
+    // Nothing above found a single usable model: no key, no bridge, no OAuth session, no local
+    // Ollama. Every enrichment below is a network round trip (openrouter.ai + models.dev listings,
+    // balance probes, the benchmark feed) that can only annotate models that exist, so a keyless
+    // run would pay ~0.5-6 s of fetches just to be told it is unroutable.
+    if !enrichment_needed(live_models) {
+        tracing::debug!(
+            "no credentialed or local model source found — skipping catalog enrichment \
+             (context windows, prices, balances, benchmarks)"
+        );
+        return (forge_mesh::ModelCatalog::new(models), statuses);
+    }
     // Fetch + persist real per-model context windows (OpenRouter exposes `context_length`) so the
     // core can trim each turn to the routed model's window instead of overflowing it. Best-effort;
     // the family heuristic covers everything else.
@@ -414,6 +504,15 @@ pub(crate) async fn discover_catalog_with_status(
 
 pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mesh::ModelCatalog {
     discover_catalog_with_status(config).await.0
+}
+
+/// Whether the catalog is worth enriching over the network. `live_models` counts what the
+/// credentialed and local sources actually returned, BEFORE the configured seed candidates are
+/// appended: seeds are a safety net for a provider whose listing blipped, not evidence that any
+/// provider is usable. Zero live models means nothing can route, so fetching context windows,
+/// prices, balances and benchmarks for them is pure latency.
+fn enrichment_needed(live_models: usize) -> bool {
+    live_models > 0
 }
 
 fn bridge_discovery_status(
@@ -496,8 +595,49 @@ pub(crate) async fn drop_unaffordable_models(
 }
 
 #[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_cache_is_still_returned_for_routing() {
+        let json = serde_json::to_vec(&ModelCatalog::new(vec!["groq::a".to_string()])).unwrap();
+        let (_, epoch, age) = parse_cached_catalog(&json, 1_700_000_000, 60).unwrap();
+        assert_eq!(epoch, 1_700_000_000);
+        assert!(age <= CATALOG_CACHE_MAX_AGE_SECS);
+        // Two hours past the window: the old policy dropped this and blocked the turn on a full
+        // rediscovery. It must now still be handed to the router, flagged stale.
+        let (catalog, _, stale_age) =
+            parse_cached_catalog(&json, 1_700_000_000, CATALOG_CACHE_MAX_AGE_SECS + 7200).unwrap();
+        assert!(stale_age > CATALOG_CACHE_MAX_AGE_SECS);
+        assert_eq!(catalog.models(), ["groq::a".to_string()]);
+    }
+
+    #[test]
+    fn background_catalog_refresh_is_single_flight() {
+        assert!(try_begin_catalog_refresh());
+        assert!(
+            !try_begin_catalog_refresh(),
+            "a second startup must not launch a parallel provider sweep"
+        );
+        end_catalog_refresh();
+        assert!(try_begin_catalog_refresh());
+        end_catalog_refresh();
+    }
+}
+
+#[cfg(test)]
 mod bridge_status_tests {
     use super::*;
+
+    #[test]
+    fn keyless_discovery_skips_every_network_enrichment() {
+        assert!(!enrichment_needed(0), "nothing routable → no fetches");
+        assert!(
+            enrichment_needed(1),
+            "one live model needs its window/price"
+        );
+        assert!(enrichment_needed(259));
+    }
 
     #[test]
     fn failed_live_bridge_lookup_reports_fallback_and_reason() {

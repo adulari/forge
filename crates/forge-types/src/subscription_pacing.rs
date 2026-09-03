@@ -68,11 +68,26 @@ impl SubscriptionPacing {
     pub fn is_over_pace(&self) -> bool {
         self.fraction_used > self.allowed_fraction
     }
+
+    /// Fraction of the window that has elapsed (0.0–1.0) — the "at X% elapsed" half of a pacing
+    /// claim, which is meaningless without the used/allowed pair beside it.
+    pub fn elapsed_fraction(&self) -> f64 {
+        if self.total_secs <= 0 {
+            return 0.0;
+        }
+        self.elapsed_secs as f64 / self.total_secs as f64
+    }
 }
 
 /// Nominal duration for quota windows with a defined subscription pacing policy.
+///
+/// `monthly` is a calendar window, so 30 days is only a nominal length: providers that report it
+/// (OpenCode Go) always send an authoritative `resets_at`, which [`SubscriptionPacing::from_window`]
+/// prefers. The nominal value is the fallback that keeps the window paceable rather than silently
+/// ignored when a reset instant is missing.
 pub fn nominal_window_secs(window: &str) -> Option<i64> {
     match window {
+        "monthly" => Some(30 * 24 * 60 * 60),
         "weekly" => Some(7 * 24 * 60 * 60),
         "five_hour" => Some(5 * 60 * 60),
         _ => None,
@@ -158,5 +173,45 @@ mod tests {
 
     fn four_hours(five_hours: i64) -> i64 {
         five_hours - 60 * 60
+    }
+
+    #[test]
+    fn monthly_windows_are_paced_against_their_authoritative_reset() {
+        let total = nominal_window_secs("monthly").unwrap();
+        assert_eq!(total, 30 * 24 * 60 * 60);
+        let reset = 2_000_000;
+        // Half the month elapsed: linear allowance is half of the 75% spendable fraction.
+        let now = reset - total / 2;
+        let pacing =
+            SubscriptionPacing::from_windows(&[window("monthly", 0.50, 0, Some(reset))], now)
+                .unwrap();
+        assert_eq!(pacing.window, "monthly");
+        assert!(!pacing.used_nominal_fallback);
+        assert!((pacing.allowed_fraction - 0.375).abs() < 1e-9);
+        assert!(
+            pacing.is_over_pace(),
+            "50% spent at 37.5% allowed is over pace"
+        );
+    }
+
+    #[test]
+    fn a_pressured_monthly_window_can_outrank_healthy_shorter_windows() {
+        // OpenCode Go reports all three windows at once; the most constrained must win, including
+        // when that is the new monthly kind.
+        let now = 5_000_000;
+        let month = nominal_window_secs("monthly").unwrap();
+        let week = nominal_window_secs("weekly").unwrap();
+        let five = nominal_window_secs("five_hour").unwrap();
+        let pacing = SubscriptionPacing::from_windows(
+            &[
+                window("five_hour", 0.01, now, Some(now + five / 2)),
+                window("weekly", 0.05, now, Some(now + week / 2)),
+                window("monthly", 0.80, now, Some(now + month / 2)),
+            ],
+            now,
+        )
+        .unwrap();
+        assert_eq!(pacing.window, "monthly");
+        assert!(pacing.is_over_pace());
     }
 }

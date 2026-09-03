@@ -23,6 +23,13 @@ pub(crate) use dispatcher::*;
 
 pub use adapter_kind::*;
 
+/// OpenCode Go per-model wire-format routing (see `adapters::opencode_go`): the proxy serves
+/// each model on one of three formats and `/models` does not say which, so a caller that hits
+/// the measured failure shape can register the model as Responses-served for the process.
+pub mod opencode_go {
+	pub use super::adapters::opencode_go::{is_responses_model, mark_responses_model, unmark_responses_model};
+}
+
 /// Build the stable Gemini request configuration (`systemInstruction` + `tools`) in the exact
 /// wire format used by the Gemini adapter. Callers can store this in Google's `cachedContents`
 /// API and then reference it from generation requests.

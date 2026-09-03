@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// Whether to poll the OpenCode Go usage endpoint at session startup. Unlike the Codex probe this
+/// costs no subscription burn (it is a plain GET, not a model request), but it is still skipped for
+/// mock sessions and for any fully-qualified pin, which bypasses mesh selection entirely.
+fn should_refresh_opencode_go_quota(mock: bool, pin: Option<&str>) -> bool {
+    should_refresh_codex_quota(mock, pin)
+}
+
 fn should_refresh_codex_quota(mock: bool, pin: Option<&str>) -> bool {
     if mock {
         return false;
@@ -70,6 +77,7 @@ pub(crate) async fn build_session_with_self_mcp(
     allow_self_mcp: bool,
     session_cwd: Option<&str>,
 ) -> Result<Session> {
+    let mut clock = StartupClock::start();
     if let Some(session_id) = resume.as_deref() {
         if crate::open_store()?
             .session_handoff_blocked(session_id)
@@ -84,8 +92,10 @@ pub(crate) async fn build_session_with_self_mcp(
     forge_config::inject_provider_keys();
     // …and the search-API key visible to the web_search tool.
     forge_config::inject_search_keys();
+    clock.mark("inject keyring keys");
 
     let mut config = forge_config::load().context("loading configuration")?;
+    clock.mark("config load");
     if let Some(m) = mode {
         config.permission_mode = m.into();
     }
@@ -143,6 +153,7 @@ pub(crate) async fn build_session_with_self_mcp(
     let pin = pin.map(|p| forge_provider::normalize_model_id(&p).into_owned());
 
     let store = Arc::new(open_store()?);
+    clock.mark("store open + migrations");
     // Never construct a session router from an expired Codex pressure reading. The helper uses a
     // fresh CLI rollout when available, otherwise performs one bounded minimal OAuth probe; it
     // updates the shared codex-oauth/codex-cli quota bucket before this session's first route.
@@ -150,6 +161,14 @@ pub(crate) async fn build_session_with_self_mcp(
     // startup work and can block the requested provider behind an unavailable Secret Service.
     if should_refresh_codex_quota(mock, pin.as_deref()) {
         crate::cli::commands::models::refresh_codex_quota(&store).await;
+        clock.mark("codex quota refresh");
+    }
+    // OpenCode Go's windows only move when polled — its chat completions carry no rate-limit
+    // headers — so the same pre-routing refresh keeps its pacing from running on stale data. The
+    // helper's own freshness gate bounds this to one request every few minutes.
+    if should_refresh_opencode_go_quota(mock, pin.as_deref()) {
+        crate::cli::commands::models::refresh_opencode_go_quota(&store).await;
+        clock.mark("opencode go quota refresh");
     }
     let store_for_lattice = Arc::clone(&store);
     // Startup hint: if models are benched from a prior run/probe, tell the user how to recheck
@@ -181,46 +200,28 @@ pub(crate) async fn build_session_with_self_mcp(
     // Auto-discovery: build a live model catalog so the mesh routes to the best usable model
     // (docs/features/mesh-routing.md). Skipped for the offline mock and when disabled.
     //
-    // Cache-first: if a catalog from the last 24 h exists on disk, use it instantly and kick off
-    // a background refresh so the NEXT startup is also fast. On first run (or stale cache) we
-    // do the full network discovery (bounded at 15 s) and save it for next time.
+    // Cache-first, ALWAYS: whenever a catalog exists on disk we route from it immediately —
+    // stale or not — and refresh it in the background (single-flight per process) for the next
+    // startup. A turn must never wait on rediscovery: the stale cache is a strictly better
+    // routing input than the built-in seeds, which carry no prices, benchmarks or burn weights,
+    // so blocking bought a 15 s stall AND a worse decision. Only a completely absent catalog
+    // falls back to the seeds, and then it says so — here and in every routing rationale.
     let catalog = if !mock && config.mesh.auto_discover {
-        if let Some(cached) = load_cached_catalog() {
-            // Fast path — instant startup. Refresh in background for the next run.
-            let cfg = config.clone();
-            tokio::spawn(async move {
-                let fresh = discover_catalog(&cfg).await;
-                save_catalog(&fresh);
-            });
-            Some(cached)
-        } else {
-            // First run or stale cache — block on discovery, then persist the result.
-            const DISCOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
-            match tokio::time::timeout(DISCOVERY_BUDGET, discover_catalog(&config)).await {
-                Ok(cat) => {
-                    if !cat
-                        .models()
-                        .iter()
-                        .any(|model| model.starts_with("ollama::"))
-                    {
-                        presenter.emit(forge_tui::PresenterEvent::Warning(
-                            "mesh skipped Ollama: the server is unreachable or no local models are pulled"
-                                .to_string(),
-                        ));
-                    }
-                    save_catalog(&cat);
-                    Some(cat)
-                }
-                Err(_) => {
-                    presenter.emit(forge_tui::PresenterEvent::Warning(format!(
-                        "model auto-discovery exceeded {}s — using built-in defaults for now; run \
-                         `forge models` to refresh once your network/providers respond",
-                        DISCOVERY_BUDGET.as_secs()
-                    )));
-                    None
-                }
-            }
+        let cached = read_cached_catalog();
+        if cached.is_none() {
+            presenter.emit(forge_tui::PresenterEvent::Warning(
+                "no model catalog yet: built-in seed candidates for this session — discovery is \
+                 running in the background and the next turn routes from the real catalog"
+                    .to_string(),
+            ));
         }
+        clock.mark(if cached.is_some() {
+            "catalog from cache"
+        } else {
+            "no catalog: built-in seed"
+        });
+        spawn_catalog_refresh(&config);
+        cached.map(|cached| cached.catalog)
     } else {
         None
     };
@@ -267,6 +268,7 @@ pub(crate) async fn build_session_with_self_mcp(
         .ok()
         .and_then(|s| s.all_model_contexts().ok())
         .unwrap_or_default();
+    clock.mark("calibration + context windows");
     let workspace_root = match session_cwd {
         Some(cwd) => std::path::PathBuf::from(cwd)
             .canonicalize()
@@ -297,6 +299,7 @@ pub(crate) async fn build_session_with_self_mcp(
         ctx_windows,
         repo_boosts,
     );
+    clock.mark("provider + router");
 
     // Build the code-intelligence index up front so it can be shared between the model-facing
     // `lattice` tool and the turn's auto-injection (code-intelligence.md). Cheap to construct; it
@@ -370,6 +373,7 @@ pub(crate) async fn build_session_with_self_mcp(
         )
         .context("starting session")?,
     };
+    clock.mark("tools + lattice + session start");
     if let Some(update_rx) = lattice_update_rx {
         session.set_lattice_update(Some(update_rx));
     }
@@ -453,7 +457,36 @@ pub(crate) async fn build_session_with_self_mcp(
             forge_lsp::LspRegistry::from_config(&lsp_config),
         )));
     }
+    clock.mark("skills + mcp + lsp");
     Ok(session)
+}
+
+/// Startup phase timer: one debug line per phase (`RUST_LOG=forge=debug`), so a slow launch can
+/// be attributed to a phase instead of guessed at. Costs one `Instant::now()` per mark.
+struct StartupClock {
+    started: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl StartupClock {
+    fn start() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            started: now,
+            last: now,
+        }
+    }
+
+    fn mark(&mut self, phase: &str) {
+        let now = std::time::Instant::now();
+        tracing::debug!(
+            target: "forge::startup",
+            "{phase}: {} ms (t+{} ms)",
+            now.duration_since(self.last).as_millis(),
+            now.duration_since(self.started).as_millis()
+        );
+        self.last = now;
+    }
 }
 
 /// Build a session with the default surface (TUI on a tty, else plain).

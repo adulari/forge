@@ -45,6 +45,12 @@ pub struct UsageOverlay {
     pub claude_5h_pct: Option<f64>,
     /// Claude weekly used % (0–100), from ~/.claude/.rate-limits-cache.json.
     pub claude_weekly_pct: Option<f64>,
+    /// OpenCode Go 5-hour (`rolling`) used % (0–100), polled from its usage endpoint.
+    pub opencode_go_5h_pct: Option<f64>,
+    /// OpenCode Go weekly used % (0–100).
+    pub opencode_go_weekly_pct: Option<f64>,
+    /// OpenCode Go monthly used % (0–100). Go is the only provider reporting a monthly window.
+    pub opencode_go_monthly_pct: Option<f64>,
     /// Claude tokens (input incl cache) used in the last 5 hours.
     pub claude_5h_in: u64,
     pub claude_5h_out: u64,
@@ -56,9 +62,40 @@ pub struct UsageOverlay {
     pub claude_rl_age_secs: Option<i64>,
     /// Animation tick counter (incremented each tick, used for spinner).
     pub anim_tick: u32,
+    /// One pacing marker per subscription with an observed window, in display order.
+    pub pace_notes: Vec<UsagePaceNote>,
+}
+
+/// One provider's pacing verdict in the `/usage` overlay. Rendered by the mesh
+/// (`forge_mesh::pacing_summary`) from the router's own `SubscriptionPacing`, so this screen and
+/// `forge mesh` can never disagree about whether a window is over pace.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct UsagePaceNote {
+    /// Short provider label ("codex", "claude", "opencode_go").
+    pub provider: String,
+    /// "weekly 32% used · 22% allowed · OVER PACE", "… · on pace", or "pace unknown …".
+    pub note: String,
+    /// True only for a real over-pace verdict — never for a nominal-window guess.
+    pub over_pace: bool,
 }
 
 impl UsageOverlay {
+    /// The OpenCode Go window closest to its cap, as `(short label, used %)`.
+    ///
+    /// Go bills one dollar allowance across three simultaneous windows, so "the" percentage is
+    /// meaningless on its own: a surface with room for a single figure must show the binding one
+    /// AND name it, since a 90% monthly and a 90% five-hour call for opposite reactions.
+    pub fn opencode_go_tightest_window(&self) -> Option<(&'static str, f64)> {
+        [
+            ("5h", self.opencode_go_5h_pct),
+            ("wk", self.opencode_go_weekly_pct),
+            ("mo", self.opencode_go_monthly_pct),
+        ]
+        .into_iter()
+        .filter_map(|(label, pct)| pct.map(|pct| (label, pct)))
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+    }
+
     pub(crate) fn totals(rows: &[(String, f64, u64, u64)]) -> (f64, u64, u64) {
         rows.iter().fold((0.0, 0, 0), |acc, r| {
             (acc.0 + r.1, acc.1 + r.2, acc.2 + r.3)
@@ -97,6 +134,11 @@ pub struct MeshQuotaRow {
     pub projected_fraction_at_reset: Option<f64>,
     /// True when that projection would exceed the window before it resets.
     pub exhaustion_warning: bool,
+    /// The pacing marker for the most-constrained window, rendered by the mesh so this overlay
+    /// and `forge mesh` never disagree ("weekly 27% used · 21% allowed · OVER PACE → …").
+    pub pace_note: String,
+    /// True when pacing is currently holding models back for this provider.
+    pub over_pace: bool,
 }
 
 /// One scored candidate row in the `/mesh` inspector.
@@ -112,6 +154,9 @@ pub struct MeshCandRow {
     pub selected: bool,
     /// Conservation demotion applied (0.0 = none).
     pub penalty: f64,
+    /// Set when a routing rule, not `score` (the catalog score), decided this rank — the rule's
+    /// name, e.g. `cost-aware sibling`.
+    pub reorder_reason: Option<String>,
 }
 
 /// Data for the `/mesh` overlay — a legible, animated trace of one routing decision (or the

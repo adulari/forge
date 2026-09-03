@@ -214,7 +214,7 @@ pub fn is_frontier(id: &str) -> bool {
 /// `"gpt-5.6-sol"` from `"codex-oauth::gpt-5.6-sol"`). Mirrors the split-once idiom used elsewhere
 /// in this crate (`bench.rs`, `pricing.rs::context_limit`) for stripping the provider prefix.
 /// Documented in docs/features/mesh-routing.md.
-fn bare_model(id: &str) -> &str {
+pub(crate) fn bare_model(id: &str) -> &str {
     id.split_once("::").map(|(_, m)| m).unwrap_or(id)
 }
 
@@ -223,7 +223,8 @@ fn bare_model(id: &str) -> &str {
 /// published list prices on a nominal 1000-in/500-out mix (`in + 0.5·out`, Haiku 4.5 = the 1.0
 /// baseline) — do NOT add entries beyond this table without the same derivation; an absent entry
 /// correctly defaults to neutral (1.0) rather than a guess. Weights, per verified list prices:
-///   - GPT-5.6 Sol $5/$30 → 5.0, Terra $2.50/$15 → 2.5, Luna $1/$6 → 1.0
+///   - GPT-5.6 Sol $4/$20 → 17.5, Terra $2/$12 → 10.0, Luna $0.20/$1.20 → 1.0 (list prices as of
+///     2026-09-02; Luna was discounted well below the original $1/$6 ladder)
 ///   - Claude Fable 5 / Mythos 5 $10/$50 → 10.0 (the fleet's most expensive models; a neutral
 ///     default here would leave the single most expensive model with ZERO burn penalty)
 ///   - Claude Opus 4.8 $5/$25 → 5.0, Sonnet 5 $3/$15 (steady-state) → 3.0, Haiku 4.5 $1/$5 → 1.0
@@ -239,13 +240,31 @@ fn bare_model(id: &str) -> &str {
 /// that specific substitution.
 /// Documented in docs/features/mesh-routing.md; value asserted in sync by `doc_sync::mesh_routing_doc_matches_live_constants`.
 pub(crate) fn known_burn_weight(id: &str) -> Option<f64> {
+    // A bare `provider::` alias ("whatever the CLI's own default model is") names no family, so it
+    // used to fall through to the neutral 1.0 — the LIGHTEST possible weight. Every turn routed to
+    // `claude-cli::` / `codex-cli::` therefore escaped subscription pacing entirely (189 such turns
+    // in the store on 2026-09-02). The CLIs don't cheaply report which model their default resolves
+    // to, so charge the provider's flagship instead: over- rather than under-counting the burn is
+    // the only safe direction for an unknown model on a shared plan.
+    if bare_model(id).is_empty() {
+        return match crate::catalog::provider_of(id) {
+            "claude-cli" => known_burn_weight("claude-cli::opus"),
+            "codex-cli" => known_burn_weight("codex-cli::gpt-5.6-sol"),
+            _ => None,
+        };
+    }
     let toks = crate::bench::tokens(bare_model(id));
     let has = |w: &str| toks.iter().any(|t| t == w);
     // GPT-5.6 family: the sub-name (sol/terra/luna) is the family identifier.
+    // Fallback ladder only — a fetched or bundled price wins over this table
+    // (`subscription_cost::subscription_burn_penalty`). Values follow the CURRENT list prices on
+    // the nominal 1000-in/500-out mix: luna $0.20/$1.20 → 0.0008; terra $2/$12 → 0.008 (10x);
+    // sol $4/$20 → 0.014 (17.5x). The previous 5.0/2.5/1.0 described the pre-discount ladder
+    // and under-credited Luna ~4x (models.dev `api.json`, openai provider, read 2026-09-02).
     if has("sol") {
-        Some(5.0)
+        Some(17.5)
     } else if has("terra") {
-        Some(2.5)
+        Some(10.0)
     } else if has("luna") {
         Some(1.0)
     // Claude families, matched on the family word. Fable/Mythos checked before Opus: their real AA
@@ -273,12 +292,22 @@ pub(crate) fn known_burn_weight(id: &str) -> Option<f64> {
 /// table. Unknown models default to 1.0 (neutral, no penalty) — load-bearing: an unpriced/unknown
 /// model must get zero penalty in `route_score` so nothing regresses.
 /// Documented in docs/features/mesh-routing.md.
+/// Production routing goes through [`configured_burn_weight`], which distinguishes "no curated
+/// weight" from "neutral"; this collapsed form remains the readable subject of the table's own
+/// tests and the doc-sync guard.
+#[cfg(test)]
 pub(crate) fn subscription_burn_weight(id: &str, overrides: &HashMap<String, f64>) -> f64 {
-    let bare = bare_model(id);
-    if let Some(&w) = overrides.get(bare) {
-        return w;
-    }
-    known_burn_weight(id).unwrap_or(1.0)
+    configured_burn_weight(id, overrides).unwrap_or(1.0)
+}
+
+/// The explicitly-known weight for `id` — a config override, else the bundled family table —
+/// distinguished from "no curated weight" so a caller can substitute a derived one instead of a
+/// neutral 1.0 (see `catalog::price_derived_burn_weights`).
+pub(crate) fn configured_burn_weight(id: &str, overrides: &HashMap<String, f64>) -> Option<f64> {
+    overrides
+        .get(bare_model(id))
+        .copied()
+        .or_else(|| known_burn_weight(id))
 }
 
 /// The subset of `known_burn_weight`'s table that `speed_class` is allowed to derive its class
@@ -640,11 +669,11 @@ mod tests {
         for prefix in ["codex-oauth::", "codex-cli::"] {
             assert_eq!(
                 subscription_burn_weight(&format!("{prefix}gpt-5.6-sol"), &no_overrides),
-                5.0
+                17.5
             );
             assert_eq!(
                 subscription_burn_weight(&format!("{prefix}gpt-5.6-terra"), &no_overrides),
-                2.5
+                10.0
             );
             assert_eq!(
                 subscription_burn_weight(&format!("{prefix}gpt-5.6-luna"), &no_overrides),
@@ -716,6 +745,25 @@ mod tests {
     }
 
     #[test]
+    fn bare_bridge_aliases_burn_like_their_provider_flagship() {
+        // `claude-cli::` means "the CLI's own default model" — unknown, so it used to score the
+        // neutral 1.0 and slip past subscription pacing entirely. It must cost at least as much as
+        // the provider's flagship.
+        let no_overrides = HashMap::new();
+        assert_eq!(
+            subscription_burn_weight("claude-cli::", &no_overrides),
+            subscription_burn_weight("claude-cli::opus", &no_overrides)
+        );
+        assert_eq!(
+            subscription_burn_weight("codex-cli::", &no_overrides),
+            subscription_burn_weight("codex-cli::gpt-5.6-sol", &no_overrides)
+        );
+        assert!(subscription_burn_weight("claude-cli::", &no_overrides) > 1.0);
+        // An unknown provider's bare alias stays neutral rather than guessing a pool cost.
+        assert_eq!(subscription_burn_weight("agy-cli::", &no_overrides), 1.0);
+    }
+
+    #[test]
     fn speed_class_for_fable_is_unchanged_and_never_leaks_into_the_speed_path() {
         // Fable is a known burn-weight entry (10.0) for the route-score penalty, but it must NOT be
         // in `gpt56_family_speed_weight` — else it would re-trigger the provider-monopoly regression.
@@ -741,6 +789,38 @@ mod tests {
         }
     }
 
+    /// The burn-weight ladder must encode the real GPT-5.6 price ladder, because that ladder is
+    /// the only cost signal a shared Codex subscription has. Published list prices per 1M tokens
+    /// (models.dev `api.json`, `openai` provider, release 2026-07-09, read 2026-09-02; OpenAI's
+    /// own pricing page agrees):
+    ///   luna $0.20 in / $1.20 out · terra $2.00 / $12.00 · sol $4.00 / $20.00
+    /// On the nominal 1000-in/500-out routing mix that is 0.0008 / 0.008 / 0.014 USD, i.e.
+    /// terra ≈ 10x luna and sol ≈ 17.5x luna. The bundled table said 2.5x and 5x — Luna was
+    /// discounted after the table was written and the constants never followed, under-crediting
+    /// Luna ~4x on every codex-cli / codex-oauth routing decision.
+    #[test]
+    fn gpt56_burn_weight_ratios_match_the_published_price_ladder() {
+        let no_overrides = HashMap::new();
+        let weight =
+            |name: &str| subscription_burn_weight(&format!("codex-oauth::{name}"), &no_overrides);
+        // Nominal-mix USD per turn from the list prices above (per 1k: in + out/2).
+        let nominal = |input_per_1k: f64, output_per_1k: f64| input_per_1k + output_per_1k / 2.0;
+        let luna_price = nominal(0.0002, 0.0012);
+        let terra_price = nominal(0.002, 0.012);
+        let sol_price = nominal(0.004, 0.020);
+
+        let luna = weight("gpt-5.6-luna");
+        for (name, price) in [("gpt-5.6-terra", terra_price), ("gpt-5.6-sol", sol_price)] {
+            let expected = price / luna_price;
+            let actual = weight(name) / luna;
+            assert!(
+                (actual - expected).abs() <= expected * 0.1,
+                "{name}: burn weight ratio to luna is {actual:.2}x but its price ratio is \
+                 {expected:.2}x — the ladder no longer tracks the published prices"
+            );
+        }
+    }
+
     #[test]
     fn subscription_burn_weight_config_override_wins_over_table() {
         let mut overrides = HashMap::new();
@@ -758,7 +838,7 @@ mod tests {
         // Unrelated ids are unaffected by an override for a different model.
         assert_eq!(
             subscription_burn_weight("codex-oauth::gpt-5.6-terra", &overrides),
-            2.5
+            10.0
         );
     }
 

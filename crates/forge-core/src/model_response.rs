@@ -82,6 +82,12 @@ impl Session {
         }
         self.store
             .record_usage(&self.id, &msg_id, &resp.usage, Some(active_model))?;
+        self.turn_input_tokens = self
+            .turn_input_tokens
+            .saturating_add(resp.usage.input_tokens);
+        self.turn_output_tokens = self
+            .turn_output_tokens
+            .saturating_add(resp.usage.output_tokens);
         // Accumulate this bridge completion's input toward the per-turn ceiling (wave 5, fix 1).
         if forge_provider::is_cli_bridge(active_model) {
             *bridge_input_accum = bridge_input_accum.saturating_add(resp.usage.input_tokens);

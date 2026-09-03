@@ -183,6 +183,20 @@ fn render_statusline_widget<'a>(
                 Style::default().fg(color).bg(STATUSBG),
             )])
         }
+        W::QuotaOpencodeGo => {
+            let (window, pct) = app.usage_overlay.opencode_go_tightest_window()?;
+            let color = if pct >= 90.0 {
+                ERRRED
+            } else if pct >= 70.0 {
+                WARNYEL
+            } else {
+                DIM
+            };
+            Some(vec![Span::styled(
+                format!("go {window} {pct:.0}%"),
+                Style::default().fg(color).bg(STATUSBG),
+            )])
+        }
         W::QuotaPace => {
             let p = app.quota_pace.as_ref()?;
             let color = if p.exhaustion_warning {
@@ -195,6 +209,7 @@ fn render_statusline_widget<'a>(
             let short_window = match p.window.as_str() {
                 "five_hour" => "5h",
                 "weekly" => "wk",
+                "monthly" => "mo",
                 "" => "?",
                 other => other,
             };
@@ -292,6 +307,14 @@ fn stop_notice(app: &App, compact: bool) -> Option<(&'static str, Color)> {
             WARNYEL,
         )),
         Some(forge_types::StopReason::BudgetExhausted) => Some(("✕ budget cap", ERRRED)),
+        Some(forge_types::StopReason::TasksUnfinished) => Some((
+            if compact {
+                "✕ tasks unfinished"
+            } else {
+                "✕ stopped with tasks unfinished"
+            },
+            ERRRED,
+        )),
         Some(forge_types::StopReason::NoOutput) => Some((
             if compact {
                 "✕ no output — turn failed"

@@ -9,6 +9,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { markFirstDataResolve } from "./performance";
+import { catalogHasModel } from "./modelCatalog";
 import { useEffect, useRef, useState } from "react";
 import { useIsFocused } from "expo-router";
 
@@ -246,7 +247,32 @@ export function useSessions() {
     // The widget mirrors what the user is looking at, not what slid past under a thumb.
     if (query.data && !peeking) syncWidgetSessions(query.data);
   }, [peeking, query.data]);
+  useRoutedModelCatalogSync(query.data);
   return query;
+}
+
+/** When the mesh routes a turn to a model the cached catalog cannot name, the host discovered it
+ * after that snapshot was taken — ask it to rediscover rather than leaving the model list unable
+ * to explain the answer on screen. Each unknown id triggers at most one refresh, so a pinned id
+ * the host genuinely doesn't serve can't turn this into a polling loop. */
+function useRoutedModelCatalogSync(sessions: SessionRow[] | undefined) {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  const handled = useRef(new Set<string>());
+  useEffect(() => {
+    if (baseUrl == null || !sessions?.length) return;
+    const cached = queryClient.getQueryData<ModelsResponse>(keys(baseUrl).models);
+    if (!cached || cached.catalog !== "available") return;
+    const unknown = sessions
+      .map((row) => row.model)
+      .find((model) => model && !handled.current.has(model) && !catalogHasModel(cached, model));
+    if (!unknown) return;
+    handled.current.add(unknown);
+    void getModels(baseUrl, true).then(
+      (data) => queryClient.setQueryData(keys(baseUrl).models, data),
+      () => undefined,
+    );
+  }, [baseUrl, queryClient, sessions]);
 }
 
 /** Per-server fleet probes for the Settings server switcher. */
@@ -340,7 +366,33 @@ export function useSessionTree() { const { baseUrl } = useAuth(); return useQuer
 export function useSkills() { const { baseUrl } = useAuth(); return useQuery<SkillRow[]>({ queryKey: keys(baseUrl).skills, queryFn: () => getSkills(baseUrl as string), enabled: baseUrl != null }); }
 export function useWorkflows(sessionId?: string) { const { baseUrl } = useAuth(); return useQuery<WorkflowRow[]>({ queryKey: keys(baseUrl).workflows(sessionId), queryFn: () => getWorkflows(baseUrl as string, sessionId), enabled: baseUrl != null }); }
 export function useHooks() { const { baseUrl } = useAuth(); return useQuery<HookRow[]>({ queryKey: keys(baseUrl).hooks, queryFn: () => getHooks(baseUrl as string), enabled: baseUrl != null }); }
-export function useModels() { const { baseUrl } = useAuth(); const isFocused = useIsFocused(); return useQuery<ModelsResponse>({ queryKey: keys(baseUrl).models, queryFn: () => getModels(baseUrl as string), enabled: baseUrl != null, refetchOnWindowFocus: isFocused }); }
+export function useModels() {
+  const { baseUrl } = useAuth();
+  const isFocused = useIsFocused();
+  return useQuery<ModelsResponse>({
+    queryKey: keys(baseUrl).models,
+    queryFn: () => getModels(baseUrl as string),
+    enabled: baseUrl != null,
+    // The catalog changes whenever the host discovers a new model (a bridge alias appearing, a
+    // key added) — refetch on mount/focus/reconnect so a persisted snapshot is never the last
+    // word. `staleTime` only keeps a burst of screens from all fetching at once.
+    staleTime: 30_000,
+    refetchOnMount: true,
+    refetchOnReconnect: true,
+    refetchOnWindowFocus: isFocused,
+  });
+}
+
+/** Force the daemon to rediscover, then seed the cache with what it found. Pull-to-refresh on a
+ * model list should ask the host what it can reach NOW, not re-read its 15-minute cache. */
+export function useRefreshModels() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation<ModelsResponse, Error, void>({
+    mutationFn: () => getModels(baseUrl as string, true),
+    onSuccess: (data) => queryClient.setQueryData(keys(baseUrl).models, data),
+  });
+}
 export function useProviders() {
   const { baseUrl } = useAuth();
   const isFocused = useIsFocused();

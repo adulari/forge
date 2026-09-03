@@ -27,6 +27,12 @@ impl Session {
         // Failover chain: only meaningful for the primary turn (decision is Some). The autofix
         // path passes None, so `chain` is immediately exhausted and failover never fires.
         let fallbacks: Vec<String> = decision.map(|d| d.fallbacks.clone()).unwrap_or_default();
+        let paced_held = self.pacing_held_in_chain(
+            decision.filter(|_| failover_enabled),
+            &active_model,
+            &fallbacks,
+        );
+        let mut paced_held_warned = false;
         let mut chain = fallbacks.into_iter();
         let explicit_pin = self.pinned_model.is_some() || decision.is_some_and(|d| d.pinned);
         let mut last_resort_used = false;
@@ -59,6 +65,13 @@ impl Session {
         let mut pinned_outage_attempts = 0u32;
         let mut pinned_outage_waited = std::time::Duration::ZERO;
         let mut pinned_outage_warned_halfway = false;
+        // The previous outage attempt's error text when it came back fast — the
+        // "identical fast rejection twice" detector in `request_model_response`.
+        let mut pinned_outage_last_error: Option<String> = None;
+
+        if let Some(short_circuit) = self.hard_guard_short_circuit(active_model.clone()) {
+            return Ok(short_circuit);
+        }
 
         let mut final_text = String::new();
         let mut has_prior_final = false;
@@ -72,11 +85,8 @@ impl Session {
         let mut bridge_input_accum: u64 = 0;
         let mut hit_step_cap = true;
         let mut halted_by_loop_guard = false;
-        // A plan a bridge model proposes via the out-of-band sink (StreamEvent::Plan). Captured by
-        // the per-step stream closure and returned in the outcome for the turn's approval flow.
-        // Only honored in planning mode (the bridge advertises present_plan unconditionally — it
-        // can't see the parent's runtime temper — so the parent gates here): outside Plan mode a
-        // stray plan is dropped, which also stops the post-approval build turn from re-proposing.
+        // A plan a bridge proposes via the out-of-band sink (StreamEvent::Plan); only honored in
+        // Plan mode — the bridge advertises present_plan unconditionally, so the parent gates here.
         let mut proposed_plan: Option<forge_types::PlanProposal> = None;
         let in_plan_mode = self.mode == PermissionMode::Plan;
         // Harness reliability guards. `empty_nudges`: bounded retries when the model returns nothing
@@ -117,13 +127,10 @@ impl Session {
         // mutating tool. Separate from tool-call-markup repair because ordinary prose has no markup.
         let mut phantom_edit_nudges = 0usize;
 
-        // `bridge_continue_nudges`: bounded RE-RUNS of a CLI bridge whose turn returned with tracked
-        // tasks still unfinished. A bridge turn is otherwise terminal (it runs its own tool loop and
-        // returns once), so a long multi-step plan stalls partway — the bridge does a few steps,
-        // returns, and the turn ends with work pending (the half-finished release: merged + tagged
-        // but brew-sha + verify never ran). This drives a clean re-run, exactly as the user typing
-        // `continue` would.
+        // `bridge_continue_nudges`: bounded RE-RUNS of a CLI bridge that returned with tracked tasks
+        // unfinished (a bridge turn is terminal, so long plans stall partway) — as `continue` would.
         let mut bridge_continue_nudges = 0usize;
+        let mut bridge_stall_nudged = false;
         // Verification gate: when a bridge reports every task Done, completion is NOT accepted on
         // its say-so. Fresh tool-grounded evidence newer than the last artifact mutation is enough;
         // otherwise Forge requests a verification turn. This is the completion AUTHORITY: "done"
@@ -180,7 +187,16 @@ impl Session {
         // constant within a turn); non-bridge providers ignore it.
         let checkpoint_ctx = self.checkpoint_context();
 
+        let unattended = self.turn_is_unattended();
+        let soft_cap = self.config.mesh.max_steps.max(1);
+        let mut warned_soft_cap = false;
+        let mut hard_guard_abort = false;
+
         for step in 0..max_steps {
+            if step >= soft_cap && unattended && !warned_soft_cap {
+                warned_soft_cap = true;
+                self.warn_soft_step_checkpoint(soft_cap, step, max_steps);
+            }
             // ── Timeout reconciliation window (quality guards wave 4, fix 2) ──────────────────
             // The caller's hard timeout (`bench swe`'s tokio kill) is invisible from inside the
             // turn, so without this the kill lands mid-verification and "submit partial work"
@@ -232,6 +248,8 @@ impl Session {
                 failover_enabled,
                 default_cooldown,
                 &mut chain,
+                &paced_held,
+                &mut paced_held_warned,
                 &mut last_resort_used,
                 &mut compact_retries,
                 &mut transient_retries,
@@ -242,6 +260,7 @@ impl Session {
                 &mut pinned_outage_attempts,
                 &mut pinned_outage_waited,
                 &mut pinned_outage_warned_halfway,
+                &mut pinned_outage_last_error,
                 step,
             )
             .await?;
@@ -268,6 +287,14 @@ impl Session {
                 &mut bridge_input_accum,
                 &mut empty_nudges,
             )?;
+
+            if self.turn_input_ceiling_hit() {
+                final_text = self.abort_for_token_ceiling();
+                hit_step_cap = false;
+                halted_by_loop_guard = true;
+                hard_guard_abort = true;
+                break;
+            }
 
             if !resp.wants_tools() {
                 if !resp.content.trim().is_empty() {
@@ -529,17 +556,21 @@ impl Session {
                             self.transcript.push(Message::system(&nudge));
                             continue;
                         }
-                        // No progress on the re-run (would spiral) or the re-drive budget is spent:
-                        // stop LOUDLY with the work named, rather than silently reporting success.
-                        let why = if made_progress {
-                            "reached the continue limit"
-                        } else {
-                            "the last attempt made no progress (no task completed, no tool ran)"
-                        };
-                        self.presenter.emit(PresenterEvent::Warning(format!(
-                            "bridge stopped with {} task(s) still unfinished — {why}. Send `continue` to resume.",
-                            unfinished.len()
-                        )));
+                        if !made_progress && !bridge_stall_nudged {
+                            bridge_stall_nudged = true;
+                            self.escalate_bridge_stall(&unfinished);
+                            continue;
+                        }
+                        // Still nothing after the escalation, or the re-drive budget is spent:
+                        if let Some(error) =
+                            self.halt_for_unfinished_tasks(unfinished, made_progress, unattended)
+                        {
+                            final_text = error;
+                            halted_by_loop_guard = true;
+                            hard_guard_abort = true;
+                            hit_step_cap = false;
+                            break;
+                        }
                     } else if !self.tasks.is_empty() {
                         // The bridge reports every task Done — but a self-reported status is exactly
                         // what produced the phantom release (claimed merged + tagged; nothing ran).
@@ -748,6 +779,12 @@ impl Session {
         // any single loop's count.
         self.mutations_this_turn += mutations_ran.load(std::sync::atomic::Ordering::Relaxed);
 
+        if hit_step_cap && unattended {
+            final_text = self.abort_for_step_ceiling(max_steps, soft_cap);
+            halted_by_loop_guard = true;
+            hard_guard_abort = true;
+        }
+
         Ok(ModelLoopOutcome {
             final_text,
             context_tokens,
@@ -757,6 +794,7 @@ impl Session {
             plan: proposed_plan,
             tools_ran: tools_ran.load(std::sync::atomic::Ordering::Relaxed),
             mcp_tools_unavailable: mcp_tools_unavailable.load(std::sync::atomic::Ordering::Relaxed),
+            hard_guard_abort,
         })
     }
 }

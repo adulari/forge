@@ -2,7 +2,7 @@ import { Check, ChevronDown, Cpu } from "lucide-react-native";
 import React, { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
-import type { ModelRow } from "../../lib/api";
+import { type CatalogModel, catalogModels } from "../../lib/modelCatalog";
 import { useModels } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
@@ -13,11 +13,6 @@ import { Input } from "../ds/Input";
 import { ListRow } from "../ds/ListRow";
 import { SearchField } from "../ds/SearchField";
 import { Sheet } from "../ds/Sheet";
-
-interface CatalogModel {
-  provider: string;
-  model: ModelRow;
-}
 
 export interface ModelPickerProps {
   value: string;
@@ -37,8 +32,7 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
 
   const catalog = useMemo<CatalogModel[]>(
     () =>
-      (query.data?.providers ?? [])
-        .flatMap(({ provider, models }) => models.map((model) => ({ provider, model })))
+      catalogModels(query.data)
         .sort(
           (a, b) =>
             Number(a.model.health != null) - Number(b.model.health != null) ||
@@ -46,7 +40,7 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
               (a.model.benchmark_intelligence ?? -Infinity) ||
             a.model.name.localeCompare(b.model.name),
         ),
-    [query.data?.providers],
+    [query.data],
   );
 
   const selected = catalog.find(({ model }) => model.id === value)?.model;

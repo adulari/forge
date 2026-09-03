@@ -42,6 +42,9 @@ After install, verify it works:
 forge --version
 ```
 
+Running `forge` with no arguments prints a short orientation panel — the commands to set up a
+provider if you have none yet, and the handful you need day to day. `forge --help` lists everything.
+
 ---
 
 ## Step 2 — Connect a free AI provider
@@ -96,6 +99,9 @@ This walks you through:
 - Basic preferences
 
 You can skip any step and come back later. Run `forge setup` again anytime.
+
+It needs a real terminal — run from a pipe or CI it exits with an "is interactive" error. For
+unattended setup use `forge auth <provider>`, which reads the key from stdin.
 
 ---
 

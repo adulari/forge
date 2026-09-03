@@ -59,7 +59,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 30;
+const SCHEMA_VERSION: i64 = 31;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -519,7 +519,7 @@ fn quota_observation_is_current(provider: &str, window: &str, updated_at: i64, n
         "weekly" => 7 * 24 * 60 * 60,
         _ => 30 * 24 * 60 * 60,
     };
-    let freshness = if matches!(provider, "codex-oauth" | "codex-cli") {
+    let freshness = if matches!(provider, "codex-oauth" | "codex-cli" | "opencode_go") {
         window_age.min(forge_types::CODEX_QUOTA_FRESHNESS_SECS)
     } else {
         window_age
@@ -527,10 +527,10 @@ fn quota_observation_is_current(provider: &str, window: &str, updated_at: i64, n
     now.saturating_sub(updated_at) <= freshness
 }
 
-/// Codex's shared account can also be consumed outside Forge, so plan observations need a
-/// shorter source-freshness gate than their rolling-window lifetime.
-fn codex_quota_is_fresh(provider: &str, updated_at: i64, now: i64) -> bool {
-    !matches!(provider, "codex-oauth" | "codex-cli")
+/// Poll-only/shared accounts can be consumed outside Forge, so observations need a shorter
+/// source-freshness gate than their rolling-window lifetime.
+fn live_quota_is_fresh(provider: &str, updated_at: i64, now: i64) -> bool {
+    !matches!(provider, "codex-oauth" | "codex-cli" | "opencode_go")
         || now.saturating_sub(updated_at) <= forge_types::CODEX_QUOTA_FRESHNESS_SECS
 }
 
@@ -4189,6 +4189,50 @@ mod tests {
     }
 
     #[test]
+    fn stale_polled_opencode_go_quota_does_not_mask_a_failed_refresh() {
+        let store = Store::open_in_memory().unwrap();
+        // Wall clock, because `subscription_age_secs`/`bridge_fractions` are `now()`-based while
+        // `quota_at` takes an explicit clock; a synthetic epoch would compare the two against
+        // different clocks.
+        let now = chrono::Utc::now().timestamp();
+        let hint = |fraction| forge_types::QuotaHint {
+            provider: "opencode_go".into(),
+            window: "five_hour".into(),
+            status: forge_types::QuotaStatus::Warning,
+            resets_at: Some(now + 10_000),
+            fraction_used: Some(fraction),
+        };
+        let stale_at = now - forge_types::CODEX_QUOTA_FRESHNESS_SECS - 1;
+        store.record_quota_at(&hint(0.92), stale_at).unwrap();
+
+        // A /usage poll that fails leaves this stale row as the only observation. It must read as
+        // unknown everywhere routing and display look, never as 92% and never as free headroom.
+        let quota = store.quota_at(now).unwrap();
+        assert_eq!(quota.fraction_for("opencode_go"), 0.0);
+        assert!(!quota.is_pressured("opencode_go"));
+        assert!(!store
+            .bridge_fractions()
+            .unwrap()
+            .contains_key("opencode_go"));
+
+        // `subscription_age_secs` answers "how old is the newest row", not "is it usable" — the
+        // row exists, so it reports an age. What matters is that the age is past the freshness
+        // limit, which is exactly what makes the poll gate re-poll instead of trusting it.
+        let age = store.subscription_age_secs("opencode_go").unwrap();
+        assert!(
+            age > forge_types::CODEX_QUOTA_FRESHNESS_SECS,
+            "a stale row must never look fresh to the poll gate (age {age}s)"
+        );
+
+        // A fresher successful reading becomes authoritative, and a late stale observation
+        // (a retried seed, a slow in-flight poll) can never regress it.
+        store.record_quota_at(&hint(0.10), now).unwrap();
+        store.record_quota_at(&hint(0.92), stale_at).unwrap();
+        let quota = store.quota_at(now).unwrap();
+        assert!((quota.fraction_for("opencode_go") - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
     fn quota_observations_expire_with_their_window_and_dead_kinds_are_pruned() {
         let store = Store::open_in_memory().unwrap();
         let now = 3_000_000;
@@ -4243,6 +4287,42 @@ mod tests {
         assert_eq!(
             remaining, 1,
             "expired and dead windows are removed from the snapshot table"
+        );
+    }
+
+    #[test]
+    fn subscription_pacing_covers_every_window_kind_including_monthly() {
+        let store = Store::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let month = forge_types::nominal_window_secs("monthly").unwrap();
+        let five = forge_types::nominal_window_secs("five_hour").unwrap();
+        // An OpenCode Go reading: the 5-hour window is fresh, the monthly one is well ahead of
+        // its linear allowance. `quota_at` would collapse this to one fraction and lose the
+        // schedule; pacing must name the monthly window.
+        for (window, fraction, resets_at) in [
+            ("five_hour", 0.02, now + five / 2),
+            ("monthly", 0.80, now + month / 2),
+        ] {
+            store
+                .record_quota_at(
+                    &forge_types::QuotaHint {
+                        provider: "opencode_go".into(),
+                        window: window.into(),
+                        status: forge_types::QuotaStatus::Ok,
+                        resets_at: Some(resets_at),
+                        fraction_used: Some(fraction),
+                    },
+                    now,
+                )
+                .unwrap();
+        }
+        let pacing = store.subscription_pacing_at(now).unwrap();
+        let go = pacing.get("opencode_go").expect("go windows are paced");
+        assert_eq!(go.window, "monthly");
+        assert!(go.is_over_pace());
+        assert!(
+            !go.used_nominal_fallback,
+            "the reset instant is authoritative"
         );
     }
 
@@ -5934,6 +6014,57 @@ mod tests {
     /// `cache_read_input_tokens`; Codex emits `cached_input_tokens`, so every codex-cli zero is a
     /// dropped field, not a measurement. Zeros from providers that do report caching are real
     /// measurements and must survive untouched.
+    /// A store created before `model_pricing` gained `cache_read_per_1k` (the shape every real
+    /// install had at user_version 30) must gain the column on open, and price upserts — which
+    /// silently failed against it for months — must succeed afterwards.
+    #[test]
+    fn migration_0031_adds_the_missing_pricing_column_to_existing_stores() {
+        let path = temp_db_path();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(schema::SCHEMA).unwrap();
+            conn.execute_batch(
+                "DROP TABLE model_pricing;
+                 CREATE TABLE model_pricing (
+                     model         TEXT PRIMARY KEY,
+                     input_per_1k  REAL NOT NULL,
+                     output_per_1k REAL NOT NULL,
+                     updated_at    INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                 );
+                 INSERT INTO model_pricing (model, input_per_1k, output_per_1k, updated_at)
+                     VALUES ('openrouter::old/model', 0.001, 0.002, 1750000000);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 30i64).unwrap();
+        }
+        for pass in ["first open (migrates)", "second open (idempotent)"] {
+            let store = Store::open(&path).unwrap_or_else(|e| panic!("{pass}: {e:?}"));
+            store
+                .set_model_pricing("openrouter::moonshotai/kimi-k3", 0.003, 0.015, Some(0.0003))
+                .unwrap_or_else(|e| panic!("{pass}: price upsert must work: {e}"));
+            let rows = store.all_model_pricing().unwrap();
+            let kimi = rows
+                .iter()
+                .find(|(m, ..)| m == "openrouter::moonshotai/kimi-k3")
+                .unwrap_or_else(|| panic!("{pass}: new row present"));
+            assert_eq!(kimi.3, Some(0.0003), "{pass}");
+            let old = rows
+                .iter()
+                .find(|(m, ..)| m == "openrouter::old/model")
+                .unwrap();
+            assert_eq!(
+                old.3, None,
+                "{pass}: pre-existing row keeps an unknown cache price"
+            );
+            let (count, newest) = store.model_pricing_freshness().unwrap();
+            assert_eq!(count, 2, "{pass}");
+            assert!(
+                newest.unwrap() > 1750000000,
+                "{pass}: freshness follows the new write"
+            );
+        }
+    }
+
     #[test]
     fn migration_0030_nulls_only_the_codex_bridge_fabricated_zeros() {
         let path = temp_db_path();
@@ -6586,6 +6717,29 @@ mod tests {
             .unwrap();
         let rows = store.file_edits("main.rs").unwrap();
         assert_eq!(rows[0].model.as_deref(), Some("openai::gpt-4o"));
+    }
+
+    #[test]
+    fn latest_task_tier_reads_most_recent_active_routing_decision() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+        let first = store
+            .add_message(&sid, 0, Role::Assistant, "first", Some("m1"))
+            .unwrap();
+        store
+            .record_routing(&first, TaskTier::Complex, "m1", "first")
+            .unwrap();
+        let second = store
+            .add_message(&sid, 1, Role::Assistant, "second", Some("m2"))
+            .unwrap();
+        store
+            .record_routing(&second, TaskTier::Standard, "m2", "second")
+            .unwrap();
+
+        assert_eq!(
+            store.latest_task_tier(&sid).unwrap(),
+            Some(TaskTier::Standard)
+        );
     }
 
     #[test]

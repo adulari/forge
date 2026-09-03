@@ -17,7 +17,7 @@ import { EmptyState } from "../ds/EmptyState";
 import { usagePaceColor } from "./UsageRing";
 
 const compact = (value: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value).toLowerCase();
-const WINDOW_LABEL: Record<string, string> = { five_hour: "Session (5h)", weekly: "Weekly", secondary: "Secondary" };
+const WINDOW_LABEL: Record<string, string> = { five_hour: "Session (5h)", weekly: "Weekly", monthly: "Monthly", secondary: "Secondary" };
 
 interface ProviderBlock {
   provider: string;

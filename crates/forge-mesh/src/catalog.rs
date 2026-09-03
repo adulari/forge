@@ -275,53 +275,9 @@ fn code_prior(provider: &str, code_heavy: bool, tier: TaskTier) -> f64 {
     0.0
 }
 
-/// Per-tier scaling for the subscription burn-weight penalty (Fix 2,
-/// docs/design/subscription-efficiency-routing.md): cheap tiers avoid flagship burn hard, since a
-/// trivial/standard task rarely needs the expensive sibling's extra capability; Complex still
-/// wants the flagship but tie-breaks toward the cheaper sibling when capability is close.
-/// Documented in docs/features/mesh-routing.md; value asserted in sync by `doc_sync::mesh_routing_doc_matches_live_constants`.
-pub(crate) const BURN_K_TRIVIAL: f64 = 1.0;
-pub(crate) const BURN_K_STANDARD: f64 = 0.7;
-pub(crate) const BURN_K_COMPLEX: f64 = 0.30;
-
-/// Documented in docs/features/mesh-routing.md.
-fn burn_k(tier: TaskTier) -> f64 {
-    match tier {
-        TaskTier::Trivial => BURN_K_TRIVIAL,
-        TaskTier::Standard => BURN_K_STANDARD,
-        TaskTier::Complex => BURN_K_COMPLEX,
-    }
-}
-
-/// Linear map from a subscription's live consumed-window fraction (`SubscriptionQuota::
-/// effective_fraction_for`, pace-projected per #573) to a penalty multiplier: 0.5 when the window
-/// is fresh, 2.0 when it is nearly spent. This composes with — and does not duplicate —
-/// `conserve_decision`: that fires per-prompt to spread whole turns off the subscription onto a
-/// free-frontier alternative; this only scales how hard a same-subscription tie-break (e.g. Sol vs
-/// Luna) leans toward the cheaper sibling.
-/// Documented in docs/features/mesh-routing.md.
-fn pressure_multiplier(fraction: f64) -> f64 {
-    (0.5 + 1.5 * fraction).clamp(0.5, 2.0)
-}
-
-/// Fix 2: the subscription plan-burn penalty for a subscription model, scaled by tier urgency and
-/// live quota pressure. `ln(weight)` keeps a 5x burn from swamping a genuine capability gap (ln 5
-/// ≈ 1.61) and makes a weight of 1.0 (cheapest sibling, or any unknown model) contribute exactly
-/// zero — so behaviour is unchanged for every model with no burn-weight entry.
-/// Documented in docs/features/mesh-routing.md.
-fn subscription_burn_penalty(
-    id: &str,
-    tier: TaskTier,
-    quota: &forge_types::SubscriptionQuota,
-    overrides: &HashMap<String, f64>,
-) -> f64 {
-    let weight = crate::capability::subscription_burn_weight(id, overrides);
-    if weight <= 1.0 {
-        return 0.0;
-    }
-    let fraction = quota.effective_fraction_for(provider_of(id));
-    burn_k(tier) * weight.ln() * pressure_multiplier(fraction)
-}
+pub(crate) use crate::subscription_cost::{price_derived_burn_weights, subscription_burn_penalty};
+#[cfg(test)]
+pub(crate) use crate::subscription_cost::{BURN_K_COMPLEX, BURN_K_STANDARD, BURN_K_TRIVIAL};
 
 /// Provider pairs where a native OAuth surface dispatches the SAME model catalog as a CLI bridge:
 /// `(oauth, bridge)`. When the catalog contains `<oauth>::X`, the twin `<bridge>::X` is demoted by
@@ -403,6 +359,7 @@ fn route_score(
     quota: &forge_types::SubscriptionQuota,
     bench: Option<&BenchmarkScores>,
     burn_weight_overrides: &HashMap<String, f64>,
+    price_burn_weights: &HashMap<String, f64>,
     superseded: bool,
 ) -> f64 {
     let mut base = capability_score_b(id, tier, code_heavy, bench)
@@ -413,7 +370,11 @@ fn route_score(
         base -= BRIDGE_SUPERSEDE_PENALTY;
     }
     if is_subscription(id) {
-        base -= subscription_burn_penalty(id, tier, quota, burn_weight_overrides);
+        base -=
+            subscription_burn_penalty(id, tier, quota, burn_weight_overrides, price_burn_weights);
+        // A request's share of its pool: the same model on a larger, fuller pool ranks above
+        // itself on a tiny or nearly-spent one (see `subscription_cost::pool_capacity_penalty`).
+        base -= crate::subscription_cost::pool_capacity_penalty(id, tier, quota);
         match quota.status_for(provider_of(id)) {
             // This ranking pass (`ranked_seeded`) scores every routable catalog model BEFORE
             // `LlmRouter::is_usable` applies the real, hard exclusion for `Exhausted` (a score
@@ -894,6 +855,14 @@ impl ModelCatalog {
         }
     }
 
+    /// Drop every model `keep` rejects, preserving the attached bench/pricing metadata. Used to
+    /// apply facts discovery cannot know — such as a CLI bridge that has since been logged out —
+    /// to a catalog that was loaded from cache.
+    pub fn retaining(mut self, keep: impl Fn(&str) -> bool) -> Self {
+        self.models.retain(|m| keep(m));
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
     }
@@ -1002,6 +971,7 @@ impl ModelCatalog {
             self.bench.as_ref(),
         );
         let superseded = superseded_bridge_ids(&self.models);
+        let price_burn_weights = price_derived_burn_weights(&self.models, pricing);
 
         struct ScoredModel<'a> {
             id: &'a String,
@@ -1030,6 +1000,7 @@ impl ModelCatalog {
                     quota,
                     self.bench.as_ref(),
                     &self.burn_weights,
+                    &price_burn_weights,
                     superseded.contains(m),
                 );
                 score += calibration_adjustment(self.calibration.get(m));
@@ -1140,6 +1111,7 @@ impl ModelCatalog {
             self.bench.as_ref(),
         );
         let superseded = superseded_bridge_ids(&self.models);
+        let price_burn_weights = price_derived_burn_weights(&self.models, pricing);
         let mut rows: Vec<ScoreRow> = self
             .models
             .iter()
@@ -1154,6 +1126,7 @@ impl ModelCatalog {
                     quota,
                     self.bench.as_ref(),
                     &self.burn_weights,
+                    &price_burn_weights,
                     superseded.contains(m),
                 ) + calibration_adjustment(self.calibration.get(m));
                 let sub = is_subscription(m);
@@ -1331,6 +1304,26 @@ mod tests {
             "local observations remain a tie-breaker, never a benchmark replacement"
         );
         assert!(adjustment < 0.0);
+    }
+
+    /// A cached catalog outlives the login it was discovered under, so the loader has to be able
+    /// to subtract a bridge without losing the benchmark data attached to everything else.
+    #[test]
+    fn retaining_drops_only_the_rejected_models_and_keeps_benchmarks() {
+        let survivor = "groq::llama-3.1-8b-instant".to_string();
+        let full = ModelCatalog::new(vec![
+            "agy-cli::gemini-3.1-pro".into(),
+            "agy-cli::gemini-3.5-flash".into(),
+            survivor.clone(),
+        ])
+        .with_burn_weights(HashMap::from([("llama-3.1-8b-instant".to_string(), 0.25)]));
+        let filtered = full.clone().retaining(|m| provider_of(m) != "agy-cli");
+        assert_eq!(filtered.models(), std::slice::from_ref(&survivor));
+        assert_eq!(
+            filtered.ranked_for(TaskTier::Trivial, &Pricing::default(), 4),
+            [survivor],
+            "the surviving model still ranks with its attached metadata"
+        );
     }
 
     fn catalog() -> ModelCatalog {
@@ -2378,6 +2371,7 @@ mod tests {
             &quota,
             None,
             &overrides,
+            &HashMap::new(),
             false,
         );
         assert!(
@@ -2560,6 +2554,174 @@ mod tests {
         assert!(!is_free("opencode::deepseek-v4-flash", 0.0, false));
     }
 
+    /// A catalog + pricing pair modelling the real OpenCode Go situation: two subscription models
+    /// with near-equal measured capability, whose list prices (fetched under a metered namespace,
+    /// exactly as `Pricing::from_config_with_fetched` records them) differ by ~30x.
+    fn opencode_go_fixture() -> (ModelCatalog, Pricing) {
+        let mut bench = BenchmarkScores::new();
+        // Real Artificial Analysis figures (2026-09-01): the expensive model leads by ~3 points
+        // of intelligence and ~4.6 of coding — a genuine but small edge.
+        bench.insert("kimi-k3", 59.7, 76.2);
+        bench.insert("muse-spark-1.2-contributor", 56.8, 72.2);
+        let catalog = ModelCatalog::new(vec![
+            "opencode_go::kimi-k3".to_string(),
+            "opencode_go::muse-spark-1.2-contributor".to_string(),
+        ])
+        .with_benchmarks(Some(bench));
+        // $3/$15 vs $0.10/$0.20 per 1M tokens (docs table, opencode.ai/docs/go, 2026-09-01),
+        // reaching Forge as ordinary fetched rates for the same models on a metered surface.
+        let pricing = Pricing::from_rates(HashMap::from([
+            (
+                "openrouter::moonshotai/kimi-k3".to_string(),
+                crate::pricing::ModelRate {
+                    input_per_1k: 0.003,
+                    output_per_1k: 0.015,
+                    cache_read_per_1k: None,
+                },
+            ),
+            (
+                "openrouter::opencode/muse-spark-1.2-contributor".to_string(),
+                crate::pricing::ModelRate {
+                    input_per_1k: 0.0001,
+                    output_per_1k: 0.0002,
+                    cache_read_per_1k: None,
+                },
+            ),
+        ]));
+        (catalog, pricing)
+    }
+
+    fn go_quota(fraction: f64) -> forge_types::SubscriptionQuota {
+        forge_types::SubscriptionQuota::default()
+            .with_fractions(HashMap::from([("opencode_go".to_string(), fraction)]))
+    }
+
+    #[test]
+    fn opencode_go_burn_weights_come_from_tracked_prices_not_a_model_list() {
+        let (catalog, pricing) = opencode_go_fixture();
+        let weights = price_derived_burn_weights(catalog.models(), &pricing);
+        assert!((weights["opencode_go::muse-spark-1.2-contributor"] - 1.0).abs() < 1e-9);
+        // Price ratio (1000/1000*0.003 + 500/1000*0.015) / (1000/1000*0.0001 + 500/1000*0.0002)
+        // = 52.5, times the weekly-quota multiplier: Kimi K3 draws on a $7.50/wk quota, Muse on
+        // $30/wk, so a Kimi dollar drains the pool 4x as fast (dashboard, 2026-09-02).
+        assert!((weights["opencode_go::kimi-k3"] - 210.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_small_weekly_quota_multiplies_the_price_ratio() {
+        let models = [
+            "opencode_go::grok-4.6".to_string(),
+            "opencode_go::muse-spark-1.2-contributor".to_string(),
+        ];
+        // Same list price for both so the quota multiplier is the only difference.
+        let rate = || crate::pricing::ModelRate {
+            input_per_1k: 0.0001,
+            output_per_1k: 0.0002,
+            cache_read_per_1k: None,
+        };
+        let equal_price = Pricing::from_rates(HashMap::from([
+            ("openrouter::x-ai/grok-4.6".to_string(), rate()),
+            (
+                "openrouter::opencode/muse-spark-1.2-contributor".to_string(),
+                rate(),
+            ),
+        ]));
+        let price_ratio = equal_price.reference_estimated_cost(&models[0]).unwrap()
+            / equal_price.reference_estimated_cost(&models[1]).unwrap();
+        let weights = price_derived_burn_weights(&models, &equal_price);
+        let weight_ratio = weights[&models[0]] / weights[&models[1]];
+        assert!(
+            weight_ratio >= price_ratio * 4.0 - 1e-9,
+            "grok-4.6 ($7.50/wk) vs muse ($30/wk): weight ratio {weight_ratio} must be at least \
+             4x the price ratio {price_ratio}"
+        );
+    }
+
+    /// The user's screenshot (2026-09-02): opencode_go at 28%, codex at 25%, both "plus"-class or
+    /// smaller by the numbers routing saw, and the identical model ranked as if the pools were the
+    /// same size. The same score on a tiny pool must lose to the same score on a larger one, and a
+    /// pool that is nearly spent must lose to a fresh one of the same size.
+    #[test]
+    fn a_request_out_of_a_smaller_or_emptier_pool_is_penalised_more() {
+        use crate::subscription_cost::{pool_capacity, pool_capacity_penalty, PoolCapacity};
+        let quota = |go: f64, codex: f64| {
+            forge_types::SubscriptionQuota::default()
+                .with_fractions(HashMap::from([
+                    ("opencode_go".to_string(), go),
+                    ("codex-oauth".to_string(), codex),
+                ]))
+                .with_plans(HashMap::from([(
+                    "codex-oauth".to_string(),
+                    "plus".to_string(),
+                )]))
+        };
+        assert_eq!(pool_capacity("opencode_go", ""), PoolCapacity::Tiny);
+        assert_eq!(pool_capacity("codex-oauth", "plus"), PoolCapacity::Small);
+        assert_eq!(pool_capacity("claude-cli", "max-20x"), PoolCapacity::Large);
+        assert_eq!(pool_capacity("claude-cli", ""), PoolCapacity::Unknown);
+
+        let q = quota(0.28, 0.25);
+        let go = pool_capacity_penalty("opencode_go::gpt-5.6-luna", TaskTier::Complex, &q);
+        let codex = pool_capacity_penalty("codex-oauth::gpt-5.6-luna", TaskTier::Complex, &q);
+        assert!(
+            go > codex,
+            "tiny pool {go} must be penalised more than a small one {codex}"
+        );
+        assert!(
+            pool_capacity_penalty("claude-cli::opus", TaskTier::Complex, &q) == 0.0,
+            "an unknown pool is never guessed at"
+        );
+        // Scarcity: the same tiny pool at 80% costs more per request than fresh, capped at 3x.
+        let fresh = pool_capacity_penalty(
+            "opencode_go::gpt-5.6-luna",
+            TaskTier::Complex,
+            &quota(0.0, 0.0),
+        );
+        let spent = pool_capacity_penalty(
+            "opencode_go::gpt-5.6-luna",
+            TaskTier::Complex,
+            &quota(0.8, 0.0),
+        );
+        assert!(
+            spent > fresh && spent <= fresh * 3.0 + 1e-9,
+            "fresh {fresh} spent {spent}"
+        );
+        // Tier scaling: a trivial request never justifies the spend the way a complex one might.
+        assert!(pool_capacity_penalty("opencode_go::gpt-5.6-luna", TaskTier::Trivial, &q) > go);
+    }
+
+    #[test]
+    fn a_lone_priced_subscription_model_gets_no_derived_weight() {
+        // A ratio needs a cheaper sibling to be a ratio against; one model must stay neutral
+        // rather than being penalised against itself.
+        let (_, pricing) = opencode_go_fixture();
+        let weights = price_derived_burn_weights(&["opencode_go::kimi-k3".to_string()], &pricing);
+        assert!(weights.is_empty());
+    }
+
+    #[test]
+    fn a_pressured_dollar_subscription_prefers_its_far_cheaper_near_equal_model() {
+        let (catalog, pricing) = opencode_go_fixture();
+        // Fresh window: the pool is shared and dollar-denominated, so a ~52x heavier sibling must
+        // be MEANINGFULLY better to be worth it even at zero pressure. Kimi's small capability
+        // edge is not, so the cheaper near-equal model leads from the first turn — the previous
+        // "penalty starts at zero" rule burned 64% of a real $12/5h pool in two hours.
+        let fresh = catalog.ranked_rows(TaskTier::Complex, &pricing, true, 0, &go_quota(0.0), None);
+        assert_eq!(
+            fresh.1[0].model, "opencode_go::muse-spark-1.2-contributor",
+            "a fresh dollar pool must already prefer the far cheaper near-equal sibling"
+        );
+
+        // Five-hour window nearly spent: the ~52x spend difference now outweighs the small
+        // capability edge, and the plan buys the cheaper model instead of the provider vanishing.
+        let pressured =
+            catalog.ranked_rows(TaskTier::Complex, &pricing, true, 0, &go_quota(0.75), None);
+        assert_eq!(
+            pressured.1[0].model, "opencode_go::muse-spark-1.2-contributor",
+            "window pressure must steer within the provider before displacing it"
+        );
+    }
+
     #[test]
     fn opencode_go_is_subscription_and_never_free() {
         assert!(is_subscription("opencode_go::deepseek-v4-flash"));
@@ -2611,7 +2773,8 @@ mod tests {
                 "claude-cli::sonnet",
                 TaskTier::Complex,
                 &forge_types::SubscriptionQuota::default(),
-                &overrides
+                &overrides,
+                &HashMap::new()
             ),
             0.0
         );

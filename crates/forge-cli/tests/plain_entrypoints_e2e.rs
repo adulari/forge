@@ -82,3 +82,33 @@ fn chat_plain_completes_a_real_mock_turn_and_exits() {
         "the chat must persist into the requested store"
     );
 }
+
+/// The bin under `CARGO_BIN_EXE_forge` is compiled with the `test-secrets` feature unified in and
+/// uplifted to `target/debug/forge`. Its store is an empty in-memory map, so it MUST say so: a
+/// bare "no keys configured" from it has been mistaken for a lost provider key more than once.
+#[test]
+fn test_built_binary_announces_its_blind_secret_store() {
+    let output = Command::new(env!("CARGO_BIN_EXE_forge"))
+        .args(["auth", "opencode_go", "--list"])
+        .env_remove("OPENCODE_GO_API_KEY")
+        .env_remove("OPENCODE_GO_API_KEY_2")
+        .env_remove("OPENCODE_GO_API_KEY_3")
+        .output()
+        .expect("spawn forge auth");
+    assert!(
+        output.status.success(),
+        "forge auth failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("reading keys from: in-memory test store"),
+        "backend line missing: {stdout}"
+    );
+    assert!(stdout.contains("test-secrets"), "{stdout}");
+    assert!(stdout.contains("cargo build --bin forge"), "{stdout}");
+    assert!(
+        stdout.contains("no opencode_go keys configured"),
+        "the in-memory store must be empty: {stdout}"
+    );
+}

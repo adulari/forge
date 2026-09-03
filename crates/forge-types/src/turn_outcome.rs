@@ -18,6 +18,10 @@ pub enum StopReason {
     /// it burned a turn and changed nothing. Reported as a failure, never as a completed turn:
     /// from an orchestrator or the phone this was previously indistinguishable from real work.
     NoOutput,
+    /// The turn ended with tracked tasks still unfinished — the model stopped (or kept narrating
+    /// without acting) before the plan was complete. Never a success: an orchestrator polling the
+    /// fleet must see half-done work as half-done.
+    TasksUnfinished,
 }
 
 impl StopReason {
@@ -30,6 +34,7 @@ impl StopReason {
             Self::Interrupted => "interrupted",
             Self::DaemonShutdown => "daemon_shutdown",
             Self::NoOutput => "no_output",
+            Self::TasksUnfinished => "tasks_unfinished",
         }
     }
 
@@ -40,7 +45,11 @@ impl StopReason {
         match self {
             Self::FinalAnswer => "success",
             Self::DaemonShutdown => "interrupted",
-            Self::MaxSteps | Self::BudgetExhausted | Self::Interrupted | Self::NoOutput => "failed",
+            Self::MaxSteps
+            | Self::BudgetExhausted
+            | Self::Interrupted
+            | Self::NoOutput
+            | Self::TasksUnfinished => "failed",
         }
     }
 
@@ -140,6 +149,7 @@ mod tests {
             StopReason::MaxSteps,
             StopReason::BudgetExhausted,
             StopReason::Interrupted,
+            StopReason::TasksUnfinished,
         ] {
             assert_eq!(failed.outcome(), "failed", "{failed:?} is not a success");
         }
@@ -151,6 +161,7 @@ mod tests {
             StopReason::Interrupted,
             StopReason::DaemonShutdown,
             StopReason::NoOutput,
+            StopReason::TasksUnfinished,
         ] {
             assert_eq!(
                 serde_json::to_string(&reason).unwrap(),

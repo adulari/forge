@@ -38,6 +38,7 @@ pub(crate) fn build_mesh_overlay(
                 rank: c.rank,
                 model: c.row.model.clone(),
                 score: c.row.final_score,
+                reorder_reason: c.reorder_reason.map(str::to_string),
                 cost_tag: match c.row.cost_class {
                     0 => "free",
                     1 => "subscription",
@@ -73,6 +74,11 @@ pub(crate) fn build_mesh_overlay(
                 spread_complex: q.spread_probability,
                 projected_fraction_at_reset: q.projected_fraction_at_reset,
                 exhaustion_warning: q.exhaustion_warning,
+                pace_note: forge_mesh::pacing_summary(q.pacing.as_ref(), q.hold.as_ref()),
+                over_pace: q
+                    .pacing
+                    .as_ref()
+                    .is_some_and(|pacing| pacing.is_over_pace() && !pacing.used_nominal_fallback),
             })
             .collect(),
         candidates: candidates.clone(),

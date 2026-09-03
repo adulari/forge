@@ -17,7 +17,7 @@ use crate::app_remote::{DiffFileSnapshot, TranscriptKind};
 use crate::{surface, PresenterEvent, QChoice, ReplayItem};
 
 pub use crate::overlays::{
-    MeshCandRow, MeshOverlay, MeshQuotaRow, QuotaPaceInfo, RoutingView, UsageOverlay,
+    MeshCandRow, MeshOverlay, MeshQuotaRow, QuotaPaceInfo, RoutingView, UsageOverlay, UsagePaceNote,
 };
 
 pub use crate::voice::{insert_voice_transcript, VoiceOverlay, VoicePhase};
@@ -1025,7 +1025,7 @@ impl App {
             } => {
                 self.routing = Some(RoutingView {
                     tier,
-                    model,
+                    model: crate::display_model(&model),
                     rationale,
                 });
                 self.set_turn_activity(
@@ -1481,6 +1481,9 @@ impl App {
                     ("claude-cli", "weekly") => self.usage_overlay.claude_weekly_pct = pct,
                     ("codex-cli", "five_hour") => self.usage_overlay.codex_5h_pct = pct,
                     ("codex-cli", "weekly") => self.usage_overlay.codex_weekly_pct = pct,
+                    ("opencode_go", "five_hour") => self.usage_overlay.opencode_go_5h_pct = pct,
+                    ("opencode_go", "weekly") => self.usage_overlay.opencode_go_weekly_pct = pct,
+                    ("opencode_go", "monthly") => self.usage_overlay.opencode_go_monthly_pct = pct,
                     _ => {}
                 }
             }
@@ -4533,6 +4536,7 @@ mod tests {
                 usable: true,
                 selected: true,
                 penalty: 0.0,
+                reorder_reason: None,
             },
             MeshCandRow {
                 rank: 2,
@@ -6094,6 +6098,8 @@ mod tests {
                 spread_complex: 0.5,
                 projected_fraction_at_reset: Some(0.93),
                 exhaustion_warning: true,
+                pace_note: "weekly 78% used · 21% allowed · OVER PACE → opus held, sonnet".into(),
+                over_pace: true,
             }],
             candidates: vec![
                 MeshCandRow {
@@ -6105,6 +6111,7 @@ mod tests {
                     usable: true,
                     selected: true,
                     penalty: 0.0,
+                    reorder_reason: None,
                 },
                 MeshCandRow {
                     rank: 2,
@@ -6115,6 +6122,7 @@ mod tests {
                     usable: true,
                     selected: false,
                     penalty: 4.0,
+                    reorder_reason: None,
                 },
             ],
             pick: "groq::llama-3.3-70b-versatile".into(),

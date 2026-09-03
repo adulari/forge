@@ -21,8 +21,17 @@
 //!    `[dev-dependencies]` (resolver=2: does not leak into production builds).
 //! 2. **Runtime tripwire** — on the real path, panics if `current_exe` looks like a cargo
 //!    test/bench binary (`…/target/…/deps/…`), unless `FORGE_ALLOW_REAL_SECRETS=1`.
+//!
+//! The feature has one side effect worth knowing about: `cargo test` (and `--all-targets`) builds
+//! the `forge` bin for the integration tests' `CARGO_BIN_EXE_forge` with the dev-dependency
+//! features unified in, and uplifts that bin to `target/debug/forge`. Until the next
+//! `cargo build --bin forge`, that path is a binary whose secret store is this in-memory map:
+//! every `forge auth --list` says "no keys configured" and `forge models`/`forge mesh` see only
+//! keyless providers. It is not a debug-vs-release difference — a plain `cargo build` in either
+//! profile reads the same keyring + file as the release binary. [`backend`] tells which store a
+//! process is reading so the commands can say so.
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 use std::path::PathBuf;
 use std::path::{Component, Path};
 
@@ -52,6 +61,70 @@ const ALLOW_REAL_SECRETS_ENV: &str = "FORGE_ALLOW_REAL_SECRETS";
 // Public API — feature-gated between in-memory (tests) and real backends (production)
 // =============================================================================================
 
+/// Which store answers [`get`]/[`set`]/[`delete`] in this process. Reported by
+/// `forge auth --list`, `forge models`, `forge mesh` and `forge doctor` so an empty store is never
+/// mistaken for a missing key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretBackend {
+    /// The `test-secrets` process-local map: nothing on disk or in the OS keyring is visible.
+    InMemoryTest,
+    /// The OS keyring (service `forge`) answered the probe; `fallback` is the encrypted file that
+    /// is consulted after it.
+    OsKeyring {
+        fallback: Option<std::path::PathBuf>,
+    },
+    /// The OS keyring is unreachable; the encrypted file is the only store.
+    EncryptedFile(Option<std::path::PathBuf>),
+}
+
+impl SecretBackend {
+    /// One human-readable line naming the store and, for the test map, why it is empty.
+    pub fn describe(&self) -> String {
+        let file = |p: &Option<std::path::PathBuf>| match p {
+            Some(p) => p.display().to_string(),
+            None => "<no config dir>".to_string(),
+        };
+        match self {
+            SecretBackend::InMemoryTest => "in-memory test store — this binary was compiled with \
+                 the `test-secrets` feature (a `forge` built by `cargo test` or `--all-targets`), \
+                 so NO stored key is visible; rebuild with `cargo build --bin forge`"
+                .to_string(),
+            SecretBackend::OsKeyring { fallback } => {
+                format!(
+                    "OS keyring (service `forge`), then encrypted file {}",
+                    file(fallback)
+                )
+            }
+            SecretBackend::EncryptedFile(path) => {
+                format!("encrypted file {} (OS keyring unreachable)", file(path))
+            }
+        }
+    }
+
+    /// Whether reads can never see a stored key, whatever the user configured.
+    pub fn is_blind(&self) -> bool {
+        matches!(self, SecretBackend::InMemoryTest)
+    }
+}
+
+/// The store this process reads. Runs the (cached, bounded) keyring probe on the real path.
+#[cfg(feature = "test-secrets")]
+pub fn backend() -> SecretBackend {
+    SecretBackend::InMemoryTest
+}
+
+/// The store this process reads. Runs the (cached, bounded) keyring probe on the real path.
+#[cfg(not(feature = "test-secrets"))]
+pub fn backend() -> SecretBackend {
+    if keyring_available() {
+        SecretBackend::OsKeyring {
+            fallback: secrets_path(),
+        }
+    } else {
+        SecretBackend::EncryptedFile(secrets_path())
+    }
+}
+
 /// Store `value` under `key`.
 #[cfg(feature = "test-secrets")]
 pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
@@ -74,6 +147,7 @@ pub fn delete(key: &str) -> Result<bool, ConfigError> {
 #[cfg(not(feature = "test-secrets"))]
 pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
     refuse_if_test_binary();
+    read_cache().invalidate(key);
     if keyring_available() {
         let key = key.to_string();
         let value = value.to_string();
@@ -91,9 +165,24 @@ pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
 }
 
 /// Read the secret for `key`: env-independent. Keyring first, then the encrypted file.
+///
+/// Memoized for [`READ_CACHE_TTL`]: one startup asks for the same ~30 provider entries five times
+/// over (discovery, key injection, routing, quota refreshes), and on a live Secret Service every
+/// miss is a D-Bus round trip — 138 reads cost ~0.9 s before a single model was even considered.
 #[cfg(not(feature = "test-secrets"))]
 pub fn get(key: &str) -> Option<String> {
     refuse_if_test_binary();
+    let now = std::time::Instant::now();
+    if let Some(hit) = read_cache().lookup(key, now) {
+        return hit;
+    }
+    let value = get_uncached(key);
+    read_cache().store(key, value.clone(), now);
+    value
+}
+
+#[cfg(not(feature = "test-secrets"))]
+fn get_uncached(key: &str) -> Option<String> {
     if keyring_available() {
         let key = key.to_string();
         if let Some(Ok(v)) = keyring_call("read", move || {
@@ -107,11 +196,60 @@ pub fn get(key: &str) -> Option<String> {
     file_get(key)
 }
 
+#[cfg(not(feature = "test-secrets"))]
+fn read_cache() -> std::sync::MutexGuard<'static, ReadCache> {
+    static CACHE: std::sync::Mutex<ReadCache> = std::sync::Mutex::new(ReadCache::new());
+    CACHE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How long a secret read (hit or miss) is trusted before the backends are asked again. Long
+/// enough to cover one command's startup burst; short enough that a key added by `forge auth` in
+/// another process reaches a long-running `forge serve` on its next turn, not its next restart.
+#[cfg_attr(feature = "test-secrets", allow(dead_code))]
+const READ_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Process-local memo of recent secret reads. Pure over an injected clock so the TTL and
+/// invalidation rules are unit-testable without a keyring.
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "test-secrets", allow(dead_code))]
+pub(crate) struct ReadCache {
+    entries: Vec<(String, Option<String>, std::time::Instant)>,
+}
+
+#[cfg_attr(feature = "test-secrets", allow(dead_code))]
+impl ReadCache {
+    pub(crate) const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// `Some(value)` when `key` was read within the TTL (the value itself may be `None`: a
+    /// confirmed miss is cached too — that is where the startup savings are).
+    pub(crate) fn lookup(&self, key: &str, now: std::time::Instant) -> Option<Option<String>> {
+        self.entries
+            .iter()
+            .find(|(k, _, at)| k == key && now.duration_since(*at) < READ_CACHE_TTL)
+            .map(|(_, v, _)| v.clone())
+    }
+
+    pub(crate) fn store(&mut self, key: &str, value: Option<String>, now: std::time::Instant) {
+        self.invalidate(key);
+        self.entries.push((key.to_string(), value, now));
+    }
+
+    /// A write or delete through this process must be visible to its very next read.
+    pub(crate) fn invalidate(&mut self, key: &str) {
+        self.entries.retain(|(k, _, _)| k != key);
+    }
+}
+
 /// Remove `key` from wherever it lives. `Ok(true)` if something was removed (from either store),
 /// `Ok(false)` if nothing was stored — so removal stays idempotent.
 #[cfg(not(feature = "test-secrets"))]
 pub fn delete(key: &str) -> Result<bool, ConfigError> {
     refuse_if_test_binary();
+    read_cache().invalidate(key);
     let mut removed = false;
     if keyring_available() {
         let key = key.to_string();
@@ -424,6 +562,47 @@ mod tests {
     }
 
     #[test]
+    fn read_cache_memoizes_hits_and_misses_until_the_ttl_elapses() {
+        let t0 = std::time::Instant::now();
+        let mut cache = ReadCache::new();
+        assert_eq!(
+            cache.lookup("groq", t0),
+            None,
+            "cold cache asks the backend"
+        );
+        cache.store("groq", None, t0);
+        cache.store("openai", Some("sk-1".into()), t0);
+        // A confirmed miss is memoized too: that is the keyless-startup saving.
+        assert_eq!(cache.lookup("groq", t0), Some(None));
+        assert_eq!(cache.lookup("openai", t0), Some(Some("sk-1".into())));
+        let within = t0 + READ_CACHE_TTL - std::time::Duration::from_millis(1);
+        assert_eq!(cache.lookup("groq", within), Some(None));
+        assert_eq!(cache.lookup("groq", t0 + READ_CACHE_TTL), None, "expired");
+    }
+
+    #[test]
+    fn read_cache_forgets_a_key_on_write_or_delete_but_keeps_the_others() {
+        let t0 = std::time::Instant::now();
+        let mut cache = ReadCache::new();
+        cache.store("groq", None, t0);
+        cache.store("openai", Some("sk-1".into()), t0);
+        cache.invalidate("groq");
+        assert_eq!(
+            cache.lookup("groq", t0),
+            None,
+            "`forge auth` must be visible at once"
+        );
+        assert_eq!(cache.lookup("openai", t0), Some(Some("sk-1".into())));
+        cache.store("openai", Some("sk-2".into()), t0);
+        assert_eq!(cache.lookup("openai", t0), Some(Some("sk-2".into())));
+        assert_eq!(
+            cache.entries.len(),
+            1,
+            "re-store replaces, never duplicates"
+        );
+    }
+
+    #[test]
     fn tripwire_detects_cargo_test_deps_paths() {
         assert!(is_cargo_test_or_bench_binary(Path::new(
             "/home/u/proj/target/debug/deps/forge_config-abc123"
@@ -457,6 +636,45 @@ mod tests {
         assert!(!is_cargo_test_or_bench_binary(Path::new(
             "/home/u/deps-project/src/main"
         )));
+    }
+
+    #[cfg(feature = "test-secrets")]
+    #[test]
+    fn test_secrets_feature_reports_a_blind_in_memory_backend() {
+        // This crate's own unit tests carry the feature, exactly like a `forge` bin that cargo
+        // built alongside the test suite. The report must name the feature and the rebuild
+        // command, because that bin's "no keys configured" is what gets mistaken for a lost key.
+        let backend = backend();
+        assert_eq!(backend, SecretBackend::InMemoryTest);
+        assert!(backend.is_blind());
+        let text = backend.describe();
+        assert!(text.contains("test-secrets"), "{text}");
+        assert!(text.contains("cargo test"), "{text}");
+        assert!(text.contains("cargo build --bin forge"), "{text}");
+    }
+
+    #[test]
+    fn real_backends_name_the_store_they_read() {
+        let file = Some(PathBuf::from("/home/u/.config/forge/secrets.enc"));
+        let keyring = SecretBackend::OsKeyring {
+            fallback: file.clone(),
+        };
+        assert!(!keyring.is_blind());
+        let text = keyring.describe();
+        assert!(text.contains("OS keyring (service `forge`)"), "{text}");
+        assert!(text.contains("/home/u/.config/forge/secrets.enc"), "{text}");
+
+        let file_only = SecretBackend::EncryptedFile(file);
+        assert!(!file_only.is_blind());
+        let text = file_only.describe();
+        assert!(
+            text.starts_with("encrypted file /home/u/.config/forge/secrets.enc"),
+            "{text}"
+        );
+        assert!(text.contains("keyring unreachable"), "{text}");
+
+        let text = SecretBackend::EncryptedFile(None).describe();
+        assert!(text.contains("<no config dir>"), "{text}");
     }
 
     #[cfg(feature = "test-secrets")]
