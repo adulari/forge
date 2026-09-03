@@ -187,15 +187,7 @@ impl Session {
     /// compact. Distinct from the failover consent path ([`admit_failover_model`]).
     pub(crate) async fn auto_compact_if_needed(&mut self, model: &str) {
         let window = self.base_context_window(model) as u64;
-        // `compact_cap_tokens` is a SPEND control — it exists to stop a large-window subscription
-        // model burning quota on an ever-growing prompt. A free model has no quota to burn, and
-        // applying the cap to one just throws away context for nothing: on a 1M-window free model
-        // the 217_600 default fired auto-compaction at ~21% of the window.
-        let cap = if self.router.model_is_free(model) {
-            u64::MAX
-        } else {
-            self.config.mesh.compact_cap_tokens
-        };
+        let cap = compaction_cap(self.router.model_is_free(model), &self.config.mesh);
         let trigger = auto_compact_trigger_tokens(window, cap, AUTO_COMPACT_THRESHOLD);
         if self.estimated_transcript_tokens() > trigger || !self.transcript_fits(model) {
             // Cheap first: the pipeline's mutating phase — prune bulky OLD tool results in place
@@ -679,5 +671,83 @@ mod auth_failure_tests {
             provider_excluded(&store),
             "a repeat separated in time is a real logout"
         );
+    }
+}
+
+/// The absolute token ceiling at which a session auto-compacts, before the model's own window is
+/// taken into account. Two different ceilings, because they answer two different questions.
+///
+/// [`forge_config::MeshConfig::compact_cap_tokens`] is a SPEND control — it exists to stop a
+/// large-window subscription model burning quota on an ever-growing prompt. A free model has no
+/// quota to burn, so applying it there just throws away context for nothing: on a 1M-window free
+/// model the 217_600 default fired auto-compaction at ~21% of the window.
+///
+/// [`forge_config::MeshConfig::free_model_cap_tokens`] is what a free model gets INSTEAD. Exempting
+/// free models from the spend cap by handing them `u64::MAX` left them with no absolute ceiling at
+/// all, so the only remaining limit was `AUTO_COMPACT_THRESHOLD * window` — 838,860 tokens on a 1M
+/// window. Free buys tokens, not attention: a turn carrying 800k of mostly-stale tool output is not
+/// better than one carrying a compacted 400k, and every later turn re-sends the whole thing.
+pub(crate) fn compaction_cap(free: bool, mesh: &forge_config::MeshConfig) -> u64 {
+    if free {
+        mesh.free_model_cap_tokens
+    } else {
+        mesh.compact_cap_tokens
+    }
+}
+
+#[cfg(test)]
+mod compaction_cap_tests {
+    use super::*;
+    use crate::{auto_compact_trigger_tokens, AUTO_COMPACT_THRESHOLD};
+
+    /// The window of `meta::muse-spark-1.3-contributor` and every other muse-spark model, as
+    /// OpenRouter publishes it and as the store records it.
+    const MUSE_WINDOW: u64 = 1_048_576;
+
+    #[test]
+    fn a_free_model_still_has_a_ceiling_on_a_million_token_window() {
+        let mesh = forge_config::Config::default().mesh;
+
+        // The regression: with the spend cap replaced by `u64::MAX`, the ONLY remaining limit was
+        // the fraction of the window, and a 1M-window free model ran to 838,860 tokens before
+        // anything folded it. Measured consequence on a real session: requests carrying 300k-720k
+        // of context, 90% of it stale tool output.
+        let unbounded = auto_compact_trigger_tokens(MUSE_WINDOW, u64::MAX, AUTO_COMPACT_THRESHOLD);
+        assert_eq!(unbounded, 838_860);
+
+        let free = auto_compact_trigger_tokens(
+            MUSE_WINDOW,
+            compaction_cap(true, &mesh),
+            AUTO_COMPACT_THRESHOLD,
+        );
+        assert_eq!(free, 400_000, "a free model compacts at its own ceiling");
+        assert!(free < unbounded / 2);
+    }
+
+    #[test]
+    fn the_free_ceiling_never_second_guesses_the_spend_cap_for_a_paid_model() {
+        let mesh = forge_config::Config::default().mesh;
+        let paid = compaction_cap(false, &mesh);
+        assert_eq!(paid, mesh.compact_cap_tokens);
+        assert!(
+            compaction_cap(true, &mesh) > paid,
+            "the free ceiling is a backstop, deliberately looser than the spend control — a free \
+             model that compacted EARLIER than a paid one would be the original bug inverted"
+        );
+    }
+
+    #[test]
+    fn a_small_window_still_wins_over_either_ceiling() {
+        // Both caps are absolute ceilings, not targets: a model whose real window is smaller must
+        // still compact at its own 80%, or the transcript stops fitting at all.
+        let mesh = forge_config::Config::default().mesh;
+        for free in [true, false] {
+            let trigger = auto_compact_trigger_tokens(
+                32_768,
+                compaction_cap(free, &mesh),
+                AUTO_COMPACT_THRESHOLD,
+            );
+            assert_eq!(trigger, 26_214, "free={free}");
+        }
     }
 }
