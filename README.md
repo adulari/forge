@@ -37,6 +37,7 @@ https://github.com/Adulari/forge/raw/main/docs/assets/forge-promo.mp4
 ---
 
 ```bash
+forge setup                                   # first run: keys, bridges, optional local model
 forge chat                                    # full-screen TUI, multi-turn
 forge run "add pagination to the user list"   # one-shot task
 forge run --model claude-cli::sonnet "…"       # run your Claude subscription THROUGH Forge
