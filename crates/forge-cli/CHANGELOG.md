@@ -6,6 +6,69 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **A long tool loop threw away the task it was working on.** When the transcript overflowed the
+  model's window, the fit kept every system message and a newest-first suffix of history — and the
+  user's own message was neither, so a tool loop that filled the budget evicted the instruction
+  while keeping the output it produced. The model then reported that no task had arrived and
+  invented work from what was left. The newest user message is now reserved before the walk, and
+  clipped rather than dropped when it alone exceeds the budget (`crates/forge-core/src/context_pipeline.rs`).
+- **A model behind a gateway assumed a 32k window when its real one is a million tokens.** OpenCode
+  Zen and Go list models without a context length, as do most custom OpenAI-compatible endpoints, so
+  every model behind one fell to the conservative floor and trimmed long turns for no reason. A
+  model with no window row of its own now inherits the window published for the same model under
+  another namespace, lowest match winning (`crates/forge-mesh/src/pricing.rs`,
+  `crates/forge-core/src/routing_policy.rs`).
+- **An explicitly read-only turn was re-driven to produce a diff.** A worktree-backed daemon session
+  arms a code-change expectation for its whole life, and that beat the prompt, so a turn that said
+  "do not edit anything" ended with no edits, tripped the empty-diff guard, and was pushed to
+  "implement the fix now". An imperative read-only instruction in the prompt now wins, and the
+  phrase list recognises what an operator actually types (`crates/forge-core/src/turn_contract.rs`).
+- **OpenCode Zen's Responses-only models could not be called at all.** `muse-*`, `gpt-*` and `grok-*`
+  answer only on `/responses` there, while Forge always built an OpenAI-chat request and got an
+  instant 500. Zen now reuses the per-model wire-format matrix the Go adapter already carries
+  (`crates/forge-provider/src/genai_provider.rs`).
+- **A new model silently inherited an older sibling's benchmark score.** The cross-version guard
+  compared version numbers by membership, so a shared major digit let a different minor through:
+  `muse-spark-1.3` matched "Muse Spark 1.2" on the shared `1`. Comparison is positional now, and a
+  benchmark row missing one of its two indices is kept on the index it has rather than dropped
+  (`crates/forge-mesh/src/bench.rs`, `crates/forge-cli/src/benchmarks.rs`).
+
+- **An Ask temper on the CLI bridge approved silently instead of refusing.** A bridged turn had no
+  one to answer a permission prompt, so the gate resolved the wrong way
+  (`crates/forge-core/src/permission.rs`).
+- **Routing stalled on rediscovery when a cached catalog already existed**, and the daemon's models
+  page served the last terminal's catalog rather than its own
+  (`crates/forge-cli/src/cli/commands/models/discovery.rs`, `crates/forge-cli/src/serve/serve_models.rs`).
+- **An over-pace subscription pool is now held entirely**, and the last-resort override is
+  re-checked per failover hop instead of being spent once and left open
+  (`crates/forge-mesh/src/lib.rs`, `crates/forge-core/src/model_request.rs`).
+- **An unattended bridge turn that stalled with tasks still open now fails** instead of reporting
+  success (`crates/forge-core/src/turn_guards.rs`).
+- **An explicitly configured `[mesh.models]` tier is honoured** over an auto-discovered one
+  (`crates/forge-mesh/src/catalog.rs`).
+- **`forge doctor` reports a provider-rejected key as invalid** rather than unreachable, and
+  `forge models` says which listed models have no key
+  (`crates/forge-cli/src/doctor_health.rs`, `crates/forge-cli/src/cli/commands/models.rs`).
+- **A keyless first run skips network enrichment**, bare `forge` shows a first-run panel instead of
+  the full command list, non-tty setup is actionable, and CLI bridges known to be logged out are no
+  longer probed (`crates/forge-cli/src/cli/commands/run.rs`, `crates/forge-provider/src/lib.rs`).
+- **Claude quota is read from `unifiedWindows`**, and model reasoning is no longer printed as answer
+  text on a non-tty (`crates/forge-provider/src/claude_quota.rs`, `crates/forge-tui/src/lib.rs`).
+
+### Added
+- **`POST /api/sessions/{id}/interrupt`** ends a fleet session's current turn and leaves it live and
+  idle. The daemon accepted an interrupt over its WebSocket but had no HTTP route, so a script could
+  only stop a runaway turn by ending the session; `--steer` is no substitute, since it lands at the
+  next turn boundary and a session stuck in a tool loop never reaches one (`crates/forge-cli/src/serve.rs`).
+
+### Changed
+- **`release-build` no longer gates pull requests.** The release compile plus its upgrade,
+  reconnect and rollback end-to-end is the longest job in the pipeline, and every heavy job
+  serializes on one runner, so running it per pull request set the merge throughput of the project.
+  It runs on the push to main after a merge, on the weekly schedule, and on the dispatch the release
+  workflow fires — still before anything ships (`.github/workflows/ci.yml`).
+
 ## [2.13.7] - 2026-09-02
 
 ### Fixed
