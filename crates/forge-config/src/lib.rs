@@ -157,7 +157,7 @@ pub struct Config {
 }
 
 /// `[remote]` config block — the phone/browser remote-control server (`remote-control.md`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
     /// Auto-start exposure when `forge chat` launches. `off` (default) leaves remote control off
     /// until you type `/remote`; `local` binds loopback (this machine only); `lan` binds the LAN
@@ -213,6 +213,28 @@ pub struct RemoteConfig {
     /// `false` to keep local chat out of the fleet entirely.
     #[serde(default = "default_true")]
     pub publish_local_sessions: bool,
+}
+
+// Hand-written, NOT derived. `Config` carries `#[serde(default)] pub remote: RemoteConfig`, so a
+// config file with no `[remote]` block at all builds this struct through `Default` and never
+// touches the per-field `#[serde(default = "default_true")]` attributes — those only apply when
+// the block EXISTS and the key is missing. Deriving `Default` therefore silently gave
+// `publish_local_runs`/`publish_local_sessions` the `bool` default of `false` for every user
+// without a `[remote]` block, which is most of them: terminal sessions stopped appearing in the
+// fleet entirely. Any future `default_true` field here must be added in both places.
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            auto: RemoteAuto::default(),
+            host: None,
+            port: None,
+            tunnel_name: None,
+            tunnel_hostname: None,
+            project_roots: Vec::new(),
+            publish_local_runs: default_true(),
+            publish_local_sessions: default_true(),
+        }
+    }
 }
 
 /// `[anywhere]` config block for the optional managed companion.
@@ -3266,6 +3288,35 @@ mod tests {
         // Reaching the fleet is opt-OUT for both: a config with no `[remote]` block at all must
         // still advertise local chat AND host one-shot runs in the daemon, or the phone and
         // desktop apps show nothing of what this machine is working on.
+        // Parse a WHOLE config with no `[remote]` block — the shape of a real config file, and
+        // the case that regressed. `#[serde(default)]` on `Config::remote` builds the struct via
+        // `Default`, which never consults the per-field `default_true` attributes; deriving
+        // `Default` here silently disabled fleet publishing for every user without the block.
+        // Asserting on `toml::from_str::<RemoteConfig>("")` alone does NOT cover this: that path
+        // does use the field attributes, which is why the original test passed while terminal
+        // sessions stopped appearing in the fleet.
+        let whole: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+"#,
+        )
+        .expect("a config with no [remote] block parses");
+        assert!(
+            whole.remote.publish_local_sessions,
+            "an absent [remote] block must still publish local sessions"
+        );
+        assert!(
+            whole.remote.publish_local_runs,
+            "an absent [remote] block must still host one-shot runs in the daemon"
+        );
+        assert!(
+            RemoteConfig::default().publish_local_sessions,
+            "Default must agree with the serde defaults"
+        );
+        assert!(RemoteConfig::default().publish_local_runs);
+
         let default: RemoteConfig = toml::from_str("").expect("an absent [remote] block parses");
         assert!(default.publish_local_sessions);
         assert!(
