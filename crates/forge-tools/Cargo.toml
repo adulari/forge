@@ -11,6 +11,7 @@ repository.workspace = true
 name = "forge_tools"
 
 [dependencies]
+forge-browser.workspace = true
 forge-types.workspace = true
 forge-index.workspace = true
 async-trait.workspace = true

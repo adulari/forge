@@ -2090,6 +2090,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-agent-browser"
+version = "2.13.9"
+dependencies = [
+ "anyhow",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+]
+
+[[package]]
 name = "forge-agent-config"
 version = "2.13.9"
 dependencies = [
@@ -2306,6 +2321,7 @@ name = "forge-agent-tools"
 version = "2.13.9"
 dependencies = [
  "async-trait",
+ "forge-agent-browser",
  "forge-agent-index",
  "forge-agent-types",
  "futures",
