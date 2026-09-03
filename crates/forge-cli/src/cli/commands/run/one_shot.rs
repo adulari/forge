@@ -130,7 +130,7 @@ async fn maybe_publish_run_to_fleet(
 ) -> Option<String> {
     let configured = forge_config::load()
         .map(|c| c.remote.publish_local_runs)
-        .unwrap_or(false);
+        .unwrap_or(true);
     if !crate::cli::dispatch::resolve_publish_to_fleet(
         publish_to_fleet,
         no_publish_to_fleet,

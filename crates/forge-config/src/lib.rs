@@ -194,10 +194,25 @@ pub struct RemoteConfig {
     /// without exposing the rest of the host filesystem.
     #[serde(default)]
     pub project_roots: Vec<String>,
-    /// Register a standalone `forge run` with the local daemon so the run shows up in the Anywhere
-    /// fleet (phone and desktop apps). Off by default: publishing a one-shot run is opt-in.
-    #[serde(default)]
+    /// Run a standalone `forge run` IN the local daemon, so the run shows up in the Anywhere
+    /// fleet (phone and desktop apps) and can be watched and steered from either.
+    ///
+    /// ON by default, like [`Self::publish_local_sessions`]: a one-shot run that nobody can see
+    /// from the phone is the odd case, not the norm. This moves where the turn EXECUTES rather
+    /// than only advertising it, so it fail-softs — if the daemon is down, unreachable, or
+    /// rejects the request, the run proceeds locally exactly as if this were off. Set to `false`
+    /// (or pass `--no-publish-to-fleet`) to keep one-shot runs purely local.
+    #[serde(default = "default_true")]
     pub publish_local_runs: bool,
+    /// Advertise terminal-local `forge` chat sessions in the fleet, so the phone and desktop apps
+    /// list what this machine is working on alongside `forge serve`-hosted sessions.
+    ///
+    /// ON by default. This publishes presence only — id, title, cwd, busy — for sessions already
+    /// in the shared store, and remote clients see them read-only with no input path, so unlike
+    /// [`Self::publish_local_runs`] nothing about where a turn executes changes. Set this to
+    /// `false` to keep local chat out of the fleet entirely.
+    #[serde(default = "default_true")]
+    pub publish_local_sessions: bool,
 }
 
 /// `[anywhere]` config block for the optional managed companion.
@@ -3241,6 +3256,25 @@ pub fn inject_provider_keys() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_sessions_and_runs_reach_the_fleet_unless_opted_out() {
+        // Reaching the fleet is opt-OUT for both: a config with no `[remote]` block at all must
+        // still advertise local chat AND host one-shot runs in the daemon, or the phone and
+        // desktop apps show nothing of what this machine is working on.
+        let default: RemoteConfig = toml::from_str("").expect("an absent [remote] block parses");
+        assert!(default.publish_local_sessions);
+        assert!(
+            default.publish_local_runs,
+            "a one-shot run nobody can see from the phone is the odd case, not the norm"
+        );
+
+        let opted_out: RemoteConfig =
+            toml::from_str("publish_local_sessions = false\npublish_local_runs = false\n")
+                .expect("opt-out parses");
+        assert!(!opted_out.publish_local_sessions);
+        assert!(!opted_out.publish_local_runs);
+    }
 
     #[test]
     fn claude_aliases_cover_every_imported_permission_tool() {

@@ -127,7 +127,22 @@ impl Store {
     pub fn local_live_sessions(&self) -> Result<Vec<LocalPresenceRow>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.title, s.cwd, s.worktree_path, s.local_busy, s.created_at,
+            // An untitled session must not surface as a BLANK fleet row. Only the daemon driver,
+            // the rename route, and subagents ever write `session.title`, so a plain `forge`
+            // chat session has none — it appeared in the phone/desktop fleet as an unlabelled,
+            // unidentifiable entry, which is indistinguishable from not appearing at all. Fall
+            // back to the opening line of the first user message, the same shape the daemon
+            // derives a title from when publishing a run. Read-side only: no title is written
+            // behind the user's back, and every already-stored session benefits with no
+            // migration.
+            "SELECT s.id,
+                    COALESCE(NULLIF(s.title, ''),
+                             (SELECT substr(replace(replace(m.content, char(10), ' '),
+                                                    char(13), ' '), 1, 60)
+                              FROM message m
+                              WHERE m.session_id = s.id AND m.role = 'user'
+                              ORDER BY m.seq LIMIT 1)) AS title,
+                    s.cwd, s.worktree_path, s.local_busy, s.created_at,
                     COALESCE((SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id),
                              s.created_at) AS last_activity,
                     (SELECT r.chosen_model FROM routing_decision r

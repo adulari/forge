@@ -620,7 +620,16 @@ pub(crate) async fn run_chat_tui(
     // rather than being set once here, because `/new` and `/resume` retarget `session` to a
     // different id without this function returning. Store-open failure degrades to a silent no-op
     // (`store: None`) rather than blocking chat on a presence feature that is read-only anyway.
-    let local_presence = LocalPresenceGuard::new(crate::open_store().ok().map(Arc::new));
+    // `[remote] publish_local_sessions` is the opt-OUT: on by default, since this publishes only
+    // read-only presence for a session the shared store already holds.
+    let publish_local_sessions = forge_config::load()
+        .map(|c| c.remote.publish_local_sessions)
+        .unwrap_or(true);
+    let local_presence = LocalPresenceGuard::new(
+        publish_local_sessions
+            .then(|| crate::open_store().ok().map(Arc::new))
+            .flatten(),
+    );
     local_presence.retarget(&sid);
 
     // On a resumed session (`--continue` / `--resume <id>`): render the FULL prior transcript into
