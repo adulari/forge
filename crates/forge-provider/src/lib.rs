@@ -89,6 +89,13 @@ pub fn normalize_model_id(model: &str) -> std::borrow::Cow<'_, str> {
 /// whole bridge in confusion. `xai-oauth::…` is deliberately EXCLUDED: it's subscription-billed
 /// like a bridge, but it's a normal single-turn API call whose tool calls DO surface to the
 /// parent's own loop.
+/// The one-time notice shown before a turn first runs on a CLI bridge. Exported so the session
+/// can present it in Forge's own voice while the provider layer keeps a copy for the log.
+pub const CLI_BRIDGE_NOTICE: &str = "CLI-bridge runs your locally-installed claude/codex; Forge \
+     never sees your login. Using subscription CLIs from third-party tools may be restricted by \
+     Anthropic/OpenAI terms — you run this at your own discretion. See \
+     docs/features/provider-integrations.md.";
+
 pub fn is_cli_bridge(model: &str) -> bool {
     let m = normalize_model_id(model);
     m.starts_with("claude-cli::") || m.starts_with("codex-cli::") || m.starts_with("agy-cli::")
@@ -828,9 +835,14 @@ impl DispatchProvider {
         self
     }
 
+    /// The CLI-bridge terms notice. It goes to the LOG, not the user's turn output: a
+    /// `tracing::warn!` in the middle of a run renders with a timestamp and module path, unlike
+    /// every other user-facing line, and it lands mid-stream between the routing line and the
+    /// model's first token. The session emits the same text once through the presenter instead,
+    /// so it reads like the rest of Forge and appears before the turn starts.
     fn cli_notice(&self) {
         self.notice.call_once(|| {
-            tracing::warn!(
+            tracing::debug!(
                 "CLI-bridge runs your locally-installed claude/codex; Forge never sees your \
                  login. Using subscription CLIs from third-party tools may be restricted by \
                  Anthropic/OpenAI terms — you run this at your own discretion. See \

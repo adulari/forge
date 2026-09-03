@@ -218,6 +218,7 @@ impl Session {
             turn_hard_guard_abort: false,
             turn_unfinished_tasks: Vec::new(),
             expect_code_change: false,
+            cli_bridge_notice_shown: false,
             tools_unavailable_run: false,
             turn_deadline: None,
             deadline_reconciled: false,

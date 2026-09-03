@@ -1593,6 +1593,8 @@ pub struct Session {
     /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
     /// tree clean gets ONE "implement it, don't describe it" push-back. Never set interactively.
     expect_code_change: bool,
+    /// Whether this session already showed the CLI-bridge terms notice (once per session).
+    cli_bridge_notice_shown: bool,
     /// Set by the last [`Session::run_turn`] on an `expect_code_change` bridge turn that was
     /// classified TOOLS-UNAVAILABLE (wave 7): Forge's `mcp-serve` tool server failed to start, so
     /// the model ran with no write tools and produced an empty tree. Read by the harness
@@ -2263,6 +2265,21 @@ impl Session {
         Ok(())
     }
 
+    /// Show the CLI-bridge terms notice once per session, the first time a turn is about to run
+    /// on `claude-cli`/`codex-cli` — including when failover lands there, which is how a keyless
+    /// first run reaches a bridge. The provider layer keeps the same text at debug level for the
+    /// log; emitting it there as a `warn` printed a timestamped, module-prefixed line between the
+    /// routing line and the model's first token, unlike every other user-facing line.
+    pub(crate) fn note_cli_bridge_once(&mut self, model: &str) {
+        if self.cli_bridge_notice_shown || !forge_provider::is_cli_bridge(model) {
+            return;
+        }
+        self.cli_bridge_notice_shown = true;
+        self.presenter.emit(PresenterEvent::Warning(
+            forge_provider::CLI_BRIDGE_NOTICE.to_string(),
+        ));
+    }
+
     /// Load the persisted replay entries for any session (not just this one) — used by the
     /// `/replay` chat command to show a transcript inline.
     pub fn load_replay(
@@ -2579,6 +2596,7 @@ impl Session {
             model: routed_model.clone(),
             rationale: decision.rationale.clone(),
         });
+        self.note_cli_bridge_once(&routed_model);
 
         // Prepend any command/skill guidance as persisted system messages, so the methodology
         // is in context for this turn and rehydrates verbatim on resume (the skill file is not

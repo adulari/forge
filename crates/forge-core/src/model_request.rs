@@ -705,6 +705,7 @@ pub(super) async fn request_provider_response(
                             model: next.clone(),
                             rationale: format!("failover from {active_model}"),
                         });
+                        session.note_cli_bridge_once(&next);
                         *active_model = next;
                         failover_hop = failover_hop.saturating_add(1);
                         *transient_retries = 0;
