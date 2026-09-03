@@ -59,7 +59,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 31;
+const SCHEMA_VERSION: i64 = 32;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1558,6 +1558,10 @@ pub struct LocalPresenceRow {
     pub last_activity: i64,
     /// The most recently routed model, or `None` if the session hasn't taken a turn yet.
     pub model: Option<String>,
+    /// The loopback control endpoint this session published, when it is drivable from a remote
+    /// client (`[remote] interactive_local_sessions`). `None` means watch-only: the fleet lists
+    /// the session but there is nothing to send input to.
+    pub control_url: Option<String>,
 }
 
 /// A one-line summary of a past session, for `forge sessions`.
@@ -1942,6 +1946,51 @@ mod tests {
         // Clean exit removes the session from the fleet.
         store.set_session_local_live(&sid, false).unwrap();
         assert!(store.local_live_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_terminal_session_is_drivable_only_while_its_control_channel_is_alive() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp/local", "Default").unwrap();
+        store.set_session_local_live(&sid, true).unwrap();
+
+        // Live but no channel published yet — the fleet lists it, nothing can drive it.
+        assert!(store.local_session_control_url(&sid).unwrap().is_none());
+        assert!(store.local_live_sessions().unwrap()[0]
+            .control_url
+            .is_none());
+
+        store
+            .set_session_local_control_url(&sid, Some("http://127.0.0.1:5051/tok"))
+            .unwrap();
+        assert_eq!(
+            store.local_session_control_url(&sid).unwrap().as_deref(),
+            Some("http://127.0.0.1:5051/tok")
+        );
+        assert_eq!(
+            store.local_live_sessions().unwrap()[0]
+                .control_url
+                .as_deref(),
+            Some("http://127.0.0.1:5051/tok"),
+            "the fleet row carries the endpoint so the listing can flag the row drivable"
+        );
+
+        // A stale heartbeat (killed terminal) hides the endpoint: that port is very likely to
+        // belong to something else by now, so it must never be handed to a client.
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session SET local_last_seen = strftime('%s','now') - ?2 WHERE id = ?1",
+                rusqlite::params![sid, LOCAL_PRESENCE_STALE_SECS + 1],
+            )
+            .unwrap();
+        assert!(store.local_session_control_url(&sid).unwrap().is_none());
+
+        // Restarting a terminal on the same session clears whatever the dead process left behind,
+        // so it cannot be proxied to before the new channel has published itself.
+        store.set_session_local_live(&sid, true).unwrap();
+        assert!(store.local_session_control_url(&sid).unwrap().is_none());
     }
 
     #[test]

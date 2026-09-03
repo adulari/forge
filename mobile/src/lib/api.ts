@@ -326,10 +326,16 @@ export interface SessionRow {
   permission_mode: "default" | "accept-edits" | "bypass" | "plan" | null;
   created_at: number;
   last_activity: number;
-  /** Terminal-local session the daemon merely observes via the store, never drives — no remote
-   * input path exists for it. Additive field: optional so a response from an older daemon (which
-   * never emitted the key) still parses, defaulting to drivable. */
+  /** No remote input path exists for this session, so never mount a composer for it. True for a
+   * terminal session whose Forge build predates the control channel, or whose user set
+   * `[remote] interactive_local_sessions = false`. Additive: absent from an older daemon, which
+   * defaults it to drivable. */
   read_only?: boolean;
+  /** The session runs in a terminal, not in this daemon — drivable or not. Gates the lifecycle
+   * actions (archive/merge/discard), which stop a driver that does not exist here. Additive: an
+   * older daemon emits `read_only` for exactly this set of sessions and never emits this key,
+   * which is why the fallback below reads both. */
+  terminal?: boolean;
   /** How the session's most recent turn ended. `null`/absent until one has (and always absent for
    * a `read_only` row). Without it, `busy: false` is the whole story: a session that did the work
    * and one that burned a turn producing nothing look identical. Additive. */

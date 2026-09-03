@@ -51,6 +51,12 @@ struct LocalPresenceGuard {
     /// async) because every access here is a quick compare-and-maybe-write, never held across an
     /// `.await`.
     current: std::sync::Mutex<Option<String>>,
+    /// The loopback control endpoint this terminal published, when it opened one (`[remote]
+    /// interactive_local_sessions`). Kept here rather than written once because
+    /// `set_session_local_live` deliberately clears the column, so `/new` and `/resume` have to
+    /// re-publish the SAME still-listening channel against the new session id — otherwise the
+    /// session silently reverts to read-only in the apps the moment the user starts a new chat.
+    control_url: std::sync::Mutex<Option<String>>,
 }
 
 impl LocalPresenceGuard {
@@ -58,6 +64,25 @@ impl LocalPresenceGuard {
         Self {
             store,
             current: std::sync::Mutex::new(None),
+            control_url: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Record the loopback control endpoint for this terminal and publish it for the session
+    /// currently marked live, making the session drivable (not merely visible) from the apps.
+    fn publish_control_url(&self, url: String) {
+        let mut held = self
+            .control_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = Some(url);
+        let Some(store) = &self.store else { return };
+        let current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(id) = current.as_deref() {
+            let _ = store.set_session_local_control_url(id, held.as_deref());
         }
     }
 
@@ -78,6 +103,17 @@ impl LocalPresenceGuard {
         }
         let _ = store.set_session_local_live(session_id, true);
         *current = Some(session_id.to_string());
+        // `set_session_local_live` cleared the endpoint column (it may have held a dead port from
+        // a previous process). This terminal's channel is still listening and still drives this
+        // very loop, so re-publish it for the new id.
+        if let Some(url) = self
+            .control_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_deref()
+        {
+            let _ = store.set_session_local_control_url(session_id, Some(url));
+        }
     }
 
     /// Refresh the liveness heartbeat and busy flag for the currently-tracked session.
@@ -899,6 +935,35 @@ pub(crate) async fn run_chat_tui(
         // first frame is always broadcast even if the app state hasn't changed since the last
         // server's final snapshot.
         last_remote_snap = None;
+    }
+
+    // The fleet control channel: a token-gated loopback server the Anywhere daemon proxies the
+    // phone/desktop apps into, so a terminal chat is DRIVABLE from them and not merely listed
+    // read-only. Deliberately separate from `/remote` above — that is the user's own channel and
+    // toggling it must not take the apps' one down with it (and vice versa) — and always loopback,
+    // whatever exposure `/remote` is using. Opt-out via `[remote] interactive_local_sessions`.
+    //
+    // Nothing is announced in scrollback: this opens on every chat, and a connect banner on every
+    // startup would be noise for a channel the user never types a URL for. Failure is silent for
+    // the same reason presence failure is — the session keeps working, it is just read-only in the
+    // apps, exactly as it was before this existed.
+    let mut fleet_control: Option<remote::RemoteControl> = None;
+    if tui_config.remote.interactive_local_sessions && local_presence.store.is_some() {
+        match remote::start(
+            remote::Exposure::Local,
+            None,
+            Some(remote_history.clone()),
+            Some(&remote_workspace),
+        ) {
+            Ok(rc) => {
+                local_presence.publish_control_url(rc.url.url.clone());
+                fleet_control = Some(rc);
+                last_remote_snap = None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "fleet control channel unavailable; session stays read-only in the apps");
+            }
+        }
     }
 
     while !quit {
@@ -3302,8 +3367,20 @@ pub(crate) async fn run_chat_tui(
         // them exactly like local keystrokes. We process the whole queue each iteration so a
         // chatty phone can't fall behind. Each input marks `dirty` (the statusline/preview may
         // change) and may spawn a turn / answer a prompt.
-        if let Some(rc) = remote.as_mut() {
-            while let Ok(input) = rc.input_rx.try_recv() {
+        {
+            // Both channels feed the same injection path: `/remote`'s (the user's own browser) and
+            // the fleet channel the apps are proxied into. Drained into one list first so the
+            // handling below stays a single body rather than being duplicated per channel.
+            let mut remote_inputs: Vec<remote::RemoteInput> = Vec::new();
+            for rc in [remote.as_mut(), fleet_control.as_mut()]
+                .into_iter()
+                .flatten()
+            {
+                while let Ok(input) = rc.input_rx.try_recv() {
+                    remote_inputs.push(input);
+                }
+            }
+            for input in remote_inputs {
                 dirty = true;
                 // Fleet-messaging "steer" delivery — outrank the queued backlog for the target's
                 // very next turn boundary without touching an in-flight turn (mirrors the headless
@@ -4454,7 +4531,7 @@ pub(crate) async fn run_chat_tui(
         // Push any finalized lines into native scrollback (above the pinned live region). While
         // remote control is on, also fold them into the transcript ring buffer so the phone's
         // snapshot mirrors the conversation tail, then broadcast the snapshot.
-        if remote.is_some() {
+        if remote.is_some() || fleet_control.is_some() {
             if let Some(error) = remote
                 .as_ref()
                 .and_then(remote::RemoteControl::server_error)
@@ -4524,10 +4601,15 @@ pub(crate) async fn run_chat_tui(
                     remote_revision += 1;
                     snap.revision = remote_revision;
                     last_remote_snap = Some(snap.clone());
-                    if let Some(rc) = remote.as_ref() {
+                    for rc in [remote.as_ref(), fleet_control.as_ref()]
+                        .into_iter()
+                        .flatten()
+                    {
                         // `broadcast` (not a bare `send`): the frame must also land in the
-                        // replay log so a reconnecting page gets exactly what it missed.
-                        rc.broadcast(snap);
+                        // replay log so a reconnecting page gets exactly what it missed. Both
+                        // channels receive the identical frame, revision included, so their
+                        // replay logs stay interchangeable.
+                        rc.broadcast(snap.clone());
                     }
                 }
             }
