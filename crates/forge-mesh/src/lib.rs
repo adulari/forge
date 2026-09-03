@@ -1248,6 +1248,32 @@ impl HeuristicRouter {
     }
 
     /// Whether auto-discovery routing is active (enabled + a non-empty catalog attached).
+    /// The tier's configured seeds, then the other tiers' as a tail, deduped.
+    ///
+    /// Only for the seed path — auto-discovery on, no catalog yet. The tier's own candidates still
+    /// lead, so the primary pick never changes; the tail only gives failover somewhere to go.
+    /// Without it a tier whose every candidate is unusable exhausts the chain and fails the turn
+    /// while a usable model sits one tier away: on a fresh install with no API keys and a
+    /// logged-in codex CLI, the trivial tier is ollama (not running) plus groq (no key), so a
+    /// one-word prompt died with "model chain exhausted" and never tried the bridge.
+    ///
+    /// A user who turned auto-discovery OFF and listed models per tier is NOT widened — that
+    /// configuration is a deliberate restriction, not a starting point.
+    fn widened_seed_candidates(&self, tier: TaskTier) -> Vec<String> {
+        let mut seeds = self.config.candidates_for(tier);
+        for other in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
+            if other == tier {
+                continue;
+            }
+            for model in self.config.candidates_for(other) {
+                if !seeds.contains(&model) {
+                    seeds.push(model);
+                }
+            }
+        }
+        seeds
+    }
+
     fn auto_active(&self) -> bool {
         self.config.mesh.auto_discover && self.catalog.as_ref().is_some_and(|c| !c.is_empty())
     }
@@ -1349,7 +1375,7 @@ impl HeuristicRouter {
             // failover. (The bug: a top-5 cap meant ~6 unique models across tiers, so a few dead
             // providers exhausted the chain while most of the catalog went untried.)
             let Some(catalog) = self.catalog.as_ref() else {
-                return self.apply_repo_boosts(self.config.candidates_for(tier));
+                return self.apply_repo_boosts(self.widened_seed_candidates(tier));
             };
             let ranked = catalog.ranked_seeded(
                 tier,
@@ -1365,6 +1391,8 @@ impl HeuristicRouter {
             } else {
                 ranked
             }
+        } else if self.seed_only {
+            self.widened_seed_candidates(tier)
         } else {
             self.config.candidates_for(tier)
         };
@@ -5067,6 +5095,39 @@ mod tests {
         assert_eq!(d.tier, TaskTier::Standard);
         assert_eq!(d.model, "openai::gpt-4o-mini");
         assert!(d.rationale.contains("cheapest of 2"), "{}", d.rationale);
+    }
+
+    /// A fresh install with no API keys and a logged-in codex CLI: the trivial tier is ollama
+    /// (not running) plus groq (no key), so a one-word prompt exhausted the chain and failed the
+    /// turn while a usable bridge sat one tier away, unlisted and untried.
+    #[tokio::test]
+    async fn a_seed_tier_falls_back_to_models_from_the_other_tiers() {
+        let router = HeuristicRouter::new(Config::default()).with_seed_only_catalog();
+        let chain = router.candidates_for_tier(
+            TaskTier::Trivial,
+            RouteHints::default(),
+            &SubscriptionQuota::default(),
+            None,
+        );
+
+        let trivial = Config::default().candidates_for(TaskTier::Trivial);
+        assert_eq!(
+            chain
+                .iter()
+                .take(trivial.len())
+                .cloned()
+                .collect::<Vec<_>>(),
+            trivial,
+            "the tier's own candidates still lead, so the primary pick is unchanged"
+        );
+        assert!(
+            chain.iter().any(|m| m.starts_with("claude-cli::")),
+            "the bridge from another tier is reachable as failover: {chain:?}"
+        );
+        let mut seen = chain.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), chain.len(), "no duplicates: {chain:?}");
     }
 
     #[tokio::test]

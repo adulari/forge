@@ -2319,6 +2319,11 @@ impl Default for Config {
             TaskTier::Complex.as_str().into(),
             many(&[
                 "claude-cli::",
+                // Both subscription bridges belong in the seed, not just one: on a fresh install
+                // with no API keys, whichever CLI the user is logged into is the only thing that
+                // can serve a turn, and an unavailable bridge is filtered by availability anyway.
+                // Listing only claude meant a codex-only machine failed its first prompt.
+                "codex-cli::",
                 "anthropic::claude-opus-5",
                 "groq::llama-3.3-70b-versatile",
             ]),
