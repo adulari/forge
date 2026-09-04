@@ -285,6 +285,42 @@ fn dedupe_repeated_tool_results(messages: &mut [Message], keep_recent: usize) ->
     reclaimed
 }
 
+/// The tail-relative boundary: everything from here on stays verbatim. Moves forward with every
+/// new tool result, which is precisely what used to rewrite already-sent messages.
+fn sliding_boundary(
+    messages: &[Message],
+    synthetic_tool_results: &std::collections::HashSet<usize>,
+    keep_recent: usize,
+) -> usize {
+    if keep_recent == 0 {
+        return messages.len();
+    }
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(index, message)| {
+            message.role == Role::Tool && !synthetic_tool_results.contains(index)
+        })
+        .rev()
+        .nth(keep_recent - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+/// The boundary actually used: the sliding one, frozen at the current turn's start.
+pub(crate) fn elision_boundary(
+    messages: &[Message],
+    synthetic_tool_results: &std::collections::HashSet<usize>,
+    keep_recent: usize,
+) -> usize {
+    let sliding = sliding_boundary(messages, synthetic_tool_results, keep_recent);
+    let turn_start = messages
+        .iter()
+        .rposition(|message| message.role == Role::User)
+        .unwrap_or(sliding);
+    sliding.min(turn_start)
+}
+
 fn elide_old_tool_results(
     messages: &[Message],
     synthetic_tool_results: &std::collections::HashSet<usize>,
@@ -294,20 +330,25 @@ fn elide_old_tool_results(
     if token_budget == 0 {
         return messages.to_vec();
     }
-    let protected_from = if keep_recent_tool_results == 0 {
-        messages.len()
-    } else {
-        messages
-            .iter()
-            .enumerate()
-            .filter(|(index, message)| {
-                message.role == Role::Tool && !synthetic_tool_results.contains(index)
-            })
-            .rev()
-            .nth(keep_recent_tool_results - 1)
-            .map(|(index, _)| index)
-            .unwrap_or(0)
-    };
+    // Freeze the boundary for the duration of a turn.
+    //
+    // `sliding` alone is measured from the TAIL, so every new tool result pushed it forward and a
+    // result that was verbatim on the last request got elided on this one. Prompt caches key on a
+    // PREFIX, so rewriting a message in the middle invalidates every token after it — on a real
+    // 138k-token prompt whose boundary sat ~69k from the end, that discarded ~69k of cache on
+    // EVERY round-trip. Measured over 630 requests: 160 of them were under 50% cached and carried
+    // 19.9M fresh tokens, 87% of all fresh input, while the 453 well-cached ones carried 1.5M.
+    //
+    // Anchoring on the last user message makes the boundary constant for a whole turn: within the
+    // turn nothing already sent is ever rewritten, so the cache holds across all of its
+    // round-trips, and the boundary advances exactly once — at the next user message — for one
+    // invalidation instead of one per step.
+    //
+    // `min` because a lower index protects MORE: this can only ever keep more verbatim than the
+    // sliding window did, never less, so no turn loses data it used to have. The extra bulk that
+    // buys is bounded by auto-compaction, which fires mid-turn on the same transcript.
+    let protected_from =
+        elision_boundary(messages, synthetic_tool_results, keep_recent_tool_results);
     messages
         .iter()
         .enumerate()
@@ -1052,6 +1093,125 @@ mod tests {
     /// The waste this removes, in the shape it was measured: one real day of one real session
     /// carried 280 redundant copies across 84 groups — 1.10M characters of byte-identical tool
     /// output re-sent to the model, including an 84,521-char file carried five times.
+    /// The measurement behind this change, taken on the mechanism itself.
+    ///
+    /// Prompt caches key on a PREFIX, so the moment a request rewrites a message it has already
+    /// sent, every cached token after that point is discarded. The elision boundary WAS measured
+    /// from the tail, so each new tool result pushed it forward and elided a result that had been
+    /// verbatim a moment earlier — one such rewrite per round-trip, forever.
+    ///
+    /// On real traffic that cost 19.9M fresh tokens across 160 requests (87% of all fresh input),
+    /// while the 453 well-cached requests carried 1.5M between them.
+    ///
+    /// Frozen at the turn's start, the boundary does not move for the whole turn, so nothing
+    /// already sent is ever rewritten.
+    #[test]
+    fn the_elision_boundary_does_not_move_during_a_turn() {
+        let synthetic = std::collections::HashSet::new();
+        let mut transcript = vec![
+            Message::system("preamble"),
+            Message::user("go do the thing"),
+        ];
+
+        let mut frozen = Vec::new();
+        let mut sliding = Vec::new();
+        for i in 0..8 {
+            let id = format!("call{i}");
+            transcript.push(Message::assistant_tool_calls("", vec![tool_call(&id)]));
+            transcript.push(Message::tool_result(
+                &id,
+                format!("r{i}: {}", "x".repeat(40_000)),
+            ));
+            frozen.push(elision_boundary(&transcript, &synthetic, 2));
+            sliding.push(sliding_boundary(&transcript, &synthetic, 2));
+        }
+
+        assert!(
+            sliding.windows(2).any(|w| w[0] != w[1]),
+            "the tail-relative boundary must move, or there was never a problem: {sliding:?}"
+        );
+        // From the first step at which there are at least `keep_recent` results, the boundary is
+        // fixed for the rest of the turn. Step 0 is degenerate — fewer results than `keep_recent`,
+        // so the tail-relative value has nothing to count back from — and nothing is cached yet
+        // anyway, so there is nothing to invalidate.
+        assert!(
+            frozen[1..].windows(2).all(|w| w[0] == w[1]),
+            "the frozen boundary must not move once a turn is under way: {frozen:?}"
+        );
+        assert_eq!(
+            frozen[1], 1,
+            "it anchors on the user message that started the turn"
+        );
+        assert!(
+            sliding.last() > sliding.first(),
+            "the contrast is the point: {sliding:?} moved every step, {frozen:?} did not"
+        );
+    }
+
+    /// And it DOES move at a turn boundary — one invalidation per turn instead of one per step,
+    /// which is the whole trade.
+    #[test]
+    fn the_elision_boundary_advances_once_at_each_new_turn() {
+        let synthetic = std::collections::HashSet::new();
+        let mut transcript = vec![Message::user("first")];
+        for i in 0..3 {
+            let id = format!("a{i}");
+            transcript.push(Message::assistant_tool_calls("", vec![tool_call(&id)]));
+            transcript.push(Message::tool_result(&id, "y".repeat(40_000)));
+        }
+        let before = elision_boundary(&transcript, &synthetic, 2);
+        transcript.push(Message::user("second"));
+        let after = elision_boundary(&transcript, &synthetic, 2);
+        assert!(
+            after > before,
+            "a new turn must let the boundary advance ({before} → {after})"
+        );
+    }
+
+    /// The flip side: the freeze must not disable elision. An earlier turn's bulk still goes, or
+    /// we have traded a cache problem for an unbounded-prompt problem.
+    #[test]
+    fn results_from_earlier_turns_are_still_elided() {
+        let mut transcript = vec![Message::user("first task")];
+        for i in 0..3 {
+            let id = format!("old{i}");
+            transcript.push(Message::assistant_tool_calls("", vec![tool_call(&id)]));
+            transcript.push(Message::tool_result(
+                &id,
+                format!("old result {i}: {}", "y".repeat(40_000)),
+            ));
+        }
+        transcript.push(Message::user("second task"));
+        transcript.push(Message::assistant_tool_calls("", vec![tool_call("new")]));
+        transcript.push(Message::tool_result(
+            "new",
+            format!("new: {}", "z".repeat(40_000)),
+        ));
+
+        let rendered = to_llm(&transcript, 1_000_000, 4_096, 2);
+        // Semantic rather than a byte threshold: of the previous turn's three results, most must
+        // be elided. Exactly one stays verbatim, and deliberately so — see below.
+        let elided = rendered
+            .iter()
+            .filter(|m| m.content.starts_with("old result") && m.content.contains("elided"))
+            .count();
+        let verbatim = rendered
+            .iter()
+            .filter(|m| m.content.starts_with("old result") && m.content.len() > 39_000)
+            .count();
+        assert_eq!(elided, 2, "the previous turn's bulk must still be elided");
+        assert_eq!(verbatim, 1);
+        // One old result stays verbatim: `sliding` still protects the newest few regardless of
+        // turn, and the `min` keeps whichever protects MORE. That is deliberate — a result that
+        // was verbatim last request staying verbatim is exactly the cache stability being bought.
+        assert!(
+            rendered
+                .iter()
+                .any(|m| m.content.contains(&"z".repeat(1_000))),
+            "the CURRENT turn's result stays verbatim"
+        );
+    }
+
     #[test]
     fn a_file_read_five_times_is_sent_once() {
         let body = "//! Forge Anywhere account, device, and host commands.\n".repeat(200);
