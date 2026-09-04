@@ -9338,6 +9338,83 @@ mod tests {
         }
     }
 
+    /// A resumed session must show its persisted spend immediately, not "untracked" until the
+    /// first turn of the new process happens to finish. `session.total_cost_usd` accumulates
+    /// across processes and the store never lost it — only the display started at zero, which is
+    /// indistinguishable from the spend having been reset by the restart. Observed live: the store
+    /// held $1.69308 while the statusline read "untracked" for minutes into a long turn.
+    #[tokio::test]
+    async fn a_resumed_session_reports_its_persisted_spend_before_any_turn() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = Arc::clone(&capture.events);
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config = Config::default();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(forge_provider::MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(workspace),
+            Box::new(capture),
+            config,
+            workspace.to_str().unwrap(),
+        )
+        .unwrap();
+
+        // A fresh session has nothing to restore — emitting a zero frame on every startup would
+        // just be noise.
+        session.emit_restored_totals();
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, PresenterEvent::Cost { .. })),
+            "a brand-new session must emit no restored totals"
+        );
+
+        // Spend from an earlier process.
+        let msg = store
+            .add_message(session.session_id(), 0, forge_types::Role::User, "hi", None)
+            .unwrap();
+        store
+            .record_usage(
+                session.session_id(),
+                &msg,
+                &forge_types::Usage {
+                    input_tokens: 120,
+                    cached_input_tokens: Some(40),
+                    output_tokens: 30,
+                    cost_usd: 1.69308,
+                },
+                Some("meta::muse-spark-1.3-contributor"),
+            )
+            .unwrap();
+
+        session.emit_restored_totals();
+
+        let (usd, tokens_in, tokens_out) = events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                PresenterEvent::Cost {
+                    session_total_usd,
+                    session_in,
+                    session_out,
+                    ..
+                } => Some((*session_total_usd, *session_in, *session_out)),
+                _ => None,
+            })
+            .expect("resuming a session with spend must emit its persisted totals");
+        assert!(
+            (usd - 1.69308).abs() < 1e-9,
+            "got {usd}, expected the persisted total"
+        );
+        assert_eq!((tokens_in, tokens_out), (120, 30));
+    }
+
     #[tokio::test]
     async fn headless_terminal_cost_includes_awaited_memory_and_done_is_last() {
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -11017,6 +11094,72 @@ mod tests {
         }
     }
 
+    /// 429s one specific model forever and answers on any other, so a pinned SET can be watched
+    /// deciding between waiting and moving on.
+    struct RateLimitsOneModelProvider {
+        limited: String,
+        attempts_on_limited: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for RateLimitsOneModelProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            if model == self.limited {
+                self.attempts_on_limited
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(forge_provider::ProviderError::RateLimited {
+                    message: "429 rate limited".into(),
+                    retry_after: Some(std::time::Duration::from_millis(1)),
+                });
+            }
+            on_event(StreamEvent::Text(model.into()));
+            Ok(forge_provider::ModelResponse {
+                content: model.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_pin_set_waits_then_moves_to_the_next_member() {
+        // The reported defect: `/model free,paid` retried the free model, exhausted the backoff,
+        // and FAILED the turn — never reaching the paid member the user had supplied. The turn
+        // must finish on the second member instead.
+        //
+        // The wait comes first on purpose: a set is ordered free-then-paid, so switching on the
+        // first 429 would throw away the free tier that ordering asked for. Both halves are
+        // asserted — the backoff really ran, and the turn really moved on.
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(RateLimitsOneModelProvider {
+            limited: "free::model".into(),
+            attempts_on_limited: attempts.clone(),
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "free::model".into(),
+            fallbacks: vec!["paid::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+
+        let answer = session.run_turn("fix the bug").await.unwrap();
+
+        assert_eq!(
+            answer, "paid::model",
+            "a pinned SET must fail over within itself instead of failing the turn"
+        );
+        assert!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst) > 1,
+            "the first member must get its backoff before the set advances, got {} attempt(s)",
+            attempts.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
     #[tokio::test]
     async fn rate_limit_waits_for_reset_and_retries_the_same_model() {
         // An explicit pin keeps the requested model: a short 429 reset is waited out before
@@ -11308,7 +11451,7 @@ mod tests {
         let provider = Arc::new(VaryingUnavailableProvider::default());
         let router = Arc::new(PinnedRouter {
             model: "pin::model".into(),
-            fallbacks: vec!["worse::model".into()],
+            fallbacks: Vec::new(), // strict single pin: a fallback here would make it a two-member SET
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.mesh.pin_outage_wait_secs = 6;

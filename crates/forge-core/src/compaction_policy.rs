@@ -187,23 +187,23 @@ impl Session {
     /// compact. Distinct from the failover consent path ([`admit_failover_model`]).
     pub(crate) async fn auto_compact_if_needed(&mut self, model: &str) {
         let window = self.base_context_window(model) as u64;
-        // `compact_cap_tokens` is a SPEND control — it exists to stop a large-window subscription
-        // model burning quota on an ever-growing prompt. A free model has no quota to burn, and
-        // applying the cap to one just throws away context for nothing: on a 1M-window free model
-        // the 217_600 default fired auto-compaction at ~21% of the window.
-        let cap = if self.router.model_is_free(model) {
-            u64::MAX
-        } else {
-            self.config.mesh.compact_cap_tokens
-        };
+        let cap = compaction_cap(self.router.model_is_free(model), &self.config.mesh);
         let trigger = auto_compact_trigger_tokens(window, cap, AUTO_COMPACT_THRESHOLD);
-        if self.estimated_transcript_tokens() > trigger || !self.transcript_fits(model) {
+        if needs_compaction(
+            self.estimated_transcript_tokens(),
+            trigger,
+            self.transcript_fits(model),
+        ) {
             // Cheap first: the pipeline's mutating phase — prune bulky OLD tool results in place
             // (no model call). Often reclaims enough that the LLM summarize below isn't needed.
             if prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT) > 0 {
                 self.emit_context_gauge(model);
             }
-            if !self.transcript_fits(model) {
+            if needs_compaction(
+                self.estimated_transcript_tokens(),
+                trigger,
+                self.transcript_fits(model),
+            ) {
                 let (before, after) = self.compact(true).await.unwrap_or_default();
                 // Continual Harness auto-refine gate (`harness.auto_refine = "compact"`,
                 // refinement.rs): only when this call actually folded something — `compact`
@@ -220,6 +220,39 @@ impl Session {
             // showing the old (over-window) size until the turn's first model call returns.
             self.emit_context_gauge(model);
         }
+    }
+
+    /// Emit the session's PERSISTED totals the moment it is resumed, before any turn runs.
+    ///
+    /// Cost, tokens, and context fill all live on the `Cost` event, and that event is only emitted
+    /// once a turn reaches its end (or `emit_context_gauge` fires mid-turn). So a resumed session
+    /// showed a spend meter of `untracked` and an empty token counter until its first turn
+    /// COMPLETED in the new process — on a long turn that is many minutes of the statusline
+    /// claiming the session had cost nothing, when the store knew it had cost $1.69.
+    ///
+    /// The numbers were never lost: `session.total_cost_usd` accumulates across processes and
+    /// [`Store::session_cost`] reads it. Only the display started from zero, which reads exactly
+    /// like the spend was reset by restarting.
+    ///
+    /// `context_limit` is deliberately `None`: no model has been routed yet, so there is no honest
+    /// denominator to show. The gauge fills in on the first real call.
+    pub fn emit_restored_totals(&mut self) {
+        let session_total_usd = self.store.session_cost(&self.id).unwrap_or(0.0);
+        let (session_in, session_out) = self.store.session_tokens(&self.id).unwrap_or((0, 0));
+        if session_total_usd <= 0.0 && session_in == 0 && session_out == 0 {
+            return; // a genuinely fresh session has nothing to restore
+        }
+        self.presenter.emit(PresenterEvent::Cost {
+            session_total_usd,
+            session_in,
+            session_cached_in: self
+                .store
+                .session_cached_input_tokens(&self.id)
+                .unwrap_or(None),
+            session_out,
+            context_tokens: self.estimated_transcript_tokens(),
+            context_limit: None,
+        });
     }
 
     /// Emit a [`Cost`](PresenterEvent::Cost) event reflecting the CURRENT transcript size as the
@@ -679,5 +712,142 @@ mod auth_failure_tests {
             provider_excluded(&store),
             "a repeat separated in time is a real logout"
         );
+    }
+}
+
+/// Whether the transcript must be folded: over the configured ceiling, OR no longer fitting the
+/// model's window. Both call sites in [`Session::auto_compact_if_needed`] ask this same question —
+/// the one before the cheap prune, and the one after it that decides whether to spend a model call
+/// on summarizing.
+///
+/// That second call site used to ask only `transcript_fits`, i.e. the WINDOW, which made the
+/// ceiling decorative on any large-window model. The outer check let a 757k-token transcript
+/// through, the prune reclaimed what it could, and then the summarize step asked "does 757k fit in
+/// 1,048,576?", answered yes, and returned. So a ceiling could only ever trigger the cheap prune,
+/// never the compaction that actually bounds a transcript — and a session grew until it approached
+/// the window itself (832,307 tokens on a 1M-token model) no matter what the ceiling said.
+pub(crate) fn needs_compaction(transcript_tokens: u64, trigger: u64, fits_window: bool) -> bool {
+    transcript_tokens > trigger || !fits_window
+}
+
+/// The absolute token ceiling at which a session auto-compacts, before the model's own window is
+/// taken into account. Two different ceilings, because they answer two different questions.
+///
+/// [`forge_config::MeshConfig::compact_cap_tokens`] is a SPEND control — it exists to stop a
+/// large-window subscription model burning quota on an ever-growing prompt. A free model has no
+/// quota to burn, so applying it there just throws away context for nothing: on a 1M-window free
+/// model the 217_600 default fired auto-compaction at ~21% of the window.
+///
+/// [`forge_config::MeshConfig::free_model_cap_tokens`] is what a free model gets INSTEAD. Exempting
+/// free models from the spend cap by handing them `u64::MAX` left them with no absolute ceiling at
+/// all, so the only remaining limit was `AUTO_COMPACT_THRESHOLD * window` — 838,860 tokens on a 1M
+/// window. Free buys tokens, not attention: a turn carrying 800k of mostly-stale tool output is not
+/// better than one carrying a compacted 400k, and every later turn re-sends the whole thing.
+pub(crate) fn compaction_cap(free: bool, mesh: &forge_config::MeshConfig) -> u64 {
+    if free {
+        mesh.free_model_cap_tokens
+    } else {
+        mesh.compact_cap_tokens
+    }
+}
+
+#[cfg(test)]
+mod compaction_cap_tests {
+    use super::*;
+    use crate::{auto_compact_trigger_tokens, AUTO_COMPACT_THRESHOLD};
+
+    /// The window of `meta::muse-spark-1.3-contributor` and every other muse-spark model, as
+    /// OpenRouter publishes it and as the store records it.
+    const MUSE_WINDOW: u64 = 1_048_576;
+
+    /// The measured failure, and why this PR's ceiling alone would have changed nothing.
+    /// `compact_cap_tokens` was restored to its 217_600 default on a real machine and the session
+    /// still sent 757,178 input tokens per request, because the step that would have folded it
+    /// asked about the WINDOW instead of the ceiling.
+    #[test]
+    fn the_ceiling_governs_the_summarize_step_not_only_the_prune() {
+        // The reserve for the default `max_output_tokens = 0` is
+        // UNBOUNDED_OUTPUT_PLANNING_RESERVE, and `transcript_fits` keeps 80% of what is left.
+        let fits_window_at = (MUSE_WINDOW - 8_192) * 8 / 10;
+        assert_eq!(fits_window_at, 832_307);
+
+        let mesh = forge_config::Config::default().mesh;
+        let trigger = auto_compact_trigger_tokens(
+            MUSE_WINDOW,
+            compaction_cap(false, &mesh),
+            AUTO_COMPACT_THRESHOLD,
+        );
+        assert_eq!(trigger, 217_600);
+
+        // What a real session was carrying, per request, with that 217_600 ceiling in force.
+        let observed = 757_178;
+        let fits_window = observed <= fits_window_at;
+        assert!(
+            fits_window,
+            "it fit the window — which is exactly why the old gate returned without compacting"
+        );
+        assert!(
+            needs_compaction(observed, trigger, fits_window),
+            "3.5x over the ceiling must compact even though it still fits the window"
+        );
+    }
+
+    #[test]
+    fn a_transcript_under_the_ceiling_that_fits_is_left_alone() {
+        assert!(!needs_compaction(100_000, 217_600, true));
+    }
+
+    /// The ceiling is an upper bound, never a licence to overflow: a model whose window is smaller
+    /// than the ceiling must still compact on the window alone.
+    #[test]
+    fn a_transcript_under_the_ceiling_that_no_longer_fits_still_compacts() {
+        assert!(needs_compaction(30_000, 217_600, false));
+    }
+
+    #[test]
+    fn a_free_model_still_has_a_ceiling_on_a_million_token_window() {
+        let mesh = forge_config::Config::default().mesh;
+
+        // The regression: with the spend cap replaced by `u64::MAX`, the ONLY remaining limit was
+        // the fraction of the window, and a 1M-window free model ran to 838,860 tokens before
+        // anything folded it. Measured consequence on a real session: requests carrying 300k-720k
+        // of context, 90% of it stale tool output.
+        let unbounded = auto_compact_trigger_tokens(MUSE_WINDOW, u64::MAX, AUTO_COMPACT_THRESHOLD);
+        assert_eq!(unbounded, 838_860);
+
+        let free = auto_compact_trigger_tokens(
+            MUSE_WINDOW,
+            compaction_cap(true, &mesh),
+            AUTO_COMPACT_THRESHOLD,
+        );
+        assert_eq!(free, 400_000, "a free model compacts at its own ceiling");
+        assert!(free < unbounded / 2);
+    }
+
+    #[test]
+    fn the_free_ceiling_never_second_guesses_the_spend_cap_for_a_paid_model() {
+        let mesh = forge_config::Config::default().mesh;
+        let paid = compaction_cap(false, &mesh);
+        assert_eq!(paid, mesh.compact_cap_tokens);
+        assert!(
+            compaction_cap(true, &mesh) > paid,
+            "the free ceiling is a backstop, deliberately looser than the spend control — a free \
+             model that compacted EARLIER than a paid one would be the original bug inverted"
+        );
+    }
+
+    #[test]
+    fn a_small_window_still_wins_over_either_ceiling() {
+        // Both caps are absolute ceilings, not targets: a model whose real window is smaller must
+        // still compact at its own 80%, or the transcript stops fitting at all.
+        let mesh = forge_config::Config::default().mesh;
+        for free in [true, false] {
+            let trigger = auto_compact_trigger_tokens(
+                32_768,
+                compaction_cap(free, &mesh),
+                AUTO_COMPACT_THRESHOLD,
+            );
+            assert_eq!(trigger, 26_214, "free={free}");
+        }
     }
 }

@@ -291,6 +291,15 @@ pub(crate) async fn build_session_with_self_mcp(
         .ok()
         .and_then(|s| s.duel_boosts(&repo_key).ok())
         .unwrap_or_default();
+    // OpenCode Go requires `x-opencode-session`: one STABLE id per conversation (enforced from
+    // 2026-09-06). Seed it from the session id before the provider makes its first request, so a
+    // resumed conversation keeps the same id across restarts instead of looking like a new one.
+    // First-wins inside the process; falls back to a per-process id when no session id is known.
+    if let Some(prefix) = resume.as_deref() {
+        if let Ok(full) = resolve_session(&store, prefix) {
+            forge_provider::set_conversation_id(&full);
+        }
+    }
     let (provider, router) = build_provider_and_router(
         &config,
         mock,

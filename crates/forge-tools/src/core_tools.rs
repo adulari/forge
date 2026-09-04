@@ -743,7 +743,9 @@ impl Tool for DeleteFileTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery_tools::{GlobTool, ListDirTool, SearchTool};
+    use crate::discovery_tools::{
+        GlobTool, ListDirTool, SearchTool, SEARCH_LINE_MAX_BYTES, SEARCH_OUTPUT_MAX_BYTES,
+    };
     use std::path::Path;
     use std::path::PathBuf;
 
@@ -903,6 +905,65 @@ mod tests {
         assert!(!out.contains("target"), "must skip target/:\n{out}");
         assert!(!out.contains("g.txt"), "must skip .git/:\n{out}");
         assert!(!out.contains("n.txt"), "must skip node_modules/:\n{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real failure this bounds: a `search` over a tree containing a log file returned
+    /// 651,214 bytes — ~163k tokens — in ONE tool result, because the default (`context: 0`) path
+    /// was bounded by a MATCH COUNT and nothing else. 200 matches of multi-kilobyte log lines is
+    /// 200 matches, so the cap never fired while the output ran away. Reproduced here with the
+    /// same shape: many hits, each on a very long line.
+    #[tokio::test]
+    async fn search_bounds_its_output_in_bytes_not_just_in_match_count() {
+        let dir = temp_dir("search-bytes");
+        let long_line = format!("2024/12/31 postgres.go:213: {}", "x".repeat(8_000));
+        let body: String = std::iter::repeat_n(long_line.as_str(), 400)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.join("fatal.txt"), &body).unwrap();
+
+        let out = SearchTool
+            .run(&json!({ "query": "213", "path": dir.to_str().unwrap() }))
+            .await
+            .unwrap();
+
+        // Pre-fix this was ~1.6 MB (400 lines x 8 KB, capped only at 200 matches = ~1.6 MB).
+        assert!(
+            out.len() <= SEARCH_OUTPUT_MAX_BYTES * 2,
+            "one search must not be able to flood the context: {} bytes",
+            out.len()
+        );
+        assert!(
+            out.contains("capped"),
+            "a truncated result must say so rather than looking complete:\n{}",
+            &out[..out.len().min(400)]
+        );
+        // Each individual line is trimmed, and says how much it dropped.
+        assert!(
+            out.contains("bytes on this line)"),
+            "an over-long match line must be trimmed with a marker"
+        );
+        assert!(
+            out.lines().all(|l| l.len() < SEARCH_LINE_MAX_BYTES + 200),
+            "no rendered line may exceed the per-line cap plus its marker"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The per-line cap must not touch ordinary source lines — the overwhelming majority of real
+    /// matches — or every search result becomes harder to read to fix a pathological case.
+    #[tokio::test]
+    async fn search_leaves_normal_length_lines_untouched() {
+        let dir = temp_dir("search-normal");
+        std::fs::write(dir.join("a.rs"), "fn main() {\n    let needle = 1;\n}").unwrap();
+
+        let out = SearchTool
+            .run(&json!({ "query": "needle", "path": dir.to_str().unwrap() }))
+            .await
+            .unwrap();
+
+        assert!(out.contains("a.rs:2:     let needle = 1;"), "got:\n{out}");
+        assert!(!out.contains("bytes on this line"), "got:\n{out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
