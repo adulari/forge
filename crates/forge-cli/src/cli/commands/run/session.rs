@@ -9,18 +9,35 @@ fn should_refresh_opencode_go_quota(mock: bool, pin: Option<&str>) -> bool {
     should_refresh_codex_quota(mock, pin)
 }
 
+/// The members of a `--model` value. `--model a,b` pins a SET — the flag documents this — so every
+/// step that inspects the pin must see the members rather than the joined string. Normalizing
+/// "a,b" as one id only ever fixed the FIRST member's provider prefix, and validating it looked up
+/// a model literally named "a,b", which no catalog contains: the set was reported "unknown" and
+/// the session started unpinned.
+fn pin_members(pin: &str) -> Vec<String> {
+    pin.split(',')
+        .map(str::trim)
+        .filter(|member| !member.is_empty())
+        .map(|member| forge_provider::normalize_model_id(member).into_owned())
+        .collect()
+}
+
 fn should_refresh_codex_quota(mock: bool, pin: Option<&str>) -> bool {
     if mock {
         return false;
     }
-    match pin.map(forge_config::provider_of) {
-        // Unpinned/bare ids may route through Codex, so preserve the routing-pressure refresh.
-        None | Some("") => true,
-        // Any fully-qualified pin bypasses mesh selection. A Codex response carries fresh quota
-        // headers itself, so a separate pre-turn Luna probe cannot affect the decision and only
-        // adds subscription burn plus startup latency.
-        Some(_) => false,
-    }
+    let Some(pin) = pin else {
+        return true; // unpinned may route through Codex
+    };
+    // Any fully-qualified pin bypasses mesh selection. A Codex response carries fresh quota
+    // headers itself, so a separate pre-turn Luna probe cannot affect the decision and only adds
+    // subscription burn plus startup latency. A SET only bypasses it when EVERY member is
+    // qualified — one bare member can still route through Codex.
+    let members = pin_members(pin);
+    members.is_empty()
+        || members
+            .iter()
+            .any(|member| forge_config::provider_of(member).is_empty())
 }
 
 fn remove_recursive_self_mcp(
@@ -150,7 +167,7 @@ pub(crate) async fn build_session_with_self_mcp(
 
     // Normalize before any provider-specific startup work so a pinned session only initializes
     // the provider it can actually use.
-    let pin = pin.map(|p| forge_provider::normalize_model_id(&p).into_owned());
+    let pin = pin.map(|p| pin_members(&p).join(","));
 
     let store = Arc::new(open_store()?);
     clock.mark("store open + migrations");
@@ -228,7 +245,8 @@ pub(crate) async fn build_session_with_self_mcp(
 
     // Validate the pinned model so unknown ids fail fast with a clear message rather than a
     // confusing provider "Resolver error" at the first API call.
-    if let Some(id) = pin.as_deref() {
+    for id in pin.as_deref().map(pin_members).unwrap_or_default() {
+        let id = id.as_str();
         let prefix = forge_config::provider_of(id);
         // A prefixed id whose provider isn't a recognized one is clearly invalid — hard stop, even
         // when discovery is off/timed-out and there's no catalog to check against (it would
@@ -586,5 +604,63 @@ mod tests {
         ));
         assert!(!should_refresh_codex_quota(false, Some("openai::gpt-5.4")));
         assert!(!should_refresh_codex_quota(true, None));
+
+        // A SET of fully-qualified models bypasses mesh selection just as a single pin does.
+        assert!(!should_refresh_codex_quota(
+            false,
+            Some("openai::gpt-5.4,groq::llama-3.3-70b")
+        ));
+        // …but one bare member can still route through Codex.
+        assert!(should_refresh_codex_quota(
+            false,
+            Some("openai::gpt-5.4,bare-model")
+        ));
+    }
+
+    /// `--model a,b` pins a SET, exactly as the flag's help documents. Treating the value as one
+    /// id made `forge chat --model "opencode::muse-spark-1.3-contributor-free,meta::muse-spark-1.3-contributor"`
+    /// warn `unknown model 'opencode::…-free,meta::…'` and start the session UNPINNED, while the
+    /// in-session `/model a,b` accepted the same string. The members are what must be inspected.
+    #[test]
+    fn a_comma_separated_pin_is_split_into_its_members() {
+        assert_eq!(
+            pin_members(
+                "opencode::muse-spark-1.3-contributor-free,meta::muse-spark-1.3-contributor"
+            ),
+            vec![
+                "opencode::muse-spark-1.3-contributor-free".to_string(),
+                "meta::muse-spark-1.3-contributor".to_string(),
+            ]
+        );
+        assert_eq!(
+            pin_members("openai::gpt-4o"),
+            vec!["openai::gpt-4o".to_string()],
+            "a single pin is a one-member set"
+        );
+    }
+
+    /// Normalization ran on the joined string, so `strip_prefix` only ever matched the FIRST
+    /// member — a set's later members kept their underscore provider prefix and resolved to
+    /// nothing.
+    #[test]
+    fn every_member_of_a_set_gets_its_provider_prefix_normalized() {
+        assert_eq!(
+            pin_members("claude_cli::sonnet,codex_cli::gpt-5.4-mini"),
+            vec![
+                "claude-cli::sonnet".to_string(),
+                "codex-cli::gpt-5.4-mini".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn whitespace_and_empty_members_are_tolerated() {
+        assert_eq!(
+            pin_members(" openai::gpt-4o , groq::llama-3.3-70b ,"),
+            vec![
+                "openai::gpt-4o".to_string(),
+                "groq::llama-3.3-70b".to_string(),
+            ]
+        );
     }
 }
