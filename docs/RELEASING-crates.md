@@ -56,9 +56,10 @@ Then publish the versioned Forge graph:
 12. `forge-agent-tui`
 13. `forge-agent-provider`
 14. `forge-agent-browser`
-15. `forge-agent-tools`
-16. `forge-agent-core`
-17. `forge-agent` (the binary crate, published last)
+15. `forge-agent-proxy`
+16. `forge-agent-tools`
+17. `forge-agent-core`
+18. `forge-agent` (the binary crate, published last)
 
 (`forge-relay` and `xtasks` are `publish = false` and are never released.)
 
@@ -89,7 +90,7 @@ cargo info --registry crates-io forge-agent-genai@0.6.5-forge.1 >/dev/null 2>&1 
 for crate in forge-agent-anywhere-protocol forge-agent-types forge-agent-workflow forge-agent-voice \
              forge-agent-skills forge-agent-store forge-agent-config forge-agent-lsp forge-agent-mcp \
              forge-agent-mesh forge-agent-index forge-agent-tui forge-agent-provider \
-             forge-agent-browser forge-agent-tools \
+             forge-agent-browser forge-agent-proxy forge-agent-tools \
              forge-agent-core forge-agent; do
   cargo publish -p "$crate" --locked
   # give the index a moment so the next crate can resolve this one
