@@ -20,6 +20,7 @@ mod browser;
 mod core_tools;
 mod discovery_tools;
 mod lattice_tool;
+mod proxy;
 mod sandbox;
 mod shell;
 mod web;
@@ -30,6 +31,7 @@ pub use core_tools::{
     ReadFileTool, WriteFileTool,
 };
 pub use lattice_tool::LatticeTool;
+pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};
 pub use shell::ShellTool;
 pub use web::{BraveSearch, DuckDuckGo, SearchBackend, SearchResult, WebFetchTool, WebSearchTool};
@@ -141,6 +143,8 @@ impl ToolRegistry {
         r.register(Box::new(WebSearchTool::new()));
         r.register(Box::new(BrowserTool));
         r.register(Box::new(BrowserNetworkTool));
+        r.register(Box::new(ProxyTool));
+        r.register(Box::new(ProxyNetworkTool));
         r
     }
 

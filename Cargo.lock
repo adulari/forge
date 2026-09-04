@@ -2294,6 +2294,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-agent-proxy"
+version = "2.13.9"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "forge-agent-skills"
 version = "2.13.9"
 dependencies = [
@@ -2323,6 +2336,7 @@ dependencies = [
  "async-trait",
  "forge-agent-browser",
  "forge-agent-index",
+ "forge-agent-proxy",
  "forge-agent-types",
  "futures",
  "globset",
