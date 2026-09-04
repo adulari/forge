@@ -21,6 +21,7 @@ description = "Fast, model-agnostic AI coding harness and CLI in Rust."
 # points each at its renamed crates.io package (the `forge-*` names are taken). Lib names
 # are preserved as `forge_X` in each crate's `[lib]` so import paths are unchanged.
 forge-types = { package = "forge-agent-types", path = "crates/forge-types", version = "2.13.6" }
+forge-proxy = { package = "forge-agent-proxy", path = "crates/forge-proxy", version = "2.13.9" }
 forge-browser = { package = "forge-agent-browser", path = "crates/forge-browser", version = "2.13.6" }
 forge-config = { package = "forge-agent-config", path = "crates/forge-config", version = "2.13.6" }
 forge-core = { package = "forge-agent-core", path = "crates/forge-core", version = "2.13.6" }
