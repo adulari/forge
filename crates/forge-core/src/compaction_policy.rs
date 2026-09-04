@@ -251,8 +251,32 @@ impl Session {
                 .unwrap_or(None),
             session_out,
             context_tokens: self.estimated_transcript_tokens(),
-            context_limit: None,
+            // Without this the gauge falls back to a 128k "~approx" denominator, which for a
+            // million-token model reads as 100% full on a session that is nowhere near it — the
+            // restored cost is right but the context bar is alarming and wrong. The window is
+            // knowable here: the pin if there is one, else the model this session last routed to.
+            context_limit: self.restored_context_window(),
         });
+    }
+
+    /// The context window to show for a session being resumed, before any turn has run.
+    ///
+    /// Prefers the pin (that is the model the next turn will use) and falls back to the model the
+    /// session last routed to. `None` only when neither is known, which keeps the old
+    /// conservative-fallback behaviour for a session with no routing history.
+    fn restored_context_window(&self) -> Option<u32> {
+        let pinned = self
+            .pinned_model
+            .as_ref()
+            .and_then(|set| set.first())
+            .cloned();
+        let model = pinned.or_else(|| {
+            self.store
+                .session_models(&self.id)
+                .ok()
+                .and_then(|models| models.last().cloned())
+        })?;
+        Some(self.base_context_window(&model))
     }
 
     /// Emit a [`Cost`](PresenterEvent::Cost) event reflecting the CURRENT transcript size as the

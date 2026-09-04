@@ -8731,6 +8731,123 @@ mod tests {
         assert_eq!(session.effective_context_window(model), base);
     }
 
+    /// A resumed session showed its context gauge against a 128k "~approx" denominator because the
+    /// restore frame carried `context_limit: None`. On a million-token model that renders as 100%
+    /// full — an alarming, wrong reading on a session with plenty of room. The window is knowable
+    /// at restore time, so it must be sent.
+    #[test]
+    fn a_resumed_session_reports_the_pinned_models_real_context_window() {
+        let (store, capture, events) = restore_fixture();
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config = Config::default();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(forge_provider::MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(workspace),
+            Box::new(capture),
+            config,
+            workspace.to_str().unwrap(),
+        )
+        .unwrap();
+        seed_prior_spend(&store, session.session_id(), None);
+        session.pin_model(Some("meta::muse-spark-1.3-contributor".into()));
+
+        session.emit_restored_totals();
+
+        let limit = restored_context_limit(&events);
+        assert!(
+            limit.is_some(),
+            "the restore frame must carry a real window, not fall back to 128k"
+        );
+        assert_eq!(
+            limit,
+            Some(session.base_context_window("meta::muse-spark-1.3-contributor")),
+            "the pinned model's own window is what the gauge should show"
+        );
+    }
+
+    /// With no pin, the model the session last routed to is the one the gauge should reflect —
+    /// that is the model whose window the transcript was accumulated against.
+    #[test]
+    fn a_resumed_session_falls_back_to_the_last_routed_model() {
+        let (store, capture, events) = restore_fixture();
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config = Config::default();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(forge_provider::MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(workspace),
+            Box::new(capture),
+            config,
+            workspace.to_str().unwrap(),
+        )
+        .unwrap();
+        seed_prior_spend(
+            &store,
+            session.session_id(),
+            Some("meta::muse-spark-1.3-contributor"),
+        );
+
+        session.emit_restored_totals();
+
+        assert_eq!(
+            restored_context_limit(&events),
+            Some(session.base_context_window("meta::muse-spark-1.3-contributor")),
+        );
+    }
+
+    fn restore_fixture() -> (
+        Arc<Store>,
+        CapturePresenter,
+        Arc<std::sync::Mutex<Vec<PresenterEvent>>>,
+    ) {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = Arc::clone(&capture.events);
+        (store, capture, events)
+    }
+
+    /// Prior spend from an earlier process, optionally with a routing decision so the session has
+    /// a last-routed model to fall back to.
+    fn seed_prior_spend(store: &Store, session_id: &str, routed: Option<&str>) {
+        let msg = store
+            .add_message(session_id, 0, forge_types::Role::User, "hi", None)
+            .unwrap();
+        store
+            .record_usage(
+                session_id,
+                &msg,
+                &forge_types::Usage {
+                    input_tokens: 120,
+                    cached_input_tokens: Some(40),
+                    output_tokens: 30,
+                    cost_usd: 1.69308,
+                },
+                Some("meta::muse-spark-1.3-contributor"),
+            )
+            .unwrap();
+        if let Some(model) = routed {
+            store
+                .record_routing(&msg, forge_types::TaskTier::Standard, model, "test")
+                .unwrap();
+        }
+    }
+
+    fn restored_context_limit(events: &Arc<std::sync::Mutex<Vec<PresenterEvent>>>) -> Option<u32> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                PresenterEvent::Cost { context_limit, .. } => Some(*context_limit),
+                _ => None,
+            })
+            .expect("a restore frame was emitted")
+    }
+
     #[test]
     fn authoritative_context_window_beats_stale_cached_metadata() {
         let store = Arc::new(Store::open_in_memory().unwrap());
