@@ -90,24 +90,49 @@ pub(super) fn spawn() -> tokio::task::JoinHandle<()> {
         let mut last_error = String::new();
         loop {
             tokio::time::sleep(wait_before_next).await;
-            match upload_batch().await {
+            let outcome = upload_batch().await.map_err(|error| format!("{error:#}"));
+            if let Some(line) = sync_report(&last_error, outcome.as_ref().err(), retry_delay) {
+                eprintln!("{line}");
+            }
+            match outcome {
                 Ok(()) => {
                     last_error.clear();
                     retry_delay = SYNC_INTERVAL;
                     wait_before_next = SYNC_INTERVAL;
                 }
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    if message != last_error {
-                        eprintln!("⚠ Forge Anywhere sync paused: {message}");
-                        last_error = message;
-                    }
+                Err(message) => {
+                    last_error = message;
                     wait_before_next = retry_delay;
                     retry_delay = next_retry_delay(retry_delay);
                 }
             }
         }
     })
+}
+
+/// The line to print for this cycle, or `None` to stay quiet.
+///
+/// Only TRANSITIONS are worth printing: a repeated identical error would spam the log every cycle.
+/// But recovery must be announced too — without it the last Anywhere line in the log says the sync
+/// is failing long after it is healthy again, which reads as a dead sync to anyone checking. That
+/// is not hypothetical: a transient `database is locked` at startup left "sync paused" as the final
+/// log line while the loop quietly recovered on its next attempt.
+fn sync_report(
+    previous_error: &str,
+    error: Option<&String>,
+    retry_delay: Duration,
+) -> Option<String> {
+    match error {
+        // "paused" overstated it — this loop always retries. Name the delay so a reader can tell a
+        // retrying sync from a stopped one.
+        Some(message) if message.as_str() != previous_error => Some(format!(
+            "⚠ Forge Anywhere sync failing: {message} — retrying in {}s",
+            retry_delay.as_secs().max(1)
+        )),
+        Some(_) => None,
+        None if !previous_error.is_empty() => Some("⚒ Forge Anywhere sync recovered".to_string()),
+        None => None,
+    }
 }
 
 fn next_retry_delay(current: Duration) -> Duration {
@@ -560,6 +585,60 @@ mod tests {
                 .sync_upload_envelope(entry.id)
                 .expect("load cached envelope"),
             Some(prepared)
+        );
+    }
+}
+
+#[cfg(test)]
+mod sync_report_tests {
+    use super::*;
+
+    /// The defect this fixes: a transient failure printed one line, the loop recovered on its next
+    /// attempt, and nothing said so — leaving "sync failing" as the last word in the log while the
+    /// sync was healthy. An operator reading that log concludes the sync is dead. It cost a
+    /// needless daemon restart to "fix" something that had already fixed itself.
+    #[test]
+    fn recovery_is_announced_so_the_log_does_not_end_on_a_failure() {
+        let locked = "database is locked".to_string();
+
+        let first = sync_report("", Some(&locked), SYNC_INTERVAL).expect("a new error is reported");
+        assert!(first.contains("database is locked"));
+        assert!(
+            first.contains("retrying"),
+            "the line must say it will retry, not that it stopped: {first}"
+        );
+
+        assert_eq!(
+            sync_report(&locked, Some(&locked), SYNC_INTERVAL),
+            None,
+            "the same error every 10s would spam the log"
+        );
+
+        assert_eq!(
+            sync_report(&locked, None, SYNC_INTERVAL),
+            Some("⚒ Forge Anywhere sync recovered".to_string()),
+            "recovery after an error MUST be announced"
+        );
+    }
+
+    #[test]
+    fn a_healthy_sync_stays_silent() {
+        assert_eq!(sync_report("", None, SYNC_INTERVAL), None);
+    }
+
+    /// A different error while already failing is real news — it means the cause changed.
+    #[test]
+    fn a_changed_error_is_reported_with_the_current_backoff() {
+        let line = sync_report(
+            "database is locked",
+            Some(&"connection refused".to_string()),
+            Duration::from_secs(80),
+        )
+        .expect("a changed error is reported");
+        assert!(line.contains("connection refused"));
+        assert!(
+            line.contains("80s"),
+            "the actual backoff must be named: {line}"
         );
     }
 }
