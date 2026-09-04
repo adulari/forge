@@ -389,11 +389,72 @@ pub fn bundled_http_client() -> reqwest::Client {
     build_reqwest_client()
 }
 
+/// The conversation id sent as `x-opencode-session`, and the identity sent as `User-Agent`.
+///
+/// OpenCode Go asked (2026-09-04, with a 09/06 enforcement date) for two things Forge was not
+/// sending: a `User-Agent` — its dashboard listed our traffic as "Unknown client", because
+/// `reqwest` sends none by default — and `x-opencode-session`, one stable id per conversation,
+/// which it uses to optimise routing. Requests missing the header may start erroring on 09/06.
+///
+/// Scope is deliberately the whole HTTP client rather than the OpenCode branch of the service
+/// resolver: `default_headers` is the one hook genai exposes that survives every adapter, and both
+/// headers are safe to send everywhere. A `User-Agent` is expected of any HTTP client, and
+/// `x-opencode-session` is an `x-`-prefixed vendor header that other providers ignore. Putting it
+/// in the resolver instead would mean `AuthData::RequestOverride`, which replaces the URL as well —
+/// and OpenCode's URL varies per model (`/responses` vs `/chat/completions`), so that path would
+/// have to rebuild routing logic the adapter already owns.
+static CONVERSATION_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Seed the conversation id from the session this process is driving. Idempotent and first-wins:
+/// the id must be STABLE for the conversation, so a later call (a `/new` inside the same process,
+/// say) must not renumber traffic that is already in flight under the first id.
+///
+/// Callers that know the session id should call this before the first provider request. Anything
+/// that does not is still covered: [`conversation_id`] falls back to a per-process random id, which
+/// for an interactive chat is one conversation anyway.
+pub fn set_conversation_id(id: &str) {
+    if !id.is_empty() {
+        let _ = CONVERSATION_ID.set(id.to_string());
+    }
+}
+
+/// The stable conversation id for this process, seeding a random one if nothing set it.
+pub fn conversation_id() -> &'static str {
+    // No uuid dependency here: a monotonic-clock + pid pair is unique per process, which is all a
+    // fallback conversation id needs to be.
+    CONVERSATION_ID.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        format!("forge-{}-{nanos:x}", std::process::id())
+    })
+}
+
+/// `forge/<version>` — enough for a provider to tell what is calling it, with no host, user, or
+/// workspace detail. Deliberately not the OS/arch string a browser would send: the provider asked
+/// to identify the tool, not to fingerprint the machine.
+fn forge_user_agent() -> String {
+    format!("forge/{}", env!("CARGO_PKG_VERSION"))
+}
+
+fn provider_default_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Ok(value) = reqwest::header::HeaderValue::from_str(&forge_user_agent()) {
+        headers.insert(reqwest::header::USER_AGENT, value);
+    }
+    if let Ok(value) = reqwest::header::HeaderValue::from_str(conversation_id()) {
+        headers.insert("x-opencode-session", value);
+    }
+    headers
+}
+
 fn build_reqwest_client() -> reqwest::Client {
     let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
         .iter()
         .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok());
     reqwest::Client::builder()
+        .default_headers(provider_default_headers())
         .tcp_nodelay(true)
         .gzip(true)
         .pool_max_idle_per_host(4)
@@ -1453,6 +1514,51 @@ mod tests {
         );
         assert_eq!(crate::effective_output_token_cap(None, None), None);
         assert_eq!(crate::effective_output_token_cap(None, Some(0)), None);
+    }
+
+    /// OpenCode Go reported (2026-09-04) that Forge's traffic arrived as "Unknown client" with no
+    /// `x-opencode-session`, and said requests missing the header may error from 09/06. Both are
+    /// sent on every provider request now, so this pins the two header names and the shape of the
+    /// values — a rename or an accidental drop is a live outage against that deadline.
+    #[test]
+    fn every_provider_request_identifies_forge_and_its_conversation() {
+        let headers = provider_default_headers();
+
+        let ua = headers
+            .get(reqwest::header::USER_AGENT)
+            .expect("a request with no user agent is what made us 'Unknown client'")
+            .to_str()
+            .unwrap();
+        assert!(ua.starts_with("forge/"), "{ua}");
+        assert!(
+            !ua.contains(std::env::consts::OS)
+                || ua == format!("forge/{}", env!("CARGO_PKG_VERSION")),
+            "identify the tool, do not fingerprint the machine: {ua}"
+        );
+
+        let session = headers
+            .get("x-opencode-session")
+            .expect("OpenCode Go requires one stable id per conversation")
+            .to_str()
+            .unwrap();
+        assert!(!session.is_empty());
+        assert_eq!(
+            session,
+            conversation_id(),
+            "the header must carry the SAME id the process reports, or it is not stable"
+        );
+    }
+
+    /// "Stable per conversation" is the whole point: the id must not change under a later caller,
+    /// or traffic already in flight gets renumbered mid-conversation.
+    #[test]
+    fn the_conversation_id_is_first_wins_and_never_empty() {
+        let first = conversation_id().to_string();
+        set_conversation_id("some-other-session");
+        assert_eq!(conversation_id(), first, "a later setter must not renumber");
+        set_conversation_id("");
+        assert_eq!(conversation_id(), first);
+        assert!(!first.is_empty());
     }
 
     #[test]
