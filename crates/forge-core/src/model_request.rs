@@ -458,14 +458,31 @@ pub(super) async fn request_provider_response(
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        // Backoff budget exhausted: fail the turn with the REAL error
-                        // rather than silently running a different model than the pin.
-                        session.presenter.emit(PresenterEvent::Warning(format!(
-                            "{active_model}: still rate limited after \
-                         {pinned_rl_attempts} backoff retries — failing the turn \
-                         (pinned model; cross-model failover disabled). `/model a,b` pins a SET and fails over WITHIN it, `/model` alone unpins, or `mesh.pin_failover = true` allows full mesh fallback"
-                        )));
-                        return Err(e.into());
+                        // Backoff budget exhausted. `/model a,b` documents that a SET fails
+                        // over within itself, and `route_with_pin_set` already confined
+                        // `chain` to the other set members — so spend the backoff on the
+                        // model the user put first, then move to the next one rather than
+                        // failing a turn the user supplied an alternative for. Waiting first
+                        // is deliberate: a set is usually free-then-paid, and switching on the
+                        // first 429 would abandon the free tier the ordering asked for.
+                        if !chain.as_slice().is_empty() {
+                            session.presenter.emit(PresenterEvent::Warning(format!(
+                                "{active_model}: still rate limited after \
+                             {pinned_rl_attempts} backoff retries — moving to the next model \
+                             in the pinned set"
+                            )));
+                            *pinned_rl_attempts = 0;
+                            *pinned_rl_waited = std::time::Duration::ZERO;
+                        } else {
+                            // Nothing left in the set: fail with the REAL error rather than
+                            // silently running a different model than the pin.
+                            session.presenter.emit(PresenterEvent::Warning(format!(
+                                "{active_model}: still rate limited after \
+                             {pinned_rl_attempts} backoff retries — failing the turn \
+                             (pinned model; cross-model failover disabled). `/model a,b` pins a SET and fails over WITHIN it, `/model` alone unpins, or `mesh.pin_failover = true` allows full mesh fallback"
+                            )));
+                            return Err(e.into());
+                        }
                     }
                     // Transient outage (Unavailable, typically) that survived the hot
                     // same-model retries above (pinned-outage-resilience §1): same
@@ -539,14 +556,25 @@ pub(super) async fn request_provider_response(
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        // Outage budget exhausted: fail the turn with the REAL error,
-                        // mirroring the rate-limit exhaustion wording above.
-                        session.presenter.emit(PresenterEvent::Warning(format!(
-                            "{active_model}: still unreachable after \
-                         {pinned_outage_attempts} backoff retries — failing the turn \
-                         (pinned model; cross-model failover disabled). `/model a,b` pins a SET and fails over WITHIN it, `/model` alone unpins, or `mesh.pin_failover = true` allows full mesh fallback"
-                        )));
-                        return Err(e.into());
+                        // Outage budget exhausted: same in-set advance as the rate-limit
+                        // branch above, for the same reason.
+                        if !chain.as_slice().is_empty() {
+                            session.presenter.emit(PresenterEvent::Warning(format!(
+                                "{active_model}: still unreachable after \
+                             {pinned_outage_attempts} backoff retries — moving to the next \
+                             model in the pinned set"
+                            )));
+                            *pinned_outage_attempts = 0;
+                            *pinned_outage_waited = std::time::Duration::ZERO;
+                            *pinned_outage_last_error = None;
+                        } else {
+                            session.presenter.emit(PresenterEvent::Warning(format!(
+                                "{active_model}: still unreachable after \
+                             {pinned_outage_attempts} backoff retries — failing the turn \
+                             (pinned model; cross-model failover disabled). `/model a,b` pins a SET and fails over WITHIN it, `/model` alone unpins, or `mesh.pin_failover = true` allows full mesh fallback"
+                            )));
+                            return Err(e.into());
+                        }
                     }
                     FailoverPolicy::FailTurn => {
                         // A pinned model with a permanent incapability, or a transient

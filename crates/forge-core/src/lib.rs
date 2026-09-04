@@ -11094,6 +11094,72 @@ mod tests {
         }
     }
 
+    /// 429s one specific model forever and answers on any other, so a pinned SET can be watched
+    /// deciding between waiting and moving on.
+    struct RateLimitsOneModelProvider {
+        limited: String,
+        attempts_on_limited: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for RateLimitsOneModelProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            if model == self.limited {
+                self.attempts_on_limited
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(forge_provider::ProviderError::RateLimited {
+                    message: "429 rate limited".into(),
+                    retry_after: Some(std::time::Duration::from_millis(1)),
+                });
+            }
+            on_event(StreamEvent::Text(model.into()));
+            Ok(forge_provider::ModelResponse {
+                content: model.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_pin_set_waits_then_moves_to_the_next_member() {
+        // The reported defect: `/model free,paid` retried the free model, exhausted the backoff,
+        // and FAILED the turn — never reaching the paid member the user had supplied. The turn
+        // must finish on the second member instead.
+        //
+        // The wait comes first on purpose: a set is ordered free-then-paid, so switching on the
+        // first 429 would throw away the free tier that ordering asked for. Both halves are
+        // asserted — the backoff really ran, and the turn really moved on.
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(RateLimitsOneModelProvider {
+            limited: "free::model".into(),
+            attempts_on_limited: attempts.clone(),
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "free::model".into(),
+            fallbacks: vec!["paid::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+
+        let answer = session.run_turn("fix the bug").await.unwrap();
+
+        assert_eq!(
+            answer, "paid::model",
+            "a pinned SET must fail over within itself instead of failing the turn"
+        );
+        assert!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst) > 1,
+            "the first member must get its backoff before the set advances, got {} attempt(s)",
+            attempts.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
     #[tokio::test]
     async fn rate_limit_waits_for_reset_and_retries_the_same_model() {
         // An explicit pin keeps the requested model: a short 429 reset is waited out before
@@ -11385,7 +11451,7 @@ mod tests {
         let provider = Arc::new(VaryingUnavailableProvider::default());
         let router = Arc::new(PinnedRouter {
             model: "pin::model".into(),
-            fallbacks: vec!["worse::model".into()],
+            fallbacks: Vec::new(), // strict single pin: a fallback here would make it a two-member SET
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.mesh.pin_outage_wait_secs = 6;
