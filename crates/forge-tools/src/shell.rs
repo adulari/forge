@@ -390,7 +390,7 @@ async fn run_command_inner(
     }
     for (stream, error) in [("stdout", out_error), ("stderr", err_error)] {
         if let Some(error) = error {
-            header.push_str(&format!("  ({stream} drain failed: {error})"));
+            header.push_str(&format!("  ({stream}: {error})"));
         }
     }
     let result = if body.trim().is_empty() {
@@ -401,20 +401,30 @@ async fn run_command_inner(
     (result, exit_code)
 }
 
+/// What a drain timeout actually means, said in a way the model can act on.
+///
+/// Reaching this point is not ambiguous: the process group has already been killed, so the only
+/// thing that can still hold the pipe open is a process that LEFT the group — something the
+/// command started and detached (a browser, a dev server, a daemon). That is a specific,
+/// recoverable situation with a specific fix, and saying "drain failed: timed out after 5000ms"
+/// buries it.
+///
+/// Observed cost of the old wording: a headless Chrome left running by a test binary inherited the
+/// command's stdout, so `prog | tail -6` never saw EOF, `tail` never exited, `sh` never exited, and
+/// the call sat until its 600s timeout. The agent then spent ten minutes and several more timeouts
+/// guessing at DISPLAY and CDP before working it out — with all of the evidence already in hand.
+const PIPE_HELD_HINT: &str =
+    "output pipe still open after the process tree was killed — something \
+     this command started has detached and inherited it (a browser, server, or daemon). Redirect \
+     it away from the pipe, e.g. `cmd >/dev/null 2>&1 &`, or run it under `setsid`";
+
 async fn drain_reader(
     task: tokio::task::JoinHandle<(Vec<u8>, bool)>,
 ) -> (Vec<u8>, bool, Option<String>) {
     match tokio::time::timeout(READER_DRAIN_TIMEOUT, task).await {
         Ok(Ok((bytes, capped))) => (bytes, capped, None),
         Ok(Err(error)) => (Vec::new(), false, Some(error.to_string())),
-        Err(_) => (
-            Vec::new(),
-            false,
-            Some(format!(
-                "timed out after {}ms",
-                READER_DRAIN_TIMEOUT.as_millis()
-            )),
-        ),
+        Err(_) => (Vec::new(), false, Some(PIPE_HELD_HINT.to_string())),
     }
 }
 
@@ -1035,6 +1045,48 @@ mod tests {
                 start.elapsed() < Duration::from_secs(15),
                 "must not wait for the backgrounded sleep, elapsed: {:?}",
                 start.elapsed()
+            );
+        }
+
+        /// The reader-drain guard exists for exactly one situation: a process that LEFT the
+        /// process group survives the group kill and keeps the output pipe open, so the read never
+        /// sees EOF. The message it produces is the only explanation the model gets, so it has to
+        /// name the cause and the fix rather than report that a timer expired.
+        ///
+        /// The real incident: a test binary left a headless Chrome running; Chrome inherited the
+        /// command's stdout, so `prog | tail -6` never saw EOF, `tail` never exited, `sh` never
+        /// exited, and the call sat until its 600s timeout. The agent then burned ten minutes and
+        /// several more timeouts guessing at DISPLAY and CDP settings, because "drain failed:
+        /// timed out after 5000ms" says nothing about a detached process holding a pipe.
+        ///
+        /// Driven through `drain_reader` directly with a reader that never finishes. Constructing
+        /// a process that both escapes the group AND keeps the pipe is not portable enough to pin
+        /// in a unit test — `setsid` drops the descriptors on some systems — and the wording is
+        /// what this change is actually about.
+        /// Takes the real `READER_DRAIN_TIMEOUT`; tokio's time pausing needs the `test-util`
+        /// feature, which is not worth adding to the workspace for one assertion about wording.
+        #[tokio::test]
+        async fn a_stuck_reader_is_explained_not_just_timed_out() {
+            let never = tokio::spawn(async {
+                std::future::pending::<()>().await;
+                unreachable!()
+            });
+            let (bytes, capped, error) = drain_reader(never).await;
+
+            assert!(bytes.is_empty() && !capped);
+            let error = error.expect("a stuck reader must report something");
+            assert!(
+                error.contains("output pipe still open"),
+                "must say WHAT happened: {error}"
+            );
+            assert!(error.contains("detached"), "must name the cause: {error}");
+            assert!(
+                error.contains("setsid") || error.contains("/dev/null"),
+                "must give the fix: {error}"
+            );
+            assert!(
+                !error.contains("timed out after"),
+                "a bare timer reading explained nothing: {error}"
             );
         }
 
