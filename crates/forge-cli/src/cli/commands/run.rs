@@ -673,7 +673,13 @@ pub(crate) async fn run_chat_tui(
     // away from the model's view), then a separator marking where new input begins.
     let mut offer_resume_choice = false;
     {
-        let s = session.lock().await;
+        let mut s = session.lock().await;
+        // Spend and token counters live on the `Cost` event, which is only emitted once a turn
+        // ENDS. Without this a resumed session showed "untracked" and empty counters until its
+        // first turn completed in the new process — minutes of the statusline saying the session
+        // had cost nothing while the store knew otherwise, which reads exactly like restarting
+        // wiped the spend. The totals were always persisted; only the display started at zero.
+        s.emit_restored_totals();
         let items = s.replay_items_full();
         if !items.is_empty() {
             let sid8: String = s.session_id().chars().take(8).collect();

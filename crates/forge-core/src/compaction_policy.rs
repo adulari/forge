@@ -222,6 +222,39 @@ impl Session {
         }
     }
 
+    /// Emit the session's PERSISTED totals the moment it is resumed, before any turn runs.
+    ///
+    /// Cost, tokens, and context fill all live on the `Cost` event, and that event is only emitted
+    /// once a turn reaches its end (or `emit_context_gauge` fires mid-turn). So a resumed session
+    /// showed a spend meter of `untracked` and an empty token counter until its first turn
+    /// COMPLETED in the new process — on a long turn that is many minutes of the statusline
+    /// claiming the session had cost nothing, when the store knew it had cost $1.69.
+    ///
+    /// The numbers were never lost: `session.total_cost_usd` accumulates across processes and
+    /// [`Store::session_cost`] reads it. Only the display started from zero, which reads exactly
+    /// like the spend was reset by restarting.
+    ///
+    /// `context_limit` is deliberately `None`: no model has been routed yet, so there is no honest
+    /// denominator to show. The gauge fills in on the first real call.
+    pub fn emit_restored_totals(&mut self) {
+        let session_total_usd = self.store.session_cost(&self.id).unwrap_or(0.0);
+        let (session_in, session_out) = self.store.session_tokens(&self.id).unwrap_or((0, 0));
+        if session_total_usd <= 0.0 && session_in == 0 && session_out == 0 {
+            return; // a genuinely fresh session has nothing to restore
+        }
+        self.presenter.emit(PresenterEvent::Cost {
+            session_total_usd,
+            session_in,
+            session_cached_in: self
+                .store
+                .session_cached_input_tokens(&self.id)
+                .unwrap_or(None),
+            session_out,
+            context_tokens: self.estimated_transcript_tokens(),
+            context_limit: None,
+        });
+    }
+
     /// Emit a [`Cost`](PresenterEvent::Cost) event reflecting the CURRENT transcript size as the
     /// live context fill, so the statusline gauge + compaction band update right away (e.g. right
     /// after auto-compaction) rather than waiting for the next model call's real input-token count
