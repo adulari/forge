@@ -92,9 +92,16 @@ pub(crate) fn to_llm(
 const TURN_CONTRACT_PREFIX: &str = "Turn contract:";
 
 /// Derive the provider's system-context view without rewriting the persisted transcript. A turn
-/// contract is scoped to one turn, so only the newest contract may remain authoritative. Exact
-/// repeated system guidance is likewise standing context, not cumulative evidence; keep its newest
-/// occurrence so its relative position beside the current turn remains correct.
+/// contract is scoped to one turn, so only the newest contract may remain authoritative.
+///
+/// Exact repeated system guidance is standing context, not cumulative evidence, so only one full
+/// copy is sent — but WHICH copy matters more than it looks. Prompt caches key on a PREFIX, so
+/// keeping the newest copy deletes the previously-kept one from the middle of the prompt and
+/// discards every cached token after it. One live session showed 344 exact-duplicate system
+/// messages, mostly re-emitted `[lsp diagnostics]` blocks: 344 invalidations of a ~50k-token
+/// prompt, each to save ~380 chars. Keeping the FIRST copy is just as bounded and costs nothing,
+/// because whether a message is dropped then depends only on the messages before it — so a
+/// transcript that grows never rewrites what the provider has already cached.
 fn normalize_system_context(messages: Vec<Message>) -> Vec<Message> {
     let newest_contract = messages.iter().rposition(|message| {
         message.role == Role::System
@@ -103,18 +110,8 @@ fn normalize_system_context(messages: Vec<Message>) -> Vec<Message> {
                 .trim_start()
                 .starts_with(TURN_CONTRACT_PREFIX)
     });
-    let mut newest_exact = std::collections::HashMap::<String, usize>::new();
-    for (index, message) in messages.iter().enumerate() {
-        if message.role == Role::System
-            && !message
-                .content
-                .trim_start()
-                .starts_with(TURN_CONTRACT_PREFIX)
-        {
-            newest_exact.insert(message.content.clone(), index);
-        }
-    }
 
+    let mut seen = std::collections::HashSet::<String>::new();
     messages
         .into_iter()
         .enumerate()
@@ -129,7 +126,7 @@ fn normalize_system_context(messages: Vec<Message>) -> Vec<Message> {
             {
                 return (Some(index) == newest_contract).then_some(message);
             }
-            (newest_exact.get(&message.content) == Some(&index)).then_some(message)
+            seen.insert(message.content.clone()).then_some(message)
         })
         .collect()
 }
@@ -988,37 +985,68 @@ mod tests {
     }
 
     #[test]
-    fn to_llm_keeps_only_the_newest_exact_system_guidance_copy() {
+    fn to_llm_keeps_the_first_exact_system_guidance_copy_not_the_newest() {
+        let guidance = format!("standing workflow guidance {}", "detail ".repeat(40));
         let messages = vec![
-            Message::system("standing workflow guidance"),
+            Message::system(&guidance),
             Message::user("first"),
             Message::assistant("first answer"),
-            Message::system("standing workflow guidance"),
+            Message::system(&guidance),
             Message::user("second"),
         ];
 
         let output = to_llm(&messages, 10_000, 4_096, 2);
 
-        assert_eq!(
-            output
-                .iter()
-                .filter(|message| message.content == "standing workflow guidance")
-                .count(),
-            1
-        );
-        let guidance_index = output
+        let full: Vec<usize> = output
             .iter()
-            .position(|message| message.content == "standing workflow guidance")
-            .unwrap();
-        let second_user_index = output
+            .enumerate()
+            .filter(|(_, message)| message.content == guidance)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(full.len(), 1, "exactly one full copy is sent");
+
+        let first_user = output
             .iter()
-            .position(|message| message.content == "second")
+            .position(|message| message.content == "first")
             .unwrap();
+        // The point of the change: the copy that survives whole is the EARLIER one, so the prompt
+        // prefix a provider has already cached is never rewritten. Keeping the newest instead —
+        // the previous behaviour — puts the full copy after this index and fails here.
         assert!(
-            guidance_index < second_user_index,
-            "newest copy retains its order"
+            full[0] < first_user,
+            "the first copy is the one kept whole, not the newest"
         );
     }
+
+    /// The cache-critical property, stated directly: appending to a transcript must never change
+    /// what was already sent. Anything that rewrites an earlier message discards every cached
+    /// token after it, which is exactly what keeping the NEWEST duplicate used to do — 344 times
+    /// in one observed session.
+    #[test]
+    fn growing_a_transcript_never_rewrites_what_was_already_sent() {
+        let guidance = format!("[lsp diagnostics] {}", "warning: unused import ".repeat(20));
+        let mut messages = vec![
+            Message::system(&guidance),
+            Message::user("first"),
+            Message::assistant("first answer"),
+        ];
+        let before = to_llm(&messages, 100_000, 4_096, 2);
+
+        messages.push(Message::system(&guidance));
+        messages.push(Message::user("second"));
+        let after = to_llm(&messages, 100_000, 4_096, 2);
+
+        assert!(after.len() > before.len(), "the transcript really did grow");
+        for (index, sent) in before.iter().enumerate() {
+            assert_eq!(
+                sent.content, after[index].content,
+                "message {index} was rewritten after it had already been sent"
+            );
+        }
+    }
+
+    /// A marker longer than the message it replaces would spend tokens to save them. Short system
+    /// messages are routing markers ("memory", "shell/diagnose") and stay whole.
 
     #[test]
     fn repeated_contract_and_guidance_context_converges_to_a_bounded_provider_view() {
