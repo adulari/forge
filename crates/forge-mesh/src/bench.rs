@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+use forge_types::EffortLevel;
 use serde::{Deserialize, Serialize};
 
 /// One model's measured performance — Artificial Analysis indices, each roughly 0–70 today.
@@ -23,6 +24,109 @@ pub struct BenchScore {
     pub coding: f64,
 }
 
+/// One rung on a model's measured effort ladder, as the source publishes it: the effort
+/// parenthetical on a row name ("GPT-6 Astra (medium)"). Kept distinct from
+/// [`forge_types::EffortLevel`] because the source also rates a *non-reasoning* rung that Forge
+/// has no pin for, and because a rated rung is not necessarily one a given provider can be asked
+/// for. Ordered weakest-first so a ladder sorts naturally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BenchEffort {
+    NonReasoning,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl BenchEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BenchEffort::NonReasoning => "non-reasoning",
+            BenchEffort::Low => "low",
+            BenchEffort::Medium => "medium",
+            BenchEffort::High => "high",
+            BenchEffort::XHigh => "xhigh",
+            BenchEffort::Max => "max",
+        }
+    }
+
+    /// The rung a Forge pin asks for. `WhiteHot` maps to `Max` because white-hot's extra lift is
+    /// orchestration guidance in forge-core, not a provider setting — the reasoning rung it asks
+    /// the provider for is the top one, the same rung the source labels "(max)".
+    pub fn from_level(level: EffortLevel) -> Self {
+        match level {
+            EffortLevel::Low => BenchEffort::Low,
+            EffortLevel::Medium => BenchEffort::Medium,
+            EffortLevel::High => BenchEffort::High,
+            EffortLevel::XHigh => BenchEffort::XHigh,
+            EffortLevel::WhiteHot => BenchEffort::Max,
+        }
+    }
+
+    /// The Forge pin that requests this rung, or `None` for the non-reasoning rung — Forge has no
+    /// level meaning "turn reasoning off", so that row is scoring evidence only, never a routing
+    /// choice.
+    pub fn to_level(self) -> Option<EffortLevel> {
+        match self {
+            BenchEffort::NonReasoning => None,
+            BenchEffort::Low => Some(EffortLevel::Low),
+            BenchEffort::Medium => Some(EffortLevel::Medium),
+            BenchEffort::High => Some(EffortLevel::High),
+            BenchEffort::XHigh => Some(EffortLevel::XHigh),
+            BenchEffort::Max => Some(EffortLevel::WhiteHot),
+        }
+    }
+
+    /// The effort rung a source row name declares, if any.
+    ///
+    /// Only a parenthetical whose WHOLE content is an effort word counts. The feed decorates names
+    /// with far more than efforts — "(June 2026)" is a release date, "(Vision)" a modality, and
+    /// "Quasar 438B (max, based on GLM-5.2)" describes a derived model whose "max" belongs to the
+    /// base it was built from, not to a rung anyone can request. Matching the whole content keeps
+    /// all three out.
+    fn from_source_name(name: &str) -> Option<Self> {
+        let mut depth = 0u32;
+        let mut group = String::new();
+        for c in name.chars() {
+            match c {
+                '(' | '[' => {
+                    depth += 1;
+                    group.clear();
+                }
+                ')' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    if let Some(effort) = Self::parse_exact(&group) {
+                        return Some(effort);
+                    }
+                    group.clear();
+                }
+                _ if depth > 0 => group.push(c),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn parse_exact(text: &str) -> Option<Self> {
+        match text
+            .trim()
+            .to_lowercase()
+            .replace(['-', '_', ' '], "")
+            .as_str()
+        {
+            "nonreasoning" => Some(BenchEffort::NonReasoning),
+            "low" => Some(BenchEffort::Low),
+            "medium" | "med" => Some(BenchEffort::Medium),
+            "high" => Some(BenchEffort::High),
+            "xhigh" | "extrahigh" => Some(BenchEffort::XHigh),
+            "max" => Some(BenchEffort::Max),
+            _ => None,
+        }
+    }
+}
+
 /// Measured performance for the models a data source knew about, matchable to Forge ids.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BenchmarkScores {
@@ -30,6 +134,11 @@ pub struct BenchmarkScores {
     by_canon: HashMap<String, BenchScore>,
     /// All rows as (token set, score) for the overlap fallback.
     entries: Vec<(Vec<String>, BenchScore)>,
+    /// Every rated effort rung, keyed by the same canonical key as `by_canon`. `tokens` strips the
+    /// effort parenthetical before tokenising, so all of a model's rungs share one key. Only
+    /// models the source rated at more than one rung get an entry worth routing on.
+    #[serde(default)]
+    by_effort: HashMap<String, Vec<(BenchEffort, BenchScore)>>,
 }
 
 impl BenchmarkScores {
@@ -50,6 +159,12 @@ impl BenchmarkScores {
     /// ("GPT-5.5 (xhigh)", "… (low)") that collapses to the same canonical key — when that
     /// happens we keep the HIGHER-intelligence row, i.e. the model's best effort, as its
     /// representative capability.
+    ///
+    /// The collapse is lossy, so the rung is ALSO kept on the model's effort ladder
+    /// ([`Self::efforts_for`]). Which rung a model is actually run at moves its measured quality
+    /// substantially, and not always upward: GPT-6 Astra's coding index peaks at `high` (77.1) and
+    /// falls at `xhigh` (75.9). Routing on the collapsed row alone scores every model as though it
+    /// ran at its best-rated effort, whatever effort it is really being sent.
     pub fn insert(&mut self, name: &str, intelligence: f64, coding: f64) {
         let score = BenchScore {
             intelligence,
@@ -73,6 +188,20 @@ impl BenchmarkScores {
             Some((_, s)) if s.intelligence < intelligence => *s = score,
             Some(_) => {}
             None => self.entries.push((toks, score)),
+        }
+        // Keep the rung itself. A feed may rate the same rung twice (a re-run, or two spellings
+        // that canonicalise together); the higher-intelligence measurement wins, matching how the
+        // collapsed row above is chosen.
+        if let Some(effort) = BenchEffort::from_source_name(name) {
+            let rungs = self.by_effort.entry(key).or_default();
+            match rungs.iter_mut().find(|(e, _)| *e == effort) {
+                Some((_, s)) if s.intelligence < intelligence => *s = score,
+                Some(_) => {}
+                None => {
+                    rungs.push((effort, score));
+                    rungs.sort_by_key(|(e, _)| *e);
+                }
+            }
         }
     }
 
@@ -105,8 +234,61 @@ impl BenchmarkScores {
     /// The score matched directly from a benchmark-source row, without predecessor inheritance.
     /// Cache refresh logic uses this to distinguish measured data from a temporary routing prior.
     pub fn source_score_for(&self, id: &str) -> Option<BenchScore> {
+        self.resolve(id).map(|(_, score)| score)
+    }
+
+    /// Every measured effort rung for a Forge id, weakest first.
+    ///
+    /// Empty when the source rated the model at a single undecorated effort — there is then no
+    /// ladder to choose from and callers must fall back to [`Self::score_for`]. Resolution follows
+    /// [`Self::score_for`] exactly, predecessor inheritance included, so a model routed on an
+    /// inherited score reads its rungs from the same row it was scored by.
+    pub fn efforts_for(&self, id: &str) -> Vec<(BenchEffort, BenchScore)> {
+        self.resolve_key(id)
+            .and_then(|key| self.by_effort.get(&key))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The measured score for one exact rung, or `None` when the source did not rate it. A caller
+    /// must not substitute a neighbouring rung: the whole point of the ladder is that rungs differ,
+    /// and on some models they do not even increase monotonically.
+    pub fn score_for_effort(&self, id: &str, effort: BenchEffort) -> Option<BenchScore> {
+        self.efforts_for(id)
+            .into_iter()
+            .find(|(rung, _)| *rung == effort)
+            .map(|(_, score)| score)
+    }
+
+    /// The canonical key of the row that represents `id` under [`Self::score_for`] semantics.
+    fn resolve_key(&self, id: &str) -> Option<String> {
+        if let Some(predecessor) = Self::predecessor_canon(id) {
+            let want = id_tokens(id);
+            if want.is_empty() {
+                return None;
+            }
+            let own = canon(&want);
+            if self.by_canon.contains_key(&own) {
+                return Some(own);
+            }
+            return self
+                .by_canon
+                .contains_key(&predecessor)
+                .then_some(predecessor);
+        }
+        self.resolve(id).map(|(key, _)| key)
+    }
+
+    /// Match a Forge id to a source row, returning that row's canonical key alongside its score.
+    /// The key is what ties a model to its effort ladder, which is stored under the same key.
+    fn resolve(&self, id: &str) -> Option<(String, BenchScore)> {
         if Self::predecessor_canon(id).is_some() {
-            return self.exact_score_for(id);
+            let want = id_tokens(id);
+            if want.is_empty() {
+                return None;
+            }
+            let key = canon(&want);
+            return self.by_canon.get(&key).map(|score| (key, *score));
         }
         if self.entries.is_empty() {
             return None;
@@ -116,8 +298,9 @@ impl BenchmarkScores {
             return None;
         }
         // Fast path: identical token set.
-        if let Some(s) = self.by_canon.get(&canon(&want)) {
-            return Some(*s);
+        let key = canon(&want);
+        if let Some(s) = self.by_canon.get(&key) {
+            return Some((key, *s));
         }
         // Fallback: the row sharing the most tokens, requiring a shared *family* word (an
         // alphabetic token ≥3 chars) so we never match purely on a stray version number.
@@ -139,7 +322,8 @@ impl BenchmarkScores {
             .filter(|t| t.chars().all(|c| c.is_ascii_digit()))
             .map(String::as_str)
             .collect();
-        let mut best: Option<(usize, f64, BenchScore)> = None; // (overlap, intelligence, score)
+        // (overlap, intelligence, canonical key, score)
+        let mut best: Option<(usize, f64, String, BenchScore)> = None;
         for (toks, score) in &self.entries {
             let shared = overlap(&want, toks);
             let family = want.iter().any(|t| {
@@ -165,15 +349,15 @@ impl BenchmarkScores {
             }
             // Prefer more shared tokens; break ties toward the higher-intelligence row (a bare
             // bridge alias like `claude-cli::opus` should map to the latest/best Claude-Opus).
-            let better = match best {
+            let better = match &best {
                 None => true,
-                Some((bo, bi, _)) => shared > bo || (shared == bo && score.intelligence > bi),
+                Some((bo, bi, _, _)) => shared > *bo || (shared == *bo && score.intelligence > *bi),
             };
             if better {
-                best = Some((shared, score.intelligence, *score));
+                best = Some((shared, score.intelligence, canon(toks), *score));
             }
         }
-        best.map(|(_, _, s)| s)
+        best.map(|(_, _, key, score)| (key, score))
     }
 
     /// Resolve narrowly scoped, product-reviewed benchmark inheritance to the predecessor's exact
@@ -304,6 +488,147 @@ fn overlap(want: &[String], have: &[String]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    /// The six rows Artificial Analysis publishes for GPT-6 Astra, verbatim from the live feed
+    /// cached at `~/.local/share/forge/benchmarks.json` (2026-09-05). Real numbers on purpose: the
+    /// ladder's shape is the thing under test, and a made-up ladder would be monotonic.
+    fn astra_feed() -> BenchmarkScores {
+        let mut b = BenchmarkScores::new();
+        b.insert("GPT-6 Astra (Non-reasoning)", 47.8, 76.2);
+        b.insert("GPT-6 Astra (low)", 49.3, 75.7);
+        b.insert("GPT-6 Astra (medium)", 52.2, 76.7);
+        b.insert("GPT-6 Astra (high)", 53.4, 77.1);
+        b.insert("GPT-6 Astra (xhigh)", 54.3, 75.9);
+        b.insert("GPT-6 Astra (max)", 54.7, 76.9);
+        b
+    }
+
+    #[test]
+    fn an_effort_ladder_survives_the_collapse_to_one_representative_row() {
+        let b = astra_feed();
+        // The collapsed row is unchanged: still the highest-intelligence rung.
+        let collapsed = b
+            .score_for("codex-oauth::gpt-6-astra")
+            .expect("astra is rated");
+        assert_eq!(
+            collapsed.intelligence, 54.7,
+            "the (max) row still represents the model"
+        );
+
+        let ladder = b.efforts_for("codex-oauth::gpt-6-astra");
+        assert_eq!(
+            ladder.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+            [
+                BenchEffort::NonReasoning,
+                BenchEffort::Low,
+                BenchEffort::Medium,
+                BenchEffort::High,
+                BenchEffort::XHigh,
+                BenchEffort::Max,
+            ],
+            "every rated rung is kept, weakest first"
+        );
+    }
+
+    #[test]
+    fn coding_quality_does_not_rise_monotonically_with_effort() {
+        // The reason routing may not simply ask for the top rung. Astra codes BETTER at high than
+        // at xhigh, and medium is within 0.4 of the best rung it has — at a fraction of the burn.
+        // An implementation that assumes "more effort is more quality" passes every synthetic
+        // fixture and gets this backwards on the real feed.
+        let b = astra_feed();
+        let coding = |rung| {
+            b.score_for_effort("codex-oauth::gpt-6-astra", rung)
+                .expect("rung is rated")
+                .coding
+        };
+        assert!(
+            coding(BenchEffort::High) > coding(BenchEffort::XHigh),
+            "astra codes better at high ({}) than at xhigh ({})",
+            coding(BenchEffort::High),
+            coding(BenchEffort::XHigh)
+        );
+        assert!(
+            coding(BenchEffort::Max) - coding(BenchEffort::Medium) < 0.5,
+            "medium is within half a point of the top rung on coding"
+        );
+        assert!(
+            coding(BenchEffort::Low) < coding(BenchEffort::Medium),
+            "the ladder is not inverted either — low really is worse"
+        );
+    }
+
+    #[test]
+    fn score_for_effort_never_substitutes_a_neighbouring_rung() {
+        let mut b = BenchmarkScores::new();
+        b.insert("GPT-6 Astra (high)", 53.4, 77.1);
+        assert!(b
+            .score_for_effort("codex-oauth::gpt-6-astra", BenchEffort::High)
+            .is_some());
+        assert!(
+            b.score_for_effort("codex-oauth::gpt-6-astra", BenchEffort::Medium)
+                .is_none(),
+            "an unrated rung is unknown, not approximated by the rung next to it"
+        );
+    }
+
+    #[test]
+    fn a_parenthetical_that_is_not_an_effort_is_not_read_as_one() {
+        // Three real decorations from the feed that must not become rungs: a release date, a
+        // modality, and a derived model whose "max" belongs to the base it was built from.
+        let mut b = BenchmarkScores::new();
+        b.insert("GPT-5.5 Instant (June 2026)", 21.6, 39.4);
+        b.insert("Llama 3.2 Instruct 90B (Vision)", 1.0, 1.0);
+        b.insert("Quasar 438B (max, based on GLM-5.2)", 33.9, 61.2);
+        assert!(b.efforts_for("openai::gpt-5.5-instant").is_empty());
+        assert!(b.efforts_for("meta::llama-3.2-90b").is_empty());
+        assert!(
+            b.efforts_for("openrouter::quasar-438b").is_empty(),
+            "a derived model's base-model parenthetical is not a rung Forge can request"
+        );
+    }
+
+    #[test]
+    fn a_model_rated_at_a_single_undecorated_effort_has_no_ladder() {
+        let mut b = BenchmarkScores::new();
+        b.insert("Claude 4.5 Sonnet", 50.0, 70.0);
+        assert!(b.score_for("anthropic::claude-sonnet-4-5").is_some());
+        assert!(
+            b.efforts_for("anthropic::claude-sonnet-4-5").is_empty(),
+            "no rungs means callers fall back to the single score, not to a guess"
+        );
+    }
+
+    #[test]
+    fn an_inherited_score_reads_the_ladder_of_the_row_it_inherited_from() {
+        // muse-spark-1.3 has no row of its own; `score_for` falls back to 1.2. Its rungs must come
+        // from that same row, or the model would be scored by one row and routed by another.
+        let mut b = BenchmarkScores::new();
+        b.insert("Muse Spark 1.2 (xhigh)", 46.8, 72.2);
+        b.insert("Muse Spark 1.2 (low)", 30.0, 55.0);
+        let ladder = b.efforts_for("opencode::muse-spark-1.3-contributor-free");
+        assert_eq!(
+            ladder.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+            [BenchEffort::Low, BenchEffort::XHigh]
+        );
+    }
+
+    #[test]
+    fn the_top_rung_maps_to_the_pin_that_asks_for_it() {
+        // White-hot asks the provider for the top reasoning rung; its extra lift is orchestration
+        // guidance, not a higher provider setting. So it must score against "(max)", not fall off
+        // the ladder into the collapsed row.
+        assert_eq!(
+            BenchEffort::from_level(EffortLevel::WhiteHot),
+            BenchEffort::Max
+        );
+        assert_eq!(BenchEffort::Max.to_level(), Some(EffortLevel::WhiteHot));
+        assert_eq!(
+            BenchEffort::NonReasoning.to_level(),
+            None,
+            "Forge has no pin meaning 'reasoning off' — that row is evidence, never a choice"
+        );
+    }
+
     fn muse_feed() -> BenchmarkScores {
         let mut b = BenchmarkScores::new();
         b.insert("Muse Spark 1.2 (xhigh)", 56.8, 72.2);
