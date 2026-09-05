@@ -164,6 +164,7 @@ pub fn picker_kind_wire(kind: crate::commands::PickerKind) -> &'static str {
         P::ResumeMode => "picker:resume_mode",
         P::CopyBlocks => "picker:copy_blocks",
         P::ModelPin => "picker:model_pin",
+        P::ModelRung => "picker:model_rung",
         P::Duel => "picker:duel",
     }
 }

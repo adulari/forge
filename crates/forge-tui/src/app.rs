@@ -4972,6 +4972,28 @@ mod tests {
     }
 
     #[test]
+    fn a_pin_shows_in_the_statusline_with_no_turn_having_run() {
+        // Pinning a model used to change session state and emit nothing, so the status row kept
+        // naming the PREVIOUSLY routed model until the next turn produced a Routing event. The
+        // dispatch/picker paths now emit on pin; this asserts the consumer half — that such an
+        // event alone, with no turn ever started, updates model and rung.
+        let mut app = App::default();
+        assert!(app.routing.is_none(), "nothing routed yet");
+        assert!(!app.busy, "no turn is running");
+        app.apply(PresenterEvent::Routing {
+            tier: "pinned".into(),
+            model: "codex-oauth::gpt-6-astra".into(),
+            rationale: "pinned by /model".into(),
+            effort: Some(forge_types::EffortLevel::High),
+        });
+        let text = screen_wh(&app, 120, LIVE_H);
+        assert!(
+            text.contains("codex-oauth::gpt-6-astra") && text.contains("⟨high⟩"),
+            "the pin and its rung must be visible immediately: {text:?}"
+        );
+    }
+
+    #[test]
     fn the_rung_mesh_chose_is_what_the_statusline_reports() {
         // End of the chain: mesh picked medium from astra's measured ladder with nothing pinned,
         // and that is what the request sends — so that is what the marker must say. Reading the

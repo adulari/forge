@@ -1057,6 +1057,12 @@ pub enum PickerKind {
     /// sorted by tier (subscription → frontier → paid → free). Enter pins the selected model;
     /// selecting "mesh" clears the pin. Esc closes without changing anything.
     ModelPin,
+    /// Step two of pinning: the rated effort rungs of ONE model, best value first and marked.
+    ///
+    /// Only opened for a model whose ladder has more than one rated rung — for anything else the
+    /// list would be a single row restating the pin. Each row's `id` is `provider::model@rung`, so
+    /// the loop pins the exact pair without carrying extra state between the two steps.
+    ModelRung,
     /// Pick the winning candidate from a finished `/duel` run (docs/features/duel.md). Each row's
     /// `id` is the candidate's worktree branch. Enter merges the winner back and discards the
     /// rest; Esc discards every candidate (no merge, no routing-learning record).
