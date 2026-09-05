@@ -315,8 +315,24 @@ pub(crate) async fn dispatch_command(
             // `/model <partial>` → open the animated ModelPin picker pre-filtered.
             if model_id.contains("::") {
                 let model_id = forge_provider::normalize_model_id(&model_id).into_owned();
-                let mut s = session.lock().await;
-                s.pin_model(Some(model_id.clone()));
+                let rung = {
+                    let mut s = session.lock().await;
+                    s.pin_model(Some(model_id.clone()));
+                    // The rung the pin will actually run at. Computed here so the statusline is
+                    // correct the INSTANT the pin lands: previously `pin_model` changed session
+                    // state and emitted nothing, so the status row kept naming the previously
+                    // routed model until the next turn produced a Routing event.
+                    let ceiling = s.pinned_effort();
+                    s.catalog().and_then(|catalog| {
+                        forge_mesh::rung_cost::best_value_rung(catalog, &model_id, ceiling, false)
+                    })
+                };
+                app.apply(forge_tui::PresenterEvent::Routing {
+                    tier: "pinned".to_string(),
+                    model: model_id.clone(),
+                    rationale: "pinned by /model".to_string(),
+                    effort: rung,
+                });
                 app.note(&format!("⊕ model pinned: {model_id} (clear with /model)"));
             } else {
                 open_model_pin_picker(session, app, &model_id).await?;

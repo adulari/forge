@@ -519,7 +519,23 @@ pub(crate) async fn picker_accept(
                 app.note("⊕ model pin cleared — mesh auto-routing restored");
             } else {
                 let model_id = forge_provider::normalize_model_id(&row.id).into_owned();
-                session.lock().await.pin_model(Some(model_id.clone()));
+                // Emit the pick so the status row is right immediately — see the matching comment
+                // on the `/model <full-id>` path in dispatch.rs. Selecting from the picker used to
+                // change session state and leave the statusline naming the previous model.
+                let rung = {
+                    let mut s = session.lock().await;
+                    s.pin_model(Some(model_id.clone()));
+                    let ceiling = s.pinned_effort();
+                    s.catalog().and_then(|catalog| {
+                        forge_mesh::rung_cost::best_value_rung(catalog, &model_id, ceiling, false)
+                    })
+                };
+                app.apply(forge_tui::PresenterEvent::Routing {
+                    tier: "pinned".to_string(),
+                    model: model_id.clone(),
+                    rationale: "pinned by /model".to_string(),
+                    effort: rung,
+                });
                 app.note(&format!("⊕ model pinned: {model_id} (clear with /model)"));
             }
         }

@@ -125,6 +125,23 @@ pub fn select_rung_by_value(
         .and_then(|(rung, _, _)| rung.to_level())
 }
 
+/// The rung mesh would run `model` at, for surfaces that need the answer OUTSIDE a routing
+/// decision — the statusline the moment a pin lands, and the pin picker's best-value marking.
+///
+/// Same rule the router uses: value first, quality-band fallback, then resolved against the
+/// provider surface so it can never name a rung the route cannot be asked for.
+pub fn best_value_rung(
+    catalog: &crate::catalog::ModelCatalog,
+    model: &str,
+    ceiling: Option<EffortLevel>,
+    code_heavy: bool,
+) -> Option<EffortLevel> {
+    let ladder = catalog.effort_ladder_for(model);
+    let selected = select_rung_by_value(model, &ladder, ceiling, code_heavy, VALUE_LAMBDA)
+        .or_else(|| crate::bench::select_rung(&ladder, ceiling, code_heavy))?;
+    forge_types::effort::resolve_id(model, Some(selected)).sent
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1233,20 +1233,7 @@ impl HeuristicRouter {
         ceiling: Option<EffortLevel>,
         code_heavy: bool,
     ) -> Option<EffortLevel> {
-        let ladder = self.catalog.as_ref()?.effort_ladder_for(model);
-        // Prefer the VALUE choice when this model's rung costs are known: quality alone cannot tell
-        // a cheap step to a better rung from an expensive step to a worse one. Falls back to the
-        // quality-band rule rather than assuming a cost — a guessed cost curve would be
-        // indistinguishable from a measured one here and would misroute silently.
-        let selected = rung_cost::select_rung_by_value(
-            model,
-            &ladder,
-            ceiling,
-            code_heavy,
-            rung_cost::VALUE_LAMBDA,
-        )
-        .or_else(|| bench::select_rung(&ladder, ceiling, code_heavy))?;
-        forge_types::effort::resolve_id(model, Some(selected)).sent
+        rung_cost::best_value_rung(self.catalog.as_ref()?, model, ceiling, code_heavy)
     }
 
     /// Documented in docs/features/mesh-routing.md.
