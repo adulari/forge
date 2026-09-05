@@ -23,6 +23,7 @@ mod doc_sync;
 pub mod explain;
 pub mod pacing_view;
 pub mod pricing;
+pub mod rung_cost;
 mod subscription_cost;
 pub mod vision;
 
@@ -1233,7 +1234,18 @@ impl HeuristicRouter {
         code_heavy: bool,
     ) -> Option<EffortLevel> {
         let ladder = self.catalog.as_ref()?.effort_ladder_for(model);
-        let selected = bench::select_rung(&ladder, ceiling, code_heavy)?;
+        // Prefer the VALUE choice when this model's rung costs are known: quality alone cannot tell
+        // a cheap step to a better rung from an expensive step to a worse one. Falls back to the
+        // quality-band rule rather than assuming a cost — a guessed cost curve would be
+        // indistinguishable from a measured one here and would misroute silently.
+        let selected = rung_cost::select_rung_by_value(
+            model,
+            &ladder,
+            ceiling,
+            code_heavy,
+            rung_cost::VALUE_LAMBDA,
+        )
+        .or_else(|| bench::select_rung(&ladder, ceiling, code_heavy))?;
         forge_types::effort::resolve_id(model, Some(selected)).sent
     }
 
@@ -6225,11 +6237,15 @@ mod rung_routing_tests {
 
     #[test]
     fn the_same_model_is_routed_at_different_rungs_for_coding_and_reasoning() {
-        // Astra's coding index is flat above medium (76.7 vs a 77.1 best) while its intelligence
-        // index keeps climbing (52.2 → 54.7). Routing both at one rung gets one of them wrong.
+        // The same model, two metrics, two answers — which is the whole point of a per-rung ladder.
+        //
+        // Coding takes `high`: it is Astra's best coding rung (77.1) and costs only 1.22x medium,
+        // so the step is worth buying. Reasoning stops at `xhigh`: `max` buys +0.4 intelligence for
+        // +39% cost. Both answers come from the VALUE rule; the earlier quality-only rule answered
+        // medium for coding because it could not see that the step to high was cheap.
         let id = "codex-oauth::gpt-6-astra";
         let router = router_for(id);
-        assert_eq!(router.rung_for(id, None, true), Some(EffortLevel::Medium));
+        assert_eq!(router.rung_for(id, None, true), Some(EffortLevel::High));
         assert_eq!(router.rung_for(id, None, false), Some(EffortLevel::XHigh));
     }
 
@@ -6242,11 +6258,11 @@ mod rung_routing_tests {
             router.rung_for(id, Some(EffortLevel::Low), false),
             Some(EffortLevel::Low)
         );
-        // And a ceiling ABOVE mesh's own choice does not drag the choice up to meet it: a coding
-        // turn stays at medium under a high pin, which is the whole saving.
+        // A ceiling ABOVE mesh's own choice does not drag the choice up to meet it: a reasoning
+        // turn whose value pick is xhigh stays there under a white-hot pin.
         assert_eq!(
-            router.rung_for(id, Some(EffortLevel::High), true),
-            Some(EffortLevel::Medium)
+            router.rung_for(id, Some(EffortLevel::WhiteHot), false),
+            Some(EffortLevel::XHigh)
         );
     }
 
