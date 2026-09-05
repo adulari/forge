@@ -2293,6 +2293,10 @@ pub(crate) async fn run_chat_tui(
                             && app.models_drilled.is_some()
                         {
                             open_models_root(&session, &mut app).await?;
+                        } else if app.picker.kind == Some(forge_tui::PickerKind::ModelRung) {
+                            // Step two is a drill-in: Esc goes back to the model list, matching
+                            // how Esc behaves inside the models browser.
+                            open_model_pin_picker(&session, &mut app, "").await?;
                         } else {
                             app.models_drilled = None;
                             app.models_pin_mode = false;
@@ -2307,6 +2311,18 @@ pub(crate) async fn run_chat_tui(
                     }
                     KeyKind::Up => app.picker.move_up(),
                     KeyKind::Down => app.picker.move_down(),
+                    // `->` on a pinnable model opens its effort rungs (the `>` affordance in the
+                    // row). Enter still pins at the best value, so the second step is opt-in for
+                    // when the trade matters rather than a keystroke everyone pays.
+                    KeyKind::Right if app.picker.kind == Some(forge_tui::PickerKind::ModelPin) => {
+                        if let Some(row) = app.picker.selected_row().cloned() {
+                            if row.id != "mesh" {
+                                let model_id =
+                                    forge_provider::normalize_model_id(&row.id).into_owned();
+                                open_model_rung_picker(&session, &mut app, &model_id).await?;
+                            }
+                        }
+                    }
                     KeyKind::Tab if app.picker.kind == Some(forge_tui::PickerKind::Sessions) => {
                         let query = app.picker.query.clone();
                         app.show_archived = !app.show_archived;

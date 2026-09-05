@@ -142,6 +142,62 @@ pub fn best_value_rung(
     forge_types::effort::resolve_id(model, Some(selected)).sent
 }
 
+/// One rung of a model, described for a human choosing between them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RungChoice {
+    pub rung: BenchEffort,
+    /// The rung Forge would actually request (the ladder rung resolved against the provider).
+    pub level: EffortLevel,
+    /// Measured quality on the metric asked for.
+    pub quality: f64,
+    /// Cost relative to this model's cheapest rated rung, when known.
+    pub cost_ratio: Option<f64>,
+    /// Whether this is the value pick.
+    pub best_value: bool,
+}
+
+/// Describe every rung of `model` for a chooser UI, best-value marked.
+///
+/// Returns fewer than two entries when there is nothing to choose between — the caller should then
+/// not present a second step at all rather than show a list of one.
+pub fn rung_choices(
+    catalog: &crate::catalog::ModelCatalog,
+    model: &str,
+    ceiling: Option<EffortLevel>,
+    code_heavy: bool,
+) -> Vec<RungChoice> {
+    let ladder = catalog.effort_ladder_for(model);
+    let best = best_value_rung(catalog, model, ceiling, code_heavy);
+    let cap = ceiling.map(BenchEffort::from_level);
+    let cheapest = ladder
+        .iter()
+        .filter_map(|(rung, _)| published_cost_ratio(model, *rung))
+        .fold(f64::INFINITY, f64::min);
+    ladder
+        .iter()
+        .filter(|(rung, _)| rung.to_level().is_some())
+        .filter(|(rung, _)| cap.is_none_or(|cap| *rung <= cap))
+        .filter_map(|(rung, score)| {
+            // The level is resolved against the provider, so a rung the route cannot be asked for
+            // is never offered as a choice.
+            let level = forge_types::effort::resolve_id(model, rung.to_level()).sent?;
+            Some(RungChoice {
+                rung: *rung,
+                level,
+                quality: if code_heavy {
+                    score.coding
+                } else {
+                    score.intelligence
+                },
+                cost_ratio: published_cost_ratio(model, *rung)
+                    .filter(|_| cheapest.is_finite())
+                    .map(|c| c / cheapest),
+                best_value: Some(level) == best,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +268,47 @@ mod tests {
                 VALUE_LAMBDA
             ),
             Some(EffortLevel::Medium)
+        );
+    }
+
+    #[test]
+    fn rung_choices_mark_exactly_one_best_value_and_price_it() {
+        use crate::catalog::ModelCatalog;
+        let mut b = crate::bench::BenchmarkScores::new();
+        b.insert("GPT-6 Astra (low)", 49.3, 75.7);
+        b.insert("GPT-6 Astra (medium)", 52.2, 76.7);
+        b.insert("GPT-6 Astra (high)", 53.4, 77.1);
+        b.insert("GPT-6 Astra (xhigh)", 54.3, 75.9);
+        b.insert("GPT-6 Astra (max)", 54.7, 76.9);
+        let catalog = ModelCatalog::new(vec![ASTRA.to_string()]).with_benchmarks(Some(b));
+
+        let choices = rung_choices(&catalog, ASTRA, None, true);
+        assert_eq!(choices.len(), 5, "one row per requestable rung");
+        assert_eq!(
+            choices.iter().filter(|c| c.best_value).count(),
+            1,
+            "exactly one row is the value pick"
+        );
+        let best = choices.iter().find(|c| c.best_value).expect("a best");
+        assert_eq!(best.level, EffortLevel::High, "coding's value pick");
+        // Every rung is priced relative to the cheapest, so the UI can show the trade.
+        assert!(choices.iter().all(|c| c.cost_ratio.is_some()));
+        let cheapest = choices.iter().find(|c| c.rung == BenchEffort::Low).unwrap();
+        assert!((cheapest.cost_ratio.unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_ceiling_hides_the_rungs_it_forbids_from_the_chooser() {
+        use crate::catalog::ModelCatalog;
+        let mut b = crate::bench::BenchmarkScores::new();
+        b.insert("GPT-6 Astra (low)", 49.3, 75.7);
+        b.insert("GPT-6 Astra (medium)", 52.2, 76.7);
+        b.insert("GPT-6 Astra (max)", 54.7, 76.9);
+        let catalog = ModelCatalog::new(vec![ASTRA.to_string()]).with_benchmarks(Some(b));
+        let choices = rung_choices(&catalog, ASTRA, Some(EffortLevel::Medium), false);
+        assert!(
+            choices.iter().all(|c| c.level != EffortLevel::WhiteHot),
+            "a rung above the ceiling must not be offered: {choices:?}"
         );
     }
 

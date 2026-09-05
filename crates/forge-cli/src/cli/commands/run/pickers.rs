@@ -281,6 +281,7 @@ pub(crate) async fn open_model_pin_picker(
     let rows_opt: Option<Vec<forge_tui::PickerRow>> = {
         let s = session.lock().await;
         let benched = s.provider_readiness().health;
+        let ceiling = s.pinned_effort();
         s.catalog().map(|cat| {
             let pricing = s.pricing();
             // Collect all models flat from all providers.
@@ -296,6 +297,16 @@ pub(crate) async fn open_model_pin_picker(
                     .cmp(&tier_priority(b))
                     .then(a.id.cmp(&b.id))
             });
+            // The value rung per model, computed once over the finished list rather than per row —
+            // each lookup walks the benchmark entries, so doing it inside the row loop would be
+            // quadratic on a catalog this size.
+            let best_rung: std::collections::HashMap<String, forge_types::EffortLevel> = models
+                .iter()
+                .filter_map(|m| {
+                    forge_mesh::rung_cost::best_value_rung(cat, &m.id, ceiling, false)
+                        .map(|level| (m.id.clone(), level))
+                })
+                .collect();
             let mut rows = vec![forge_tui::PickerRow {
                 id: "mesh".into(),
                 title: "⊞ mesh (auto-route)".into(),
@@ -340,6 +351,17 @@ pub(crate) async fn open_model_pin_picker(
                     }
                     sub.push_str(&ctx_str);
                 }
+                // The value rung, shown before drilling in: for most models this is the whole
+                // answer, and seeing it here saves opening the second step at all.
+                if let Some(level) = best_rung.get(&m.id) {
+                    if !sub.is_empty() {
+                        sub.push_str(" · ");
+                    }
+                    sub.push_str(&format!(
+                        "★ {} best value",
+                        forge_types::effort::wire_name(*level)
+                    ));
+                }
                 rows.push(forge_tui::PickerRow {
                     id: m.id,
                     title: display_name,
@@ -353,7 +375,7 @@ pub(crate) async fn open_model_pin_picker(
         Some(rows) if !rows.is_empty() => {
             app.picker.open_with(
                 forge_tui::PickerKind::ModelPin,
-                "⊕ pin model — Enter to select · Esc cancel · /model clears pin",
+                "⊕ pin model — Enter pins at best value · → choose effort · Esc cancel",
                 rows,
             );
             if !query.is_empty() {
@@ -369,6 +391,69 @@ pub(crate) async fn open_model_pin_picker(
         None => app.note("model discovery is off (mock/offline) — nothing to pick"),
     }
     Ok(())
+}
+
+/// Open step two of `/model`: the rated effort rungs of one model, best value first and marked.
+///
+/// Does nothing when the model has fewer than two requestable rungs — a chooser with one row would
+/// just restate the pin. The caller then pins at the best value directly.
+pub(crate) async fn open_model_rung_picker(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    app: &mut forge_tui::App,
+    model_id: &str,
+) -> Result<bool> {
+    let choices = {
+        let s = session.lock().await;
+        let ceiling = s.pinned_effort();
+        s.catalog()
+            .map(|catalog| forge_mesh::rung_cost::rung_choices(catalog, model_id, ceiling, false))
+            .unwrap_or_default()
+    };
+    if choices.len() < 2 {
+        return Ok(false);
+    }
+    // Best value first: the row a user should take unless they have a reason not to.
+    let mut ordered = choices.clone();
+    ordered.sort_by_key(|c| (!c.best_value, c.rung));
+    let best_cost = choices
+        .iter()
+        .find(|c| c.best_value)
+        .and_then(|c| c.cost_ratio);
+    let rows: Vec<forge_tui::PickerRow> = ordered
+        .iter()
+        .map(|c| {
+            let mut sub = format!("{:.1}", c.quality);
+            // Describe each alternative RELATIVE to the value pick, because "77.1" alone does not
+            // tell anyone whether the extra spend is worth it — the comparison is the point.
+            match (c.cost_ratio, best_cost) {
+                (Some(cost), Some(best)) if !c.best_value && best > 0.0 => {
+                    let best_quality = choices
+                        .iter()
+                        .find(|b| b.best_value)
+                        .map(|b| b.quality)
+                        .unwrap_or(c.quality);
+                    sub.push_str(&format!(
+                        "  ·  {:+.1} vs best  ·  {:.2}x cost",
+                        c.quality - best_quality,
+                        cost / best
+                    ));
+                }
+                _ if c.best_value => sub.push_str("  ·  ★ best value"),
+                _ => {}
+            }
+            forge_tui::PickerRow {
+                id: format!("{model_id}@{}", forge_types::effort::wire_name(c.level)),
+                title: forge_types::effort::wire_name(c.level).to_string(),
+                subtitle: sub,
+            }
+        })
+        .collect();
+    app.picker.open_with(
+        forge_tui::PickerKind::ModelRung,
+        &format!("◎ effort for {model_id} — Enter pins · Esc back"),
+        rows,
+    );
+    Ok(true)
 }
 
 /// Tier sort priority: lower = shown first.
@@ -522,21 +607,65 @@ pub(crate) async fn picker_accept(
                 // Emit the pick so the status row is right immediately — see the matching comment
                 // on the `/model <full-id>` path in dispatch.rs. Selecting from the picker used to
                 // change session state and leave the statusline naming the previous model.
+                // Enter pins at the model's best-value rung; `->` opens the rung list for anyone
+                // who wants a different trade. Pinning the rung too is the point of the two-step
+                // design — a model pin that left effort unset would keep running at whatever the
+                // session ceiling happened to be.
                 let rung = {
                     let mut s = session.lock().await;
                     s.pin_model(Some(model_id.clone()));
                     let ceiling = s.pinned_effort();
-                    s.catalog().and_then(|catalog| {
+                    let rung = s.catalog().and_then(|catalog| {
                         forge_mesh::rung_cost::best_value_rung(catalog, &model_id, ceiling, false)
-                    })
+                    });
+                    if let Some(level) = rung {
+                        s.set_effort(Some(level));
+                    }
+                    rung
                 };
+                if let Some(level) = rung {
+                    app.apply(forge_tui::PresenterEvent::Effort(Some(level)));
+                }
                 app.apply(forge_tui::PresenterEvent::Routing {
                     tier: "pinned".to_string(),
                     model: model_id.clone(),
                     rationale: "pinned by /model".to_string(),
                     effort: rung,
                 });
-                app.note(&format!("⊕ model pinned: {model_id} (clear with /model)"));
+                match rung {
+                    Some(level) => app.note(&format!(
+                        "⊕ pinned: {model_id} at {} effort (best value) — → for other rungs",
+                        forge_types::effort::wire_name(level)
+                    )),
+                    None => app.note(&format!("⊕ model pinned: {model_id} (clear with /model)")),
+                }
+            }
+        }
+        forge_tui::PickerKind::ModelRung => {
+            // Row ids are `provider::model@rung`, so the pair is pinned without carrying state
+            // between the two steps.
+            if let Some((model_id, rung)) = row.id.rsplit_once('@') {
+                let level = forge_types::EffortLevel::parse(rung);
+                let model_id = model_id.to_string();
+                {
+                    let mut s = session.lock().await;
+                    s.pin_model(Some(model_id.clone()));
+                    if let Some(level) = level {
+                        s.set_effort(Some(level));
+                    }
+                }
+                if let Some(level) = level {
+                    app.apply(forge_tui::PresenterEvent::Effort(Some(level)));
+                }
+                app.apply(forge_tui::PresenterEvent::Routing {
+                    tier: "pinned".to_string(),
+                    model: model_id.clone(),
+                    rationale: "pinned by /model".to_string(),
+                    effort: level,
+                });
+                app.note(&format!(
+                    "⊕ pinned: {model_id} at {rung} effort (clear with /model)"
+                ));
             }
         }
         // /duel resolves in the render loop (it needs to merge a worktree branch + drop guards
