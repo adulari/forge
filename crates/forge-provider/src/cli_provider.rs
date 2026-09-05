@@ -1428,8 +1428,8 @@ fn provider_namespace(kind: CliKind) -> &'static str {
 /// being sent, so an unpinned turn keeps running at the provider's own default exactly as before.
 fn push_effort_args(args: &mut Vec<String>, kind: CliKind, effort: Option<EffortLevel>) {
     let provider = provider_namespace(kind);
-    if let Some(level) = crate::effort::resolve(provider, "", effort).sent {
-        args.extend(crate::effort::bridge_args(provider, level));
+    if let Some(level) = forge_types::effort::resolve(provider, "", effort).sent {
+        args.extend(forge_types::effort::bridge_args(provider, level));
     }
 }
 

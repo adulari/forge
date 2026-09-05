@@ -1029,9 +1029,9 @@ fn apply_codex_body_overrides(body: &mut serde_json::Value, opts: &CompletionOpt
         .get("model")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    let decision = crate::effort::resolve(CODEX_OAUTH_NAMESPACE, model, opts.effort);
+    let decision = forge_types::effort::resolve(CODEX_OAUTH_NAMESPACE, model, opts.effort);
     if let Some(level) = decision.sent {
-        body["reasoning"]["effort"] = serde_json::json!(crate::effort::wire_name(level));
+        body["reasoning"]["effort"] = serde_json::json!(forge_types::effort::wire_name(level));
     }
     if let Some(obj) = body.as_object_mut() {
         for k in CODEX_UNSUPPORTED_PARAMS {

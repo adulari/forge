@@ -14,7 +14,7 @@
 //! The ladders below are recorded from each binary's own `--help` (checked 2026-09-05), never
 //! guessed. A surface whose ladder is unknown is modelled as unknown, not assumed to be five rungs.
 
-use forge_types::EffortLevel;
+use crate::EffortLevel;
 
 /// Why the requested rung is or is not the rung being sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub fn ladder(provider: &str, model: &str) -> &'static [EffortLevel] {
         // Everything else goes over the generic (genai/OpenAI-compatible) path, where an effort
         // field is only meaningful for a reasoning model.
         _ => {
-            if crate::genai_provider::model_benefits_from_effort(model) {
+            if model_has_reasoning_control(model) {
                 &FULL_LADDER[..4]
             } else {
                 &[]
@@ -142,9 +142,41 @@ pub fn bridge_args(provider: &str, level: EffortLevel) -> Vec<String> {
     }
 }
 
+
+/// Whether a model served over the generic OpenAI-compatible path takes a reasoning-effort field
+/// at all.
+///
+/// This is a model-FAMILY question, not an effort question: the OpenAI reasoning line rejects a
+/// custom `temperature` whether or not an effort hint was set this turn, so the provider path uses
+/// the same predicate to decide both. `gpt-6` is on the list because Astra rejects a temperature
+/// exactly as the gpt-5 line does.
+pub fn model_has_reasoning_control(model: &str) -> bool {
+    let m = model.to_lowercase();
+    let is_openai_reasoning = ["o1", "o1-", "o3", "o3-", "o4", "o4-", "gpt-5", "gpt-6"]
+        .iter()
+        .any(|needle| m == *needle || m.contains(&format!("::{needle}")) || m.contains(needle));
+
+    is_openai_reasoning
+        || m.contains("thinking")
+        || m.contains("reasoning")
+        || m.contains("deepseek-r1")
+        || m.contains("r1-")
+        || m == "deepseek-r1"
+}
+
 /// Split a Forge id into its provider namespace and bare model name.
 pub fn split_id(id: &str) -> (&str, &str) {
     id.split_once("::").unwrap_or(("", id))
+}
+
+/// Whether this surface exposes any reasoning-effort control for this model.
+///
+/// Distinct from "is a rung being sent": an unpinned turn on a reasoning model sends nothing but
+/// still HAS a control, while a non-reasoning model has none at any pin. A readout that conflates
+/// the two renders an effort for a model that cannot have one.
+pub fn has_control(id: &str) -> bool {
+    let (provider, model) = split_id(id);
+    !ladder(provider, model).is_empty()
 }
 
 /// Resolve a pin for a full Forge id.
@@ -214,6 +246,16 @@ mod tests {
         assert_eq!(d.sent, None);
         assert_eq!(d.reason, EffortReason::NoControl);
         assert!(!d.is_forge_set());
+    }
+
+    #[test]
+    fn having_a_control_is_not_the_same_as_sending_a_rung() {
+        // An unpinned reasoning model sends nothing but still has a knob; a non-reasoning model has
+        // none at any pin. A readout that conflates these renders an effort for a model that
+        // cannot have one.
+        assert!(has_control("codex-oauth::gpt-6-astra"));
+        assert!(!has_control("groq::llama-3.3-70b"));
+        assert!(has_control("claude-cli::opus"));
     }
 
     #[test]

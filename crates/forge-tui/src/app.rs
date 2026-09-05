@@ -4936,17 +4936,53 @@ mod tests {
     }
 
     #[test]
-    fn statusline_shows_pinned_effort() {
+    fn statusline_shows_forge_effort_labelled_as_meshs_own() {
+        // The cell is labelled "mesh" because the statusline now carries TWO efforts: this one,
+        // which biases routing, and the rung glued to the model id, which is what the model runs
+        // at. An unlabelled level would be read as the model's.
         let mut app = App::default();
         app.apply(PresenterEvent::Effort(Some(
             forge_types::EffortLevel::XHigh,
         )));
         let text = screen_wh(&app, 100, LIVE_H);
-        assert!(text.contains("effort xhigh"), "effort in statusline");
+        assert!(
+            text.contains("mesh xhigh"),
+            "effort in statusline: {text:?}"
+        );
 
+        // Clearing the pin no longer hides the cell. It previously vanished, so the most common
+        // state of all — mesh choosing — showed nothing where a level had been.
         app.apply(PresenterEvent::Effort(None));
         let text = screen_wh(&app, 100, LIVE_H);
-        assert!(!text.contains("effort"), "cleared effort is hidden");
+        assert!(
+            text.contains("mesh auto"),
+            "unpinned effort still names who is choosing: {text:?}"
+        );
+    }
+
+    #[test]
+    fn statusline_names_the_provider_and_the_models_own_rung() {
+        // The same model over codex-oauth, codex-cli and explabs is three routes with three costs,
+        // quotas and effort ladders, so the provider is part of "what am I talking to".
+        let mut app = App::default();
+        app.apply(PresenterEvent::Effort(Some(
+            forge_types::EffortLevel::Medium,
+        )));
+        app.apply(PresenterEvent::Routing {
+            tier: "standard".into(),
+            model: "codex-oauth::gpt-6-astra".into(),
+            rationale: "x".into(),
+        });
+        let text = screen_wh(&app, 120, LIVE_H);
+        assert!(
+            text.contains("codex-oauth::gpt-6-astra"),
+            "provider-qualified model: {text:?}"
+        );
+        assert!(
+            text.contains("⟨med⟩"),
+            "the rung the model actually runs at, glued to the id: {text:?}"
+        );
+        assert!(text.contains("mesh medium"), "mesh's own effort: {text:?}");
     }
 
     #[test]

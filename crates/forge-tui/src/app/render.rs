@@ -16,8 +16,8 @@ pub(crate) use overlays::{cost_cell, mesh_pace_suffix};
 pub use overlays::{render_mesh_overlay, render_usage_overlay};
 pub(crate) use status_line::render_statusline;
 pub(crate) use status_widgets::{
-    compact_band_height, context_gauge_spans, effort_status, fmt_dur, format_tok, human,
-    render_compact_band, render_effort_slider, rl_age_note, statusline_height,
+    compact_band_height, context_gauge_spans, fmt_dur, format_tok, human, mesh_effort_chip,
+    model_effort_marker, render_compact_band, render_effort_slider, rl_age_note, statusline_height,
     statusline_wants_row2,
 };
 pub(crate) use transcript::{
