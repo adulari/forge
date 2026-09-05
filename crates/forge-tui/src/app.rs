@@ -4546,6 +4546,7 @@ mod tests {
         app.mesh_overlay.conserve_line = "off".into();
         app.mesh_overlay.candidates = vec![
             MeshCandRow {
+                effort: None,
                 rank: 1,
                 model: "claude-cli::opus".into(),
                 score: 0.9,
@@ -4557,6 +4558,7 @@ mod tests {
                 reorder_reason: None,
             },
             MeshCandRow {
+                effort: None,
                 rank: 2,
                 model: "groq::llama".into(),
                 score: 0.7,
@@ -6175,6 +6177,7 @@ mod tests {
     #[test]
     fn mesh_overlay_renders_without_panic() {
         let mesh_overlay = MeshOverlay {
+            pick_effort: None,
             open: true,
             loading: false,
             prompt: "design a lock-free queue".into(),
@@ -6198,6 +6201,7 @@ mod tests {
             }],
             candidates: vec![
                 MeshCandRow {
+                    effort: None,
                     rank: 1,
                     model: "groq::llama-3.3-70b-versatile".into(),
                     score: 6.65,
@@ -6209,6 +6213,7 @@ mod tests {
                     reorder_reason: None,
                 },
                 MeshCandRow {
+                    effort: None,
                     rank: 2,
                     model: "codex-cli::gpt-5.5".into(),
                     score: 3.05,

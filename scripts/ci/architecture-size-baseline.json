@@ -9,7 +9,7 @@
     "crates/forge-index/src/lib.rs": 1030,
     "crates/forge-lsp/src/lib.rs": 22,
     "crates/forge-mcp/src/lib.rs": 1291,
-    "crates/forge-mesh/src/lib.rs": 2214,
+    "crates/forge-mesh/src/lib.rs": 2228,
     "crates/forge-provider/src/lib.rs": 770,
     "crates/forge-relay/src/main.rs": 383,
     "crates/forge-skills/src/lib.rs": 886,

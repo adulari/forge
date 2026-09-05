@@ -49,6 +49,7 @@ pub(crate) fn build_mesh_overlay(
                 usable: c.usable,
                 selected: c.selected,
                 penalty: c.row.conserve_penalty,
+                effort: c.effort.map(|rung| rung.as_str().to_string()),
             })
             .collect()
     };
@@ -56,6 +57,7 @@ pub(crate) fn build_mesh_overlay(
         open: true,
         loading: false,
         prompt: prompt.to_string(),
+        pick_effort: e.pick_effort.map(|rung| rung.as_str().to_string()),
         classified: e.classified_tier.as_str().to_string(),
         classifier: e.classifier_label.clone(),
         routed: e.routed_tier.as_str().to_string(),

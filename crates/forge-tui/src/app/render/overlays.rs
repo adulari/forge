@@ -353,10 +353,17 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         ]));
     }
     if !o.pick.is_empty() {
-        top.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled("selected  ", Style::default().fg(DIM)),
             Span::styled(o.pick.clone(), Style::default().fg(OKGREEN).bold()),
-        ]));
+        ];
+        if let Some(rung) = &o.pick_effort {
+            spans.push(Span::styled(
+                format!("⟨{rung}⟩"),
+                Style::default().fg(OKGREEN).bold(),
+            ));
+        }
+        top.push(Line::from(spans));
     }
     if !o.classifier.is_empty() {
         top.push(Line::from(vec![
@@ -431,9 +438,14 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             String::new()
         };
         let tag = format!(
-            "{}{}{}{}{}",
+            "{}{}{}{}{}{}",
             c.cost_tag,
             pen,
+            // Same ⟨rung⟩ notation the statusline glues to the model id, so the two surfaces read
+            // as one vocabulary rather than two.
+            c.effort
+                .as_ref()
+                .map_or_else(String::new, |rung| format!(" · ⟨{rung}⟩")),
             c.reorder_reason
                 .as_ref()
                 .map_or_else(String::new, |reason| format!(" · ↕ {reason}")),
@@ -476,13 +488,20 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         ]));
     }
     rows.push(Line::from(""));
-    rows.push(Line::from(vec![
+    let mut pick_spans = vec![
         Span::styled("pick  ", Style::default().fg(DIM)),
         Span::styled(
             o.pick.clone(),
             Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD),
         ),
-    ]));
+    ];
+    if let Some(rung) = &o.pick_effort {
+        pick_spans.push(Span::styled(
+            format!("⟨{rung}⟩"),
+            Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD),
+        ));
+    }
+    rows.push(Line::from(pick_spans));
     if !o.rationale.is_empty() {
         rows.push(Line::from(Span::styled(
             mesh_truncate(&format!("why   {}", o.rationale), inner.width as usize),
