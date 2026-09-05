@@ -1,6 +1,7 @@
 //! Stateful provider, failover, and tool-execution loop for a session.
 
 use super::*;
+use crate::nudge_policy::{self, ContinueNudge};
 
 impl Session {
     /// Shared model↔tool inner loop used by both the primary turn and the autofix re-run.
@@ -106,6 +107,9 @@ impl Session {
         // turn mid-task. `doom_nudged`: the doom-loop fires a "change approach" nudge BEFORE it
         // ever hard-stops, so a repeated call doesn't kill an otherwise-recoverable turn.
         let mut continue_nudges = 0usize;
+        // (tools executed, tasks resolved) captured when the last continue-nudge was sent — see
+        // `nudge_policy::decide`.
+        let mut last_nudge_progress: Option<nudge_policy::Progress> = None;
         // A model can mark every task done, pass the verification gate, then yield a sentence such
         // as "Let me verify runtime issues:" with no tool call. That is explicit unfinished intent,
         // not a final answer. Give it one bounded chance to perform the promised action.
@@ -655,33 +659,54 @@ impl Session {
                     if unfinished > 0 {
                         // Work is still open — any earlier "all done" verification is stale.
                         verify_attempts = 0;
-                        if continue_nudges < MAX_CONTINUE_NUDGES {
-                            continue_nudges += 1;
-                            self.presenter.emit(PresenterEvent::Warning(format!(
-                                "model stopped with {unfinished} task(s) unfinished — continuing it ({continue_nudges}/{MAX_CONTINUE_NUDGES})"
-                            )));
-                            let nudge = "You ended your reply, but tasks on your list are NOT yet \
-                                         Done. The turn is not over — do not stop. Continue now: call \
-                                         the next tool to make progress on the remaining work. Only \
-                                         finish once every task is resolved; if one is genuinely \
-                                         complete or impossible, mark it Done via update_tasks and say \
-                                         why. Do not reply again without either calling a tool or \
-                                         marking a task Done.";
-                            let nseq = self.next_seq();
-                            let _ =
-                                self.store
-                                    .add_message(&self.id, nseq, Role::System, nudge, None);
-                            self.transcript.push(Message::system(nudge));
-                            continue;
+                        let progress_now = (
+                            tools_ran.load(std::sync::atomic::Ordering::Relaxed),
+                            self.tasks.len().saturating_sub(unfinished),
+                        );
+                        match nudge_policy::decide(
+                            continue_nudges,
+                            MAX_CONTINUE_NUDGES,
+                            last_nudge_progress,
+                            progress_now,
+                        ) {
+                            ContinueNudge::Send => {
+                                continue_nudges += 1;
+                                last_nudge_progress = Some(progress_now);
+                                self.presenter.emit(PresenterEvent::Warning(
+                                    nudge_policy::continuing_warning(
+                                        unfinished,
+                                        continue_nudges,
+                                        MAX_CONTINUE_NUDGES,
+                                    ),
+                                ));
+                                let nudge = nudge_policy::CONTINUE_NUDGE;
+                                let nseq = self.next_seq();
+                                let _ = self.store.add_message(
+                                    &self.id,
+                                    nseq,
+                                    Role::System,
+                                    nudge,
+                                    None,
+                                );
+                                self.transcript.push(Message::system(nudge));
+                                continue;
+                            }
+                            ContinueNudge::BlockedStop => {
+                                self.presenter.emit(PresenterEvent::Warning(
+                                    nudge_policy::blocked_warning(continue_nudges, unfinished),
+                                ));
+                            }
+                            ContinueNudge::BudgetSpent => {
+                                // The bridge path always warned here; the direct path used to fall
+                                // through silently, leaving the user wondering why it stopped.
+                                self.presenter.emit(PresenterEvent::Warning(
+                                    nudge_policy::budget_spent_warning(
+                                        unfinished,
+                                        MAX_CONTINUE_NUDGES,
+                                    ),
+                                ));
+                            }
                         }
-                        // Nudge budget spent and work is STILL open — surface it. The bridge path
-                        // emits an equivalent warning; the direct path used to fall through here
-                        // silently, leaving the user to wonder why the turn stopped mid-plan.
-                        self.presenter.emit(PresenterEvent::Warning(format!(
-                            "model stopped with {unfinished} task(s) unfinished after \
-                             {MAX_CONTINUE_NUDGES} continue nudge(s) — giving up. Send `continue` \
-                             to resume."
-                        )));
                     } else if !self.tasks.is_empty() {
                         // Every tracked task reported Done — same completion authority as the bridge:
                         // accept fresh evidence newer than the last mutation, otherwise request a
