@@ -157,6 +157,11 @@ pub struct MeshCandRow {
     /// Set when a routing rule, not `score` (the catalog score), decided this rank — the rule's
     /// name, e.g. `cost-aware sibling`.
     pub reorder_reason: Option<String>,
+    /// The reasoning rung this model would run at if routed, already resolved against its provider
+    /// surface. Shown because two rows for the same model on different providers can differ only
+    /// in the rung they can be asked for — a comparison the table could not otherwise express.
+    /// `None` when the model has no measured ladder or no reasoning control.
+    pub effort: Option<String>,
 }
 
 /// Data for the `/mesh` overlay — a legible, animated trace of one routing decision (or the
@@ -181,6 +186,8 @@ pub struct MeshOverlay {
     pub quota: Vec<MeshQuotaRow>,
     pub candidates: Vec<MeshCandRow>,
     pub pick: String,
+    /// The rung `pick` will actually run at.
+    pub pick_effort: Option<String>,
     pub fallbacks: Vec<String>,
     pub rationale: String,
     /// Animation tick — drives the bar-fill ease and the row-by-row candidate reveal. Stops

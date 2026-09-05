@@ -461,14 +461,21 @@ pub(crate) fn print_mesh_explanation(
                 Some(reason) => format!(" · ↕ {reason}"),
                 None => String::new(),
             };
+            // The rung this row would run at, in the same ⟨…⟩ notation the statusline and the
+            // /mesh overlay use. Two rows for one model on different providers can differ only
+            // here, which the rest of the line cannot express.
+            let rung = c
+                .effort
+                .map_or_else(String::new, |rung| format!(" · ⟨{}⟩", rung.as_str()));
             println!(
-                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}{}{}",
+                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}{}{}{}",
                 c.rank,
                 c.row.model,
                 c.row.final_score,
                 c.row.capability,
                 cost_tag(c.row.cost_class),
                 pen,
+                rung,
                 if c.row.frontier { " · frontier" } else { "" },
                 quota_suffix(&c.row.model),
                 reorder,
@@ -479,7 +486,10 @@ pub(crate) fn print_mesh_explanation(
         }
     }
 
-    println!("\npick: {}", e.pick);
+    match e.pick_effort {
+        Some(rung) => println!("\npick: {} ⟨{}⟩", e.pick, rung.as_str()),
+        None => println!("\npick: {}", e.pick),
+    }
     if !e.fallbacks.is_empty() {
         println!("fallbacks: {}", e.fallbacks.join(", "));
     }
@@ -510,6 +520,10 @@ pub(crate) fn mesh_explanation_json(
                 "frontier": c.row.frontier,
                 "usable": c.usable,
                 "selected": c.selected,
+                // Added, not renamed: the reasoning rung this row would run at, already resolved
+                // against its provider surface. Null when the model has no measured effort ladder
+                // or no reasoning control at all.
+                "effort": c.effort.map(|rung| rung.as_str()),
             })
         })
         .collect();
@@ -548,6 +562,7 @@ pub(crate) fn mesh_explanation_json(
         "excluded_providers": provider_exclusions_json(excluded),
         "candidates": candidates,
         "pick": e.pick,
+        "pick_effort": e.pick_effort.map(|rung| rung.as_str()),
         "fallbacks": e.fallbacks,
         "rationale": e.rationale,
     }))
@@ -612,6 +627,7 @@ mod tests {
             quota: vec![],
             candidates: vec![],
             pick: "model".into(),
+            pick_effort: None,
             fallbacks: vec![],
             rationale: "test".into(),
             classifier_label: "heuristic fallback".into(),

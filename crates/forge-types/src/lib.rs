@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod effort;
 pub mod interaction;
 mod subscription_pacing;
 mod turn_outcome;

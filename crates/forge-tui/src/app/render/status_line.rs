@@ -47,13 +47,36 @@ fn render_statusline_widget<'a>(
                     Style::default().fg(DIM).bg(STATUSBG),
                 ));
             }
+            // The PROVIDER is part of the answer to "what am I talking to": the same model served
+            // over codex-oauth, codex-cli and explabs is three different routes with three
+            // different costs, quotas and effort ladders. It is dimmed rather than dropped so the
+            // model name still reads as the headline. Narrow terminals fall back to the bare tail,
+            // matching the activity panel and transcript: at 80 columns the row already carries
+            // tier, cost, effort and temper, and a provider prefix would push the widgets after it
+            // off the line entirely.
+            if w >= 100 {
+                if let Some((provider, _)) = model.split_once("::") {
+                    spans.push(Span::styled(
+                        format!("{provider}::"),
+                        Style::default().fg(DIM).bg(STATUSBG),
+                    ));
+                }
+            }
             spans.push(Span::styled(
-                // In-band display uses the short tail (e.g. `claude-opus-4-8`), matching the
-                // activity panel + transcript; the full `provider::model` id is only kept where
-                // disambiguation matters (cost lookup, routing rationale).
                 model_short(Some(model)),
                 Style::default().fg(ACCENT).bold().bg(STATUSBG),
             ));
+            // The rung the MODEL runs at, glued to the model id so it reads as part of the model's
+            // identity rather than as another independent chip. `mesh_effort_chip` renders Forge's
+            // own routing effort separately — see `model_effort_marker` for why they differ.
+            // `routed_effort.or(effort)` mirrors exactly what the request sends: mesh's chosen
+            // rung when it had a measured ladder, otherwise the session pin. Reading the pin alone
+            // would show ⟨auto⟩ for a turn mesh had in fact picked a rung for.
+            if let Some((marker, style)) =
+                model_effort_marker(model, app.routed_effort.or(app.effort))
+            {
+                spans.push(Span::styled(marker, style));
+            }
             Some(spans)
         }
         W::Tier => {
@@ -74,8 +97,16 @@ fn render_statusline_widget<'a>(
             Some(vec![Span::styled(format!("◈ {text}"), style)])
         }
         W::Effort => {
-            let effort = app.effort?;
-            let (label, style) = effort_status(effort);
+            // Rendered even when nothing is pinned. The old widget returned `None` there, so a
+            // statusline configured to show effort showed nothing at all — the most common case,
+            // and the one where a user most needs to see that mesh is choosing.
+            // Gated wider than most cells because it now renders even when unpinned, so unlike
+            // before it always costs its columns. At 80 the row is full; taking ~16 columns there
+            // would silently clip whatever the user configured after it.
+            if w < 90 {
+                return None;
+            }
+            let (label, style) = mesh_effort_chip(app.effort);
             Some(vec![Span::styled(label, style)])
         }
         W::Mode => {

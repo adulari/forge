@@ -39,6 +39,15 @@ pub struct CandidateRow {
     /// it. Without this the table looked like it contradicted its own ranking — rank #1 above a
     /// rank #2 with a higher score.
     pub reorder_reason: Option<&'static str>,
+    /// The reasoning rung this model would run at if routed — chosen from its MEASURED effort
+    /// ladder and already resolved against its provider surface, so it is what would actually be
+    /// sent rather than the session pin.
+    ///
+    /// `None` when the model has no measured ladder (mesh expresses no opinion and the pin
+    /// applies) or no reasoning control at all. Effort is part of the comparison, not a detail:
+    /// two rows for the same model over different providers can differ only in the rung they can
+    /// be asked for.
+    pub effort: Option<EffortLevel>,
 }
 
 /// A subscription provider's quota pressure + the spread probability for the explained tier.
@@ -89,6 +98,8 @@ pub struct RoutingExplanation {
     /// Human-readable label for which classifier produced this tier — set by the caller (forge-core)
     /// based on the configured `mesh.classifier`. Defaults to `"llm"` (with heuristic fallback).
     pub classifier_label: String,
+    /// The rung the routed `pick` will run at, mirroring `RoutingDecision::effort`.
+    pub pick_effort: Option<EffortLevel>,
 }
 
 impl HeuristicRouter {
@@ -283,6 +294,7 @@ impl HeuristicRouter {
                 rank: i + 1,
                 usable: visible_models.contains(row.model.as_str()),
                 selected: row.model == decision.model,
+                effort: self.rung_for(&row.model, effort, hints.code_heavy),
                 reorder_reason: reorder_reasons
                     .iter()
                     .find(|(model, _)| *model == row.model)
@@ -358,6 +370,7 @@ impl HeuristicRouter {
 
         RoutingExplanation {
             prompt: prompt.to_string(),
+            pick_effort: decision.effort,
             classified_tier: tier,
             routed_tier: decision.tier,
             classify_reasons,

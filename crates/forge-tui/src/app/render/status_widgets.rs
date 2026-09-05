@@ -201,27 +201,90 @@ pub(crate) fn fmt_dur(secs: u64) -> String {
     }
 }
 
-pub(crate) fn effort_status(effort: forge_types::EffortLevel) -> (&'static str, Style) {
-    match effort {
-        forge_types::EffortLevel::Low => ("effort low", Style::default().fg(TOOLCYAN).bg(STATUSBG)),
-        forge_types::EffortLevel::Medium => (
-            "effort medium",
-            Style::default().fg(WARNYEL).bold().bg(STATUSBG),
+/// The colour a rung is drawn in — shared by the model marker and the mesh chip so the same level
+/// reads as the same intensity wherever it appears.
+fn rung_colour(level: forge_types::EffortLevel) -> Color {
+    match level {
+        forge_types::EffortLevel::Low => TOOLCYAN,
+        forge_types::EffortLevel::Medium | forge_types::EffortLevel::High => WARNYEL,
+        forge_types::EffortLevel::XHigh => ERRRED,
+        forge_types::EffortLevel::WhiteHot => Color::Rgb(255, 252, 235),
+    }
+}
+
+/// Full rung name for the mesh chip, which has room for it. Deliberately not the same spelling as
+/// the glued marker: seeing "mesh medium" beside "⟨med⟩" makes it obvious at a glance that the two
+/// cells are answering different questions rather than repeating one value.
+fn rung_long(level: forge_types::EffortLevel) -> &'static str {
+    match level {
+        forge_types::EffortLevel::Low => "low",
+        forge_types::EffortLevel::Medium => "medium",
+        forge_types::EffortLevel::High => "high",
+        forge_types::EffortLevel::XHigh => "xhigh",
+        forge_types::EffortLevel::WhiteHot => "white-hot",
+    }
+}
+
+/// Compact rung name for the marker glued to the model id, where every column competes with the
+/// model name itself.
+fn rung_short(level: forge_types::EffortLevel) -> &'static str {
+    match level {
+        forge_types::EffortLevel::Low => "low",
+        forge_types::EffortLevel::Medium => "med",
+        forge_types::EffortLevel::High => "high",
+        forge_types::EffortLevel::XHigh => "xhigh",
+        forge_types::EffortLevel::WhiteHot => "max",
+    }
+}
+
+/// The rung marker glued to the model id: what the MODEL is running at.
+///
+/// Deliberately different from the mesh chip beside it. Three states, because the honest answer has
+/// three cases and collapsing them is how the old statusline came to report a level nothing was
+/// running at:
+///
+/// - `⟨med⟩` bright — Forge set this rung and it is on the wire.
+/// - `⟨auto⟩` dim   — the model has a reasoning control but Forge sent nothing, so the PROVIDER
+///   chose the rung. Forge does not know which one, and must not name one.
+/// - nothing        — the model has no reasoning control at all, so it has no rung to show.
+pub(crate) fn model_effort_marker(
+    model_id: &str,
+    pinned: Option<forge_types::EffortLevel>,
+) -> Option<(String, Style)> {
+    if !forge_types::effort::has_control(model_id) {
+        return None;
+    }
+    let decision = forge_types::effort::resolve_id(model_id, pinned);
+    Some(match decision.sent {
+        Some(level) => (
+            format!("⟨{}⟩", rung_short(level)),
+            Style::default().fg(rung_colour(level)).bold().bg(STATUSBG),
         ),
-        forge_types::EffortLevel::High => (
-            "▲ effort high",
-            Style::default().fg(WARNYEL).bold().bg(STATUSBG),
-        ),
-        forge_types::EffortLevel::XHigh => (
-            "▲▲ effort xhigh",
-            Style::default().fg(ERRRED).bold().bg(STATUSBG),
-        ),
-        forge_types::EffortLevel::WhiteHot => (
-            "⚒ WHITE-HOT",
+        None => ("⟨auto⟩".to_string(), Style::default().fg(DIM).bg(STATUSBG)),
+    })
+}
+
+/// Forge's OWN effort: the level mesh routes with. A separate cell from the marker above because
+/// they answer different questions and are frequently different values — mesh may route at high
+/// while the chosen model is asked for medium.
+pub(crate) fn mesh_effort_chip(pinned: Option<forge_types::EffortLevel>) -> (String, Style) {
+    match pinned {
+        Some(forge_types::EffortLevel::WhiteHot) => (
+            "⚒ mesh WHITE-HOT".to_string(),
             Style::default()
-                .fg(Color::Rgb(255, 252, 235))
+                .fg(rung_colour(forge_types::EffortLevel::WhiteHot))
                 .bold()
                 .bg(STATUSBG),
+        ),
+        Some(level) => (
+            format!("⚙ mesh {}", rung_long(level)),
+            Style::default().fg(rung_colour(level)).bold().bg(STATUSBG),
+        ),
+        // Nothing pinned: mesh is choosing. Dim, and named "auto" rather than given the level mesh
+        // happens to default to — the user did not set one.
+        None => (
+            "⚙ mesh auto".to_string(),
+            Style::default().fg(DIM).bg(STATUSBG),
         ),
     }
 }
@@ -419,4 +482,77 @@ pub(crate) fn render_effort_slider(frame: &mut Frame, area: Rect, app: &App) {
     spans.push(Span::styled(label_text, slider_label_style(idx, tick)));
 
     frame.render_widget(Paragraph::new(TextLine::from(spans)), inner);
+}
+
+#[cfg(test)]
+mod effort_cell_tests {
+    use super::*;
+    use forge_types::EffortLevel;
+
+    fn marker(id: &str, pinned: Option<EffortLevel>) -> Option<String> {
+        model_effort_marker(id, pinned).map(|(text, _)| text)
+    }
+
+    #[test]
+    fn the_marker_names_the_rung_forge_actually_sent() {
+        assert_eq!(
+            marker("codex-oauth::gpt-6-astra", Some(EffortLevel::Medium)).as_deref(),
+            Some("⟨med⟩")
+        );
+    }
+
+    #[test]
+    fn an_unpinned_reasoning_model_says_auto_rather_than_naming_a_level() {
+        // The whole point of the cell. Forge sends no rung here, so the provider picked one and
+        // Forge does not know which — naming a level would be the exact lie this replaces.
+        assert_eq!(
+            marker("codex-oauth::gpt-6-astra", None).as_deref(),
+            Some("⟨auto⟩")
+        );
+        let (_, style) = model_effort_marker("codex-oauth::gpt-6-astra", None).unwrap();
+        assert_eq!(style.fg, Some(DIM), "a provider-chosen rung reads as dim");
+    }
+
+    #[test]
+    fn a_model_with_no_reasoning_control_shows_no_marker_at_all() {
+        assert_eq!(marker("groq::llama-3.3-70b", Some(EffortLevel::High)), None);
+        assert_eq!(marker("groq::llama-3.3-70b", None), None);
+    }
+
+    #[test]
+    fn the_marker_shows_the_clamped_rung_not_the_pin() {
+        // agy tops out at high. The cell reports what is on the wire, so a white-hot pin against a
+        // three-rung surface must not render as "max" — that would be the pin talking, not the
+        // model.
+        assert_eq!(
+            marker("agy-cli::gemini-3.8-flash", Some(EffortLevel::WhiteHot)).as_deref(),
+            Some("⟨high⟩")
+        );
+        // claude does have the top rung, so there it is genuinely max.
+        assert_eq!(
+            marker("claude-cli::opus", Some(EffortLevel::WhiteHot)).as_deref(),
+            Some("⟨max⟩")
+        );
+    }
+
+    #[test]
+    fn the_mesh_chip_and_the_model_marker_can_legitimately_disagree() {
+        // Mesh routes at white-hot while the chosen model is only asked for high. Both are true at
+        // once, which is why they are two cells and not one.
+        let (chip, _) = mesh_effort_chip(Some(EffortLevel::WhiteHot));
+        assert_eq!(chip, "⚒ mesh WHITE-HOT");
+        assert_eq!(
+            marker("agy-cli::gemini-3.8-flash", Some(EffortLevel::WhiteHot)).as_deref(),
+            Some("⟨high⟩")
+        );
+    }
+
+    #[test]
+    fn the_mesh_chip_renders_when_nothing_is_pinned() {
+        // Previously the widget returned nothing at all in this state, so a statusline configured
+        // to show effort showed none — in the most common case of all.
+        let (chip, style) = mesh_effort_chip(None);
+        assert_eq!(chip, "⚙ mesh auto");
+        assert_eq!(style.fg, Some(DIM));
+    }
 }

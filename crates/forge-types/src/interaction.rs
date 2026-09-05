@@ -28,6 +28,12 @@ pub enum PresenterEvent {
         tier: String,
         model: String,
         rationale: String,
+        /// The reasoning rung mesh chose for `model`, when it had a measured ladder to choose from.
+        ///
+        /// Carried so a surface can report the rung the model is actually running at rather than
+        /// the session's pin, which since auto-effort is only a ceiling. `None` means mesh had no
+        /// opinion and the pin (or the provider default) applies.
+        effort: Option<EffortLevel>,
     },
     /// A concrete provider request is about to start. Unlike `Routing` (which can precede context
     /// assembly), this marks the exact model-loop boundary used by live progress surfaces.

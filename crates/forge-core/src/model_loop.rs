@@ -364,9 +364,9 @@ impl Session {
                         if let Some(next) = picked {
                             self.presenter.emit(PresenterEvent::Routing {
                                 tier: decision
-                                    .map(|d| d.tier.as_str().to_string())
-                                    .unwrap_or_default(),
+                                    .map_or_else(String::new, |d| d.tier.as_str().to_string()),
                                 model: next.clone(),
+                                effort: decision.and_then(|d| d.effort),
                                 rationale: format!("failover from {active_model} (empty response)"),
                             });
                             active_model = next;

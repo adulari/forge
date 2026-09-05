@@ -181,6 +181,9 @@ struct TurnActivity {
 pub struct App {
     pub session_id: String,
     pub routing: Option<RoutingView>,
+    /// The rung mesh chose for the routed model, when it had a measured ladder. Falls back to
+    /// `effort` (the session pin) for display, mirroring exactly what the request sends.
+    pub routed_effort: Option<forge_types::EffortLevel>,
     /// While `Some`, the mesh is recovering from a failed model attempt — drives the animated
     /// status indicator. The bool is `retrying`: true = same-model retry (backoff), false =
     /// searching for a replacement. Set on a `ModelSearch` event, cleared the moment real output
@@ -1024,7 +1027,12 @@ impl App {
                 tier,
                 model,
                 rationale,
+                effort,
             } => {
+                // Mesh's chosen rung, kept separately from the session pin: the statusline must
+                // report the rung actually being sent, and since auto-effort the pin is only the
+                // ceiling on that choice.
+                self.routed_effort = effort;
                 self.routing = Some(RoutingView {
                     tier,
                     model: crate::display_model(&model),
@@ -4538,6 +4546,7 @@ mod tests {
         app.mesh_overlay.conserve_line = "off".into();
         app.mesh_overlay.candidates = vec![
             MeshCandRow {
+                effort: None,
                 rank: 1,
                 model: "claude-cli::opus".into(),
                 score: 0.9,
@@ -4549,6 +4558,7 @@ mod tests {
                 reorder_reason: None,
             },
             MeshCandRow {
+                effort: None,
                 rank: 2,
                 model: "groq::llama".into(),
                 score: 0.7,
@@ -4916,6 +4926,7 @@ mod tests {
             ..Default::default()
         };
         app.apply(PresenterEvent::Routing {
+            effort: None,
             tier: "standard".into(),
             model: "openai::gpt-4o-mini".into(),
             rationale: "x".into(),
@@ -4936,17 +4947,91 @@ mod tests {
     }
 
     #[test]
-    fn statusline_shows_pinned_effort() {
+    fn statusline_shows_forge_effort_labelled_as_meshs_own() {
+        // The cell is labelled "mesh" because the statusline now carries TWO efforts: this one,
+        // which biases routing, and the rung glued to the model id, which is what the model runs
+        // at. An unlabelled level would be read as the model's.
         let mut app = App::default();
         app.apply(PresenterEvent::Effort(Some(
             forge_types::EffortLevel::XHigh,
         )));
         let text = screen_wh(&app, 100, LIVE_H);
-        assert!(text.contains("effort xhigh"), "effort in statusline");
+        assert!(
+            text.contains("mesh xhigh"),
+            "effort in statusline: {text:?}"
+        );
 
+        // Clearing the pin no longer hides the cell. It previously vanished, so the most common
+        // state of all — mesh choosing — showed nothing where a level had been.
         app.apply(PresenterEvent::Effort(None));
         let text = screen_wh(&app, 100, LIVE_H);
-        assert!(!text.contains("effort"), "cleared effort is hidden");
+        assert!(
+            text.contains("mesh auto"),
+            "unpinned effort still names who is choosing: {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_rung_mesh_chose_is_what_the_statusline_reports() {
+        // End of the chain: mesh picked medium from astra's measured ladder with nothing pinned,
+        // and that is what the request sends — so that is what the marker must say. Reading the
+        // session pin instead would render ⟨auto⟩ for a turn whose rung was in fact chosen.
+        let mut app = App::default();
+        assert_eq!(app.effort, None, "nothing pinned");
+        app.apply(PresenterEvent::Routing {
+            tier: "complex".into(),
+            model: "codex-oauth::gpt-6-astra".into(),
+            rationale: "auto-selected".into(),
+            effort: Some(forge_types::EffortLevel::Medium),
+        });
+        let text = screen_wh(&app, 120, LIVE_H);
+        assert!(
+            text.contains("⟨med⟩"),
+            "mesh's chosen rung, not the empty pin: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_model_mesh_has_no_ladder_for_falls_back_to_the_pin() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::Effort(Some(forge_types::EffortLevel::High)));
+        app.apply(PresenterEvent::Routing {
+            tier: "complex".into(),
+            model: "codex-oauth::gpt-6-astra".into(),
+            rationale: "auto-selected".into(),
+            effort: None,
+        });
+        let text = screen_wh(&app, 120, LIVE_H);
+        assert!(
+            text.contains("⟨high⟩"),
+            "the pin still applies when mesh has no opinion: {text:?}"
+        );
+    }
+
+    #[test]
+    fn statusline_names_the_provider_and_the_models_own_rung() {
+        // The same model over codex-oauth, codex-cli and explabs is three routes with three costs,
+        // quotas and effort ladders, so the provider is part of "what am I talking to".
+        let mut app = App::default();
+        app.apply(PresenterEvent::Effort(Some(
+            forge_types::EffortLevel::Medium,
+        )));
+        app.apply(PresenterEvent::Routing {
+            effort: None,
+            tier: "standard".into(),
+            model: "codex-oauth::gpt-6-astra".into(),
+            rationale: "x".into(),
+        });
+        let text = screen_wh(&app, 120, LIVE_H);
+        assert!(
+            text.contains("codex-oauth::gpt-6-astra"),
+            "provider-qualified model: {text:?}"
+        );
+        assert!(
+            text.contains("⟨med⟩"),
+            "the rung the model actually runs at, glued to the id: {text:?}"
+        );
+        assert!(text.contains("mesh medium"), "mesh's own effort: {text:?}");
     }
 
     #[test]
@@ -5368,6 +5453,7 @@ mod tests {
         app.on_turn_start();
         app.busy = true;
         app.apply(PresenterEvent::Routing {
+            effort: None,
             tier: "complex".into(),
             model: "qwencloud::qwen3.8-max-preview".into(),
             rationale: "pinned".into(),
@@ -5401,6 +5487,7 @@ mod tests {
         app.on_turn_start();
         app.busy = true;
         app.apply(PresenterEvent::Routing {
+            effort: None,
             tier: "complex".into(),
             model: "qwencloud::qwen3.8-max-preview".into(),
             rationale: "pinned".into(),
@@ -6090,6 +6177,7 @@ mod tests {
     #[test]
     fn mesh_overlay_renders_without_panic() {
         let mesh_overlay = MeshOverlay {
+            pick_effort: None,
             open: true,
             loading: false,
             prompt: "design a lock-free queue".into(),
@@ -6113,6 +6201,7 @@ mod tests {
             }],
             candidates: vec![
                 MeshCandRow {
+                    effort: None,
                     rank: 1,
                     model: "groq::llama-3.3-70b-versatile".into(),
                     score: 6.65,
@@ -6124,6 +6213,7 @@ mod tests {
                     reorder_reason: None,
                 },
                 MeshCandRow {
+                    effort: None,
                     rank: 2,
                     model: "codex-cli::gpt-5.5".into(),
                     score: 3.05,

@@ -472,6 +472,9 @@ impl App {
             .enumerate()
             .map(|(i, c)| {
                 let mut badges = vec![c.cost_tag.clone()];
+                if let Some(rung) = &c.effort {
+                    badges.push(format!("⟨{rung}⟩"));
+                }
                 if c.frontier {
                     badges.push("frontier".to_string());
                 }

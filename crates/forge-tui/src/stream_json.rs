@@ -61,6 +61,7 @@ impl Presenter for StreamJsonPresenter {
                 tier,
                 model,
                 rationale,
+                ..
             } => self.line(serde_json::json!({
                 "type": "system", "subtype": "routing", "session_id": sid,
                 "tier": tier, "model": model, "rationale": rationale

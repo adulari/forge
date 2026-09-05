@@ -2607,6 +2607,7 @@ impl Session {
             tier: decision.tier.as_str().to_string(),
             model: routed_model.clone(),
             rationale: decision.rationale.clone(),
+            effort: decision.effort,
         });
         self.note_cli_bridge_once(&routed_model);
 
@@ -2949,6 +2950,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 tier: decision.tier.as_str().to_string(),
                 model: editor.clone(),
                 rationale: "architect edit phase".to_string(),
+                effort: decision.effort,
             });
             // Keep the gauge's model + limit in lockstep: emit the edit model's window now, else the
             // limit stays stuck on the plan-phase model (the "1050k under a glm editor" bug) because
@@ -6359,6 +6361,7 @@ mod tests {
         )
         .unwrap();
         let pinned = forge_mesh::RoutingDecision {
+            effort: None,
             tier: TaskTier::Trivial,
             model: "codex-oauth::gpt-5.6-sol".into(),
             rationale: "explicit pin".into(),
@@ -6367,6 +6370,7 @@ mod tests {
             unroutable: false,
         };
         let routed = forge_mesh::RoutingDecision {
+            effort: None,
             pinned: false,
             ..pinned.clone()
         };
@@ -6379,6 +6383,7 @@ mod tests {
         );
 
         let claude_bridge = forge_mesh::RoutingDecision {
+            effort: None,
             model: "claude-cli::sonnet".into(),
             pinned: false,
             ..pinned
@@ -10660,6 +10665,7 @@ mod tests {
             _project: &forge_types::ProjectContext,
         ) -> forge_mesh::RoutingDecision {
             forge_mesh::RoutingDecision {
+                effort: None,
                 tier: forge_types::TaskTier::Trivial,
                 model: self.model.clone(),
                 rationale: "test".into(),
@@ -10680,6 +10686,7 @@ mod tests {
             _project: &forge_types::ProjectContext,
         ) -> forge_mesh::RoutingDecision {
             forge_mesh::RoutingDecision {
+                effort: None,
                 tier: forge_types::TaskTier::Trivial,
                 model: pin.first().cloned().unwrap_or_else(|| self.model.clone()),
                 rationale: "test".into(),
@@ -10710,6 +10717,7 @@ mod tests {
             _project: &forge_types::ProjectContext,
         ) -> forge_mesh::RoutingDecision {
             forge_mesh::RoutingDecision {
+                effort: None,
                 tier: forge_types::TaskTier::Trivial,
                 model: self.model.clone(),
                 rationale: "pinned via --model".into(),
@@ -10835,6 +10843,7 @@ mod tests {
             _project: &forge_types::ProjectContext,
         ) -> forge_mesh::RoutingDecision {
             forge_mesh::RoutingDecision {
+                effort: None,
                 tier: forge_types::TaskTier::Trivial,
                 model: self.model.clone(),
                 rationale: "ignores the pin".into(),
@@ -11021,6 +11030,7 @@ mod tests {
             _project: &forge_types::ProjectContext,
         ) -> forge_mesh::RoutingDecision {
             forge_mesh::RoutingDecision {
+                effort: None,
                 tier: forge_types::TaskTier::Complex,
                 model: self.model.clone(),
                 rationale: "test".into(),

@@ -844,21 +844,9 @@ mod error_policy;
 use error_policy::*;
 
 fn model_benefits_from_effort(model: &str) -> bool {
-    let m = model.to_lowercase();
-    // `gpt-6` joined the list the day Astra shipped: it rejects a custom temperature exactly as
-    // the gpt-5 reasoning line does, and without it EVERY genai-served route carrying the model
-    // ("explabs::gpt-6-astra", "opencode::gpt-6-astra", …) fails the whole turn with
-    // `unsupported_parameter: temperature`.
-    let is_openai_reasoning = ["o1", "o1-", "o3", "o3-", "o4", "o4-", "gpt-5", "gpt-6"]
-        .iter()
-        .any(|needle| m == *needle || m.contains(&format!("::{needle}")) || m.contains(needle));
-
-    is_openai_reasoning
-        || m.contains("thinking")
-        || m.contains("reasoning")
-        || m.contains("deepseek-r1")
-        || m.contains("r1-")
-        || m == "deepseek-r1"
+    // Shared with effort-ladder resolution: a model that takes a reasoning-effort field is exactly
+    // the model that rejects a custom temperature, and the two must not drift apart.
+    forge_types::effort::model_has_reasoning_control(model)
 }
 
 /// Qwen 3.8 Max Preview is thinking-only on the Token Plan endpoint (the API rejects
@@ -978,20 +966,22 @@ impl Provider for GenAiProvider {
         }
 
         let mut reasoning_engaged = qwencloud_thinking;
-        // Apply the caller's reasoning-effort hint when set (e.g. from `/effort high`).
-        if let Some(effort) = opts.effort {
-            if model_benefits_from_effort(&model_name) {
-                let re = match effort {
-                    EffortLevel::Low => ReasoningEffort::Low,
-                    EffortLevel::Medium => ReasoningEffort::Medium,
-                    EffortLevel::High => ReasoningEffort::High,
-                    // Providers top out at xhigh — WhiteHot's extra lift is orchestration
-                    // guidance in forge-core, not a provider knob.
-                    EffortLevel::XHigh | EffortLevel::WhiteHot => ReasoningEffort::XHigh,
-                };
-                options = options.with_reasoning_effort(re);
-                reasoning_engaged = true;
-            }
+        // Apply the caller's reasoning-effort hint when set (e.g. from `/effort high`). Which rung
+        // this surface can be asked for — and whether it has a knob at all — is decided by
+        // `effort::resolve`, so the generic path, the codex transports and the CLI bridges all
+        // clamp against one table instead of three private matches that could drift apart.
+        let effort_decision = forge_types::effort::resolve("", &model_name, opts.effort);
+        if let Some(level) = effort_decision.sent {
+            let re = match level {
+                EffortLevel::Low => ReasoningEffort::Low,
+                EffortLevel::Medium => ReasoningEffort::Medium,
+                EffortLevel::High => ReasoningEffort::High,
+                // This path tops out at xhigh — WhiteHot's extra lift is orchestration guidance in
+                // forge-core, not a provider knob — and `resolve` has already clamped to it.
+                EffortLevel::XHigh | EffortLevel::WhiteHot => ReasoningEffort::XHigh,
+            };
+            options = options.with_reasoning_effort(re);
+            reasoning_engaged = true;
         }
 
         // Low temperature for deterministic edits/patches — but ONLY for a model that takes one.
