@@ -1435,6 +1435,10 @@ fn push_effort_args(args: &mut Vec<String>, kind: CliKind, effort: Option<Effort
 
 /// Build the complete argv for a one-shot turn. Claude and Codex consume the prompt from stdin,
 /// while agy's `-p` accepts an optional value and otherwise consumes the following flag.
+// Each argument is an independent axis of the spawn (which CLI, which model, harness or text mode,
+// where Forge lives, what the served MCP child needs, whether this resumes, the prompt, the rung).
+// Bundling them into a struct would name the same eight values one indirection further away.
+#[allow(clippy::too_many_arguments)]
 fn build_oneshot_args(
     kind: CliKind,
     bare_model: &str,

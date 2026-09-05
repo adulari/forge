@@ -81,14 +81,27 @@ impl BenchEffort {
 
     /// The effort rung a source row name declares, if any.
     ///
-    /// Only a parenthetical whose WHOLE content is an effort word counts. The feed decorates names
-    /// with far more than efforts — "(June 2026)" is a release date, "(Vision)" a modality, and
+    /// Vendors spell the rung two different ways, and reading only one of them silently drops a
+    /// whole vendor's ladder:
+    ///
+    /// - OpenAI-style, the whole parenthetical is the rung — "GPT-6 Astra (high)".
+    /// - Anthropic-style, the parenthetical is a comma-separated config in which one segment names
+    ///   the rung — "Claude Opus 5 (Adaptive Reasoning, Max Effort)", "Claude Fable 5.1 (Adaptive
+    ///   Reasoning, High Effort, Default Fallback)".
+    ///
+    /// The feed decorates names with far more than efforts, so each form is matched precisely:
+    /// "(June 2026)" is a release date, "(Vision)" a modality, "(Reasoning)" carries no rung, and
     /// "Quasar 438B (max, based on GLM-5.2)" describes a derived model whose "max" belongs to the
-    /// base it was built from, not to a rung anyone can request. Matching the whole content keeps
-    /// all three out.
+    /// base it was built from. That last one is why a BARE effort word only counts as the entire
+    /// parenthetical: as one segment among several it is not a rung anyone can request.
+    ///
+    /// A "Non-reasoning" segment wins over the rung beside it ("Claude Sonnet 5 (Non-reasoning,
+    /// High Effort)" is a measurement of the thinking-off configuration), so the row stays scoring
+    /// evidence and never becomes a routing choice.
     fn from_source_name(name: &str) -> Option<Self> {
         let mut depth = 0u32;
         let mut group = String::new();
+        let mut found: Option<Self> = None;
         for c in name.chars() {
             match c {
                 '(' | '[' => {
@@ -97,8 +110,11 @@ impl BenchEffort {
                 }
                 ')' | ']' => {
                     depth = depth.saturating_sub(1);
-                    if let Some(effort) = Self::parse_exact(&group) {
-                        return Some(effort);
+                    if let Some(effort) = Self::parse_group(&group) {
+                        if effort == BenchEffort::NonReasoning {
+                            return Some(effort);
+                        }
+                        found = found.or(Some(effort));
                     }
                     group.clear();
                 }
@@ -106,7 +122,31 @@ impl BenchEffort {
                 _ => {}
             }
         }
-        None
+        found
+    }
+
+    /// The rung declared by one parenthetical group's contents.
+    fn parse_group(group: &str) -> Option<Self> {
+        // Whole-content form: "(high)", "(Non-reasoning)".
+        if let Some(effort) = Self::parse_exact(group) {
+            return Some(effort);
+        }
+        // Segmented form: one segment is "<rung> Effort", and a "Non-reasoning" segment anywhere
+        // outranks it.
+        let mut rung = None;
+        for segment in group.split(',') {
+            let segment = segment.trim();
+            if Self::parse_exact(segment) == Some(BenchEffort::NonReasoning) {
+                return Some(BenchEffort::NonReasoning);
+            }
+            if let Some(word) = segment
+                .strip_suffix(" Effort")
+                .or_else(|| segment.strip_suffix(" effort"))
+            {
+                rung = rung.or_else(|| Self::parse_exact(word));
+            }
+        }
+        rung
     }
 
     fn parse_exact(text: &str) -> Option<Self> {
@@ -708,6 +748,72 @@ mod tests {
         assert!(
             b.efforts_for("openrouter::quasar-438b").is_empty(),
             "a derived model's base-model parenthetical is not a rung Forge can request"
+        );
+    }
+
+    #[test]
+    fn an_anthropic_style_config_parenthetical_still_yields_its_rung() {
+        // Anthropic does not spell rungs the way OpenAI does. Reading only the OpenAI form left
+        // EVERY Claude model — the whole `claude-cli` provider — with no ladder at all, silently,
+        // while the astra fixtures all passed.
+        let mut b = BenchmarkScores::new();
+        b.insert("Claude Opus 5 (Adaptive Reasoning, Max Effort)", 60.0, 80.0);
+        b.insert(
+            "Claude Opus 5 (Adaptive Reasoning, Xhigh Effort)",
+            59.0,
+            79.5,
+        );
+        b.insert("Claude Opus 5 (Adaptive Reasoning, Low Effort)", 50.0, 70.0);
+        let ladder = b.efforts_for("claude-cli::opus");
+        assert_eq!(
+            ladder.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+            [BenchEffort::Low, BenchEffort::XHigh, BenchEffort::Max]
+        );
+    }
+
+    #[test]
+    fn a_trailing_fallback_segment_does_not_hide_the_rung() {
+        // Real feed names: the rung is the MIDDLE segment, not the last.
+        assert_eq!(
+            BenchEffort::from_source_name(
+                "Claude Fable 5.1 (Adaptive Reasoning, High Effort, Default Fallback)"
+            ),
+            Some(BenchEffort::High)
+        );
+        assert_eq!(
+            BenchEffort::from_source_name(
+                "Claude Fable 5 (Adaptive Reasoning, Max Effort, Opus 4.8 Fallback)"
+            ),
+            Some(BenchEffort::Max)
+        );
+    }
+
+    #[test]
+    fn a_non_reasoning_segment_outranks_the_effort_beside_it() {
+        // "Claude Sonnet 5 (Non-reasoning, High Effort)" measures the thinking-OFF configuration.
+        // Reading it as a plain "high" rung would let mesh route onto a configuration it cannot
+        // ask for, and would do so under the label of a rung it can.
+        assert_eq!(
+            BenchEffort::from_source_name("Claude Sonnet 5 (Non-reasoning, High Effort)"),
+            Some(BenchEffort::NonReasoning)
+        );
+    }
+
+    #[test]
+    fn a_bare_effort_word_among_other_segments_is_still_not_a_rung() {
+        // The guard that the segmented form must not weaken: "max" here belongs to the base model
+        // this one was derived from, and "(Reasoning)" names no rung at all.
+        assert_eq!(
+            BenchEffort::from_source_name("Quasar 438B (max, based on GLM-5.2)"),
+            None
+        );
+        assert_eq!(
+            BenchEffort::from_source_name("Claude 4.5 Haiku (Reasoning)"),
+            None
+        );
+        assert_eq!(
+            BenchEffort::from_source_name("GPT-5.5 Instant (June 2026)"),
+            None
         );
     }
 
