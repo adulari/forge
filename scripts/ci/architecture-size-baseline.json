@@ -67,7 +67,7 @@
     "crates/forge-mesh/src/catalog.rs": 1332,
     "crates/forge-mesh/src/lib.rs": 2214,
     "crates/forge-provider/src/cli_provider.rs": 3381,
-    "crates/forge-provider/src/codex_oauth.rs": 1125,
+    "crates/forge-provider/src/codex_oauth.rs": 1139,
     "crates/forge-provider/src/genai_provider.rs": 1670,
     "crates/forge-skills/src/lib.rs": 886,
     "crates/forge-store/src/lib.rs": 8298,

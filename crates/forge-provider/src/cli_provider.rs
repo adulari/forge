@@ -838,8 +838,8 @@ fn parse_codex_catalog_models(out: &str) -> Vec<String> {
 
 /// One bridge's last successfully-probed model list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CachedBridgeModels {
-    models: Vec<String>,
+pub(crate) struct CachedBridgeModels {
+    pub(crate) models: Vec<String>,
     /// Unix seconds when the CLI advertised this list.
     probed_at: u64,
 }
@@ -847,7 +847,7 @@ struct CachedBridgeModels {
 /// Last-known-good model lists, keyed by [`CliKind::prefix`]. Persisted next to the catalog cache
 /// so a CLI that was signed in yesterday keeps contributing its REAL models today, and so signing
 /// a CLI in never requires a Forge release or a manual cache bust to take effect.
-fn bridge_model_cache_path() -> Option<std::path::PathBuf> {
+pub(crate) fn bridge_model_cache_path() -> Option<std::path::PathBuf> {
     forge_config::data_dir().map(|d| d.join("bridge-models.json"))
 }
 
@@ -858,7 +858,7 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn read_bridge_model_cache(
+pub(crate) fn read_bridge_model_cache(
     path: &std::path::Path,
 ) -> std::collections::HashMap<String, CachedBridgeModels> {
     std::fs::read(path)
@@ -867,7 +867,12 @@ fn read_bridge_model_cache(
         .unwrap_or_default()
 }
 
-fn remember_bridge_models_at(path: &std::path::Path, prefix: &str, models: &[String], now: u64) {
+pub(crate) fn remember_bridge_models_at(
+    path: &std::path::Path,
+    prefix: &str,
+    models: &[String],
+    now: u64,
+) {
     if models.is_empty() {
         return;
     }

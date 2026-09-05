@@ -784,11 +784,131 @@ pub async fn list_models() -> Result<Vec<String>, ProviderError> {
     Ok(seed_models())
 }
 
+/// The ChatGPT backend has no public `/models`, so this list used to be the bundled seeds alone —
+/// and went stale the moment OpenAI shipped a model to subscribers. `gpt-6-astra` was the case in
+/// point: `codex-cli` advertised it the day it landed while `codex-oauth`, on the SAME account and
+/// the same backend, could not see it until Forge cut a release.
+///
+/// The Codex CLI's own advertised list is that missing endpoint. Reading its probe cache lets a
+/// newly shipped model appear on both paths at once. The seeds stay as a floor rather than being
+/// replaced: they include ids (`gpt-5.4`, `gpt-5.2`, `gpt-5.3-codex`) the CLI no longer lists but
+/// the OAuth backend still serves, and dropping those would break anyone who pins one.
 fn seed_models() -> Vec<String> {
-    CODEX_OAUTH_SEED_MODELS
-        .iter()
+    merge_advertised(
+        CODEX_OAUTH_SEED_MODELS,
+        &remembered_bridge_models("codex-cli"),
+    )
+}
+
+/// The bare model names `prefix`'s CLI last advertised, from its probe cache. This is the
+/// `/models` endpoint the ChatGPT backend does not offer: codex-cli and codex-oauth are the same
+/// account, so what one is told the other can use.
+fn remembered_bridge_models(prefix: &str) -> Vec<String> {
+    crate::cli_provider::bridge_model_cache_path()
+        .map(|path| remembered_bridge_models_at(&path, prefix))
+        .unwrap_or_default()
+}
+
+fn remembered_bridge_models_at(path: &std::path::Path, prefix: &str) -> Vec<String> {
+    crate::cli_provider::read_bridge_model_cache(path)
+        .remove(prefix)
+        .map(|entry| entry.models)
+        .unwrap_or_default()
+}
+
+/// Seeds first (stable order, and a floor), then anything the CLI advertises that they missed.
+fn merge_advertised(seeds: &[&str], advertised: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = seeds.iter().map(|m| (*m).to_string()).collect();
+    for model in advertised {
+        let model = model.trim();
+        if !model.is_empty() && !names.iter().any(|n| n == model) {
+            names.push(model.to_string());
+        }
+    }
+    names
+        .into_iter()
         .map(|m| format!("{CODEX_OAUTH_NAMESPACE}::{m}"))
         .collect()
+}
+
+#[cfg(test)]
+mod dynamic_model_tests {
+    use super::*;
+
+    /// The defect: `codex-cli` advertised `gpt-6-astra` the day it shipped, while `codex-oauth` —
+    /// same account, same backend — could not see it until Forge cut a release, because its list
+    /// was a bundled constant.
+    #[test]
+    fn a_model_the_cli_advertises_appears_on_the_oauth_path_too() {
+        let advertised = vec!["gpt-6-astra".to_string(), "gpt-5.6-sol".to_string()];
+        let merged = merge_advertised(CODEX_OAUTH_SEED_MODELS, &advertised);
+
+        assert!(
+            merged.contains(&"codex-oauth::gpt-6-astra".to_string()),
+            "a newly shipped model must appear without a Forge release: {merged:?}"
+        );
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|m| *m == "codex-oauth::gpt-5.6-sol")
+                .count(),
+            1,
+            "a model on both lists is not duplicated"
+        );
+    }
+
+    /// The seeds are a floor, not a default: they carry ids the CLI no longer lists but the OAuth
+    /// backend still serves, so replacing the list outright would break anyone pinning one.
+    #[test]
+    fn seeds_survive_models_the_cli_no_longer_advertises() {
+        let merged = merge_advertised(CODEX_OAUTH_SEED_MODELS, &["gpt-6-astra".to_string()]);
+        for retired in ["gpt-5.4", "gpt-5.2", "gpt-5.3-codex"] {
+            assert!(
+                merged.contains(&format!("codex-oauth::{retired}")),
+                "{retired} must survive: {merged:?}"
+            );
+        }
+    }
+
+    /// codex-oauth reads this cache to learn about models shipped after the last Forge release,
+    /// so a reader that silently returns nothing would restore the stale hardcoded behaviour it
+    /// exists to replace.
+    #[test]
+    fn the_cache_round_trips_what_the_cli_advertised() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bridge-models.json");
+        let advertised = vec!["gpt-6-astra".to_string(), "gpt-5.6-sol".to_string()];
+
+        crate::cli_provider::remember_bridge_models_at(
+            &path,
+            "codex-cli",
+            &advertised,
+            1_788_000_000,
+        );
+
+        assert_eq!(remembered_bridge_models_at(&path, "codex-cli"), advertised);
+        assert!(
+            remembered_bridge_models_at(&path, "claude-cli").is_empty(),
+            "an unprobed bridge reads as empty, not as another bridge's list"
+        );
+    }
+
+    #[test]
+    fn a_missing_cache_file_is_empty_not_an_error() {
+        assert!(remembered_bridge_models_at(
+            std::path::Path::new("/nonexistent/forge/bridge-models.json"),
+            "codex-cli",
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn no_cli_probe_yet_leaves_the_seeds_untouched() {
+        assert_eq!(
+            merge_advertised(CODEX_OAUTH_SEED_MODELS, &[]).len(),
+            CODEX_OAUTH_SEED_MODELS.len()
+        );
+    }
 }
 
 /// Exchange an authorization code for tokens (PKCE).
