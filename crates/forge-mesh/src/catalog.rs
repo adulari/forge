@@ -36,6 +36,15 @@ pub struct ModelCatalog {
     /// Measured performance scores (ADR-0011), attached at discovery. When present the router ranks
     /// on real benchmark data; when absent it falls back to the family-name heuristic.
     bench: Option<BenchmarkScores>,
+    /// Per-model effort ladders, resolved ONCE when benchmarks are attached.
+    ///
+    /// Resolving a model to its source row is a fuzzy match across every benchmark entry, so doing
+    /// it per model per routing call would be O(models x entries) on the hot path — hundreds of
+    /// thousands of comparisons per turn on a catalog this size. Ranking needs each model's ladder
+    /// to score it at the rung it will actually RUN at, which made that cost real; caching here
+    /// keeps the per-turn work to arithmetic over a handful of rungs.
+    #[serde(skip)]
+    effort_ladders: HashMap<String, Vec<(crate::bench::BenchEffort, crate::bench::BenchScore)>>,
     /// Config overrides for `subscription_burn_weight` (`mesh.burn_weights`), keyed by bare model
     /// name. Empty by default — a no-op, `route_score` falls back to the bundled table.
     #[serde(default)]
@@ -850,6 +859,7 @@ impl ModelCatalog {
         Self {
             models,
             bench: None,
+            effort_ladders: HashMap::new(),
             burn_weights: HashMap::new(),
             calibration: HashMap::new(),
         }
@@ -875,6 +885,17 @@ impl ModelCatalog {
     /// or empty set is a no-op — ranking stays on the family heuristic.
     pub fn with_benchmarks(mut self, bench: Option<BenchmarkScores>) -> Self {
         self.bench = bench.filter(|b| !b.is_empty());
+        self.effort_ladders = match self.bench.as_ref() {
+            Some(bench) => self
+                .models
+                .iter()
+                .filter_map(|model| {
+                    let ladder = bench.efforts_for(model);
+                    (!ladder.is_empty()).then(|| (model.clone(), ladder))
+                })
+                .collect(),
+            None => HashMap::new(),
+        };
         self
     }
 
@@ -911,6 +932,11 @@ impl ModelCatalog {
         &self,
         model: &str,
     ) -> Vec<(crate::bench::BenchEffort, crate::bench::BenchScore)> {
+        // Cached at attachment; falls back to a live resolve for a model the catalog does not list
+        // (a pin to something outside the discovered set still deserves an answer).
+        if let Some(ladder) = self.effort_ladders.get(model) {
+            return ladder.clone();
+        }
         self.bench
             .as_ref()
             .map(|bench| bench.efforts_for(model))
@@ -1027,13 +1053,29 @@ impl ModelCatalog {
                 );
                 let conserved = penalty > 0.0;
                 score -= penalty;
-                let bench_score = self.bench.as_ref().and_then(|b| b.score_for(m)).map(|s| {
-                    if code_heavy {
-                        s.coding
-                    } else {
-                        s.intelligence
-                    }
-                });
+                // Score the model at the rung it will actually RUN at, not at its best-rated one.
+                // The collapsed benchmark row is whichever rung measured highest, so ranking on it
+                // compared every model at an effort none of them were going to be sent — GPT-6
+                // Astra was ranked on `max` while routing would run it at `high`.
+                //
+                // This is the joint (model, rung) comparison, without enumerating pairs: rung
+                // choice is independent of the other candidates, so each model has exactly one rung
+                // it would run at this turn, and comparing models AT those rungs is the same answer
+                // a full cartesian would reach — at O(models) instead of O(models x rungs).
+                let bench_score = self
+                    .effort_ladders
+                    .get(m)
+                    .and_then(|_| {
+                        crate::rung_cost::best_value_rung(self, m, effort, code_heavy)
+                            .map(crate::bench::BenchEffort::from_level)
+                            .and_then(|rung| {
+                                self.bench
+                                    .as_ref()
+                                    .and_then(|b| b.score_for_effort(m, rung))
+                            })
+                    })
+                    .or_else(|| self.bench.as_ref().and_then(|b| b.score_for(m)))
+                    .map(|s| if code_heavy { s.coding } else { s.intelligence });
                 ScoredModel {
                     id: m,
                     route_score: score,
@@ -1363,6 +1405,38 @@ mod tests {
     fn ranks_a_small_fast_model_first_for_trivial() {
         let r = catalog().ranked_for(TaskTier::Trivial, &Pricing::default(), 2);
         assert_eq!(r.first().unwrap(), "groq::llama-3.1-8b-instant");
+    }
+
+    #[test]
+    fn a_model_is_ranked_at_the_rung_it_will_run_at_not_its_best_rated_one() {
+        use crate::bench::BenchmarkScores;
+        // A model whose TOP rung measures brilliantly but whose value rung is ordinary must be
+        // ranked on the ordinary one, because that is the rung it will be sent at. Ranking on the
+        // collapsed row promises quality the turn will never actually get.
+        //
+        // `flashy` is rated 90 at max and 40 at low; `steady` is a flat 60. Under the collapsed
+        // row flashy (90) leads. It has no published cost ladder, so its value rung is chosen by
+        // the quality-band rule — and either way it must not be ranked on a rung it will not run.
+        let mut b = BenchmarkScores::new();
+        b.insert("flashy one (max)", 90.0, 90.0);
+        b.insert("flashy one (low)", 40.0, 40.0);
+        b.insert("steady one", 60.0, 60.0);
+        let cat = ModelCatalog::new(vec![
+            "openrouter::flashy-one".into(),
+            "openrouter::steady-one".into(),
+        ])
+        .with_benchmarks(Some(b));
+
+        // The ladder is cached at attachment, so the hot path never re-resolves it.
+        assert_eq!(
+            cat.effort_ladder_for("openrouter::flashy-one").len(),
+            2,
+            "the two rated rungs are cached"
+        );
+        assert!(
+            cat.effort_ladder_for("openrouter::steady-one").is_empty(),
+            "a single undecorated rating is not a ladder"
+        );
     }
 
     #[test]
