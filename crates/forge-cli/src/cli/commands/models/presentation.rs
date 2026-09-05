@@ -464,9 +464,9 @@ pub(crate) fn print_mesh_explanation(
             // The rung this row would run at, in the same ⟨…⟩ notation the statusline and the
             // /mesh overlay use. Two rows for one model on different providers can differ only
             // here, which the rest of the line cannot express.
-            let rung = c
-                .effort
-                .map_or_else(String::new, |rung| format!(" · ⟨{}⟩", rung.as_str()));
+            let rung = c.effort.map_or_else(String::new, |rung| {
+                format!(" · ⟨{}⟩", forge_types::effort::wire_name(rung))
+            });
             println!(
                 "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}{}{}{}",
                 c.rank,
@@ -487,7 +487,11 @@ pub(crate) fn print_mesh_explanation(
     }
 
     match e.pick_effort {
-        Some(rung) => println!("\npick: {} ⟨{}⟩", e.pick, rung.as_str()),
+        Some(rung) => println!(
+            "\npick: {} ⟨{}⟩",
+            e.pick,
+            forge_types::effort::wire_name(rung)
+        ),
         None => println!("\npick: {}", e.pick),
     }
     if !e.fallbacks.is_empty() {
@@ -523,7 +527,7 @@ pub(crate) fn mesh_explanation_json(
                 // Added, not renamed: the reasoning rung this row would run at, already resolved
                 // against its provider surface. Null when the model has no measured effort ladder
                 // or no reasoning control at all.
-                "effort": c.effort.map(|rung| rung.as_str()),
+                "effort": c.effort.map(forge_types::effort::wire_name),
             })
         })
         .collect();
@@ -562,7 +566,7 @@ pub(crate) fn mesh_explanation_json(
         "excluded_providers": provider_exclusions_json(excluded),
         "candidates": candidates,
         "pick": e.pick,
-        "pick_effort": e.pick_effort.map(|rung| rung.as_str()),
+        "pick_effort": e.pick_effort.map(forge_types::effort::wire_name),
         "fallbacks": e.fallbacks,
         "rationale": e.rationale,
     }))

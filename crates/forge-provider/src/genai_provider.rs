@@ -844,8 +844,6 @@ mod error_policy;
 use error_policy::*;
 
 fn model_benefits_from_effort(model: &str) -> bool {
-    // Shared with effort-ladder resolution: a model that takes a reasoning-effort field is exactly
-    // the model that rejects a custom temperature, and the two must not drift apart.
     forge_types::effort::model_has_reasoning_control(model)
 }
 
@@ -985,12 +983,24 @@ impl Provider for GenAiProvider {
         }
 
         // Low temperature for deterministic edits/patches — but ONLY for a model that takes one.
-        // A reasoning model rejects (or ignores) a custom temperature whether or not an effort
-        // hint engaged it this turn: OpenCode Go's Responses-served `gpt-5.6-luna` answers
-        // `[invalid_request_error] Unsupported parameter: 'temperature' is not supported with
-        // this model` and the turn dies (2026-09-02), and OpenAI's own reasoning line documents
-        // the same restriction. So the gate is the model family, not the effort flag.
-        if !reasoning_engaged && !model_benefits_from_effort(&model_name) {
+        //
+        // Two DIFFERENT populations refuse a temperature, and the old single gate conflated them
+        // with "has an effort control", which is why no non-OpenAI vendor ever received a rung:
+        //
+        //  - Absolutely, effort or no effort — OpenAI's reasoning line. OpenCode Go's
+        //    Responses-served `gpt-5.6-luna` answers `[invalid_request_error] Unsupported
+        //    parameter: 'temperature' is not supported with this model` and the turn dies
+        //    (2026-09-02), and OpenAI documents the same restriction for the whole line.
+        //  - Only while reasoning is engaged — Anthropic rejects a non-default temperature with
+        //    extended thinking on, and qwencloud's endpoint is thinking-only. Both take one
+        //    happily with reasoning off.
+        //
+        // Gemini and the rest now get an effort AND a temperature, which is correct: they accept
+        // both, and only the conflated gate ever suggested otherwise.
+        let temperature_refused = forge_types::effort::model_rejects_temperature(&model_name)
+            || (reasoning_engaged
+                && forge_types::effort::thinking_forbids_temperature(&model_name));
+        if !temperature_refused {
             if let Some(temp) = opts.temperature {
                 options = options.with_temperature(crate::wire_params::temperature_for_wire(temp));
             }
