@@ -621,6 +621,7 @@ impl Provider for XaiOauthProvider {
         )
         .unwrap_or(0);
         let mut body = build_responses_request(model, messages, tools, opts, max_output_tokens);
+        apply_xai_body_overrides(&mut body, model, opts);
 
         // Set once an attempt below puts text/reasoning on screen; from then on a hop would
         // replay it into the same sink — see `watch_visible_output`.
@@ -672,8 +673,59 @@ impl Provider for XaiOauthProvider {
     }
 }
 
+/// xAI-specific request shaping applied after the generic Responses builder.
+///
+/// The reasoning rung. The generic builder emits no `reasoning` object and this surface — unlike
+/// codex — had no shaping step after it at all, so `/effort` could not move a Grok turn: it ran at
+/// xAI's own default while every Forge readout named the pin.
+fn apply_xai_body_overrides(body: &mut serde_json::Value, model: &str, opts: &CompletionOptions) {
+    if let Some(level) = forge_types::effort::resolve(XAI_OAUTH_NAMESPACE, model, opts.effort).sent
+    {
+        body["reasoning"]["effort"] = serde_json::json!(forge_types::effort::wire_name(level));
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_pinned_rung_reaches_grok_as_a_reasoning_effort() {
+        // Before this, xai-oauth had no shaping step after the generic Responses builder at all,
+        // so `/effort` moved routing and nothing else on this surface.
+        let messages = vec![Message::user("hi")];
+        let opts = CompletionOptions {
+            effort: Some(forge_types::EffortLevel::High),
+            ..Default::default()
+        };
+        let mut body = build_responses_request("xai-oauth::grok-4", &messages, &[], &opts, 512);
+        assert!(
+            body.get("reasoning").is_none(),
+            "the generic builder emits no reasoning object — the override is what adds it"
+        );
+        apply_xai_body_overrides(&mut body, "xai-oauth::grok-4", &opts);
+        assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn an_unpinned_grok_turn_sends_no_reasoning_field() {
+        let messages = vec![Message::user("hi")];
+        let opts = CompletionOptions::default();
+        let mut body = build_responses_request("xai-oauth::grok-4", &messages, &[], &opts, 512);
+        apply_xai_body_overrides(&mut body, "xai-oauth::grok-4", &opts);
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn white_hot_is_clamped_to_what_this_surface_accepts() {
+        let messages = vec![Message::user("hi")];
+        let opts = CompletionOptions {
+            effort: Some(forge_types::EffortLevel::WhiteHot),
+            ..Default::default()
+        };
+        let mut body = build_responses_request("xai-oauth::grok-4", &messages, &[], &opts, 512);
+        apply_xai_body_overrides(&mut body, "xai-oauth::grok-4", &opts);
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+    }
+
     use super::*;
     use crate::oauth_responses::{apply_sse_event, bare_model, ResponseAccumulator};
     use crate::StreamEvent;

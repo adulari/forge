@@ -843,12 +843,6 @@ fn short(s: &str) -> String {
 mod error_policy;
 use error_policy::*;
 
-fn model_benefits_from_effort(model: &str) -> bool {
-    // Shared with effort-ladder resolution: a model that takes a reasoning-effort field is exactly
-    // the model that rejects a custom temperature, and the two must not drift apart.
-    forge_types::effort::model_has_reasoning_control(model)
-}
-
 /// Qwen 3.8 Max Preview is thinking-only on the Token Plan endpoint (the API rejects
 /// `enable_thinking=false`). Bound its private reasoning phase independently from the answer/tool
 /// payload so a difficult coding turn cannot spend many minutes re-planning before its first tool
@@ -985,12 +979,24 @@ impl Provider for GenAiProvider {
         }
 
         // Low temperature for deterministic edits/patches — but ONLY for a model that takes one.
-        // A reasoning model rejects (or ignores) a custom temperature whether or not an effort
-        // hint engaged it this turn: OpenCode Go's Responses-served `gpt-5.6-luna` answers
-        // `[invalid_request_error] Unsupported parameter: 'temperature' is not supported with
-        // this model` and the turn dies (2026-09-02), and OpenAI's own reasoning line documents
-        // the same restriction. So the gate is the model family, not the effort flag.
-        if !reasoning_engaged && !model_benefits_from_effort(&model_name) {
+        //
+        // Two DIFFERENT populations refuse a temperature, and the old single gate conflated them
+        // with "has an effort control", which is why no non-OpenAI vendor ever received a rung:
+        //
+        //  - Absolutely, effort or no effort — OpenAI's reasoning line. OpenCode Go's
+        //    Responses-served `gpt-5.6-luna` answers `[invalid_request_error] Unsupported
+        //    parameter: 'temperature' is not supported with this model` and the turn dies
+        //    (2026-09-02), and OpenAI documents the same restriction for the whole line.
+        //  - Only while reasoning is engaged — Anthropic rejects a non-default temperature with
+        //    extended thinking on, and qwencloud's endpoint is thinking-only. Both take one
+        //    happily with reasoning off.
+        //
+        // Gemini and the rest now get an effort AND a temperature, which is correct: they accept
+        // both, and only the conflated gate ever suggested otherwise.
+        let temperature_refused = forge_types::effort::model_rejects_temperature(&model_name)
+            || (reasoning_engaged
+                && forge_types::effort::thinking_forbids_temperature(&model_name));
+        if !temperature_refused {
             if let Some(temp) = opts.temperature {
                 options = options.with_temperature(crate::wire_params::temperature_for_wire(temp));
             }
@@ -1402,12 +1408,15 @@ fn is_phantom_truncation(saw_end: bool, has_tool_calls: bool, usage: &Usage) -> 
 
 #[cfg(test)]
 mod tests {
-    /// The temperature gate is the model family, not the effort flag: a reasoning model rejects a
-    /// custom temperature whether or not an effort hint engaged it this turn. Live failure this
-    /// pins: OpenCode Go's Responses-served `gpt-5.6-luna` answered `Unsupported parameter:
-    /// 'temperature' is not supported with this model` and the turn died (2026-09-02).
+    /// The temperature gate is the model family, not the effort flag: OpenAI's reasoning line
+    /// rejects a custom temperature whether or not an effort hint engaged it this turn. Live
+    /// failure this pins: OpenCode Go's Responses-served `gpt-5.6-luna` answered `Unsupported
+    /// parameter: 'temperature' is not supported with this model` and the turn died (2026-09-02).
+    ///
+    /// Asserts `model_rejects_temperature` specifically, NOT "is a reasoning model" — those became
+    /// different questions once Claude and Gemini gained rungs, and they take a temperature.
     #[test]
-    fn reasoning_families_are_recognised_under_every_namespace() {
+    fn families_that_reject_a_temperature_are_recognised_under_every_namespace() {
         for id in [
             "opencode_go::gpt-5.6-luna",
             "codex-oauth::gpt-5.6-sol",
@@ -1421,8 +1430,8 @@ mod tests {
             "codex-cli::gpt-6-astra",
         ] {
             assert!(
-                super::model_benefits_from_effort(id),
-                "{id} is a reasoning model"
+                forge_types::effort::model_rejects_temperature(id),
+                "{id} rejects a custom temperature"
             );
         }
         for id in [
@@ -1430,7 +1439,7 @@ mod tests {
             "groq::llama-3.3-70b-versatile",
         ] {
             assert!(
-                !super::model_benefits_from_effort(id),
+                !forge_types::effort::model_rejects_temperature(id),
                 "{id} takes a temperature"
             );
         }

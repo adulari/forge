@@ -142,25 +142,70 @@ pub fn bridge_args(provider: &str, level: EffortLevel) -> Vec<String> {
     }
 }
 
-/// Whether a model served over the generic OpenAI-compatible path takes a reasoning-effort field
-/// at all.
+/// Whether a model REJECTS a custom `temperature`.
 ///
-/// This is a model-FAMILY question, not an effort question: the OpenAI reasoning line rejects a
-/// custom `temperature` whether or not an effort hint was set this turn, so the provider path uses
-/// the same predicate to decide both. `gpt-6` is on the list because Astra rejects a temperature
-/// exactly as the gpt-5 line does.
-pub fn model_has_reasoning_control(model: &str) -> bool {
+/// This is OpenAI's reasoning line and only that line: it refuses a temperature outright, effort or
+/// no effort ("Unsupported parameter: 'temperature' is not supported with this model" — live, on
+/// `gpt-5.6-luna`, 2026-09-02). `gpt-6` is on the list because Astra refuses it identically.
+///
+/// Deliberately SEPARATE from [`model_has_reasoning_control`]. One predicate used to answer both
+/// questions, which is exactly why no non-OpenAI vendor ever received an effort: the only way to
+/// grant Claude or Gemini a rung was to also declare that they reject a temperature, which they do
+/// not.
+pub fn model_rejects_temperature(model: &str) -> bool {
     let m = model.to_lowercase();
-    let is_openai_reasoning = ["o1", "o1-", "o3", "o3-", "o4", "o4-", "gpt-5", "gpt-6"]
+    ["o1", "o1-", "o3", "o3-", "o4", "o4-", "gpt-5", "gpt-6"]
         .iter()
-        .any(|needle| m == *needle || m.contains(&format!("::{needle}")) || m.contains(needle));
-
-    is_openai_reasoning
-        || m.contains("thinking")
-        || m.contains("reasoning")
+        .any(|needle| m == *needle || m.contains(&format!("::{needle}")) || m.contains(needle))
         || m.contains("deepseek-r1")
         || m.contains("r1-")
         || m == "deepseek-r1"
+}
+
+/// Whether a custom temperature is refused *because reasoning is engaged this turn*.
+///
+/// Anthropic rejects a non-default temperature while extended thinking is on, and qwencloud's
+/// Token Plan endpoint is thinking-only. Both accept a temperature perfectly well with reasoning
+/// off — so this is conditional, where [`model_rejects_temperature`] is absolute.
+pub fn thinking_forbids_temperature(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.contains("claude") || m.contains("anthropic") || m.contains("qwen")
+}
+
+/// Whether a model has a reasoning-effort control at all.
+///
+/// Every vendor family below ships one, and genai carries the field for the adapters that serve
+/// them (`anthropic`, `gemini`, `bedrock`, `openai`, `openai_resp` — the last covering every
+/// OpenAI-compatible provider). Listing families explicitly rather than defaulting to "everything"
+/// keeps Forge from asking a model with no such control for a rung, which some providers answer
+/// with a 400 rather than by ignoring the field.
+pub fn model_has_reasoning_control(model: &str) -> bool {
+    let m = model.to_lowercase();
+    let has = |needle: &str| m.contains(needle);
+    // OpenAI's reasoning line — and the generic markers any vendor may use in a model id.
+    model_rejects_temperature(model)
+        || has("thinking")
+        || has("reasoning")
+        || has("gpt-oss")
+        // Anthropic: every modern Claude takes `--effort` / an extended-thinking budget.
+        || has("claude")
+        || has("opus")
+        || has("sonnet")
+        || has("haiku")
+        || has("fable")
+        // Google: Gemini 2.5 onward carries a thinking budget.
+        || has("gemini")
+        // xAI: Grok 3 onward takes reasoning_effort.
+        || has("grok")
+        // Open-weight reasoning families.
+        || has("deepseek")
+        || has("qwen")
+        || has("glm")
+        || has("minimax")
+        || has("kimi")
+        || has("nemotron")
+        || has("magistral")
+        || has("muse")
 }
 
 /// Split a Forge id into its provider namespace and bare model name.
@@ -245,6 +290,78 @@ mod tests {
         assert_eq!(d.sent, None);
         assert_eq!(d.reason, EffortReason::NoControl);
         assert!(!d.is_forge_set());
+    }
+
+    #[test]
+    fn every_vendor_with_a_reasoning_control_can_be_asked_for_a_rung() {
+        // The gap this closes: only OpenAI's line and names literally containing
+        // "thinking"/"reasoning" ever qualified, so Claude, Gemini, Grok and every open-weight
+        // reasoning family silently received no rung on the generic path.
+        for id in [
+            "anthropic::claude-opus-5",
+            "anthropic::claude-sonnet-4-5",
+            "claude-cli::fable",
+            "gemini::gemini-3.8-flash",
+            "xai::grok-4",
+            "openrouter::z-ai/glm-5.2",
+            "qwencloud::qwen3.8-max-preview",
+            "sambanova::MiniMax-M3",
+            "nvidia::moonshotai/kimi-k3",
+            "nvidia::nvidia/nemotron-3-super-120b-a12b",
+            "mistral::magistral-medium-latest",
+            "groq::openai/gpt-oss-120b",
+            "opencode::muse-spark-1.3-contributor-free",
+        ] {
+            assert!(
+                has_control(id),
+                "{id} has a reasoning control and must get a rung"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_instruct_model_still_gets_no_rung() {
+        // Broadening must not become "everything": a model with no such control answers a
+        // reasoning field with a 400 on some providers rather than ignoring it.
+        for id in [
+            "groq::llama-3.3-70b-versatile",
+            "nvidia::google/gemma-4-31b-it",
+            "mistral::codestral-latest",
+            "nvidia::meta/codellama-70b",
+        ] {
+            assert!(!has_control(id), "{id} has no reasoning control");
+        }
+    }
+
+    #[test]
+    fn rejecting_a_temperature_is_a_narrower_claim_than_having_a_rung() {
+        // The conflation that caused the gap. Claude and Gemini take BOTH a rung and a
+        // temperature; only OpenAI's line refuses the temperature outright.
+        assert!(model_rejects_temperature("openai::gpt-5.6-luna"));
+        assert!(model_rejects_temperature("codex-oauth::gpt-6-astra"));
+        for id in ["anthropic::claude-opus-5", "gemini::gemini-3.8-flash"] {
+            assert!(has_control(id), "{id} takes a rung");
+            assert!(
+                !model_rejects_temperature(id),
+                "{id} takes a temperature too — conflating these is what blocked its rung"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_refuses_a_temperature_only_while_thinking_is_engaged() {
+        // Conditional, not absolute: the same model takes one with reasoning off.
+        assert!(thinking_forbids_temperature("anthropic::claude-opus-5"));
+        assert!(thinking_forbids_temperature(
+            "qwencloud::qwen3.8-max-preview"
+        ));
+        assert!(!thinking_forbids_temperature("gemini::gemini-3.8-flash"));
+    }
+
+    #[test]
+    fn grok_over_oauth_is_asked_for_its_rung() {
+        let d = resolve_id("xai-oauth::grok-4", Some(EffortLevel::High));
+        assert_eq!(d.sent, Some(EffortLevel::High));
     }
 
     #[test]
