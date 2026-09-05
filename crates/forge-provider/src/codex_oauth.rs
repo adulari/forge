@@ -796,8 +796,24 @@ pub async fn list_models() -> Result<Vec<String>, ProviderError> {
 fn seed_models() -> Vec<String> {
     merge_advertised(
         CODEX_OAUTH_SEED_MODELS,
-        &crate::cli_provider::remembered_bridge_models("codex-cli"),
+        &remembered_bridge_models("codex-cli"),
     )
+}
+
+/// The bare model names `prefix`'s CLI last advertised, from its probe cache. This is the
+/// `/models` endpoint the ChatGPT backend does not offer: codex-cli and codex-oauth are the same
+/// account, so what one is told the other can use.
+fn remembered_bridge_models(prefix: &str) -> Vec<String> {
+    crate::cli_provider::bridge_model_cache_path()
+        .map(|path| remembered_bridge_models_at(&path, prefix))
+        .unwrap_or_default()
+}
+
+fn remembered_bridge_models_at(path: &std::path::Path, prefix: &str) -> Vec<String> {
+    crate::cli_provider::read_bridge_model_cache(path)
+        .remove(prefix)
+        .map(|entry| entry.models)
+        .unwrap_or_default()
 }
 
 /// Seeds first (stable order, and a floor), then anything the CLI advertises that they missed.
@@ -852,6 +868,38 @@ mod dynamic_model_tests {
                 "{retired} must survive: {merged:?}"
             );
         }
+    }
+
+    /// codex-oauth reads this cache to learn about models shipped after the last Forge release,
+    /// so a reader that silently returns nothing would restore the stale hardcoded behaviour it
+    /// exists to replace.
+    #[test]
+    fn the_cache_round_trips_what_the_cli_advertised() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bridge-models.json");
+        let advertised = vec!["gpt-6-astra".to_string(), "gpt-5.6-sol".to_string()];
+
+        crate::cli_provider::remember_bridge_models_at(
+            &path,
+            "codex-cli",
+            &advertised,
+            1_788_000_000,
+        );
+
+        assert_eq!(remembered_bridge_models_at(&path, "codex-cli"), advertised);
+        assert!(
+            remembered_bridge_models_at(&path, "claude-cli").is_empty(),
+            "an unprobed bridge reads as empty, not as another bridge's list"
+        );
+    }
+
+    #[test]
+    fn a_missing_cache_file_is_empty_not_an_error() {
+        assert!(remembered_bridge_models_at(
+            std::path::Path::new("/nonexistent/forge/bridge-models.json"),
+            "codex-cli",
+        )
+        .is_empty());
     }
 
     #[test]
