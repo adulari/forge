@@ -16,7 +16,14 @@ const BOOT_POLL: Duration = Duration::from_secs(2);
 
 /// Options for booting an AVD.
 ///
-/// The defaults are deliberately frugal. An emulator left on its own defaults takes the host's
+/// The defaults keep the device **persistent**: an app installed in one session is still there in
+/// the next. That rests on two things, both defaults here — `wipe_data` is off, so the userdata
+/// image survives, and the quick-boot snapshot is loaded and saved, so the disk state a session
+/// ended with is the state the next one starts from. It also rests on shutting down through
+/// [`stop`], which asks the emulator to save; a SIGKILL discards everything since the last save,
+/// which for a freshly installed app means the app.
+///
+/// The defaults are otherwise deliberately frugal. An emulator left on its own defaults takes the host's
 /// core count and the AVD's configured RAM, which on a developer laptop competes with the build
 /// it is supposed to be testing. [`BootOptions::light`] caps both and turns off everything that
 /// costs time or power without helping a test: audio, the boot animation, metrics upload, and —
@@ -275,6 +282,10 @@ pub async fn wait_for_boot(adb: &Adb, timeout: Duration) -> Result<Duration> {
 ///
 /// Returning as soon as `emu kill` is sent would be a lie: the process takes seconds to flush its
 /// disk image, and a boot started in that window collides with the one still shutting down.
+///
+/// This is also the only shutdown that preserves state. `emu kill` is graceful, so the emulator
+/// writes its quick-boot snapshot on the way out and an app installed this session is still
+/// installed next session. Killing the process instead loses everything since the last save.
 pub async fn stop(adb: &Adb, timeout: Duration) -> Result<Duration> {
     let serial = adb.serial().map(str::to_string);
     adb.run(&["emu", "kill"]).await?;
@@ -365,6 +376,18 @@ mod tests {
         let args = options.args("Pixel");
         assert!(!args.iter().any(|arg| arg == "-memory"));
         assert!(!args.iter().any(|arg| arg == "-cores"));
+    }
+
+    #[test]
+    fn the_default_boot_never_discards_the_device_state() {
+        // Installs have to survive a restart, so nothing that erases state may be a default.
+        let args = BootOptions::light().args("Pixel");
+        for destructive in ["-wipe-data", "-no-snapshot-load", "-no-snapshot-save"] {
+            assert!(
+                !args.iter().any(|arg| arg == destructive),
+                "{destructive} would make the device forget installed apps"
+            );
+        }
     }
 
     #[test]

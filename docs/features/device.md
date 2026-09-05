@@ -70,6 +70,21 @@ matter, and the rest is `FrameLayout` nesting. Pass `all: true` when you need th
 a network call or an animation. A dump that fails mid-animation is retried rather than reported;
 only running out of time is an error.
 
+## The device is persistent
+
+An app installed in one session is still installed in the next. Nothing in the default boot erases
+state: `wipe_data` is off, so the userdata image survives, and the quick-boot snapshot is both
+loaded and saved, so a session starts where the last one ended.
+
+That last part has a trap in it. The emulator writes its state on a *graceful* shutdown, which is
+what `emulator_stop` performs. Killing the process instead — `kill -9`, closing a terminal that
+owns it — discards everything since the last save, and for an app installed minutes earlier that
+means the app. Always stop through `emulator_stop`.
+
+`cold_boot: true` ignores the snapshot but keeps installed apps, since those live in the userdata
+image rather than the snapshot. `wipe_data: true` is the only option that genuinely erases the
+device, and it is never a default.
+
 ## The emulator is deliberately small
 
 `emulator_start` boots with 2 GB and 2 cores, no audio, no boot animation, no metrics upload, and
