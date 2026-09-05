@@ -47,6 +47,7 @@ mod model_request;
 mod model_response;
 mod model_stream;
 mod model_tools;
+mod nudge_policy;
 mod orchestration;
 pub mod permission;
 pub mod project_context;
@@ -5898,6 +5899,217 @@ mod tests {
         );
     }
 
+    /// Works once, then reports a blocker in prose forever — the shape of a real stalled session:
+    /// tool calls up to a point, then repeated explanations with no tool call and no task resolved.
+    struct BlockedAfterWorkingProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for BlockedAfterWorkingProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_provider::ModelResponse;
+            use forge_types::{new_id, ToolCall, Usage};
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(if n == 0 {
+                ModelResponse {
+                    content: "checking".into(),
+                    tool_calls: vec![
+                        ToolCall {
+                            id: new_id(),
+                            name: "update_tasks".into(),
+                            args: serde_json::json!({
+                                "tasks": [{"title": "finish the run", "status": "pending"}]
+                            }),
+                        },
+                        ToolCall {
+                            id: new_id(),
+                            name: "read_file".into(),
+                            args: serde_json::json!({"path": "Cargo.toml"}),
+                        },
+                    ],
+                    usage: Usage::default(),
+                    quotas: Vec::new(),
+                }
+            } else {
+                // Deliberately NOT identical text: the real replies were paraphrases of one
+                // another (word-set similarity 0.18-0.32, against a 0.08-0.12 baseline for
+                // unrelated messages), so a repetition detector keyed on text could not separate
+                // them from ordinary on-topic work. The signal is structural, not textual.
+                ModelResponse {
+                    content: format!(
+                        "attempt {n}: login cannot be completed reliably; this needs a human \
+                         decision before I continue"
+                    ),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                    quotas: Vec::new(),
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blocked_model_is_not_re_driven_through_the_whole_nudge_budget() {
+        // Observed live (session 07ca114e): the model worked, hit a blocker, explained it, and was
+        // then re-driven four times — four provider calls at ~119k input each, every one answered
+        // in prose. The nudge asks for "a tool call or a task marked Done"; when one nudge yields
+        // neither, the next cannot do better, so the budget must not be spent on it.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let provider = Arc::new(BlockedAfterWorkingProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut config = Config::default();
+        config.mesh.verify_completeness = false;
+        let mut session = Session::start(
+            Arc::clone(&store),
+            provider.clone(),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("finish it").await.unwrap();
+
+        let warnings: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                PresenterEvent::Warning(w) => Some(w.clone()),
+                _ => None,
+            })
+            .collect();
+        // The behaviour under test is the NUDGE count, not the raw provider-call count: an outer
+        // turn-level continuation can re-enter the loop for its own reasons, which would make a
+        // call-count assertion measure something else and break on unrelated changes.
+        let nudges = warnings
+            .iter()
+            .filter(|w| w.contains("continuing it"))
+            .count();
+        assert_eq!(
+            nudges, 1,
+            "one nudge, then stop — MAX_CONTINUE_NUDGES is 4, so the old path spent all four on a \
+             model that had already answered the first without acting: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("blocked, not stalling")),
+            "the user must be told it is blocked and where the reason is: {warnings:?}"
+        );
+    }
+
+    /// Alternates: explains without acting, then actually runs a tool, forever. Each nudge DOES
+    /// produce progress, so each one is worth spending — the case the budget exists for.
+    struct NudgeThenActsProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for NudgeThenActsProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_provider::ModelResponse;
+            use forge_types::{new_id, ToolCall, Usage};
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let read = ToolCall {
+                id: new_id(),
+                name: "read_file".into(),
+                args: serde_json::json!({"path": "Cargo.toml"}),
+            };
+            Ok(if n == 0 {
+                ModelResponse {
+                    content: "starting".into(),
+                    tool_calls: vec![
+                        ToolCall {
+                            id: new_id(),
+                            name: "update_tasks".into(),
+                            args: serde_json::json!({
+                                "tasks": [{"title": "finish the run", "status": "pending"}]
+                            }),
+                        },
+                        read,
+                    ],
+                    usage: Usage::default(),
+                    quotas: Vec::new(),
+                }
+            } else if n % 2 == 1 {
+                // Narrates the next action without doing it — the slip the nudge is FOR.
+                ModelResponse {
+                    content: "now I'll check the next file".into(),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                    quotas: Vec::new(),
+                }
+            } else {
+                // The nudge worked: it acted.
+                ModelResponse {
+                    content: "checked".into(),
+                    tool_calls: vec![read],
+                    usage: Usage::default(),
+                    quotas: Vec::new(),
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_that_acts_after_each_nudge_still_gets_the_full_budget() {
+        // The guard must only withhold a nudge that the LAST nudge proved useless. A model that
+        // narrates, gets nudged, then actually runs a tool is exactly what the budget is for, and
+        // must still be re-driven the full four times before Forge gives up.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut config = Config::default();
+        config.mesh.verify_completeness = false;
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(NudgeThenActsProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("finish it").await.unwrap();
+
+        let warnings: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                PresenterEvent::Warning(w) => Some(w.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            warnings.iter().any(|w| w.contains("continuing it (4/4)")),
+            "progress between nudges must still earn the whole budget: {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.contains("blocked, not stalling")),
+            "a model that acts after each nudge is not blocked: {warnings:?}"
+        );
+    }
+
     // --- Stop-hook enforcement (Claude-Code "Stop hook can block stopping") ---
 
     /// A provider that always returns a final text answer with no tool calls, counting how many
@@ -7162,11 +7374,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_continue_nudge_exhaustion_warns_when_giving_up() {
+    async fn direct_narration_loop_stops_loudly_not_silently() {
         // Regression for a SILENT exit: when a direct model narrates forever with a task still open,
-        // the harness nudges it a bounded number of times then GIVES UP. That give-up must be
-        // surfaced (the bridge path always warned; the direct path used to fall through silently,
-        // leaving the user to wonder why the turn stopped mid-plan).
+        // the harness stops and that stop must be SURFACED (the bridge path always warned; the
+        // direct path used to fall through silently, leaving the user to wonder why the turn
+        // stopped mid-plan).
+        //
+        // This provider never acts after its first call, so the stop now comes from the
+        // no-progress guard after one wasted nudge rather than from exhausting all four — the
+        // budget-exhaustion path is covered by `a_model_that_acts_after_each_nudge_still_gets_the_full_budget`.
+        // Either way the guarantee under test is the same: the user is told, and told why.
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
@@ -7197,8 +7414,9 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("giving up") && w.contains("unfinished")),
-            "exhausting the continue-nudge budget must surface a give-up warning; warnings: {warnings:?}"
+                .any(|w| w.contains("unfinished")
+                    && (w.contains("giving up") || w.contains("blocked, not stalling"))),
+            "stopping mid-plan must surface a warning naming the unfinished work; warnings: {warnings:?}"
         );
     }
 
