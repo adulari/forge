@@ -367,6 +367,7 @@ impl Session {
                                     .map(|d| d.tier.as_str().to_string())
                                     .unwrap_or_default(),
                                 model: next.clone(),
+                                effort: decision.and_then(|d| d.effort),
                                 rationale: format!("failover from {active_model} (empty response)"),
                             });
                             active_model = next;

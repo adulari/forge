@@ -142,7 +142,6 @@ pub fn bridge_args(provider: &str, level: EffortLevel) -> Vec<String> {
     }
 }
 
-
 /// Whether a model served over the generic OpenAI-compatible path takes a reasoning-effort field
 /// at all.
 ///

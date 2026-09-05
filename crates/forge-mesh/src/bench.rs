@@ -390,6 +390,66 @@ impl BenchmarkScores {
     }
 }
 
+/// How far below the best available rung a cheaper rung may measure and still be taken.
+///
+/// Matches the routing band used to choose between models, for the same reason: a difference this
+/// small is not reliably a difference at all, and paying several times the reasoning tokens to
+/// chase it is a bad trade.
+pub const RUNG_QUALITY_BAND: f64 = 1.0;
+
+/// Choose the rung to run a model at, given its measured ladder.
+///
+/// Returns the CHEAPEST rung whose measured quality is within [`RUNG_QUALITY_BAND`] of the best
+/// rung available under `ceiling`. Where a model's ladder is flat this drops effort a long way for
+/// free; where it is steep it changes nothing, because no cheaper rung is in band.
+///
+/// Quality is read from the metric the turn is actually judged on — the coding index for code-heavy
+/// work, the general index otherwise. That distinction is not cosmetic: on GPT-6 Astra the coding
+/// ladder is nearly flat and non-monotonic (medium 76.7, high 77.1, xhigh 75.9) while the
+/// intelligence ladder climbs steadily (52.2 → 53.4 → 54.3). The same model therefore warrants
+/// medium for coding and xhigh for reasoning, and a single blended score would get both wrong.
+///
+/// `None` when the source rated no rung Forge can request — the caller then sends no rung rather
+/// than inventing one.
+///
+/// Deliberately NOT a cost-weighted optimum: what an extra rung costs is reasoning tokens burned,
+/// which the benchmark ladder does not carry. Rather than model that with a number we have not
+/// measured, this takes the cheapest rung that is not measurably worse.
+pub fn select_rung(
+    ladder: &[(BenchEffort, BenchScore)],
+    ceiling: Option<EffortLevel>,
+    code_heavy: bool,
+) -> Option<EffortLevel> {
+    let metric = |score: &BenchScore| {
+        if code_heavy {
+            score.coding
+        } else {
+            score.intelligence
+        }
+    };
+    let cap = ceiling.map(BenchEffort::from_level);
+    // The non-reasoning row is scoring evidence, never a routing choice: Forge has no pin that
+    // means "turn reasoning off", so a model must not be routed onto it.
+    let mut usable: Vec<(BenchEffort, f64)> = ladder
+        .iter()
+        .filter(|(rung, _)| rung.to_level().is_some())
+        .filter(|(rung, _)| cap.is_none_or(|cap| *rung <= cap))
+        .map(|(rung, score)| (*rung, metric(score)))
+        .collect();
+    if usable.is_empty() {
+        return None;
+    }
+    usable.sort_by_key(|(rung, _)| *rung);
+    let best = usable
+        .iter()
+        .map(|(_, quality)| *quality)
+        .fold(f64::NEG_INFINITY, f64::max);
+    usable
+        .into_iter()
+        .find(|(_, quality)| best - *quality <= RUNG_QUALITY_BAND)
+        .and_then(|(rung, _)| rung.to_level())
+}
+
 /// Tokens for a Forge id: provider-derived family words (so the bare CLI bridges match) plus the
 /// model part's own tokens.
 fn id_tokens(id: &str) -> Vec<String> {
@@ -555,6 +615,70 @@ mod tests {
             coding(BenchEffort::Low) < coding(BenchEffort::Medium),
             "the ladder is not inverted either — low really is worse"
         );
+    }
+
+    #[test]
+    fn a_flat_coding_ladder_routes_far_below_the_top_rung() {
+        // The case that motivated all of this. Astra codes within 0.4 of its best rung at medium,
+        // so a coding turn takes medium and stops paying for reasoning tokens that buy nothing.
+        let ladder = astra_feed().efforts_for("codex-oauth::gpt-6-astra");
+        assert_eq!(
+            select_rung(&ladder, None, true),
+            Some(EffortLevel::Medium),
+            "coding ladder is flat above medium"
+        );
+    }
+
+    #[test]
+    fn a_steep_reasoning_ladder_on_the_same_model_still_routes_high() {
+        // Same model, same ladder, different metric — and the answer must differ, or the selector
+        // is just a constant. Astra's intelligence index climbs where its coding index does not.
+        let ladder = astra_feed().efforts_for("codex-oauth::gpt-6-astra");
+        assert_eq!(select_rung(&ladder, None, false), Some(EffortLevel::XHigh));
+    }
+
+    #[test]
+    fn the_ceiling_caps_the_choice_and_is_never_exceeded() {
+        let ladder = astra_feed().efforts_for("codex-oauth::gpt-6-astra");
+        for ceiling in [
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::XHigh,
+        ] {
+            let picked = select_rung(&ladder, Some(ceiling), false).expect("a rung is rated");
+            assert!(
+                BenchEffort::from_level(picked) <= BenchEffort::from_level(ceiling),
+                "picked {picked:?} above the ceiling {ceiling:?}"
+            );
+        }
+        // A low ceiling leaves exactly one rung, and it is taken rather than refused.
+        assert_eq!(
+            select_rung(&ladder, Some(EffortLevel::Low), false),
+            Some(EffortLevel::Low)
+        );
+    }
+
+    #[test]
+    fn a_model_is_never_routed_onto_the_non_reasoning_rung() {
+        // Astra's non-reasoning row (76.2 coding) is within a point of its best coding rung, so a
+        // band-only rule WOULD select it. Forge has no pin meaning "reasoning off", so a routing
+        // choice it cannot express must never be made.
+        let ladder = astra_feed().efforts_for("codex-oauth::gpt-6-astra");
+        let picked = select_rung(&ladder, None, true).expect("a rung is rated");
+        assert_ne!(picked, EffortLevel::Low, "low codes measurably worse");
+        assert!(
+            ladder
+                .iter()
+                .any(|(rung, _)| *rung == BenchEffort::NonReasoning),
+            "the fixture really does carry the rung this test guards against"
+        );
+    }
+
+    #[test]
+    fn a_model_with_no_rated_ladder_selects_nothing() {
+        // No ladder means no evidence. The caller must then send no rung rather than invent one.
+        assert_eq!(select_rung(&[], None, true), None);
     }
 
     #[test]

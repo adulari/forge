@@ -181,6 +181,9 @@ struct TurnActivity {
 pub struct App {
     pub session_id: String,
     pub routing: Option<RoutingView>,
+    /// The rung mesh chose for the routed model, when it had a measured ladder. Falls back to
+    /// `effort` (the session pin) for display, mirroring exactly what the request sends.
+    pub routed_effort: Option<forge_types::EffortLevel>,
     /// While `Some`, the mesh is recovering from a failed model attempt — drives the animated
     /// status indicator. The bool is `retrying`: true = same-model retry (backoff), false =
     /// searching for a replacement. Set on a `ModelSearch` event, cleared the moment real output
@@ -1024,7 +1027,12 @@ impl App {
                 tier,
                 model,
                 rationale,
+                effort,
             } => {
+                // Mesh's chosen rung, kept separately from the session pin: the statusline must
+                // report the rung actually being sent, and since auto-effort the pin is only the
+                // ceiling on that choice.
+                self.routed_effort = effort;
                 self.routing = Some(RoutingView {
                     tier,
                     model: crate::display_model(&model),
@@ -4916,6 +4924,7 @@ mod tests {
             ..Default::default()
         };
         app.apply(PresenterEvent::Routing {
+            effort: None,
             tier: "standard".into(),
             model: "openai::gpt-4o-mini".into(),
             rationale: "x".into(),
@@ -4961,6 +4970,43 @@ mod tests {
     }
 
     #[test]
+    fn the_rung_mesh_chose_is_what_the_statusline_reports() {
+        // End of the chain: mesh picked medium from astra's measured ladder with nothing pinned,
+        // and that is what the request sends — so that is what the marker must say. Reading the
+        // session pin instead would render ⟨auto⟩ for a turn whose rung was in fact chosen.
+        let mut app = App::default();
+        assert_eq!(app.effort, None, "nothing pinned");
+        app.apply(PresenterEvent::Routing {
+            tier: "complex".into(),
+            model: "codex-oauth::gpt-6-astra".into(),
+            rationale: "auto-selected".into(),
+            effort: Some(forge_types::EffortLevel::Medium),
+        });
+        let text = screen_wh(&app, 120, LIVE_H);
+        assert!(
+            text.contains("⟨med⟩"),
+            "mesh's chosen rung, not the empty pin: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_model_mesh_has_no_ladder_for_falls_back_to_the_pin() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::Effort(Some(forge_types::EffortLevel::High)));
+        app.apply(PresenterEvent::Routing {
+            tier: "complex".into(),
+            model: "codex-oauth::gpt-6-astra".into(),
+            rationale: "auto-selected".into(),
+            effort: None,
+        });
+        let text = screen_wh(&app, 120, LIVE_H);
+        assert!(
+            text.contains("⟨high⟩"),
+            "the pin still applies when mesh has no opinion: {text:?}"
+        );
+    }
+
+    #[test]
     fn statusline_names_the_provider_and_the_models_own_rung() {
         // The same model over codex-oauth, codex-cli and explabs is three routes with three costs,
         // quotas and effort ladders, so the provider is part of "what am I talking to".
@@ -4969,6 +5015,7 @@ mod tests {
             forge_types::EffortLevel::Medium,
         )));
         app.apply(PresenterEvent::Routing {
+            effort: None,
             tier: "standard".into(),
             model: "codex-oauth::gpt-6-astra".into(),
             rationale: "x".into(),
@@ -5404,6 +5451,7 @@ mod tests {
         app.on_turn_start();
         app.busy = true;
         app.apply(PresenterEvent::Routing {
+            effort: None,
             tier: "complex".into(),
             model: "qwencloud::qwen3.8-max-preview".into(),
             rationale: "pinned".into(),
@@ -5437,6 +5485,7 @@ mod tests {
         app.on_turn_start();
         app.busy = true;
         app.apply(PresenterEvent::Routing {
+            effort: None,
             tier: "complex".into(),
             model: "qwencloud::qwen3.8-max-preview".into(),
             rationale: "pinned".into(),

@@ -221,7 +221,11 @@ pub(super) async fn request_provider_response(
                 );
             };
             let completion_opts = CompletionOptions {
-                effort: session.pinned_effort,
+                // Mesh's chosen rung wins over the raw pin: it was selected from this model's
+                // MEASURED effort ladder with the pin already applied as a ceiling, so it is the
+                // pin refined by evidence rather than a value competing with it. The pin is the
+                // fallback for a model mesh has no ladder for, and `None` still sends nothing.
+                effort: decision.and_then(|d| d.effort).or(session.pinned_effort),
                 temperature: Some(CODING_TEMPERATURE),
                 checkpoint: Some(checkpoint_ctx.clone()),
                 prompt_cache_key: Some(checkpoint_ctx.session.clone()),
@@ -317,6 +321,7 @@ pub(super) async fn request_provider_response(
                                 .map(|d| d.tier.as_str().to_string())
                                 .unwrap_or_default(),
                             model: next.clone(),
+                            effort: decision.and_then(|d| d.effort),
                             rationale: if pacing_override {
                                 format!("{PACING_LAST_RESORT_RATIONALE}: {active_model} busy")
                             } else {
@@ -663,6 +668,7 @@ pub(super) async fn request_provider_response(
                         session.presenter.emit(PresenterEvent::Routing {
                             tier: d.tier.as_str().to_string(),
                             model: next.clone(),
+                            effort: d.effort,
                             rationale: format!("failover from {active_model}"),
                         });
                         session.note_cli_bridge_once(&next);
@@ -682,6 +688,7 @@ pub(super) async fn request_provider_response(
                                 session.presenter.emit(PresenterEvent::Routing {
                                     tier: d.tier.as_str().to_string(),
                                     model: next.clone(),
+                                    effort: d.effort,
                                     rationale: format!(
                                         "{PACING_LAST_RESORT_RATIONALE}: failover from \
                                          {active_model}, every non-held model exhausted"
@@ -715,6 +722,7 @@ pub(super) async fn request_provider_response(
                             session.presenter.emit(PresenterEvent::Routing {
                                 tier: d.tier.as_str().to_string(),
                                 model: m.clone(),
+                                effort: d.effort,
                                 rationale: "last-resort: least-recently-benched model".to_string(),
                             });
                             *active_model = m;

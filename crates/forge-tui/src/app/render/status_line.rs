@@ -69,7 +69,12 @@ fn render_statusline_widget<'a>(
             // The rung the MODEL runs at, glued to the model id so it reads as part of the model's
             // identity rather than as another independent chip. `mesh_effort_chip` renders Forge's
             // own routing effort separately — see `model_effort_marker` for why they differ.
-            if let Some((marker, style)) = model_effort_marker(model, app.effort) {
+            // `routed_effort.or(effort)` mirrors exactly what the request sends: mesh's chosen
+            // rung when it had a measured ladder, otherwise the session pin. Reading the pin alone
+            // would show ⟨auto⟩ for a turn mesh had in fact picked a rung for.
+            if let Some((marker, style)) =
+                model_effort_marker(model, app.routed_effort.or(app.effort))
+            {
                 spans.push(Span::styled(marker, style));
             }
             Some(spans)

@@ -308,6 +308,7 @@ mod session_affinity_tests {
         let context = dependent_context(WARM, TaskTier::Complex, 51_061);
         let decision = router.apply_session_affinity(
             RoutingDecision {
+                effort: None,
                 tier: TaskTier::Complex,
                 model: WARM.into(),
                 rationale: "normal continuation order".into(),
@@ -344,6 +345,7 @@ mod session_affinity_tests {
         let context = dependent_context(WARM, TaskTier::Complex, 48_000);
         let decision = router.apply_session_affinity(
             RoutingDecision {
+                effort: None,
                 tier: TaskTier::Complex,
                 model: BEST.into(),
                 rationale: "normal mesh order".into(),
@@ -766,6 +768,7 @@ mod session_affinity_tests {
             );
             let decision = router.apply_session_affinity(
                 RoutingDecision {
+                    effort: None,
                     tier: TaskTier::Complex,
                     model: (*base).into(),
                     rationale: "retained route replay".into(),
@@ -821,6 +824,7 @@ mod session_affinity_tests {
             );
         let restored = router.apply_session_affinity(
             RoutingDecision {
+                effort: None,
                 tier: TaskTier::Complex,
                 model: LUNA.into(),
                 rationale: "confirmation-v3 turn-4 replay".into(),
@@ -904,6 +908,13 @@ pub struct RoutingDecision {
     /// No model in the routed or fallback tiers can serve this turn. Consumers must stop before
     /// provider dispatch and surface `rationale` as the user-visible error.
     pub unroutable: bool,
+    /// The reasoning rung to run `model` at, chosen from its MEASURED effort ladder and capped by
+    /// the session's `/effort` pin (a ceiling, not an instruction — see `bench::select_rung`).
+    ///
+    /// `None` means mesh has no measured ladder for this model and expresses no opinion; the
+    /// caller then falls back to the session pin, and sends nothing if there isn't one. It does
+    /// NOT mean "no effort" — a rung Forge invented would be worse than the provider's own default.
+    pub effort: Option<EffortLevel>,
 }
 
 /// A routing strategy. `async` so an implementation may consult a model (e.g. the opt-in
@@ -1079,6 +1090,7 @@ pub trait Router: Send + Sync {
                 .await;
         };
         RoutingDecision {
+            effort: None,
             // Classification is skipped entirely, so report the tier the caller would otherwise
             // have paid a model call to learn nothing from.
             tier: TaskTier::Standard,
@@ -1203,6 +1215,28 @@ fn effective_min_context(min_tokens: Option<u32>, effort: Option<EffortLevel>) -
 }
 
 impl HeuristicRouter {
+    /// The reasoning rung to run `model` at.
+    ///
+    /// Auto-effort is always on: with nothing pinned this picks the cheapest rung that is not
+    /// measurably worse than the best one the model has, and a `/effort` pin only CAPS that choice
+    /// rather than dictating it. The saving is real and model-specific — GPT-6 Astra codes within
+    /// 0.4 index points of its top rung at medium — and it is only available because the measured
+    /// ladder is now kept instead of collapsed.
+    ///
+    /// The chosen rung is then resolved against the provider surface, so mesh can never name a rung
+    /// the route cannot be asked for. `None` means no measured ladder: mesh expresses no opinion
+    /// and the caller keeps whatever the session pinned.
+    fn rung_for(
+        &self,
+        model: &str,
+        ceiling: Option<EffortLevel>,
+        code_heavy: bool,
+    ) -> Option<EffortLevel> {
+        let ladder = self.catalog.as_ref()?.effort_ladder_for(model);
+        let selected = bench::select_rung(&ladder, ceiling, code_heavy)?;
+        forge_types::effort::resolve_id(model, Some(selected)).sent
+    }
+
     /// Documented in docs/features/mesh-routing.md.
     pub fn new(config: Config) -> Self {
         let pricing = pricing::Pricing::from_config(&config);
@@ -2592,6 +2626,7 @@ impl HeuristicRouter {
                 chain.clear();
             }
             return RoutingDecision {
+                effort: None,
                 tier: classified_tier,
                 model,
                 rationale: why,
@@ -2709,7 +2744,9 @@ impl HeuristicRouter {
                     why.push_str(&note);
                 }
                 chain.retain(|m| m != &model);
+                let rung = self.rung_for(&model, effort, hints.code_heavy);
                 RoutingDecision {
+                    effort: rung,
                     tier,
                     model,
                     rationale: why,
@@ -2736,6 +2773,7 @@ impl HeuristicRouter {
                     tier.as_str()
                 ));
                 RoutingDecision {
+                    effort: None,
                     tier,
                     model: original,
                     rationale: why,
@@ -2960,6 +2998,7 @@ impl Router for HeuristicRouter {
             .into_iter()
             .enumerate()
             .map(|(i, model)| RoutingDecision {
+                effort: None,
                 tier,
                 model,
                 rationale: format!("duel candidate #{} — {reason}", i + 1),
@@ -3004,6 +3043,7 @@ mod tests {
             _project: &ProjectContext,
         ) -> RoutingDecision {
             RoutingDecision {
+                effort: None,
                 tier: TaskTier::Trivial,
                 model: "mesh::would-have-classified".into(),
                 rationale: "classified".into(),
@@ -6020,6 +6060,7 @@ mod tests {
                 _project: &ProjectContext,
             ) -> RoutingDecision {
                 RoutingDecision {
+                    effort: None,
                     tier: TaskTier::Standard,
                     model: "fixed::model".into(),
                     rationale: "fixed".into(),
@@ -6157,5 +6198,72 @@ mod tests {
             d.model, "textonly::model-a",
             "fail-open: still routes even though no candidate supports vision"
         );
+    }
+}
+
+#[cfg(test)]
+mod rung_routing_tests {
+    use super::*;
+    use crate::bench::BenchmarkScores;
+    use crate::catalog::ModelCatalog;
+
+    /// The six rows Artificial Analysis publishes for GPT-6 Astra, verbatim from the live feed.
+    fn astra_catalog(id: &str) -> ModelCatalog {
+        let mut b = BenchmarkScores::new();
+        b.insert("GPT-6 Astra (Non-reasoning)", 47.8, 76.2);
+        b.insert("GPT-6 Astra (low)", 49.3, 75.7);
+        b.insert("GPT-6 Astra (medium)", 52.2, 76.7);
+        b.insert("GPT-6 Astra (high)", 53.4, 77.1);
+        b.insert("GPT-6 Astra (xhigh)", 54.3, 75.9);
+        b.insert("GPT-6 Astra (max)", 54.7, 76.9);
+        ModelCatalog::new(vec![id.to_string()]).with_benchmarks(Some(b))
+    }
+
+    fn router_for(id: &str) -> HeuristicRouter {
+        HeuristicRouter::new(Config::default()).with_catalog(astra_catalog(id))
+    }
+
+    #[test]
+    fn the_same_model_is_routed_at_different_rungs_for_coding_and_reasoning() {
+        // Astra's coding index is flat above medium (76.7 vs a 77.1 best) while its intelligence
+        // index keeps climbing (52.2 → 54.7). Routing both at one rung gets one of them wrong.
+        let id = "codex-oauth::gpt-6-astra";
+        let router = router_for(id);
+        assert_eq!(router.rung_for(id, None, true), Some(EffortLevel::Medium));
+        assert_eq!(router.rung_for(id, None, false), Some(EffortLevel::XHigh));
+    }
+
+    #[test]
+    fn a_pin_is_a_ceiling_that_is_never_exceeded() {
+        let id = "codex-oauth::gpt-6-astra";
+        let router = router_for(id);
+        // Pinning low really does hold it to low, rather than the rung mesh would have preferred.
+        assert_eq!(
+            router.rung_for(id, Some(EffortLevel::Low), false),
+            Some(EffortLevel::Low)
+        );
+        // And a ceiling ABOVE mesh's own choice does not drag the choice up to meet it: a coding
+        // turn stays at medium under a high pin, which is the whole saving.
+        assert_eq!(
+            router.rung_for(id, Some(EffortLevel::High), true),
+            Some(EffortLevel::Medium)
+        );
+    }
+
+    #[test]
+    fn mesh_never_names_a_rung_the_route_cannot_be_asked_for() {
+        // Same ladder, served over agy, which has only three rungs. Mesh's preferred xhigh must
+        // come back as high — the rung that surface can actually take — not as a value the
+        // transport would have to silently drop.
+        let id = "agy-cli::gpt-6-astra";
+        let router = router_for(id);
+        assert_eq!(router.rung_for(id, None, false), Some(EffortLevel::High));
+    }
+
+    #[test]
+    fn a_model_with_no_measured_ladder_leaves_the_rung_to_the_session() {
+        let router = HeuristicRouter::new(Config::default())
+            .with_catalog(ModelCatalog::new(vec!["groq::llama-3.3-70b".into()]));
+        assert_eq!(router.rung_for("groq::llama-3.3-70b", None, true), None);
     }
 }

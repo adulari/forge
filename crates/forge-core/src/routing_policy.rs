@@ -471,6 +471,7 @@ Rules:\n\
                 tier: forge_types::TaskTier::Complex.as_str().to_string(),
                 model: model.clone(),
                 rationale: "architect plan phase (no tools)".to_string(),
+                effort: None,
             });
 
             // Re-window the transcript for THIS model (a smaller fallback still fits), then prepend

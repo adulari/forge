@@ -61,6 +61,7 @@ impl Presenter for HeadlessPresenter {
                 tier,
                 model,
                 rationale,
+                ..
             } => {
                 let model = crate::display_model(&model);
                 println!("⚒ mesh → [{tier}] {model}  ({rationale})");

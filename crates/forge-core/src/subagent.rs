@@ -106,6 +106,7 @@ pub async fn route_child(
         // onto one model and make the feature meaningless. So this explicit per-child pin always
         // takes precedence over the effective session pin.
         return RoutingDecision {
+            effort: None,
             tier: agent.tier.unwrap_or(TaskTier::Standard),
             model: model.to_string(),
             rationale: "duel: pinned".to_string(),
@@ -147,6 +148,7 @@ pub async fn route_child(
         .and_then(|t| ctx.config.model_for(t).map(|m| (t, m)))
     {
         Some((tier, model)) => RoutingDecision {
+            effort: None,
             tier,
             model: model.to_string(),
             rationale: format!("pinned by agent type '{}'", agent.name),
@@ -1338,6 +1340,7 @@ mod tests {
             _project: &forge_types::ProjectContext,
         ) -> RoutingDecision {
             RoutingDecision {
+                effort: None,
                 tier: TaskTier::Standard,
                 model: self.model.clone(),
                 rationale: "test".into(),
@@ -1396,6 +1399,7 @@ mod tests {
         ) -> RoutingDecision {
             match &self.pinned {
                 Some(pin) => RoutingDecision {
+                    effort: None,
                     tier: TaskTier::Standard,
                     model: pin.clone(),
                     rationale: "pinned via --model".into(),
@@ -1404,6 +1408,7 @@ mod tests {
                     unroutable: false,
                 },
                 None => RoutingDecision {
+                    effort: None,
                     tier: TaskTier::Standard,
                     model: self.mesh_model.clone(),
                     rationale: "mesh".into(),
@@ -1424,6 +1429,7 @@ mod tests {
             _project: &forge_types::ProjectContext,
         ) -> RoutingDecision {
             RoutingDecision {
+                effort: None,
                 tier: TaskTier::Standard,
                 model: self.mesh_model.clone(),
                 rationale: "mesh".into(),
@@ -1447,6 +1453,7 @@ mod tests {
             // set, chain confined to the set.
             let model = pin.first().cloned().unwrap_or_default();
             RoutingDecision {
+                effort: None,
                 tier: TaskTier::Standard,
                 model,
                 rationale: "inherited pin".into(),

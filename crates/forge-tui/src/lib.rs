@@ -102,6 +102,7 @@ mod stream_json_tests {
             id: "sess-42".into(),
         });
         p.emit(PresenterEvent::Routing {
+            effort: None,
             tier: "standard".into(),
             model: "openai::gpt-4o".into(),
             rationale: "best coding score".into(),

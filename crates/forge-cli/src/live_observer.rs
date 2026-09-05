@@ -87,10 +87,14 @@ pub fn to_live_event(event: &PresenterEvent) -> Option<LiveEvent> {
             ok: *ok,
             summary: summary.clone(),
         }),
+        // The routed rung is deliberately not carried across this seam: `LiveEvent` is its own
+        // versioned wire contract, and a remote observer showing no rung is honest degradation
+        // where widening the protocol for a display detail is not.
         PresenterEvent::Routing {
             tier,
             model,
             rationale,
+            ..
         } => Some(LiveEvent::Routing {
             tier: tier.clone(),
             model: model.clone(),
@@ -182,6 +186,7 @@ pub fn live_event_to_presenter(event: LiveEvent) -> Option<PresenterEvent> {
             tier,
             model,
             rationale,
+            effort: None,
         }),
         LiveEvent::AuxiliaryRequest { model, purpose } => {
             Some(PresenterEvent::AuxiliaryRequest { model, purpose })

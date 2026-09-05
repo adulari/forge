@@ -891,6 +891,7 @@ mod tests {
             _project: &ProjectContext,
         ) -> RoutingDecision {
             RoutingDecision {
+                effort: None,
                 tier: forge_types::TaskTier::Standard,
                 model: self.model.clone(),
                 rationale: "test".into(),

@@ -905,6 +905,18 @@ impl ModelCatalog {
             .map(|score| (score.intelligence, score.coding))
     }
 
+    /// The model's measured effort ladder, weakest rung first. Empty when the benchmark source
+    /// rated it at a single undecorated effort, or not at all.
+    pub fn effort_ladder_for(
+        &self,
+        model: &str,
+    ) -> Vec<(crate::bench::BenchEffort, crate::bench::BenchScore)> {
+        self.bench
+            .as_ref()
+            .map(|bench| bench.efforts_for(model))
+            .unwrap_or_default()
+    }
+
     /// Bounded local execution evidence for one exact provider/model id.
     ///
     /// Calibration is keyed by the full id because provider and model-variant caches are not
