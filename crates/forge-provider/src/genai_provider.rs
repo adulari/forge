@@ -845,7 +845,11 @@ use error_policy::*;
 
 fn model_benefits_from_effort(model: &str) -> bool {
     let m = model.to_lowercase();
-    let is_openai_reasoning = ["o1", "o1-", "o3", "o3-", "o4", "o4-", "gpt-5"]
+    // `gpt-6` joined the list the day Astra shipped: it rejects a custom temperature exactly as
+    // the gpt-5 reasoning line does, and without it EVERY genai-served route carrying the model
+    // ("explabs::gpt-6-astra", "opencode::gpt-6-astra", …) fails the whole turn with
+    // `unsupported_parameter: temperature`.
+    let is_openai_reasoning = ["o1", "o1-", "o3", "o3-", "o4", "o4-", "gpt-5", "gpt-6"]
         .iter()
         .any(|needle| m == *needle || m.contains(&format!("::{needle}")) || m.contains(needle));
 
@@ -1419,6 +1423,12 @@ mod tests {
             "codex-oauth::gpt-5.6-sol",
             "openai::o3-mini",
             "nvidia::deepseek-ai/deepseek-r1",
+            // GPT-6. Live failure this pins: `explabs::gpt-6-astra` answered
+            // `unsupported_parameter: The parameter 'temperature' is not supported by this model
+            // route` and the turn died (2026-09-05) — the gpt-5 needle did not cover it.
+            "explabs::gpt-6-astra",
+            "opencode::gpt-6-astra",
+            "codex-cli::gpt-6-astra",
         ] {
             assert!(
                 super::model_benefits_from_effort(id),
