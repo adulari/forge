@@ -249,7 +249,7 @@ pub(crate) fn known_burn_weight(id: &str) -> Option<f64> {
     if bare_model(id).is_empty() {
         return match crate::catalog::provider_of(id) {
             "claude-cli" => known_burn_weight("claude-cli::opus"),
-            "codex-cli" => known_burn_weight("codex-cli::gpt-5.6-sol"),
+            "codex-cli" | "codex-oauth" => known_burn_weight("codex-cli::gpt-6-astra"),
             _ => None,
         };
     }
@@ -261,7 +261,11 @@ pub(crate) fn known_burn_weight(id: &str) -> Option<f64> {
     // the nominal 1000-in/500-out mix: luna $0.20/$1.20 → 0.0008; terra $2/$12 → 0.008 (10x);
     // sol $4/$20 → 0.014 (17.5x). The previous 5.0/2.5/1.0 described the pre-discount ladder
     // and under-credited Luna ~4x (models.dev `api.json`, openai provider, read 2026-09-02).
-    if has("sol") {
+    if has("astra") {
+        // GPT-6: $0.0350 on the same nominal mix, i.e. 43.75x Luna — derived on the SAME basis as
+        // its siblings below (cost / luna's cost), which reproduces their table values exactly.
+        Some(43.75)
+    } else if has("sol") {
         Some(17.5)
     } else if has("terra") {
         Some(10.0)
@@ -744,6 +748,35 @@ mod tests {
         );
     }
 
+    /// GPT-6 shipped to Codex subscribers matching no family token, so it fell through to the
+    /// neutral 1.0 — the LIGHTEST weight — and `subscription_burn_penalty` returns 0.0 there. The
+    /// most expensive model in the family was escaping pacing entirely while its cheaper siblings
+    /// were correctly penalized. Weight derived on the same basis as the rest of the ladder
+    /// (cost / luna's cost): $0.0350 / $0.0008 = 43.75.
+    #[test]
+    fn astra_burns_at_its_price_ratio_not_the_neutral_default() {
+        let no_overrides = HashMap::new();
+        let weight = |id: &str| subscription_burn_weight(id, &no_overrides);
+
+        assert_eq!(weight("codex-cli::gpt-6-astra"), 43.75);
+        assert_eq!(weight("codex-oauth::gpt-6-astra"), 43.75);
+        assert!(
+            weight("codex-cli::gpt-6-astra") > weight("codex-cli::gpt-5.6-sol"),
+            "the priciest model must not be lighter than the previous flagship"
+        );
+        // The ladder stays ordered by real cost across the whole family.
+        for (heavier, lighter) in [
+            ("gpt-6-astra", "gpt-5.6-sol"),
+            ("gpt-5.6-sol", "gpt-5.6-terra"),
+            ("gpt-5.6-terra", "gpt-5.6-luna"),
+        ] {
+            assert!(
+                weight(&format!("codex-cli::{heavier}")) > weight(&format!("codex-cli::{lighter}")),
+                "{heavier} must outweigh {lighter}"
+            );
+        }
+    }
+
     #[test]
     fn bare_bridge_aliases_burn_like_their_provider_flagship() {
         // `claude-cli::` means "the CLI's own default model" — unknown, so it used to score the
@@ -754,9 +787,21 @@ mod tests {
             subscription_burn_weight("claude-cli::", &no_overrides),
             subscription_burn_weight("claude-cli::opus", &no_overrides)
         );
+        // The flagship moved from sol to astra when GPT-6 shipped; the alias must track whichever
+        // model is currently heaviest, never a superseded one.
         assert_eq!(
             subscription_burn_weight("codex-cli::", &no_overrides),
-            subscription_burn_weight("codex-cli::gpt-5.6-sol", &no_overrides)
+            subscription_burn_weight("codex-cli::gpt-6-astra", &no_overrides)
+        );
+        assert!(
+            subscription_burn_weight("codex-cli::", &no_overrides)
+                >= subscription_burn_weight("codex-cli::gpt-5.6-sol", &no_overrides),
+            "the bare alias must never charge less than the previous flagship"
+        );
+        // codex-oauth is the same account and the same pool, so its bare alias charges the same.
+        assert_eq!(
+            subscription_burn_weight("codex-oauth::", &no_overrides),
+            subscription_burn_weight("codex-cli::gpt-6-astra", &no_overrides)
         );
         assert!(subscription_burn_weight("claude-cli::", &no_overrides) > 1.0);
         // An unknown provider's bare alias stays neutral rather than guessing a pool cost.

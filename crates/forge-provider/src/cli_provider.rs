@@ -867,6 +867,23 @@ fn read_bridge_model_cache(
         .unwrap_or_default()
 }
 
+/// The bare model names last advertised by `prefix`'s CLI, from the probe cache — empty when that
+/// CLI was never probed. Lets a sibling provider on the SAME account (codex-oauth ↔ codex-cli)
+/// learn about newly shipped models without its own `/models` endpoint.
+pub(crate) fn remembered_bridge_models(prefix: &str) -> Vec<String> {
+    match bridge_model_cache_path() {
+        Some(path) => remembered_bridge_models_at(&path, prefix),
+        None => Vec::new(),
+    }
+}
+
+fn remembered_bridge_models_at(path: &std::path::Path, prefix: &str) -> Vec<String> {
+    read_bridge_model_cache(path)
+        .get(prefix)
+        .map(|entry| entry.models.clone())
+        .unwrap_or_default()
+}
+
 fn remember_bridge_models_at(path: &std::path::Path, prefix: &str, models: &[String], now: u64) {
     if models.is_empty() {
         return;
@@ -6634,5 +6651,37 @@ esac
                 "non-deterministic parse_sink_line: {line:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod remembered_bridge_model_tests {
+    use super::*;
+
+    /// codex-oauth reads this cache to learn about models OpenAI shipped after the last Forge
+    /// release, so a reader that silently returns nothing would quietly restore the stale
+    /// hardcoded behaviour it exists to replace.
+    #[test]
+    fn the_cache_round_trips_what_the_cli_advertised() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bridge-models.json");
+        let advertised = vec!["gpt-6-astra".to_string(), "gpt-5.6-sol".to_string()];
+
+        remember_bridge_models_at(&path, "codex-cli", &advertised, 1_788_000_000);
+
+        assert_eq!(remembered_bridge_models_at(&path, "codex-cli"), advertised);
+        assert!(
+            remembered_bridge_models_at(&path, "claude-cli").is_empty(),
+            "an unprobed bridge reads as empty, not as another bridge's list"
+        );
+    }
+
+    #[test]
+    fn a_missing_cache_file_is_empty_not_an_error() {
+        assert!(remembered_bridge_models_at(
+            std::path::Path::new("/nonexistent/forge/bridge-models.json"),
+            "codex-cli",
+        )
+        .is_empty());
     }
 }
