@@ -13,6 +13,7 @@ mod claude_bridge_home;
 mod cli_provider;
 mod codex_oauth;
 mod codex_websocket;
+pub mod effort;
 mod embedder;
 mod error;
 mod genai_provider;

@@ -38,6 +38,7 @@ use crate::{
     CheckpointContext, CompletionOptions, EventSink, ModelResponse, Provider, ProviderError,
     StreamEvent, ToolSpec,
 };
+use forge_types::EffortLevel;
 
 /// Which official CLI to bridge to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1413,6 +1414,25 @@ fn build_args(
     args
 }
 
+/// The Forge provider namespace a bridge kind serves, so effort resolution reads the same ladder
+/// the rest of Forge does.
+fn provider_namespace(kind: CliKind) -> &'static str {
+    match kind {
+        CliKind::ClaudeCode => "claude-cli",
+        CliKind::Codex => "codex-cli",
+        CliKind::Antigravity => "agy-cli",
+    }
+}
+
+/// Append the flags that ask a bridge for a reasoning rung. Nothing is appended when no rung is
+/// being sent, so an unpinned turn keeps running at the provider's own default exactly as before.
+fn push_effort_args(args: &mut Vec<String>, kind: CliKind, effort: Option<EffortLevel>) {
+    let provider = provider_namespace(kind);
+    if let Some(level) = crate::effort::resolve(provider, "", effort).sent {
+        args.extend(crate::effort::bridge_args(provider, level));
+    }
+}
+
 /// Build the complete argv for a one-shot turn. Claude and Codex consume the prompt from stdin,
 /// while agy's `-p` accepts an optional value and otherwise consumes the following flag.
 fn build_oneshot_args(
@@ -1423,8 +1443,10 @@ fn build_oneshot_args(
     mcp_env: &[(String, String)],
     resume_id: Option<&str>,
     prompt: &str,
+    effort: Option<EffortLevel>,
 ) -> Vec<String> {
     let mut args = build_args(kind, bare_model, harness, forge_exe, mcp_env, resume_id);
+    push_effort_args(&mut args, kind, effort);
     if kind == CliKind::Antigravity {
         let print = args
             .iter_mut()
@@ -1744,7 +1766,7 @@ impl Provider for CliProvider {
     ) -> Result<ModelResponse, ProviderError> {
         // No explicit checkpoint context on the base path → the bridge child falls back to inherited
         // process env (legacy compatibility for callers that don't pass options).
-        self.complete_routed(model, messages, tools, None, on_event)
+        self.complete_routed(model, messages, tools, None, None, on_event)
             .await
     }
 
@@ -1758,8 +1780,15 @@ impl Provider for CliProvider {
     ) -> Result<ModelResponse, ProviderError> {
         // The parent threads its per-turn checkpoint context here instead of mutating process-global
         // env; it is forwarded to the spawned child's own `Command` env at the spawn site.
-        self.complete_routed(model, messages, tools, opts.checkpoint.as_ref(), on_event)
-            .await
+        self.complete_routed(
+            model,
+            messages,
+            tools,
+            opts.checkpoint.as_ref(),
+            opts.effort,
+            on_event,
+        )
+        .await
     }
 }
 
@@ -1773,6 +1802,7 @@ impl CliProvider {
         messages: &[Message],
         tools: &[ToolSpec],
         checkpoint: Option<&CheckpointContext>,
+        effort: Option<EffortLevel>,
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
         // P1 persistent transport (claude only, opt-out): drive the turn on a long-lived
@@ -1781,7 +1811,7 @@ impl CliProvider {
         // tool; `Failed` means the turn started (tools may have run) — propagate, don't re-run.
         if self.persistent && self.kind == CliKind::ClaudeCode {
             match self
-                .complete_persistent(model, messages, checkpoint, on_event)
+                .complete_persistent(model, messages, checkpoint, effort, on_event)
                 .await
             {
                 Ok(r) => return Ok(r),
@@ -1789,7 +1819,7 @@ impl CliProvider {
                 Err(PersistentTurn::Failed(e)) => return Err(e),
             }
         }
-        self.complete_oneshot(model, messages, tools, checkpoint, on_event)
+        self.complete_oneshot(model, messages, tools, checkpoint, effort, on_event)
             .await
     }
 
@@ -1803,6 +1833,7 @@ impl CliProvider {
         _tools: &[ToolSpec], // harness mode serves Forge's tools via `forge mcp-serve`, which
         // builds its own registry — not from this param; text mode uses the CLI's own tools.
         checkpoint: Option<&CheckpointContext>,
+        effort: Option<EffortLevel>,
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
         // Decide whether to RESUME the CLI's prior session (claude `--resume`) and send only the new
@@ -1898,6 +1929,7 @@ impl CliProvider {
             &mcp_env,
             resume_id.as_deref(),
             &prompt,
+            effort,
         );
 
         let mut cmd = bridge_command(&self.binary, &args);
@@ -2561,6 +2593,12 @@ struct LiveSession {
     /// running under the SAME temper — otherwise switching to Full/Auto-edit would keep writing
     /// through a child still enforcing the mode the session started in.
     permission_mode: Option<String>,
+    /// The reasoning rung baked into the process's argv at spawn (`--effort`). A live process
+    /// cannot be re-asked for a different rung, so — exactly like `permission_mode` above — a
+    /// parked session may only be reused for a turn running at the SAME rung. Without this, an
+    /// `/effort` change would keep driving turns on a process still running at the rung the
+    /// session started in, while every readout reported the new one.
+    effort: Option<EffortLevel>,
     sink_path: Option<std::path::PathBuf>,
     sub_rx: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
     tailer: Option<tokio::task::JoinHandle<()>>,
@@ -2907,6 +2945,7 @@ impl CliProvider {
         &self,
         bare: &str,
         checkpoint: Option<&CheckpointContext>,
+        effort: Option<EffortLevel>,
     ) -> std::io::Result<LiveSession> {
         let forge_exe = self.forge_executable();
         let sink_path: Option<std::path::PathBuf> = {
@@ -2935,6 +2974,7 @@ impl CliProvider {
         // No `--resume`: a persistent process holds its own context across turns. Add the
         // streaming-input flag so it reads user turns from stdin instead of one prompt + EOF.
         let mut args = build_args(self.kind, bare, self.harness, &forge_exe, &mcp_env, None);
+        push_effort_args(&mut args, self.kind, effort);
         args.push("--input-format".into());
         args.push("stream-json".into());
 
@@ -2979,6 +3019,7 @@ impl CliProvider {
             sent: 0,
             checkpoint_seq,
             permission_mode,
+            effort,
             sink_path,
             sub_rx,
             tailer,
@@ -2995,6 +3036,7 @@ impl CliProvider {
         model: &str,
         messages: &[Message],
         checkpoint: Option<&CheckpointContext>,
+        effort: Option<EffortLevel>,
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, PersistentTurn> {
         let bare = bare_model(model);
@@ -3014,12 +3056,12 @@ impl CliProvider {
         // isn't mid-turn from a prior call that never finished (see `LiveSession::turn_in_flight`) —
         // reusing that one would write a new turn into a stream whose read position is ambiguous.
         let reuse = matches!(&*guard, Some(s)
-            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.checkpoint_seq == checkpoint_seq && s.permission_mode == permission_mode && !s.turn_in_flight);
+            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.checkpoint_seq == checkpoint_seq && s.permission_mode == permission_mode && s.effort == effort && !s.turn_in_flight);
         if !reuse {
             if let Some(old) = guard.take() {
                 old.teardown().await;
             }
-            match self.spawn_live(bare, checkpoint).await {
+            match self.spawn_live(bare, checkpoint, effort).await {
                 Ok(s) => *guard = Some(s),
                 Err(e) => {
                     tracing::warn!("persistent bridge spawn failed, falling back to one-shot: {e}");
@@ -4133,6 +4175,7 @@ mod tests {
                 &[],
                 None,
                 prompt,
+                None,
             ),
             [
                 "-p",
@@ -4155,6 +4198,7 @@ mod tests {
                 &[],
                 None,
                 prompt,
+                None,
             ),
             [
                 "exec",
@@ -4175,6 +4219,7 @@ mod tests {
                 &[],
                 None,
                 prompt,
+                None,
             ),
             [
                 "-p=hello --from-forge",
@@ -4187,6 +4232,58 @@ mod tests {
                 "gemini-3.5-flash",
             ]
         );
+    }
+
+    #[test]
+    fn a_pinned_rung_reaches_each_bridge_in_its_own_spelling() {
+        // Every bridge exposes reasoning effort, each differently. Before this, Forge sent none of
+        // them: `/effort` moved routing only, and a bridged turn ran at whatever the binary (or,
+        // on codex's text path, the user's own ~/.codex/config.toml) happened to default to.
+        let argv = |kind, effort| {
+            build_oneshot_args(kind, "m", false, "/bin/forge", &[], None, "p", effort).join(" ")
+        };
+
+        assert!(
+            argv(CliKind::ClaudeCode, Some(EffortLevel::High)).contains("--effort high"),
+            "claude documents `--effort <level>`"
+        );
+        assert!(
+            argv(CliKind::Antigravity, Some(EffortLevel::Low)).contains("--effort low"),
+            "agy documents `--effort (low|medium|high)`"
+        );
+        assert!(
+            argv(CliKind::Codex, Some(EffortLevel::High))
+                .contains(r#"-c model_reasoning_effort="high""#),
+            "codex has no --effort flag; the rung is a config override"
+        );
+    }
+
+    #[test]
+    fn only_claude_reaches_the_top_rung_the_others_are_clamped() {
+        let argv = |kind, effort| {
+            build_oneshot_args(kind, "m", false, "/bin/forge", &[], None, "p", effort).join(" ")
+        };
+        let top = Some(EffortLevel::WhiteHot);
+
+        // claude's own help lists `max`, so white-hot reaches it.
+        assert!(argv(CliKind::ClaudeCode, top).contains("--effort max"));
+        // agy stops at high, codex at xhigh. Clamping keeps the turn running at the most effort
+        // the surface HAS; dropping the flag instead would hand it back to the provider default,
+        // which is a different and much weaker thing.
+        assert!(argv(CliKind::Antigravity, top).contains("--effort high"));
+        assert!(argv(CliKind::Codex, top).contains(r#"model_reasoning_effort="xhigh""#));
+    }
+
+    #[test]
+    fn an_unpinned_turn_adds_no_effort_flag_to_any_bridge() {
+        for kind in [CliKind::ClaudeCode, CliKind::Codex, CliKind::Antigravity] {
+            let argv =
+                build_oneshot_args(kind, "m", false, "/bin/forge", &[], None, "p", None).join(" ");
+            assert!(
+                !argv.contains("--effort") && !argv.contains("model_reasoning_effort"),
+                "{kind:?} must keep running at the provider default when nothing is pinned"
+            );
+        }
     }
 
     #[test]

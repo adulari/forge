@@ -1017,6 +1017,22 @@ fn apply_codex_body_overrides(body: &mut serde_json::Value, opts: &CompletionOpt
     if let Some(key) = opts.prompt_cache_key.as_deref() {
         body["prompt_cache_key"] = serde_json::json!(key);
     }
+    // The reasoning rung. Without it a pinned session ran at the backend's own default while every
+    // Forge readout reported the pinned level, and `/effort` could not move a codex-oauth turn at
+    // all — the generic Responses builder emits no reasoning field, and nothing here added one.
+    //
+    // `reasoning` is the Responses API's own object, NOT one of the params the ChatGPT backend
+    // rejects, so it is set AFTER `store`/`prompt_cache_key` and is deliberately not in
+    // CODEX_UNSUPPORTED_PARAMS. The rung is resolved through `effort::resolve` rather than mapped
+    // here so this surface's ceiling is stated in exactly one place.
+    let model = body
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let decision = crate::effort::resolve(CODEX_OAUTH_NAMESPACE, model, opts.effort);
+    if let Some(level) = decision.sent {
+        body["reasoning"]["effort"] = serde_json::json!(crate::effort::wire_name(level));
+    }
     if let Some(obj) = body.as_object_mut() {
         for k in CODEX_UNSUPPORTED_PARAMS {
             obj.remove(*k);
@@ -1220,7 +1236,7 @@ impl Provider for CodexOauthProvider {
 mod tests {
     use super::*;
     use crate::StreamEvent;
-    use forge_types::Role;
+    use forge_types::{EffortLevel, Role};
     use futures::{SinkExt, StreamExt};
 
     #[tokio::test]
@@ -1297,6 +1313,49 @@ mod tests {
         apply_codex_body_overrides(&mut bare, &Default::default());
         assert!(bare.get("prompt_cache_key").is_none());
         assert!(bare.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn a_pinned_rung_reaches_the_model_as_a_reasoning_effort() {
+        // Before this, `/effort` could not move a codex-oauth turn at all: the generic Responses
+        // builder emits no reasoning field and nothing here added one, so a pinned session ran at
+        // the backend default while Forge reported the pin.
+        let messages = vec![Message::user("hi")];
+        let opts = CompletionOptions {
+            effort: Some(EffortLevel::Medium),
+            ..Default::default()
+        };
+        let mut body =
+            build_responses_request("codex-oauth::gpt-6-astra", &messages, &[], &opts, 4096);
+        apply_codex_body_overrides(&mut body, &opts);
+        assert_eq!(body["reasoning"]["effort"], "medium");
+    }
+
+    #[test]
+    fn an_unpinned_turn_sends_no_reasoning_field_at_all() {
+        // Absence matters: sending a rung Forge invented would silently change how every existing
+        // unpinned session runs.
+        let messages = vec![Message::user("hi")];
+        let opts = CompletionOptions::default();
+        let mut body =
+            build_responses_request("codex-oauth::gpt-6-astra", &messages, &[], &opts, 4096);
+        apply_codex_body_overrides(&mut body, &opts);
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn white_hot_is_clamped_to_this_surfaces_ceiling_not_sent_raw() {
+        // `max` is a rung claude accepts and codex has no evidence of accepting. Being clamped one
+        // rung down is recoverable; a rejected turn is not.
+        let messages = vec![Message::user("hi")];
+        let opts = CompletionOptions {
+            effort: Some(EffortLevel::WhiteHot),
+            ..Default::default()
+        };
+        let mut body =
+            build_responses_request("codex-oauth::gpt-6-astra", &messages, &[], &opts, 4096);
+        apply_codex_body_overrides(&mut body, &opts);
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
     }
 
     #[test]
