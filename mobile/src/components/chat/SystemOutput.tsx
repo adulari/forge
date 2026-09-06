@@ -16,51 +16,13 @@ import { monoFamily, type } from "../../theme/typography";
 import { DiffLines } from "../review/DiffLines";
 import { renderAssayReport } from "../session/AssayView";
 import { IconButton } from "../ds/IconButton";
+import { summarizeToolLine } from "../../lib/toolRows";
 
 const COLLAPSE_LINES = 4;
 const COPY_RESET_MS = 1200;
 
 export interface SystemOutputProps {
   content: string;
-}
-
-// Preference order for the "primary target" pulled out of a tool call's JSON args — the first
-// of these present as a non-empty string wins. Covers the common shapes across Forge's tool
-// surface (file ops, shell, search) without needing per-tool-name special cases.
-const TARGET_KEYS = ["path", "file", "filepath", "file_path", "command", "cmd", "script", "query", "pattern", "url"];
-
-function truncateMiddle(value: string, max = 44): string {
-  const trimmed = value.trim();
-  if (trimmed.length <= max) return trimmed;
-  const head = Math.ceil((max - 1) / 2);
-  const tail = Math.floor((max - 1) / 2);
-  return `${trimmed.slice(0, head)}…${trimmed.slice(trimmed.length - tail)}`;
-}
-
-/**
- * Turns a transcript/tool-call line (e.g. `↳ write_file {"content":"…","cwd":"…"}`) into a
- * compact one-line summary. A line with no `{…}` blob is already clean and passes through
- * unchanged; a JSON blob is parsed for a recognizable target field instead of ever being
- * rendered verbatim — falls back to the bare tool name (never the raw args) if nothing
- * recognizable is found or the blob doesn't parse.
- */
-export function summarizeToolLine(rawLine: string): string {
-  const line = rawLine.replace(/^↳\s*/, "").trim();
-  const braceIdx = line.indexOf("{");
-  if (braceIdx === -1) return line;
-  const name = line.slice(0, braceIdx).trim().replace(/[:(]+$/, "") || "tool";
-  let argsText = line.slice(braceIdx);
-  if (argsText.endsWith(")")) argsText = argsText.slice(0, -1);
-  try {
-    const parsed = JSON.parse(argsText) as Record<string, unknown>;
-    for (const key of TARGET_KEYS) {
-      const value = parsed[key];
-      if (typeof value === "string" && value.length > 0) return `${name} ${truncateMiddle(value)}`;
-    }
-  } catch {
-    // unparsable args — fall through to the bare tool name rather than leak raw text
-  }
-  return name;
 }
 
 // A recognizable assay report (the headless runner's `◈ ASSAY REPORT` plain block or a

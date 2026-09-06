@@ -2,7 +2,7 @@
 // CodeBlock body for user/assistant; system rows (tool/diff-ish output) render compact mono
 // per the same materials CodeBlock uses, without a full Markdown pass over structured text.
 import React, { useState } from "react";
-import { Platform, Pressable, StyleSheet, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import type { HistoryRow } from "../../lib/api";
@@ -11,7 +11,8 @@ import { haptics } from "../../lib/haptics";
 import { useSessionCtx } from "../../lib/sessionContext";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii, space } from "../../theme/tokens";
+import { monoFamily, type as typeScale } from "../../theme/typography";
+import { hexToRgba, radii, space } from "../../theme/tokens";
 import { AttachmentRow } from "./Attachments";
 import type { SentAttachment } from "./attach";
 import { Markdown } from "./Markdown";
@@ -92,6 +93,44 @@ export function displayMessageText(row: HistoryRow): string {
   return row.content;
 }
 
+/** The trailing segment of a model id — `opencode::muse-spark-1.3` reads as `muse-spark-1.3`.
+ * The provider prefix is noise beside a message; the model name is what identifies the answer. */
+export function shortModel(model: string | null | undefined): string {
+  if (!model) return "";
+  const tail = model.split("::").pop() ?? model;
+  return tail.split("/").pop() ?? tail;
+}
+
+/**
+ * Who is speaking. Before this, a user turn and an assistant turn were told apart only by a
+ * hairline box around one of them — on a phone, with a short prompt and a short reply, that is
+ * not a legible difference. Every turn now names its speaker in a micro-caps eyebrow: the user's
+ * in neutral ink, Forge's in accent with the answering model beside it.
+ */
+export function SpeakerTag({ speaker, model }: { speaker: "you" | "forge"; model?: string | null }) {
+  const tokens = useTokens();
+  const isUser = speaker === "you";
+  const name = shortModel(model);
+  return (
+    <View style={styles.speaker}>
+      <View
+        style={[styles.speakerDot, { backgroundColor: isUser ? tokens.ink4 : tokens.accent }]}
+      />
+      <Text style={[typeScale.section, { color: isUser ? tokens.ink3 : tokens.accent }]}>
+        {isUser ? "You" : "Forge"}
+      </Text>
+      {!isUser && name ? (
+        <Text
+          style={[typeScale.monoMeta, styles.speakerModel, { color: tokens.ink4 }]}
+          numberOfLines={1}
+        >
+          {name}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
 function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const tokens = useTokens();
   // Entrance only for rows that just arrived — virtualization remounts rows while
@@ -101,7 +140,10 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const entrance = useForgeline(Math.max(0, row.seq), isFresh);
   const { baseUrl, sessionId } = useSessionCtx();
   const isUser = row.role === "user";
-  const isSystem = row.role === "system";
+  // A `kind: "tool"` row (only ever on an `include_tools` page) is machine output, not a turn —
+  // the chat renders those through ToolCallRow, and this guard keeps any that slip through from
+  // being formatted as assistant prose.
+  const isSystem = row.role === "system" || row.role === "tool" || row.kind === "tool";
   // Hearth: no on-row chrome at all — message actions live behind long-press (native and
   // touch-web) and right-click (desktop/web). Hover buttons were tried and cut.
 
@@ -165,7 +207,14 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         style={[
           styles.bubble,
           isUser
-            ? [styles.userBubble, { backgroundColor: tokens.bg2, borderColor: tokens.border }]
+            ? [
+                styles.userBubble,
+                {
+                  backgroundColor: tokens.bg2,
+                  borderColor: tokens.border,
+                  borderLeftColor: hexToRgba(tokens.accent, 0.45),
+                },
+              ]
             : { backgroundColor: "transparent" },
           IS_WEB && (webTextCursor as object),
         ]}
@@ -174,6 +223,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         {historyFileAttachments.length > 0 ? (
           <AttachmentRow attachments={historyFileAttachments} />
         ) : null}
+        {isSystem ? null : <SpeakerTag speaker={isUser ? "you" : "forge"} model={row.model} />}
         {isSystem ? (
           <SystemOutput content={row.content} />
         ) : parsed ? (
@@ -202,5 +252,10 @@ const styles = StyleSheet.create({
   // gutter as everything else in the transcript. Only the user turn gets a quiet bordered box.
   bubble: { borderRadius: radii.radius8, paddingHorizontal: space.space12, paddingVertical: space.space8 },
   // Full-width bordered quiet box (bg2, hairline, radius4) — not a right-aligned chat bubble.
-  userBubble: { width: "100%", borderWidth: StyleSheet.hairlineWidth },
+  // The accent left edge is the second half of the speaker cue: the eyebrow names the speaker,
+  // the edge makes the block scannable without reading it.
+  userBubble: { width: "100%", borderWidth: StyleSheet.hairlineWidth, borderLeftWidth: 2 },
+  speaker: { flexDirection: "row", alignItems: "center", gap: space.space4, paddingBottom: space.space4 },
+  speakerDot: { width: 4, height: 4, borderRadius: radii.radiusPill },
+  speakerModel: { flexShrink: 1, fontFamily: monoFamily.regular },
 });

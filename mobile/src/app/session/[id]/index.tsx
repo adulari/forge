@@ -37,9 +37,10 @@ import { Composer } from "../../../components/chat/Composer";
 import { MessageActionsMenu } from "../../../components/chat/MessageActionsMenu";
 import { MessageActionsSheet } from "../../../components/chat/MessageActionsSheet";
 import { Markdown } from "../../../components/chat/Markdown";
-import { MessageRow } from "../../../components/chat/MessageRow";
+import { MessageRow, SpeakerTag } from "../../../components/chat/MessageRow";
+import { ToolCallRow } from "../../../components/chat/ToolCallRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
-import { summarizeToolLine } from "../../../components/chat/SystemOutput";
+import { buildTranscript, summarizeToolLine, type ToolInvocation } from "../../../lib/toolRows";
 import { SubagentStrip } from "../../../components/session/SubagentStrip";
 import { BellowsSpinner } from "../../../components/ds/BellowsSpinner";
 import { BoundedList } from "../../../components/ds/BoundedList";
@@ -71,6 +72,7 @@ function offlineQueueKey(baseUrl: string | null, sessionId: string): string {
 type TimelineItem =
   | { kind: "streaming"; id: string; text: string; streaming: boolean }
   | { kind: "history"; id: string; row: HistoryRow }
+  | { kind: "tool"; id: string; invocation: ToolInvocation }
   | { kind: "filler"; id: string; text: string }
   | { kind: "note"; id: string; text: string }
   | { kind: "pendingSent"; id: string; text: string; attachments: SentAttachment[] };
@@ -212,7 +214,9 @@ export default function SessionChat() {
   const toast = useToast();
   const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer, draftText, setDraftText, focusComposer } = useSessionCtx();
 
-  const historyQuery = useHistory(sessionId);
+  // The chat opts into tool rows so a turn's tool activity renders inline (ToolCallRow),
+  // instead of the tool-less stream the fork picker and turn watcher still use.
+  const historyQuery = useHistory(sessionId, { includeTools: true });
   // `read_only` means there is genuinely no input path: a terminal session whose Forge build
   // predates the control channel, or whose user opted out of it. A terminal session that DID
   // publish one reports `read_only: false` — the daemon proxies this WS straight into it — so the
@@ -553,8 +557,15 @@ export default function SessionChat() {
       list.push({ kind: "pendingSent", id: p.id, text: p.text, attachments: p.attachments });
     }
     if (!useTranscriptFiller) {
-      for (const row of historyRows) {
-        list.push({ kind: "history", id: `h${row.seq}`, row });
+      // Collapse the call/result row PAIR the daemon serves into one ToolCallRow entry, and keep
+      // ordinary turns as message rows. `historyRows` is already newest-first, which is what
+      // buildTranscript takes and returns.
+      for (const entry of buildTranscript(historyRows)) {
+        if (entry.kind === "tool") {
+          list.push({ kind: "tool", id: entry.key, invocation: entry.invocation });
+        } else {
+          list.push({ kind: "history", id: `h${entry.row.seq}`, row: entry.row });
+        }
       }
     } else {
       // Snapshot transcript is chronological (oldest->newest); walk it back-to-front for the
@@ -613,6 +624,8 @@ export default function SessionChat() {
       switch (item.kind) {
         case "history":
           return <MessageRow row={item.row} onLongPress={onMessageLongPress} />;
+        case "tool":
+          return <ToolCallRow invocation={item.invocation} />;
         case "pendingSent":
           // Renders through the same MessageRow the real (server-truth) row will use once
           // history lands, so there's no visual "jump" when this optimistic bubble is replaced.
@@ -656,6 +669,7 @@ export default function SessionChat() {
           }
           return (
             <View style={styles.streamingRow}>
+              {parsed.answer ? <SpeakerTag speaker="forge" /> : null}
               {hasReasoning ? (
                 <ReasoningDisclosure
                   reasoning={parsed.reasoning}
