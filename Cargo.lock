@@ -2309,6 +2309,7 @@ name = "forge-agent-proxy"
 version = "2.13.9"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "reqwest",
  "serde",
  "serde_json",

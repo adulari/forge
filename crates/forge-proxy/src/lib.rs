@@ -30,7 +30,7 @@ mod session;
 
 pub use flows::{Filter, Flow};
 pub use rules::{BodyRule, HeaderRule, InterceptRules, StubRule};
-pub use session::{Proxy, ProxyStatus};
+pub use session::{BodySide, Proxy, ProxyStatus, StartOptions};
 
 /// The addon mitmdump loads. Compiled in rather than shipped alongside the binary: a Forge that
 /// found no addon file would start a proxy that captured nothing, and the failure would look like
