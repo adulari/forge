@@ -55,11 +55,26 @@ impl Session {
         if osc_count == 1 {
             *doom_nudged = false;
         }
+        // How many DIFFERENT things the model did in the window. A real cycle is dominated by
+        // repetition — A,A,A or A,B,A,B — so it holds at most two distinct signatures.
+        //
+        // Requiring that is what keeps act-then-observe workflows out of this guard. Driving a UI
+        // goes tap, ui, tap, ui…: the observation is byte-identical every time (same tool, same
+        // args, so the same signature) while every action differs, which pushed a *productive*
+        // loop to `osc_count == 3` on the observation alone and nudged a model that was making
+        // progress. Browser and device work cannot be done any other way — you have to look at
+        // the screen between taps — so the repeated look is the shape of progress here, not
+        // evidence against it. A model genuinely stuck tapping the same element still trips this:
+        // its taps repeat too, leaving two distinct signatures.
+        let distinct_sigs = recent_sigs
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let cycling = distinct_sigs <= 2 && osc_count >= DOOM_LOOP_THRESHOLD;
         // Distinguish the two loop shapes so the warning isn't misleading: a true A,A,A repeat
         // vs an A,B,A,B oscillation (where the model did NOT repeat the *same* call back-to-back).
-        let is_oscillation =
-            osc_count >= DOOM_LOOP_THRESHOLD && *repeat_count + 1 < DOOM_LOOP_THRESHOLD;
-        if *repeat_count + 1 >= DOOM_LOOP_THRESHOLD || osc_count >= DOOM_LOOP_THRESHOLD {
+        let is_oscillation = cycling && *repeat_count + 1 < DOOM_LOOP_THRESHOLD;
+        if *repeat_count + 1 >= DOOM_LOOP_THRESHOLD || cycling {
             if !*doom_nudged {
                 // First time: don't kill the turn. Tell it the loop won't make progress and to
                 // switch approach — a weaker model usually breaks out of the rut. Queue the nudge

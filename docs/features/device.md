@@ -64,6 +64,16 @@ Coordinates still win when both are given — some things genuinely have no acce
 Layout-only nodes are hidden by default: a real screen is a few hundred nodes of which a dozen
 matter, and the rest is `FrameLayout` nesting. Pass `all: true` when you need the full tree.
 
+## Sharing a device
+
+Two sessions can drive one device. Each dump is written to a path carrying the process id, so
+concurrent reads cannot see each other's half-written file, and a dump that loses a race is retried
+before it is reported.
+
+`uiautomator` refuses to dump while another client holds it — a second session, or an
+Appium/uiautomator2 server — and reports that by failing with an empty message. When the retries
+are exhausted the error names those causes rather than passing the silence along.
+
 ## Waiting
 
 `wait_for` polls the hierarchy until an element appears, which is what makes a flow reliable across

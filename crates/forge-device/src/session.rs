@@ -286,8 +286,37 @@ impl Device {
     ///
     /// Written to a file and read back rather than using `dump /dev/tty`: the tty form interleaves
     /// a status line with the XML and mangles output on several vendor builds.
+    ///
+    /// The path carries this process's pid because two Forge sessions may drive one device, and a
+    /// shared filename means one reads the other's half-written dump. The retry is for the same
+    /// reason plus animations: `uiautomator` refuses while another dump holds it or while the
+    /// window is still settling, and it reports that by failing with an empty stderr — which,
+    /// surfaced as-is, tells a caller nothing and invites a blind retry loop.
     pub async fn dump_ui(&self) -> Result<Hierarchy> {
-        let remote = "/sdcard/forge-ui-dump.xml";
+        const ATTEMPTS: usize = 3;
+        let remote = format!("/sdcard/forge-ui-dump-{}.xml", std::process::id());
+        let mut last = String::new();
+        for attempt in 0..ATTEMPTS {
+            match self.try_dump(&remote).await {
+                Ok(tree) => return Ok(tree),
+                Err(error) => {
+                    last = error.to_string();
+                    if attempt + 1 < ATTEMPTS {
+                        tokio::time::sleep(Duration::from_millis(600)).await;
+                    }
+                }
+            }
+        }
+        bail!(
+            "could not read the screen after {ATTEMPTS} attempts: {last}\n\
+             uiautomator refuses to dump while another client holds it (a second Forge session, \
+             or an Appium/uiautomator2 server), while the screen is off, and on a window marked \
+             FLAG_SECURE such as a password or payment sheet. A screenshot still works on a \
+             secure window; the hierarchy does not."
+        )
+    }
+
+    async fn try_dump(&self, remote: &str) -> Result<Hierarchy> {
         let status = self
             .adb
             .shell_timeout(
@@ -296,7 +325,7 @@ impl Device {
             )
             .await?;
         if status.contains("ERROR") || status.contains("could not get idle state") {
-            bail!("uiautomator could not dump the screen: {status}");
+            bail!("uiautomator said: {status}");
         }
         let xml = self
             .adb
@@ -304,17 +333,35 @@ impl Device {
             .await?;
         let tree = Hierarchy::parse(&xml);
         if tree.nodes.is_empty() {
-            bail!("the screen dump contained no nodes — the screen may be off or secure");
+            bail!("the dump contained no nodes");
         }
         Ok(tree)
     }
 
-    /// Find one element, erroring when the selector is ambiguous or matches nothing.
+    /// Find one element, erroring when the selector matches nothing.
+    ///
+    /// A miss reports what IS on screen. "no element matched" on its own tells a caller nothing
+    /// about whether the screen moved on, the label differs, or the element has not appeared yet,
+    /// and the only move left is to guess again — which is how a tap/dump/tap retry loop starts.
     pub async fn find_one(&self, selector: &Selector) -> Result<UiNode> {
         let tree = self.dump_ui().await?;
         let matches = tree.find(selector);
         match matches.as_slice() {
-            [] => bail!("no element matched"),
+            [] => {
+                let (visible, _) = tree.interesting();
+                let listing =
+                    crate::ui::outline(&visible.iter().take(20).copied().collect::<Vec<_>>());
+                let more = visible.len().saturating_sub(20);
+                bail!(
+                    "no element matched. {} element(s) are on screen{}:\n{listing}",
+                    visible.len(),
+                    if more > 0 {
+                        format!(", first 20 of them shown, {more} not listed")
+                    } else {
+                        String::new()
+                    }
+                )
+            }
             [only] => Ok((*only).clone()),
             many => Ok((*many[0]).clone()),
         }

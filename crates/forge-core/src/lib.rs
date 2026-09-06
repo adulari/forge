@@ -6486,6 +6486,89 @@ mod tests {
         );
     }
 
+    /// Act, then observe, then act — the shape of driving a UI. The observation is byte-identical
+    /// every step (same tool, same args) while every action differs, exactly as `device`'s
+    /// `ui` + `tap` or the browser's `html` + `click` behave.
+    struct ActObserveProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for ActObserveProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_types::{new_id, ToolCall, Usage};
+            let n = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Odd steps re-read the SAME file (the observation); even steps each read a different
+            // one (the action). Nine steps is three full act/observe cycles.
+            let args = if n.is_multiple_of(2) {
+                serde_json::json!({"path": format!("Cargo.toml#{n}")})
+            } else {
+                serde_json::json!({"path": "Cargo.toml"})
+            };
+            Ok(forge_provider::ModelResponse {
+                content: String::new(),
+                tool_calls: if n < 9 {
+                    vec![ToolCall {
+                        id: new_id(),
+                        name: "read_file".into(),
+                        args,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                usage: Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_identical_observation_between_differing_actions_is_progress_not_a_loop() {
+        // Regression: the oscillation guard counted only how often ONE signature recurred in the
+        // window, so a productive tap/ui/tap/ui flow tripped it on the repeated `ui` alone — the
+        // observation is necessarily identical, while every tap differed. Driving a device or a
+        // browser cannot be done without looking between actions, so this must not fire.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(ActObserveProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            Config::default(),
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("drive the screen").await.unwrap();
+
+        let complaints: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                PresenterEvent::Warning(w) | PresenterEvent::Error(w) => Some(w.clone()),
+                _ => None,
+            })
+            .filter(|w| w.contains("alternating") || w.contains("repeated the same tool call"))
+            .collect();
+        assert!(
+            complaints.is_empty(),
+            "an act-observe workflow was flagged as a loop: {complaints:?}"
+        );
+    }
+
     /// Reads a UNIQUE non-existent path each call. Every call fails the same WAY (`NotFound`) but with
     /// DIFFERENT args, so the identical-call doom-loop never fires — only the failure-loop guard,
     /// which tracks failures by (tool, error-kind) across the turn, can catch it.
