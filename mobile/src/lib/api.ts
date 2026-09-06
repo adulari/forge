@@ -379,7 +379,10 @@ export type TranscriptKind = "user" | "assistant" | "tool" | "system";
 
 export interface HistoryRow {
   seq: number;
-  role: "user" | "assistant" | "system";
+  /** `"tool"` only ever appears on a page fetched with `include_tools` — the daemon serves the
+   * stored role verbatim (remote_projection.rs `map_history_row`), and tool rows are the one
+   * role the default page never selects. */
+  role: "user" | "assistant" | "system" | "tool";
   content: string;
   model: string | null;
   created_at: number;
