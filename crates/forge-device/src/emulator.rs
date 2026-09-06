@@ -43,7 +43,7 @@ pub struct BootOptions {
     pub memory_mb: Option<u32>,
     /// Guest CPU cores. `None` uses the AVD's own setting.
     pub cores: Option<u32>,
-    /// `-gpu` mode. `None` picks `swiftshader_indirect` headless, `host` with a window.
+    /// `-gpu` mode. `None` picks `auto-no-window` headless, `host` with a window.
     pub gpu: Option<String>,
     /// Ignore the saved quick-boot snapshot and boot from scratch. Slower, but the only way to be
     /// sure of the starting state when a snapshot may be stale.
@@ -83,11 +83,19 @@ impl BootOptions {
         if self.headless {
             args.push("-no-window".into());
         }
-        // Software GL headless: there is no surface to hand to the host driver, and asking for one
-        // is a common way for a headless boot to hang instead of failing.
+        // Headless still wants the host driver when there is one. `auto-no-window` is the
+        // emulator's own headless renderer selection: it uses the host GPU where that works and
+        // falls back to software itself, without the caller having to guess.
+        //
+        // Naming `swiftshader_indirect` here instead — the old default — is what made a headless
+        // boot fragile. SwiftShader renders in JIT-compiled shader code, and a bad draw call from
+        // the guest faults INSIDE that code (an out-of-bounds SIMD load), which is a SIGSEGV in
+        // the emulator process, not a dropped frame: the whole device dies mid-test. It also
+        // renders a phone-sized screen on the CPU, which on a laptop means thermal throttling for
+        // whatever else is building. Software GL is still available by asking for it.
         let gpu = self.gpu.clone().unwrap_or_else(|| {
             if self.headless {
-                "swiftshader_indirect".into()
+                "auto-no-window".into()
             } else {
                 "host".into()
             }
@@ -338,14 +346,19 @@ mod tests {
     }
 
     #[test]
-    fn headless_boots_on_software_gl_and_windowed_on_the_host_driver() {
+    fn neither_headless_nor_windowed_falls_back_to_software_gl_on_its_own() {
         let headless = BootOptions {
             headless: true,
             ..BootOptions::light()
         };
         let args = headless.args("Pixel");
         let gpu = args.iter().position(|arg| arg == "-gpu").expect("-gpu");
-        assert_eq!(args[gpu + 1], "swiftshader_indirect");
+        assert_eq!(
+            args[gpu + 1],
+            "auto-no-window",
+            "a headless boot must not silently pick swiftshader_indirect: its JIT shader code \
+             segfaults the whole emulator on a bad guest draw call"
+        );
         assert!(args.iter().any(|arg| arg == "-no-window"));
 
         let windowed = BootOptions::light().args("Pixel");

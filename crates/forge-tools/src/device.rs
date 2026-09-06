@@ -146,7 +146,7 @@ impl Tool for DeviceTool {
                 "cold_boot": {"type": "boolean", "description": "For emulator_start: ignore the quick-boot snapshot. Slower but certain."},
                 "memory_mb": {"type": "integer", "description": "For emulator_start: guest RAM. Default 2048 — a deliberately small emulator."},
                 "cores": {"type": "integer", "description": "For emulator_start: guest CPU cores. Default 2."},
-                "gpu": {"type": "string", "description": "For emulator_start: -gpu mode. Default swiftshader_indirect headless, host otherwise."},
+                "gpu": {"type": "string", "description": "For emulator_start: -gpu mode. Default auto-no-window headless, host otherwise. swiftshader_indirect is available but renders on the CPU and can segfault the emulator."},
                 "writable_system": {
                     "type": "boolean",
                     "description": "For emulator_start: mount /system writable. Required later if \
