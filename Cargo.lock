@@ -2163,6 +2163,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-agent-device"
+version = "2.13.9"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "forge-agent-genai"
 version = "0.6.5-forge.1"
 dependencies = [
@@ -2335,6 +2346,7 @@ version = "2.13.9"
 dependencies = [
  "async-trait",
  "forge-agent-browser",
+ "forge-agent-device",
  "forge-agent-index",
  "forge-agent-proxy",
  "forge-agent-types",

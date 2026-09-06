@@ -18,6 +18,7 @@ tokio::task_local! {
 
 mod browser;
 mod core_tools;
+mod device;
 mod discovery_tools;
 mod lattice_tool;
 mod proxy;
@@ -30,6 +31,7 @@ pub use core_tools::{
     AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, MultiEditTool, NotebookEditTool,
     ReadFileTool, WriteFileTool,
 };
+pub use device::{DeviceLogsTool, DeviceTool};
 pub use lattice_tool::LatticeTool;
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};
@@ -145,6 +147,8 @@ impl ToolRegistry {
         r.register(Box::new(BrowserNetworkTool));
         r.register(Box::new(ProxyTool));
         r.register(Box::new(ProxyNetworkTool));
+        r.register(Box::new(DeviceTool));
+        r.register(Box::new(DeviceLogsTool));
         r
     }
 
