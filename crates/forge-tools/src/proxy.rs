@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use forge_proxy::{Filter, InterceptRules, Proxy};
+use forge_proxy::{BodySide, Filter, InterceptRules, Proxy, StartOptions};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
@@ -65,10 +65,14 @@ impl Tool for ProxyTool {
          canned response, so you can ask what the app does when an API fails, returns something \
          else, or disappears — rules apply to the next request with no restart. \"replay\" \
          re-issues a captured request from this machine with your changes, turning a one-shot \
-         mobile request into something you can iterate on. Note: certificate pinning defeats \
-         interception for apps that use it, and on Android 7+ a user-installed CA is not trusted \
-         by apps unless the app opts in. Actions: start, status, intercept, intercept_clear, \
-         replay, stop."
+         mobile request into something you can iterate on. For full custom control, \"start\" \
+         takes extra_addon (your own mitmproxy addon loaded alongside the built-in one, never \
+         overwritten) and max_body (raise the capture cap). Binary bodies (protobuf, gRPC) are \
+         captured too — retrieve the real bytes with proxy_network body save_to. Note: \
+         certificate pinning defeats interception for apps that use it, and on Android 7+ a \
+         user-installed CA is not trusted by apps unless the app opts in. Starting again stops \
+         the previous proxy first. Actions: start, status, intercept, intercept_clear, replay, \
+         stop."
     }
 
     fn side_effect(&self) -> SideEffect {
@@ -85,6 +89,8 @@ impl Tool for ProxyTool {
                     "description": "What to do."
                 },
                 "port": {"type": "integer", "description": "For start. Default 8080."},
+                "max_body": {"type": "integer", "description": "For start: per-body capture cap in bytes (default 131072). Raise it when a payload you need comes back clipped."},
+                "extra_addon": {"type": "string", "description": "For start: path to your own mitmproxy addon (.py), loaded ALONGSIDE the built-in capture addon for full custom control (decode a wire format, sign a request, etc.). Your file is never overwritten; the built-in addon is."},
                 "request_id": {"type": "string", "description": "For replay — the id from proxy_network list."},
                 "method": {"type": "string", "description": "For replay: override the HTTP method."},
                 "headers": {
@@ -128,18 +134,40 @@ impl Tool for ProxyTool {
         match action.as_str() {
             "start" => {
                 let port = args.get("port").and_then(Value::as_u64).map(|p| p as u16);
-                let proxy = Proxy::start(port, &capture_dir())
+                let options = StartOptions {
+                    max_body: args
+                        .get("max_body")
+                        .and_then(Value::as_u64)
+                        .map(|b| b as usize),
+                    extra_addon: str_arg(args, "extra_addon").map(std::path::PathBuf::from),
+                };
+                // Stop any proxy already running before starting a new one. Two mitmdumps racing
+                // for the same port and capture file was a real source of confusion — the old
+                // process kept serving the old addon while a listing read a file both were
+                // touching. Dropping the previous handle kills its mitmdump first.
+                let replaced = slot().lock().await.take().is_some();
+                let proxy = Proxy::start_with(port, &capture_dir(), &options)
                     .await
                     .map_err(|error| ToolError::Failed(format!("{error:#}")))?;
                 let status = proxy.status();
                 let host = forge_proxy::lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
                 let steps = forge_proxy::setup_instructions(&host, status.port);
                 *slot().lock().await = Some(Arc::new(Mutex::new(proxy)));
-                Ok(format!(
+                let mut out = String::new();
+                if replaced {
+                    out.push_str(
+                        "(restarted — the previous proxy was stopped and its capture cleared)\n",
+                    );
+                }
+                if options.extra_addon.is_some() {
+                    out.push_str("custom addon loaded alongside the built-in capture addon\n");
+                }
+                out.push_str(&format!(
                     "proxy listening on {} (all interfaces — anything on this LAN can use it \
                      while it runs)\n\n{steps}",
                     status.listening_on
-                ))
+                ));
+                Ok(out)
             }
             "status" => {
                 let proxy = require_proxy().await?;
@@ -243,9 +271,10 @@ impl Tool for ProxyNetworkTool {
          with method, URL, status, full request and response headers, and bodies. \"list\" is the \
          index (filter by url_contains, method, status, host, or only requests that carried a \
          body — the fast path to \"what did the app POST\"); \"body\" opens one flow whole by its \
-         id; \"har\" exports everything to a HAR file that opens in browser devtools, Charles, or \
-         Proxyman; \"clear\" empties the capture so the next interaction starts clean. Requires \
-         `proxy` with action \"start\" first."
+         id — a binary body (protobuf, gRPC) shows its base64 and can be dumped whole to a file \
+         with save_to (side=request|response) for a decoder; \"har\" exports everything to a HAR \
+         file that opens in browser devtools, Charles, or Proxyman; \"clear\" empties the capture \
+         so the next interaction starts clean. Requires `proxy` with action \"start\" first."
     }
 
     fn side_effect(&self) -> SideEffect {
@@ -258,6 +287,8 @@ impl Tool for ProxyNetworkTool {
             "properties": {
                 "action": {"type": "string", "enum": ["list", "body", "har", "clear"]},
                 "request_id": {"type": "string", "description": "For body — the id from list (a prefix is fine)."},
+                "save_to": {"type": "string", "description": "For body: write the RAW bytes of one side to this file (base64-decoded for a binary body), so protobuf/gRPC/other binary can be fed to a decoder. Without it, body returns the rendered text."},
+                "side": {"type": "string", "enum": ["request", "response"], "description": "For body + save_to: which body to dump. Default request."},
                 "path": {"type": "string", "description": "For har — where to write it. Default a temp path."},
                 "url_contains": {"type": "string", "description": "Case-insensitive URL filter."},
                 "method": {"type": "string", "description": "GET, POST, ..."},
@@ -313,6 +344,22 @@ impl Tool for ProxyNetworkTool {
             "body" => {
                 let id = str_arg(args, "request_id")
                     .ok_or_else(|| ToolError::Failed("body needs request_id".into()))?;
+                // `save_to` dumps the RAW bytes of one side to a file — base64-decoded for a
+                // binary body — so a native app's protobuf/gRPC request can be fed straight to a
+                // decoder. Without it the tool can only ever hand back text, which cannot carry
+                // binary. `side` picks request (default) or response.
+                if let Some(path) = str_arg(args, "save_to") {
+                    let side = match str_arg(args, "side").as_deref() {
+                        Some("response") => BodySide::Response,
+                        _ => BodySide::Request,
+                    };
+                    let bytes = guard
+                        .body_bytes(&id, side)
+                        .map_err(|error| ToolError::Failed(format!("{error:#}")))?;
+                    std::fs::write(&path, &bytes)
+                        .map_err(|error| ToolError::Failed(format!("writing {path}: {error}")))?;
+                    return Ok(format!("wrote {} bytes to {path}", bytes.len()));
+                }
                 let flow = guard
                     .flow(&id)
                     .map_err(|error| ToolError::Failed(format!("{error:#}")))?;
@@ -354,20 +401,33 @@ fn render_flow(flow: &forge_proxy::Flow) -> String {
             String::new()
         }
     };
+    // A binary body shows its base64 inline (small enough to read) and always names the
+    // save-to-file path, so the model both sees the real bytes and knows how to get them whole
+    // for a decoder rather than being stuck with the "<N bytes of binary>" placeholder.
+    let body = |text: &str, b64: &Option<String>, side: &str| -> String {
+        match b64 {
+            Some(encoded) => format!(
+                "{text}\n[binary — base64 below; save whole with proxy_network body \
+                 request_id=<id> side={side} save_to=<path>]\nbase64: {}",
+                forge_proxy::truncate(encoded, forge_proxy::MAX_BODY_CHARS)
+            ),
+            None => forge_proxy::truncate(text, forge_proxy::MAX_BODY_CHARS),
+        }
+    };
     format!(
         "{} {}\n\nREQUEST HEADERS\n{}\n\nREQUEST BODY{}\n{}\n\nRESPONSE {}\n{}\n\nRESPONSE BODY{}\n{}",
         flow.method,
         flow.url,
         headers(&flow.request_headers),
         clip(flow.request_body_clipped, flow.request_body_bytes),
-        forge_proxy::truncate(&flow.request_body, forge_proxy::MAX_BODY_CHARS),
+        body(&flow.request_body, &flow.request_body_b64, "request"),
         flow.status
             .map(|s| s.to_string())
             .or_else(|| flow.error.clone())
             .unwrap_or_else(|| "—".into()),
         headers(&flow.response_headers),
         clip(flow.response_body_clipped, flow.response_body_bytes),
-        forge_proxy::truncate(&flow.response_body, forge_proxy::MAX_BODY_CHARS),
+        body(&flow.response_body, &flow.response_body_b64, "response"),
     )
 }
 

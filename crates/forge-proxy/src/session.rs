@@ -6,6 +6,13 @@ use anyhow::{Context, Result};
 
 use crate::{flows, rules::InterceptRules, Filter, Flow, ADDON, DEFAULT_PORT};
 
+/// Which half of a captured flow to read raw. See [`Proxy::body_bytes`].
+#[derive(Debug, Clone, Copy)]
+pub enum BodySide {
+    Request,
+    Response,
+}
+
 /// A running mitmdump and the two files it talks through.
 pub struct Proxy {
     child: tokio::process::Child,
@@ -14,6 +21,17 @@ pub struct Proxy {
     pub rules_path: PathBuf,
     pub rules: InterceptRules,
     http: reqwest::Client,
+}
+
+/// Optional knobs for [`Proxy::start_with`]. Defaults reproduce the plain observe-only proxy.
+#[derive(Debug, Clone, Default)]
+pub struct StartOptions {
+    /// Per-body capture cap in bytes (overrides the addon's 128 KiB default). Raise it when a
+    /// payload you need is larger than the default and comes back clipped.
+    pub max_body: Option<usize>,
+    /// A user-supplied mitmproxy addon loaded alongside the built-in one — full custom control
+    /// that survives restarts because Forge never writes to it.
+    pub extra_addon: Option<PathBuf>,
 }
 
 /// What `status` reports.
@@ -27,13 +45,19 @@ pub struct ProxyStatus {
 }
 
 impl Proxy {
-    /// Start mitmdump on `port`, writing captures under `dir`.
+    /// Options for [`Proxy::start`] — all optional, so `StartOptions::default()` is the plain
+    /// observe-only proxy the tool has always started.
     ///
-    /// Binds all interfaces, not loopback: the whole point is a *phone* reaching it, and a
-    /// loopback-only proxy is invisible to every device except this machine. That is a deliberate
-    /// exposure — anyone on the LAN can use it as an open proxy while it runs — which is why it is
-    /// started explicitly per task rather than left running.
-    pub async fn start(port: Option<u16>, dir: &std::path::Path) -> Result<Self> {
+    /// `extra_addon` is the escape hatch for FULL control: mitmdump loads it *alongside* Forge's
+    /// built-in capture addon, so a task can add arbitrary mitmproxy scripting (decode a custom
+    /// wire format, sign a request, dump raw bytes its own way) without editing — and losing on
+    /// the next `start` — the compiled-in addon. The built-in one is rewritten every start by
+    /// design; a user file passed here is never touched.
+    pub async fn start_with(
+        port: Option<u16>,
+        dir: &std::path::Path,
+        options: &StartOptions,
+    ) -> Result<Self> {
         let mitmdump = crate::find_mitmdump()?;
         let port = port.unwrap_or(DEFAULT_PORT);
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -48,13 +72,26 @@ impl Proxy {
         // would otherwise show up as if the app had just made them.
         let _ = std::fs::remove_file(&capture);
 
-        let child = tokio::process::Command::new(&mitmdump)
+        if let Some(extra) = &options.extra_addon {
+            if !extra.exists() {
+                anyhow::bail!("extra_addon does not exist: {}", extra.display());
+            }
+        }
+
+        let mut command = tokio::process::Command::new(&mitmdump);
+        command
             .arg("--listen-host")
             .arg("0.0.0.0")
             .arg("-p")
             .arg(port.to_string())
             .arg("-s")
-            .arg(&addon)
+            .arg(&addon);
+        // A user addon loads AFTER the built-in one so its request/response hooks run after
+        // Forge's rules and capture — it sees, and can further change, whatever they did.
+        if let Some(extra) = &options.extra_addon {
+            command.arg("-s").arg(extra);
+        }
+        command
             // mitmdump's own stdout is noise once the addon is writing structured flows, and a
             // full pipe would block the proxy mid-capture.
             .arg("-q")
@@ -62,7 +99,11 @@ impl Proxy {
             .env("FORGE_PROXY_RULES", &rules_path)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        if let Some(max_body) = options.max_body {
+            command.env("FORGE_PROXY_MAX_BODY", max_body.to_string());
+        }
+        let child = command
             .spawn()
             .with_context(|| format!("starting {}", mitmdump.display()))?;
 
@@ -79,6 +120,29 @@ impl Proxy {
         };
         proxy.wait_until_listening(port).await?;
         Ok(proxy)
+    }
+
+    /// Start an observe-only proxy with default options. See [`Proxy::start_with`] for the knobs.
+    pub async fn start(port: Option<u16>, dir: &std::path::Path) -> Result<Self> {
+        Self::start_with(port, dir, &StartOptions::default()).await
+    }
+
+    /// The raw bytes of a captured flow's request or response body — the actual bytes for a
+    /// binary body (base64-decoded from the capture), or the UTF-8 text bytes otherwise. This is
+    /// what a decoder (protobuf, a custom format) needs; the text field alone can't carry binary.
+    pub fn body_bytes(&self, id: &str, which: BodySide) -> Result<Vec<u8>> {
+        let flow = self.flow(id)?;
+        let (b64, text) = match which {
+            BodySide::Request => (&flow.request_body_b64, &flow.request_body),
+            BodySide::Response => (&flow.response_body_b64, &flow.response_body),
+        };
+        if let Some(encoded) = b64 {
+            use base64::Engine;
+            return base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .context("decoding the captured binary body");
+        }
+        Ok(text.clone().into_bytes())
     }
 
     /// Wait for the port to accept a connection, so `start` never returns a proxy the device

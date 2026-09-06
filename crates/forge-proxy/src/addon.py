@@ -13,6 +13,7 @@ Bodies are truncated HERE rather than in Forge: a 200 MB video response should n
 the capture file, let alone a model's context.
 """
 
+import base64
 import json
 import os
 import time
@@ -40,16 +41,24 @@ def _rules():
 
 
 def _body(raw):
+    """Return (text, total_bytes, clipped, base64_or_None).
+
+    A UTF-8 body round-trips as text and needs no base64. A BINARY body (protobuf, gRPC, a
+    packed request a native app builds by hand) is exactly what a reversing session is usually
+    after, and the old placeholder threw it away — so the raw bytes (capped) are also returned
+    base64-encoded, letting `proxy_network` hand back or dump the real bytes for a decoder.
+    """
     if not raw:
-        return "", 0, False
+        return "", 0, False, None
     total = len(raw)
     clipped = raw[:MAX_BODY]
     try:
         text = clipped.decode("utf-8")
     except UnicodeDecodeError:
-        # Binary. Say so rather than emitting mojibake the model would try to read.
-        return f"<{total} bytes of binary>", total, True
-    return text, total, total > MAX_BODY
+        # Binary. The placeholder stays as the human/model-readable summary; the actual bytes
+        # ride alongside as base64 so nothing is lost.
+        return f"<{total} bytes of binary>", total, total > MAX_BODY, base64.b64encode(clipped).decode("ascii")
+    return text, total, total > MAX_BODY, None
 
 
 def _matches(flow, pattern):
@@ -105,13 +114,13 @@ def error(flow: http.HTTPFlow):
 
 
 def _record(flow: http.HTTPFlow):
-    request_text, request_total, request_clipped = _body(flow.request.raw_content)
+    request_text, request_total, request_clipped, request_b64 = _body(flow.request.raw_content)
     if flow.response is not None:
-        response_text, response_total, response_clipped = _body(flow.response.raw_content)
+        response_text, response_total, response_clipped, response_b64 = _body(flow.response.raw_content)
         status = flow.response.status_code
         response_headers = dict(flow.response.headers)
     else:
-        response_text, response_total, response_clipped = "", 0, False
+        response_text, response_total, response_clipped, response_b64 = "", 0, False, None
         status = None
         response_headers = {}
 
@@ -133,6 +142,12 @@ def _record(flow: http.HTTPFlow):
         "response_body_clipped": response_clipped,
         "blocked": "x-forge-blocked" in response_headers,
     }
+    # Only present for binary bodies — a UTF-8 body is already whole in the text field, and
+    # doubling it as base64 would bloat the capture for no gain.
+    if request_b64 is not None:
+        row["request_body_b64"] = request_b64
+    if response_b64 is not None:
+        row["response_body_b64"] = response_b64
     try:
         with open(CAPTURE, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")

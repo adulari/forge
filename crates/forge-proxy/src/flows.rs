@@ -29,6 +29,11 @@ pub struct Flow {
     pub request_body_bytes: usize,
     #[serde(default)]
     pub request_body_clipped: bool,
+    /// Base64 of the raw request bytes, present ONLY when the body is binary (protobuf, gRPC, a
+    /// hand-packed payload). A UTF-8 body is already whole in `request_body`, so this stays
+    /// `None` for it. This is the seam that makes a native app's binary requests decodable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_b64: Option<String>,
     #[serde(default)]
     pub response_headers: std::collections::BTreeMap<String, String>,
     #[serde(default)]
@@ -37,6 +42,10 @@ pub struct Flow {
     pub response_body_bytes: usize,
     #[serde(default)]
     pub response_body_clipped: bool,
+    /// Base64 of the raw response bytes, present ONLY when the body is binary. See
+    /// [`Flow::request_body_b64`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_b64: Option<String>,
     #[serde(default)]
     pub blocked: bool,
 }
@@ -144,10 +153,12 @@ mod tests {
             request_body: String::new(),
             request_body_bytes: body,
             request_body_clipped: false,
+            request_body_b64: None,
             response_headers: Default::default(),
             response_body: String::new(),
             response_body_bytes: 0,
             response_body_clipped: false,
+            response_body_b64: None,
             blocked: false,
         }
     }
@@ -191,6 +202,27 @@ mod tests {
 
         let flows = read_capture(&path).unwrap();
         assert_eq!(flows.len(), 2, "the two complete lines survive");
+    }
+
+    /// The addon emits `request_body_b64`/`response_body_b64` ONLY for binary bodies; the field
+    /// names are a contract with addon.py. A binary flow must round-trip whole, and a text flow
+    /// must not carry an empty b64 field (skip_serializing_if keeps the line small).
+    #[test]
+    fn a_binary_body_carries_base64_and_a_text_body_does_not() {
+        let mut binary = flow("POST", "https://spclient.test/login5", Some(200), 3113);
+        binary.response_body = "<9 bytes of binary>".into();
+        binary.response_body_b64 = Some("aGVsbG8gaGk=".into());
+        let json = serde_json::to_string(&binary).unwrap();
+        assert!(json.contains("response_body_b64"), "{json}");
+        let back: Flow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.response_body_b64.as_deref(), Some("aGVsbG8gaGk="));
+
+        let text = flow("GET", "https://api.test/me", Some(200), 0);
+        let json = serde_json::to_string(&text).unwrap();
+        assert!(
+            !json.contains("body_b64"),
+            "a text flow must not emit a b64 field: {json}"
+        );
     }
 
     #[test]
