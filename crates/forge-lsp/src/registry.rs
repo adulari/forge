@@ -27,6 +27,15 @@ const MAX_LIVE_SERVERS: usize = 1;
 /// A lightweight rust-analyzer still needs a short cold-start window to load project metadata.
 /// Hot diagnostic requests continue to use the operator-configured timeout.
 const COLD_START_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(12);
+/// Consecutive failures after which a `(language, root)` pair is given up on for the lifetime of
+/// this registry.
+///
+/// Backoff answers "the toolchain is being repaired, try again later". It has no answer for "this
+/// server cannot succeed here", and the difference is not academic: one repo spent three days
+/// starting rust-analyzer, watching it exceed the memory guard while indexing, killing it, and
+/// starting it again — 386 times, ~90% of the session log, every one of them doomed for the same
+/// reason. After this many identical failures, stop and say what would actually fix it.
+const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 /// A lazily-initialized language-server slot for one `(language, repo-root)` pair, behind its
 /// own lock so a hung server only blocks callers waiting on that same pair.
@@ -47,6 +56,8 @@ fn global_permits() -> &'static Arc<Semaphore> {
 struct ServerEntry {
     server: Option<LspServer>,
     consecutive_failures: u32,
+    /// Set once this pair is given up on, holding the reason to report instead of retrying.
+    abandoned: Option<String>,
     retry_at: Option<Instant>,
     last_used: Instant,
     idle_generation: u64,
@@ -59,6 +70,7 @@ impl Default for ServerEntry {
         Self {
             server: None,
             consecutive_failures: 0,
+            abandoned: None,
             retry_at: None,
             last_used: Instant::now(),
             idle_generation: 0,
@@ -84,8 +96,26 @@ impl ServerEntry {
         backoff
     }
 
+    /// Whether this pair has now failed often enough to stop trying.
+    fn should_abandon(&self) -> bool {
+        self.abandoned.is_none() && self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES
+    }
+
+    /// Give up on this pair, keeping the reason to hand back in place of another doomed start.
+    fn abandon(&mut self, reason: String) {
+        self.server = None;
+        self.permit = None;
+        self.abandoned = Some(reason);
+    }
+
+    /// Clear the failure state. Only a server that actually PRODUCED diagnostics may call this:
+    /// a successful handshake is not success. rust-analyzer initializes in milliseconds and then
+    /// dies minutes later while indexing, so clearing here reset the counter to zero before every
+    /// failure — the exponential backoff never once doubled, and 386 consecutive failures all
+    /// reported the same "retrying in 30s".
     fn clear_failure(&mut self) {
         self.consecutive_failures = 0;
+        self.abandoned = None;
         self.retry_at = None;
     }
 
@@ -97,6 +127,26 @@ impl ServerEntry {
 
     fn is_idle_for(&self, now: Instant, ttl: Duration) -> bool {
         now.duration_since(self.last_used) >= ttl
+    }
+}
+
+/// What to tell the caller when a language server is given up on — the cause, and the one setting
+/// that would change the outcome.
+///
+/// The memory guard is called out by name because it is the case where retrying is guaranteed to
+/// fail forever: the analyzer needs more resident memory than `lsp.memory_limit_mb` allows for
+/// this project, so every future start ends the same way. "Retrying in 30s" said 386 times is not
+/// a diagnosis; "raise lsp.memory_limit_mb above 2048" is.
+fn give_up_reason(lang: &str, error: &str, memory_limit_mb: u64) -> String {
+    if error.contains("closed stdout") || error.contains("memory guard") {
+        format!(
+            "{lang} language server disabled for this session: it kept dying while analysing this \
+             project, which is what the {memory_limit_mb} MiB `lsp.memory_limit_mb` guard does to \
+             an analyzer that needs more. Raise that setting for this project, or set \
+             `lsp.enabled = false` to stop paying for the attempts."
+        )
+    } else {
+        format!("{lang} language server disabled for this session after repeated failures: {error}")
     }
 }
 
@@ -221,12 +271,17 @@ impl LspRegistry {
                 .clone()
         };
 
+        let memory_limit_mb = self.config.memory_limit_mb;
         let mut slot = entry.lock().await;
         let idle_generation = slot.touch();
         arm_idle_timer(&mut slot, entry.clone(), idle_generation, idle_ttl);
         let mut cold_start = false;
         if slot.server.is_none() {
             let now = Instant::now();
+            if let Some(reason) = slot.abandoned.clone() {
+                debug!("lsp: {lang} ({cmd}) was given up on: {reason}");
+                return Self::unavailable_diagnostic(abs_path, reason);
+            }
             if slot.cooling_down(now) {
                 debug!("lsp: {lang} ({cmd}) is in failure cooldown — skipping diagnostics");
                 return Self::unavailable_diagnostic(
@@ -259,7 +314,8 @@ impl LspRegistry {
                     .await
                 {
                     Ok(()) => {
-                        slot.clear_failure();
+                        // Deliberately NOT clear_failure(): the handshake proves the binary runs,
+                        // not that it can analyse this project. Only delivered diagnostics do.
                         slot.server = Some(srv);
                         cold_start = true;
                     }
@@ -333,6 +389,16 @@ impl LspRegistry {
             }
             Err(error) => {
                 let backoff = slot.record_failure(Instant::now());
+                if slot.should_abandon() {
+                    let reason = give_up_reason(lang, &error.to_string(), memory_limit_mb);
+                    warn!(
+                        "lsp: giving up on {lang} ({cmd}) for this session after {} consecutive \
+                         failures: {reason}",
+                        slot.consecutive_failures
+                    );
+                    slot.abandon(reason.clone());
+                    return Self::unavailable_diagnostic(abs_path, reason);
+                }
                 warn!(
                     "lsp: diagnostics failed for {lang} ({cmd}): {error} — retrying in {}s",
                     backoff.as_secs()
@@ -343,6 +409,7 @@ impl LspRegistry {
                 );
             }
         };
+        slot.clear_failure();
         let idle_generation = slot.touch();
         arm_idle_timer(&mut slot, entry.clone(), idle_generation, idle_ttl);
         diagnostics
@@ -815,6 +882,59 @@ mod tests {
         fs::write(&f, "hello").unwrap();
         let diags = reg.diagnostics_for(&f, Duration::from_millis(100)).await;
         assert!(diags.is_empty());
+    }
+
+    /// The bug that produced 386 identical "retrying in 30s" lines over three days: a handshake
+    /// success reset the counter, so the next failure was always the FIRST failure and the
+    /// exponential backoff never doubled. Only delivered diagnostics may clear it.
+    #[test]
+    fn a_handshake_that_is_followed_by_failure_does_not_reset_the_backoff() {
+        let mut entry = ServerEntry::default();
+        let now = Instant::now();
+        assert_eq!(entry.record_failure(now), BACKOFF_BASE);
+        assert_eq!(
+            entry.record_failure(now),
+            BACKOFF_BASE * 2,
+            "a second consecutive failure must wait longer than the first"
+        );
+        assert_eq!(entry.record_failure(now), BACKOFF_BASE * 4);
+
+        entry.clear_failure();
+        assert_eq!(
+            entry.record_failure(now),
+            BACKOFF_BASE,
+            "delivered diagnostics DO reset it — that is the recovery path"
+        );
+    }
+
+    /// Backoff answers "try again later"; it has no answer for "this can never work here". After
+    /// enough identical failures the pair is dropped for the session, with a reason that names the
+    /// setting that would change the outcome.
+    #[test]
+    fn a_server_that_keeps_dying_is_given_up_on_with_an_actionable_reason() {
+        let mut entry = ServerEntry::default();
+        let now = Instant::now();
+        for _ in 0..MAX_CONSECUTIVE_FAILURES - 1 {
+            entry.record_failure(now);
+            assert!(
+                !entry.should_abandon(),
+                "must keep retrying while it might recover"
+            );
+        }
+        entry.record_failure(now);
+        assert!(entry.should_abandon());
+
+        let reason = give_up_reason(
+            "rust",
+            "lsp: server closed stdout while collecting diagnostics",
+            2048,
+        );
+        assert!(reason.contains("lsp.memory_limit_mb"), "{reason}");
+        assert!(reason.contains("2048"), "{reason}");
+
+        entry.abandon(reason);
+        assert!(!entry.should_abandon(), "abandoning is not repeated");
+        assert!(entry.abandoned.is_some());
     }
 
     #[test]

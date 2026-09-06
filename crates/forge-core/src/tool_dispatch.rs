@@ -526,6 +526,14 @@ impl Session {
                                     std::time::Duration::from_millis(self.config.lsp.timeout_ms);
                                 let lsp = Arc::clone(lsp);
                                 let diags = lsp.diagnostics_for(&abs, timeout).await;
+                                // "diagnostics unavailable" is not a finding. The model cannot
+                                // act on it, and it arrives after EVERY write while the server is
+                                // down — one project produced 386 of them, each one context the
+                                // turn paid to carry and re-send. Outages belong in the log.
+                                let diags: Vec<_> = diags
+                                    .iter()
+                                    .filter(|d| d.code.as_deref() != Some("forge-lsp-unavailable"))
+                                    .collect();
                                 if !diags.is_empty() {
                                     let lines: Vec<String> = diags
                                         .iter()

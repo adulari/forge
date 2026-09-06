@@ -43,8 +43,9 @@ impl Session {
     pub(crate) fn warn_soft_step_checkpoint(&mut self, soft_cap: usize, step: usize, hard: usize) {
         self.presenter.emit(PresenterEvent::Warning(format!(
             "reached soft step cap {soft_cap} at step {step}; unattended turn continuing toward \
-             hard cap {hard} (turn tokens: input={}, output={})",
-            self.turn_input_tokens, self.turn_output_tokens
+             hard cap {hard} (turn tokens: billable input={}, total input={} incl. cache reads, \
+             output={})",
+            self.turn_billable_input_tokens, self.turn_input_tokens, self.turn_output_tokens
         )));
     }
 
@@ -53,10 +54,28 @@ impl Session {
         cap != 0 && self.turn_billable_input_tokens >= cap
     }
 
+    /// Preserve whatever the turn had reached before a hard guard ends it, and describe both the
+    /// files and where they were saved.
+    ///
+    /// Naming the uncommitted files without saving them is what made these aborts expensive: the
+    /// error said "work is uncommitted: … and 56 more" and then the run ended, leaving a human to
+    /// work out what a 400-step turn had been in the middle of. The files are left in place; the
+    /// snapshot is an extra copy, not a move.
+    fn preserve_uncommitted_work(&self) -> String {
+        let root = self.workspace.root();
+        let work = uncommitted_work_message(root);
+        match snapshot_uncommitted_work(root) {
+            Some(sha) => format!(
+                "{work} — files left in place; tracked edits also snapshotted to {sha}                  (refs/forge/aborted-turns; recover with `git stash apply {sha}`)"
+            ),
+            None => work,
+        }
+    }
+
     /// End the turn for the per-turn input-token ceiling. Returns the final text to adopt.
     pub(crate) fn abort_for_token_ceiling(&mut self) -> String {
         let cap = self.config.mesh.max_turn_input_tokens;
-        let work = uncommitted_work_message(self.workspace.root());
+        let work = self.preserve_uncommitted_work();
         self.presenter.emit(PresenterEvent::Error(format!(
             "ERROR: turn input-token ceiling exceeded (cap {cap}, billable input {}, total input \
              {} incl. cache reads, output {}) — ending turn; raise `mesh.max_turn_input_tokens` \
@@ -69,11 +88,18 @@ impl Session {
 
     /// End an unattended turn that ran all the way to the hard step ceiling.
     pub(crate) fn abort_for_step_ceiling(&mut self, hard: usize, soft_cap: usize) -> String {
-        let work = uncommitted_work_message(self.workspace.root());
+        let work = self.preserve_uncommitted_work();
+        // Print BOTH input figures. The one that looked alarming in the field — 48.5M — is the
+        // cache-inclusive total, while `mesh.max_turn_input_tokens` watches the billable subtotal;
+        // showing only the former makes a working token ceiling look broken.
         self.presenter.emit(PresenterEvent::Error(format!(
             "ERROR: unattended turn reached hard step ceiling {hard} (soft cap {soft_cap}; turn \
-             tokens: input={}, output={}) — ending turn; work is uncommitted: {work}",
-            self.turn_input_tokens, self.turn_output_tokens
+             tokens: billable input={}, total input={} incl. cache reads, output={}; token \
+             ceiling `mesh.max_turn_input_tokens`={}) — ending turn; work is uncommitted: {work}",
+            self.turn_billable_input_tokens,
+            self.turn_input_tokens,
+            self.turn_output_tokens,
+            self.config.mesh.max_turn_input_tokens
         )));
         self.turn_hard_guard_abort = true;
         format!(
@@ -141,7 +167,7 @@ impl Session {
         let changed = working_tree_status(Some(self.workspace.root()))
             .is_some_and(|status| !status.is_empty());
         let files = if changed {
-            uncommitted_work_message(self.workspace.root())
+            self.preserve_uncommitted_work()
         } else {
             "no files were changed".to_string()
         };
