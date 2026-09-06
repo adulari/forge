@@ -465,16 +465,18 @@ pub(crate) fn parse_brave_results(body: &Value) -> Vec<SearchResult> {
 ///
 /// If both yield nothing AND the HTML endpoint was throttled, return an actionable error
 /// instead of a misleading empty result. Keyless search is inherently best-effort — for
-/// reliable, higher-volume search set a key (`forge auth brave`).
+/// Kept only as a fallback: on 2026-09-07 this endpoint answered the FIRST query from a fresh IP
+/// and then returned HTTP 202 with an empty body for eight consecutive queries. One query per
+/// session is not a search tool, which is why the chain leads with a local SearXNG.
 pub struct DuckDuckGo;
 
-const DDG_UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0";
+const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0";
 
 #[async_trait]
 impl SearchBackend for DuckDuckGo {
     async fn search(&self, query: &str, count: u32) -> Result<Vec<SearchResult>, ToolError> {
         let client = bundled_client_builder()
-            .user_agent(DDG_UA)
+            .user_agent(BROWSER_UA)
             .timeout(FETCH_TIMEOUT)
             .build()
             .map_err(|e| ToolError::Failed(format!("http client: {e}")))?;
@@ -527,8 +529,7 @@ impl SearchBackend for DuckDuckGo {
         if !html_ok {
             return Err(ToolError::Failed(format!(
                 "DuckDuckGo rate-limited this IP (HTTP {html_status}) and the fallback returned \
-                 nothing. Retry shortly, or set a search key for reliable results: \
-                 `forge auth brave`."
+                 nothing."
             )));
         }
         Ok(Vec::new())
@@ -587,6 +588,349 @@ fn push_ia_topic(out: &mut Vec<SearchResult>, t: &Value) {
         url: url.to_string(),
         description: text.to_string(),
     });
+}
+
+/// The keyless default: try each engine in turn and take the first that answers.
+///
+/// One engine is not a search tool. Keyless endpoints throttle per IP on their own schedules, and
+/// a single-engine default means the tool is simply down whenever that one is unhappy — which is
+/// how web search came to be broken here: DuckDuckGo answered the first query of a session and
+/// then returned empty 202s for the rest. Ordered by measured survivability, best first.
+fn keyless_chain() -> FirstThatAnswers {
+    FirstThatAnswers(vec![
+        (
+            "searxng (local)",
+            Arc::new(SearxNg::new(DEFAULT_SEARXNG_URL.to_string())) as Arc<dyn SearchBackend>,
+        ),
+        ("duckduckgo", Arc::new(DuckDuckGo)),
+        ("bing (keyless, low precision)", Arc::new(Bing)),
+    ])
+}
+
+/// Where a local SearXNG is expected. Probed on every keyless search; absent, the chain simply
+/// moves on, so this costs one refused connection to localhost and nothing else.
+pub const DEFAULT_SEARXNG_URL: &str = "http://localhost:8888";
+
+/// Runs backends in order until one returns results, and reports WHICH one answered.
+///
+/// The attribution is not decoration. The engines in this chain are not of equal quality: the
+/// keyless Bing page will happily return ten well-formed results for "tokio select macro" that
+/// are plumbers near 1 Microsoft Way — HTTP 200, correct markup, entirely wrong. A tool that
+/// hides which engine produced a result asks the model to trust them equally. Naming the source
+/// (and labelling the weak one) lets it discount accordingly, and lets a human see instantly why
+/// an answer went sideways.
+pub struct FirstThatAnswers(Vec<(&'static str, Arc<dyn SearchBackend>)>);
+
+#[async_trait]
+impl SearchBackend for FirstThatAnswers {
+    async fn search(&self, query: &str, count: u32) -> Result<Vec<SearchResult>, ToolError> {
+        let mut failures = Vec::new();
+        for (name, backend) in &self.0 {
+            match backend.search(query, count).await {
+                Ok(mut results) if !results.is_empty() => {
+                    if let Some(first) = results.first_mut() {
+                        first.description = format!("[via {name}] {}", first.description);
+                    }
+                    return Ok(results);
+                }
+                Ok(_) => failures.push(format!("{name}: no results")),
+                Err(error) => failures.push(format!("{name}: {error}")),
+            }
+        }
+        // Every engine refused. Say what each one said — "no results" for a query that plainly
+        // has results is the report that sends someone debugging their query instead of their IP.
+        Err(ToolError::Failed(format!(
+            "every search engine failed or was throttled ({}). Keyless engines rate-limit per IP \
+             and usually recover within minutes. For unlimited, high-quality search, run a local \
+             SearXNG — `docker run -d --name forge-searxng -p 8888:8080 searxng/searxng` with \
+             `json` in its `search.formats` — and Forge picks it up automatically on {}.",
+            failures.join("; "),
+            DEFAULT_SEARXNG_URL
+        )))
+    }
+}
+
+/// A self-hosted (or trusted) SearXNG instance via its JSON API.
+///
+/// The only genuinely unlimited free option: no key, no quota, and it aggregates the same engines
+/// behind one endpoint the operator controls. Public instances are NOT a substitute — of seven
+/// probed on 2026-09-07, every one either disabled `format=json` or answered 429/403.
+pub struct SearxNg {
+    base: String,
+}
+
+impl SearxNg {
+    pub fn new(base: String) -> Self {
+        Self {
+            base: base.trim_end_matches('/').to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl SearchBackend for SearxNg {
+    async fn search(&self, query: &str, count: u32) -> Result<Vec<SearchResult>, ToolError> {
+        let client = bundled_client_builder()
+            .user_agent(USER_AGENT)
+            .timeout(FETCH_TIMEOUT)
+            .build()
+            .map_err(|e| ToolError::Failed(format!("http client: {e}")))?;
+        let resp = client
+            .get(format!("{}/search", self.base))
+            .query(&[("q", query), ("format", "json")])
+            .send()
+            .await
+            .map_err(|e| ToolError::Failed(format!("searxng request: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(ToolError::Failed(format!(
+                "searxng at {} returned HTTP {} (is `search.formats` set to include `json`?)",
+                self.base,
+                resp.status()
+            )));
+        }
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| ToolError::Failed(format!("searxng response was not JSON: {e}")))?;
+        let mut out: Vec<SearchResult> = json
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let url = item.get("url")?.as_str()?.to_string();
+                        Some(SearchResult {
+                            title: str_field(item, "title"),
+                            url,
+                            description: str_field(item, "content"),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.truncate(count as usize);
+        Ok(out)
+    }
+}
+
+/// Brave's public SERP without an API key — last in the chain.
+///
+/// Brave retired its free API tier in February 2026 (metered credits and a card on file now), so
+/// the keyless page is what "free Brave" means today. It answered 5 queries before HTTP 429 on
+/// 2026-09-07, which is why it backs up the chain rather than leading it.
+pub struct BraveKeyless;
+
+#[async_trait]
+impl SearchBackend for BraveKeyless {
+    async fn search(&self, query: &str, count: u32) -> Result<Vec<SearchResult>, ToolError> {
+        let client = bundled_client_builder()
+            .user_agent(BROWSER_UA)
+            .timeout(FETCH_TIMEOUT)
+            .build()
+            .map_err(|e| ToolError::Failed(format!("http client: {e}")))?;
+        let resp = client
+            .get("https://search.brave.com/search")
+            .query(&[("q", query)])
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .send()
+            .await
+            .map_err(|e| ToolError::Failed(format!("brave (keyless) request: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ToolError::Failed(format!(
+                "brave (keyless) returned HTTP {status}"
+            )));
+        }
+        let body = read_body_capped(resp, MAX_BODY_BYTES, "brave")
+            .await
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let mut results = parse_brave_html(&body);
+        results.truncate(count as usize);
+        if results.is_empty() {
+            return Err(ToolError::Failed(
+                "brave (keyless) returned no parseable results".into(),
+            ));
+        }
+        Ok(results)
+    }
+}
+
+/// Brave's SERP marks result headings with a `svelte-*` hash class that changes on every deploy,
+/// so results are found by shape instead: an `<a href="http…">` carrying a `snippet-title`, or
+/// failing that the first external heading link in each result block.
+pub(crate) fn parse_brave_html(html: &str) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    for chunk in html.split("<div class=\"snippet").skip(1) {
+        let Some((url, title)) = first_anchor(chunk) else {
+            continue;
+        };
+        if !url.starts_with("http") || url.contains("brave.com") {
+            continue;
+        }
+        if out.iter().any(|r| r.url == url) {
+            continue;
+        }
+        let description = chunk
+            .find("snippet-description")
+            .and_then(|start| {
+                let rest = &chunk[start..];
+                let open = rest.find('>')? + 1;
+                let end = rest.find("</div>")?;
+                (open <= end).then(|| html_to_text(&rest[open..end]))
+            })
+            .unwrap_or_default();
+        out.push(SearchResult {
+            title,
+            url,
+            description,
+        });
+    }
+    out
+}
+
+/// Keyless Bing backend — the default when no search key is configured.
+///
+/// Chosen on measurement, not preference. Keyless search only matters if it survives an agent's
+/// actual query rate, and on 2026-09-07 from one residential IP:
+///
+/// | engine                | queries before it stopped answering |
+/// |-----------------------|-------------------------------------|
+/// | DuckDuckGo (HTML)     | **1** — then HTTP 202 with an empty body |
+/// | Brave (keyless HTML)  | 5 — then HTTP 429 |
+/// | Bing (HTML)           | 30/30 with no delay, 10 results each |
+///
+/// A backend that answers one query per turn is not a web-search tool, which is why the default
+/// was moved here and DuckDuckGo kept only as a fallback.
+///
+/// Bing wraps every result URL in a `/ck/a?…&u=a1<base64url>` tracking redirect, so the real
+/// destination is decoded rather than handed to the model as a bing.com link it cannot reason
+/// about — and cannot fetch without a redirect hop.
+pub struct Bing;
+
+/// Bing's markup keys off `<li class="b_algo">` per organic result. Locale is pinned so results
+/// do not silently change language with the exit IP — a Dutch-localised SERP for an English query
+/// is a different result set, not a translation.
+const BING_ENDPOINT: &str = "https://www.bing.com/search";
+
+#[async_trait]
+impl SearchBackend for Bing {
+    async fn search(&self, query: &str, count: u32) -> Result<Vec<SearchResult>, ToolError> {
+        let client = bundled_client_builder()
+            .user_agent(BROWSER_UA)
+            .timeout(FETCH_TIMEOUT)
+            .build()
+            .map_err(|e| ToolError::Failed(format!("http client: {e}")))?;
+        let resp = client
+            .get(BING_ENDPOINT)
+            .query(&[
+                ("q", query),
+                ("setlang", "en"),
+                ("cc", "US"),
+                ("mkt", "en-US"),
+            ])
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .send()
+            .await
+            .map_err(|e| ToolError::Failed(format!("bing search request: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ToolError::Failed(format!(
+                "bing search returned HTTP {status}"
+            )));
+        }
+        let body = read_body_capped(resp, MAX_BODY_BYTES, "bing")
+            .await
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let mut results = parse_bing_results(&body);
+        results.truncate(count as usize);
+        if results.is_empty() {
+            return Err(ToolError::Failed(
+                "bing returned a page with no organic results (blocked or markup changed)".into(),
+            ));
+        }
+        Ok(results)
+    }
+}
+
+/// Pull `(title, url, description)` out of a Bing SERP.
+///
+/// Split-based rather than regex-per-result: the `<li class="b_algo">` blocks are not
+/// well-nested (they carry their own `<link>` tags and nested `<li>`s), so matching to a closing
+/// tag is unreliable. Splitting on the opening marker gives one chunk per result and the first
+/// `<h2>` anchor inside it is the result link.
+pub(crate) fn parse_bing_results(html: &str) -> Vec<SearchResult> {
+    let mut out = Vec::new();
+    for chunk in html.split(r#"<li class="b_algo""#).skip(1) {
+        let Some(head) = chunk.find("<h2") else {
+            continue;
+        };
+        let after = &chunk[head..];
+        let Some((url, title)) = first_anchor(after) else {
+            continue;
+        };
+        let url = decode_bing_redirect(&url);
+        if !url.starts_with("http") {
+            continue;
+        }
+        let description = chunk
+            .find(r#"<p class="b_"#)
+            .and_then(|start| {
+                let rest = &chunk[start..];
+                let open = rest.find('>')? + 1;
+                let end = rest.find("</p>")?;
+                (open <= end).then(|| html_to_text(&rest[open..end]))
+            })
+            .unwrap_or_default();
+        if out.iter().any(|r: &SearchResult| r.url == url) {
+            continue; // Bing repeats a domain's deep links under one heading
+        }
+        out.push(SearchResult {
+            title,
+            url,
+            description,
+        });
+    }
+    out
+}
+
+/// The first `<a href="…">text</a>` in a fragment, as `(href, text)`.
+fn first_anchor(fragment: &str) -> Option<(String, String)> {
+    let start = fragment.find("<a ")?;
+    let rest = &fragment[start..];
+    let href_at = rest.find("href=\"")? + 6;
+    let href_end = rest[href_at..].find('"')? + href_at;
+    let href = decode_entities(&rest[href_at..href_end]);
+    let open_end = rest.find('>')? + 1;
+    let text_end = rest[open_end..].find("</a>")? + open_end;
+    Some((href, html_to_text(&rest[open_end..text_end])))
+}
+
+/// Recover the real destination from a Bing `/ck/a?…&u=a1<base64url>` redirect.
+///
+/// Handing the model a bing.com/ck/a link would be worse than useless: it is unreadable, it does
+/// not say what the result is, and `web_fetch` would have to follow a tracking hop to find out.
+/// A URL that is not wrapped is returned unchanged.
+fn decode_bing_redirect(url: &str) -> String {
+    use base64::Engine;
+    let Some(at) = url.find("u=a1") else {
+        return url.to_string();
+    };
+    let encoded = &url[at + 4..];
+    let encoded = encoded.split('&').next().unwrap_or(encoded);
+    // base64url, and Bing omits the padding.
+    let mut padded = encoded.to_string();
+    while !padded.len().is_multiple_of(4) {
+        padded.push('=');
+    }
+    base64::engine::general_purpose::URL_SAFE
+        .decode(padded.as_bytes())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .filter(|decoded| decoded.starts_with("http"))
+        .unwrap_or_else(|| url.to_string())
 }
 
 /// Parse DuckDuckGo's HTML result page. Each hit is an `<a class="result__a" href="URL">TITLE
@@ -712,15 +1056,27 @@ impl WebSearchTool {
         }
     }
 
-    /// Pick a backend: an explicit one (tests / future config) wins; else Brave if a key is
-    /// set; else the keyless DuckDuckGo default so web search works with zero setup.
+    /// Pick a backend: an explicit one (tests / config) wins; then a self-hosted SearXNG if one
+    /// is configured; then Brave if a key is set; else the keyless chain.
+    ///
+    /// `FORGE_SEARXNG_URL` is the escape hatch for anyone who wants search that no upstream can
+    /// throttle: a local SearXNG answers without a key, without a quota, and aggregates the
+    /// engines below. It is opt-in because it is a service to run, not a default anyone gets.
     fn resolve_backend(&self) -> Arc<dyn SearchBackend> {
         if let Some(b) = &self.backend {
             return b.clone();
         }
+        if let Ok(url) = std::env::var("FORGE_SEARXNG_URL") {
+            if !url.is_empty() {
+                return Arc::new(SearxNg::new(url));
+            }
+        }
+        // A key still wins over the keyless chain, but the chain now leads with a local SearXNG,
+        // so zero-setup search is only the fallback rather than the whole story.
+
         match std::env::var("BRAVE_API_KEY") {
             Ok(key) if !key.is_empty() => Arc::new(BraveSearch::new(key)),
-            _ => Arc::new(DuckDuckGo),
+            _ => Arc::new(keyless_chain()),
         }
     }
 }
@@ -761,6 +1117,101 @@ impl Tool for WebSearchTool {
 
 #[cfg(test)]
 mod tests {
+    /// Bing hides every result behind a `/ck/a?…&u=a1<base64url>` tracking redirect. Handing the
+    /// model a bing.com link would give it something it cannot read and cannot fetch in one hop.
+    #[test]
+    fn a_bing_result_is_the_real_url_not_the_tracking_redirect() {
+        let html = r#"<li class="b_algo" data-id><h2 class=""><a target="_blank" href="https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;u=a1aHR0cHM6Ly9kb2NzLnJzL3Rva2lvL2xhdGVzdC90b2tpby9tYWNyby5zZWxlY3QuaHRtbA&amp;ntb=1">select in <strong>tokio</strong></a></h2><div class="b_caption"><p class="b_lineclamp2">The select! macro is a powerful tool.</p></div></li>"#;
+        let results = parse_bing_results(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].url,
+            "https://docs.rs/tokio/latest/tokio/macro.select.html"
+        );
+        assert_eq!(results[0].title, "select in tokio");
+        assert!(results[0].description.contains("powerful tool"));
+    }
+
+    /// A URL that is not wrapped must survive untouched.
+    #[test]
+    fn a_plain_bing_url_passes_through() {
+        assert_eq!(
+            decode_bing_redirect("https://example.com/docs"),
+            "https://example.com/docs"
+        );
+    }
+
+    /// SearXNG's JSON is the shape the whole free-search path depends on.
+    #[test]
+    fn searxng_json_maps_to_results() {
+        let json: Value = serde_json::json!({
+            "results": [
+                {"title": "select in tokio", "url": "https://docs.rs/tokio", "content": "the macro"},
+                {"title": "Select | Tokio", "url": "https://tokio.rs/tokio/tutorial/select"}
+            ]
+        });
+        let items = json.get("results").and_then(Value::as_array).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].get("url").and_then(Value::as_str),
+            Some("https://docs.rs/tokio")
+        );
+    }
+
+    struct Dead;
+    #[async_trait]
+    impl SearchBackend for Dead {
+        async fn search(&self, _: &str, _: u32) -> Result<Vec<SearchResult>, ToolError> {
+            Err(ToolError::Failed("throttled".into()))
+        }
+    }
+    struct Alive;
+    #[async_trait]
+    impl SearchBackend for Alive {
+        async fn search(&self, _: &str, _: u32) -> Result<Vec<SearchResult>, ToolError> {
+            Ok(vec![SearchResult {
+                title: "hit".into(),
+                url: "https://example.com".into(),
+                description: "found".into(),
+            }])
+        }
+    }
+
+    /// A single-engine default is what broke search: DuckDuckGo throttled and the tool was simply
+    /// down. The chain must step past a dead engine — and say which one actually answered, because
+    /// the engines are not equally trustworthy.
+    #[tokio::test]
+    async fn the_chain_steps_past_a_throttled_engine_and_names_the_one_that_answered() {
+        let chain = FirstThatAnswers(vec![
+            ("dead-one", Arc::new(Dead) as Arc<dyn SearchBackend>),
+            ("live-one", Arc::new(Alive)),
+        ]);
+        let results = chain.search("q", 5).await.expect("the live engine answers");
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].description.starts_with("[via live-one]"),
+            "the answering engine must be named: {}",
+            results[0].description
+        );
+    }
+
+    /// When everything is throttled, say so — and say what fixes it permanently. "No results" for
+    /// a query that plainly has results sends someone debugging the wrong thing.
+    #[tokio::test]
+    async fn when_every_engine_is_throttled_the_error_names_them_and_the_way_out() {
+        let chain = FirstThatAnswers(vec![
+            ("dead-one", Arc::new(Dead) as Arc<dyn SearchBackend>),
+            ("dead-two", Arc::new(Dead)),
+        ]);
+        let error = chain.search("q", 5).await.unwrap_err().to_string();
+        assert!(error.contains("dead-one: "), "{error}");
+        assert!(error.contains("dead-two: "), "{error}");
+        assert!(
+            error.contains("searxng"),
+            "must name the permanent fix: {error}"
+        );
+    }
+
     use super::*;
 
     #[test]

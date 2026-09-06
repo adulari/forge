@@ -2346,6 +2346,7 @@ name = "forge-agent-tools"
 version = "2.13.9"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "forge-agent-browser",
  "forge-agent-device",
  "forge-agent-index",
