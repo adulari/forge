@@ -228,6 +228,12 @@ pub async fn start(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // ...and outlive a process-group kill. Inheriting Forge's group means anything that signals
+    // that group — a shell tool call cleaning up after itself, a supervisor stopping Forge — takes
+    // the emulator down with it, minutes of boot thrown away for a reason nobody can see from the
+    // device side.
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command.spawn().context("spawn the emulator")?;
 
     let started = Instant::now();

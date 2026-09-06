@@ -138,12 +138,14 @@ And choosing "allow" runs the command once
 ```
 
 ```
-S1 — background job
+S1 — background job (SHIPPED, with the changes noted in §5.2)
 Given the agent calls shell{ command: "cargo watch -x test", background: true }
 When the call returns
-Then it returns immediately with a job_id and status "running"
-And a later shell_poll{ job_id } returns new output since the last poll and current status
-And shell_kill{ job_id } terminates the process group and reports the final status
+Then it returns immediately with a job id and the path of the job's log
+And the process is still running, in its own session, after the call returns
+And a later shell_job{ action: "log", id } returns the tail of its output
+And shell_job{ action: "list" } finds it from a turn — or a session — that did not start it
+And shell_job{ action: "stop", id } terminates the process group and reports the final status
 ```
 
 ```
@@ -315,14 +317,17 @@ streaming `PresenterEvent`s. No tool gets to bypass the broker.
 }
 ```
 
-Companion tools for background lifecycle (S1):
+Companion tool for background lifecycle (S1, as shipped):
 
 ```json
-// shell_poll  — read new output and status for a running/finished job
-{ "type":"object", "properties": { "job_id": {"type":"string"} }, "required":["job_id"] }
-
-// shell_kill  — terminate a background job's process group
-{ "type":"object", "properties": { "job_id": {"type":"string"} }, "required":["job_id"] }
+// shell_job — list, read, inspect, and stop background jobs
+{ "type":"object",
+  "properties": {
+    "action": { "type":"string", "enum":["list","log","status","stop"] },
+    "id":     { "type":"integer", "description":"Job id (its pid)." },
+    "lines":  { "type":"integer", "description":"For log: trailing lines (default 40)." }
+  },
+  "required":["action"] }
 ```
 
 Internal result struct (serialized to the model as the tool-result string, and to the TUI via events):
@@ -355,9 +360,30 @@ full output in scrollback independent of the model budget.
   to a capture buffer.
 - Timeout via `tokio::time::timeout`. On expiry: `killpg(SIGTERM)`, wait a short grace (e.g. 2s),
   then `killpg(SIGKILL)`. Report `TimedOut` with output captured so far.
-- Background (`background:true`): spawn, register in `JobRegistry`, return `job_id` + status
-  `running` immediately. A reader task drains output into a bounded ring buffer keyed by `job_id`.
-  `shell_poll` returns output since the last poll + status; `shell_kill` does the killpg dance.
+- Background (`background:true`): spawn into a **new session** (`setsid`) with stdout/stderr on a
+  **log file**, return the job id (its pid) and the log path immediately. `shell_job` lists, tails,
+  inspects, and stops jobs; `stop` does the killpg dance (SIGTERM → 3s → SIGKILL).
+
+  Three deliberate departures from the original sketch above, each forced by how the feature
+  actually failed in use:
+
+  1. **New session, not just a new process group.** The foreground path SIGKILLs the process group
+     after a command returns, to stop a leaked descendant holding the output pipes open. A
+     background job in that group dies with it — and so does `nohup cmd &`, because nohup detaches
+     from the *terminal*, not the group. Only `setsid` puts the job out of reach. A real session
+     lost hours to this, concluding "the sandbox kills background processes between calls" and
+     reaching for transient systemd units to escape a mechanism that was three lines of Rust.
+  2. **A log file and on-disk records, not an in-memory `JobRegistry` with a ring buffer.** The
+     point of a background job is that a LATER call finds it, and the failure mode being fixed was
+     precisely that nothing survived the call. In-memory state dies with Forge; a ring buffer
+     silently drops the output you needed. A file under `.forge/jobs/` survives a restart, holds
+     the whole log, and can be `tail -f`'d by the human sitting next to the agent.
+  3. **Jobs are NOT killed on shutdown** (the checklist below said they would be). An emulator that
+     took two minutes to boot must not die because a turn ended; that is the entire use case.
+     `shell_job stop` is how a job ends, and `list` is how a later session finds one to stop.
+
+  The id is the pid rather than an opaque string, so `kill <id>` in a human's terminal means the
+  same thing the tool means.
 
 ### 5.3 Safety — guards, broker, policy
 
@@ -519,11 +545,13 @@ Hard-denied command (cannot be allowed, shown even in bypass):
 - [ ] `Presenter::confirm` shows the exact command, resolved cwd, and reason; `HeadlessPresenter`
       still denies non-interactively.
 - [ ] cwd is canonicalized; out-of-project cwd forces at-least-Ask and shows the resolved abs path.
-- [ ] Background jobs (S1): `shell{background:true}` → job_id; `shell_poll`/`shell_kill` work; jobs
-      killed on shutdown. (If S1 deferred, tracked as a follow-up — M-set is shippable without it.)
+- [x] Background jobs (S1): `shell{background:true}` → job id + log path; `shell_job`
+      list/log/status/stop work; jobs deliberately SURVIVE shutdown (see §5.2).
+- [x] A foreground call that leaves processes running says so, naming them, rather than killing
+      them silently.
 - [ ] Every edge case in §5.8 has a defined, tested behaviour.
-- [ ] `with_core_tools()` registers `shell` (and `shell_poll`/`shell_kill` if S1 lands);
-      `registry_has_core_tools` and `side_effect_classes_are_correct` still pass.
+- [x] `with_core_tools()` registers `shell` and `shell_job`; `registry_has_core_tools` and
+      `side_effect_classes_are_correct` still pass.
 - [ ] Secret-shaped args masked in TUI/transcript display.
 - [ ] Sandbox (C1) documented as the next safety milestone (not required to ship).
 ```

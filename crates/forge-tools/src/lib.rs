@@ -35,7 +35,7 @@ pub use device::{DeviceLogsTool, DeviceTool};
 pub use lattice_tool::LatticeTool;
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};
-pub use shell::ShellTool;
+pub use shell::{ShellJobTool, ShellTool};
 pub use web::{BraveSearch, DuckDuckGo, SearchBackend, SearchResult, WebFetchTool, WebSearchTool};
 
 /// Run a shell command without a sandbox (for use by the autofix loop and other internal
@@ -138,6 +138,7 @@ impl ToolRegistry {
         r.register(Box::new(NotebookEditTool));
         r.register(Box::new(DeleteFileTool));
         r.register(Box::new(ShellTool::with_policy(SandboxPolicy::default())));
+        r.register(Box::new(ShellJobTool::default()));
         r.register(Box::new(ListDirTool));
         r.register(Box::new(SearchTool));
         r.register(Box::new(GlobTool));

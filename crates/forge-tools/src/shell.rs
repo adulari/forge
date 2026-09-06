@@ -18,9 +18,13 @@
 //! Note: the catastrophic denylist patterns are still POSIX-oriented (`rm -rf`, secret-file
 //! reads); Windows-specific dangerous-command patterns are a follow-up (known-issues.md).
 //!
+//! Long-lived processes (`"background": true`) are the exception to the group kill: they are
+//! spawned into their own session and logged to a file, so they outlive the call — and the
+//! `shell_job` tool lists, tails, and stops them. See [`background`].
+//!
 //! Deferred to follow-ups (see docs/features/shell-tool.md): live output streaming to the
-//! TUI (`ToolOutputDelta`/`ToolEnd`), background jobs (`shell_poll`/`shell_kill`),
-//! session-remembered allows, and the rich command-context permission prompt.
+//! TUI (`ToolOutputDelta`/`ToolEnd`), session-remembered allows, and the rich command-context
+//! permission prompt.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -34,6 +38,7 @@ use tokio::process::{Child, Command};
 
 use crate::sandbox::{self, SandboxPolicy};
 use crate::{str_arg, Tool, ToolError};
+mod background;
 mod output;
 use output::{render_streams, stream_text, truncate_for_model};
 
@@ -105,6 +110,10 @@ impl Tool for ShellTool {
          poll_until_exit_zero:true — the call re-runs `command` every poll_interval_secs until it \
          exits 0, yielding a resumable 'call again' result if still not ready; call it repeatedly \
          until ready instead of one long blocking watch (which gets killed at the timeout). \
+         To start something that must KEEP RUNNING after the call returns (emulator, dev server, \
+         tunnel, daemon), set background:true — a normal call SIGKILLs everything it started when \
+         it returns, and `nohup`/`&` do NOT survive that. A background job returns a job id \
+         immediately and is then managed with the `shell_job` tool. \
          Keep verification status trustworthy: run checks separately or join them with `&&`; avoid \
          masking failures behind `;`, `||`, or a pipeline into head/tail/tee without explicit \
          pipe-failure handling."
@@ -121,7 +130,8 @@ impl Tool for ShellTool {
                 "timeout_secs": { "type": "integer", "minimum": 1, "description": "Default 120; clamped to 600. In poll mode this is the per-call budget, clamped to 100s." },
                 "pty": { "type": "boolean", "description": "Run under a pseudo-terminal so interactive/tty-detecting programs work (default false). Stdin is still closed (EOF) so prompts won't hang forever. Refused when the shell sandbox is enabled (the PTY path can't be confined by Landlock)." },
                 "poll_until_exit_zero": { "type": "boolean", "description": "Poll mode (default false): re-run command every poll_interval_secs until it exits 0 or the per-call budget elapses. On budget exhaustion returns a resumable 'call again to keep waiting' result (NOT a killed timeout). Use to wait for a long external job (CI/release build); call repeatedly until ready. Not supported with pty:true." },
-                "poll_interval_secs": { "type": "integer", "minimum": 1, "description": "Gap between poll attempts in poll mode (default 5, max 60)." }
+                "poll_interval_secs": { "type": "integer", "minimum": 1, "description": "Gap between poll attempts in poll mode (default 5, max 60)." },
+                "background": { "type": "boolean", "description": "Start the command as a long-lived background job (default false) and return immediately with its job id. The job runs in its own session with output on a log file, so it survives this call, later calls, and Forge itself — use it for anything that must keep running (emulator, dev server, tunnel, daemon). Manage it with the `shell_job` tool. Not supported with pty or poll mode." }
             },
             "required": ["command"]
         })
@@ -168,6 +178,21 @@ impl Tool for ShellTool {
                  cannot be confined by Landlock). Re-run without pty."
                     .to_string(),
             );
+        }
+        if args
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            if use_pty {
+                return Ok(
+                    "shell: background:true is not supported with pty:true — a job that \
+                           outlives the call has no terminal to attach to."
+                        .to_string(),
+                );
+            }
+            let workspace = bound_workspace().or_else(|| self.workspace.clone());
+            return Ok(start_background(command, &cwd, workspace.as_deref(), &self.policy).await);
         }
         let poll = args
             .get("poll_until_exit_zero")
@@ -262,6 +287,171 @@ pub async fn run_command(
     run_command_inner(command, cwd, timeout_secs, policy)
         .await
         .0
+}
+
+/// The workspace bound to this session, when a call is running inside one.
+fn bound_workspace() -> Option<PathBuf> {
+    crate::SESSION_WORKSPACE.try_with(Clone::clone).ok()
+}
+
+/// Manage the jobs `shell` started with `background: true`.
+///
+/// Separate from `shell` because its actions take a job id, not a command — and because the whole
+/// value of a background job is that a LATER call can find it. A model that started an emulator in
+/// one turn needs one obvious place to ask "is it still up, and what did it say".
+#[derive(Default)]
+pub struct ShellJobTool {
+    workspace: Option<std::path::PathBuf>,
+}
+
+impl ShellJobTool {
+    pub fn in_workspace(workspace: &std::path::Path) -> Self {
+        Self {
+            workspace: Some(workspace.to_path_buf()),
+        }
+    }
+
+    /// The workspace whose jobs this call is about.
+    ///
+    /// The session binding wins over the field: the registry rebinds a live session to a new
+    /// workspace (a worktree, say) without rebuilding tools, and a job list that ignored that
+    /// would show the wrong project's jobs.
+    fn workspace(&self) -> Option<std::path::PathBuf> {
+        bound_workspace().or_else(|| self.workspace.clone())
+    }
+}
+
+#[async_trait]
+impl Tool for ShellJobTool {
+    fn name(&self) -> &str {
+        "shell_job"
+    }
+    fn description(&self) -> &str {
+        "Inspect and control the long-lived jobs started by `shell` with background:true \
+         (emulator, dev server, tunnel, daemon). Actions: list (every job and whether it is still \
+         running), log (the tail of a job's output), status (one job), stop (SIGTERM then SIGKILL \
+         the job and its children). Jobs survive across tool calls, turns, and Forge restarts, so \
+         a job started earlier is still reachable here by its id."
+    }
+    fn side_effect(&self) -> SideEffect {
+        SideEffect::Shell
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["list", "log", "status", "stop"], "description": "list, log, status, or stop." },
+                "id": { "type": "integer", "description": "Job id (its pid), from the shell background:true result or from list. Required for log/status/stop." },
+                "lines": { "type": "integer", "minimum": 1, "description": "For log: how many trailing lines to return (default 40)." }
+            },
+            "required": ["action"]
+        })
+    }
+    async fn run(&self, args: &Value) -> Result<String, ToolError> {
+        let action = str_arg(args, "action")?;
+        let workspace = self.workspace();
+        let cwd = workspace
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .display()
+            .to_string();
+        let workspace = workspace.as_deref();
+        let id = || -> Result<u32, ToolError> {
+            args.get("id")
+                .and_then(Value::as_u64)
+                .map(|id| id as u32)
+                .ok_or_else(|| ToolError::Failed("this action needs a job id".into()))
+        };
+
+        match action {
+            "list" => {
+                let jobs = background::list(workspace, &cwd);
+                if jobs.is_empty() {
+                    return Ok(
+                        "no background jobs in this workspace. Start one with shell \
+                               background:true."
+                            .to_string(),
+                    );
+                }
+                let mut out = format!("{} background job(s):\n", jobs.len());
+                out.push_str("pid     status       age  command\n");
+                for job in &jobs {
+                    out.push_str(&job.summary());
+                    out.push('\n');
+                }
+                Ok(out)
+            }
+            "status" => {
+                let id = id()?;
+                let Some(job) = background::get(workspace, &cwd, id) else {
+                    return Ok(format!("no background job {id} in this workspace"));
+                };
+                Ok(format!(
+                    "job {} is {}\n  command: {}\n  cwd: {}\n  log: {}",
+                    job.pid,
+                    job.status(),
+                    job.command,
+                    job.cwd,
+                    job.log.display()
+                ))
+            }
+            "log" => {
+                let id = id()?;
+                let lines = args
+                    .get("lines")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(background::DEFAULT_TAIL_LINES as u64)
+                    .clamp(1, 2000) as usize;
+                let Some(job) = background::get(workspace, &cwd, id) else {
+                    return Ok(format!("no background job {id} in this workspace"));
+                };
+                let body = background::tail(&job.log, lines).map_err(ToolError::Failed)?;
+                let body = if body.trim().is_empty() {
+                    "(no output yet)".to_string()
+                } else {
+                    body
+                };
+                Ok(format!(
+                    "job {} is {} — last {lines} lines of {}:\n\n{body}",
+                    job.pid,
+                    job.status(),
+                    job.log.display()
+                ))
+            }
+            "stop" => {
+                let id = id()?;
+                background::stop(workspace, &cwd, id)
+                    .await
+                    .map_err(ToolError::Failed)
+            }
+            other => Err(ToolError::Failed(format!(
+                "unknown action '{other}'. Use list, log, status, or stop."
+            ))),
+        }
+    }
+}
+
+/// Start a long-lived job and describe it in the terms the next call needs: the id to ask about
+/// it with, and where its output is going.
+async fn start_background(
+    command: &str,
+    cwd: &str,
+    workspace: Option<&Path>,
+    policy: &SandboxPolicy,
+) -> String {
+    match background::start(command, cwd, workspace, policy).await {
+        Ok(job) => format!(
+            "shell: started background job {} (pid {})\n  log: {}\n  \
+             Check on it with shell_job: {{\"action\": \"log\", \"id\": {}}}, stop it with \
+             {{\"action\": \"stop\", \"id\": {}}}. It keeps running until stopped.",
+            job.pid,
+            job.pid,
+            job.log.display(),
+            job.pid,
+            job.pid
+        ),
+        Err(error) => format!("shell: could not start background job: {error}"),
+    }
 }
 
 /// Like [`run_command`] but also returns the child's exit code (`None` on timeout, spawn failure,
@@ -370,7 +560,14 @@ async fn run_command_inner(
     // the stdout/stderr pipes open (e.g. `(sleep 30 &) ; echo done`). Kill the whole process group
     // so those leaked descendants release the pipes — otherwise the readers below never see EOF.
     // The timeout path already killed the group via `terminate`.
+    let mut survivor_note = String::new();
     if !timed_out {
+        if let Some(pg) = pgid {
+            let survivors = background::survivors_in_group(pg);
+            if !survivors.is_empty() {
+                survivor_note = background::survivor_note(&survivors);
+            }
+        }
         kill_process_group(pgid);
     }
 
@@ -384,7 +581,7 @@ async fn run_command_inner(
     let body = render_streams(&out_bytes, &err_bytes);
     let (body, truncated) = truncate_for_model(&body, MODEL_BUDGET);
     let total = out_bytes.len() + err_bytes.len();
-    let mut header = format!("shell: {status_line} in {duration_ms}ms");
+    let mut header = format!("shell: {status_line} in {duration_ms}ms{survivor_note}");
     if truncated || out_capped || err_capped {
         header.push_str(&format!("  ({total} bytes captured, output truncated)"));
     }
@@ -1337,5 +1534,79 @@ mod tests {
             let out = run_command("echo hi", "Z:\\no\\such\\dir\\xyz", 5, &no_sandbox()).await;
             assert!(out.contains("failed to start"), "spawn failure: {out}");
         }
+    }
+
+    /// The group kill is right, but doing it silently is what cost a real session hours: `cmd &`
+    /// returns exit 0, the process is SIGKILLed a millisecond later, and nothing says so. The
+    /// result must name the casualty and point at the flag that would have kept it.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_foreground_call_says_when_it_killed_what_the_command_left_running() {
+        let out = run_command(
+            "sleep 30 >/dev/null 2>&1 &",
+            ".",
+            10,
+            &SandboxPolicy::default(),
+        )
+        .await;
+        assert!(
+            out.contains("killed 1 process(es)"),
+            "the kill must be reported, not silent: {out}"
+        );
+        assert!(
+            out.contains("background:true"),
+            "and it must say what to do instead: {out}"
+        );
+    }
+
+    /// A quiet command must not pay for the check with a bogus warning.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_command_that_leaves_nothing_running_gets_no_note() {
+        let out = run_command("echo hi", ".", 10, &SandboxPolicy::default()).await;
+        assert!(!out.contains("killed"), "{out}");
+    }
+
+    /// End to end through the tool's own arguments: background:true must hand back an id that
+    /// `shell_job` can then act on, with the process still alive in between.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn the_background_flag_starts_a_job_that_shell_job_can_find_and_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = ShellTool::with_policy_in_workspace(SandboxPolicy::default(), dir.path());
+        let started = shell
+            .run(&json!({ "command": "sleep 30", "background": true }))
+            .await
+            .unwrap();
+        assert!(started.contains("started background job"), "{started}");
+        let pid: u32 = started
+            .split("job ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no job id in: {started}"));
+
+        let jobs = ShellJobTool::in_workspace(dir.path());
+        let listed = jobs.run(&json!({ "action": "list" })).await.unwrap();
+        assert!(listed.contains(&pid.to_string()), "{listed}");
+        assert!(
+            jobs.run(&json!({ "action": "status", "id": pid }))
+                .await
+                .unwrap()
+                .contains("running"),
+            "the job must still be alive after the call that started it returned"
+        );
+
+        jobs.run(&json!({ "action": "stop", "id": pid }))
+            .await
+            .unwrap();
+        let after = jobs
+            .run(&json!({ "action": "status", "id": pid }))
+            .await
+            .unwrap();
+        assert!(
+            !after.contains("running"),
+            "stop must be visible in status: {after}"
+        );
     }
 }
