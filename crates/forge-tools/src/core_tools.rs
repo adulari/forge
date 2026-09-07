@@ -40,6 +40,14 @@ fn workspace_roots() -> Vec<PathBuf> {
         let tmp = std::env::temp_dir();
         roots.push(tmp.canonicalize().unwrap_or(tmp));
     }
+    // A scoped session gets any explicit `tools.extra_roots` (config allowlist), so the in-tool
+    // net matches the arg validators. These are opt-in per config — never the blanket temp dir —
+    // so the sibling-temp-workspace leak the branch above guards against stays closed.
+    if let Ok(extra) = crate::SESSION_EXTRA_ROOTS.try_with(Clone::clone) {
+        for root in extra {
+            roots.push(root.canonicalize().unwrap_or(root));
+        }
+    }
     roots
 }
 
@@ -1275,6 +1283,48 @@ mod tests {
         }
         // `..` traversal out of the workspace is refused (lexically collapsed before the check).
         assert!(confine(&escaping_traversal("etc/passwd")).is_err());
+    }
+
+    #[tokio::test]
+    async fn confine_honors_extra_roots_for_a_scoped_session() {
+        // Simulate a daemon-hosted (scoped) session: SESSION_WORKSPACE set, so the blanket temp
+        // dir is NOT an allowed root. An explicit extra root (config `tools.extra_roots`) is.
+        let workspace = std::env::temp_dir().join(format!("forge-ws-{}", std::process::id()));
+        let allowed = std::env::temp_dir().join(format!("forge-allow-{}", std::process::id()));
+        let other = std::env::temp_dir().join(format!("forge-other-{}", std::process::id()));
+        for d in [&workspace, &allowed, &other] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let allowed_c = allowed.canonicalize().unwrap();
+        let inside = allowed.join("capture.log");
+        let sibling = other.join("secret.log");
+        let outcome = crate::SESSION_WORKSPACE
+            .scope(
+                workspace.canonicalize().unwrap(),
+                crate::SESSION_EXTRA_ROOTS.scope(vec![allowed_c], async {
+                    (
+                        confine(inside.to_str().unwrap()).is_ok(),
+                        confine(sibling.to_str().unwrap()).is_err(),
+                        // The blanket temp dir is still NOT allowed for a scoped session.
+                        confine(
+                            std::env::temp_dir()
+                                .join("forge-unlisted.txt")
+                                .to_str()
+                                .unwrap(),
+                        )
+                        .is_err(),
+                    )
+                }),
+            )
+            .await;
+        for d in [&workspace, &allowed, &other] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        assert_eq!(
+            outcome,
+            (true, true, true),
+            "extra root allowed; unlisted sibling and blanket temp still refused"
+        );
     }
 
     #[tokio::test]
