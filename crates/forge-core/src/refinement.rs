@@ -147,12 +147,22 @@ impl Session {
             .pinned_model()
             .and_then(|set| set.first().cloned())
             .unwrap_or_else(|| decision.model.clone());
-        let mut routed = vec![self.auxiliary_model(&decision)];
-        routed.extend(decision.fallbacks.clone());
-        let candidates =
-            compact_candidate_chain(self.router.trivial_candidates(), routed, &guaranteed, |m| {
-                health.is_benched(m)
-            });
+        // As in `Session::compact`: a session-level `/model` pin supersedes the router's stale
+        // `--model` pin, so the routed hop is dropped when one exists.
+        let routed = if self.pinned_model().is_some() {
+            Vec::new()
+        } else {
+            let mut routed = vec![self.auxiliary_model(&decision)];
+            routed.extend(decision.fallbacks.clone());
+            routed
+        };
+        let candidates = compact_candidate_chain(
+            self.router.trivial_candidates(),
+            routed,
+            &guaranteed,
+            |m| health.is_benched(m),
+            forge_mesh::catalog::is_subscription,
+        );
         let mut chain = candidates.into_iter();
         let mut model = chain.next().expect("compact_candidate_chain is non-empty");
         let completion_opts = Self::auxiliary_completion_options(&self.id, "refine");

@@ -27,6 +27,17 @@ All notable changes to Forge are documented here. The format follows
   styling (inline code, bold) is kept, and an over-wide cell is clipped with an ellipsis so one
   long value cannot wrap every row. `~~strikethrough~~` no longer leaks its tildes either
   (`crates/forge-tui/src/render.rs`).
+||||||| parent of 1ac9c26b (fix(core): never compact or run side calls on a subscription model the session is not pinned to)
+||||||| parent of b1c463f9 (fix(core): never compact or run side calls on a subscription model the session is not pinned to)
+- **A session pinned to a free model auto-compacted on a ChatGPT-plan model.** Two pins exist:
+  the router's `--model` from session creation, which `/model` never updates, and the session's
+  own `/model` pin. Compaction and refinement built their candidate chain from the ROUTER's pin —
+  a stale `codex-oauth::gpt-6-astra` from two days earlier — ahead of the session's current free
+  pin, and when the free shortlist was exhausted the summary ran on the low-allowance
+  subscription. A session-level pin now drops the routed hop entirely, and a subscription model
+  that is not the model the session is running on is never a candidate for compaction,
+  refinement, or any other side call (recap, suggestion, memory, shell diagnosis)
+  (`crates/forge-core/src/compaction_policy.rs`, `refinement.rs`, `routing_policy.rs`).
 - **The lattice file watcher pinned a CPU core per Forge process, indefinitely.** Two Forge MCP
   agents on one laptop each burned ~90% of a core for their whole lifetime with nothing changing on
   disk — package temperature 97–100 °C and 46,000 thermal-throttle events in 32 minutes. The

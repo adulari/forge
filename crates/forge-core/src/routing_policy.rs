@@ -364,10 +364,25 @@ Rules:\n\
             .unwrap_or_else(|| ARCHITECT_LAST_RESORT.to_string())
     }
 
+    /// The model for a cheap side call (recap, suggestion, memory, shell diagnosis, compaction's
+    /// routed hop). A pinned session — the router's `--model` pin or the in-session `/model` pin,
+    /// which the router does not see — prefers the first usable trivial model that is not a
+    /// subscription, then its own pin; a routed session uses what routing chose. A subscription
+    /// model the session is not itself running on is never picked here: side calls are optional
+    /// and must not spend a plan the user did not point this session at.
     pub(crate) fn auxiliary_model(&self, routed: &forge_mesh::RoutingDecision) -> String {
-        if routed.pinned {
-            self.first_usable_for_tier(TaskTier::Trivial)
-                .unwrap_or_else(|| routed.model.clone())
+        let session_pin = self
+            .pinned_model
+            .as_ref()
+            .and_then(|set| set.first().cloned());
+        if routed.pinned || session_pin.is_some() {
+            let own = session_pin.unwrap_or_else(|| routed.model.clone());
+            self.config
+                .candidates_for(TaskTier::Trivial)
+                .into_iter()
+                .filter(|m| !forge_mesh::catalog::is_subscription(m) || *m == own)
+                .find(|m| forge_config::has_api_key(forge_config::provider_of(m)))
+                .unwrap_or(own)
         } else {
             routed.model.clone()
         }
