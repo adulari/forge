@@ -30,11 +30,17 @@ pub(crate) async fn run(
     let mut guidance = system;
     guidance.extend(command_guidance);
 
+    // `--output-format stream-json` is a CONTRACT: the caller is a program that will parse stdout.
+    // Publishing to the fleet answers with two lines of prose and exit 0 instead, so every such
+    // caller sees a successful run and no events — silently, and only on machines that happen to
+    // have a daemon reachable. An explicit machine-readable format therefore opts out of the
+    // fleet; `forge attach` is still how a human follows a run they started that way.
     if let Some(session_id) = maybe_publish_run_to_fleet(
         &prompt,
         pin.as_deref(),
         publish_to_fleet,
         no_publish_to_fleet,
+        output_format,
     )
     .await
     {
@@ -127,7 +133,11 @@ async fn maybe_publish_run_to_fleet(
     model: Option<&str>,
     publish_to_fleet: bool,
     no_publish_to_fleet: bool,
+    output_format: OutputFormat,
 ) -> Option<String> {
+    if matches!(output_format, OutputFormat::StreamJson) {
+        return None;
+    }
     let configured = forge_config::load()
         .map(|c| c.remote.publish_local_runs)
         .unwrap_or(true);
@@ -290,5 +300,20 @@ mod tests {
         assert!(publish_run_to_fleet("hello", None, &base, "tok")
             .await
             .is_err());
+    }
+
+    /// `--output-format stream-json` promises a machine-readable stdout. Publishing to the fleet
+    /// answers with prose and exit 0 instead, so a parsing caller sees a successful run and no
+    /// events — and only on machines where a daemon happens to be reachable, which is why this
+    /// went unnoticed: CI has no daemon, so the e2e test passed everywhere except a developer's
+    /// own box. The opt-out must come BEFORE any config or network work.
+    #[tokio::test]
+    async fn stream_json_never_hands_the_run_to_the_fleet() {
+        assert!(
+            maybe_publish_run_to_fleet("hi", None, true, false, OutputFormat::StreamJson)
+                .await
+                .is_none(),
+            "an explicit machine-readable format must not be answered with prose"
+        );
     }
 }
