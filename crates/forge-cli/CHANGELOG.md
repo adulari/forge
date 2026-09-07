@@ -7,6 +7,20 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **MCP servers launched through a wrapper outlived the session.** Forge's teardown killed only
+  the direct child, but `npm exec …` / `uvx …` run the real server as a grandchild, so ending a
+  session left it under pid 1 — nine `token-counter-mcp` node processes (~500 MB) from sessions that
+  had ended hours earlier were found on one laptop. Stdio servers now start in their own process
+  group, every teardown path (disconnect, reconnect, shutdown, manager drop) signals the whole
+  group, and on Linux the child asks for `SIGTERM` when Forge itself dies, so even a SIGKILLed Forge
+  leaves nothing behind (`crates/forge-mcp/src/transport.rs`).
+- **A removed worktree left its whole code index behind.** Each daemon worktree session indexes its
+  own copy of the repository and nothing pruned it afterwards: 48 dead `forge-wt-*` copies were
+  ~1 GB of a 2.5 GB store. Session start now drops the index of any root whose directory no longer
+  exists, before the incremental update (`Lattice::prune_stale_roots`). Roots that still exist are
+  never touched; the file shrinks after `forge lattice prune --stale --vacuum`.
+
+### Fixed
 - **The lattice file watcher pinned a CPU core per Forge process, indefinitely.** Two Forge MCP
   agents on one laptop each burned ~90% of a core for their whole lifetime with nothing changing on
   disk — package temperature 97–100 °C and 46,000 thermal-throttle events in 32 minutes. The

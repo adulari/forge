@@ -169,6 +169,20 @@ impl Lattice {
         self
     }
 
+    /// Drop every indexed root whose directory no longer exists. Returns the roots removed.
+    ///
+    /// Every daemon worktree session indexes its own copy of the repository (~20 MB of rows for
+    /// this one), and nothing removed those rows when the worktree was; 48 dead copies were ~1 GB
+    /// of a 2.5 GB store. Cheap — one `is_dir` per root — so it runs at every session start.
+    pub fn prune_stale_roots(&self) -> Result<Vec<String>, LatticeError> {
+        let stale = root::stale_roots(&self.store)?;
+        for root in &stale {
+            let files = root::prune_root(&self.store, root)?;
+            tracing::info!(root = %root, files, "lattice: pruned index of a removed directory");
+        }
+        Ok(stale)
+    }
+
     /// The root-identity refusal for this Lattice, if any — `None` when the root is indexable.
     pub fn refusal(&self) -> Option<&RootRefusal> {
         self.refusal.as_ref()
@@ -1564,6 +1578,38 @@ pub fn caller_c() { hub(); }
 
     /// The watcher's in-turn reindex is a second write path into the same index; it must honour the
     /// same refusal, or a session rooted at `$HOME` refills the index one saved file at a time.
+    /// A removed worktree must take its index copy with it — but only its own; the live root's
+    /// rows stay untouched.
+    #[test]
+    fn prune_stale_roots_drops_only_the_roots_whose_directory_is_gone() {
+        let live = Tmp::new();
+        let gone = Tmp::new();
+        std::fs::write(live.root.join("a.rs"), "pub fn live_symbol() {}\n").unwrap();
+        std::fs::write(gone.root.join("b.rs"), "pub fn gone_symbol() {}\n").unwrap();
+        let store = store();
+        Lattice::new_with_home(Arc::clone(&store), &live.root, None)
+            .update()
+            .unwrap();
+        Lattice::new_with_home(Arc::clone(&store), &gone.root, None)
+            .update()
+            .unwrap();
+        assert_eq!(store.lattice_repo_roots().unwrap().len(), 2);
+
+        std::fs::remove_dir_all(&gone.root).unwrap();
+        let lat = Lattice::new_with_home(Arc::clone(&store), &live.root, None);
+        let pruned = lat.prune_stale_roots().unwrap();
+        assert_eq!(pruned, vec![gone.root.to_string_lossy().to_string()]);
+
+        let roots = store.lattice_repo_roots().unwrap();
+        assert_eq!(roots, vec![live.root.to_string_lossy().to_string()]);
+        assert_eq!(
+            lat.query("live_symbol", 5).unwrap().len(),
+            1,
+            "live index intact"
+        );
+        assert!(lat.prune_stale_roots().unwrap().is_empty(), "idempotent");
+    }
+
     #[test]
     fn reindex_path_refuses_a_home_root() {
         let h = FakeHome::new();

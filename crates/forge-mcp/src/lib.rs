@@ -250,10 +250,30 @@ pub(crate) struct Connection {
     transport_label: &'static str,
     peer: Option<Peer<RoleClient>>,
     service: Option<RunningService<RoleClient, ForgeClientHandler>>,
+    /// Process group of a stdio server's child tree; signalled on every teardown path so a
+    /// wrapper's grandchild cannot outlive the session (see `transport::isolate_child`).
+    child_group: Option<u32>,
     pub(crate) tools: Vec<DiscoveredTool>,
     resources: Vec<DiscoveredResource>,
     prompts: Vec<DiscoveredPrompt>,
     reconnect_attempts: usize,
+}
+
+impl Connection {
+    /// Signal the child tree once. Idempotent: the group id is taken so a later drop is a no-op.
+    fn end_child_tree(&mut self) {
+        if let Some(group) = self.child_group.take() {
+            transport::signal_child_group(group);
+        }
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // Covers `disconnect()`, replacement on reconnect, and the manager itself going away:
+        // whatever path drops the entry, the whole child tree gets its signal.
+        self.end_child_tree();
+    }
 }
 
 /// Connects to and drives a set of external MCP servers. Cheap to hold in an `Arc`; all mutable
@@ -367,6 +387,7 @@ impl McpManager {
                         transport_label: s.transport_label(),
                         peer: None,
                         service: None,
+                        child_group: None,
                         tools: vec![],
                         resources: vec![],
                         prompts: vec![],
@@ -435,6 +456,7 @@ impl McpManager {
                             transport_label: s.transport_label(),
                             peer: None,
                             service: None,
+                            child_group: None,
                             tools: vec![],
                             resources: vec![],
                             prompts: vec![],
@@ -455,8 +477,12 @@ impl McpManager {
         &self,
         name: &str,
         transport_label: &'static str,
-        service: RunningService<RoleClient, ForgeClientHandler>,
+        established: transport::Established,
     ) {
+        let transport::Established {
+            service,
+            child_group,
+        } = established;
         let peer = service.peer().clone();
         let tools = discover_tools(&peer, name).await;
         let resources = peer
@@ -489,6 +515,7 @@ impl McpManager {
                 transport_label,
                 peer: Some(peer),
                 service: Some(service),
+                child_group,
                 tools,
                 resources,
                 prompts,
@@ -506,6 +533,7 @@ impl McpManager {
                 transport_label,
                 peer: None,
                 service: None,
+                child_group: None,
                 tools: vec![],
                 resources: vec![],
                 prompts: vec![],
@@ -847,6 +875,7 @@ impl McpManager {
         // whole session. Taking + cancelling it now reaps the child (closes its pipes) immediately.
         let dead = self.conns.lock().get_mut(server).and_then(|c| {
             c.peer = None;
+            c.end_child_tree();
             c.service.take()
         });
         if let Some(service) = dead {
@@ -978,7 +1007,10 @@ impl McpManager {
             let mut conns = self.conns.lock();
             conns
                 .values_mut()
-                .filter_map(|c| c.service.take())
+                .filter_map(|c| {
+                    c.end_child_tree();
+                    c.service.take()
+                })
                 .collect()
         };
         for s in services {
@@ -1284,7 +1316,15 @@ pub mod testsupport {
             .await
             .expect("client connects");
         let mgr = McpManager::empty(config);
-        mgr.add_established("test", "stdio", client).await;
+        mgr.add_established(
+            "test",
+            "stdio",
+            transport::Established {
+                service: client,
+                child_group: None,
+            },
+        )
+        .await;
         mgr
     }
 }

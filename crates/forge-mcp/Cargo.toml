@@ -28,6 +28,8 @@ webpki-root-certs = "1"
 # also gives a cheap, no-Result `lock()` and lets the connection map be shared (via Weak) with the
 # rmcp client handler so server `tools/list_changed` notifications can refresh the live catalog.
 parking_lot = "0.12"
+# Process-group + parent-death-signal plumbing for stdio servers (transport.rs).
+libc.workspace = true
 rmcp = { workspace = true, features = [
     "client",
     "server",

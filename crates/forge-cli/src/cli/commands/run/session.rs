@@ -371,6 +371,12 @@ pub(crate) async fn build_session_with_self_mcp(
             // "not updated" rather than propagating.)
             let lat_update = Arc::clone(&lat_bg);
             let result = tokio::task::spawn_blocking(move || {
+                // Removed worktrees leave their whole index behind; drop those copies before
+                // adding to the store (see `Lattice::prune_stale_roots`). Best-effort: a prune
+                // failure must not block indexing this session's own root.
+                if let Err(error) = lat_update.prune_stale_roots() {
+                    tracing::warn!(%error, "lattice: stale-root prune failed");
+                }
                 lat_update
                     .update()
                     .map(|_| ())
