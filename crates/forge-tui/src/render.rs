@@ -16,6 +16,7 @@ use similar::{ChangeTag, TextDiff};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
+use unicode_width::UnicodeWidthStr;
 
 use crate::surface::{ACCENT, DIM, ERRRED, OKGREEN, ORANGE, TEXT, TOOLCYAN, WARNYEL};
 
@@ -480,10 +481,60 @@ pub fn assay_report_plain(r: &forge_types::AssayReport) -> String {
 /// Render a markdown document to styled lines, indented to match the conversation body.
 pub fn markdown_to_lines(md: &str) -> Vec<Line<'static>> {
     let mut r = Renderer::default();
-    for ev in Parser::new_ext(md, Options::empty()) {
+    // Without ENABLE_TABLES a GFM table is just a paragraph: its rows are joined by soft breaks
+    // into one long line of pipes — the "broken table" every model-written comparison used to
+    // render as. Strikethrough is enabled so `~~x~~` does not leak tildes either.
+    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
+    for ev in Parser::new_ext(md, options) {
         r.event(ev);
     }
     r.finish()
+}
+
+/// Widest a single table column may render. Wider cells are cut with an ellipsis so one long
+/// cell cannot push the whole table past the terminal edge and wrap every row.
+const TABLE_CELL_MAX: usize = 48;
+
+/// A GFM table under construction: styled cells per row, header first.
+#[derive(Default)]
+struct TableBuild {
+    rows: Vec<Vec<Vec<Span<'static>>>>,
+    cell: Vec<Span<'static>>,
+    header_rows: usize,
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|s| s.content.width()).sum()
+}
+
+/// Cut a cell's spans to `max` display columns, ending with `…` when anything was dropped.
+fn clip_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+    if spans_width(&spans) <= max {
+        return spans;
+    }
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    let budget = max.saturating_sub(1);
+    for span in spans {
+        let mut kept = String::new();
+        for ch in span.content.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + w > budget {
+                break;
+            }
+            kept.push(ch);
+            used += w;
+        }
+        let done = kept.chars().count() < span.content.chars().count();
+        if !kept.is_empty() {
+            out.push(Span::styled(kept, span.style));
+        }
+        if done {
+            break;
+        }
+    }
+    out.push(Span::styled("…", Style::default().fg(DIM)));
+    out
 }
 
 #[derive(Default)]
@@ -498,6 +549,9 @@ struct Renderer {
     quote: u32,
     /// when Some, we're inside a fenced code block: (language tag, accumulated raw lines)
     code: Option<(String, Vec<String>)>,
+    /// when Some, we're inside a table: cells are collected and laid out on `TagEnd::Table`.
+    table: Option<TableBuild>,
+    strike: u32,
 }
 
 impl Renderer {
@@ -512,6 +566,9 @@ impl Renderer {
         if self.italic > 0 {
             s = s.add_modifier(Modifier::ITALIC);
         }
+        if self.strike > 0 {
+            s = s.add_modifier(Modifier::CROSSED_OUT);
+        }
         s
     }
 
@@ -525,6 +582,11 @@ impl Renderer {
     }
 
     fn push_text(&mut self, text: &str) {
+        let style = self.style();
+        if let Some(table) = self.table.as_mut() {
+            table.cell.push(Span::styled(text.to_string(), style));
+            return;
+        }
         if self.cur.is_empty() {
             // start the line with its indent (+ quote bar if quoted).
             self.cur.push(Span::raw(self.indent_prefix()));
@@ -645,7 +707,51 @@ impl Renderer {
             }
             Event::Start(Tag::Link { .. }) => {} // text rendered inline; URL appended on end
             Event::End(TagEnd::Link) => {}
+            Event::Start(Tag::Table(_)) => {
+                self.flush_line();
+                self.table = Some(TableBuild::default());
+            }
+            Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
+                if let Some(t) = self.table.as_mut() {
+                    t.rows.push(Vec::new());
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(t) = self.table.as_mut() {
+                    t.header_rows = t.rows.len();
+                }
+            }
+            Event::End(TagEnd::TableRow) => {}
+            Event::Start(Tag::TableCell) => {
+                if let Some(t) = self.table.as_mut() {
+                    t.cell.clear();
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(t) = self.table.as_mut() {
+                    let cell = clip_spans(std::mem::take(&mut t.cell), TABLE_CELL_MAX);
+                    if let Some(row) = t.rows.last_mut() {
+                        row.push(cell);
+                    }
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(t) = self.table.take() {
+                    self.render_table(t);
+                }
+                self.blank();
+            }
+            Event::Start(Tag::Strikethrough) => self.strike += 1,
+            Event::End(TagEnd::Strikethrough) => self.strike = self.strike.saturating_sub(1),
             Event::Text(t) => self.push_text(&t),
+            Event::Code(c) if self.table.is_some() => {
+                if let Some(table) = self.table.as_mut() {
+                    table.cell.push(Span::styled(
+                        c.to_string(),
+                        Style::default().fg(TOOLCYAN).bg(CODEBG),
+                    ));
+                }
+            }
             Event::Code(c) => {
                 if self.cur.is_empty() {
                     self.cur.push(Span::raw(self.indent_prefix()));
@@ -656,6 +762,7 @@ impl Renderer {
                 ));
             }
             Event::SoftBreak => self.push_text(" "),
+            Event::HardBreak if self.table.is_some() => self.push_text(" "),
             Event::HardBreak => self.flush_line(),
             Event::Rule => {
                 self.flush_line();
@@ -667,6 +774,49 @@ impl Renderer {
                 self.blank();
             }
             _ => {}
+        }
+    }
+
+    /// Lay a collected table out as aligned columns: cells padded to the column's widest cell,
+    /// `│` between columns, and a `─┼─` rule under the header. Styling inside cells (code, bold)
+    /// is preserved span-for-span; only padding is added.
+    fn render_table(&mut self, table: TableBuild) {
+        let cols = table.rows.iter().map(Vec::len).max().unwrap_or(0);
+        if cols == 0 {
+            return;
+        }
+        let mut widths = vec![0usize; cols];
+        for row in &table.rows {
+            for (i, cell) in row.iter().enumerate() {
+                widths[i] = widths[i].max(spans_width(cell));
+            }
+        }
+        let frame = Style::default().fg(DIM);
+        for (r, row) in table.rows.into_iter().enumerate() {
+            let mut line: Vec<Span<'static>> = vec![Span::raw(self.indent_prefix())];
+            for (i, width) in widths.iter().enumerate() {
+                let cell = row.get(i).cloned().unwrap_or_default();
+                let pad = width.saturating_sub(spans_width(&cell));
+                if i > 0 {
+                    line.push(Span::styled(" │ ", frame));
+                }
+                line.extend(cell);
+                if pad > 0 {
+                    line.push(Span::raw(" ".repeat(pad)));
+                }
+            }
+            self.lines.push(Line::from(line));
+            if r + 1 == table.header_rows {
+                let rule = widths
+                    .iter()
+                    .map(|w| "─".repeat(*w))
+                    .collect::<Vec<_>>()
+                    .join("─┼─");
+                self.lines.push(Line::from(vec![
+                    Span::raw(self.indent_prefix()),
+                    Span::styled(rule, frame),
+                ]));
+            }
         }
     }
 
@@ -726,6 +876,51 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter())
             .any(|s| s.content.contains(needle) && s.style.add_modifier.contains(m))
+    }
+
+    #[test]
+    fn gfm_table_renders_as_aligned_rows_not_one_line_of_pipes() {
+        let md = "Intro:\n\n| Field | App | Status |\n|---|---|---|\n| f1 wall-clock | `ctx` | ✓ |\n| f20 queue | 80 entries | **fixed** |\n\nAfter.\n";
+        let out = markdown_to_lines(md);
+        let t = text_of(&out);
+        let rows: Vec<&str> = t.lines().filter(|l| l.contains('│')).collect();
+        assert_eq!(rows.len(), 3, "header + 2 body rows, one per line: {t}");
+        assert!(!t.contains("|---"), "separator row is not literal: {t}");
+        assert!(t.contains("─┼─"), "header rule drawn: {t}");
+        // Every row's column separators line up: same byte offset of the first '│'.
+        let first: Vec<usize> = rows.iter().map(|r| r.find('│').unwrap()).collect();
+        assert!(
+            first.iter().all(|&x| x == first[0]),
+            "columns aligned: {rows:?}"
+        );
+        assert!(t.contains("f1 wall-clock") && t.contains("80 entries"));
+        assert!(
+            has_modifier(&out, "fixed", Modifier::BOLD),
+            "styling survives inside cells"
+        );
+        assert!(
+            t.contains("Intro:") && t.contains("After."),
+            "surrounding text intact"
+        );
+    }
+
+    #[test]
+    fn overlong_table_cell_is_clipped_with_an_ellipsis() {
+        let long = "x".repeat(200);
+        let md = format!("| a | b |\n|---|---|\n| {long} | y |\n");
+        let out = markdown_to_lines(&md);
+        let t = text_of(&out);
+        let row = t.lines().find(|l| l.contains("xxx")).unwrap();
+        assert!(row.contains('…'), "clipped: {row}");
+        assert!(row.width() < 200, "row bounded: {}", row.width());
+    }
+
+    #[test]
+    fn strikethrough_strips_tildes() {
+        let out = markdown_to_lines("was ~~wrong~~ now right\n");
+        let t = text_of(&out);
+        assert!(!t.contains('~'), "{t}");
+        assert!(has_modifier(&out, "wrong", Modifier::CROSSED_OUT));
     }
 
     #[test]
