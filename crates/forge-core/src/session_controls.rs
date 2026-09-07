@@ -176,6 +176,23 @@ impl Session {
         self.pinned_effort
     }
 
+    /// Release (or re-bind) this session's subagents from the active model pin
+    /// (`/subagents free|pinned`). `Some(true)` = children route the mesh independently even while
+    /// the parent is pinned; `Some(false)` = children inherit the pin; `None` = follow
+    /// `mesh.subagents.inherit_pin`. Persisted so a resume or daemon restart keeps the choice —
+    /// otherwise a long-running fleet session silently snaps its children back onto the pin.
+    pub fn set_subagents_free(&mut self, free: Option<bool>) {
+        self.subagent_pin_free = free;
+        let _ = self.store.set_session_subagent_pin_free(&self.id, free);
+    }
+
+    /// Whether this session's subagents may route off the active model pin, resolving the
+    /// in-session override against the `mesh.subagents.inherit_pin` config default.
+    pub fn subagents_free(&self) -> bool {
+        self.subagent_pin_free
+            .unwrap_or(!self.config.mesh.subagents.inherit_pin)
+    }
+
     /// The currently-pinned routing tier, if any (set by `tier_up`/`tier_down`). `None` = normal
     /// mesh classification.
     pub fn pinned_tier(&self) -> Option<TaskTier> {

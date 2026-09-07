@@ -6,6 +6,20 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`/subagents [free|pinned]` — let one pinned session fan its children out onto other models.**
+  Pin inheritance was config-only (`mesh.subagents.inherit_pin`), so releasing subagents from the
+  parent's pin meant editing `config.toml` and restarting, and it then applied to every session.
+  The command sets a per-session override that `Session::subagents_free` resolves against the
+  config default and hands to children as `AgentCtx::inherit_pin` — `route_child` now reads only
+  that field, so the runtime command and the config default meet in one place. Bare `/subagents`
+  toggles and reports the state. The override is persisted on the session row (migration #33) and
+  restored on resume, so a daemon restart mid-goal no longer silently drags every child back onto
+  the pin. Default is unchanged: children inherit the pin. A released session stays pinned itself;
+  only its children route the full mesh (`crates/forge-tui/src/commands.rs`,
+  `crates/forge-core/src/{session_controls,subagent,orchestration}.rs`,
+  `crates/forge-cli/src/cli/commands/run/dispatch.rs`).
+
 ### Fixed
 - **`tools.extra_roots` was still refused by the file tools' in-process safety net.** The
   allowlist reached the two argument validators but not `confine()` in

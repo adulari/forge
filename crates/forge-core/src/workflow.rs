@@ -921,6 +921,7 @@ mod tests {
             worktree_root: None,
             repo_root: std::path::PathBuf::from("."),
             effective_pin: None,
+            inherit_pin: true,
         }
     }
 

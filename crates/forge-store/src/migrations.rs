@@ -686,7 +686,22 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0030,
     migration_0031,
     migration_0032,
+    migration_0033,
 ];
+
+/// Migration #33: whether a session has released its subagents from the active model pin.
+///
+/// `mesh.subagents.inherit_pin` is a config-file default, so the only way to let one pinned
+/// session fan out onto other models was to edit the config and restart. `/subagents free` sets
+/// this per session instead; like the model and effort pins it lived nowhere durable, so a daemon
+/// restart or a resume would silently drag the children back onto the parent's pin. NULL = follow
+/// the config default.
+fn migration_0033(conn: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE session ADD COLUMN subagent_pin_free INTEGER",
+    )
+}
 
 /// Migration #32: the loopback control endpoint a terminal-local session publishes for the daemon.
 ///

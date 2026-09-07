@@ -1589,6 +1589,10 @@ pub struct Session {
     /// In-session reasoning-effort pin (`/effort <level>`). When set, forwarded to the provider
     /// as a `ReasoningEffort` hint each turn. `None` = provider default (no hint sent).
     pinned_effort: Option<EffortLevel>,
+    /// In-session override for subagent pin inheritance (`/subagents free|pinned`). `Some(true)`
+    /// releases this session's children from the active model pin so they route the mesh on their
+    /// own; `Some(false)` forces inheritance. `None` = follow `mesh.subagents.inherit_pin`.
+    subagent_pin_free: Option<bool>,
     /// Per-turn shrinking cap on the usable context window (tokens), armed only after a provider
     /// context-overflow error and reset at the start of each turn. Each overflow retry lowers it so
     /// the SENT transcript view trims harder — a non-destructive self-heal (the stored transcript is
@@ -9745,6 +9749,72 @@ mod tests {
         let mut session = resumed(Arc::clone(&store));
         session.set_effort(None);
         assert_eq!(resumed(Arc::clone(&store)).pinned_effort(), None);
+    }
+
+    #[tokio::test]
+    async fn resume_restores_the_subagent_pin_release() {
+        // `/subagents free` is what lets ONE pinned session fan out onto other models. It lived
+        // only in the running session before, so a daemon restart mid-goal silently dragged every
+        // child back onto the parent's pin — the exact thing the command was used to prevent.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let id = store.create_session(".", "default").unwrap();
+
+        let resumed = |store: Arc<Store>| {
+            Session::resume(
+                store,
+                Arc::new(MockProvider),
+                Arc::new(HeuristicRouter::new(Config::default())),
+                ToolRegistry::with_core_tools_in(test_workspace()),
+                Box::new(CapturePresenter::default()),
+                Config::default(),
+                &id,
+            )
+            .unwrap()
+        };
+
+        // Never set → the config default (`inherit_pin = true`) applies: children stay pinned.
+        assert!(!resumed(Arc::clone(&store)).subagents_free());
+
+        let mut session = resumed(Arc::clone(&store));
+        session.set_subagents_free(Some(true));
+        assert!(
+            resumed(Arc::clone(&store)).subagents_free(),
+            "a released session must come back released"
+        );
+
+        let mut session = resumed(Arc::clone(&store));
+        session.set_subagents_free(Some(false));
+        assert!(!resumed(Arc::clone(&store)).subagents_free());
+
+        // Clearing the override hands the decision back to the config default.
+        let mut session = resumed(Arc::clone(&store));
+        session.set_subagents_free(None);
+        assert!(!resumed(Arc::clone(&store)).subagents_free());
+    }
+
+    #[tokio::test]
+    async fn subagents_free_follows_the_config_default_until_the_command_overrides_it() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let id = store.create_session(".", "default").unwrap();
+        let mut config = Config::default();
+        config.mesh.subagents.inherit_pin = false;
+        let mut session = Session::resume(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(CapturePresenter::default()),
+            config,
+            &id,
+        )
+        .unwrap();
+        assert!(
+            session.subagents_free(),
+            "`inherit_pin = false` in config means children are free without any command"
+        );
+        // An explicit `/subagents pinned` still wins over that default.
+        session.set_subagents_free(Some(false));
+        assert!(!session.subagents_free());
     }
 
     #[tokio::test]
