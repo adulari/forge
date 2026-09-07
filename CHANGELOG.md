@@ -6,6 +6,43 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The lattice file watcher pinned a CPU core per Forge process, indefinitely.** Two Forge MCP
+  agents on one laptop each burned ~90% of a core for their whole lifetime with nothing changing on
+  disk — package temperature 97–100 °C and 46,000 thermal-throttle events in 32 minutes. The
+  watcher's inotify backend subscribes to `IN_OPEN`, so every file the reindexer *read* to hash it
+  came back as an event for that same file, which queued another reindex, which read it again:
+  a loop that fed itself forever once the initial index walk seeded it (measured: every source
+  file re-opened 73 times in 6 seconds, 97,000 events). Access-only events are now dropped before
+  they reach the worker; a real write still reindexes. A regression test reproduces the loop
+  shape — a reindex action that reads its file — and proves the count stops moving once the tree
+  is quiet (`crates/forge-index/src/watch.rs`).
+- **The watcher registered ~55,000 inotify watches on the Forge repository.** One recursive watch
+  on the project root pulled in `target/`, `node_modules/`, `.git/` and every worktree, so each
+  cargo build or checkout anywhere under the tree woke the watcher thread for nothing. It now
+  registers one watch per directory the indexer actually walks (~300 here), sharing the indexer's
+  walker so the watched set and the indexed set cannot drift, and follows the tree as directories
+  appear. The debouncer crate and its extra thread are gone; the existing coalescing worker does
+  that job.
+- **`forge mcp agent` launched a second full agent beside itself.** The self-MCP guard compared
+  executable *basenames*, but the repo's MCP launcher runs a snapshot copy named
+  `forge-<hash>`, so a `target/debug/forge mcp agent` entry in `.forge/mcp.toml` was not
+  recognised as self and was spawned — a second session, index and file watcher for every real
+  one. Any forge-named binary invoked as `mcp agent` is now treated as a nested Forge agent
+  (`crates/forge-cli/src/cli/commands/run/session.rs`).
+
+- **A `forge mcp agent` could outlive the process that spawned it.** Stdin EOF ends the server
+  loop when the parent exits cleanly, but a parent killed outright left the agent — session, index,
+  watcher — running until someone found it in `top`. On Linux the agent now asks the kernel for
+  `SIGTERM` when its parent dies (`PR_SET_PDEATHSIG`), so a dead orchestrator can no longer leave
+  a live Forge behind (`crates/forge-cli/src/mcp_agent.rs`).
+
+### Changed
+- **The repository's `.mcp.json` no longer registers Forge as an MCP server for Claude Code.**
+  Every Claude Code session in this checkout spawned a full Forge agent (session, index, file
+  watcher) whether or not it was ever used; the two runaway processes above were exactly those.
+  Add the entry back locally if you want `forge_chat` from Claude Code.
+
 ## [2.14.1] - 2026-09-07
 
 v2.14.0 was tagged but never published: its release build failed 24 seconds in, before compiling

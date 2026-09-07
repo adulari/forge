@@ -48,14 +48,21 @@ fn remove_recursive_self_mcp(
         let forge_config::McpTransport::Stdio { command, args, .. } = &server.transport else {
             return true;
         };
-        let is_self_binary = self_exe_name.is_some_and(|name| {
-            std::path::Path::new(command)
-                .file_name()
-                .is_some_and(|file| file.to_string_lossy() == name)
-        });
+        let file = std::path::Path::new(command)
+            .file_name()
+            .map(|file| file.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // The running binary is not always called `forge`: the repo's own MCP launcher snapshots
+        // `target/debug/forge` to `~/.cache/forge/mcp-agent/forge-<hash>` before exec'ing it (so a
+        // cargo rebuild can't swap the executable under a live process). Comparing basenames alone
+        // let that copy keep a `target/debug/forge mcp agent` entry, which spawned a second full
+        // agent — its own session, index, and file watcher — beside every real one. Any
+        // forge-named binary invoked as `mcp agent` is a nested Forge agent, whatever its suffix.
+        let is_forge_binary =
+            self_exe_name.is_some_and(|name| file == name) || file.starts_with("forge");
         let is_mcp_agent_invocation =
             args.iter().any(|arg| arg == "mcp") && args.iter().any(|arg| arg == "agent");
-        !(is_self_binary && is_mcp_agent_invocation)
+        !(is_forge_binary && is_mcp_agent_invocation)
     });
 }
 
@@ -575,15 +582,43 @@ mod tests {
     }
 
     #[test]
-    fn mcp_agent_keeps_config_when_executable_identity_is_unavailable() {
+    fn mcp_agent_strips_forge_named_agents_even_when_its_own_identity_is_unavailable() {
+        // A nested `forge mcp agent` is never wanted inside `mcp agent`, so not knowing our own
+        // executable name must not let one through; a foreign `mcp agent` is still kept.
         let mut config = forge_config::McpConfig {
-            servers: vec![stdio_server("forge", "forge", &["mcp", "agent"])],
+            servers: vec![
+                stdio_server("forge", "forge", &["mcp", "agent"]),
+                stdio_server("other-agent", "/opt/bin/helper", &["mcp", "agent"]),
+            ],
             ..Default::default()
         };
 
         remove_recursive_self_mcp(&mut config, None);
 
-        assert_eq!(config.servers.len(), 1);
+        let names: Vec<_> = config.servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["other-agent"]);
+    }
+
+    #[test]
+    fn mcp_agent_strips_a_self_entry_when_running_from_a_snapshot_copy() {
+        // The observed double-agent: the launcher runs `forge-942126250` (a snapshot of
+        // target/debug/forge) while .forge/mcp.toml names `target/debug/forge mcp agent`.
+        let mut config = forge_config::McpConfig {
+            servers: vec![
+                stdio_server(
+                    "forge",
+                    "/repo/target/debug/forge",
+                    &["mcp", "agent", "--cwd", "/repo"],
+                ),
+                stdio_server("forge-serve", "/repo/target/debug/forge", &["mcp", "serve"]),
+            ],
+            ..Default::default()
+        };
+
+        remove_recursive_self_mcp(&mut config, Some("forge-942126250"));
+
+        let names: Vec<_> = config.servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["forge-serve"]);
     }
 
     #[test]

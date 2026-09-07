@@ -39,7 +39,7 @@ tree-sitter-scala = "0.26.0"
 tree-sitter-kotlin-ng = "1.1.0"
 sha2 = "0.11"
 ignore = "0.4"
-notify-debouncer-mini = "0.7.0"
+notify = "8.2"
 async-trait = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
