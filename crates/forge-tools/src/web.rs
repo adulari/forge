@@ -13,6 +13,12 @@ use serde_json::{json, Value};
 
 use crate::{str_arg, Tool, ToolError};
 
+mod search;
+use search::keyless_chain;
+pub use search::{
+    Bing, BraveKeyless, BraveSearch, DuckDuckGo, SearchBackend, SearchResult, SearxNg,
+};
+
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Hard byte cap on any fetched/searched HTTP body. `reqwest`'s `.text()` buffers the WHOLE body
 /// before our `max_chars` truncation runs, so a huge or slow response OOM-kills the process — the
@@ -370,313 +376,6 @@ fn truncate_chars(s: &str, max: usize) -> String {
     format!("{truncated}\n\n[truncated at {max} chars]")
 }
 
-// ---------------------------------------------------------------------------
-// web_search
-// ---------------------------------------------------------------------------
-
-/// One search hit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchResult {
-    pub title: String,
-    pub url: String,
-    pub description: String,
-}
-
-/// A pluggable search provider. The default is Brave; the trait keeps `web_search`
-/// backend-agnostic so a free/alternative backend can be added without touching the tool.
-#[async_trait]
-pub trait SearchBackend: Send + Sync {
-    async fn search(&self, query: &str, count: u32) -> Result<Vec<SearchResult>, ToolError>;
-}
-
-/// Brave Search API backend. Verified contract (official docs, 2026-06):
-/// `GET https://api.search.brave.com/res/v1/web/search?q=…&count=…`, header
-/// `X-Subscription-Token: <key>`, results at `web.results[].{title,url,description}`.
-pub struct BraveSearch {
-    key: String,
-}
-
-impl BraveSearch {
-    pub fn new(key: String) -> Self {
-        Self { key }
-    }
-}
-
-#[async_trait]
-impl SearchBackend for BraveSearch {
-    async fn search(&self, query: &str, count: u32) -> Result<Vec<SearchResult>, ToolError> {
-        let client = bundled_client_builder()
-            .user_agent(USER_AGENT)
-            .timeout(FETCH_TIMEOUT)
-            .build()
-            .map_err(|e| ToolError::Failed(format!("http client: {e}")))?;
-        let resp = client
-            .get("https://api.search.brave.com/res/v1/web/search")
-            .header("X-Subscription-Token", &self.key)
-            .header("Accept", "application/json")
-            .query(&[("q", query), ("count", &count.to_string())])
-            .send()
-            .await
-            .map_err(|e| ToolError::Failed(format!("brave search request: {e}")))?;
-        let status = resp.status();
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| ToolError::Failed(format!("brave search response: {e}")))?;
-        if !status.is_success() {
-            return Err(ToolError::Failed(format!(
-                "brave search returned HTTP {status}"
-            )));
-        }
-        Ok(parse_brave_results(&body))
-    }
-}
-
-pub(crate) fn parse_brave_results(body: &Value) -> Vec<SearchResult> {
-    body.get("web")
-        .and_then(|w| w.get("results"))
-        .and_then(Value::as_array)
-        .map(|results| {
-            results
-                .iter()
-                .filter_map(|r| {
-                    Some(SearchResult {
-                        title: r.get("title")?.as_str()?.to_string(),
-                        url: r.get("url")?.as_str()?.to_string(),
-                        description: r
-                            .get("description")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Keyless DuckDuckGo backend — the free default when no search-API key is configured.
-/// Two-stage + honest about blocks:
-/// 1. the no-JS HTML endpoint (`html.duckduckgo.com/html/`) for full ranked web results;
-/// 2. when DDG rate-limits the HTML endpoint (it serves HTTP 202 + a challenge page, which
-///    is *technically* 2xx — the old code parsed it to an empty list and silently reported
-///    "no results"), fall back to the official Instant-Answer JSON API
-///    (`api.duckduckgo.com`), which still returns an abstract + related topics under throttle.
-///
-/// If both yield nothing AND the HTML endpoint was throttled, return an actionable error
-/// instead of a misleading empty result. Keyless search is inherently best-effort — for
-/// reliable, higher-volume search set a key (`forge auth brave`).
-pub struct DuckDuckGo;
-
-const DDG_UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0";
-
-#[async_trait]
-impl SearchBackend for DuckDuckGo {
-    async fn search(&self, query: &str, count: u32) -> Result<Vec<SearchResult>, ToolError> {
-        let client = bundled_client_builder()
-            .user_agent(DDG_UA)
-            .timeout(FETCH_TIMEOUT)
-            .build()
-            .map_err(|e| ToolError::Failed(format!("http client: {e}")))?;
-
-        // Stage 1: HTML results endpoint.
-        let html_resp = client
-            .get("https://html.duckduckgo.com/html/")
-            .query(&[("q", query)])
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .send()
-            .await
-            .map_err(|e| ToolError::Failed(format!("duckduckgo request: {e}")))?;
-        let html_status = html_resp.status();
-        let html_ok = html_status == reqwest::StatusCode::OK;
-        // Byte-cap the body (same OOM guard as web_fetch); on any read error fall back to empty.
-        let body = read_body_capped(html_resp, MAX_BODY_BYTES, "duckduckgo")
-            .await
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .unwrap_or_default();
-        if html_ok {
-            let mut results = parse_ddg_results(&body);
-            if !results.is_empty() {
-                results.truncate(count as usize);
-                return Ok(results);
-            }
-        }
-
-        // Stage 2: Instant-Answer JSON API (works even when the HTML endpoint is throttled).
-        if let Ok(resp) = client
-            .get("https://api.duckduckgo.com/")
-            .query(&[
-                ("q", query),
-                ("format", "json"),
-                ("no_html", "1"),
-                ("t", "forge"),
-            ])
-            .send()
-            .await
-        {
-            if let Ok(json) = resp.json::<Value>().await {
-                let mut results = parse_ddg_ia(&json);
-                if !results.is_empty() {
-                    results.truncate(count as usize);
-                    return Ok(results);
-                }
-            }
-        }
-
-        // Nothing. If the HTML endpoint was blocked, say so (don't pretend "no results").
-        if !html_ok {
-            return Err(ToolError::Failed(format!(
-                "DuckDuckGo rate-limited this IP (HTTP {html_status}) and the fallback returned \
-                 nothing. Retry shortly, or set a search key for reliable results: \
-                 `forge auth brave`."
-            )));
-        }
-        Ok(Vec::new())
-    }
-}
-
-/// Map DuckDuckGo's Instant-Answer JSON to results: the Abstract (usually a Wikipedia
-/// summary), then official `Results[]`, then flat/nested `RelatedTopics[]`. Deduped by URL.
-pub(crate) fn parse_ddg_ia(json: &Value) -> Vec<SearchResult> {
-    let mut out: Vec<SearchResult> = Vec::new();
-
-    let abstract_url = json
-        .get("AbstractURL")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if abstract_url.starts_with("http") {
-        out.push(SearchResult {
-            title: str_field(json, "Heading"),
-            url: abstract_url.to_string(),
-            description: str_field(json, "AbstractText"),
-        });
-    }
-
-    for key in ["Results", "RelatedTopics"] {
-        let Some(arr) = json.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        for item in arr {
-            // Flat topic, or a nested {Name, Topics:[…]} category group.
-            match item.get("Topics").and_then(Value::as_array) {
-                Some(sub) => sub.iter().for_each(|t| push_ia_topic(&mut out, t)),
-                None => push_ia_topic(&mut out, item),
-            }
-        }
-    }
-    out
-}
-
-fn str_field(json: &Value, key: &str) -> String {
-    json.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
-}
-
-/// Append a `{Text, FirstURL}` Instant-Answer topic as a result (title = text before " - "),
-/// skipping empties and URL duplicates.
-fn push_ia_topic(out: &mut Vec<SearchResult>, t: &Value) {
-    let url = t.get("FirstURL").and_then(Value::as_str).unwrap_or("");
-    let text = t.get("Text").and_then(Value::as_str).unwrap_or("");
-    if !url.starts_with("http") || text.is_empty() || out.iter().any(|r| r.url == url) {
-        return;
-    }
-    out.push(SearchResult {
-        title: text.split(" - ").next().unwrap_or(text).to_string(),
-        url: url.to_string(),
-        description: text.to_string(),
-    });
-}
-
-/// Parse DuckDuckGo's HTML result page. Each hit is an `<a class="result__a" href="URL">TITLE
-/// </a>` followed by an `<a class="result__snippet">SNIPPET</a>`. Ad/redirect anchors
-/// (`//duckduckgo.com/y.js…`) are skipped.
-pub(crate) fn parse_ddg_results(html: &str) -> Vec<SearchResult> {
-    let titles = anchors_with_class(html, "result__a");
-    let snippets = anchors_with_class(html, "result__snippet");
-    titles
-        .into_iter()
-        .enumerate()
-        .filter(|(_, (href, _))| href.starts_with("http"))
-        .map(|(i, (href, title))| SearchResult {
-            title,
-            url: href,
-            description: snippets.get(i).map(|(_, t)| t.clone()).unwrap_or_default(),
-        })
-        .collect()
-}
-
-/// Find every `<a … class="<class>" … href="HREF">INNER</a>` and return (href, plain-text
-/// inner) pairs. Tolerates attribute order and nested tags in the inner text.
-fn anchors_with_class(html: &str, class: &str) -> Vec<(String, String)> {
-    let marker = format!("class=\"{class}\"");
-    let mut out = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(rel) = html[cursor..].find(&marker) {
-        let at = cursor + rel;
-        // Find the bounds of this <a …> open tag.
-        let tag_start = html[..at].rfind('<').unwrap_or(at);
-        let Some(gt_rel) = html[at..].find('>') else {
-            break;
-        };
-        let tag_end = at + gt_rel; // index of '>'
-        let open_tag = &html[tag_start..tag_end];
-        let href = open_tag
-            .find("href=\"")
-            .map(|h| &open_tag[h + 6..])
-            .and_then(|s| s.split('"').next())
-            .unwrap_or("")
-            .to_string();
-        let inner = match html[tag_end + 1..].find("</a>") {
-            Some(end_rel) => &html[tag_end + 1..tag_end + 1 + end_rel],
-            None => "",
-        };
-        out.push((decode_ddg_href(&href), html_to_text(inner)));
-        cursor = tag_end + 1;
-    }
-    out
-}
-
-/// DDG sometimes wraps the target in a redirect: `//duckduckgo.com/l/?uddg=<encoded>`.
-/// Extract and percent-decode the real URL when present; otherwise pass through.
-fn decode_ddg_href(href: &str) -> String {
-    let Some(idx) = href.find("uddg=") else {
-        return href.to_string();
-    };
-    let enc = href[idx + 5..].split('&').next().unwrap_or("");
-    percent_decode(enc)
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                Ok(b) => {
-                    out.push(b);
-                    i += 3;
-                }
-                Err(_) => {
-                    out.push(b'%');
-                    i += 1;
-                }
-            },
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 fn format_results(results: &[SearchResult]) -> String {
     if results.is_empty() {
         return "No results found.".to_string();
@@ -712,15 +411,27 @@ impl WebSearchTool {
         }
     }
 
-    /// Pick a backend: an explicit one (tests / future config) wins; else Brave if a key is
-    /// set; else the keyless DuckDuckGo default so web search works with zero setup.
+    /// Pick a backend: an explicit one (tests / config) wins; then a self-hosted SearXNG if one
+    /// is configured; then Brave if a key is set; else the keyless chain.
+    ///
+    /// `FORGE_SEARXNG_URL` is the escape hatch for anyone who wants search that no upstream can
+    /// throttle: a local SearXNG answers without a key, without a quota, and aggregates the
+    /// engines below. It is opt-in because it is a service to run, not a default anyone gets.
     fn resolve_backend(&self) -> Arc<dyn SearchBackend> {
         if let Some(b) = &self.backend {
             return b.clone();
         }
+        if let Ok(url) = std::env::var("FORGE_SEARXNG_URL") {
+            if !url.is_empty() {
+                return Arc::new(SearxNg::new(url));
+            }
+        }
+        // A key still wins over the keyless chain, but the chain now leads with a local SearXNG,
+        // so zero-setup search is only the fallback rather than the whole story.
+
         match std::env::var("BRAVE_API_KEY") {
             Ok(key) if !key.is_empty() => Arc::new(BraveSearch::new(key)),
-            _ => Arc::new(DuckDuckGo),
+            _ => Arc::new(keyless_chain()),
         }
     }
 }
@@ -762,6 +473,9 @@ impl Tool for WebSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Parser tests for the engines now live beside them in `search.rs`; these predate the split
+    // and exercise the same functions through the module boundary.
+    use super::search::{decode_ddg_href, parse_brave_results, parse_ddg_ia, parse_ddg_results};
 
     #[test]
     fn safe_url_accepts_public_https() {

@@ -28,6 +28,7 @@ regex.workspace = true
 tracing.workspace = true
 
 portable-pty = "0.9"
+base64 = "0.23"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
