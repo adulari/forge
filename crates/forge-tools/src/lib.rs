@@ -36,7 +36,10 @@ pub use lattice_tool::LatticeTool;
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};
 pub use shell::{ShellJobTool, ShellTool};
-pub use web::{BraveSearch, DuckDuckGo, SearchBackend, SearchResult, WebFetchTool, WebSearchTool};
+pub use web::{
+    Bing, BraveKeyless, BraveSearch, DuckDuckGo, SearchBackend, SearchResult, SearxNg,
+    WebFetchTool, WebSearchTool,
+};
 
 /// Run a shell command without a sandbox (for use by the autofix loop and other internal
 /// callers that don't need filesystem confinement). Never returns `Err`.
