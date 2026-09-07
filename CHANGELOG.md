@@ -7,6 +7,26 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Every visible chat message re-rendered on every ~30 ms WebSocket frame.** `useSessionCtx()`
+  exposed one context whose value object was rebuilt on every snapshot, so any consumer —
+  including `MessageRow` (already `React.memo`'d) and the 1000+ line `Composer` — re-rendered
+  per frame regardless of whether it read `snapshot` at all; `Composer` only needed
+  `snapshot.model`/`snapshot.effort`, and the session shell's `SessionHeader`/`StatusStrip`
+  received ~25 fresh inline-arrow-function props on every frame too. `sessionContext.tsx` now
+  splits into a `live` context (`snapshot`, `snapshotTimedOut`, `connectionState`, changing per
+  frame) and a `stable` context (session id, `send`, drafts, pending answer, header height,
+  focus signal — changing only when one of those actually changes); `useSessionCtx()` still
+  merges both for existing callers, and new `useSessionStable()`/`useSessionLive()` hooks let a
+  component opt into just the slice it needs. `MessageRow` and `Composer` now read
+  `useSessionStable()` only; `Composer` takes `model`/`effort` as props from its caller instead
+  of reading them off `snapshot` itself, and is wrapped in `React.memo`. `SessionHeader` and
+  `StatusStrip` are also `React.memo`'d, with their handlers hoisted into `useCallback`s and the
+  `weekly`/`transport` object props memoized in the session shell so the memo isn't defeated by
+  a fresh object every render (`mobile/src/lib/sessionContext.tsx`,
+  `mobile/src/components/chat/MessageRow.tsx`, `mobile/src/components/chat/Composer.tsx`,
+  `mobile/src/components/session/SessionHeader.tsx`,
+  `mobile/src/components/session/StatusStrip.tsx`, `mobile/src/app/session/[id]/_layout.tsx`,
+  `mobile/src/app/session/[id]/index.tsx`).
 - **The mobile app burned battery just for being on screen.** v2.13.6's desktop performance
   monitor ran on every platform, not just Tauri: `startDesktopPerformanceMonitor()` scheduled a
   `requestAnimationFrame` loop that pushed to an unbounded array and re-sorted the whole thing

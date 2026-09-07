@@ -909,6 +909,8 @@ export default function SessionChat() {
           busy={snapshot?.busy ?? false}
           online={online}
           suggestedPrompt={snapshot?.suggested_prompt ?? null}
+          model={snapshot?.model ?? null}
+          effort={snapshot?.effort ?? null}
           onSend={handleSend}
           onInterrupt={handleInterrupt}
         />

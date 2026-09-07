@@ -49,7 +49,7 @@ export interface StatusStripProps {
   onStripAction?: (kind: string) => void;
 }
 
-export function StatusStrip(props: StatusStripProps) {
+function StatusStripImpl(props: StatusStripProps) {
   const tokens = useTokens();
   const strike = useStrike();
   const { isCompact } = useBreakpoint();
@@ -111,6 +111,12 @@ export function StatusStrip(props: StatusStripProps) {
     </>
   );
 }
+
+/** Same rationale as `SessionHeader`'s memo wrap — the session shell re-renders every WS
+ * frame, and most of this component's props (`send`, `weekly`, `transport`) are already
+ * memoized by the caller, so a snapshot frame that doesn't move any of these values skips
+ * re-rendering this row entirely. */
+export const StatusStrip = React.memo(StatusStripImpl);
 
 // ---------------------------------------------------------------------------
 // Forge Anywhere — session status-strip condition row (7 variants, design comp

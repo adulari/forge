@@ -83,7 +83,7 @@ export interface SessionHeaderProps {
   transportMeta?: string;
 }
 
-export function SessionHeader(props: SessionHeaderProps) {
+function SessionHeaderImpl(props: SessionHeaderProps) {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
   const [actionsVisible, setActionsVisible] = useState(false);
@@ -227,6 +227,11 @@ export function SessionHeader(props: SessionHeaderProps) {
     </View>
   );
 }
+
+/** The session shell (`_layout.tsx`) re-renders on every WS snapshot frame; this component's
+ * ~25 props are all primitives or `useCallback`-stabilized handlers, so memoizing it stops
+ * the header (and its icon row) from re-rendering on frames that don't touch any of them. */
+export const SessionHeader = React.memo(SessionHeaderImpl);
 
 const styles = StyleSheet.create({
   wrap: { gap: space.space4 },
