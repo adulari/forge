@@ -39,6 +39,7 @@ use tokio::process::{Child, Command};
 use crate::sandbox::{self, SandboxPolicy};
 use crate::{str_arg, Tool, ToolError};
 mod background;
+mod pty;
 pub use background::ShellJobTool;
 mod output;
 use output::{render_streams, stream_text, truncate_for_model};
@@ -222,7 +223,7 @@ impl Tool for ShellTool {
             return Ok(run_poll(command, &cwd, budget, interval, &self.policy).await);
         }
         if use_pty {
-            Ok(run_command_pty(command, &cwd, timeout_secs).await)
+            Ok(pty::run_command_pty(command, &cwd, timeout_secs).await)
         } else {
             Ok(run_command(command, &cwd, timeout_secs, &self.policy).await)
         }
@@ -467,171 +468,12 @@ async fn drain_reader(
     }
 }
 
-/// Execute `command` under a pseudo-terminal (PTY) so `isatty(stdout)` returns true in the child.
-///
-/// This is the opt-in path (`pty: true`). Key differences from [`run_command`]:
-///
-/// - Uses `portable-pty` to open a native PTY (Unix `openpty`, Windows ConPTY).
-/// - Stdin is the slave end — the OS sees a real tty, but we do not write to it, so the child
-///   receives EOF on any stdin read (programs prompting on stdin exit rather than hanging).
-/// - Combined stdout+stderr comes from the PTY master (the OS merges both streams).
-/// - **Sandbox**: the Landlock sandbox does NOT apply here. `portable-pty` owns the spawn and
-///   does not expose a `pre_exec` hook. V1 limitation — see shell-sandbox docs.
-/// - Timeout + kill: on timeout the master fd is dropped (closing the PTY) and the child PID is
-///   killed with SIGKILL (Unix) / TerminateProcess (Windows) via a dedicated blocking task.
-///   Dropping the master makes the reader's blocking `read()` return immediately (EIO/EOF),
-///   so the reader task unblocks within milliseconds without needing cancellation.
-///
-/// Output format is identical to [`run_command`]: `shell: <status> in <ms>ms\n\n<body>`.
-pub async fn run_command_pty(command: &str, cwd: &str, timeout_secs: u64) -> String {
-    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-    use std::time::Instant;
-
-    let start = Instant::now();
-    let pty_system = native_pty_system();
-
-    let pair = match pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    }) {
-        Ok(p) => p,
-        Err(e) => return format!("shell(pty): failed to open pty: {e}"),
-    };
-
-    let (shell, flag) = shell_invocation();
-    let mut cb = CommandBuilder::new(shell);
-    cb.arg(flag);
-    cb.arg(command);
-    cb.cwd(cwd);
-
-    // Spawn into the slave end.
-    let mut child = match pair.slave.spawn_command(cb) {
-        Ok(c) => c,
-        Err(e) => return format!("shell(pty): failed to spawn (cwd {cwd}): {e}"),
-    };
-    // Drop the slave fd after spawn — when the child exits the master side will see EOF.
-    drop(pair.slave);
-
-    // Clone a reader from the master before we need to move `pair.master` for the kill path.
-    let mut master_reader = match pair.master.try_clone_reader() {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = child.kill();
-            return format!("shell(pty): failed to clone pty reader: {e}");
-        }
-    };
-
-    // Read the PTY master in a blocking task. The loop exits on EOF or error (EIO after the
-    // master fd is closed — which we trigger on timeout by dropping `pair.master`).
-    let read_task: tokio::task::JoinHandle<(Vec<u8>, bool)> =
-        tokio::task::spawn_blocking(move || {
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 8192];
-            let mut capped = false;
-            loop {
-                match std::io::Read::read(&mut master_reader, &mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if buf.len() < CAPTURE_CAP {
-                            let take = n.min(CAPTURE_CAP - buf.len());
-                            buf.extend_from_slice(&tmp[..take]);
-                            if buf.len() >= CAPTURE_CAP {
-                                capped = true;
-                            }
-                        } else {
-                            capped = true;
-                        }
-                    }
-                    Err(_) => break, // EIO when master fd is closed
-                }
-            }
-            (buf, capped)
-        });
-
-    // Wait for the child with a timeout.
-    //
-    // Kill strategy on timeout:
-    //   1. Drop the PTY master — this sends HUP/EIO to the child and unblocks the reader task.
-    //   2. Kill the child's OS process directly via its PID (SIGKILL on Unix).
-    //
-    // We cannot move `child` into `spawn_blocking` and also keep it accessible for killing,
-    // so we wait on a channel: the blocking task sends the exit status back.
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut child_for_kill = child;
-    // Extract PID before moving into the blocking task for use in the kill path.
-    let child_pid = child_for_kill.process_id();
-    tokio::task::spawn_blocking(move || {
-        let result = child_for_kill.wait();
-        let _ = tx.send(result);
-    });
-
-    let (status_line, _exit_code) =
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), rx).await {
-            Ok(Ok(Ok(status))) => {
-                let code = status.exit_code();
-                (
-                    format!(
-                        "exit {}",
-                        if status.success() {
-                            "0".to_string()
-                        } else {
-                            code.to_string()
-                        }
-                    ),
-                    Some(code),
-                )
-            }
-            Ok(Ok(Err(e))) => (format!("error: {e}"), None),
-            Ok(Err(_)) => ("error: wait channel dropped".to_string(), None),
-            Err(_) => {
-                // Timeout: close the master (sends EIO to the reader task) then kill the process.
-                drop(pair.master);
-                pty_kill_child(child_pid);
-                (format!("timed out after {timeout_secs}s (killed)"), None)
-            }
-        };
-
-    let duration_ms = start.elapsed().as_millis();
-
-    // The reader task unblocks as soon as the master is closed (on timeout) or the child exits
-    // (normal path). Give it a short extra window to flush any buffered bytes.
-    let (raw_bytes, capped) = tokio::time::timeout(Duration::from_secs(5), read_task)
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
-
-    // PTY merges stdout+stderr; render the combined bytes as a single stream.
-    let body = stream_text(&raw_bytes)
-        .map(|s| {
-            if s.trim().is_empty() {
-                String::new()
-            } else {
-                s
-            }
-        })
-        .unwrap_or_default();
-    let (body, truncated) = truncate_for_model(&body, MODEL_BUDGET);
-    let total = raw_bytes.len();
-    let mut header = format!("shell: {status_line} in {duration_ms}ms");
-    if truncated || capped {
-        header.push_str(&format!("  ({total} bytes captured, output truncated)"));
-    }
-    if body.trim().is_empty() {
-        header
-    } else {
-        format!("{header}\n\n{body}")
-    }
-}
-
 /// Kill a child process by PID after a PTY timeout.
 ///
 /// On Unix: SIGKILL to the process (not the group — portable-pty does not set a separate pgid).
 /// On Windows: no-op (the PTY master close is sufficient for ConPTY to terminate the child).
 /// This is a best-effort cleanup; errors are swallowed.
-fn pty_kill_child(pid: Option<u32>) {
+pub(super) fn pty_kill_child(pid: Option<u32>) {
     #[cfg(unix)]
     if let Some(p) = pid {
         unsafe { libc::kill(p as i32, libc::SIGKILL) };
@@ -1294,7 +1136,7 @@ mod tests {
         /// A plain `echo hello` under PTY must return "hello" in the output and exit 0.
         #[tokio::test]
         async fn pty_echo_hello() {
-            let out = run_command_pty("echo hello", ".", 30).await;
+            let out = super::super::pty::run_command_pty("echo hello", ".", 30).await;
             assert!(out.contains("hello"), "pty echo output: {out}");
             assert!(out.contains("exit 0"), "pty exit code: {out}");
         }
@@ -1304,7 +1146,9 @@ mod tests {
         #[tokio::test]
         async fn pty_isatty_true_vs_notty() {
             // `test -t 1` exits 0 if fd 1 is a tty; we echo a marker based on that.
-            let pty_out = run_command_pty("test -t 1 && echo TTY || echo NOTTY", ".", 10).await;
+            let pty_out =
+                super::super::pty::run_command_pty("test -t 1 && echo TTY || echo NOTTY", ".", 10)
+                    .await;
             assert!(
                 pty_out.contains("TTY") && !pty_out.contains("NOTTY"),
                 "pty:true should report TTY, got: {pty_out}"
@@ -1327,7 +1171,7 @@ mod tests {
         #[tokio::test]
         async fn pty_timeout_kills_fast() {
             let start = Instant::now();
-            let out = run_command_pty("sleep 60", ".", 1).await;
+            let out = super::super::pty::run_command_pty("sleep 60", ".", 1).await;
             assert!(out.contains("timed out"), "pty timeout reported: {out}");
             assert!(
                 start.elapsed() < Duration::from_secs(15),
