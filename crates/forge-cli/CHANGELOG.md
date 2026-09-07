@@ -6,16 +6,7 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-- **A session never picked up an `AGENTS.md` that appeared or changed while it was running.** The
-  body was read once at construction and a resume set the "already injected" flag without reading
-  at all, so the session that *wrote* the file (or ran `/init`) never saw it, and a long-lived
-  daemon session stayed on whatever existed the day it started — restart after restart, because a
-  restart is a resume. Each turn now re-checks the file in the post-persist window the git-branch
-  refresh already uses (one `stat`; the body is read only when the fingerprint moves) and injects
-  it only when the transcript does not already carry that exact text — so an edited or newly
-  written `AGENTS.md` reaches the next turn, and an unchanged one is never restated
-  (`crates/forge-core/src/session_controls.rs` `refresh_project_instructions`).
+## [2.15.0] - 2026-09-08
 
 ### Added
 - **Expandable tool cards in the chat transcript.** A tool call printed two separate scrollback
@@ -29,8 +20,6 @@ All notable changes to Forge are documented here. The format follows
   `forge attach` and daemon-hosted sessions too. Inline mode (`--inline`) keeps the two-line
   rendering: the terminal's native scrollback cannot be rewritten after the fact
   (`crates/forge-tui/src/app/tool_cards.rs`, `docs/features/tui-tool-cards.md`).
-
-### Added
 - **`/subagents [free|pinned]` — let one pinned session fan its children out onto other models.**
   Pin inheritance was config-only (`mesh.subagents.inherit_pin`), so releasing subagents from the
   parent's pin meant editing `config.toml` and restarting, and it then applied to every session.
@@ -43,18 +32,6 @@ All notable changes to Forge are documented here. The format follows
   only its children route the full mesh (`crates/forge-tui/src/commands.rs`,
   `crates/forge-core/src/{session_controls,subagent,orchestration}.rs`,
   `crates/forge-cli/src/cli/commands/run/dispatch.rs`).
-
-### Fixed
-- **`tools.extra_roots` was still refused by the file tools' in-process safety net.** The
-  allowlist reached the two argument validators but not `confine()` in
-  `crates/forge-tools/src/core_tools.rs`, whose `workspace_roots()` only trusted the workspace
-  (and, for standalone runs, the system temp dir) — so a daemon-hosted `read_file`/`write_file`
-  on an allowlisted path still failed with "resolves outside the workspace (workspace-confinement
-  safety net)". The extra roots now ride a `SESSION_EXTRA_ROOTS` task-local scoped alongside
-  `SESSION_WORKSPACE` by the tool wrapper, and `confine()` honors them, so all three confinement
-  layers agree (`crates/forge-tools/src/lib.rs`, `workspace.rs`, `core_tools.rs`).
-
-### Added
 - **Structured file tools could not touch a path outside the workspace, even to clean up their
   own scratch files.** `validate_workspace_args` hard-rejected any `path`/`cwd`/`paths` resolving
   outside `workspace.root()` for read_file/write_file/edit_file/multi_edit/apply_patch/
@@ -75,7 +52,30 @@ All notable changes to Forge are documented here. The format follows
   temp-dir path is rejected; `tools.extra_roots` is separate from `shell.sandbox_writable` (the
   Landlock write-sandbox) and does not change `shell`, which was already unconfined.
 
+### Changed
+- **The repository's `.mcp.json` no longer registers Forge as an MCP server for Claude Code.**
+  Every Claude Code session in this checkout spawned a full Forge agent (session, index, file
+  watcher) whether or not it was ever used; the two runaway processes above were exactly those.
+  Add the entry back locally if you want `forge_chat` from Claude Code.
+
 ### Fixed
+- **A session never picked up an `AGENTS.md` that appeared or changed while it was running.** The
+  body was read once at construction and a resume set the "already injected" flag without reading
+  at all, so the session that *wrote* the file (or ran `/init`) never saw it, and a long-lived
+  daemon session stayed on whatever existed the day it started — restart after restart, because a
+  restart is a resume. Each turn now re-checks the file in the post-persist window the git-branch
+  refresh already uses (one `stat`; the body is read only when the fingerprint moves) and injects
+  it only when the transcript does not already carry that exact text — so an edited or newly
+  written `AGENTS.md` reaches the next turn, and an unchanged one is never restated
+  (`crates/forge-core/src/session_controls.rs` `refresh_project_instructions`).
+- **`tools.extra_roots` was still refused by the file tools' in-process safety net.** The
+  allowlist reached the two argument validators but not `confine()` in
+  `crates/forge-tools/src/core_tools.rs`, whose `workspace_roots()` only trusted the workspace
+  (and, for standalone runs, the system temp dir) — so a daemon-hosted `read_file`/`write_file`
+  on an allowlisted path still failed with "resolves outside the workspace (workspace-confinement
+  safety net)". The extra roots now ride a `SESSION_EXTRA_ROOTS` task-local scoped alongside
+  `SESSION_WORKSPACE` by the tool wrapper, and `confine()` honors them, so all three confinement
+  layers agree (`crates/forge-tools/src/lib.rs`, `workspace.rs`, `core_tools.rs`).
 - **Every visible chat message re-rendered on every ~30 ms WebSocket frame.** `useSessionCtx()`
   exposed one context whose value object was rebuilt on every snapshot, so any consumer —
   including `MessageRow` (already `React.memo`'d) and the 1000+ line `Composer` — re-rendered
@@ -183,18 +183,11 @@ All notable changes to Forge are documented here. The format follows
   recognised as self and was spawned — a second session, index and file watcher for every real
   one. Any forge-named binary invoked as `mcp agent` is now treated as a nested Forge agent
   (`crates/forge-cli/src/cli/commands/run/session.rs`).
-
 - **A `forge mcp agent` could outlive the process that spawned it.** Stdin EOF ends the server
   loop when the parent exits cleanly, but a parent killed outright left the agent — session, index,
   watcher — running until someone found it in `top`. On Linux the agent now asks the kernel for
   `SIGTERM` when its parent dies (`PR_SET_PDEATHSIG`), so a dead orchestrator can no longer leave
   a live Forge behind (`crates/forge-cli/src/mcp_agent.rs`).
-
-### Changed
-- **The repository's `.mcp.json` no longer registers Forge as an MCP server for Claude Code.**
-  Every Claude Code session in this checkout spawned a full Forge agent (session, index, file
-  watcher) whether or not it was ever used; the two runaway processes above were exactly those.
-  Add the entry back locally if you want `forge_chat` from Claude Code.
 
 ## [2.14.1] - 2026-09-07
 
@@ -4269,7 +4262,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.14.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.15.0...HEAD
+[2.15.0]: https://github.com/Adulari/forge/compare/v2.14.1...v2.15.0
 [2.14.1]: https://github.com/Adulari/forge/compare/v2.13.9...v2.14.1
 [2.13.9]: https://github.com/Adulari/forge/compare/v2.13.8...v2.13.9
 [2.13.8]: https://github.com/Adulari/forge/compare/v2.13.7...v2.13.8
