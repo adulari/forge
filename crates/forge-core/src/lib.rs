@@ -42,6 +42,7 @@ pub mod fleet;
 pub mod heartbeat;
 pub mod hooks;
 pub mod llm_router;
+mod lsp_hints;
 mod model_loop;
 mod model_request;
 mod model_response;

@@ -515,32 +515,16 @@ impl Session {
                         if let Some(lat) = &self.lattice {
                             let _ = lat.reindex_path(path);
                         }
-                        // LSP diagnostics: ask the language server for errors on the
-                        // just-written file and queue them as a pending hint so the model
-                        // self-corrects this turn. Best-effort: missing server → silent.
+                        // LSP diagnostics for the just-written file, queued as a hint so the
+                        // model self-corrects this turn. Best-effort: no server → silent.
                         if self.config.lsp.enabled {
                             if let Some(lsp) = &self.lsp {
-                                let abs =
-                                    std::path::absolute(path).unwrap_or_else(|_| path.clone());
                                 let timeout =
                                     std::time::Duration::from_millis(self.config.lsp.timeout_ms);
-                                let lsp = Arc::clone(lsp);
-                                let diags = lsp.diagnostics_for(&abs, timeout).await;
-                                // "diagnostics unavailable" is not a finding. The model cannot
-                                // act on it, and it arrives after EVERY write while the server is
-                                // down — one project produced 386 of them, each one context the
-                                // turn paid to carry and re-send. Outages belong in the log.
-                                let diags: Vec<_> = diags
-                                    .iter()
-                                    .filter(|d| d.code.as_deref() != Some("forge-lsp-unavailable"))
-                                    .collect();
-                                if !diags.is_empty() {
-                                    let lines: Vec<String> = diags
-                                        .iter()
-                                        .map(|d| d.format_line(&path.display().to_string()))
-                                        .collect();
-                                    self.pending_hints
-                                        .push(format!("[lsp diagnostics]\n{}", lines.join("\n")));
+                                if let Some(hint) =
+                                    crate::lsp_hints::diagnostics_hint(lsp, path, timeout).await
+                                {
+                                    self.pending_hints.push(hint);
                                 }
                             }
                         }
