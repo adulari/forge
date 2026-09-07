@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { isTauri } from "../lib/platform";
-import { dumpDesktopPerformanceSnapshot, getDesktopPerformanceSnapshot, markFirstWorkloadEvent, markPerformancePhaseStart, recordCompositorKey, recordComposerInput, type DesktopPerformanceSnapshot } from "../lib/performance";
+import { dumpDesktopPerformanceSnapshot, getDesktopPerformanceSnapshot, markFirstWorkloadEvent, markPerformancePhaseStart, recordCompositorKey, recordComposerInput, startDesktopPerformanceMonitor, stopDesktopPerformanceMonitor, type DesktopPerformanceSnapshot } from "../lib/performance";
 import { useTokens } from "../theme/ThemeProvider";
 import { type } from "../theme/typography";
 
@@ -34,6 +34,15 @@ export default function PerformanceFixtureScreen() {
       .then(({ invoke }) => invoke<boolean>("perf_fixture_enabled"))
       .then(setFixtureEnabled)
       .catch(() => setFixtureEnabled(false));
+  }, []);
+
+  useEffect(() => {
+    // On Tauri the global monitor is already running (started in _layout.tsx). Elsewhere
+    // nobody else starts it, so this fixture screen owns it for as long as it's mounted.
+    if (!isTauri) startDesktopPerformanceMonitor();
+    return () => {
+      if (!isTauri) stopDesktopPerformanceMonitor();
+    };
   }, []);
 
   useEffect(() => {

@@ -46,7 +46,7 @@ import { isTauri, isWeb } from "../lib/platform";
 import { checkDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useDesktopMenuAction } from "../lib/desktopMenu";
-import { dumpDesktopPerformanceSnapshot, markDesktopInteractive, markFirstPaint, markReactMountEnd, markReactMountStart, startDesktopPerformanceMonitor } from "../lib/performance";
+import { dumpDesktopPerformanceSnapshot, markDesktopInteractive, markFirstPaint, markReactMountEnd, markReactMountStart, startDesktopPerformanceMonitor, stopDesktopPerformanceMonitor } from "../lib/performance";
 import { IncomingShareProvider } from "../lib/incomingShare";
 import {
   useAppShortcut,
@@ -320,11 +320,16 @@ export default function RootLayout() {
 
   useEffect(() => {
     void initHaptics();
-    startDesktopPerformanceMonitor();
+    // The always-on sampler only has a consumer on Tauri (the 1s `dumpDesktopPerformanceSnapshot`
+    // dump below) — everywhere else it would just burn battery for a snapshot nobody reads.
+    // diagnostics.tsx and perf-fixture.tsx start/stop it themselves on demand for their own
+    // display needs.
+    if (isTauri) startDesktopPerformanceMonitor();
     const perfDump = isTauri ? window.setInterval(() => void dumpDesktopPerformanceSnapshot(), 1_000) : null;
     if (isTauri) void checkDesktopUpdate().catch(() => undefined);
     return () => {
       if (perfDump != null) window.clearInterval(perfDump);
+      if (isTauri) stopDesktopPerformanceMonitor();
     };
   }, []);
 
