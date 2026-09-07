@@ -6,6 +6,69 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-09-07
+
+### Added
+- **`shell` can start something that keeps running.** Every attempt before this died the moment the
+  call returned, and nothing said why — a session spent hours concluding "the sandbox kills
+  background processes" and reaching for transient systemd units. The cause was three lines: after a
+  command exits, the tool SIGKILLs its whole process group so a leaked descendant cannot hold the
+  output pipes open, and `nohup cmd &` does not escape that (nohup detaches from the *terminal*, not
+  the process group), nor does `systemd-run --scope`. `shell{background:true}` now spawns into its
+  own session (`setsid`) with output on a log file, so the job outlives the call, the turn, and
+  Forge itself; the new `shell_job` tool lists, tails, inspects and stops those jobs from state on
+  disk under `.forge/jobs/`, so a later turn — or a whole new session — can find what an earlier one
+  started. Jobs deliberately survive shutdown: an emulator that took two minutes to boot must not
+  die because a turn ended (`crates/forge-tools/src/shell/background.rs`,
+  `crates/forge-tools/src/shell.rs`).
+- **A foreground call now says when it killed what the command left running**, naming the processes
+  and pointing at `background:true`. The silent kill is what turned a three-line problem into hours
+  of dead ends (`crates/forge-tools/src/shell/background.rs`).
+- **A local SearXNG is now the default search backend**, with `scripts/searxng-setup.sh` to stand it
+  up in one command and `FORGE_SEARXNG_URL` to point at another instance
+  (`crates/forge-tools/src/web/search.rs`, `scripts/searxng-setup.sh`).
+
+### Fixed
+- **`web_search` was effectively down without a key.** The keyless DuckDuckGo default answered the
+  FIRST query from an IP and then returned HTTP 202 with an empty body — one query per session is
+  not a search tool — and the error it produced advised setting a Brave key "for reliable results",
+  advice that expired when Brave retired its free tier in February 2026. Search is now a chain
+  (local SearXNG → DuckDuckGo → keyless Bing) so one engine being throttled no longer takes it down,
+  and every result says which engine answered. That attribution is load-bearing: keyless Bing never
+  throttles but returns confident nonsense — asked for `tokio select macro` it returned ten
+  well-formed results for plumbers near 1 Microsoft Way — so it is last and labelled, never trusted
+  silently. Bing's `/ck/a` tracking redirects are decoded to real URLs
+  (`crates/forge-tools/src/web/search.rs`).
+- **The emulator booted on a renderer that segfaults it.** A headless `emulator_start` picked
+  `-gpu swiftshader_indirect`; SwiftShader renders in JIT-compiled shader code, so a bad guest draw
+  call faults *inside* it — an out-of-bounds SIMD load — and the SIGSEGV takes the whole emulator
+  down mid-test. It killed the local AVD twice in a row. Headless now uses `-gpu auto-no-window`,
+  the emulator's own renderer selection, which also drops the CPU cost of compositing a phone-sized
+  screen (`crates/forge-device/src/emulator.rs`, `crates/forge-tools/src/device.rs`).
+- **A language server that could never succeed was retried forever.** `clear_failure()` ran on a
+  successful *handshake*, but rust-analyzer initializes in milliseconds and dies minutes later while
+  indexing — so the counter reset to zero before every failure and the exponential backoff never
+  once doubled. One project logged 386 identical "retrying in 30s" lines over three days, ~90% of
+  its session log, each cycle also injecting an unactionable "diagnostics unavailable" notice into
+  the model's context after every write. Only delivered diagnostics clear the failure state now, a
+  `(language, root)` pair is given up on after five consecutive failures with a reason naming
+  `lsp.memory_limit_mb`, and outage notices stay in the log where they belong
+  (`crates/forge-lsp/src/registry.rs`, `crates/forge-core/src/lsp_hints.rs`).
+- **A hard guard abandoned the work it was ending.** The error named 60 modified files and stopped,
+  leaving a human to reconstruct what a 400-step turn had been in the middle of. Hard guards now
+  snapshot tracked edits with `git stash create` under `refs/forge/aborted-turns` — nothing moves,
+  the files stay exactly where they are — and the guard messages print billable *and* cache-inclusive
+  input, because printing only the latter made a working token ceiling look broken
+  (`crates/forge-core/src/turn_guards.rs`, `crates/forge-core/src/lib.rs`).
+- **`forge run --output-format stream-json` answered with prose on any machine running a daemon.**
+  The fleet-publish check ran before the stream-json branch, so an explicit machine-readable format
+  was silently replaced by two human-readable lines and exit 0 — every parsing caller saw a
+  successful run and no events. It went unnoticed because CI has no daemon: the e2e test passed
+  everywhere except a developer's own box. An explicit machine-readable format now opts out of the
+  fleet (`crates/forge-cli/src/cli/commands/run/one_shot.rs`).
+- **The emulator inherited Forge's process group**, so any group-directed kill threw away a
+  two-minute boot for a reason invisible from the device side (`crates/forge-device/src/emulator.rs`).
+
 ## [2.13.9] - 2026-09-03
 
 ### Fixed
@@ -4004,7 +4067,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.13.9...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.14.0...HEAD
+[2.14.0]: https://github.com/Adulari/forge/compare/v2.13.9...v2.14.0
 [2.13.9]: https://github.com/Adulari/forge/compare/v2.13.8...v2.13.9
 [2.13.8]: https://github.com/Adulari/forge/compare/v2.13.7...v2.13.8
 [2.13.7]: https://github.com/Adulari/forge/compare/v2.13.6...v2.13.7
