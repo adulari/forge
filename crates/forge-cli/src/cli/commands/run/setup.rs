@@ -45,3 +45,19 @@ pub(crate) fn sandboxed_shell_tool(
     let workspace = std::env::current_dir().ok()?;
     sandboxed_shell_tool_in(config, &workspace)
 }
+
+/// Resolve `[tools] extra_roots` (an opt-in allowlist of extra roots the structured file tools —
+/// read_file/write_file/edit_file/multi_edit/apply_patch/append_file/notebook_edit/delete_file/
+/// list_dir/search/glob — may read and write in addition to the session workspace) into
+/// canonicalized paths for `ToolRegistry::bind_extra_roots`. Relative entries are ignored.
+/// Shared by `forge run` and the `mcp-serve` CLI-bridge path so both entry points stay in sync.
+pub(crate) fn resolve_extra_tool_roots(config: &forge_config::Config) -> Vec<std::path::PathBuf> {
+    config
+        .tools
+        .extra_roots
+        .iter()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .map(|path| path.canonicalize().unwrap_or(path))
+        .collect()
+}

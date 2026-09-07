@@ -6,6 +6,27 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Structured file tools could not touch a path outside the workspace, even to clean up their
+  own scratch files.** `validate_workspace_args` hard-rejected any `path`/`cwd`/`paths` resolving
+  outside `workspace.root()` for read_file/write_file/edit_file/multi_edit/apply_patch/
+  append_file/notebook_edit/delete_file/list_dir/search/glob — but the `shell` tool reaches any
+  path via its command string, so an agent doing analysis work against scratch/capture files in
+  `/tmp` could write and read them with `shell` but not with the structured tools, forcing a
+  `cp into workspace; read; rm` dance that polluted the git tree. Added an opt-in allowlist,
+  `tools.extra_roots` (`[tools]` in config.toml), of absolute paths outside the workspace that
+  the structured file tools may also read and write; default empty, so existing configs see zero
+  behavior change. Honored by both validator copies — `crates/forge-core/src/lib.rs`
+  (`validate_workspace_args`, now also consulted from `crates/forge-core/src/tool_dispatch.rs`
+  via a new `Session::extra_tool_roots`, populated in `crates/forge-core/src/session_lifecycle.rs`
+  from `config.tools.extra_roots`) and `crates/forge-tools/src/workspace.rs`
+  (`WorkspaceTool`/`ToolRegistry::bind_extra_roots`, wired at both real binding sites:
+  `crates/forge-cli/src/cli/commands/run/session.rs` via `Session::build` and the `mcp-serve`
+  CLI-bridge path in `crates/forge-cli/src/mcp_serve.rs`). A deliberately-kept regression test
+  (`workspace_validation_rejects_peer_repository_paths`) still asserts that an unlisted sibling
+  temp-dir path is rejected; `tools.extra_roots` is separate from `shell.sandbox_writable` (the
+  Landlock write-sandbox) and does not change `shell`, which was already unconfined.
+
 ### Fixed
 - **Every visible chat message re-rendered on every ~30 ms WebSocket frame.** `useSessionCtx()`
   exposed one context whose value object was rebuilt on every snapshot, so any consumer —
