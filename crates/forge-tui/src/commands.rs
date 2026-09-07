@@ -4,6 +4,7 @@
 //! the `Session`, which this crate must not depend on).
 
 mod btw_args;
+mod subagent_args;
 
 /// One command's metadata, shown in the palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +177,11 @@ pub const COMMANDS: &[Command] = &[
         name: "effort",
         desc: "pin the reasoning-effort level (low→xhigh, or whitehot: xhigh + auto-workflows), or clear",
         usage: "/effort [low|medium|high|xhigh|whitehot]",
+    },
+    Command {
+        name: "subagents",
+        desc: "let this session's subagents route off the active model pin (free), or bind them back to it (pinned)",
+        usage: "/subagents [free|pinned]",
     },
     Command {
         name: "remember",
@@ -368,6 +374,10 @@ pub enum CommandAction {
     /// The level string is the raw user-supplied value (e.g. "high"); the binary parses + applies
     /// it. `None` clears the pin and returns to the provider default.
     SetEffort(Option<String>),
+    /// Release (`Some(true)`) or re-bind (`Some(false)`) this session's subagents from the active
+    /// model pin — `/subagents free` / `/subagents pinned`. `None` = bare `/subagents`, which
+    /// toggles and reports the resulting state.
+    Subagents(Option<bool>),
     /// Enter planning mode (`/plan <task>`): read-only investigation that proposes a plan.
     Plan(String),
     /// Approve the proposed plan and execute it (`/execute`): switches to Auto-edit and builds it.
@@ -641,6 +651,9 @@ pub fn parse_command(line: &str) -> CommandAction {
         "btw" | "side" => CommandAction::Btw(btw_args::parse_btw_arg(&arg)),
         "export" => CommandAction::Export((!arg.is_empty()).then(|| arg.trim().to_string())),
         "effort" => CommandAction::SetEffort((!arg.is_empty()).then_some(arg)),
+        "subagents" | "subagent" => {
+            CommandAction::Subagents(subagent_args::parse_subagents_arg(&arg))
+        }
         "remember" => CommandAction::Remember(arg.to_string()),
         "memories" => CommandAction::Memories,
         "self-mcp" | "self" => {
@@ -785,7 +798,9 @@ pub fn command_category(name: &str) -> &'static str {
         "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
         "sessions" | "resume" | "replay" | "undo" | "checkpoint" | "checkpoints" | "compact"
         | "uncompact" | "refine" | "clear" | "btw" | "export" => "Session",
-        "model" | "models" | "mode" | "effort" | "thinking" | "mesh" | "usage" => "Model & usage",
+        "model" | "models" | "mode" | "effort" | "subagents" | "thinking" | "mesh" | "usage" => {
+            "Model & usage"
+        }
         "assay" | "lattice" | "pr" => "Review & ship",
         "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" => "Integrations",
         "config" | "statusline" | "keys" | "help" | "init" | "remember" | "memories" => {
@@ -1502,6 +1517,30 @@ mod tests {
                 name: "audit".into(),
                 args: String::new(),
             })
+        );
+    }
+
+    #[test]
+    fn parses_subagents_command() {
+        assert_eq!(
+            parse_command("/subagents free"),
+            CommandAction::Subagents(Some(true))
+        );
+        assert_eq!(
+            parse_command("/subagents pinned"),
+            CommandAction::Subagents(Some(false))
+        );
+        // Bare `/subagents` toggles; an unrecognised argument must NOT silently mean "free" —
+        // it falls through to the same toggle rather than guessing a direction.
+        assert_eq!(parse_command("/subagents"), CommandAction::Subagents(None));
+        assert_eq!(
+            parse_command("/subagents whatever"),
+            CommandAction::Subagents(None)
+        );
+        // Singular alias + case-insensitivity, mirroring /self-mcp.
+        assert_eq!(
+            parse_command("/subagent FREE"),
+            CommandAction::Subagents(Some(true))
         );
     }
 

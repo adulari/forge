@@ -700,6 +700,7 @@ viewer (main chat + subagents + critics).
 | `/duel <task>` | Race models on the task in parallel worktrees; merge the winner, teach the router |
 | `/mode` · `/model [<id>]` · `/models` | Switch temper · pin a model · browse all discovered models |
 | `/effort [low\|medium\|high\|xhigh\|whitehot]` | Pin the effort knob — white-hot adds auto workflow orchestration |
+| `/subagents [free\|pinned]` | Let this session's subagents route off its model pin (bare toggles) — persisted per session |
 | `/usage` · `/mesh [task]` | API spend + token usage · inspect mesh routing |
 | `/mcp [server]` | Show MCP server status (or one server's tools) |
 | `/assay [--diff\|--branch <b>\|--since <ref>\|<path>] [--only/--skip <lens,…>]` | Run code-quality analysis crew |

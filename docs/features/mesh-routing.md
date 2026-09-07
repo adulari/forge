@@ -990,6 +990,20 @@ router's `--model` pin) and threaded into the `AgentCtx` used to route children.
 The strict semantics (exact model, `pinned: true`, empty chain) hold for both pin mechanisms:
 `/model` now propagates to children for the first time, matching the router pin.
 
+**`/subagents [free|pinned]`** flips step 2 at runtime, per session. `mesh.subagents.inherit_pin`
+is a config-file default, so the only way to let *one* pinned session fan its children out onto
+other models used to be editing the config and restarting — which then applied to every session.
+The command sets an in-session override (`Session::set_subagents_free`) that `Session::subagents_free`
+resolves against the config default and the parent hands to children as `AgentCtx::inherit_pin`;
+`route_child` reads only that field, so the command and the config meet in exactly one place.
+Bare `/subagents` toggles and reports the resulting state.
+
+The override is persisted on the session row (`session.subagent_pin_free`, migration #33) and
+restored by `Session::resume`, for the same reason the model and effort pins are: a daemon restart
+or a resume mid-goal would otherwise silently drag every child back onto the parent's pin. `NULL`
+means "never set" — follow the config default. A released session stays pinned *itself*; only its
+children are freed, and they route the full mesh (subscription-backed providers included).
+
 ## 10. The benchmark layer (ADR-0011)
 
 When `mesh.benchmark_ranking` is on (default `true`, `crates/forge-config/src/lib.rs:1336`) and
@@ -1126,6 +1140,7 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `pin_failover` | `false` | Escape hatch: allow cross-model failover off a pin (§9) (`lib.rs:1292`) |
 | `pin_outage_wait_secs` | 600 | Pinned transient-outage wait budget; 0 disables (§9) (`lib.rs:1301`) |
 | `subagents.inherit_pin` | `true` | When a pin is active, subagents inherit it strictly (§9) (`crates/forge-config/src/lib.rs` `SubagentsConfig`) |
+| `subagents.inherit_pin` (per session) | — | `/subagents free\|pinned` overrides the default for one session; persisted (§9.1) |
 
 Multi-key rotation: every key-based provider accepts multiple API keys (repeat
 `forge auth <provider>`, a comma-separated env value, or numbered `_2`… env siblings —

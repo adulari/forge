@@ -78,6 +78,11 @@ pub struct AgentCtx {
     /// router's own `--model` pin set. `None` = no pin, children route via the mesh independently.
     /// Used by [`route_child`] to decide whether (and which) subagents inherit the parent's pin.
     pub effective_pin: Option<Vec<String>>,
+    /// Whether children inherit `effective_pin` at all: the session's `/subagents free|pinned`
+    /// override resolved against `mesh.subagents.inherit_pin`. Resolved once by the parent rather
+    /// than read back off `config` here, so the runtime command and the config default meet in ONE
+    /// place and a child can never disagree with the session that spawned it.
+    pub inherit_pin: bool,
 }
 
 /// The result of running one child agent.
@@ -123,7 +128,7 @@ pub async fn route_child(
     // no cross-model fallback). An explicit user pin beats an agent-type tier default.
     // `agent.pinned_model` (handled above) is the one exception.
     if let Some(pin) = ctx.effective_pin.as_deref() {
-        if ctx.config.mesh.subagents.inherit_pin {
+        if ctx.inherit_pin {
             let readiness = crate::readiness::ProviderReadiness::snapshot(&ctx.config, &ctx.store);
             let health = readiness.health;
             let quota = readiness.quota;
@@ -166,7 +171,7 @@ pub async fn route_child(
             let health = readiness.health;
             let quota = readiness.quota;
             let project = crate::project_context::compute(&ctx.repo_root);
-            if ctx.config.mesh.subagents.inherit_pin {
+            if ctx.inherit_pin {
                 ctx.router
                     .route(&agent.task, false, budget, &health, &quota, None, &project)
                     .await
@@ -1372,6 +1377,7 @@ mod tests {
             worktree_root: None,
             repo_root: std::path::PathBuf::from("."),
             effective_pin: None,
+            inherit_pin: true,
         }
     }
 
@@ -1486,6 +1492,7 @@ mod tests {
         );
         ctx.effective_pin = effective_pin;
         ctx.config.mesh.subagents.inherit_pin = inherit_pin;
+        ctx.inherit_pin = inherit_pin;
         ctx
     }
 

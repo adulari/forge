@@ -852,6 +852,7 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
             worktree_root: None,
             repo_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             effective_pin: None,
+            inherit_pin: config.mesh.subagents.inherit_pin,
         };
         Some(SubagentSupport {
             ctx,

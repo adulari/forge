@@ -412,6 +412,34 @@ impl Store {
         Ok(())
     }
 
+    /// Whether this session released its subagents from the active model pin (`/subagents free`).
+    /// `None` = never set, so the `mesh.subagents.inherit_pin` config default applies.
+    pub fn session_subagent_pin_free(&self, session_id: &str) -> Result<Option<bool>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT subagent_pin_free FROM session WHERE id = ?1",
+                [session_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|v| v != 0))
+    }
+
+    /// Record (or clear, with `None`) whether a session's subagents may route off its model pin.
+    pub fn set_session_subagent_pin_free(
+        &self,
+        session_id: &str,
+        free: Option<bool>,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE session SET subagent_pin_free = ?2 WHERE id = ?1",
+            rusqlite::params![session_id, free.map(i64::from)],
+        )?;
+        Ok(())
+    }
+
     /// Mark whether a session belongs to the daemon's live fleet.
     ///
     /// Set when `forge serve` starts or resumes a session, cleared when it is closed or archived,

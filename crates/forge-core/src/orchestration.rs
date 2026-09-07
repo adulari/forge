@@ -59,6 +59,7 @@ impl Session {
             worktree_root: None,
             repo_root,
             effective_pin: self.effective_pin(),
+            inherit_pin: !self.subagents_free(),
         };
         let parent_id = self.id.clone();
         let max_concurrency = self.config.mesh.subagents.max_concurrency;
@@ -258,6 +259,7 @@ impl Session {
             worktree_root: None,
             repo_root,
             effective_pin: self.effective_pin(),
+            inherit_pin: !self.subagents_free(),
         };
         let decision = subagent::route_child(&ctx, &resolved, budget).await;
 
@@ -352,6 +354,7 @@ impl Session {
             worktree_root: None,
             repo_root: repo_root.clone(),
             effective_pin: self.effective_pin(),
+            inherit_pin: !self.subagents_free(),
         };
         let workflows_dir = repo_root.join(".forge").join("workflows");
 
@@ -469,6 +472,7 @@ impl Session {
             worktree_root: None,
             repo_root: repo_root.clone(),
             effective_pin: self.effective_pin(),
+            inherit_pin: !self.subagents_free(),
         };
         let workflows_dir = repo_root.join(".forge").join("workflows");
 
@@ -649,6 +653,7 @@ impl Session {
             worktree_root: None,
             repo_root,
             effective_pin: self.effective_pin(),
+            inherit_pin: !self.subagents_free(),
         };
         let parent_id = self.id.clone();
 

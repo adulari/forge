@@ -362,6 +362,12 @@ pub(crate) async fn dispatch_command(
                 app.effort_slider = true;
             }
         },
+        // `/subagents [free|pinned]` — whether children may route off this session's model pin.
+        // The body lives in `run/subagents.rs`: this file sits at its CI size ratchet (see
+        // `btw.rs` for the same split).
+        CommandAction::Subagents(explicit) => {
+            super::subagents::set_subagent_pin_release(session, app, explicit).await;
+        }
         // `/models` opens the interactive model browser: a provider list (with global counts in
         // the heading) that drills into each provider's models on Enter; Esc steps back.
         CommandAction::ListModels => open_models_root(session, app).await?,
