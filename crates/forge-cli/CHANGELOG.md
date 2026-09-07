@@ -19,8 +19,14 @@ All notable changes to Forge are documented here. The format follows
   ~1 GB of a 2.5 GB store. Session start now drops the index of any root whose directory no longer
   exists, before the incremental update (`Lattice::prune_stale_roots`). Roots that still exist are
   never touched; the file shrinks after `forge lattice prune --stale --vacuum`.
-
-### Fixed
+||||||| parent of c3c3fc5f (fix(tui): render GFM tables as aligned columns instead of a line of pipes)
+- **Markdown tables in `forge chat` rendered as one long line of pipes.** The transcript renderer
+  parsed with no extensions, so a GFM table was just a paragraph whose rows were joined by soft
+  breaks — every model-written comparison table came out as `| Field | App | … |---|---| …` on a
+  single wrapped line. Tables now parse and lay out as aligned columns with a header rule; cell
+  styling (inline code, bold) is kept, and an over-wide cell is clipped with an ellipsis so one
+  long value cannot wrap every row. `~~strikethrough~~` no longer leaks its tildes either
+  (`crates/forge-tui/src/render.rs`).
 - **The lattice file watcher pinned a CPU core per Forge process, indefinitely.** Two Forge MCP
   agents on one laptop each burned ~90% of a core for their whole lifetime with nothing changing on
   disk — package temperature 97–100 °C and 46,000 thermal-throttle events in 32 minutes. The
