@@ -300,7 +300,21 @@ export function useSessionSocket(
     );
 
     const generation = ++socketGenerationRef.current;
-    const ws = new TWebSocket(wsUrl(baseUrl, sessionId, revRef.current));
+    let ws: WebSocket;
+    try {
+      ws = new TWebSocket(wsUrl(baseUrl, sessionId, revRef.current));
+    } catch {
+      // A constructor that throws (a transport rejecting the URL, a native socket module not
+      // ready straight after foregrounding) fires no `onclose`, so nothing below would ever
+      // schedule another attempt: the screen sat on "reconnecting…" until the app was reopened.
+      // Treat it exactly like a failed connection and take the normal backoff path.
+      setConnectionState(attemptRef.current >= UNREACHABLE_AFTER_ATTEMPTS ? "unreachable" : "reconnecting");
+      const delay = BACKOFF_MS[Math.min(attemptRef.current, BACKOFF_MS.length - 1)];
+      attemptRef.current += 1;
+      clearReconnectTimer();
+      reconnectTimerRef.current = setTimeout(connect, delay);
+      return;
+    }
     wsRef.current = ws;
 
     const armLivenessWatchdog = () => {
@@ -418,6 +432,11 @@ export function useSessionSocket(
     };
     const goForeground = () => {
       shouldRunRef.current = true;
+      // Whatever backoff the last background-time failures accrued is stale: the user is looking
+      // at the screen now, so the first attempt is immediate and the "unreachable" escalation
+      // starts from zero.
+      attemptRef.current = 0;
+      resyncPendingRef.current = false;
       connect();
     };
 

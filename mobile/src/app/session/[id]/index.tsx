@@ -41,6 +41,7 @@ import { MessageRow, SpeakerTag } from "../../../components/chat/MessageRow";
 import { ToolCallRow } from "../../../components/chat/ToolCallRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
 import { buildTranscript, summarizeToolLine, type ToolInvocation } from "../../../lib/toolRows";
+import { fillerHistoryRows } from "../../../lib/transcriptFiller";
 import { SubagentStrip } from "../../../components/session/SubagentStrip";
 import { BellowsSpinner } from "../../../components/ds/BellowsSpinner";
 import { BoundedList } from "../../../components/ds/BoundedList";
@@ -64,6 +65,8 @@ import { tabularNums, type as typeScale } from "../../../theme/typography";
 
 const OFFLINE_QUEUE_PREFIX = "forge.offlineQueue";
 const JUMP_THRESHOLD_PX = 240;
+// How often an empty history page is re-asked for while the live snapshot shows a transcript.
+const HISTORY_RECOVERY_POLL_MS = 5_000;
 
 function offlineQueueKey(baseUrl: string | null, sessionId: string): string {
   return `${OFFLINE_QUEUE_PREFIX}:${baseUrl ?? "unknown"}:${sessionId}`;
@@ -427,6 +430,30 @@ export default function SessionChat() {
   const historyDead = historyQuery.isError && !historySettled && snapshot == null;
   const historyErrorStatus = (historyQuery.error as { status?: number } | null)?.status;
 
+  // History recovery. Two ways the screen used to get stuck on the transcript filler until a
+  // turn happened to complete (the only invalidation): (1) the socket reconnected after an
+  // outage/daemon restart but the failed history query was never retried — react-query's
+  // reconnect refetch keys off a browser online event RN never fires; (2) history answered with
+  // an EMPTY page (a session the restarted daemon had not re-registered yet) while the live
+  // snapshot plainly had content. Refetch on the reconnect edge, and poll a contradicted-empty
+  // history until it agrees with the snapshot.
+  const historyRefetch = historyQuery.refetch;
+  const prevOnlineRef = useRef(online);
+  useEffect(() => {
+    const was = prevOnlineRef.current;
+    prevOnlineRef.current = online;
+    if (online && !was) void historyRefetch();
+  }, [online, historyRefetch]);
+  const historyContradicted =
+    historyQuery.data !== undefined && historyRows.length === 0 && (snapshot?.transcript.length ?? 0) > 0;
+  useEffect(() => {
+    if (!historyContradicted) return;
+    const timer = setInterval(() => {
+      void historyRefetch();
+    }, HISTORY_RECOVERY_POLL_MS);
+    return () => clearInterval(timer);
+  }, [historyContradicted, historyRefetch]);
+
   const streamingText = snapshot?.busy ? snapshot.streaming : "";
 
   // ---------------------------------------------------------------------
@@ -530,6 +557,7 @@ export default function SessionChat() {
     );
   }, [busy, latestToolLine]);
 
+  const transcriptRows = snapshot?.transcript_rows;
   const items = useMemo<TimelineItem[]>(() => {
     const list: TimelineItem[] = [];
     // `busy` alone (before any tokens arrive) still gets a "streaming" slot — rendered with
@@ -567,10 +595,25 @@ export default function SessionChat() {
           list.push({ kind: "history", id: `h${entry.row.seq}`, row: entry.row });
         }
       }
+    } else if (transcriptRows?.length) {
+      // A v9 host sends the transcript with provenance: render it through the SAME message/tool
+      // rows history uses, so a late/failed history fetch is invisible instead of flipping the
+      // whole conversation to plain grey lines (the reported "suddenly all grey" state). Seqs are
+      // synthetic; ids are namespaced so they never collide with real history items.
+      const inFlight = busy || streamingText.length > 0 || pendingSent.length > 0;
+      const rows = fillerHistoryRows(transcriptRows, inFlight) ?? [];
+      for (const entry of buildTranscript(rows)) {
+        if (entry.kind === "tool") {
+          list.push({ kind: "tool", id: `f${entry.key}`, invocation: entry.invocation });
+        } else {
+          list.push({ kind: "history", id: `fh${entry.row.seq}`, row: entry.row });
+        }
+      }
     } else {
-      // Snapshot transcript is chronological (oldest->newest); walk it back-to-front for the
-      // inverted list. It remains visible after an empty history response because that response
-      // cannot prove the server transcript is empty.
+      // Pre-v9 host: only plain lines are available. Snapshot transcript is chronological
+      // (oldest->newest); walk it back-to-front for the inverted list. It remains visible after
+      // an empty history response because that response cannot prove the server transcript is
+      // empty.
       let filler = snapshot?.transcript ?? [];
       // The tail's newest lines describe the CURRENT turn, which the styled rows above
       // (pendingSent bubble + streaming reply + LiveToolActivity) already render — keeping
@@ -585,7 +628,7 @@ export default function SessionChat() {
       }
     }
     return list;
-  }, [displayText, streamingText, busy, pendingSent, useTranscriptFiller, historyRows, snapshot?.transcript, snapshot?.notes]);
+  }, [displayText, streamingText, busy, pendingSent, useTranscriptFiller, historyRows, snapshot?.transcript, transcriptRows, snapshot?.notes]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
   // text tick (same item id, StreamingAnswer owns its own rAF coalescing), and not when an older
