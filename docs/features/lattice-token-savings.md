@@ -30,6 +30,32 @@ not hold, the span has drifted and the caller falls back to the signature line, 
 behaviour for an unavailable body. The alternative is emitting arbitrary mid-statement code under a
 `path:line — kind name` header, which reads to the model as that symbol's verified source.
 
+## What the watcher may cost
+
+The token savings above are only real if keeping the index fresh is nearly free, and for two
+months it was not: every Forge process on this repository — MCP agents, `forge serve` — spent
+70–90% of a core in the `forge-lattice-reindex` thread with nothing changing on disk. Two rules
+now bound the watcher's cost, both enforced by tests in `crates/forge-index/src/watch.rs`:
+
+**Reads are not changes.** The inotify backend subscribes to `IN_OPEN`, so the reindexer's own
+read of a file (to hash it) came back as an event for that file, which queued another reindex, which
+read it again — a loop that fed itself forever once the initial `update()` walk seeded it (measured:
+every source file re-opened 73 times in 6 seconds). Access-only events — open, read,
+close-without-write — are dropped before they reach the worker; `Close(Write)`, how an editor save
+shows up, is kept. `the_reindexers_own_reads_do_not_feed_the_watcher` uses the production shape (a
+reindex action that reads its file) and asserts the count stops moving once the tree is quiet.
+
+**Watch what you index.** One recursive watch on the project root registered ~55,000 inotify
+watches here — `target/`, `node_modules/`, `.git/`, every worktree — so any cargo build in a
+sibling worktree woke the watcher thread for nothing. The watcher now registers one non-recursive
+watch per directory the indexer walks (~300 here), through the same `source_walker` as
+`update()`, so the watched set and the indexed set cannot drift; directories created later are
+registered from the worker as they appear. `only_source_directories_are_watched` counts the
+inotify watches through `/proc/self/fdinfo` and requires exactly root + `src`.
+
+Steady state after the fix, same repository: reindex thread 0 ticks in 10 s, whole process 1.3% of
+a core (inotify reads of *other* processes' opens), 290 watches.
+
 ## Parser budget and large generated files
 
 The indexer applies a hard **8 MiB per-source-file parser budget** before reading a file. A
