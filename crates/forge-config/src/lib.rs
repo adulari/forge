@@ -154,6 +154,9 @@ pub struct Config {
     /// edits to its own prompts/skills/subagents, persisted via forge-store's harness tables.
     #[serde(default)]
     pub harness: HarnessConfig,
+    /// Structured file-tool workspace confinement (`tools.extra_roots`).
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 /// `[remote]` config block — the phone/browser remote-control server (`remote-control.md`).
@@ -892,6 +895,19 @@ impl Default for RecapConfig {
 
 fn default_recap_enabled() -> bool {
     true
+}
+
+/// Structured file-tool workspace confinement: an opt-in allowlist of extra roots that
+/// read_file/write_file/edit_file/multi_edit/apply_patch/append_file/notebook_edit/delete_file/
+/// list_dir/search/glob may read and write, in addition to the session workspace itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolsConfig {
+    /// Absolute paths outside the session workspace that the structured file tools may read and
+    /// write, in addition to the workspace itself. Relative entries are ignored. Default empty =
+    /// file tools stay confined to the workspace. Separate from `shell.sandbox_writable` (which
+    /// governs the Landlock write-sandbox) and does not affect `shell` (already unconfined).
+    #[serde(default)]
+    pub extra_roots: Vec<String>,
 }
 
 /// Next-prompt suggestion: predicts the user's likely next prompt after each completed turn.
@@ -2481,6 +2497,7 @@ impl Default for Config {
             anywhere: AnywhereConfig::default(),
             voice: VoiceConfig::default(),
             harness: HarnessConfig::default(),
+            tools: ToolsConfig::default(),
         }
     }
 }

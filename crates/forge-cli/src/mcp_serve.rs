@@ -906,6 +906,7 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
     {
         registry.register(Box::new(shell_tool));
     }
+    let _ = registry.bind_extra_roots(crate::cli::commands::run::resolve_extra_tool_roots(&config));
     let server = ForgeMcp {
         registry,
         trust_project: config.commands.trust_project,

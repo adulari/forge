@@ -14,8 +14,8 @@ use forge_tools::ToolRegistry;
 use forge_types::{EffortLevel, Message, PermissionMode, Presenter, PresenterEvent};
 
 use crate::{
-    context_pack, current_git_branch, read_project_agents_md, turn_contract, CoreError,
-    EnvFightTracker, Session, ToolFailureTracker, WorkspaceContext,
+    context_pack, current_git_branch, normalize_workspace_target, read_project_agents_md,
+    turn_contract, CoreError, EnvFightTracker, Session, ToolFailureTracker, WorkspaceContext,
 };
 
 impl Session {
@@ -141,6 +141,18 @@ impl Session {
         seq: i64,
     ) -> Self {
         let mode = config.permission_mode;
+        // Opt-in allowlist (`tools.extra_roots`) of extra roots the structured file tools may
+        // read and write, in addition to the workspace. Relative entries are ignored. Empty by
+        // default, so this is a no-op for existing configs.
+        let extra_tool_roots: Vec<std::path::PathBuf> = config
+            .tools
+            .extra_roots
+            .iter()
+            .map(std::path::Path::new)
+            .filter(|path| path.is_absolute())
+            .map(normalize_workspace_target)
+            .collect();
+        let _ = tools.bind_extra_roots(extra_tool_roots.clone());
         // Layer fetched per-model prices (OpenRouter etc., persisted at discovery) under the config
         // overrides, so gateway/credit spend is priced instead of silently $0 (the budget cap and
         // the /usage breakdown both read these computed costs).
@@ -207,6 +219,7 @@ impl Session {
             route_affinity: None,
             workspace_binding: Arc::new(std::sync::RwLock::new(workspace.root().to_path_buf())),
             workspace,
+            extra_tool_roots,
             pending_hints: vec![],
             always_compact_on_switch: false,
             project_prompt_injected,

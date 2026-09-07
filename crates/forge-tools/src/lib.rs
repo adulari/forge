@@ -79,11 +79,23 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     workspace: Option<std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>>,
+    extra_roots: std::sync::Arc<std::sync::RwLock<Vec<std::path::PathBuf>>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Replace the allowlist of extra roots (outside the workspace) that structured file tools
+    /// may read and write (`tools.extra_roots`). Empty = file tools stay workspace-confined.
+    pub fn bind_extra_roots(&self, roots: Vec<std::path::PathBuf>) -> Result<(), ToolError> {
+        *self
+            .extra_roots
+            .write()
+            .map_err(|_| ToolError::Failed("extra tool roots binding poisoned".to_string()))? =
+            roots;
+        Ok(())
     }
 
     pub fn with_core_tools_in(workspace: &std::path::Path) -> Self {
@@ -108,6 +120,7 @@ impl ToolRegistry {
                     Box::new(WorkspaceTool {
                         inner,
                         workspace: std::sync::Arc::clone(&binding),
+                        extra_roots: std::sync::Arc::clone(&self.extra_roots),
                     }) as Box<dyn Tool>,
                 )
             })
@@ -162,6 +175,7 @@ impl ToolRegistry {
             Box::new(WorkspaceTool {
                 inner: tool,
                 workspace: std::sync::Arc::clone(workspace),
+                extra_roots: std::sync::Arc::clone(&self.extra_roots),
             }) as Box<dyn Tool>
         } else {
             tool

@@ -256,7 +256,9 @@ impl Session {
         effective_args =
             add_workspace_default_path(&call.name, effective_args, self.workspace.root());
         let mut args_json = serde_json::to_string(&effective_args)?;
-        if let Err(error) = validate_workspace_args(&effective_args, &self.workspace) {
+        if let Err(error) =
+            validate_workspace_args(&effective_args, &self.workspace, &self.extra_tool_roots)
+        {
             let result = format!("error: {error}");
             self.presenter.emit(PresenterEvent::ToolStart {
                 name: call.name.clone(),
@@ -376,7 +378,11 @@ impl Session {
                 effective_args =
                     add_workspace_default_path(&call.name, effective_args, self.workspace.root());
                 args_json = serde_json::to_string(&effective_args).unwrap_or_default();
-                if let Err(error) = validate_workspace_args(&effective_args, &self.workspace) {
+                if let Err(error) = validate_workspace_args(
+                    &effective_args,
+                    &self.workspace,
+                    &self.extra_tool_roots,
+                ) {
                     let result = format!("error: {error}");
                     self.presenter.emit(PresenterEvent::ToolResult {
                         name: call.name.clone(),

@@ -1614,6 +1614,9 @@ pub struct Session {
     /// use this instead of the daemon's process working directory.
     workspace: WorkspaceContext,
     workspace_binding: Arc<std::sync::RwLock<std::path::PathBuf>>,
+    /// Canonicalized `config.tools.extra_roots`: extra roots (outside the workspace) the
+    /// structured file tools may read and write. Empty by default (file tools stay confined).
+    extra_tool_roots: Vec<std::path::PathBuf>,
     /// System hints queued by side-call diagnostics (e.g. shell error interceptor) to be injected
     /// into the transcript immediately after the tool result that triggered them. Cleared each time.
     pending_hints: Vec<String>,
@@ -1876,7 +1879,7 @@ fn add_workspace_default_path(
     serde_json::Value::Object(object)
 }
 
-fn normalize_workspace_target(path: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn normalize_workspace_target(path: &std::path::Path) -> std::path::PathBuf {
     let absolute = path.to_path_buf();
     let mut prefix = absolute.as_path();
     let mut tail = Vec::new();
@@ -1903,13 +1906,18 @@ fn normalize_workspace_target(path: &std::path::Path) -> std::path::PathBuf {
 fn validate_workspace_args(
     args: &serde_json::Value,
     workspace: &WorkspaceContext,
+    extra_roots: &[std::path::PathBuf],
 ) -> Result<(), CoreError> {
+    let is_allowed = |target: &std::path::Path| {
+        target.starts_with(workspace.root())
+            || extra_roots.iter().any(|root| target.starts_with(root))
+    };
     for key in ["path", "cwd"] {
         let Some(value) = args.get(key).and_then(serde_json::Value::as_str) else {
             continue;
         };
         let target = normalize_workspace_target(std::path::Path::new(value));
-        if !target.starts_with(workspace.root()) {
+        if !is_allowed(&target) {
             return Err(CoreError::Workspace(format!(
                 "{key} escapes session workspace: {value}"
             )));
@@ -1918,7 +1926,7 @@ fn validate_workspace_args(
     if let Some(paths) = args.get("paths").and_then(serde_json::Value::as_array) {
         for value in paths.iter().filter_map(serde_json::Value::as_str) {
             let target = normalize_workspace_target(std::path::Path::new(value));
-            if !target.starts_with(workspace.root()) {
+            if !is_allowed(&target) {
                 return Err(CoreError::Workspace(format!(
                     "path escapes session workspace: {}",
                     target.display()
@@ -16601,27 +16609,69 @@ mod tests {
             &root,
         );
         let workspace = WorkspaceContext::new(&root).unwrap();
-        validate_workspace_args(&rooted, &workspace).unwrap();
+        validate_workspace_args(&rooted, &workspace, &[]).unwrap();
         assert!(validate_workspace_args(
             &serde_json::json!({ "path": root.join("../forge-workspace-b-").join(std::process::id().to_string()).join("peer.txt") }),
             &workspace,
+            &[],
         )
         .is_err());
         assert!(validate_workspace_args(
             &serde_json::json!({ "path": "/opt/forge-peer/peer.txt" }),
             &workspace,
+            &[],
         )
         .is_err());
         assert!(
             validate_workspace_args(
                 &serde_json::json!({ "path": std::env::temp_dir().join("forge-peer/peer.txt") }),
                 &workspace,
+                &[],
             )
             .is_err(),
             "a temporary workspace must not authorize every sibling temporary path"
         );
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(peer);
+    }
+
+    #[test]
+    fn workspace_validation_honors_extra_roots_allowlist() {
+        let root = std::env::temp_dir().join(format!("forge-workspace-c-{}", std::process::id()));
+        let allowed = std::env::temp_dir().join(format!("forge-extra-root-{}", std::process::id()));
+        let sibling =
+            std::env::temp_dir().join(format!("forge-extra-sibling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&allowed);
+        let _ = std::fs::remove_dir_all(&sibling);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let workspace = WorkspaceContext::new(&root).unwrap();
+        let extra_roots = vec![allowed.canonicalize().unwrap()];
+
+        assert!(
+            validate_workspace_args(
+                &serde_json::json!({ "path": allowed.join("scratch.txt") }),
+                &workspace,
+                &extra_roots,
+            )
+            .is_ok(),
+            "a path under an allowlisted extra root must be permitted"
+        );
+        assert!(
+            validate_workspace_args(
+                &serde_json::json!({ "path": sibling.join("scratch.txt") }),
+                &workspace,
+                &extra_roots,
+            )
+            .is_err(),
+            "a sibling temp dir outside both the workspace and the allowlist must still be rejected"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(allowed);
+        let _ = std::fs::remove_dir_all(sibling);
     }
 
     #[test]
