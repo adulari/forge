@@ -7,6 +7,29 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **The mobile app burned battery just for being on screen.** v2.13.6's desktop performance
+  monitor ran on every platform, not just Tauri: `startDesktopPerformanceMonitor()` scheduled a
+  `requestAnimationFrame` loop that pushed to an unbounded array and re-sorted the whole thing
+  every frame to find the median — measured at 0.9 ms/frame after 1 minute on screen, 33 ms/frame
+  after 30 minutes, with `frameIntervals`/`composerSamples`/`composerImeSamples`/
+  `composerInputEvents`/`composerImeEvents` all growing forever. Separately, the iOS Home Screen
+  widget was resynced (an app-group write plus a `WidgetCenter` reload) on every fleet refetch —
+  up to twice a second while any session streams — even when nothing the widget renders had
+  changed, and the session timeline rebuilt its whole transcript from history on every ~30 ms
+  WebSocket snapshot instead of only when history actually changed. The sampler now only starts on
+  Tauri (the only platform with a consumer for it); the diagnostics and perf-fixture screens start
+  and stop it themselves on demand elsewhere. Frame intervals live in a bounded 1024-entry ring
+  buffer with an O(1) running estimate for dropped-frame detection instead of a per-frame sort,
+  composer sample/event arrays cap at the newest 512 entries, and a new
+  `stopDesktopPerformanceMonitor()` cancels the loop and long-task observer. `syncWidgetSessions`
+  now skips the write and reload when the top-4 snapshot is byte-identical to the last one synced.
+  The session screen memoizes `buildTranscript` on `historyRows`/`transcriptRows` instead of
+  rebuilding it on every snapshot, and derives the live tool-activity ledger through a
+  content-keyed memo so `FlatList`'s `renderItem` identity — and therefore every visible cell's
+  render — only changes when the ledger's actual content changes
+  (`mobile/src/lib/performance.ts`, `mobile/src/app/_layout.tsx`, `mobile/src/app/diagnostics.tsx`,
+  `mobile/src/app/perf-fixture.tsx`, `mobile/src/lib/widgetData.ts`,
+  `mobile/src/app/session/[id]/index.tsx`).
 - **MCP servers launched through a wrapper outlived the session.** Forge's teardown killed only
   the direct child, but `npm exec …` / `uvx …` run the real server as a grandchild, so ending a
   session left it under pid 1 — nine `token-counter-mcp` node processes (~500 MB) from sessions that
@@ -19,7 +42,6 @@ All notable changes to Forge are documented here. The format follows
   ~1 GB of a 2.5 GB store. Session start now drops the index of any root whose directory no longer
   exists, before the incremental update (`Lattice::prune_stale_roots`). Roots that still exist are
   never touched; the file shrinks after `forge lattice prune --stale --vacuum`.
-||||||| parent of c3c3fc5f (fix(tui): render GFM tables as aligned columns instead of a line of pipes)
 - **Markdown tables in `forge chat` rendered as one long line of pipes.** The transcript renderer
   parsed with no extensions, so a GFM table was just a paragraph whose rows were joined by soft
   breaks — every model-written comparison table came out as `| Field | App | … |---|---| …` on a
@@ -27,8 +49,6 @@ All notable changes to Forge are documented here. The format follows
   styling (inline code, bold) is kept, and an over-wide cell is clipped with an ellipsis so one
   long value cannot wrap every row. `~~strikethrough~~` no longer leaks its tildes either
   (`crates/forge-tui/src/render.rs`).
-||||||| parent of 1ac9c26b (fix(core): never compact or run side calls on a subscription model the session is not pinned to)
-||||||| parent of b1c463f9 (fix(core): never compact or run side calls on a subscription model the session is not pinned to)
 - **A session pinned to a free model auto-compacted on a ChatGPT-plan model.** Two pins exist:
   the router's `--model` from session creation, which `/model` never updates, and the session's
   own `/model` pin. Compaction and refinement built their candidate chain from the ROUTER's pin —
@@ -38,9 +58,6 @@ All notable changes to Forge are documented here. The format follows
   that is not the model the session is running on is never a candidate for compaction,
   refinement, or any other side call (recap, suggestion, memory, shell diagnosis)
   (`crates/forge-core/src/compaction_policy.rs`, `refinement.rs`, `routing_policy.rs`).
-||||||| parent of 157fe0cc (fix(mobile): keep the transcript styled when history is late, and make reconnect self-heal)
-||||||| parent of 3a610f20 (fix(mobile): keep the transcript styled when history is late, and make reconnect self-heal)
-||||||| parent of 73b014fb (fix(mobile): keep the transcript styled when history is late, and make reconnect self-heal)
 - **The mobile app flipped a whole conversation to plain grey text and stayed there.** Whenever
   REST history was late, failed, or came back empty — a daemon restart, a server switch, the
   first paint — the screen fell back to the socket snapshot's transcript painted as bare lines,

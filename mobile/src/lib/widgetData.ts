@@ -13,6 +13,12 @@ const APP_GROUP = "group.dev.adulari.forge";
 const SESSIONS_KEY = "sessions";
 const MAX_SESSIONS = 4;
 
+// The fleet-invalidation socket can push a `query.data` change up to twice a second while any
+// session streams, and `useSessions()` calls this on every one of them. Without this dedupe that
+// re-writes the App Group's NSUserDefaults and asks WidgetKit to reload the timeline ~2x/s even
+// when nothing the widget renders actually changed.
+let lastSyncedJson: string | null = null;
+
 // Field names must match targets/widget/ForgeSharedData.swift's `ForgeSessionSnapshot` exactly —
 // a hand-kept-in-sync wire contract, same caveat as the Live Activity content-state.
 interface WidgetSessionSnapshot {
@@ -37,7 +43,11 @@ export function syncWidgetSessions(sessions: SessionRow[]): void {
     cost_usd: s.cost_usd,
   }));
 
+  const json = JSON.stringify(snapshot);
+  if (json === lastSyncedJson) return;
+
   const storage = new ExtensionStorage(APP_GROUP);
-  storage.set(SESSIONS_KEY, JSON.stringify(snapshot));
+  storage.set(SESSIONS_KEY, json);
   ExtensionStorage.reloadWidget();
+  lastSyncedJson = json;
 }

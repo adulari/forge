@@ -16,7 +16,7 @@ import { formatBytes } from "../lib/anywhere/format";
 import { ApiError } from "../lib/api";
 import { useAppVersion } from "../lib/appVersion";
 import { assessCompatibility, buildSupportSummary } from "../lib/diagnostics";
-import { getDesktopPerformanceSnapshot, type DesktopPerformanceSnapshot } from "../lib/performance";
+import { getDesktopPerformanceSnapshot, startDesktopPerformanceMonitor, stopDesktopPerformanceMonitor, type DesktopPerformanceSnapshot } from "../lib/performance";
 import { isTauri } from "../lib/platform";
 import { useDiagnostics } from "../lib/queries";
 import { PROTOCOL_VERSION } from "../lib/remoteProtocol";
@@ -80,8 +80,15 @@ export default function DiagnosticsScreen() {
   );
 
   useEffect(() => {
+    // On Tauri the global monitor is already running (started in _layout.tsx) — this screen
+    // just reads it. Elsewhere nobody else starts it, so this screen owns it for the time it's
+    // on screen and stops it again on unmount rather than leaving it sampling in the background.
+    if (!isTauri) startDesktopPerformanceMonitor();
     const timer = setInterval(() => setPerformanceSnapshot(getDesktopPerformanceSnapshot()), 1000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      if (!isTauri) stopDesktopPerformanceMonitor();
+    };
   }, []);
 
   useEffect(() => {

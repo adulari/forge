@@ -545,6 +545,17 @@ export default function SessionChat() {
     [snapshot?.transcript],
   );
   const latestToolLine = toolLedger.at(-1) ?? null;
+  // `snapshot.transcript` is a fresh array every WS frame, so `toolLedger` above gets a new
+  // identity every ~30ms while streaming even when the ledger's actual content hasn't changed —
+  // that identity change was propagating into `renderItem`'s deps and re-rendering every visible
+  // FlatList cell each frame. Key off the content instead so `toolLedgerLines` (and therefore
+  // `renderItem`) only changes identity when a ledger line is actually added/changed.
+  const toolLedgerKey = toolLedger.map((e) => `${e.index}:${e.line}`).join("\n");
+  const toolLedgerLines = useMemo(
+    () => toolLedger.map(({ line }) => line),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [toolLedgerKey],
+  );
   const [toolActivity, setToolActivity] = useState<{ line: string; startedAt: number } | null>(null);
   useEffect(() => {
     if (!busy || !latestToolLine) {
@@ -558,6 +569,16 @@ export default function SessionChat() {
   }, [busy, latestToolLine]);
 
   const transcriptRows = snapshot?.transcript_rows;
+  // `historyRows` come from react-query and are referentially stable between refetches, so this
+  // only recomputes when history actually changes — not on every ~30ms WS snapshot that
+  // re-renders SessionChat while streaming.
+  const historyTranscript = useMemo(() => buildTranscript(historyRows), [historyRows]);
+  const inFlight = busy || streamingText.length > 0 || pendingSent.length > 0;
+  const fillerTranscript = useMemo(() => {
+    if (!transcriptRows?.length) return [];
+    const rows = fillerHistoryRows(transcriptRows, inFlight) ?? [];
+    return buildTranscript(rows);
+  }, [transcriptRows, inFlight]);
   const items = useMemo<TimelineItem[]>(() => {
     const list: TimelineItem[] = [];
     // `busy` alone (before any tokens arrive) still gets a "streaming" slot — rendered with
@@ -588,7 +609,7 @@ export default function SessionChat() {
       // Collapse the call/result row PAIR the daemon serves into one ToolCallRow entry, and keep
       // ordinary turns as message rows. `historyRows` is already newest-first, which is what
       // buildTranscript takes and returns.
-      for (const entry of buildTranscript(historyRows)) {
+      for (const entry of historyTranscript) {
         if (entry.kind === "tool") {
           list.push({ kind: "tool", id: entry.key, invocation: entry.invocation });
         } else {
@@ -600,9 +621,7 @@ export default function SessionChat() {
       // rows history uses, so a late/failed history fetch is invisible instead of flipping the
       // whole conversation to plain grey lines (the reported "suddenly all grey" state). Seqs are
       // synthetic; ids are namespaced so they never collide with real history items.
-      const inFlight = busy || streamingText.length > 0 || pendingSent.length > 0;
-      const rows = fillerHistoryRows(transcriptRows, inFlight) ?? [];
-      for (const entry of buildTranscript(rows)) {
+      for (const entry of fillerTranscript) {
         if (entry.kind === "tool") {
           list.push({ kind: "tool", id: `f${entry.key}`, invocation: entry.invocation });
         } else {
@@ -628,7 +647,7 @@ export default function SessionChat() {
       }
     }
     return list;
-  }, [displayText, streamingText, busy, pendingSent, useTranscriptFiller, historyRows, snapshot?.transcript, transcriptRows, snapshot?.notes]);
+  }, [displayText, streamingText, busy, pendingSent, useTranscriptFiller, historyRows, historyTranscript, fillerTranscript, snapshot?.transcript, transcriptRows, snapshot?.notes]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
   // text tick (same item id, StreamingAnswer owns its own rAF coalescing), and not when an older
@@ -700,7 +719,7 @@ export default function SessionChat() {
             return item.streaming ? (
               toolActivity ? (
                 <View style={styles.streamingRow}>
-                  <LiveToolActivity entries={toolLedger.map(({ line }) => line)} startedAt={toolActivity.startedAt} />
+                  <LiveToolActivity entries={toolLedgerLines} startedAt={toolActivity.startedAt} />
                 </View>
               ) : (
                 <View style={[styles.streamingRow, styles.thinkingRow]}>
@@ -740,7 +759,7 @@ export default function SessionChat() {
           );
       }
     },
-    [tokens.ink2, tokens.ink3, toolActivity, toolLedger, onMessageLongPress],
+    [tokens.ink2, tokens.ink3, toolActivity, toolLedgerLines, onMessageLongPress],
   );
 
   const keyExtractor = useCallback((item: TimelineItem) => item.id, []);
