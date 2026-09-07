@@ -56,6 +56,15 @@ inotify watches through `/proc/self/fdinfo` and requires exactly root + `src`.
 Steady state after the fix, same repository: reindex thread 0 ticks in 10 s, whole process 1.3% of
 a core (inotify reads of *other* processes' opens), 290 watches.
 
+**A removed root takes its index with it.** Every daemon worktree session indexes its own copy of
+the repository (~20 MB of rows here), and nothing removed those rows when the worktree went away:
+48 copies of dead `forge-wt-*` checkouts were ~1 GB of a 2.5 GB store, every one of them a full
+`lattice_ref` set with three indexes. `Lattice::prune_stale_roots` runs at each session start (one
+`is_dir` per indexed root, before the incremental update) and drops the rows of any root whose
+directory is gone. It never touches a root that still exists — `forge lattice prune <root>` and
+`forge worktree reclaim` remain the tools for those — and the file only shrinks after
+`forge lattice prune --stale --vacuum`.
+
 ## Parser budget and large generated files
 
 The indexer applies a hard **8 MiB per-source-file parser budget** before reading a file. A

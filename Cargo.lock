@@ -2257,6 +2257,7 @@ dependencies = [
  "forge-agent-config",
  "forge-agent-types",
  "futures",
+ "libc",
  "parking_lot",
  "reqwest",
  "rmcp",

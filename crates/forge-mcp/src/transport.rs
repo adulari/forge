@@ -39,12 +39,67 @@ fn root_dir(uri: &str) -> Option<std::path::PathBuf> {
     path.is_dir().then_some(path)
 }
 
+/// A live server connection plus what is needed to tear it down completely.
+pub(crate) struct Established {
+    pub(crate) service: RunningService<RoleClient, ForgeClientHandler>,
+    /// Process-group id of a stdio server's child tree (`None` for HTTP). See [`isolate_child`].
+    pub(crate) child_group: Option<u32>,
+}
+
+/// Put a stdio server in its own process group and, on Linux, ask the kernel to SIGTERM it when
+/// Forge dies.
+///
+/// rmcp's cleanup kills the *direct* child only. Most stdio servers are launched through a wrapper
+/// (`npx …`, `npm exec …`, `uvx …`) whose real server is a grandchild, so ending a session left the
+/// wrapper's child running under init — nine `token-counter-mcp` node processes, ~500 MB, were
+/// found parented to pid 1 from sessions that had ended hours earlier. Its own group lets teardown
+/// signal the whole tree ([`signal_child_group`]); the parent-death signal covers a Forge that was
+/// SIGKILLed and never reached teardown.
+fn isolate_child(cmd: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+        #[cfg(target_os = "linux")]
+        // SAFETY: prctl(PR_SET_PDEATHSIG) is async-signal-safe and touches no memory; it runs in
+        // the forked child before exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// Send `SIGTERM` to a stdio server's whole process group. Best-effort; a group that has already
+/// exited is not an error. No-op off Unix (there the direct-child kill is all we have).
+pub(crate) fn signal_child_group(group: u32) {
+    #[cfg(unix)]
+    {
+        let Ok(pgid) = i32::try_from(group) else {
+            return;
+        };
+        // SAFETY: kill(2) with a negative pid signals a process group; no memory involved.
+        unsafe {
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = group;
+    }
+}
+
 /// presenting Forge's [`ForgeClientHandler`] (advertises sampling/roots/elicitation; serves
 /// `tools/list_changed`).
 pub(crate) async fn serve(
     server: &McpServerConfig,
     deps: HandlerDeps,
-) -> Result<RunningService<RoleClient, ForgeClientHandler>, String> {
+) -> Result<Established, String> {
     // Capture the workspace root BEFORE the handler takes ownership: a stdio server is a child
     // process and inherits our cwd unless told otherwise. Forge's own daemon deliberately runs from
     // a stable directory that outlives it (see forge-cli crate::daemon_cwd), which is correct for
@@ -80,15 +135,23 @@ pub(crate) async fn serve(
             // through TokioChildProcessBuilder which defaults to Stdio::inherit() and overrides
             // any cmd.stderr() we set before spawning — causing MCP server startup messages
             // (written to stderr) to reach the raw-mode terminal and corrupt the TUI.
+            isolate_child(&mut cmd);
             let transport = TokioChildProcess::builder(cmd)
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .map(|(t, _)| t)
                 .map_err(|e| format!("spawn '{command}': {e}"))?;
-            handler
+            // With `process_group(0)` the child's pid IS its process-group id; that is what the
+            // teardown signals, so grandchildren (an `npm exec` wrapper's real server) go too.
+            let child_group = transport.id();
+            let service = handler
                 .serve(transport)
                 .await
-                .map_err(|e| format!("initialize: {e}"))
+                .map_err(|e| format!("initialize: {e}"))?;
+            Ok(Established {
+                service,
+                child_group,
+            })
         }
         McpTransport::Http { url, headers } => {
             let (all_headers, bearer) = resolve_http_auth(server, headers).await?;
@@ -98,7 +161,7 @@ pub(crate) async fn serve(
                 cfg = cfg.auth_header(b); // sent as `Authorization: Bearer <token>`
             }
             let transport = StreamableHttpClientTransport::with_client(client, cfg);
-            handler.serve(transport).await.map_err(|e| {
+            let served = handler.serve(transport).await.map_err(|e| {
                 let msg = format!("initialize: {e}");
                 // 401-driven discovery: if the server rejected us as unauthorized, point at its
                 // RFC 9728 protected-resource metadata (the well-known endpoint) and an actionable
@@ -110,6 +173,10 @@ pub(crate) async fn serve(
                     return enrich_unauthorized(&server.name, url, msg);
                 }
                 msg
+            })?;
+            Ok(Established {
+                service: served,
+                child_group: None,
             })
         }
         McpTransport::Sse { url, headers } => {
@@ -120,10 +187,14 @@ pub(crate) async fn serve(
             let transport = crate::sse::SseClientTransport::connect(client, url, bearer)
                 .await
                 .map_err(|e| format!("sse connect '{url}': {e}"))?;
-            handler
+            let service = handler
                 .serve(transport)
                 .await
-                .map_err(|e| format!("initialize: {e}"))
+                .map_err(|e| format!("initialize: {e}"))?;
+            Ok(Established {
+                service,
+                child_group: None,
+            })
         }
     }
 }
@@ -314,6 +385,68 @@ fn build_http_client(
 
 #[cfg(test)]
 mod tests {
+
+    /// The observed leak: a wrapper (`npm exec`, `uvx`) whose real server is a grandchild. rmcp's
+    /// kill reaches only the wrapper, so ending the session left the server under pid 1. With the
+    /// child in its own process group, signalling that group ends the whole tree.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn signalling_the_child_group_ends_a_wrappers_grandchild_too() {
+        use std::time::{Duration, Instant};
+        // `sh` is the wrapper; `sleep` is the "real server" it spawns and waits on.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "sleep 300 & wait"])
+            .stdout(std::process::Stdio::null());
+        isolate_child(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn wrapper");
+        let pid = child.id().expect("pid");
+
+        // The wrapper leads its own group (pgid == pid): that is what makes the group signal reach
+        // exactly this tree and nothing else.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let pgid: u32 = stat
+            .rsplit(") ")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(pgid, pid, "child must lead its own process group");
+
+        // Wait for the grandchild to exist, then find it.
+        let grandchild = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let kids = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+                    .unwrap_or_default();
+                if let Some(k) = kids.split_whitespace().next() {
+                    break k.parse::<u32>().unwrap();
+                }
+                assert!(Instant::now() < deadline, "grandchild never appeared");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        assert!(std::path::Path::new(&format!("/proc/{grandchild}")).exists());
+
+        signal_child_group(pid);
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::path::Path::new(&format!("/proc/{grandchild}")).exists() {
+            // A zombie still has a /proc entry until reaped by its (now dead) parent → init.
+            let state =
+                std::fs::read_to_string(format!("/proc/{grandchild}/stat")).unwrap_or_default();
+            if state.contains(") Z ") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "grandchild survived the group signal"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
     /// A stdio MCP server is a child process: without an explicit cwd it inherits ours, which for
     /// the daemon is a stable directory chosen to outlive it rather than the project. A relative
     /// path handed to a filesystem server would then resolve against the wrong root.

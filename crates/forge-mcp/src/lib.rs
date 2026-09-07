@@ -28,13 +28,15 @@ use std::time::Duration;
 use forge_config::McpConfig;
 use forge_types::{McpServerLine, SideEffect};
 use parking_lot::Mutex;
-use rmcp::model::{
-    CallToolRequestParams, CallToolResult, GetPromptRequestParams, ReadResourceRequestParams,
-    ResourceContents,
-};
+use rmcp::model::{CallToolRequestParams, GetPromptRequestParams, ReadResourceRequestParams};
 use rmcp::service::{Peer, RoleClient, RunningService};
+
+use content::{
+    one_line, prompt_message_to_block, resource_contents_to_block, tool_result_to_outcome, truncate,
+};
 use serde_json::Value;
 
+mod content;
 mod handler;
 pub mod oauth;
 mod sse;
@@ -182,7 +184,7 @@ impl McpCallOutcome {
 }
 
 /// Join blocks into the model's text channel: each block's typed marker on its own segment.
-fn render_blocks(blocks: &[McpContentBlock]) -> String {
+pub(crate) fn render_blocks(blocks: &[McpContentBlock]) -> String {
     let joined = blocks
         .iter()
         .map(McpContentBlock::to_marker)
@@ -250,10 +252,30 @@ pub(crate) struct Connection {
     transport_label: &'static str,
     peer: Option<Peer<RoleClient>>,
     service: Option<RunningService<RoleClient, ForgeClientHandler>>,
+    /// Process group of a stdio server's child tree; signalled on every teardown path so a
+    /// wrapper's grandchild cannot outlive the session (see `transport::isolate_child`).
+    child_group: Option<u32>,
     pub(crate) tools: Vec<DiscoveredTool>,
     resources: Vec<DiscoveredResource>,
     prompts: Vec<DiscoveredPrompt>,
     reconnect_attempts: usize,
+}
+
+impl Connection {
+    /// Signal the child tree once. Idempotent: the group id is taken so a later drop is a no-op.
+    fn end_child_tree(&mut self) {
+        if let Some(group) = self.child_group.take() {
+            transport::signal_child_group(group);
+        }
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // Covers `disconnect()`, replacement on reconnect, and the manager itself going away:
+        // whatever path drops the entry, the whole child tree gets its signal.
+        self.end_child_tree();
+    }
 }
 
 /// Connects to and drives a set of external MCP servers. Cheap to hold in an `Arc`; all mutable
@@ -367,6 +389,7 @@ impl McpManager {
                         transport_label: s.transport_label(),
                         peer: None,
                         service: None,
+                        child_group: None,
                         tools: vec![],
                         resources: vec![],
                         prompts: vec![],
@@ -435,6 +458,7 @@ impl McpManager {
                             transport_label: s.transport_label(),
                             peer: None,
                             service: None,
+                            child_group: None,
                             tools: vec![],
                             resources: vec![],
                             prompts: vec![],
@@ -455,8 +479,12 @@ impl McpManager {
         &self,
         name: &str,
         transport_label: &'static str,
-        service: RunningService<RoleClient, ForgeClientHandler>,
+        established: transport::Established,
     ) {
+        let transport::Established {
+            service,
+            child_group,
+        } = established;
         let peer = service.peer().clone();
         let tools = discover_tools(&peer, name).await;
         let resources = peer
@@ -489,6 +517,7 @@ impl McpManager {
                 transport_label,
                 peer: Some(peer),
                 service: Some(service),
+                child_group,
                 tools,
                 resources,
                 prompts,
@@ -506,6 +535,7 @@ impl McpManager {
                 transport_label,
                 peer: None,
                 service: None,
+                child_group: None,
                 tools: vec![],
                 resources: vec![],
                 prompts: vec![],
@@ -847,6 +877,7 @@ impl McpManager {
         // whole session. Taking + cancelling it now reaps the child (closes its pipes) immediately.
         let dead = self.conns.lock().get_mut(server).and_then(|c| {
             c.peer = None;
+            c.end_child_tree();
             c.service.take()
         });
         if let Some(service) = dead {
@@ -978,7 +1009,10 @@ impl McpManager {
             let mut conns = self.conns.lock();
             conns
                 .values_mut()
-                .filter_map(|c| c.service.take())
+                .filter_map(|c| {
+                    c.end_child_tree();
+                    c.service.take()
+                })
                 .collect()
         };
         for s in services {
@@ -1102,103 +1136,6 @@ fn meta_specs() -> Vec<McpToolSpec> {
     ]
 }
 
-fn tool_result_to_outcome(result: CallToolResult) -> McpCallOutcome {
-    // Preserve EVERY content block (text, image, audio, embedded resource) instead of keeping only
-    // text and dropping the rest. Non-text blocks keep their data + mime type in `blocks`; `text`
-    // renders a typed marker for them so text-only consumers still see what came back.
-    let blocks: Vec<McpContentBlock> = result.content.iter().map(content_to_block).collect();
-    // An MCP `isError` payload is a tool error, not a successful result.
-    if result.is_error == Some(true) {
-        let mut out = McpCallOutcome::err(render_blocks(&blocks));
-        out.blocks = blocks;
-        out
-    } else {
-        McpCallOutcome::ok_blocks(blocks)
-    }
-}
-
-/// Map an rmcp tool/prompt content block into Forge's structured [`McpContentBlock`], keeping the
-/// raw data + mime type for non-text blocks rather than collapsing them to a placeholder string.
-fn content_to_block(c: &rmcp::model::ContentBlock) -> McpContentBlock {
-    use rmcp::model::ContentBlock;
-    match c {
-        ContentBlock::Text(t) => McpContentBlock::Text(t.text.clone()),
-        ContentBlock::Image(i) => McpContentBlock::Image {
-            data: i.data.clone(),
-            mime_type: i.mime_type.clone(),
-        },
-        ContentBlock::Audio(a) => McpContentBlock::Audio {
-            data: a.data.clone(),
-            mime_type: a.mime_type.clone(),
-        },
-        ContentBlock::Resource(r) => resource_contents_to_block(&r.resource),
-        ContentBlock::ResourceLink(l) => McpContentBlock::Resource {
-            uri: l.uri.clone(),
-            mime_type: l.mime_type.clone(),
-            text: None,
-            blob: None,
-        },
-        // An rmcp content variant this match doesn't cover yet — surface a marker instead of
-        // silently rendering an empty string, so the model knows something was omitted.
-        _ => McpContentBlock::Text("[unknown content: unsupported block type]".to_string()),
-    }
-}
-
-/// Map an embedded `ResourceContents` (text or binary blob) into a structured block, preserving the
-/// base64 blob + mime type for binary resources rather than dropping to a placeholder.
-fn resource_contents_to_block(c: &ResourceContents) -> McpContentBlock {
-    match c {
-        ResourceContents::TextResourceContents {
-            uri,
-            mime_type,
-            text,
-            ..
-        } => McpContentBlock::Resource {
-            uri: uri.clone(),
-            mime_type: mime_type.clone(),
-            text: Some(text.clone()),
-            blob: None,
-        },
-        ResourceContents::BlobResourceContents {
-            uri,
-            mime_type,
-            blob,
-            ..
-        } => McpContentBlock::Resource {
-            uri: uri.clone(),
-            mime_type: mime_type.clone(),
-            text: None,
-            blob: Some(blob.clone()),
-        },
-        // Same rationale as `content_to_block`'s fallback: don't drop unhandled variants silently.
-        _ => McpContentBlock::Text("[unknown resource content: unsupported variant]".to_string()),
-    }
-}
-
-fn prompt_message_to_block(m: &rmcp::model::PromptMessage) -> McpContentBlock {
-    content_to_block(&m.content)
-}
-
-fn one_line(s: &str) -> String {
-    let line = s.lines().next().unwrap_or("").trim();
-    if line.chars().count() > 120 {
-        format!("{}…", line.chars().take(119).collect::<String>())
-    } else {
-        line.to_string()
-    }
-}
-
-fn truncate(s: &str) -> String {
-    if s.chars().count() <= MAX_RESULT_CHARS {
-        return s.to_string();
-    }
-    let head: String = s.chars().take(MAX_RESULT_CHARS).collect();
-    format!(
-        "{head}\n…[truncated {} chars]",
-        s.chars().count() - MAX_RESULT_CHARS
-    )
-}
-
 /// Test/wiring support — not part of the stable API. A tiny in-process MCP server (two tools:
 /// `echo`, `boom`) served over a duplex stream, plus [`testsupport::manager_with_echo`] which
 /// returns an [`McpManager`] connected to it. Lets downstream crates (forge-core, forge-cli)
@@ -1284,7 +1221,15 @@ pub mod testsupport {
             .await
             .expect("client connects");
         let mgr = McpManager::empty(config);
-        mgr.add_established("test", "stdio", client).await;
+        mgr.add_established(
+            "test",
+            "stdio",
+            transport::Established {
+                service: client,
+                child_group: None,
+            },
+        )
+        .await;
         mgr
     }
 }
