@@ -3632,7 +3632,7 @@ auto = "local"
     #[test]
     fn keybinds_default_has_all_actions() {
         let kb = KeybindsConfig::default();
-        assert_eq!(kb.binds.len(), 22);
+        assert_eq!(kb.binds.len(), 23);
         assert_eq!(
             kb.binds["interrupt"],
             KeyCombo {
@@ -3698,7 +3698,7 @@ auto = "local"
         // The override took effect…
         assert_eq!(cfg.keybinds.binds["toggle_reasoning"].key, "x");
         // …and every other default bind survived the merge.
-        assert_eq!(cfg.keybinds.binds.len(), 22);
+        assert_eq!(cfg.keybinds.binds.len(), 23);
         assert_eq!(cfg.keybinds.binds["interrupt"].key, "c");
         assert_eq!(cfg.keybinds.binds["help"].key, "f1");
     }
