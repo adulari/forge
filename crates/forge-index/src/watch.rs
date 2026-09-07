@@ -1,39 +1,56 @@
 //! Background file watcher: reindex supported source files as they change on disk (external
-//! editor edits), so retrieval stays fresh without a manual `forge lattice update`. Debounced to
-//! coalesce save bursts; skips build/VCS/vendored dirs. A watcher must never crash the session, so
-//! once running, per-file reindex errors are swallowed.
+//! editor edits), so retrieval stays fresh without a manual `forge lattice update`. Coalesces save
+//! bursts; watches only the directories the indexer itself walks (no `target/`, `.git/`,
+//! `node_modules/`, worktrees). A watcher must never crash the session, so once running, per-file
+//! reindex errors are swallowed.
+//!
+//! Two properties keep this cheap, and both were learned the hard way:
+//!
+//! * **Reads are not changes.** notify's inotify backend subscribes to `IN_OPEN`, so every file
+//!   the reindexer reads to hash it produced an event for that same file, which queued another
+//!   reindex, which read the file again — a self-sustaining loop that pinned one core per Forge
+//!   process for as long as the process lived (the initial `update()` walk was enough to seed it).
+//!   The handler therefore drops every access-only event before it reaches the worker.
+//! * **Watch what you index.** A blanket recursive watch on the project root registered ~55,000
+//!   inotify watches on this repository (`target/`, `node_modules/`, every worktree), so every
+//!   cargo build or checkout in a sibling worktree woke the watcher thread for nothing. The watch
+//!   set is now exactly the directory set the indexer walks, kept current as directories appear.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use notify_debouncer_mini::notify::{
-    Config as NotifyConfig, PollWatcher, RecommendedWatcher, RecursiveMode,
-};
-use notify_debouncer_mini::{
-    new_debouncer, new_debouncer_opt, Config as DebouncerConfig, DebounceEventResult, Debouncer,
+use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind};
+use notify::{
+    Config as NotifyConfig, Event, EventKind, PollWatcher, RecommendedWatcher, RecursiveMode,
+    Watcher,
 };
 
-use crate::{is_skippable_dir, lang_for_path, Lattice};
+use crate::{is_skippable_dir, lang_for_path, source_walker, Lattice};
+
+/// The OS watcher behind a [`LatticeWatcher`]: native (inotify/FSEvents/ReadDirectoryChanges) or
+/// polling, chosen per filesystem. Shared with the reindex worker (weakly) so it can register
+/// watches for directories created after startup.
+type SharedWatcher = Arc<Mutex<Box<dyn Watcher + Send>>>;
 
 /// Keeps the background watcher alive; dropping it stops watching AND joins the reindex worker so no
-/// thread leaks. Holds the OS watcher backend (native inotify or polling) plus the worker thread that
-/// drains changed paths and reindexes them OFF the notify/debouncer thread (so a save burst can't
-/// serialize reindexing on the watcher thread or hold the store write lock too long).
+/// thread leaks. Holds the OS watcher backend (native or polling) plus the worker thread that drains
+/// changed paths and reindexes them OFF the notify thread (so a save burst can't serialize
+/// reindexing on the watcher thread or hold the store write lock too long).
 pub struct LatticeWatcher {
-    // Dropped FIRST (see the explicit `Drop`): the debouncer owns the channel `Sender` (it lives in
+    // Dropped FIRST (see the explicit `Drop`): the watcher owns the channel `Sender` (it lives in
     // the handler closure), so dropping it disconnects the channel, which is the worker's shutdown
     // signal. `Option` so `Drop` can `take()` it before joining the worker.
-    inner: Option<WatcherInner>,
+    inner: Option<SharedWatcher>,
     worker: Option<JoinHandle<()>>,
     errors: Arc<Mutex<Vec<String>>>,
 }
 
 impl LatticeWatcher {
-    fn new(inner: WatcherInner, worker: JoinHandle<()>, errors: Arc<Mutex<Vec<String>>>) -> Self {
+    fn new(inner: SharedWatcher, worker: JoinHandle<()>, errors: Arc<Mutex<Vec<String>>>) -> Self {
         Self {
             inner: Some(inner),
             worker: Some(worker),
@@ -53,9 +70,10 @@ impl LatticeWatcher {
 
 impl Drop for LatticeWatcher {
     fn drop(&mut self) {
-        // Drop the debouncer first: that drops its handler closure, the sole channel `Sender`, so the
-        // worker's `recv()` returns `Err` (disconnected) and the loop exits. Then join the worker so
-        // it's torn down deterministically instead of leaked.
+        // Drop the watcher first: that drops its handler closure, the sole channel `Sender`, so the
+        // worker's `recv()` returns `Err` (disconnected) and the loop exits. The worker only ever
+        // holds a `Weak` to the watcher, so this strong reference is the last one. Then join the
+        // worker so it's torn down deterministically instead of leaked.
         self.inner.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -63,35 +81,38 @@ impl Drop for LatticeWatcher {
     }
 }
 
-// Variants hold the debouncer purely to keep its background thread alive (dropping stops watching);
-// the value is never read back out.
-#[allow(dead_code)]
-enum WatcherInner {
-    Native(Debouncer<RecommendedWatcher>),
-    Poll(Debouncer<PollWatcher>),
+/// What the notify handler forwards to the reindex worker. Both are cheap to produce on the
+/// notify thread; all filesystem work happens on the worker.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Change {
+    /// A supported source file was written, created, moved, or removed.
+    Source(PathBuf),
+    /// A directory appeared inside the watched tree: register it (and index what it holds).
+    NewDir(PathBuf),
 }
 
 /// How often the POLLING backend rescans the tree on a filesystem without working inotify (9p/etc.).
 /// A balance between reindex latency and the cost of a full stat-walk over a remote/host link.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// After the worker pulls the first changed path of a batch, it waits this long for stragglers from
-/// the same save burst (a multi-file save, a `git checkout`) before reindexing — so paths arriving in
-/// quick succession coalesce into one reindex pass instead of one pass each. Short enough to stay
-/// imperceptible on top of the debounce window.
+/// After the worker pulls the first change of a batch, it waits at least this long for stragglers
+/// from the same save burst (a multi-file save, a `git checkout`) before reindexing — so paths
+/// arriving in quick succession coalesce into one reindex pass instead of one pass each. The
+/// caller's debounce window extends this when it is longer (see [`spawn_watcher`]).
 const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
-/// Watch `root` recursively and reindex changed source files into `lattice`. Returns an error only
-/// if the OS watcher can't be set up at all; the returned handle must be kept alive for watching to
-/// continue.
+/// Watch the source directories under `root` and reindex changed source files into `lattice`.
+/// Returns an error only if the OS watcher can't be set up at all; the returned handle must be
+/// kept alive for watching to continue. `debounce` is how long a burst of changes is allowed to
+/// settle before it is reindexed.
 ///
 /// Picks the backend by filesystem: native local filesystems use the efficient inotify watcher;
 /// a non-native filesystem (WSL2's `/mnt/*` DrvFs/9p, a FUSE mount, an SMB/NFS share) uses a
 /// **polling** watcher instead. Recursive inotify registration on 9p RPCs to the host per entry and
 /// some calls land in uninterruptible `D` state — which used to hang `forge chat` — whereas polling
-/// just stat-walks the tree on a timer (ordinary file ops that work over 9p). Both register a
-/// recursive watch on `root`; the caller runs this off the startup path so the initial poll scan
-/// (synchronous, and slow over a remote link) can't gate the UI.
+/// just stat-walks the tree on a timer (ordinary file ops that work over 9p). The caller runs this
+/// off the startup path so the initial registration walk (synchronous, and slow over a remote
+/// link) can't gate the UI.
 pub fn spawn_watcher(
     lattice: Arc<Lattice>,
     root: &Path,
@@ -100,84 +121,196 @@ pub fn spawn_watcher(
     build_watcher(
         lattice,
         root,
-        debounce,
         needs_polling(root),
         POLL_INTERVAL,
-        COALESCE_WINDOW,
+        debounce.max(COALESCE_WINDOW),
     )
 }
 
 /// Build the backend explicitly (the `poll` decision + interval are parameters so tests can exercise
-/// the polling path on a native test filesystem). `poll=false` → inotify; `poll=true` → stat-walk
+/// the polling path on a native test filesystem). `poll=false` → native; `poll=true` → stat-walk
 /// every `poll_interval`. `coalesce` is the worker's batch window (see [`COALESCE_WINDOW`]).
-///
-/// The notify/debouncer thread runs the cheap `handler`: it only *enqueues* changed paths onto a
-/// channel and returns immediately, so a burst of saves never serializes reindexing (which takes the
-/// store write lock) on the watcher thread. A dedicated worker thread drains the channel, coalesces
-/// duplicate paths within `coalesce`, and reindexes — off the watcher thread.
 fn build_watcher(
     lattice: Arc<Lattice>,
     root: &Path,
-    debounce: Duration,
     poll: bool,
     poll_interval: Duration,
     coalesce: Duration,
 ) -> Result<LatticeWatcher, String> {
-    let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+    build_watcher_with(root, poll, poll_interval, coalesce, move |path| {
+        if let Err(e) = lattice.reindex_path(path) {
+            tracing::warn!("lattice reindex of {path:?} failed: {e}");
+        }
+    })
+}
+
+/// [`build_watcher`] with the per-file action injected, so tests can count reindexes precisely
+/// instead of inferring them from index contents.
+///
+/// The notify thread runs the cheap `handler`: it classifies each event and *enqueues* the
+/// affected path onto a channel, then returns immediately, so a burst of saves never serializes
+/// reindexing (which takes the store write lock) on the watcher thread. A dedicated worker thread
+/// drains the channel, coalesces duplicate paths within `coalesce`, registers newly created
+/// directories, and reindexes — off the watcher thread.
+fn build_watcher_with<F>(
+    root: &Path,
+    poll: bool,
+    poll_interval: Duration,
+    coalesce: Duration,
+    reindex: F,
+) -> Result<LatticeWatcher, String>
+where
+    F: FnMut(&Path) + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel::<Change>();
     let errors = Arc::new(Mutex::new(Vec::new()));
+
+    // The handler runs ON the notify thread, so it must stay cheap: classify and forward. A send
+    // only fails once the worker has exited (channel closed); that can't normally happen while the
+    // watcher is alive, so it's ignored.
+    let handler_errors = Arc::clone(&errors);
+    let handler = move |res: notify::Result<Event>| match res {
+        Ok(event) => forward_event(&event, &tx),
+        Err(e) => record_watcher_error(&handler_errors, &format!("notify backend error: {e}")),
+    };
+
+    let mut watcher: Box<dyn Watcher + Send> = if poll {
+        // compare_contents so a same-SIZE edit (changing a value, a rename of equal length) is still
+        // caught — metadata-only polling would miss it if mtime granularity coincides. Costs a content
+        // read per file per tick, bounded by the source-directory scope.
+        let config = NotifyConfig::default()
+            .with_poll_interval(poll_interval)
+            .with_compare_contents(true);
+        Box::new(PollWatcher::new(handler, config).map_err(|e| e.to_string())?)
+    } else {
+        Box::new(
+            RecommendedWatcher::new(handler, NotifyConfig::default()).map_err(|e| e.to_string())?,
+        )
+    };
+
+    // Register exactly the directories the indexer walks — one non-recursive watch each — instead
+    // of one recursive watch on the root that would pull in every build tree and worktree.
+    let mut watched: HashSet<PathBuf> = HashSet::new();
+    for dir in source_dirs(root) {
+        match watcher.watch(&dir, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                watched.insert(dir);
+            }
+            Err(e) if dir == root => return Err(e.to_string()),
+            Err(e) => tracing::debug!("lattice watch skipped {dir:?}: {e}"),
+        }
+    }
+
+    let shared: SharedWatcher = Arc::new(Mutex::new(watcher));
+    let worker_watcher = Arc::downgrade(&shared);
     let worker = std::thread::Builder::new()
         .name("forge-lattice-reindex".into())
         .spawn(move || {
-            run_reindex_worker(rx, coalesce, |path| {
-                if let Err(e) = lattice.reindex_path(path) {
-                    tracing::warn!("lattice reindex of {path:?} failed: {e}");
-                }
-            });
+            let mut registrar = DirRegistrar {
+                watcher: worker_watcher,
+                watched,
+            };
+            run_reindex_worker(rx, coalesce, &mut registrar, reindex);
         })
         .map_err(|e| e.to_string())?;
+    Ok(LatticeWatcher::new(shared, worker, errors))
+}
 
-    // The handler runs ON the notify/debouncer thread, so it must stay cheap: just forward each
-    // supported changed path to the worker. A send only fails once the worker has exited (channel
-    // closed); that can't normally happen while the debouncer is alive, so it's ignored.
-    let handler_errors = Arc::clone(&errors);
-    let handler = move |res: DebounceEventResult| {
-        let Ok(events) = res else {
-            record_watcher_error(&handler_errors, "notify backend returned an error");
-            return;
+/// Every directory the indexer would walk under `root`, root first. Shares the indexer's walker so
+/// the watched set and the indexed set can't drift apart.
+fn source_dirs(root: &Path) -> Vec<PathBuf> {
+    source_walker(root)
+        .flatten()
+        .filter(|entry| entry.file_type().is_some_and(|t| t.is_dir()))
+        .map(|entry| entry.into_path())
+        .collect()
+}
+
+/// Turn one notify event into worker messages. Pure apart from a single `is_dir` stat on
+/// create/rename events (needed to tell a new directory from a new file); every other event is
+/// classified from its kind and path alone.
+fn forward_event(event: &Event, tx: &Sender<Change>) {
+    if !is_content_event(&event.kind) {
+        return;
+    }
+    let may_be_new_dir = matches!(
+        event.kind,
+        EventKind::Create(CreateKind::Folder)
+            | EventKind::Create(CreateKind::Any)
+            | EventKind::Modify(ModifyKind::Name(_))
+    );
+    for path in &event.paths {
+        if should_reindex(path) {
+            let _ = tx.send(Change::Source(path.clone()));
+        } else if may_be_new_dir && is_watchable_dir(path) {
+            let _ = tx.send(Change::NewDir(path.clone()));
+        }
+    }
+}
+
+/// Whether an event kind can reflect a change to file contents or the tree. Access events —
+/// open, read, close-without-write — cannot, and the reindexer's own reads produce them, so
+/// forwarding them would make the watcher feed itself. `Close(Write)` is the one access event
+/// that means "a writer finished" and is kept.
+fn is_content_event(kind: &EventKind) -> bool {
+    match kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
+    }
+}
+
+/// A directory the watcher should register when it appears at runtime: exists, is a directory,
+/// and no component of its path is a skipped directory (a new `target/debug/…` build dir or a
+/// fresh worktree under `.forge/` must not pull the watch set back up to tens of thousands).
+fn is_watchable_dir(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    let skipped = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .any(is_skippable_dir);
+    !skipped && !crate::is_toolchain_dir(path) && !path.join(".git").exists()
+}
+
+/// Owns the worker-side view of the watch set: which directories are registered, and a weak handle
+/// to the watcher to register more. Weak so the worker can never keep the watcher (and so its own
+/// `Sender`) alive past the `LatticeWatcher` drop that is meant to stop it.
+struct DirRegistrar {
+    watcher: Weak<Mutex<Box<dyn Watcher + Send>>>,
+    watched: HashSet<PathBuf>,
+}
+
+impl DirRegistrar {
+    /// Register `dir` and every source directory beneath it, returning the source files already
+    /// inside (files can land before the watch does, so they are indexed explicitly).
+    fn register(&mut self, dir: &Path) -> Vec<PathBuf> {
+        let Some(watcher) = self.watcher.upgrade() else {
+            return Vec::new();
         };
-        for ev in events {
-            if should_reindex(&ev.path) {
-                let _ = tx.send(ev.path);
+        let mut files = Vec::new();
+        for entry in source_walker(dir).flatten() {
+            let path = entry.path();
+            if entry.file_type().is_some_and(|t| t.is_dir()) {
+                if self.watched.contains(path) {
+                    continue;
+                }
+                let Ok(mut guard) = watcher.lock() else {
+                    return files; // poisoned: the watcher thread panicked; nothing to register into
+                };
+                match guard.watch(path, RecursiveMode::NonRecursive) {
+                    Ok(()) => {
+                        self.watched.insert(path.to_path_buf());
+                    }
+                    Err(e) => tracing::debug!("lattice watch skipped {path:?}: {e}"),
+                }
+            } else if should_reindex(path) {
+                files.push(path.to_path_buf());
             }
         }
-    };
-
-    let inner = if poll {
-        // compare_contents so a same-SIZE edit (changing a value, a rename of equal length) is still
-        // caught — metadata-only polling would miss it if mtime granularity coincides. Costs a content
-        // read per file per tick, bounded by the project-root scope + debounce.
-        let notify_config = NotifyConfig::default()
-            .with_poll_interval(poll_interval)
-            .with_compare_contents(true);
-        let config = DebouncerConfig::default()
-            .with_timeout(debounce)
-            .with_notify_config(notify_config);
-        let mut debouncer =
-            new_debouncer_opt::<_, PollWatcher>(config, handler).map_err(|e| e.to_string())?;
-        debouncer
-            .watcher()
-            .watch(root, RecursiveMode::Recursive)
-            .map_err(|e| e.to_string())?;
-        WatcherInner::Poll(debouncer)
-    } else {
-        let mut debouncer = new_debouncer(debounce, handler).map_err(|e| e.to_string())?;
-        debouncer
-            .watcher()
-            .watch(root, RecursiveMode::Recursive)
-            .map_err(|e| e.to_string())?;
-        WatcherInner::Native(debouncer)
-    };
-    Ok(LatticeWatcher::new(inner, worker, errors))
+        files
+    }
 }
 
 fn record_watcher_error(errors: &Arc<Mutex<Vec<String>>>, detail: &str) {
@@ -187,32 +320,48 @@ fn record_watcher_error(errors: &Arc<Mutex<Vec<String>>>, detail: &str) {
     }
 }
 
-/// Drain reindex requests off `rx` and apply `reindex` to each changed path, OFF the watcher thread.
-/// Coalesces a burst: after the first path arrives it grabs everything already queued, waits
+/// Drain changes off `rx` and apply `reindex` to each changed path, OFF the watcher thread.
+/// Coalesces a burst: after the first change arrives it grabs everything already queued, waits
 /// `coalesce` for stragglers from the same save, grabs those too, then reindexes each unique path
-/// ONCE — so one save that emits the same path several times (or several debounce windows for one
-/// file) reindexes it a single time, not N times. Exits when the channel disconnects (every `Sender`
-/// dropped, i.e. the watcher was dropped), which is the clean-shutdown signal.
-fn run_reindex_worker<F: FnMut(&Path)>(rx: Receiver<PathBuf>, coalesce: Duration, mut reindex: F) {
+/// ONCE — so one save that emits the same path several times reindexes it a single time, not N
+/// times. New directories are registered before the batch is indexed so the files they already
+/// hold are part of the same pass. Exits when the channel disconnects (every `Sender` dropped,
+/// i.e. the watcher was dropped), which is the clean-shutdown signal.
+fn run_reindex_worker<F: FnMut(&Path)>(
+    rx: Receiver<Change>,
+    coalesce: Duration,
+    registrar: &mut DirRegistrar,
+    mut reindex: F,
+) {
     while let Ok(first) = rx.recv() {
-        let mut batch: HashSet<PathBuf> = HashSet::new();
+        let mut batch: HashSet<Change> = HashSet::new();
         batch.insert(first);
         drain_pending(&rx, &mut batch);
         if !coalesce.is_zero() {
             std::thread::sleep(coalesce);
             drain_pending(&rx, &mut batch);
         }
-        for path in &batch {
+        let mut paths: HashSet<PathBuf> = HashSet::new();
+        for change in batch {
+            match change {
+                Change::Source(path) => {
+                    paths.insert(path);
+                }
+                Change::NewDir(dir) => paths.extend(registrar.register(&dir)),
+            }
+        }
+        for path in &paths {
             reindex(path);
         }
     }
 }
 
-/// Move every currently-queued path from `rx` into `batch` (deduping), without blocking. Stops at the
-/// first `Empty` (nothing more queued right now) or `Disconnected` (sender gone) — both end the drain.
-fn drain_pending(rx: &Receiver<PathBuf>, batch: &mut HashSet<PathBuf>) {
-    while let Ok(path) = rx.try_recv() {
-        batch.insert(path);
+/// Move every currently-queued change from `rx` into `batch` (deduping), without blocking. Stops at
+/// the first `Empty` (nothing more queued right now) or `Disconnected` (sender gone) — both end the
+/// drain.
+fn drain_pending(rx: &Receiver<Change>, batch: &mut HashSet<Change>) {
+    while let Ok(change) = rx.try_recv() {
+        batch.insert(change);
     }
 }
 
@@ -352,6 +501,191 @@ mod tests {
 
     static N: AtomicUsize = AtomicUsize::new(0);
 
+    /// A registrar with no watcher behind it: `NewDir` messages become no-ops.
+    fn detached_registrar() -> DirRegistrar {
+        DirRegistrar {
+            watcher: Weak::new(),
+            watched: HashSet::new(),
+        }
+    }
+
+    fn fresh_root(tag: &str) -> PathBuf {
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("forge-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        root
+    }
+
+    /// Number of inotify watches this process currently holds, from `/proc/self/fdinfo`. Linux only;
+    /// `None` elsewhere or when unreadable.
+    fn inotify_watch_count() -> Option<usize> {
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
+        let mut total = 0;
+        for entry in std::fs::read_dir("/proc/self/fdinfo").ok()?.flatten() {
+            if let Ok(info) = std::fs::read_to_string(entry.path()) {
+                total += info
+                    .lines()
+                    .filter(|l| l.starts_with("inotify wd:"))
+                    .count();
+            }
+        }
+        Some(total)
+    }
+
+    #[test]
+    fn access_events_are_not_changes_but_a_finished_write_is() {
+        // The reindexer's own reads (open / read / close-without-write) must never come back as
+        // work; the loop that pinned a core per Forge process was exactly that.
+        assert!(!is_content_event(&EventKind::Access(AccessKind::Open(
+            AccessMode::Read
+        ))));
+        assert!(!is_content_event(&EventKind::Access(AccessKind::Read)));
+        assert!(!is_content_event(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(!is_content_event(&EventKind::Access(AccessKind::Any)));
+        // A writer closing its handle is how an editor save shows up on inotify.
+        assert!(is_content_event(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+        assert!(is_content_event(&EventKind::Modify(ModifyKind::Any)));
+        assert!(is_content_event(&EventKind::Create(CreateKind::File)));
+        assert!(is_content_event(&EventKind::Remove(
+            notify::event::RemoveKind::File
+        )));
+    }
+
+    #[test]
+    fn the_reindexers_own_reads_do_not_feed_the_watcher() {
+        // Production shape: the reindex action READS the file it was woken for. With access events
+        // forwarded, that read is itself an event for the same file, and the watcher feeds itself
+        // forever (one core per Forge process, observed). So: trigger one real write, wait for it
+        // to be reindexed, then prove the count stops moving once the tree is quiet.
+        let root = fresh_root("read");
+        let file = root.join("src/a.rs");
+        std::fs::write(&file, "pub fn alpha() {}\n").unwrap();
+
+        let reindexes = Arc::new(AtomicUsize::new(0));
+        let r2 = Arc::clone(&reindexes);
+        let _w = build_watcher_with(
+            &root,
+            false,
+            POLL_INTERVAL,
+            Duration::from_millis(50),
+            move |path| {
+                let _ = std::fs::read_to_string(path);
+                r2.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("watcher starts");
+
+        let mut saw_write = false;
+        for _ in 0..60 {
+            std::fs::write(&file, "pub fn beta() {}\n").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            if reindexes.load(Ordering::SeqCst) > 0 {
+                saw_write = true;
+                break;
+            }
+        }
+        assert!(saw_write, "a real write must reindex");
+
+        // Let the write's own burst settle, then measure over a quiet window.
+        std::thread::sleep(Duration::from_millis(400));
+        let settled = reindexes.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(600));
+        let later = reindexes.load(Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            later, settled,
+            "reindex count kept climbing with no writes: the watcher is feeding itself"
+        );
+    }
+
+    #[test]
+    fn only_source_directories_are_watched() {
+        // Build output, VCS, and dependency trees get no watch at all — not merely filtered after
+        // the fact. Measured directly on inotify where available: exactly root + src.
+        let root = fresh_root("scope");
+        std::fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").unwrap();
+        for dir in [
+            "target/debug/deps",
+            ".git/objects",
+            "node_modules/pkg",
+            "vendor/x",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("gen.rs"), "pub fn noise() {}\n").unwrap();
+        }
+
+        let dirs = source_dirs(&root);
+        assert_eq!(dirs[0], root, "root first");
+        assert!(dirs.contains(&root.join("src")));
+        assert_eq!(dirs.len(), 2, "no build/VCS/dependency dirs: {dirs:?}");
+
+        let before = inotify_watch_count();
+        let reindexes = Arc::new(AtomicUsize::new(0));
+        let r2 = Arc::clone(&reindexes);
+        let w = build_watcher_with(
+            &root,
+            false,
+            POLL_INTERVAL,
+            Duration::from_millis(50),
+            move |_| {
+                r2.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("watcher starts");
+        if let (Some(before), Some(after)) = (before, inotify_watch_count()) {
+            assert_eq!(after - before, 2, "one inotify watch per source directory");
+        }
+
+        // Churn in target/ (what a cargo build does) never reaches the worker.
+        for i in 0..20 {
+            std::fs::write(
+                root.join("target/debug/deps/gen.rs"),
+                format!("pub fn noise{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(reindexes.load(Ordering::SeqCst), 0);
+        drop(w);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_directory_created_after_startup_is_watched() {
+        // A new module directory (mkdir + first file) must be picked up without a restart: the
+        // watch set follows the tree, it is not a startup snapshot.
+        let root = fresh_root("newdir");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let lattice = Arc::new(Lattice::new(store, &root));
+        lattice.update().unwrap();
+        let _w = spawn_watcher(Arc::clone(&lattice), &root, Duration::from_millis(100))
+            .expect("watcher starts");
+
+        let new_dir = root.join("src/later");
+        let file = new_dir.join("b.rs");
+        let mut reindexed = false;
+        for _ in 0..60 {
+            std::fs::create_dir_all(&new_dir).unwrap();
+            std::fs::write(&file, "pub fn delta() {}\n").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            if lattice.query("delta", 5).unwrap().len() == 1 {
+                reindexed = true;
+                break;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            reindexed,
+            "a file in a directory created after startup was not indexed"
+        );
+    }
+
     #[test]
     fn should_reindex_allows_dotfile_source_but_skips_dot_dirs() {
         // A dot-prefixed SOURCE file must be reindexed (the initial walk indexes it); only a
@@ -422,10 +756,9 @@ mod tests {
         let _w = build_watcher(
             Arc::clone(&lattice),
             &root,
-            Duration::from_millis(100),
             true, // force the polling backend
             Duration::from_millis(150),
-            COALESCE_WINDOW,
+            Duration::from_millis(100),
         )
         .expect("poll watcher starts");
 
@@ -491,15 +824,16 @@ mod tests {
     fn worker_coalesces_a_burst_and_stops_on_sender_drop() {
         // A rapid burst of changes to the SAME path must coalesce into far fewer reindexes than the
         // number of events (don't reindex a file 10× for one save), and dropping the sole `Sender`
-        // (what `LatticeWatcher::drop` does to the debouncer's handler) must stop the worker so its
+        // (what `LatticeWatcher::drop` does to the watcher's handler) must stop the worker so its
         // thread can be joined — no leak.
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (tx, rx) = std::sync::mpsc::channel::<Change>();
         let reindexes = Arc::new(AtomicUsize::new(0));
         let r2 = Arc::clone(&reindexes);
         let worker = std::thread::spawn(move || {
-            run_reindex_worker(rx, Duration::from_millis(80), move |_p| {
+            let mut registrar = detached_registrar();
+            run_reindex_worker(rx, Duration::from_millis(80), &mut registrar, move |_p| {
                 r2.fetch_add(1, Ordering::SeqCst);
             });
         });
@@ -507,7 +841,7 @@ mod tests {
         // Fire 20 events for one path back-to-back; they should land within a single coalesce window.
         let path = PathBuf::from("src/a.rs");
         for _ in 0..20 {
-            tx.send(path.clone()).unwrap();
+            tx.send(Change::Source(path.clone())).unwrap();
         }
 
         drop(tx); // sole sender gone → worker must finish the batch and exit
@@ -528,19 +862,20 @@ mod tests {
         // Coalescing dedups by path, so distinct paths in one burst are each reindexed once.
         use std::sync::Mutex;
 
-        let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (tx, rx) = std::sync::mpsc::channel::<Change>();
         let seen: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
         let s2 = Arc::clone(&seen);
         let worker = std::thread::spawn(move || {
-            run_reindex_worker(rx, Duration::from_millis(80), move |p| {
+            let mut registrar = detached_registrar();
+            run_reindex_worker(rx, Duration::from_millis(80), &mut registrar, move |p| {
                 s2.lock().unwrap().insert(p.to_path_buf());
             });
         });
 
         for name in ["src/a.rs", "src/b.rs", "src/c.rs"] {
             // each path sent twice — dedup should still reindex each once
-            tx.send(PathBuf::from(name)).unwrap();
-            tx.send(PathBuf::from(name)).unwrap();
+            tx.send(Change::Source(PathBuf::from(name))).unwrap();
+            tx.send(Change::Source(PathBuf::from(name))).unwrap();
         }
         drop(tx);
         worker.join().expect("worker joins");

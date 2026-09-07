@@ -185,41 +185,7 @@ impl Lattice {
         // now-skipped, e.g. a vendored/nested-git tree) and gets pruned at the end.
         let mut seen: HashSet<String> = HashSet::new();
         let root = Path::new(&self.repo_root).to_path_buf();
-        // Walk with ripgrep's `ignore` crate so the index honors `.gitignore`/`.ignore`/global
-        // excludes and skips `.git` — without it the walker indexed gitignored trees like
-        // `.forge/bench/repos/<astropy|django>/…` and `target/`, swamping `impact`/`query` with
-        // hundreds of name-collision hits from unrelated code. `filter_entry` keeps two extra
-        // guards: a hardcoded skip list (for projects that don't gitignore `target`/`node_modules`)
-        // and a nested-git-repo skip (vendored deps / scratch clones that AREN'T gitignored).
-        let walker = WalkBuilder::new(&root)
-            .hidden(false) // don't blanket-skip dotfiles; gitignore + the guards below decide
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .require_git(false) // honor .gitignore even when the dir isn't a git checkout
-            .parents(true)
-            .filter_entry(|e| {
-                if e.depth() == 0 {
-                    return true; // never filter the root itself
-                }
-                if e.file_type().is_some_and(|t| t.is_dir()) {
-                    let name = e.file_name().to_string_lossy();
-                    if is_skippable_dir(&name) {
-                        return false;
-                    }
-                    // Installed toolchains/SDKs (Go module cache, Android SDK, site-packages).
-                    // Matched on the path tail, not the bare name, so a project's own `pkg/` or
-                    // `sdk/` source directory is untouched (root.rs).
-                    if root::is_toolchain_dir(e.path()) {
-                        return false;
-                    }
-                    if e.path().join(".git").exists() {
-                        return false; // nested repo (submodule / vendored clone / scratch checkout)
-                    }
-                }
-                true
-            })
-            .build();
+        let walker = source_walker(&root);
         // Collect the candidate files BEFORE indexing any of them, so the size ceiling can refuse
         // the root without having written a single row. Bounded: once the count passes the limit
         // the walk stops, so a pathological root (a home directory, a mounted toolchain tree) costs
@@ -732,6 +698,47 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (na.sqrt() * nb.sqrt())
+}
+
+/// The walk shared by the indexer and the file watcher, so both see exactly the same tree.
+/// Uses ripgrep's `ignore` crate so the index honors `.gitignore`/`.ignore`/global excludes and
+/// skips `.git` — without it the walker indexed gitignored trees like
+/// `.forge/bench/repos/<astropy|django>/…` and `target/`, swamping `impact`/`query` with hundreds
+/// of name-collision hits from unrelated code. `filter_entry` keeps two extra guards: a hardcoded
+/// skip list (for projects that don't gitignore `target`/`node_modules`) and a nested-git-repo skip
+/// (vendored deps / scratch clones that AREN'T gitignored). The watcher registers one OS watch per
+/// directory this walk yields — on this repository that is ~300 watches instead of the ~55,000 a
+/// blanket recursive watch over `target/`, `node_modules/` and every worktree used to cost.
+pub(crate) fn source_walker(root: &Path) -> ignore::Walk {
+    WalkBuilder::new(root)
+        .hidden(false) // don't blanket-skip dotfiles; gitignore + the guards below decide
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .require_git(false) // honor .gitignore even when the dir isn't a git checkout
+        .parents(true)
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true; // never filter the root itself
+            }
+            if e.file_type().is_some_and(|t| t.is_dir()) {
+                let name = e.file_name().to_string_lossy();
+                if is_skippable_dir(&name) {
+                    return false;
+                }
+                // Installed toolchains/SDKs (Go module cache, Android SDK, site-packages).
+                // Matched on the path tail, not the bare name, so a project's own `pkg/` or
+                // `sdk/` source directory is untouched (root.rs).
+                if root::is_toolchain_dir(e.path()) {
+                    return false;
+                }
+                if e.path().join(".git").exists() {
+                    return false; // nested repo (submodule / vendored clone / scratch checkout)
+                }
+            }
+            true
+        })
+        .build()
 }
 
 /// Directories never worth indexing — build output, VCS, dependencies, and dotdirs.

@@ -586,10 +586,24 @@ impl ForgeAgentServer {
 /// `session_id` prefix, same as `forge chat --resume`) and serves it over stdio MCP until
 /// the client disconnects. The session persists in the global store — reconnecting with the
 /// same `--session` id resumes where it left off.
+/// An MCP agent exists only to serve the process that spawned it. Stdin EOF already ends the
+/// server loop when the parent exits cleanly, but a parent killed outright (a crashed or
+/// SIGKILLed Claude Code) can leave the agent — with its session, index and file watcher —
+/// running until someone notices it in `top`. Ask the kernel to SIGTERM us when the parent
+/// dies instead. Linux-only; other platforms keep the stdin-EOF behaviour.
+fn die_with_parent() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: prctl with PR_SET_PDEATHSIG takes an integer signal and touches no memory.
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+    }
+}
+
 pub async fn run(session_id: Option<String>, cwd: Option<std::path::PathBuf>) -> Result<()> {
     if let Some(cwd) = cwd {
         std::env::set_current_dir(&cwd)?;
     }
+    die_with_parent();
 
     // Default to AcceptEdits: agent mode is assumed to be orchestrated, so file edits
     // auto-proceed without prompts. The orchestrating agent can escalate via forge_set_mode.
