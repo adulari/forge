@@ -4,6 +4,7 @@
 //! the `Session`, which this crate must not depend on).
 
 mod btw_args;
+mod subagent_args;
 
 /// One command's metadata, shown in the palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -651,12 +652,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "export" => CommandAction::Export((!arg.is_empty()).then(|| arg.trim().to_string())),
         "effort" => CommandAction::SetEffort((!arg.is_empty()).then_some(arg)),
         "subagents" | "subagent" => {
-            let free = match arg.to_lowercase().as_str() {
-                "free" | "any" | "unpinned" | "off" | "0" => Some(true),
-                "pinned" | "pin" | "inherit" | "on" | "1" => Some(false),
-                _ => None, // bare /subagents → toggle
-            };
-            CommandAction::Subagents(free)
+            CommandAction::Subagents(subagent_args::parse_subagents_arg(&arg))
         }
         "remember" => CommandAction::Remember(arg.to_string()),
         "memories" => CommandAction::Memories,

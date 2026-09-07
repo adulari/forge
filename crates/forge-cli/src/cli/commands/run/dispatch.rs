@@ -363,36 +363,10 @@ pub(crate) async fn dispatch_command(
             }
         },
         // `/subagents [free|pinned]` — whether children may route off this session's model pin.
-        // Bare `/subagents` toggles. Persisted on the session row, so a resume or a daemon restart
-        // keeps the choice instead of silently snapping the children back onto the pin.
+        // The body lives in `run/subagents.rs`: this file sits at its CI size ratchet (see
+        // `btw.rs` for the same split).
         CommandAction::Subagents(explicit) => {
-            let mut s = session.lock().await;
-            let free = explicit.unwrap_or(!s.subagents_free());
-            s.set_subagents_free(Some(free));
-            let pin = s
-                .pinned_model()
-                .map(|set| set.join(", "))
-                .unwrap_or_default();
-            drop(s);
-            if free {
-                app.note(&format!(
-                    "⛓ subagents: free — children route the mesh independently{}",
-                    if pin.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" (this session stays pinned to {pin})")
-                    }
-                ));
-            } else {
-                app.note(&format!(
-                    "⛓ subagents: pinned — children inherit {}",
-                    if pin.is_empty() {
-                        "the session's pin when one is set".to_string()
-                    } else {
-                        pin
-                    }
-                ));
-            }
+            super::subagents::set_subagent_pin_release(session, app, explicit).await;
         }
         // `/models` opens the interactive model browser: a provider list (with global counts in
         // the heading) that drills into each provider's models on Enter; Esc steps back.
