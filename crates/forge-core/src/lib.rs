@@ -42,6 +42,7 @@ pub mod fleet;
 pub mod heartbeat;
 pub mod hooks;
 pub mod llm_router;
+mod lsp_hints;
 mod model_loop;
 mod model_request;
 mod model_response;
@@ -716,6 +717,45 @@ fn working_tree_status(root: Option<&std::path::Path>) -> Option<Vec<u8>> {
         .ok()
         .filter(|out| out.status.success())
         .map(|out| out.stdout)
+}
+
+/// Snapshot the working tree into a dangling git commit and return its short sha.
+///
+/// A hard guard ends the turn on work nobody asked to throw away: one abort named 60 modified
+/// files and then simply stopped, leaving them live in the tree with no record of what the turn
+/// had reached. `git stash create` builds a commit object WITHOUT touching the index, the working
+/// tree, or the stash list — so the files stay exactly where they are for the human, and there is
+/// also a recoverable object if the tree is later reset or the next turn overwrites it.
+///
+/// Captures TRACKED modifications only — `git stash create` does not include untracked files, so
+/// a brand-new file the turn wrote is not in the commit. Nothing is lost by that: the snapshot is
+/// an additional copy and every file, tracked or not, stays on disk untouched.
+///
+/// Best-effort by design: outside a repo, with nothing staged-or-modified, or if git is missing,
+/// there is simply no snapshot and the caller says so.
+fn snapshot_uncommitted_work(root: &std::path::Path) -> Option<String> {
+    let created = std::process::Command::new("git")
+        .args(["stash", "create", "forge: turn ended by a hard guard"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    let sha = String::from_utf8_lossy(&created.stdout).trim().to_string();
+    if sha.is_empty() {
+        return None; // nothing to snapshot
+    }
+    // A dangling commit is garbage-collectable. A ref keeps it findable and safe.
+    let _ = std::process::Command::new("git")
+        .args([
+            "update-ref",
+            "refs/forge/aborted-turns",
+            &sha,
+            "-m",
+            "forge: turn ended by a hard guard",
+        ])
+        .current_dir(root)
+        .output();
+    Some(sha.chars().take(12).collect())
 }
 
 /// Whether the repository status changed during this turn. Comparing against the turn baseline
@@ -12171,6 +12211,61 @@ mod tests {
         git(&["add", "-A"]);
         git(&["commit", "-qm", "seed"]);
         dir
+    }
+
+    /// A hard guard used to name the uncommitted files and then simply stop, leaving a human to
+    /// reconstruct what a 400-step turn had been in the middle of. The snapshot must be a real,
+    /// recoverable commit — and must NOT disturb the working tree it is snapshotting.
+    #[test]
+    fn an_aborted_turn_snapshots_the_work_without_moving_it() {
+        let dir = clean_git_repo();
+        std::fs::write(dir.join("f.txt"), "work in progress").unwrap();
+        std::fs::write(dir.join("new.rs"), "fn added() {}").unwrap();
+        let before = working_tree_status(Some(&dir)).unwrap();
+
+        let sha = snapshot_uncommitted_work(&dir).expect("a dirty tree must produce a snapshot");
+        assert!(!sha.is_empty());
+
+        assert_eq!(
+            working_tree_status(Some(&dir)).unwrap(),
+            before,
+            "the snapshot must leave the files exactly where they are"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "work in progress"
+        );
+
+        // Recoverable: the ref resolves and the commit carries the edit.
+        let show = std::process::Command::new("git")
+            .args(["show", &format!("{sha}:f.txt")])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(show.status.success(), "the snapshot commit must resolve");
+        assert_eq!(
+            String::from_utf8_lossy(&show.stdout).trim(),
+            "work in progress"
+        );
+
+        let named = std::process::Command::new("git")
+            .args(["rev-parse", "refs/forge/aborted-turns"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            named.status.success(),
+            "a dangling commit is garbage-collectable; it must be kept by a ref"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A clean tree has nothing to preserve, and must not manufacture an empty snapshot.
+    #[test]
+    fn a_clean_tree_produces_no_snapshot() {
+        let dir = clean_git_repo();
+        assert!(snapshot_uncommitted_work(&dir).is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
