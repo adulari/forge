@@ -6,7 +6,19 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
-## [2.14.0] - 2026-09-07
+## [2.14.1] - 2026-09-07
+
+v2.14.0 was tagged but never published: its release build failed 24 seconds in, before compiling
+anything, because Debian Bullseye is EOL and its security pool rotated out from under the live
+mirror — the apt index advertised `libc-dev-bin 2.31-13+deb11u14` while `deb.debian.org` had
+already deleted that `.deb`. Both Linux targets died identically. This release is the same work
+plus the build fix; per RELEASING.md a release tag is never moved, so it ships as a new version.
+
+### Fixed
+- **The portable Linux release build could not install its toolchain packages.** The container now
+  pins apt to a timestamped `snapshot.debian.org` view, which keeps the security suite and cannot
+  rotate underneath a build — making the step reproducible the same way the image digest and Rust
+  toolchain already are (`.github/workflows/release.yml`).
 
 ### Added
 - **`shell` can start something that keeps running.** Every attempt before this died the moment the
@@ -4067,8 +4079,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.14.0...HEAD
-[2.14.0]: https://github.com/Adulari/forge/compare/v2.13.9...v2.14.0
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.14.1...HEAD
+[2.14.1]: https://github.com/Adulari/forge/compare/v2.13.9...v2.14.1
 [2.13.9]: https://github.com/Adulari/forge/compare/v2.13.8...v2.13.9
 [2.13.8]: https://github.com/Adulari/forge/compare/v2.13.7...v2.13.8
 [2.13.7]: https://github.com/Adulari/forge/compare/v2.13.6...v2.13.7
