@@ -310,6 +310,65 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             ? "done"
             : "idle";
 
+  // SessionShell re-renders on every WS snapshot frame (it reads `snapshot` directly for the
+  // header/status-strip fields below), so SessionHeader/StatusStrip's own `React.memo` only
+  // pays off if the handlers and objects passed to them keep a stable identity across those
+  // frames — hoisted here instead of the inline arrow functions/object literals JSX had
+  // before, none of which changes what any handler does.
+  const onBack = useCallback(() => goBackOr("/(tabs)"), []);
+  const onNewHere = useCallback(() => {
+    router.push({ pathname: "/new-session", params: { cwd: snapshot?.cwd ?? "" } });
+  }, [snapshot?.cwd]);
+  const onDuel = useCallback(() => setDuelVisible(true), []);
+  const onSessionReplay = useCallback(() => router.push(`/session/${sessionId}/replay`), [sessionId]);
+  const onPlan = useCallback(() => setPlanVisible(true), []);
+  const onWorkflows = useCallback(() => router.push(`/session/${sessionId}/workflows`), [sessionId]);
+  const onFork = useCallback(() => setForkVisible(true), []);
+  const onInit = useCallback(() => setInitVisible(true), []);
+  const onAssay = useCallback(() => setAssayVisible(true), []);
+  const onSelfMcp = useCallback(() => setSelfMcpVisible(true), []);
+  const onCheckpoint = useCallback(() => setCheckpointVisible(true), []);
+  const onPullRequest = useCallback(() => setPullRequestVisible(true), []);
+  const onMemory = useCallback(() => setMemoryVisible(true), []);
+  const onLattice = useCallback(() => setLatticeVisible(true), []);
+  const onManageLifecycle = useCallback(() => setLifecycleVisible(true), []);
+  const onToggleFiles = useCallback(() => {
+    if (activeRightSurface?.kind === "files") workbench.hidePlacement("right");
+    else workbench.openSurface({ kind: "files" });
+  }, [activeRightSurface, workbench]);
+  const onTogglePreview = useCallback(
+    () => workbench.toggleSurface({ kind: "preview", sessionId }),
+    [workbench, sessionId],
+  );
+  const onToggleGitReview = useCallback(() => workbench.toggleSurface({ kind: "git" }), [workbench]);
+  const onToggleTerminal = useCallback(() => workbench.toggleSurface({ kind: "terminal" }), [workbench]);
+  const openHandoffSheet = useCallback(() => setHandoffVisible(true), []);
+  const openShareSheet = useCallback(() => setShareVisible(true), []);
+  const onSwitchTransportPress = useCallback(
+    () => toast.show("transport switching lands with the relay backend"),
+    [toast],
+  );
+  // `onHandoff`/`onShareReplay`/`onSwitchTransport` stay `undefined` (not a fresh no-op arrow)
+  // when signed out, so SessionHeader's memo sees a stable `undefined` across frames too.
+  const onHandoff = signedIn ? openHandoffSheet : undefined;
+  const onShareReplay = signedIn ? openShareSheet : undefined;
+  const onSwitchTransport = signedIn ? onSwitchTransportPress : undefined;
+
+  // StatusStrip's `weekly`/`transport` props are object literals — recreating them every
+  // render (as the JSX used to do inline) would defeat its memo on every frame even though
+  // the underlying values rarely change (weekly usage polls independently of the WS snapshot).
+  const weeklySubscription = weekly.mode === "subscription";
+  const weeklyProvider = weeklySubscription ? weekly.provider : null;
+  const weeklyDeltaPct = weeklySubscription ? weekly.deltaPct : null;
+  const weeklyProp = useMemo(
+    () => (weeklySubscription ? { provider: weeklyProvider as string, deltaPct: weeklyDeltaPct as number } : null),
+    [weeklySubscription, weeklyProvider, weeklyDeltaPct],
+  );
+  const transportProp = useMemo(
+    () => (signedIn ? { hostName: authHost ?? "this host", transport: "direct" as const } : undefined),
+    [signedIn, authHost],
+  );
+
   const gutter = { paddingHorizontal: isCompact ? space.space16 : space.space24 };
   // DESIGN_SYSTEM.md §7 expanded: the full spec calls for session/[id] to render inline as the
   // right pane of a persistent Fleet rail (master-detail), but that's a routing-architecture
@@ -333,53 +392,36 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             title={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
             state={statusState}
             exposure={snapshot?.exposure ?? "loopback"}
-            onBack={() => goBackOr("/(tabs)")}
+            onBack={onBack}
             showBack={!isExpanded}
-            onNewHere={() => router.push({ pathname: "/new-session", params: { cwd: snapshot?.cwd ?? "" } })}
+            onNewHere={onNewHere}
             onPalette={openPalette}
-            onDuel={() => setDuelVisible(true)}
-            onReplay={() => router.push(`/session/${sessionId}/replay`)}
-            onPlan={() => setPlanVisible(true)}
-
-            onWorkflows={() => router.push(`/session/${sessionId}/workflows`)}
-
-            onFork={() => setForkVisible(true)}
-
-            onInit={() => setInitVisible(true)}
-
-            onAssay={() => setAssayVisible(true)}
-
-            onSelfMcp={() => setSelfMcpVisible(true)}
-
-
-            onCheckpoint={() => setCheckpointVisible(true)}
-
-
-            onPullRequest={() => setPullRequestVisible(true)}
-
-
-            onMemory={() => setMemoryVisible(true)}
-
-
-            onLattice={() => setLatticeVisible(true)}
-            onManageLifecycle={() => setLifecycleVisible(true)}
-            onToggleFiles={() => {
-              if (activeRightSurface?.kind === "files") workbench.hidePlacement("right");
-              else workbench.openSurface({ kind: "files" });
-            }}
-            onTogglePreview={() => workbench.toggleSurface({ kind: "preview", sessionId })}
-            onToggleGitReview={() => workbench.toggleSurface({ kind: "git" })}
-            onToggleTerminal={() => workbench.toggleSurface({ kind: "terminal" })}
+            onDuel={onDuel}
+            onReplay={onSessionReplay}
+            onPlan={onPlan}
+            onWorkflows={onWorkflows}
+            onFork={onFork}
+            onInit={onInit}
+            onAssay={onAssay}
+            onSelfMcp={onSelfMcp}
+            onCheckpoint={onCheckpoint}
+            onPullRequest={onPullRequest}
+            onMemory={onMemory}
+            onLattice={onLattice}
+            onManageLifecycle={onManageLifecycle}
+            onToggleFiles={onToggleFiles}
+            onTogglePreview={onTogglePreview}
+            onToggleGitReview={onToggleGitReview}
+            onToggleTerminal={onToggleTerminal}
             filesActive={activeRightSurface?.kind === "files"}
             previewActive={activeRightSurface?.kind === "preview"}
             gitReviewActive={activeRightSurface?.kind === "git"}
             terminalActive={activeBottomSurface?.kind === "terminal"}
-
-            onHandoff={signedIn ? () => setHandoffVisible(true) : undefined}
-            onShareReplay={signedIn ? () => setShareVisible(true) : undefined}
+            onHandoff={onHandoff}
+            onShareReplay={onShareReplay}
             // Direct<->Anywhere switching needs the relay backend (not built yet) to actually
             // move a live session between transports — surface intent now, land the real flow later.
-            onSwitchTransport={signedIn ? () => toast.show("transport switching lands with the relay backend") : undefined}
+            onSwitchTransport={onSwitchTransport}
             handoffEligibility="eligible · at checkpoint"
             transportMeta="anywhere → direct"
           />
@@ -393,14 +435,14 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             costUsd={snapshot?.cost_usd ?? 0}
             contextTokens={snapshot?.context_tokens ?? 0}
             contextLimit={snapshot?.context_limit ?? null}
-            weekly={weekly.mode === "subscription" ? { provider: weekly.provider, deltaPct: weekly.deltaPct } : null}
+            weekly={weeklyProp}
             cwd={snapshot?.cwd ?? sessionId}
             worktree={snapshot?.worktree ?? null}
             reconnecting={reconnecting && !sessionEnded}
             // Real sessions run Direct today — there's no relay-hosted session state yet, so
             // `strip` stays unset rather than fabricating one of the 7 Anywhere conditions.
             // A future relay-hosted session sets `transport: "anywhere"` and a real `strip`.
-            transport={signedIn ? { hostName: authHost ?? "this host", transport: "direct" } : undefined}
+            transport={transportProp}
           />
           {snapshot?.workflow ? (
             <Pressable

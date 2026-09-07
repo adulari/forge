@@ -8,7 +8,7 @@ import Animated from "react-native-reanimated";
 import type { HistoryRow } from "../../lib/api";
 import { parseReasoning } from "../../lib/reasoning";
 import { haptics } from "../../lib/haptics";
-import { useSessionCtx } from "../../lib/sessionContext";
+import { useSessionStable } from "../../lib/sessionContext";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { monoFamily, type as typeScale } from "../../theme/typography";
@@ -138,7 +138,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   // Lazy useState: evaluated once at mount (the sanctioned home for an impure read).
   const [isFresh] = useState(() => Date.now() / 1000 - row.created_at < 5);
   const entrance = useForgeline(Math.max(0, row.seq), isFresh);
-  const { baseUrl, sessionId } = useSessionCtx();
+  const { baseUrl, sessionId } = useSessionStable();
   const isUser = row.role === "user";
   // A `kind: "tool"` row (only ever on an `include_tools` page) is machine output, not a turn —
   // the chat renders those through ToolCallRow, and this guard keeps any that slip through from

@@ -3,6 +3,13 @@
 // layout (`src/app/session/[id]/_layout.tsx`) mounts `SessionProvider` exactly once; child
 // route segments consume it via `useSessionCtx()` and never create their own socket
 // (UI_RULES.md #3 — data via hooks only, and BUILD_PLAN §6 Session shell contract).
+//
+// Split into two contexts (live/stable) so a component that only reads the stable slice
+// (e.g. MessageRow, Composer) doesn't re-render on every ~30ms WS snapshot frame — only
+// `useSessionLive()` consumers (and `useSessionCtx()`, which merges both for backward
+// compatibility) pay that cost. See PR that introduced this split for the profiling that
+// motivated it: MessageRow/Composer were re-rendering per streamed frame despite React.memo
+// because the single merged context object changed identity every frame.
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 import type { Attachment } from "../components/chat/attach";
@@ -28,9 +35,10 @@ export type PendingAnswer = Extract<RemoteInput, { kind: "allow" | "answer" }>;
 // skeleton/empty states would never resolve to an honest "this session doesn't exist".
 const SNAPSHOT_TIMEOUT_MS = 10_000;
 
-export interface SessionCtxValue {
-  sessionId: string;
-  baseUrl: string | null;
+/** Changes on every WS frame (~30ms apart while a session streams). Consume this directly
+ * only if you actually need live snapshot/connection data — everything else should use
+ * `useSessionStable()` so it doesn't re-render per frame. */
+export interface SessionLiveCtxValue {
   snapshot: Snapshot | null;
   /** True once this session has been mounted for `SNAPSHOT_TIMEOUT_MS` with no Snapshot ever
    * arriving over WS — segments use this to stop rendering "loading" skeletons/fillers and
@@ -38,6 +46,14 @@ export interface SessionCtxValue {
    * switch. */
   snapshotTimedOut: boolean;
   connectionState: ConnectionState;
+}
+
+/** Stable across WS frames — its identity only changes when one of ITS OWN fields changes
+ * (e.g. draft text edited, header measured, session switched). Safe for React.memo'd
+ * consumers that don't need live snapshot data. */
+export interface SessionStableCtxValue {
+  sessionId: string;
+  baseUrl: string | null;
   send: (input: RemoteInput) => boolean;
   pendingAnswer: PendingAnswer | null;
   setPendingAnswer: (answer: PendingAnswer) => void;
@@ -69,7 +85,13 @@ export interface SessionCtxValue {
   focusComposer: () => void;
 }
 
-const SessionCtx = createContext<SessionCtxValue | null>(null);
+/** Backward-compatible merged shape — every field from both slices. Prefer `useSessionStable()`
+ * / `useSessionLive()` in new or newly-optimized consumers; this stays for callers that
+ * genuinely read both (or haven't been split yet). */
+export interface SessionCtxValue extends SessionStableCtxValue, SessionLiveCtxValue {}
+
+const SessionLiveCtx = createContext<SessionLiveCtxValue | null>(null);
+const SessionStableCtx = createContext<SessionStableCtxValue | null>(null);
 
 export function SessionProvider({
   sessionId,
@@ -135,13 +157,15 @@ export function SessionProvider({
     [],
   );
 
-  const value = useMemo<SessionCtxValue>(
+  const live = useMemo<SessionLiveCtxValue>(
+    () => ({ snapshot, snapshotTimedOut, connectionState }),
+    [snapshot, snapshotTimedOut, connectionState],
+  );
+
+  const stable = useMemo<SessionStableCtxValue>(
     () => ({
       sessionId,
       baseUrl,
-      snapshot,
-      snapshotTimedOut,
-      connectionState,
       send,
       pendingAnswer,
       setPendingAnswer,
@@ -162,9 +186,6 @@ export function SessionProvider({
     [
       sessionId,
       baseUrl,
-      snapshot,
-      snapshotTimedOut,
-      connectionState,
       send,
       pendingAnswer,
       setPendingAnswer,
@@ -182,12 +203,35 @@ export function SessionProvider({
     ],
   );
 
-  return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;
+  return (
+    <SessionStableCtx.Provider value={stable}>
+      <SessionLiveCtx.Provider value={live}>{children}</SessionLiveCtx.Provider>
+    </SessionStableCtx.Provider>
+  );
 }
 
-/** B3 contract: `useSessionCtx()` — call from any segment under `session/[id]/`. */
-export function useSessionCtx(): SessionCtxValue {
-  const ctx = useContext(SessionCtx);
-  if (!ctx) throw new Error("useSessionCtx must be used within a SessionProvider");
+/** Stable slice only (see `SessionStableCtxValue`) — use this instead of `useSessionCtx()`
+ * whenever a component never reads `snapshot`/`snapshotTimedOut`/`connectionState`, so it
+ * doesn't re-render on every WS frame. */
+export function useSessionStable(): SessionStableCtxValue {
+  const ctx = useContext(SessionStableCtx);
+  if (!ctx) throw new Error("useSessionStable must be used within a SessionProvider");
   return ctx;
+}
+
+/** Live slice only (see `SessionLiveCtxValue`) — use this when a component genuinely needs
+ * to re-render on every snapshot (e.g. it renders `snapshot` fields directly). */
+export function useSessionLive(): SessionLiveCtxValue {
+  const ctx = useContext(SessionLiveCtx);
+  if (!ctx) throw new Error("useSessionLive must be used within a SessionProvider");
+  return ctx;
+}
+
+/** B3 contract: `useSessionCtx()` — call from any segment under `session/[id]/`. Merges both
+ * slices, so any consumer of this re-renders per WS frame same as before the live/stable
+ * split — components that don't need that should call `useSessionStable()` instead. */
+export function useSessionCtx(): SessionCtxValue {
+  const stable = useSessionStable();
+  const live = useSessionLive();
+  return useMemo(() => ({ ...stable, ...live }), [stable, live]);
 }

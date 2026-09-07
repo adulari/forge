@@ -45,7 +45,7 @@ import {
 import { isMacOS } from "../../lib/platform";
 import { recordComposerImeCommit, recordComposerInput } from "../../lib/performance";
 import { useUpload, useWorkspaceSearch } from "../../lib/queries";
-import { useSessionCtx } from "../../lib/sessionContext";
+import { useSessionStable } from "../../lib/sessionContext";
 import { supportsDirectDaemonEndpoints } from "../../lib/transport";
 import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
@@ -113,11 +113,16 @@ export interface ComposerProps {
   /** AI-suggested likely next user prompt (Snapshot.suggested_prompt) — surfaced as ghost text
    * + Tab-to-fill on a hardware keyboard, or a chip on touch. Never auto-sent. */
   suggestedPrompt?: string | null;
+  /** Snapshot.model / Snapshot.effort, passed down by the caller — Composer itself only
+   * reads the stable session context (see `useSessionStable` below) so it can be wrapped in
+   * `React.memo` without re-rendering on every WS snapshot frame. */
+  model?: string | null;
+  effort?: string | null;
   onSend: (text: string, attachments: SentAttachment[]) => boolean;
   onInterrupt: () => void;
 }
 
-export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onInterrupt }: ComposerProps) {
+function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort, onSend, onInterrupt }: ComposerProps) {
   const { scheme, tokens } = useTheme();
   const depth = scheme === "dark" ? depthDark : depthLight;
   const imeProps = { onCompositionEnd: recordComposerImeCommit } as unknown as React.ComponentProps<typeof TextInput>;
@@ -142,11 +147,10 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     suppressedSuggestion,
     setSuppressedSuggestion,
     composerFocusSignal,
-    snapshot,
     // The session socket's own sender — the model/effort chips are pickers over the existing
     // slash-command path (see file header), which is a `RemoteInput`, not an `onSend` prompt.
     send,
-  } = useSessionCtx();
+  } = useSessionStable();
   const reviewComments = useReviewComments(sessionId);
   const visualAnnotations = useVisualAnnotations(sessionId);
   const toast = useToast();
@@ -761,13 +765,13 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
             shadowStyle(depth.sheet),
           ]}
         >
-          {snapshot?.model || snapshot?.effort ? (
+          {model || effort ? (
             <View style={styles.metaRow}>
-              {snapshot?.model ? (
+              {model ? (
                 <MetaChip
-                  label={snapshot.model}
+                  label={model}
                   color={tokens.ink2}
-                  accessibilityLabel={`model: ${snapshot.model} — change model`}
+                  accessibilityLabel={`model: ${model} — change model`}
                   testID="composer-model-chip"
                   onPress={openModelPicker}
                 />
@@ -776,9 +780,9 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
                   EffortPicker calls the default detent), so the chip stays reachable either
                   way rather than hiding the only way to open the picker. */}
               <MetaChip
-                label={`effort · ${snapshot?.effort ?? "auto"}`}
+                label={`effort · ${effort ?? "auto"}`}
                 color={tokens.ink3}
-                accessibilityLabel={`reasoning effort: ${snapshot?.effort ?? "auto"} — change effort`}
+                accessibilityLabel={`reasoning effort: ${effort ?? "auto"} — change effort`}
                 testID="composer-effort-chip"
                 onPress={() => setEffortVisible(true)}
               />
@@ -902,7 +906,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
       {/* Headless: the composer's own chip is the trigger, so the picker contributes only its
           sheet/popover. Commits `/effort <level>` over the same prompt path. */}
       <EffortPicker
-        effort={snapshot?.effort}
+        effort={effort}
         send={send}
         visible={effortVisible}
         onClose={() => setEffortVisible(false)}
@@ -911,6 +915,12 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     </View>
   );
 }
+
+/** Every prop the caller passes is either a primitive extracted from `snapshot`
+ * (`busy`/`online`/`suggestedPrompt`/`model`/`effort`) or a `useCallback`-stabilized handler,
+ * so this memo actually skips re-renders across the ~30ms WS snapshot frames that don't
+ * change any of them (see `mobile/src/app/session/[id]/index.tsx`'s `handleSend`). */
+export const Composer = React.memo(ComposerImpl);
 
 /** One control-row chip: mono value + a chevron marking it as a picker, not a readout. */
 function MetaChip({
