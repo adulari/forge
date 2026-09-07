@@ -217,6 +217,24 @@ jobs:
             --workdir /workspace \
             "$image" \
             bash -euxo pipefail -c '
+              # Bullseye is EOL and its security pool rotated out from under the live mirror: the
+              # index advertises libc-dev-bin 2.31-13+deb11u14 while deb.debian.org has already
+              # deleted that .deb, so apt 404s and the release build dies 24 seconds in, before a
+              # line of Rust is compiled. It broke both Linux targets of v2.14.0.
+              # archive.debian.org is not the answer yet either: mid-transition it has no
+              # bullseye-security Release file at all.
+              #
+              # snapshot.debian.org is: a frozen, timestamped view that keeps the security suite
+              # and cannot rotate underneath a build. Pinning it makes this step reproducible the
+              # same way the image digest and toolchain already are. Move the timestamp forward
+              # deliberately when the build needs newer packages, never automatically.
+              snapshot=20260901T000000Z
+              base=http://snapshot.debian.org/archive
+              printf "deb %s/debian/%s bullseye main\n" "$base" "$snapshot" > /etc/apt/sources.list
+              printf "deb %s/debian-security/%s bullseye-security main\n" "$base" "$snapshot" >> /etc/apt/sources.list
+              printf "deb %s/debian/%s bullseye-updates main\n" "$base" "$snapshot" >> /etc/apt/sources.list
+              # A snapshot Release file is deliberately older than apt tolerates by default.
+              printf "Acquire::Check-Valid-Until \"false\";\n" > /etc/apt/apt.conf.d/99forge-snapshot
               apt-get update -qq
               packages=(cmake libclang-dev)
               if [[ "$LINUX_CROSS" == true ]]; then
