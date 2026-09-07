@@ -160,8 +160,18 @@ fn browse<F: FnMut() -> Vec<TranscriptView>>(
 /// line stays one blank line. Measures terminal CELL width (CJK/emoji = 2) so wide glyphs don't
 /// overflow; deterministic so the scroll math is exact.
 pub(crate) fn wrap_lines(lines: &[TextLine<'_>], width: usize) -> Vec<TextLine<'static>> {
+    wrap_lines_indexed(lines, width).0
+}
+
+/// [`wrap_lines`], plus the source-line index each wrapped row came from. The chat needs the map
+/// to turn a mouse click — which lands on a WRAPPED row — back into the logical line, and from
+/// there into the tool card that owns it.
+pub(crate) fn wrap_lines_indexed(
+    lines: &[TextLine<'_>],
+    width: usize,
+) -> (Vec<TextLine<'static>>, Vec<usize>) {
     if width == 0 {
-        return lines
+        let rows: Vec<TextLine<'static>> = lines
             .iter()
             .map(|l| {
                 TextLine::from(
@@ -172,10 +182,13 @@ pub(crate) fn wrap_lines(lines: &[TextLine<'_>], width: usize) -> Vec<TextLine<'
                 )
             })
             .collect();
+        let origins = (0..rows.len()).collect();
+        return (rows, origins);
     }
     use unicode_width::UnicodeWidthChar;
     let mut out: Vec<TextLine<'static>> = Vec::with_capacity(lines.len());
-    for line in lines {
+    let mut origins: Vec<usize> = Vec::with_capacity(lines.len());
+    for (src, line) in lines.iter().enumerate() {
         let mut cur: Vec<Span<'static>> = Vec::new();
         let mut cur_w = 0usize;
         for span in &line.spans {
@@ -191,6 +204,7 @@ pub(crate) fn wrap_lines(lines: &[TextLine<'_>], width: usize) -> Vec<TextLine<'
                         cur.push(Span::styled(std::mem::take(&mut buf), style));
                     }
                     out.push(TextLine::from(std::mem::take(&mut cur)));
+                    origins.push(src);
                     cur_w = 0;
                 }
                 buf.push(ch);
@@ -198,6 +212,7 @@ pub(crate) fn wrap_lines(lines: &[TextLine<'_>], width: usize) -> Vec<TextLine<'
                 if cur_w >= width {
                     cur.push(Span::styled(std::mem::take(&mut buf), style));
                     out.push(TextLine::from(std::mem::take(&mut cur)));
+                    origins.push(src);
                     cur_w = 0;
                 }
             }
@@ -207,8 +222,9 @@ pub(crate) fn wrap_lines(lines: &[TextLine<'_>], width: usize) -> Vec<TextLine<'
         }
         // Always emit a line for this logical line (even if empty → preserves blank spacing).
         out.push(TextLine::from(std::mem::take(&mut cur)));
+        origins.push(src);
     }
-    out
+    (out, origins)
 }
 
 fn kind_theme(kind: ActivityKind) -> (&'static str, Color) {

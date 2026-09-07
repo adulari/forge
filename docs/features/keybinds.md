@@ -39,6 +39,7 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | `tier_up` | Ctrl-↑ | Pin the next turn to the next higher mesh tier (mid-turn: abort and retry) |
 | `tier_down` | Ctrl-↓ | Pin the next turn to the next lower mesh tier (mid-turn: abort and retry) |
 | `toggle_reasoning` | Ctrl-R | Show/hide reasoning blocks inline |
+| `toggle_tool_card` | Ctrl-T | Expand/collapse the most recent tool call (click a card for any other) |
 | `undo` | Ctrl-Z | Undo last file write (`/undo`) |
 | `compact` | Ctrl-L | Compact/summarize conversation (`/compact`) |
 | `model_picker` | Alt-M | Open model picker overlay |

@@ -7,6 +7,19 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Expandable tool cards in the chat transcript.** A tool call printed two separate scrollback
+  lines — a `↳ name {raw json…}` line truncated mid-JSON and, later, an unrelated-looking
+  `✓ name: exit 0 in 132ms` line — and the tool's actual output never reached the screen at all,
+  because the presenter only ever received the result's first line. A call is now ONE row that
+  carries its own outcome at the right margin; clicking it (or `Ctrl+T` for the most recent,
+  rebindable as `toggle_tool_card`) expands it in place into the decoded arguments and the output,
+  and clicking again collapses it. `PresenterEvent::ToolResult` and `LiveEvent::ToolResult` gained
+  a bounded `detail` field (200 lines / 8000 chars) to carry that output, so cards work in
+  `forge attach` and daemon-hosted sessions too. Inline mode (`--inline`) keeps the two-line
+  rendering: the terminal's native scrollback cannot be rewritten after the fact
+  (`crates/forge-tui/src/app/tool_cards.rs`, `docs/features/tui-tool-cards.md`).
+
+### Added
 - **`/subagents [free|pinned]` — let one pinned session fan its children out onto other models.**
   Pin inheritance was config-only (`mesh.subagents.inherit_pin`), so releasing subagents from the
   parent's pin meant editing `config.toml` and restarting, and it then applied to every session.

@@ -376,6 +376,20 @@ pub struct App {
     /// When true, model reasoning/thinking blocks are shown in scrollback. Default false (hidden).
     /// Toggled by `/thinking`.
     pub show_thinking: bool,
+    /// Expandable tool cards, oldest first — full-screen only (inline mode prints into the
+    /// terminal's own scrollback, which cannot be rewritten once printed).
+    pub(crate) tool_cards: Vec<ToolCard>,
+    /// Next card id. Monotonic, never reused, so a card is identifiable after the log ring has
+    /// dropped older ones and shifted every index.
+    next_card_id: u64,
+    /// Rows that exist only for the remote-control transcript: a finished card is redrawn IN
+    /// PLACE in `main_log`, which the phone's tail-of-conversation ring never sees, so the
+    /// outcome row is handed to it separately. Drained by `drain_flush_remote`.
+    remote_only: Vec<(TextLine<'static>, LineOrigin)>,
+    /// Cards whose lines are queued in `flush` but not yet folded into `main_log`:
+    /// `(offset within this flush, card id, line count)`. Drained by `drain_flush`, which is the
+    /// only place the final `main_log` position is known.
+    pending_card_marks: Vec<(usize, u64, usize)>,
     /// Attachment blocks shown inline as placeholders (pasted text or images): the placeholder
     /// lives in `input`, the backing content here. On submit, `resolve_paste_blocks()` substitutes
     /// text back inline and pulls images out as vision input.
@@ -468,6 +482,10 @@ struct WrapCache {
     width: u16,
     rev: u64,
     rows: Vec<TextLine<'static>>,
+    /// For each wrapped row, the `main_log` line it came from. A click lands on a wrapped row;
+    /// tool cards own a RANGE of source lines, so a card can only be identified from a click
+    /// through this map.
+    origins: Vec<usize>,
 }
 
 /// Cached wrap of the entry the in-loop activity viewer has selected, keyed on
@@ -737,6 +755,9 @@ pub enum KeyKind {
     CycleTemper,
     /// CTRL+O — toggle the expanded detail view for the active subagents (shell-handled).
     ToggleSubagentDetail,
+    /// CTRL+T — expand/collapse the most recent tool card (shell-handled). The keyboard path to
+    /// what a click on the card does, for terminals without mouse reporting.
+    ToggleToolCard,
     /// PageUp — scroll the full-screen transcript up (shell-handled; ignored by the input line).
     PageUp,
     /// PageDown — scroll the full-screen transcript down (shell-handled).
@@ -974,6 +995,7 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::Tab
         | KeyKind::CycleTemper
         | KeyKind::ToggleSubagentDetail
+        | KeyKind::ToggleToolCard
         | KeyKind::ToggleEffortSlider
         | KeyKind::PageUp
         | KeyKind::PageDown
@@ -1159,12 +1181,24 @@ impl App {
                 self.model_search = None;
                 self.turn_activity.tool_calls += 1;
                 self.set_turn_activity(TurnPhase::RunningTool, format!("executing {name}"));
-                self.tag_flush(LineOrigin::tool_call(&name), |s| {
-                    s.flush
-                        .push(tool_start_line(&name, &args, s.last_width.get()))
-                })
+                let origin = LineOrigin::tool_call(&name);
+                if self.fullscreen {
+                    self.open_tool_card(origin, name, args);
+                } else {
+                    // Inline mode prints into the terminal's own scrollback, which cannot be
+                    // rewritten once printed — so no card, and the call/result stay two lines.
+                    self.tag_flush(origin, |s| {
+                        s.flush
+                            .push(tool_start_line(&name, &args, s.last_width.get()))
+                    })
+                }
             }
-            PresenterEvent::ToolResult { name, ok, summary } => {
+            PresenterEvent::ToolResult {
+                name,
+                ok,
+                summary,
+                detail,
+            } => {
                 self.set_turn_activity(
                     TurnPhase::ProcessingToolResult,
                     format!(
@@ -1180,6 +1214,9 @@ impl App {
                     if ok {
                         self.push_turn_diff(d);
                     }
+                }
+                if self.fullscreen && self.close_tool_card(&name, ok, &summary, detail) {
+                    return;
                 }
                 self.tag_flush(LineOrigin::tool_result(&name, ok), |s| {
                     s.flush
@@ -2284,8 +2321,26 @@ impl App {
     pub fn drain_flush(&mut self) -> Vec<TextLine<'static>> {
         let lines = std::mem::take(&mut self.flush);
         self.flush_origins.clear();
+        self.remote_only.clear();
+        self.place_pending_cards();
         self.fold_main_log(&lines);
         lines
+    }
+
+    /// Resolve each queued card's `main_log` position: the log's current length plus the card's
+    /// offset within the flush about to be appended. Called before `fold_main_log`, which may then
+    /// shift every position when it trims the front of the ring.
+    fn place_pending_cards(&mut self) {
+        if self.pending_card_marks.is_empty() {
+            return;
+        }
+        let base = self.main_log.len();
+        for (offset, id, len) in std::mem::take(&mut self.pending_card_marks) {
+            if let Some(card) = self.tool_cards.iter_mut().find(|c| c.id == id) {
+                card.start = base + offset;
+                card.len = len;
+            }
+        }
     }
 
     /// Like [`drain_flush`], but also folds each line's plain text (and the provenance the
@@ -2299,6 +2354,10 @@ impl App {
         for (l, origin) in lines.iter().zip(origins.iter()) {
             self.push_remote_transcript_line(l, origin);
         }
+        for (line, origin) in std::mem::take(&mut self.remote_only) {
+            self.push_remote_transcript_line(&line, &origin);
+        }
+        self.place_pending_cards();
         self.fold_main_log(&lines);
         lines
     }
@@ -2608,8 +2667,12 @@ impl App {
     fn ensure_wrapped_main(&self, width: u16) {
         let mut c = self.wrap_cache.borrow_mut();
         if c.width != width || c.rev != self.main_log_rev {
-            c.rows =
-                crate::transcript::wrap_lines(&self.main_log, width.saturating_sub(1) as usize);
+            let (rows, origins) = crate::transcript::wrap_lines_indexed(
+                &self.main_log,
+                width.saturating_sub(1) as usize,
+            );
+            c.rows = rows;
+            c.origins = origins;
             c.width = width;
             c.rev = self.main_log_rev;
         }
@@ -2821,8 +2884,207 @@ impl App {
         if self.main_log.len() > MAIN_LOG_MAX {
             let drop = self.main_log.len() - MAIN_LOG_MAX;
             self.main_log.drain(0..drop);
+            // Every card's recorded position is an index into `main_log`, so trimming the front
+            // moves all of them. A card whose own lines were (partly) trimmed no longer has a
+            // region to rewrite and is dropped — expanding it would splice over its neighbours.
+            self.tool_cards.retain_mut(|card| {
+                if card.start < drop {
+                    false
+                } else {
+                    card.start -= drop;
+                    true
+                }
+            });
         }
         self.main_log_rev += 1;
+    }
+
+    /// The cell width a card renders to. Two columns come off the area width: the transcript
+    /// itself reserves one when it wraps (`ensure_wrapped_main`), and `wrap_lines` breaks AT the
+    /// wrap width, so a row filling it exactly still emits a second, empty row. A card row must
+    /// stay one wrapped row — a card that occupies two rows shows a blank gap under every call
+    /// and desynchronises click hit-testing from the card's own line range.
+    fn card_width(&self) -> u16 {
+        self.last_width.get().saturating_sub(2)
+    }
+
+    /// Start a tool card: queue its collapsed row into the flush like any other scrollback line,
+    /// and remember where in this flush it sits so `drain_flush` can record the card's final
+    /// position in `main_log` (the only point at which that position is known).
+    fn open_tool_card(&mut self, origin: LineOrigin, name: String, args: String) {
+        let id = self.next_card_id;
+        self.next_card_id += 1;
+        let card = ToolCard::new(id, name, args);
+        let lines = tool_cards::card_lines(&card, self.card_width());
+        let len = lines.len();
+        self.tool_cards.push(card);
+        self.seal_flush_origins(&LineOrigin::default());
+        self.pending_card_marks.push((self.flush.len(), id, len));
+        self.tag_flush(origin, |s| s.flush.extend(lines));
+    }
+
+    /// Finish the newest still-running card for `name` and redraw it in place. Returns false when
+    /// there is no such card (a result with no matching start — e.g. a call refused before its
+    /// `ToolStart` was emitted), so the caller can fall back to the plain result line.
+    fn close_tool_card(
+        &mut self,
+        name: &str,
+        ok: bool,
+        summary: &str,
+        detail: Option<String>,
+    ) -> bool {
+        let Some(card) = self
+            .tool_cards
+            .iter_mut()
+            .rev()
+            .find(|c| c.name == name && c.status == CardStatus::Running)
+        else {
+            return false;
+        };
+        card.status = if ok {
+            CardStatus::Ok
+        } else {
+            CardStatus::Failed
+        };
+        card.summary = sanitize_terminal_text(summary);
+        card.detail = detail.map(|d| sanitize_terminal_text(&d));
+        let id = card.id;
+        self.redraw_tool_card(id);
+        // The redraw rewrote `main_log` directly; the remote transcript ring only ever sees
+        // flushed lines, so hand it the finished row explicitly or the phone would be left
+        // showing this call as still running. Not needed when the card was still queued — the
+        // redraw rewrote the queued row itself, which the ring is about to receive anyway, and
+        // pushing here too would show the phone the same call twice.
+        let still_queued = self.pending_card_marks.iter().any(|(_, mid, _)| *mid == id);
+        if let Some(card) = self
+            .tool_cards
+            .iter()
+            .find(|c| c.id == id)
+            .filter(|_| !still_queued)
+        {
+            let row = tool_cards::card_lines(card, self.card_width())
+                .into_iter()
+                .next();
+            if let Some(row) = row {
+                self.remote_only
+                    .push((row, LineOrigin::tool_result(name, ok)));
+            }
+        }
+        true
+    }
+
+    /// Re-render one card over the lines it currently occupies, shifting the cards after it by the
+    /// change in height. Bumps the log revision so the wrap cache re-wraps.
+    fn redraw_tool_card(&mut self, id: u64) {
+        let width = self.card_width();
+        let Some(pos) = self.tool_cards.iter().position(|c| c.id == id) else {
+            return;
+        };
+        // A card still carrying a pending mark has no place in `main_log` yet — its lines are
+        // sitting in the flush, unclaimed. That is the common case for a fast tool, which starts
+        // and finishes inside a single frame: rewrite the QUEUED lines. Splicing `main_log` at the
+        // card's still-unset position would instead insert a second copy of the row at the very
+        // top of the transcript, above the banner, while the queued row stayed "running" forever.
+        if let Some(mark) = self
+            .pending_card_marks
+            .iter()
+            .position(|(_, mid, _)| *mid == id)
+        {
+            let (offset, _, old_len) = self.pending_card_marks[mark];
+            if offset + old_len > self.flush.len() {
+                return;
+            }
+            let lines = tool_cards::card_lines(&self.tool_cards[pos], width);
+            let new_len = lines.len();
+            self.flush.splice(offset..offset + old_len, lines);
+            // `flush_origins` runs in lockstep with `flush`; keep the replaced lines' provenance
+            // (a tool call) rather than letting a later seal reclassify them.
+            if self.flush_origins.len() >= offset + old_len {
+                let origin = self.flush_origins[offset].clone();
+                self.flush_origins.splice(
+                    offset..offset + old_len,
+                    std::iter::repeat_n(origin, new_len),
+                );
+            }
+            self.tool_cards[pos].len = new_len;
+            self.pending_card_marks[mark].2 = new_len;
+            // Every later mark in this same flush shifts by the change in height.
+            let delta = new_len as isize - old_len as isize;
+            if delta != 0 {
+                for (other_offset, _, _) in self.pending_card_marks.iter_mut().skip(mark + 1) {
+                    *other_offset = (*other_offset as isize + delta).max(0) as usize;
+                }
+            }
+            return;
+        }
+        let (start, old_len) = (self.tool_cards[pos].start, self.tool_cards[pos].len);
+        if start + old_len > self.main_log.len() {
+            return; // its region no longer exists (log cleared under it)
+        }
+        let lines = tool_cards::card_lines(&self.tool_cards[pos], width);
+        let new_len = lines.len();
+        self.main_log.splice(start..start + old_len, lines);
+        self.tool_cards[pos].len = new_len;
+        let delta = new_len as isize - old_len as isize;
+        if delta != 0 {
+            for card in self.tool_cards.iter_mut().skip(pos + 1) {
+                card.start = (card.start as isize + delta).max(0) as usize;
+            }
+        }
+        self.main_log_rev += 1;
+        if self.transcript_follow {
+            self.transcript_scroll = usize::MAX / 2;
+        }
+    }
+
+    /// Toggle the tool card under a screen cell. Returns true when a card was hit, so the caller
+    /// treats the click as a card toggle instead of the start of a text selection.
+    pub fn toggle_tool_card_at(&mut self, col: u16, row: u16) -> bool {
+        let Some((wrapped_row, _)) = self.pointer_to_text(col, row) else {
+            return false;
+        };
+        let width = self.transcript_geom.get().map(|g| g.width).unwrap_or(0);
+        self.ensure_wrapped_main(width);
+        let source = {
+            let cache = self.wrap_cache.borrow();
+            match cache.origins.get(wrapped_row) {
+                Some(line) => *line,
+                None => return false, // the streaming edge, below the committed log
+            }
+        };
+        let Some(id) = self
+            .tool_cards
+            .iter()
+            .find(|c| c.has_detail() && source >= c.start && source < c.start + c.len)
+            .map(|c| c.id)
+        else {
+            return false;
+        };
+        self.toggle_tool_card(id);
+        true
+    }
+
+    /// Toggle the most recent expandable card (Ctrl+T) — the keyboard path to the same drawer,
+    /// for terminals without mouse reporting and for a quick look at what just ran.
+    pub fn toggle_last_tool_card(&mut self) -> bool {
+        let Some(id) = self
+            .tool_cards
+            .iter()
+            .rev()
+            .find(|c| c.has_detail())
+            .map(|c| c.id)
+        else {
+            return false;
+        };
+        self.toggle_tool_card(id);
+        true
+    }
+
+    fn toggle_tool_card(&mut self, id: u64) {
+        if let Some(card) = self.tool_cards.iter_mut().find(|c| c.id == id) {
+            card.expanded = !card.expanded;
+            self.redraw_tool_card(id);
+        }
     }
 
     fn push_remote_transcript_line(&mut self, line: &TextLine<'static>, origin: &LineOrigin) {
@@ -3402,11 +3664,13 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
 }
 
 mod render;
+mod tool_cards;
 pub(crate) use render::{human, mesh_pace_suffix, model_short, needs_phase_header};
 pub use render::{
     input_box_height, input_cursor_up, render_live, render_mesh_overlay, render_usage_overlay,
     render_voice_overlay,
 };
+pub(crate) use tool_cards::{CardStatus, ToolCard};
 
 #[cfg(test)]
 mod tests {
@@ -4222,6 +4486,7 @@ mod tests {
             name: "write_file".into(),
             ok,
             summary: if ok { "ok" } else { "denied" }.into(),
+            detail: None,
         });
     }
 
@@ -4679,6 +4944,257 @@ mod tests {
         assert!(flush_text(&mut app).contains("the workspace looks healthy"));
     }
 
+    /// A full-screen app with a rendered transcript geometry, ready to receive tool events and
+    /// be clicked. Cards are full-screen-only, so `fullscreen` is what arms them.
+    fn card_app() -> App {
+        let app = App {
+            fullscreen: true,
+            ..Default::default()
+        };
+        app.last_width.set(100);
+        app.transcript_geom.set(Some(TranscriptGeom {
+            col0: 0,
+            row0: 0,
+            width: 100,
+            height: 40,
+            scroll: 0,
+        }));
+        app
+    }
+
+    fn main_log_text(app: &App) -> String {
+        app.main_log
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn run_a_tool(app: &mut App, name: &str, args: &str, detail: Option<&str>) {
+        app.apply(PresenterEvent::ToolStart {
+            name: name.into(),
+            args: args.into(),
+        });
+        let _ = app.drain_flush();
+        app.apply(PresenterEvent::ToolResult {
+            name: name.into(),
+            ok: true,
+            summary: format!("{name}: exit 0 in 12ms"),
+            detail: detail.map(str::to_string),
+        });
+        let _ = app.drain_flush();
+    }
+
+    #[test]
+    fn a_finished_tool_call_occupies_one_transcript_row_not_two() {
+        // The old rendering emitted a `↳ name {json…}` line and, later, a separate `✓ name …`
+        // line: the reader had to pair them up by eye. One card owns both halves.
+        let mut app = card_app();
+        run_a_tool(&mut app, "shell", r#"{"command":"cargo test"}"#, None);
+        assert_eq!(app.main_log.len(), 1, "{:?}", main_log_text(&app));
+        let text = main_log_text(&app);
+        assert!(
+            text.contains("cargo test") && text.contains("exit 0 in 12ms"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn clicking_a_card_expands_it_in_place_and_clicking_again_collapses_it() {
+        let mut app = card_app();
+        run_a_tool(
+            &mut app,
+            "shell",
+            r#"{"command":"cargo test","cwd":"/tmp/x"}"#,
+            Some("running 3 tests\nall passed"),
+        );
+        let collapsed = app.main_log.len();
+
+        assert!(app.toggle_tool_card_at(4, 0), "the row is a click target");
+        assert!(app.main_log.len() > collapsed, "expanding adds rows");
+        let text = main_log_text(&app);
+        assert!(text.contains("all passed"), "output is revealed: {text}");
+        assert!(text.contains("/tmp/x"), "arguments are revealed: {text}");
+
+        assert!(app.toggle_tool_card_at(4, 0), "clicking again toggles back");
+        assert_eq!(app.main_log.len(), collapsed, "collapsing restores the row");
+        assert!(!main_log_text(&app).contains("all passed"));
+    }
+
+    #[test]
+    fn a_tool_that_finishes_inside_one_frame_updates_its_own_row() {
+        // Found live: a fast tool starts and finishes between two frames, so its card is still
+        // queued in the flush when the result lands. Rewriting `main_log` at the card's unset
+        // position inserted a SECOND copy of the row at the very top of the transcript while the
+        // queued row stayed "running" for the rest of the session.
+        let mut app = card_app();
+        app.apply(PresenterEvent::ToolStart {
+            name: "write_file".into(),
+            args: r#"{"path":"note.txt"}"#.into(),
+        });
+        app.apply(PresenterEvent::ToolResult {
+            name: "write_file".into(),
+            ok: true,
+            summary: "wrote 26 bytes".into(),
+            detail: None,
+        });
+        let flushed = flush_text(&mut app);
+        assert!(flushed.contains("wrote 26 bytes"), "{flushed}");
+        assert!(
+            !flushed.contains("running"),
+            "the row is not left mid-call: {flushed}"
+        );
+        assert_eq!(
+            app.main_log.len(),
+            1,
+            "one row, not a duplicate: {:?}",
+            main_log_text(&app)
+        );
+        // And the card is still anchored correctly afterwards, so it stays clickable.
+        assert!(app.toggle_tool_card_at(4, 0));
+        assert!(app.tool_cards[0].expanded);
+    }
+
+    #[test]
+    fn the_remote_transcript_sees_each_call_once_with_its_outcome() {
+        // The phone reads the flushed-line ring, not `main_log`, so a card redrawn in place has
+        // to be handed over explicitly — but exactly once: the same-frame case rewrites the
+        // queued row, and pushing there too showed the call twice on the phone.
+        let mut app = card_app();
+        // Same-frame: start and result before any drain.
+        app.apply(PresenterEvent::ToolStart {
+            name: "shell".into(),
+            args: r#"{"command":"fast"}"#.into(),
+        });
+        app.apply(PresenterEvent::ToolResult {
+            name: "shell".into(),
+            ok: true,
+            summary: "exit 0".into(),
+            detail: None,
+        });
+        let _ = app.drain_flush_remote();
+        let rows: Vec<String> = app
+            .recent_transcript
+            .iter()
+            .map(|r| r.text.clone())
+            .filter(|t| t.contains("fast"))
+            .collect();
+        assert_eq!(rows.len(), 1, "one row for one call: {rows:?}");
+        assert!(rows[0].contains("exit 0"), "carrying the outcome: {rows:?}");
+
+        // Across frames: the start row is flushed first, the finished row follows it.
+        app.apply(PresenterEvent::ToolStart {
+            name: "shell".into(),
+            args: r#"{"command":"slow"}"#.into(),
+        });
+        let _ = app.drain_flush_remote();
+        app.apply(PresenterEvent::ToolResult {
+            name: "shell".into(),
+            ok: true,
+            summary: "exit 0 in 9s".into(),
+            detail: None,
+        });
+        let _ = app.drain_flush_remote();
+        let rows: Vec<String> = app
+            .recent_transcript
+            .iter()
+            .map(|r| r.text.clone())
+            .filter(|t| t.contains("slow"))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "the running row, then the finished one: {rows:?}"
+        );
+        assert!(rows[1].contains("exit 0 in 9s"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_click_outside_any_card_is_not_swallowed() {
+        // The shell treats a `false` return as "start a text selection here" — a click on
+        // ordinary transcript text must keep selecting, not silently do nothing.
+        let mut app = card_app();
+        app.apply(PresenterEvent::AssistantText("just prose".into()));
+        let _ = app.drain_flush();
+        assert!(!app.toggle_tool_card_at(4, 0));
+    }
+
+    #[test]
+    fn expanding_an_earlier_card_leaves_the_later_ones_clickable() {
+        // Cards track their own position in the log; splicing a taller card in must shift the
+        // ones after it, or every later click lands on the wrong card (or on nothing).
+        let mut app = card_app();
+        run_a_tool(&mut app, "shell", r#"{"command":"first"}"#, Some("out one"));
+        run_a_tool(
+            &mut app,
+            "shell",
+            r#"{"command":"second"}"#,
+            Some("out two"),
+        );
+        let second_row = (app.tool_cards[1].start) as u16;
+
+        assert!(app.toggle_tool_card_at(4, 0), "expand the first card");
+        let grew = app.main_log.len() - 2;
+        let moved = app.tool_cards[1].start as u16;
+        assert_eq!(moved, second_row + grew as u16, "the later card moved down");
+
+        assert!(app.toggle_tool_card_at(4, moved), "and is still clickable");
+        assert!(app.tool_cards[1].expanded);
+        assert!(main_log_text(&app).contains("out two"));
+    }
+
+    #[test]
+    fn ctrl_t_expands_the_most_recent_call_without_a_mouse() {
+        let mut app = card_app();
+        run_a_tool(&mut app, "shell", r#"{"command":"first"}"#, Some("out one"));
+        run_a_tool(
+            &mut app,
+            "shell",
+            r#"{"command":"second"}"#,
+            Some("out two"),
+        );
+        assert!(app.toggle_last_tool_card());
+        assert!(app.tool_cards[1].expanded && !app.tool_cards[0].expanded);
+        // Nothing to expand on a fresh app — the shell shows a note instead of doing nothing.
+        assert!(!App::default().toggle_last_tool_card());
+    }
+
+    #[test]
+    fn inline_mode_keeps_the_two_line_rendering() {
+        // Inline prints into the terminal's own scrollback, which cannot be rewritten later, so
+        // a card there would be a control that never responds. It must stay plain lines.
+        let mut app = App::default(); // fullscreen defaults to false
+        app.apply(PresenterEvent::ToolStart {
+            name: "shell".into(),
+            args: r#"{"command":"ls"}"#.into(),
+        });
+        app.apply(PresenterEvent::ToolResult {
+            name: "shell".into(),
+            ok: true,
+            summary: "shell: exit 0".into(),
+            detail: Some("a.txt".into()),
+        });
+        let text = flush_text(&mut app);
+        assert!(app.tool_cards.is_empty(), "no cards in inline mode");
+        assert!(text.contains("↳"), "the classic call line: {text}");
+        assert!(text.contains("exit 0"));
+    }
+
+    #[test]
+    fn a_result_with_no_matching_start_still_renders() {
+        // Some refusals emit a result without a start (the call never ran). Falling back to the
+        // plain line keeps the outcome visible instead of dropping it on the floor.
+        let mut app = card_app();
+        app.apply(PresenterEvent::ToolResult {
+            name: "shell".into(),
+            ok: false,
+            summary: "permission denied by policy".into(),
+            detail: None,
+        });
+        assert!(flush_text(&mut app).contains("permission denied by policy"));
+    }
+
     #[test]
     fn tool_invocation_is_queued_to_scrollback() {
         let mut app = App::default();
@@ -4690,6 +5206,7 @@ mod tests {
             name: "read_file".into(),
             ok: true,
             summary: "[workspace]".into(),
+            detail: None,
         });
         assert!(flush_text(&mut app).contains("read_file"));
     }
@@ -4706,6 +5223,7 @@ mod tests {
             name: "read_file".into(),
             ok: false,
             summary: "no such file".into(),
+            detail: None,
         });
         // An untagged emitter between tool activity and the reply must NOT inherit either.
         app.apply(PresenterEvent::Warning("retrying".into()));
@@ -5561,6 +6079,7 @@ mod tests {
             name: "shell".into(),
             ok: false,
             summary: "exit 1".into(),
+            detail: None,
         });
         app.apply(PresenterEvent::AuxiliaryRequest {
             model: "codex-oauth::gpt-5.6-luna".into(),

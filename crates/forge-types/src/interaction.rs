@@ -76,6 +76,12 @@ pub enum PresenterEvent {
         name: String,
         ok: bool,
         summary: String,
+        /// A bounded slice of the tool's RAW output, for surfaces that can show it on demand (the
+        /// chat's expandable tool card). `summary` is only the result's first line, so without
+        /// this a surface has nothing to reveal when the user opens a call. `None` when the tool
+        /// produced nothing beyond the summary, or when the emitter has no output to hand over
+        /// (a call refused before it ran).
+        detail: Option<String>,
     },
     Cost {
         session_total_usd: f64,

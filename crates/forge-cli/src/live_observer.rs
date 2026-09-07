@@ -17,6 +17,11 @@ pub enum LiveEvent {
         name: String,
         ok: bool,
         summary: String,
+        /// Bounded raw output for a client that can reveal it (the chat's expandable tool card).
+        /// `#[serde(default)]` so an older daemon's frames still deserialize — they simply carry
+        /// nothing to expand.
+        #[serde(default)]
+        detail: Option<String>,
     },
     Routing {
         tier: String,
@@ -82,10 +87,16 @@ pub fn to_live_event(event: &PresenterEvent) -> Option<LiveEvent> {
             name: name.clone(),
             args: args.clone(),
         }),
-        PresenterEvent::ToolResult { name, ok, summary } => Some(LiveEvent::ToolResult {
+        PresenterEvent::ToolResult {
+            name,
+            ok,
+            summary,
+            detail,
+        } => Some(LiveEvent::ToolResult {
             name: name.clone(),
             ok: *ok,
             summary: summary.clone(),
+            detail: detail.clone(),
         }),
         // The routed rung is deliberately not carried across this seam: `LiveEvent` is its own
         // versioned wire contract, and a remote observer showing no rung is honest degradation
@@ -175,9 +186,17 @@ pub fn live_event_to_presenter(event: LiveEvent) -> Option<PresenterEvent> {
         LiveEvent::AssistantDone => Some(PresenterEvent::AssistantDone),
         LiveEvent::Warning(w) => Some(PresenterEvent::Warning(w)),
         LiveEvent::ToolStart { name, args } => Some(PresenterEvent::ToolStart { name, args }),
-        LiveEvent::ToolResult { name, ok, summary } => {
-            Some(PresenterEvent::ToolResult { name, ok, summary })
-        }
+        LiveEvent::ToolResult {
+            name,
+            ok,
+            summary,
+            detail,
+        } => Some(PresenterEvent::ToolResult {
+            name,
+            ok,
+            summary,
+            detail,
+        }),
         LiveEvent::Routing {
             tier,
             model,

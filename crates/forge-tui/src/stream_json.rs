@@ -87,7 +87,9 @@ impl Presenter for StreamJsonPresenter {
                                  "content": [ { "type": "tool_use", "name": name, "input": input } ] }
                 }));
             }
-            PresenterEvent::ToolResult { name, ok, summary } => self.line(serde_json::json!({
+            PresenterEvent::ToolResult {
+                name, ok, summary, ..
+            } => self.line(serde_json::json!({
                 "type": "user", "session_id": sid,
                 "message": { "role": "user",
                              "content": [ { "type": "tool_result", "tool_name": name,

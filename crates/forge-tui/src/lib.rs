@@ -116,6 +116,7 @@ mod stream_json_tests {
             name: "shell".into(),
             ok: true,
             summary: "a.txt b.txt".into(),
+            detail: None,
         });
         p.emit(PresenterEvent::Done {
             final_text: "done".into(),

@@ -112,7 +112,9 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::ToolStart { name, args } => {
                 println!("  ↳ {name}({args})");
             }
-            PresenterEvent::ToolResult { name, ok, summary } => {
+            PresenterEvent::ToolResult {
+                name, ok, summary, ..
+            } => {
                 let mark = if ok { "✓" } else { "✗" };
                 println!("  {mark} {name}: {summary}");
             }
