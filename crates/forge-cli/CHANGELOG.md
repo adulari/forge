@@ -6,6 +6,17 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **A session never picked up an `AGENTS.md` that appeared or changed while it was running.** The
+  body was read once at construction and a resume set the "already injected" flag without reading
+  at all, so the session that *wrote* the file (or ran `/init`) never saw it, and a long-lived
+  daemon session stayed on whatever existed the day it started — restart after restart, because a
+  restart is a resume. Each turn now re-checks the file in the post-persist window the git-branch
+  refresh already uses (one `stat`; the body is read only when the fingerprint moves) and injects
+  it only when the transcript does not already carry that exact text — so an edited or newly
+  written `AGENTS.md` reaches the next turn, and an unchanged one is never restated
+  (`crates/forge-core/src/session_controls.rs` `refresh_project_instructions`).
+
 ### Added
 - **`/subagents [free|pinned]` — let one pinned session fan its children out onto other models.**
   Pin inheritance was config-only (`mesh.subagents.inherit_pin`), so releasing subagents from the

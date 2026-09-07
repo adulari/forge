@@ -228,6 +228,7 @@ impl Session {
             pending_hints: vec![],
             always_compact_on_switch: false,
             project_prompt_injected,
+            agents_md_fingerprint: None,
             pending_images: Vec::new(),
             edits_this_turn: 0,
             mutations_this_turn: 0,

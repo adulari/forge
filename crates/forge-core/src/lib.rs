@@ -1699,8 +1699,13 @@ pub struct Session {
     /// first turn can inject it await-free + syscall-free — a `tokio::fs` read at the injection site
     /// deterministically reintroduces the abort-before-persist cancel window on the current-thread
     /// runtime. `None` for a resumed session (already in the transcript) or when no file exists;
-    /// `take()`-n on injection.
+    /// `take()`-n on injection. Only ever seeds the FIRST turn — `agents_md_fingerprint` below is
+    /// what keeps a running session current afterwards.
     cached_agents_md: Option<String>,
+    /// Fingerprint (path, modified time, length) of the `AGENTS.md` this session has already
+    /// injected, so `refresh_project_instructions` can tell "unchanged" from "written or edited
+    /// since" with one `stat` per turn. `None` until the first check.
+    agents_md_fingerprint: Option<(std::path::PathBuf, std::time::SystemTime, u64)>,
     /// What project/codebase this session is operating in (project_context.rs) — read ONCE at
     /// construction, same rationale as `cached_git_branch`, and passed to the mesh router on every
     /// `route`/`route_hinted` call so it can weight self-hosting infrastructure work correctly.
@@ -1744,6 +1749,24 @@ fn read_project_agents_md(root: &std::path::Path) -> Option<String> {
         if let Ok(body) = std::fs::read_to_string(path) {
             if !body.trim().is_empty() {
                 return Some(body);
+            }
+        }
+    }
+    None
+}
+
+/// The winning `AGENTS.md` path for a workspace — `.forge/AGENTS.md`, else `AGENTS.md` — paired
+/// with a cheap change fingerprint (modified time + length). Mirrors [`read_project_agents_md`]'s
+/// precedence exactly, including its "non-empty wins" rule, so the file that is stat-ed is the
+/// file that would be read.
+async fn project_agents_md_stat(
+    root: &std::path::Path,
+) -> Option<(std::path::PathBuf, std::time::SystemTime, u64)> {
+    for path in [root.join(".forge/AGENTS.md"), root.join("AGENTS.md")] {
+        if let Ok(meta) = tokio::fs::metadata(&path).await {
+            if meta.len() > 0 {
+                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                return Some((path, modified, meta.len()));
             }
         }
     }
@@ -2936,6 +2959,15 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             .ok()
             .as_deref()
             .and_then(parse_git_head);
+
+        // Standing project instructions can appear or change WHILE a session runs, and the
+        // construction-time read alone could never see that: the session that writes AGENTS.md (or
+        // runs `/init`) never got it, and a resume set `project_prompt_injected = true` without
+        // reading at all — so a long-lived daemon session stayed on whatever existed the day it
+        // started, restart after restart. Re-check here, in the same post-persist window the git
+        // branch uses, and inject only a body the transcript does not already carry (so an
+        // unchanged file costs one `stat` per turn and nothing else).
+        self.refresh_project_instructions(&mut context_pack).await?;
 
         // ★ Auto-retrieve relevant code from the Lattice index and inject it as a system message
         // before the first provider call (code-intelligence.md §5.1). Retrieve into an owned value
@@ -16542,6 +16574,146 @@ mod tests {
     }
 
     // ── Auto-review gate tests ────────────────────────────────────────────────────────────────
+
+    /// A workspace with an optional `AGENTS.md`, plus a session rooted in it.
+    fn agents_md_workspace(name: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("forge-agents-md-{name}-{}", forge_types::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn agents_md_session(store: &Arc<Store>, root: &std::path::Path) -> Session {
+        Session::start(
+            Arc::clone(store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(root),
+            Box::new(CapturePresenter::default()),
+            Config::default(),
+            root.to_str().unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn injected_agents_bodies(store: &Store, id: &str, needle: &str) -> Vec<String> {
+        store
+            .load_messages(id)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.role == Role::System && m.content.contains(needle))
+            .map(|m| m.content)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_agents_md_written_mid_session_reaches_the_next_turn() {
+        // The session that WRITES the file (or runs `/init`) used to be the one session that never
+        // saw it: the body was read once at construction, so a repo that gained its standing
+        // instructions at 15:58 left the session started at 13:53 running without them for days.
+        let root = agents_md_workspace("mid-session");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = agents_md_session(&store, &root);
+        let id = session.id().to_string();
+
+        session.run_turn("first prompt").await.unwrap();
+        assert!(
+            injected_agents_bodies(&store, &id, "PROJECT-RULES").is_empty(),
+            "nothing to inject before the file exists"
+        );
+
+        std::fs::write(root.join("AGENTS.md"), "PROJECT-RULES v1\n").unwrap();
+        session.run_turn("second prompt").await.unwrap();
+        assert_eq!(
+            injected_agents_bodies(&store, &id, "PROJECT-RULES"),
+            vec!["PROJECT-RULES v1\n".to_string()],
+            "the new file is injected exactly once on the next turn"
+        );
+
+        // An unchanged file must not pile up a copy per turn.
+        session.run_turn("third prompt").await.unwrap();
+        assert_eq!(
+            injected_agents_bodies(&store, &id, "PROJECT-RULES").len(),
+            1,
+            "unchanged AGENTS.md is not re-injected"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn an_edited_agents_md_is_re_injected_and_a_resumed_session_picks_it_up() {
+        let root = agents_md_workspace("edited");
+        std::fs::write(root.join("AGENTS.md"), "PROJECT-RULES v1\n").unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = agents_md_session(&store, &root);
+        let id = session.id().to_string();
+        session.run_turn("first prompt").await.unwrap();
+        assert_eq!(
+            injected_agents_bodies(&store, &id, "PROJECT-RULES"),
+            vec!["PROJECT-RULES v1\n".to_string()],
+            "a fresh session still injects at construction time"
+        );
+
+        // Edit it. `stat` fingerprints on (mtime, len); the length changes here, so this does not
+        // depend on filesystem timestamp granularity.
+        std::fs::write(root.join("AGENTS.md"), "PROJECT-RULES v2 — revised\n").unwrap();
+
+        // Resume: the path that used to give up entirely (`project_prompt_injected = true`, no read).
+        let mut resumed = Session::resume(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(&root),
+            Box::new(CapturePresenter::default()),
+            Config::default(),
+            &id,
+        )
+        .unwrap();
+        resumed.run_turn("after the edit").await.unwrap();
+        let bodies = injected_agents_bodies(&store, &id, "PROJECT-RULES");
+        assert_eq!(
+            bodies.len(),
+            2,
+            "the revised body joins the original: {bodies:?}"
+        );
+        assert!(
+            bodies[1].contains("v2"),
+            "and it is the new text: {bodies:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_with_an_unchanged_agents_md_stays_quiet() {
+        // The counterpart guard: resuming must not re-state instructions the transcript already
+        // carries, or every daemon restart would grow the context by another copy.
+        let root = agents_md_workspace("unchanged");
+        std::fs::write(root.join("AGENTS.md"), "PROJECT-RULES stable\n").unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = agents_md_session(&store, &root);
+        let id = session.id().to_string();
+        session.run_turn("first prompt").await.unwrap();
+
+        for _ in 0..2 {
+            let mut resumed = Session::resume(
+                Arc::clone(&store),
+                Arc::new(MockProvider),
+                Arc::new(HeuristicRouter::new(Config::default())),
+                ToolRegistry::with_core_tools_in(&root),
+                Box::new(CapturePresenter::default()),
+                Config::default(),
+                &id,
+            )
+            .unwrap();
+            resumed.run_turn("another prompt").await.unwrap();
+        }
+        assert_eq!(
+            injected_agents_bodies(&store, &id, "PROJECT-RULES").len(),
+            1,
+            "two resumes, still one copy"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[tokio::test]
     async fn serve_style_sessions_keep_distinct_workspace_metadata() {
