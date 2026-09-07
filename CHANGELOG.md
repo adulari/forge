@@ -38,6 +38,22 @@ All notable changes to Forge are documented here. The format follows
   that is not the model the session is running on is never a candidate for compaction,
   refinement, or any other side call (recap, suggestion, memory, shell diagnosis)
   (`crates/forge-core/src/compaction_policy.rs`, `refinement.rs`, `routing_policy.rs`).
+||||||| parent of 157fe0cc (fix(mobile): keep the transcript styled when history is late, and make reconnect self-heal)
+||||||| parent of 3a610f20 (fix(mobile): keep the transcript styled when history is late, and make reconnect self-heal)
+||||||| parent of 73b014fb (fix(mobile): keep the transcript styled when history is late, and make reconnect self-heal)
+- **The mobile app flipped a whole conversation to plain grey text and stayed there.** Whenever
+  REST history was late, failed, or came back empty — a daemon restart, a server switch, the
+  first paint — the screen fell back to the socket snapshot's transcript painted as bare lines,
+  and nothing asked for history again until a turn completed. The fallback now renders the v9
+  `transcript_rows` through the same message and tool rows history uses (the two states are
+  indistinguishable), history is refetched on every socket reconnect, and an empty history page
+  that contradicts a non-empty snapshot is re-asked for every 5 s until it agrees
+  (`mobile/src/lib/transcriptFiller.ts`, `mobile/src/app/session/[id]/index.tsx`).
+- **Mobile reconnect could stall until the app was reopened.** A WebSocket constructor that threw
+  fired no `onclose`, so no retry was ever scheduled; and returning to the foreground reused the
+  backoff accrued while backgrounded, so the first visible attempt could wait 15 s. Construction
+  failures now take the normal backoff path, and foregrounding resets the attempt counter so the
+  first reconnect is immediate (`mobile/src/lib/ws.ts`).
 - **The lattice file watcher pinned a CPU core per Forge process, indefinitely.** Two Forge MCP
   agents on one laptop each burned ~90% of a core for their whole lifetime with nothing changing on
   disk — package temperature 97–100 °C and 46,000 thermal-throttle events in 32 minutes. The
