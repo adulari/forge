@@ -1206,6 +1206,12 @@ pub(crate) async fn run_chat_tui(
                             MouseKind::Down => {
                                 if app.jump_bar_hit(col, row) {
                                     app.transcript_to_bottom();
+                                } else if app.toggle_tool_card_at(col, row) {
+                                    // A click on a tool card opens/closes it. Selection is not
+                                    // started here: a card row is a control, and beginning a
+                                    // drag-select on it would leave a stray highlight behind
+                                    // every toggle.
+                                    dirty = true;
                                 } else {
                                     app.clear_selection();
                                     app.selection_begin(col, row);
@@ -2081,6 +2087,7 @@ pub(crate) async fn run_chat_tui(
                     }
                     KeyKind::CycleTemper
                     | KeyKind::ToggleSubagentDetail
+                    | KeyKind::ToggleToolCard
                     | KeyKind::ToggleEffortSlider
                     | KeyKind::SkipModel
                     | KeyKind::TierUp
@@ -2262,6 +2269,7 @@ pub(crate) async fn run_chat_tui(
                     }
                     KeyKind::CycleTemper
                     | KeyKind::ToggleSubagentDetail
+                    | KeyKind::ToggleToolCard
                     | KeyKind::ToggleEffortSlider
                     | KeyKind::SkipModel
                     | KeyKind::TierUp
@@ -2542,6 +2550,7 @@ pub(crate) async fn run_chat_tui(
                     KeyKind::Tab
                     | KeyKind::CycleTemper
                     | KeyKind::ToggleSubagentDetail
+                    | KeyKind::ToggleToolCard
                     | KeyKind::ToggleEffortSlider
                     | KeyKind::SkipModel
                     | KeyKind::TierUp
@@ -2582,6 +2591,17 @@ pub(crate) async fn run_chat_tui(
             // floating jump-to-bottom bar).
             if app.fullscreen && matches!(key, KeyKind::JumpBottom) {
                 app.transcript_to_bottom();
+                dirty = true;
+                continue;
+            }
+
+            // Ctrl+T expands/collapses the most recent tool card in the transcript — the keyboard
+            // path to what clicking the card does, so a terminal without mouse reporting (or a
+            // user whose hands are on the keys) still gets at a call's arguments and output.
+            if matches!(key, KeyKind::ToggleToolCard) {
+                if !app.toggle_last_tool_card() {
+                    app.note("no tool call to expand yet");
+                }
                 dirty = true;
                 continue;
             }

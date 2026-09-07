@@ -155,7 +155,9 @@ fn event_notification(
             LoggingLevel::Info,
             serde_json::json!({ "event": "tool_start", "name": name, "args": args }),
         ),
-        forge_tui::PresenterEvent::ToolResult { name, ok, summary } => (
+        forge_tui::PresenterEvent::ToolResult {
+            name, ok, summary, ..
+        } => (
             LoggingLevel::Info,
             serde_json::json!({
                 "event": "tool_result",

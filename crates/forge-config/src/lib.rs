@@ -2334,6 +2334,7 @@ impl Default for KeybindsConfig {
         binds.insert("tier_up".into(), bind("up", true, false, false));
         binds.insert("tier_down".into(), bind("down", true, false, false));
         binds.insert("toggle_reasoning".into(), bind("r", true, false, false));
+        binds.insert("toggle_tool_card".into(), bind("t", true, false, false));
         binds.insert("undo".into(), bind("z", true, false, false));
         binds.insert("compact".into(), bind("l", true, false, false));
         binds.insert("model_picker".into(), bind("m", false, true, false));

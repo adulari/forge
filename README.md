@@ -678,7 +678,9 @@ forge chat --plain                              # headless / CI mode
 
 The TUI is full-screen by default (scrollable transcript, pinned panels, mouse-wheel scroll). Use
 `--inline` (or `[tui] fullscreen = false`) for classic inline-scrollback. `Ctrl+O` opens the activity
-viewer (main chat + subagents + critics).
+viewer (main chat + subagents + critics). Each tool call is one row carrying its own outcome —
+click it (or `Ctrl+T` for the most recent) to expand the full arguments and the tool's output
+([docs](docs/features/tui-tool-cards.md)).
 
 **In-session slash commands:**
 
@@ -721,7 +723,7 @@ viewer (main chat + subagents + critics).
 **Keyboard shortcuts:** `SHIFT+TAB`/`Alt+T` cycle temper · `Ctrl+Shift+K` mid-turn — abort + retry the same
 prompt on the mesh's next-ranked model (excludes ones already skipped this turn) · `Ctrl+↑`/`Ctrl+↓`
 bias the routing tier up/down, re-running immediately if mid-turn · `Ctrl+O` activity viewer ·
-`Ctrl+J` newline · `Esc` interrupt (mid-turn) / quit (idle) · `↑/↓` navigate ·
+`Ctrl+T` expand/collapse the most recent tool call · `Ctrl+J` newline · `Esc` interrupt (mid-turn) / quit (idle) · `↑/↓` navigate ·
 `y/n/a` allow/deny/always-allow a permission prompt · `Alt+M` model picker · `Alt+E` cycle effort ·
 `Ctrl+N` new session · `Ctrl+S` checkpoint · `Ctrl+Z` undo last write · `Ctrl+L` compact ·
 `Ctrl+R` toggle reasoning display · `Ctrl+,` edit keybinds · `F1` full keybind reference.

@@ -73,7 +73,14 @@ pub(super) fn handle_stream_event(
             if ok && completion::tool_name_mutates(&name) {
                 mutations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            presenter.emit(PresenterEvent::ToolResult { name, ok, summary })
+            // A CLI bridge reports only a summary line for its own tool calls — there is no raw
+            // output to hand a surface, so an expandable card here stays header-only.
+            presenter.emit(PresenterEvent::ToolResult {
+                name,
+                ok,
+                summary,
+                detail: None,
+            })
         }
         StreamEvent::SubagentStarted { id, agent, task } => {
             presenter.emit(PresenterEvent::SubagentStart {

@@ -387,6 +387,9 @@ impl Tui {
                     KeyCode::Char('o') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::ToggleSubagentDetail
                     }
+                    KeyCode::Char('t') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::ToggleToolCard
+                    }
                     KeyCode::Char('j') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::InsertNewline
                     }

@@ -67,6 +67,7 @@ pub fn action_to_key_kind(action: &str) -> Option<KeyKind> {
         "tier_up" => Some(KeyKind::TierUp),
         "tier_down" => Some(KeyKind::TierDown),
         "toggle_reasoning" => Some(KeyKind::ToggleReasoning),
+        "toggle_tool_card" => Some(KeyKind::ToggleToolCard),
         "undo" => Some(KeyKind::UndoWrite),
         "compact" => Some(KeyKind::CompactSession),
         "model_picker" => Some(KeyKind::ModelPicker),

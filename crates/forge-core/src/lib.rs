@@ -4458,6 +4458,41 @@ fn checkpoint_preview(prompt: &str) -> String {
     }
 }
 
+/// The bounded slice of a tool result the UI keeps so an expandable tool card has something to
+/// reveal. The presenter only ever received [`summarize`]'s first line, so "open this call" had
+/// nothing to show; handing over the WHOLE result instead would pin every megabyte of shell
+/// output in the UI's line ring for the life of the session. Bounded on both axes — long output
+/// is cut at [`TOOL_DETAIL_MAX_LINES`] lines and [`TOOL_DETAIL_MAX_CHARS`] characters, whichever
+/// comes first, with a trailing marker so the reader knows the view is partial.
+///
+/// `None` when there is nothing more to show than the summary already says.
+pub(crate) fn tool_detail(result: &str) -> Option<String> {
+    const TOOL_DETAIL_MAX_LINES: usize = 200;
+    const TOOL_DETAIL_MAX_CHARS: usize = 8_000;
+    let trimmed = result.trim_end();
+    if trimmed.is_empty() || trimmed == summarize(result) {
+        return None;
+    }
+    let mut out = String::new();
+    let mut truncated = false;
+    for (lines, line) in trimmed.lines().enumerate() {
+        if lines == TOOL_DETAIL_MAX_LINES
+            || out.chars().count() + line.chars().count() > TOOL_DETAIL_MAX_CHARS
+        {
+            truncated = true;
+            break;
+        }
+        if lines > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    if truncated {
+        out.push_str("\n… output truncated");
+    }
+    Some(out)
+}
+
 fn summarize(s: &str) -> String {
     let first = s.lines().next().unwrap_or("").trim();
     // Truncate by *characters*, not bytes — a byte slice (`&first[..80]`) panics when the
@@ -9698,7 +9733,7 @@ mod tests {
 
         let evs = events.lock().unwrap();
         let blocked = evs.iter().any(|e| {
-            matches!(e, PresenterEvent::ToolResult { name, ok, summary }
+            matches!(e, PresenterEvent::ToolResult { name, ok, summary, .. }
                 if name == "list_dir" && !ok && summary.contains("blocked by hook"))
         });
         assert!(
@@ -10438,6 +10473,31 @@ mod tests {
         let s = summarize(&line);
         assert!(s.ends_with('…'), "long line is truncated with an ellipsis");
         assert!(s.chars().count() <= 81);
+    }
+
+    #[test]
+    fn tool_detail_carries_more_than_the_summary_but_stays_bounded() {
+        // The presenter only ever received `summarize`'s first line, so an expandable tool card
+        // had nothing to reveal; the whole result would instead pin megabytes of shell output.
+        assert_eq!(tool_detail(""), None);
+        assert_eq!(tool_detail("one line"), None, "nothing beyond the summary");
+        let two = tool_detail("first\nsecond").expect("multi-line output is worth keeping");
+        assert!(two.contains("first") && two.contains("second"));
+
+        let long = (0..500)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let capped = tool_detail(&long).unwrap();
+        assert!(capped.lines().count() <= 201, "line cap holds");
+        assert!(
+            capped.ends_with("… output truncated"),
+            "and says it is partial"
+        );
+
+        let wide = format!("head\n{}", "x".repeat(50_000));
+        let capped = tool_detail(&wide).unwrap();
+        assert!(capped.chars().count() < 9_000, "character cap holds");
     }
 
     #[test]
