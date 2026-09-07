@@ -16,7 +16,8 @@ use similar::{ChangeTag, TextDiff};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
-use unicode_width::UnicodeWidthStr;
+mod table;
+use table::{clip_spans, TableBuild, TABLE_CELL_MAX};
 
 use crate::surface::{ACCENT, DIM, ERRRED, OKGREEN, ORANGE, TEXT, TOOLCYAN, WARNYEL};
 
@@ -491,52 +492,6 @@ pub fn markdown_to_lines(md: &str) -> Vec<Line<'static>> {
     r.finish()
 }
 
-/// Widest a single table column may render. Wider cells are cut with an ellipsis so one long
-/// cell cannot push the whole table past the terminal edge and wrap every row.
-const TABLE_CELL_MAX: usize = 48;
-
-/// A GFM table under construction: styled cells per row, header first.
-#[derive(Default)]
-struct TableBuild {
-    rows: Vec<Vec<Vec<Span<'static>>>>,
-    cell: Vec<Span<'static>>,
-    header_rows: usize,
-}
-
-fn spans_width(spans: &[Span<'_>]) -> usize {
-    spans.iter().map(|s| s.content.width()).sum()
-}
-
-/// Cut a cell's spans to `max` display columns, ending with `…` when anything was dropped.
-fn clip_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
-    if spans_width(&spans) <= max {
-        return spans;
-    }
-    let mut out = Vec::new();
-    let mut used = 0usize;
-    let budget = max.saturating_sub(1);
-    for span in spans {
-        let mut kept = String::new();
-        for ch in span.content.chars() {
-            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            if used + w > budget {
-                break;
-            }
-            kept.push(ch);
-            used += w;
-        }
-        let done = kept.chars().count() < span.content.chars().count();
-        if !kept.is_empty() {
-            out.push(Span::styled(kept, span.style));
-        }
-        if done {
-            break;
-        }
-    }
-    out.push(Span::styled("…", Style::default().fg(DIM)));
-    out
-}
-
 #[derive(Default)]
 struct Renderer {
     lines: Vec<Line<'static>>,
@@ -777,47 +732,9 @@ impl Renderer {
         }
     }
 
-    /// Lay a collected table out as aligned columns: cells padded to the column's widest cell,
-    /// `│` between columns, and a `─┼─` rule under the header. Styling inside cells (code, bold)
-    /// is preserved span-for-span; only padding is added.
     fn render_table(&mut self, table: TableBuild) {
-        let cols = table.rows.iter().map(Vec::len).max().unwrap_or(0);
-        if cols == 0 {
-            return;
-        }
-        let mut widths = vec![0usize; cols];
-        for row in &table.rows {
-            for (i, cell) in row.iter().enumerate() {
-                widths[i] = widths[i].max(spans_width(cell));
-            }
-        }
-        let frame = Style::default().fg(DIM);
-        for (r, row) in table.rows.into_iter().enumerate() {
-            let mut line: Vec<Span<'static>> = vec![Span::raw(self.indent_prefix())];
-            for (i, width) in widths.iter().enumerate() {
-                let cell = row.get(i).cloned().unwrap_or_default();
-                let pad = width.saturating_sub(spans_width(&cell));
-                if i > 0 {
-                    line.push(Span::styled(" │ ", frame));
-                }
-                line.extend(cell);
-                if pad > 0 {
-                    line.push(Span::raw(" ".repeat(pad)));
-                }
-            }
-            self.lines.push(Line::from(line));
-            if r + 1 == table.header_rows {
-                let rule = widths
-                    .iter()
-                    .map(|w| "─".repeat(*w))
-                    .collect::<Vec<_>>()
-                    .join("─┼─");
-                self.lines.push(Line::from(vec![
-                    Span::raw(self.indent_prefix()),
-                    Span::styled(rule, frame),
-                ]));
-            }
-        }
+        let indent = self.indent_prefix();
+        self.lines.extend(table::layout(table, &indent));
     }
 
     fn render_code_block(&mut self, lang: &str, code: &[String]) {
@@ -857,6 +774,7 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     fn text_of(lines: &[Line]) -> String {
         lines
