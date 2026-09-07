@@ -531,12 +531,24 @@ impl Session {
             .unwrap_or_else(|| decision.model.clone());
         // The routed model + its failover chain, preserved so a rate-limited summarizer still walks
         // to the routed fallback (not just to the guaranteed model).
-        let mut routed = vec![self.auxiliary_model(&decision)];
-        routed.extend(decision.fallbacks.clone());
-        let candidates =
-            compact_candidate_chain(self.router.compact_candidates(), routed, &guaranteed, |m| {
-                health.is_benched(m)
-            });
+        // The routed chain comes from the ROUTER's pin, which is the `--model` the session was
+        // created with and is never updated by `/model`. When the session carries its own pin
+        // that is the user's current, deliberate choice; the router's stale one must not sit in
+        // the chain ahead of it (that is how a free-pinned session summarized on a ChatGPT plan).
+        let routed = if self.pinned_model().is_some() {
+            Vec::new()
+        } else {
+            let mut routed = vec![self.auxiliary_model(&decision)];
+            routed.extend(decision.fallbacks.clone());
+            routed
+        };
+        let candidates = compact_candidate_chain(
+            self.router.compact_candidates(),
+            routed,
+            &guaranteed,
+            |m| health.is_benched(m),
+            forge_mesh::catalog::is_subscription,
+        );
         let mut chain = candidates.into_iter();
         let mut model = chain.next().expect("compact_candidate_chain is non-empty");
         let completion_opts = Self::auxiliary_completion_options(&self.id, "compact");

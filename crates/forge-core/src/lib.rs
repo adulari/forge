@@ -1221,22 +1221,36 @@ fn continuation_decision(
 /// 429 on the summarizer walks to the routed fallback), then `guaranteed` (the session's own,
 /// reachable model) last as a can't-exhaust backstop. Order-preserving dedup, empties dropped, and
 /// never empty. Pure/no I/O so it's offline-unit-testable without a live router.
+///
+/// A subscription model (a ChatGPT / Claude / Gemini plan billed by the user's own quota) is
+/// admitted ONLY when it is `guaranteed` — the model the session is already running on. Observed
+/// 2026-09-07: a session pinned to a free model auto-compacted on `codex-oauth::gpt-6-astra`, a
+/// low-allowance ChatGPT plan, because the router still carried the `--model` pin the session had
+/// been created with two days earlier and the free shortlist was exhausted. Nothing about
+/// summarizing a transcript justifies spending a subscription the user did not point this
+/// session at.
 fn compact_candidate_chain(
     trivial: Vec<String>,
     routed: Vec<String>,
     guaranteed: &str,
     is_benched: impl Fn(&str) -> bool,
+    is_subscription: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let foreign_subscription = |m: &str| is_subscription(m) && m != guaranteed;
     let add = |m: String, out: &mut Vec<String>| {
         if !m.is_empty() && !out.iter().any(|x| x == &m) {
             out.push(m);
         }
     };
-    for m in trivial.into_iter().filter(|m| !is_benched(m)).take(3) {
+    for m in trivial
+        .into_iter()
+        .filter(|m| !is_benched(m) && !foreign_subscription(m))
+        .take(3)
+    {
         add(m, &mut out);
     }
-    for m in routed {
+    for m in routed.into_iter().filter(|m| !foreign_subscription(m)) {
         add(m, &mut out);
     }
     add(guaranteed.to_string(), &mut out);
@@ -4837,10 +4851,13 @@ mod tests {
     #[test]
     fn compact_candidate_chain_filters_benched_models() {
         let trivial = vec!["ollama::llama3.2".to_string(), "groq::fast".to_string()];
-        let chain =
-            compact_candidate_chain(trivial, routed(&["aux::fallback"]), "session::model", |m| {
-                m == "ollama::llama3.2"
-            });
+        let chain = compact_candidate_chain(
+            trivial,
+            routed(&["aux::fallback"]),
+            "session::model",
+            |m| m == "ollama::llama3.2",
+            |_| false,
+        );
         assert_eq!(chain, vec!["groq::fast", "aux::fallback", "session::model"]);
     }
 
@@ -4856,6 +4873,7 @@ mod tests {
             trivial,
             routed(&["aux::fallback"]),
             "session::model",
+            |_| false,
             |_| false,
         );
         assert_eq!(
@@ -4879,6 +4897,7 @@ mod tests {
             routed(&["bad::model", "good::model"]),
             "bad::model",
             |_| false,
+            |_| false,
         );
         assert_eq!(chain, vec!["bad::model", "good::model"]);
     }
@@ -4891,8 +4910,48 @@ mod tests {
             routed(&["session::model"]),
             "session::model",
             |_| false,
+            |_| false,
         );
         assert_eq!(chain, vec!["a::one", "session::model"]);
+    }
+
+    /// The 2026-09-07 incident: the router's stale `--model` pin put a ChatGPT-plan model in the
+    /// routed chain of a session pinned to a free model. A subscription model that is not the
+    /// session's own must never be a compaction candidate, wherever it appears in the inputs.
+    #[test]
+    fn compact_candidate_chain_never_admits_a_subscription_model_the_session_is_not_on() {
+        let is_sub = |m: &str| m.starts_with("codex-oauth::") || m.starts_with("claude-cli::");
+        let trivial = vec!["claude-cli::haiku".to_string(), "groq::fast".to_string()];
+        let chain = compact_candidate_chain(
+            trivial,
+            routed(&[
+                "codex-oauth::gpt-6-astra",
+                "codex-oauth::gpt-5.6-luna",
+                "openrouter::x",
+            ]),
+            "opencode::muse-free",
+            |_| false,
+            is_sub,
+        );
+        assert_eq!(
+            chain,
+            vec!["groq::fast", "openrouter::x", "opencode::muse-free"]
+        );
+    }
+
+    #[test]
+    fn compact_candidate_chain_keeps_the_sessions_own_subscription_model() {
+        // A session the user deliberately pinned to a subscription model may still summarize on
+        // it: it is the one model that spends nothing the user did not already choose to spend.
+        let is_sub = |m: &str| m.starts_with("codex-oauth::");
+        let chain = compact_candidate_chain(
+            vec!["groq::fast".to_string()],
+            routed(&["codex-oauth::gpt-6-astra"]),
+            "codex-oauth::gpt-5.6-luna",
+            |_| false,
+            is_sub,
+        );
+        assert_eq!(chain, vec!["groq::fast", "codex-oauth::gpt-5.6-luna"]);
     }
 
     #[test]
