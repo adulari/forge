@@ -22,10 +22,13 @@ use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+use forge_types::SideEffect;
 use serde_json::{json, Value};
 use tokio::process::Command;
 
 use crate::sandbox::SandboxPolicy;
+use crate::{str_arg, Tool, ToolError};
 
 /// Bytes of log tail handed back by default. Small enough to keep a status check cheap; the log
 /// file itself is always there for a full read.
@@ -460,6 +463,173 @@ fn proc_start_ticks(pid: u32) -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn proc_start_ticks(_pid: u32) -> Option<u64> {
     None
+}
+
+// ---------------------------------------------------------------------------
+// The tool surface: `shell{background:true}` starts a job, `shell_job` manages it.
+// ---------------------------------------------------------------------------
+
+/// The workspace bound to this session, when a call is running inside one.
+pub(super) fn bound_workspace() -> Option<PathBuf> {
+    crate::SESSION_WORKSPACE.try_with(Clone::clone).ok()
+}
+
+/// Manage the jobs `shell` started with `background: true`.
+///
+/// Separate from `shell` because its actions take a job id, not a command — and because the whole
+/// value of a background job is that a LATER call can find it. A model that started an emulator in
+/// one turn needs one obvious place to ask "is it still up, and what did it say".
+#[derive(Default)]
+pub struct ShellJobTool {
+    workspace: Option<std::path::PathBuf>,
+}
+
+impl ShellJobTool {
+    pub fn in_workspace(workspace: &std::path::Path) -> Self {
+        Self {
+            workspace: Some(workspace.to_path_buf()),
+        }
+    }
+
+    /// The workspace whose jobs this call is about.
+    ///
+    /// The session binding wins over the field: the registry rebinds a live session to a new
+    /// workspace (a worktree, say) without rebuilding tools, and a job list that ignored that
+    /// would show the wrong project's jobs.
+    fn workspace(&self) -> Option<std::path::PathBuf> {
+        bound_workspace().or_else(|| self.workspace.clone())
+    }
+}
+
+#[async_trait]
+impl Tool for ShellJobTool {
+    fn name(&self) -> &str {
+        "shell_job"
+    }
+    fn description(&self) -> &str {
+        "Inspect and control the long-lived jobs started by `shell` with background:true \
+         (emulator, dev server, tunnel, daemon). Actions: list (every job and whether it is still \
+         running), log (the tail of a job's output), status (one job), stop (SIGTERM then SIGKILL \
+         the job and its children). Jobs survive across tool calls, turns, and Forge restarts, so \
+         a job started earlier is still reachable here by its id."
+    }
+    fn side_effect(&self) -> SideEffect {
+        SideEffect::Shell
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["list", "log", "status", "stop"], "description": "list, log, status, or stop." },
+                "id": { "type": "integer", "description": "Job id (its pid), from the shell background:true result or from list. Required for log/status/stop." },
+                "lines": { "type": "integer", "minimum": 1, "description": "For log: how many trailing lines to return (default 40)." }
+            },
+            "required": ["action"]
+        })
+    }
+    async fn run(&self, args: &Value) -> Result<String, ToolError> {
+        let action = str_arg(args, "action")?;
+        let workspace = self.workspace();
+        let cwd = workspace
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .display()
+            .to_string();
+        let workspace = workspace.as_deref();
+        let id = || -> Result<u32, ToolError> {
+            args.get("id")
+                .and_then(Value::as_u64)
+                .map(|id| id as u32)
+                .ok_or_else(|| ToolError::Failed("this action needs a job id".into()))
+        };
+
+        match action {
+            "list" => {
+                let jobs = list(workspace, &cwd);
+                if jobs.is_empty() {
+                    return Ok(
+                        "no background jobs in this workspace. Start one with shell \
+                               background:true."
+                            .to_string(),
+                    );
+                }
+                let mut out = format!("{} background job(s):\n", jobs.len());
+                out.push_str("pid     status       age  command\n");
+                for job in &jobs {
+                    out.push_str(&job.summary());
+                    out.push('\n');
+                }
+                Ok(out)
+            }
+            "status" => {
+                let id = id()?;
+                let Some(job) = get(workspace, &cwd, id) else {
+                    return Ok(format!("no background job {id} in this workspace"));
+                };
+                Ok(format!(
+                    "job {} is {}\n  command: {}\n  cwd: {}\n  log: {}",
+                    job.pid,
+                    job.status(),
+                    job.command,
+                    job.cwd,
+                    job.log.display()
+                ))
+            }
+            "log" => {
+                let id = id()?;
+                let lines = args
+                    .get("lines")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(DEFAULT_TAIL_LINES as u64)
+                    .clamp(1, 2000) as usize;
+                let Some(job) = get(workspace, &cwd, id) else {
+                    return Ok(format!("no background job {id} in this workspace"));
+                };
+                let body = tail(&job.log, lines).map_err(ToolError::Failed)?;
+                let body = if body.trim().is_empty() {
+                    "(no output yet)".to_string()
+                } else {
+                    body
+                };
+                Ok(format!(
+                    "job {} is {} — last {lines} lines of {}:\n\n{body}",
+                    job.pid,
+                    job.status(),
+                    job.log.display()
+                ))
+            }
+            "stop" => {
+                let id = id()?;
+                stop(workspace, &cwd, id).await.map_err(ToolError::Failed)
+            }
+            other => Err(ToolError::Failed(format!(
+                "unknown action '{other}'. Use list, log, status, or stop."
+            ))),
+        }
+    }
+}
+
+/// Start a long-lived job and describe it in the terms the next call needs: the id to ask about
+/// it with, and where its output is going.
+pub(super) async fn start_background(
+    command: &str,
+    cwd: &str,
+    workspace: Option<&Path>,
+    policy: &SandboxPolicy,
+) -> String {
+    match start(command, cwd, workspace, policy).await {
+        Ok(job) => format!(
+            "shell: started background job {} (pid {})\n  log: {}\n  \
+             Check on it with shell_job: {{\"action\": \"log\", \"id\": {}}}, stop it with \
+             {{\"action\": \"stop\", \"id\": {}}}. It keeps running until stopped.",
+            job.pid,
+            job.pid,
+            job.log.display(),
+            job.pid,
+            job.pid
+        ),
+        Err(error) => format!("shell: could not start background job: {error}"),
+    }
 }
 
 #[cfg(test)]
