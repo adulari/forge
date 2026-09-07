@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use forge_types::{FileDiff, SideEffect};
 use serde_json::Value;
 
-use crate::{Tool, ToolError, SESSION_WORKSPACE};
+use crate::{Tool, ToolError, SESSION_EXTRA_ROOTS, SESSION_WORKSPACE};
 
 pub(crate) struct WorkspaceTool {
     pub(crate) inner: Box<dyn Tool>,
@@ -38,8 +38,11 @@ impl Tool for WorkspaceTool {
         let extra_roots = self.extra_roots.read().ok()?.clone();
         let args = root_workspace_args(self.inner.name(), args, &workspace);
         validate_workspace_args(&args, &workspace, &extra_roots).ok()?;
-        SESSION_WORKSPACE
-            .scope(workspace, self.inner.preview(&args))
+        SESSION_EXTRA_ROOTS
+            .scope(
+                extra_roots,
+                SESSION_WORKSPACE.scope(workspace, self.inner.preview(&args)),
+            )
             .await
     }
 
@@ -56,8 +59,11 @@ impl Tool for WorkspaceTool {
             .clone();
         let args = root_workspace_args(self.inner.name(), args, &workspace);
         validate_workspace_args(&args, &workspace, &extra_roots)?;
-        SESSION_WORKSPACE
-            .scope(workspace, self.inner.run(&args))
+        SESSION_EXTRA_ROOTS
+            .scope(
+                extra_roots,
+                SESSION_WORKSPACE.scope(workspace, self.inner.run(&args)),
+            )
             .await
     }
 }

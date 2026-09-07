@@ -14,6 +14,9 @@ use serde_json::Value;
 
 tokio::task_local! {
     pub(crate) static SESSION_WORKSPACE: std::path::PathBuf;
+    // Extra allowed roots (config `tools.extra_roots`) the in-tool confinement net honors
+    // alongside the workspace, so read_file/write_file reach them the same as the arg validators.
+    pub(crate) static SESSION_EXTRA_ROOTS: Vec<std::path::PathBuf>;
 }
 
 mod browser;
@@ -362,6 +365,28 @@ mod tests {
         );
         assert!(!peer.join("new.txt").exists());
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn registry_extra_roots_let_file_tools_reach_an_allowlisted_path() {
+        let base = std::env::temp_dir().join(format!("forge-xroots-{}", std::process::id()));
+        let workspace = base.join("workspace");
+        let allowed = base.join("allowed");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&allowed).unwrap();
+        let target = allowed.join("capture.log");
+        std::fs::write(&target, "hello-from-allowed-root").unwrap();
+        let registry = ToolRegistry::with_core_tools_in(&workspace);
+        registry
+            .bind_extra_roots(vec![allowed.canonicalize().unwrap()])
+            .unwrap();
+        let read = registry.get("read_file").unwrap();
+        let out = read
+            .run(&serde_json::json!({ "path": target.to_str().unwrap() }))
+            .await;
+        let _ = std::fs::remove_dir_all(&base);
+        let out = out.expect("read_file must succeed on an allowlisted extra root");
+        assert!(out.contains("hello-from-allowed-root"), "got: {out}");
     }
 
     #[tokio::test]

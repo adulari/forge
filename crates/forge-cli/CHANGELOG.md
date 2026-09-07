@@ -6,6 +6,16 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`tools.extra_roots` was still refused by the file tools' in-process safety net.** The
+  allowlist reached the two argument validators but not `confine()` in
+  `crates/forge-tools/src/core_tools.rs`, whose `workspace_roots()` only trusted the workspace
+  (and, for standalone runs, the system temp dir) — so a daemon-hosted `read_file`/`write_file`
+  on an allowlisted path still failed with "resolves outside the workspace (workspace-confinement
+  safety net)". The extra roots now ride a `SESSION_EXTRA_ROOTS` task-local scoped alongside
+  `SESSION_WORKSPACE` by the tool wrapper, and `confine()` honors them, so all three confinement
+  layers agree (`crates/forge-tools/src/lib.rs`, `workspace.rs`, `core_tools.rs`).
+
 ### Added
 - **Structured file tools could not touch a path outside the workspace, even to clean up their
   own scratch files.** `validate_workspace_args` hard-rejected any `path`/`cwd`/`paths` resolving
