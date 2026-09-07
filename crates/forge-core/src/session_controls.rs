@@ -55,6 +55,57 @@ impl Session {
         Ok(())
     }
 
+    /// Re-read the project `AGENTS.md` and inject it when it is new or has changed since the copy
+    /// this session is carrying.
+    ///
+    /// Called once per turn from the post-persist window (never from the pre-persist injection
+    /// site, whose await-free invariant protects the abort-before-persist window). An unchanged
+    /// file costs one `stat`: the body is only read when the fingerprint moves, and even then it
+    /// is injected only if the transcript does not already hold that exact text — so a resumed
+    /// session with the instructions already in its history stays silent, while one whose file
+    /// was written or edited meanwhile picks the new text up on its next turn.
+    pub(crate) async fn refresh_project_instructions(
+        &mut self,
+        pack: &mut context_pack::ContextPack,
+    ) -> Result<(), CoreError> {
+        let root = self.workspace.root().to_path_buf();
+        let Some((path, modified, len)) = crate::project_agents_md_stat(&root).await else {
+            return Ok(());
+        };
+        let fingerprint = (path, modified, len);
+        if self.agents_md_fingerprint.as_ref() == Some(&fingerprint) {
+            return Ok(());
+        }
+        self.agents_md_fingerprint = Some(fingerprint.clone());
+        let Ok(body) = tokio::fs::read_to_string(&fingerprint.0).await else {
+            return Ok(());
+        };
+        if body.trim().is_empty()
+            || self
+                .transcript
+                .iter()
+                .any(|message| message.role == Role::System && message.content == body)
+        {
+            return Ok(());
+        }
+        let reason = if self.project_prompt_injected {
+            "project AGENTS.md (changed since this session started)"
+        } else {
+            "project AGENTS.md"
+        };
+        self.inject_context(
+            pack,
+            context_pack::ContextSource::ProjectInstructions,
+            reason,
+            &body,
+        )?;
+        self.project_prompt_injected = true;
+        // The construction-time copy is now stale by definition; drop it so the first-turn site
+        // cannot inject an older body after this one.
+        self.cached_agents_md = None;
+        Ok(())
+    }
+
     /// Publish the one accepted terminal answer. Provider-visible provisional completions stay in
     /// the lossless transcript as `LlmOnly`; this UI-only copy is the sole conversation answer.
     pub(crate) fn publish_terminal_answer(&mut self, content: &str) -> Result<(), CoreError> {
