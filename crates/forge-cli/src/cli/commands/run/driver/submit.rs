@@ -56,9 +56,10 @@ impl DriverState {
                             .note("⏳ commands run when the turn is idle — finish or Stop first");
                     } else {
                         self.queued_prompts.push(text.clone());
+                        self.steer.push(text.clone());
                         self.app.set_queued(&self.queued_prompts);
                         self.app.note(&format!(
-                            "⏳ queued ({} pending) — runs after this turn",
+                            "⏳ queued ({} pending) — sent at this turn's next step",
                             self.queued_prompts.len()
                         ));
                     }
@@ -177,13 +178,14 @@ impl DriverState {
             }
             remote::RemoteInput::Steer { text } => {
                 if self.busy {
+                    self.steer.push(text.clone());
                     forge_core::fleet::insert_into_queue(
                         &mut self.queued_prompts,
                         forge_core::fleet::MessageMode::Steer,
                         text,
                     );
                     self.app.set_queued(&self.queued_prompts);
-                    self.app.note("⚡ steered — next up when this turn ends");
+                    self.app.note("⚡ steered — sent at this turn's next step");
                 } else {
                     self.submit_line(text, None).await?;
                 }

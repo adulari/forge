@@ -62,6 +62,7 @@ mod session_history;
 mod session_lifecycle;
 mod session_virtual_tools;
 pub mod snapshot;
+pub mod steer;
 pub mod subagent;
 mod text_policy;
 pub mod tokens;
@@ -1624,6 +1625,13 @@ pub struct Session {
     /// System hints queued by side-call diagnostics (e.g. shell error interceptor) to be injected
     /// into the transcript immediately after the tool result that triggered them. Cleared each time.
     pending_hints: Vec<String>,
+    /// Prompts queued by the surface while a turn runs; drained by the model loop (`steer.rs`).
+    steer: steer::SteerInbox,
+    /// Bumped whenever the transcript is rewritten from outside the model loop (rewind, uncompact,
+    /// full reload) — see [`forge_provider::CheckpointContext::epoch`].
+    history_epoch: u64,
+    /// One-shot latch for the "invalid tool arguments while routed through Headroom" warning.
+    headroom_args_warned: bool,
     /// Session-scoped "always" answer to the auto-compact-on-switch consent prompt: once the user
     /// picks "always", a mesh failover to a model that needs compaction proceeds silently for the
     /// rest of this session (reset next launch). `false` = ask each time.
@@ -2486,6 +2494,10 @@ impl Session {
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
         self.poll_lattice_background();
+        // Anything still in the steer inbox belongs to a turn that already ended; the surface still
+        // holds those prompts and is starting this turn with the first of them, so delivering them
+        // again here would duplicate them.
+        self.steer.clear();
         // A TUI/serve driver can remain alive while retention prunes its previously empty parent
         // row. Every subsequent persistence write references this id, so restore that minimal
         // parent before routing, command guidance, or the prompt can touch the transcript.
@@ -4578,6 +4590,9 @@ mod tests {
 
     #[path = "bridge_stall.rs"]
     mod bridge_stall_tests;
+
+    #[path = "steer_rewind.rs"]
+    mod steer_rewind_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {

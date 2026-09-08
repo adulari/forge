@@ -32,7 +32,8 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 
 | Action | Default | Notes |
 |---|---|---|
-| `interrupt` | Ctrl-C | Stop current turn (idle: quit) |
+| `interrupt` | Ctrl-C | Stop current turn (idle: quit; in an overlay: close it) |
+| — | Esc | Stop current turn (idle: press twice to open the rewind picker; never quits) |
 | `command_palette` | / | Open slash-command palette |
 | `skip_model` | Ctrl-Shift-K | Mid-turn: abort so you can retry on another model |
 | `command_center` | Ctrl-K | Open the command center |

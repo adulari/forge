@@ -31,6 +31,27 @@ use crate::surface::{SELECT_BG, SEPARATOR as SEPCOL, STATUS_BG as STATUSBG};
 
 pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// The text a scrollback line contributes to the remote transcript ring. A tool-card row is laid
+/// out for a terminal width — the status is pushed to the right margin with padding, and a call
+/// that has not finished carries a `◍ running` mark. The phone renders rows in its own width and
+/// its ring is append-only (the in-place redraw the terminal gets cannot reach it), so the padded
+/// running row wrapped into a stray "running" line under every call and then stayed there next to
+/// the finished row. Collapse the padding and drop the transient mark; the finished row still
+/// arrives as its own line, exactly like the pre-card `↳ call` / `✓ result` pair did.
+fn remote_transcript_text(plain: &str, origin: &LineOrigin) -> String {
+    if origin.kind != TranscriptKind::Tool {
+        return plain.to_string();
+    }
+    let collapsed = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed
+        .strip_suffix(" ◍ running")
+        .map(str::to_string)
+        .unwrap_or(collapsed)
+}
+
+/// Two idle Esc presses closer together than this open the rewind picker.
+pub const ESC_DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(700);
+
 /// ANSI-Shadow block wordmark retained for terminal startup, with a quieter in-chat welcome.
 const FORGE_WORDMARK: &[&str] = &[
     "███████╗ ██████╗ ██████╗  ██████╗ ███████╗",
@@ -254,6 +275,12 @@ pub struct App {
     streaming_active: bool,
     /// True while a turn is running (drives the thinking spinner).
     pub busy: bool,
+    /// When an idle Esc was last pressed: a second press inside [`ESC_DOUBLE_TAP`] opens the
+    /// rewind picker. The statusline hint says so while it is armed.
+    pub esc_armed: Option<std::time::Instant>,
+    /// A startup phase label ("starting session…") shown with the spinner before the session
+    /// exists, so the terminal is never blank while the store and providers come up.
+    pub loading: Option<&'static str>,
     /// Prompts the user typed while busy, queued to run after the current turn (shown in the
     /// statusline as "⏳ N queued"). Maintained by the I/O shell.
     pub queued: Vec<String>,
@@ -728,6 +755,10 @@ pub enum KeyKind {
     Backspace,
     Enter,
     Esc,
+    /// Ctrl-C (the `interrupt` bind). Mid-turn it stops the response like Esc; idle with nothing
+    /// modal open it quits. Kept distinct from `Esc` so a bare Esc can carry its own idle meaning
+    /// (double-tap opens the rewind picker) without turning the quit key into a rewind key.
+    Interrupt,
     /// Arrow up/down — navigate the command palette / pickers (ignored by the input line).
     Up,
     Down,
@@ -989,7 +1020,7 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
             *cursor = next_word_end(input, *cursor);
             InputOutcome::Editing
         }
-        KeyKind::Esc => InputOutcome::Quit,
+        KeyKind::Esc | KeyKind::Interrupt => InputOutcome::Quit,
         KeyKind::Up
         | KeyKind::Down
         | KeyKind::Tab
@@ -1175,6 +1206,7 @@ impl App {
                     self.flush_reasoning();
                 }
             }
+            PresenterEvent::Steered(text) => self.echo_steered(&text),
             PresenterEvent::Warning(msg) => self.flush.push(warning_line(&msg)),
             PresenterEvent::Error(msg) => self.flush.push(error_line(&msg)),
             PresenterEvent::ToolStart { name, args } => {
@@ -2284,6 +2316,52 @@ impl App {
         self.flush.push(TextLine::default());
     }
 
+    /// Register an idle Esc press. Returns true when it completes a double-tap (the caller opens
+    /// the rewind picker); otherwise the press is armed and the statusline says "Esc again".
+    pub fn esc_tap(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if self
+            .esc_armed
+            .is_some_and(|at| now.duration_since(at) < ESC_DOUBLE_TAP)
+        {
+            self.esc_armed = None;
+            return true;
+        }
+        self.esc_armed = Some(now);
+        false
+    }
+
+    /// Drop an expired Esc arm. Returns true when it did (the statusline hint needs a redraw).
+    pub fn expire_esc_hint(&mut self) -> bool {
+        if self
+            .esc_armed
+            .is_some_and(|at| at.elapsed() >= ESC_DOUBLE_TAP)
+        {
+            self.esc_armed = None;
+            return true;
+        }
+        false
+    }
+
+    /// Whether the "Esc again to rewind" hint is live.
+    pub fn esc_hint_active(&self) -> bool {
+        self.esc_armed
+            .is_some_and(|at| at.elapsed() < ESC_DOUBLE_TAP)
+    }
+
+    /// Echo a prompt the running turn just picked up from the queue (`PresenterEvent::Steered`),
+    /// where it landed in the conversation. Deliberately does NOT reset the turn's diff/plan
+    /// projections the way `submit_user` does — this is the same turn continuing.
+    fn echo_steered(&mut self, text: &str) {
+        self.tag_flush(LineOrigin::user(), |s| {
+            s.flush.push(header_line("you ⚡ steer", USER));
+            for l in text.lines() {
+                s.flush.push(body_line(l));
+            }
+            s.flush.push(TextLine::default());
+        });
+    }
+
     /// Push a dim informational line into scrollback (command feedback, session lists, etc).
     pub fn note(&mut self, text: &str) {
         self.flush.push(TextLine::from(Span::styled(
@@ -3092,6 +3170,7 @@ impl App {
         if plain.trim().is_empty() {
             return;
         }
+        let plain = remote_transcript_text(&plain, origin);
         self.recent_transcript.push_back(TranscriptRow {
             kind: origin.kind,
             text: plain,
@@ -3664,6 +3743,8 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
 }
 
 mod render;
+#[cfg(test)]
+mod steer_esc_tests;
 mod tool_cards;
 pub(crate) use render::{human, mesh_pace_suffix, model_short, needs_phase_header};
 pub use render::{
@@ -5405,7 +5486,7 @@ mod tests {
             ..Default::default()
         };
         let hint = statusline_hint(&app);
-        assert!(hint.contains("esc quit"), "done hint: {hint}");
+        assert!(hint.contains("Ctrl-C quit"), "done hint: {hint}");
     }
 
     #[test]

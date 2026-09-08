@@ -8,6 +8,8 @@ pub enum LiveEvent {
     AssistantDelta(String),
     Reasoning(String),
     AssistantDone,
+    /// A queued prompt the running turn just consumed mid-turn (see `PresenterEvent::Steered`).
+    Steered(String),
     Warning(String),
     ToolStart {
         name: String,
@@ -82,6 +84,7 @@ pub fn to_live_event(event: &PresenterEvent) -> Option<LiveEvent> {
         PresenterEvent::AssistantDelta(d) => Some(LiveEvent::AssistantDelta(d.clone())),
         PresenterEvent::Reasoning(r) => Some(LiveEvent::Reasoning(r.clone())),
         PresenterEvent::AssistantDone => Some(LiveEvent::AssistantDone),
+        PresenterEvent::Steered(t) => Some(LiveEvent::Steered(t.clone())),
         PresenterEvent::Warning(w) => Some(LiveEvent::Warning(w.clone())),
         PresenterEvent::ToolStart { name, args } => Some(LiveEvent::ToolStart {
             name: name.clone(),
@@ -184,6 +187,7 @@ pub fn live_event_to_presenter(event: LiveEvent) -> Option<PresenterEvent> {
         LiveEvent::AssistantDelta(d) => Some(PresenterEvent::AssistantDelta(d)),
         LiveEvent::Reasoning(r) => Some(PresenterEvent::Reasoning(r)),
         LiveEvent::AssistantDone => Some(PresenterEvent::AssistantDone),
+        LiveEvent::Steered(t) => Some(PresenterEvent::Steered(t)),
         LiveEvent::Warning(w) => Some(PresenterEvent::Warning(w)),
         LiveEvent::ToolStart { name, args } => Some(PresenterEvent::ToolStart { name, args }),
         LiveEvent::ToolResult {

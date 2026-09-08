@@ -320,6 +320,8 @@ struct DriverState {
     assay_lenses: Vec<forge_types::FindingCategory>,
     assay_scope: forge_types::AssayScope,
     queued_prompts: Vec<String>,
+    /// Mirror of `queued_prompts` the running turn drains at its next boundary (steering).
+    steer: forge_core::steer::SteerInbox,
     prompt_history: Vec<String>,
     last_prompt: Option<String>,
     prompt_seq: u64,
@@ -433,8 +435,10 @@ async fn drive_session(
         && !forge_config::project_initialization(std::path::Path::new(&cwd)).initialized
         && !forge_config::project_auto_setup_attempted(std::path::Path::new(&cwd));
 
+    let steer = session.lock().await.steer_handle();
     let mut st = DriverState {
         session,
+        steer,
         app,
         catalog,
         armed_project: std::collections::HashSet::new(),
@@ -510,6 +514,12 @@ async fn drive_session(
             dirty = true;
             match msg {
                 UiMsg::Event(e) => {
+                    if let forge_tui::PresenterEvent::Steered(text) = &e {
+                        if let Some(i) = st.queued_prompts.iter().position(|q| q == text) {
+                            st.queued_prompts.remove(i);
+                            st.app.set_queued(&st.queued_prompts);
+                        }
+                    }
                     if let forge_tui::PresenterEvent::Error(m) = &e {
                         turn_error = Some(m.clone());
                         // A turn-ending error only reached `view.transcript` (scrollback) before
@@ -1038,7 +1048,9 @@ mod tests {
         let catalog =
             std::sync::Arc::new(forge_skills::Catalog::load(&forge_config::command_sources()));
         let (done_tx, _) = std::sync::mpsc::channel();
+        let steer = session.steer_handle();
         DriverState {
+            steer,
             session: std::sync::Arc::new(tokio::sync::Mutex::new(session)),
             app: App::default(),
             catalog,

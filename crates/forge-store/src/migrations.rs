@@ -687,6 +687,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0031,
     migration_0032,
     migration_0033,
+    migration_0034,
 ];
 
 /// Migration #33: whether a session has released its subagents from the active model pin.
@@ -761,4 +762,16 @@ pub(super) fn seed_singleton_rows(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Migration #34: index `routing_decision(message_id)`.
+///
+/// `session_models` and the fleet presence listing join `routing_decision` to `message` per
+/// session. With no index on the join column the planner walked `routing_decision` for every
+/// message row: resuming a 23k-message session spent 5.5 s in that one statement before the
+/// first frame (found with `FORGE_SQL_PROFILE`). Same shape as `idx_usage_message`.
+fn migration_0034(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_routing_decision_message ON routing_decision(message_id)",
+    )
 }

@@ -32,6 +32,7 @@ export const BUILTIN_COMMANDS: string[] = [
   "/uncompact",
   "/clear",
   "/undo",
+  "/rewind",
   "/checkpoint",
   "/checkpoints",
   "/usage",

@@ -162,6 +162,17 @@
         "scoped_cargo_target_dir": {
           "type": "string",
           "description": "Base directory for the scoped CARGO_TARGET_DIR (see scoped_cargo_target). Each project gets a stable subdir. Defaults to <system-temp>/forge-cargo-target when unset."
+        },
+        "rtk": {
+          "type": "string",
+          "enum": ["auto", "on", "off"],
+          "default": "auto",
+          "description": "Route eligible shell commands through RTK (rtk) so the model reads its compacted output. auto = on when rtk is on PATH. See docs/features/token-savings.md."
+        },
+        "rtk_skip": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Programs (first word, e.g. \"cargo\") never routed through RTK."
         }
       }
     },

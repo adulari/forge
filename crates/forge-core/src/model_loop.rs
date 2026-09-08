@@ -398,6 +398,12 @@ impl Session {
                         hit_step_cap = false;
                         break;
                     }
+                } else if self.inject_steers() {
+                    // The user queued a prompt while this response was being produced. Rather than
+                    // ending the turn and starting a new one, continue with it now — the model
+                    // keeps its working context and the queued instruction lands as soon as it
+                    // legally can (Claude Code / Codex semantics).
+                    continue;
                 } else if completion_promises_followup(&resp.content) && followup_intent_nudges == 0
                 {
                     followup_intent_nudges += 1;
@@ -796,6 +802,8 @@ impl Session {
                 hit_step_cap = false;
                 break;
             }
+            // Tool results are in: the earliest point a queued prompt can join the conversation.
+            self.inject_steers();
         }
 
         // Roll this loop's successful mutations into the turn-wide tally. `run_turn_with` re-enters

@@ -1366,7 +1366,10 @@ mod tests {
     /// `ShellTool::default()` from `with_core_tools()`, ignoring `[shell]` entirely).
     #[test]
     fn sandboxed_shell_tool_is_none_when_config_knobs_are_off() {
-        let config = Config::default();
+        let mut config = Config::default();
+        // `rtk = auto` would build a tool on any machine with rtk installed; pin it off so the
+        // assertion is about the sandbox knobs alone.
+        config.shell.rtk = forge_config::AutoToggle::Off;
         assert!(crate::cli::commands::run::sandboxed_shell_tool(&config).is_none());
     }
 

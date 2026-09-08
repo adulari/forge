@@ -761,3 +761,29 @@ impl Session {
         self.mode
     }
 }
+
+impl Session {
+    /// A handle a surface keeps to queue prompts INTO a running turn (docs/features/queue-autopilot.md).
+    pub fn steer_handle(&self) -> crate::steer::SteerInbox {
+        self.steer.clone()
+    }
+
+    /// Hand every queued steer prompt to the model as a persisted user message and tell the
+    /// surface. Returns whether anything was injected — the loop then continues instead of
+    /// treating the last response as the end of the turn.
+    pub(crate) fn inject_steers(&mut self) -> bool {
+        let texts = self.steer.drain();
+        if texts.is_empty() {
+            return false;
+        }
+        for text in texts {
+            let seq = self.next_seq();
+            let _ = self
+                .store
+                .add_message(&self.id, seq, Role::User, &text, None);
+            self.transcript.push(Message::user(&text));
+            self.presenter.emit(PresenterEvent::Steered(text));
+        }
+        true
+    }
+}

@@ -120,6 +120,13 @@ pub(crate) async fn build_session_with_self_mcp(
 
     let mut config = forge_config::load().context("loading configuration")?;
     clock.mark("config load");
+    // Headroom proxy routing for direct-API calls and the claude bridge (token-savings.md).
+    // `auto` probes loopback once (~1 ms, refused instantly when nothing listens); the decision
+    // is process-wide, so the daemon's sessions and a `forge run` share it.
+    if let Some(url) = forge_provider::headroom::configure(&config.mesh) {
+        tracing::info!(target: "forge::startup", proxy = %url, "routing direct-API calls through Headroom");
+    }
+    clock.mark("headroom probe");
     if let Some(m) = mode {
         config.permission_mode = m.into();
     }
@@ -370,7 +377,14 @@ pub(crate) async fn build_session_with_self_mcp(
             // pool so worker threads stay free. (`spawn_blocking` JoinError on panic → treat as
             // "not updated" rather than propagating.)
             let lat_update = Arc::clone(&lat_bg);
+            // Let the first frame and the first prompt win the disk. On a cold page cache this
+            // update — hash the tree, re-read the graph for PageRank — pulled ~100 MB of a
+            // multi-GB store through the same disk the startup path was waiting on, which is
+            // where "forge takes seconds to open" came from. Nothing consumes the result before
+            // the next turn boundary anyway.
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             let result = tokio::task::spawn_blocking(move || {
+                deprioritize_current_thread();
                 // Removed worktrees leave their whole index behind; drop those copies before
                 // adding to the store (see `Lattice::prune_stale_roots`). Best-effort: a prune
                 // failure must not block indexing this session's own root.
@@ -500,6 +514,23 @@ pub(crate) async fn build_session_with_self_mcp(
     clock.mark("skills + mcp + lsp");
     Ok(session)
 }
+
+/// Run the calling (blocking-pool) thread at low CPU and idle I/O priority — the background
+/// index must never compete with the interactive path for the disk. Lowering priority needs no
+/// privileges; a failure is silently ignored.
+#[cfg(target_os = "linux")]
+fn deprioritize_current_thread() {
+    // SAFETY: plain syscalls that only affect the calling thread's scheduling classes.
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, tid, 10);
+        // ioprio_set(IOPRIO_WHO_PROCESS, tid, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0))
+        libc::syscall(libc::SYS_ioprio_set, 1, tid, 3 << 13);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn deprioritize_current_thread() {}
 
 /// Startup phase timer: one debug line per phase (`RUST_LOG=forge=debug`), so a slow launch can
 /// be attributed to a phase instead of guessed at. Costs one `Instant::now()` per mark.

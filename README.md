@@ -691,7 +691,7 @@ click it (or `Ctrl+T` for the most recent) to expand the full arguments and the 
 | `/execute` | Approve the proposed plan and carry it out (aliases `/approve`, `/go`) |
 | `/init` | Scan the repo and write `.forge/AGENTS.md` project memory |
 | `/new` · `/resume [id]` · `/sessions` | Start fresh · resume · browse past sessions |
-| `/undo` · `/checkpoint [label]` · `/checkpoints` | Revert last turn · save · rewind to a checkpoint |
+| `/rewind` (alias `/undo`, or Esc Esc) · `/checkpoint [label]` · `/checkpoints` | Rewind chat + context + files to a message · save · rewind to a checkpoint ([docs](docs/features/rewind.md)) |
 | `/compact` · `/uncompact` | Summarize older context to free the window (also auto-triggers at 80% gauge) · undo it — restore the full transcript |
 | `/refine [instructions]` · `/refine status` · `/refine rollback <id>` | Capture durable session/project lessons, inspect the refinement journal, or reverse a prior batch |
 | `/btw <question>` · `/side <question>` | Ask a background side question without adding it to the session transcript |
@@ -723,7 +723,7 @@ click it (or `Ctrl+T` for the most recent) to expand the full arguments and the 
 **Keyboard shortcuts:** `SHIFT+TAB`/`Alt+T` cycle temper · `Ctrl+Shift+K` mid-turn — abort + retry the same
 prompt on the mesh's next-ranked model (excludes ones already skipped this turn) · `Ctrl+↑`/`Ctrl+↓`
 bias the routing tier up/down, re-running immediately if mid-turn · `Ctrl+O` activity viewer ·
-`Ctrl+T` expand/collapse the most recent tool call · `Ctrl+J` newline · `Esc` interrupt (mid-turn) / quit (idle) · `↑/↓` navigate ·
+`Ctrl+T` expand/collapse the most recent tool call · `Ctrl+J` newline · `Esc` interrupt (mid-turn) / `Esc Esc` rewind (idle) · `Ctrl+C` quit · `↑/↓` navigate ·
 `y/n/a` allow/deny/always-allow a permission prompt · `Alt+M` model picker · `Alt+E` cycle effort ·
 `Ctrl+N` new session · `Ctrl+S` checkpoint · `Ctrl+Z` undo last write · `Ctrl+L` compact ·
 `Ctrl+R` toggle reasoning display · `Ctrl+,` edit keybinds · `F1` full keybind reference.

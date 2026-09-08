@@ -38,7 +38,7 @@ pub use device::{DeviceLogsTool, DeviceTool};
 pub use lattice_tool::LatticeTool;
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};
-pub use shell::{ShellJobTool, ShellTool};
+pub use shell::{RtkRewriter, ShellJobTool, ShellTool};
 pub use web::{
     Bing, BraveKeyless, BraveSearch, DuckDuckGo, SearchBackend, SearchResult, SearxNg,
     WebFetchTool, WebSearchTool,
