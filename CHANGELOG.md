@@ -7,6 +7,12 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Steer from the phone.** The companion app's composer no longer turns into a bare Stop
+  button while a turn runs: typed text sends as ⚡ *steer* — the daemon queues it and hands it to
+  the model at the turn's next step, exactly like typing during a turn in the CLI — with a small
+  Stop kept next to it. Queued prompts show as ⚡ chips (tap to dequeue). Ships over the air.
+
+### Added
 - **Commit discipline.** A model left alone in a repository edited for days and hardly ever
   committed (one real session: 2,600 edits, 49 commits, 2 pushes, two whole days at zero). Forge
   now carries the habit: the system prompt asks for a focused conventional commit per verified

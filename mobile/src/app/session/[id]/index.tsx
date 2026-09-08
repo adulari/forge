@@ -873,7 +873,9 @@ export default function SessionChat() {
           {/* Tapping a queued chip sends `dequeue` (index+text echoed) so the daemon can reject a
            * stale tap after the queue shifted. */}
           {queued.map((text, i) => (
-            <Chip key={`q${i}`} label={text} onPress={() => handleDequeue(i, text)} />
+            // A server-queued prompt is also in the turn's steer inbox: it reaches the model at
+            // the next tool boundary (or starts the next turn if the current one ends first).
+            <Chip key={`q${i}`} label={`⚡ ${text}`} onPress={() => handleDequeue(i, text)} />
           ))}
           {offlineQueue.map((q, i) => (
             // Deliberately NOT `selected` (ember/accent) — this is a normal "will send on
