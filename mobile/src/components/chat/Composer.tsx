@@ -17,7 +17,7 @@
 //            call TelemetrySheet's "Model" row already makes.
 //   effort → the existing EffortPicker, mounted headless (`showTrigger={false}`), which commits
 //            `/effort <level>` (or bare `/effort` to reset) over the same prompt path.
-import { ArrowUp, ChevronDown, Clock, FileCode2, FileText, Image as ImageIcon, MessageSquare, Mic, MousePointer2, RotateCcw, Sparkles, Square } from "lucide-react-native";
+import { ArrowUp, ChevronDown, Clock, FileCode2, FileText, Image as ImageIcon, MessageSquare, Mic, MousePointer2, RotateCcw, Sparkles, Square, Zap } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ColorValue, Image, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
@@ -227,7 +227,11 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
   const canSend =
     (text.trim().length > 0 || reviewComments.length > 0 || visualAnnotations.length > 0) &&
     !attachments.some((a) => a.state === "uploading");
-  const action = busy ? "stop" : online ? "send" : "queue";
+  // While a turn runs the circle is Stop until there is something to say; typed text turns it
+  // into "steer": the prompt is queued and handed to the model at the turn's next step (the same
+  // behaviour as typing during a turn in the CLI — the daemon's queue + steer inbox). A separate
+  // small Stop stays reachable next to it so steering never hides the interrupt.
+  const action = busy ? (canSend ? "steer" : "stop") : online ? "send" : "queue";
   const reduced = useReducedMotion();
   const actionProgress = useSharedValue(action === "stop" ? 1 : 0);
   useEffect(() => {
@@ -889,18 +893,36 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
               testID="composer-mic"
             />
           ) : null}
+          {action === "steer" ? (
+            <IconButton
+              icon={<Square size={14} strokeWidth={1.75} color={tokens.danger} fill={tokens.danger} />}
+              onPress={onInterrupt}
+              accessibilityLabel="stop"
+              testID="composer-stop"
+            />
+          ) : null}
           <IconButton
-            icon={<View style={styles.actionIcon}><Animated.View style={sendIconStyle}>{online ? <ArrowUp size={20} strokeWidth={2} color={canSend ? tokens.onAccent : tokens.ink4} /> : <Clock size={18} strokeWidth={1.75} color={canSend ? tokens.onAccent : tokens.ink4} />}</Animated.View><Animated.View style={[styles.actionLayer, stopIconStyle]}><Square size={16} strokeWidth={1.75} color={tokens.onAccent} fill={tokens.onAccent} /></Animated.View></View>}
-            onPress={busy ? onInterrupt : () => commit(text)}
-            disabled={!busy && !canSend}
-            accessibilityLabel={busy ? "stop" : online ? "send" : "queue — will send on reconnect"}
-            style={[styles.sendCircle, { backgroundColor: busy ? tokens.danger : canSend ? tokens.accent : tokens.bg3 }]}
+            icon={<View style={styles.actionIcon}><Animated.View style={sendIconStyle}>{action === "steer" ? <Zap size={18} strokeWidth={2} color={tokens.onAccent} fill={tokens.onAccent} /> : online ? <ArrowUp size={20} strokeWidth={2} color={canSend ? tokens.onAccent : tokens.ink4} /> : <Clock size={18} strokeWidth={1.75} color={canSend ? tokens.onAccent : tokens.ink4} />}</Animated.View><Animated.View style={[styles.actionLayer, stopIconStyle]}><Square size={16} strokeWidth={1.75} color={tokens.onAccent} fill={tokens.onAccent} /></Animated.View></View>}
+            onPress={action === "stop" ? onInterrupt : () => commit(text)}
+            disabled={action !== "stop" && !canSend}
+            accessibilityLabel={
+              action === "stop"
+                ? "stop"
+                : action === "steer"
+                  ? "steer — sent to the model at this turn's next step"
+                  : online
+                    ? "send"
+                    : "queue — will send on reconnect"
+            }
+            style={[styles.sendCircle, { backgroundColor: action === "stop" ? tokens.danger : canSend ? tokens.accent : tokens.bg3 }]}
           />
           </View>
         </View>
       )}
       {!online && !recording ? (
         <Text style={[type.meta, styles.offlineHint, { color: tokens.ink3 }]}>will send on reconnect</Text>
+      ) : action === "steer" && !recording ? (
+        <Text style={[type.meta, styles.offlineHint, { color: tokens.ink3 }]}>⚡ steer — the model gets this at its next step</Text>
       ) : null}
       <GoalSheet visible={goalVisible} onClose={() => setGoalVisible(false)} onSubmit={commit} />
       {/* Headless: the composer's own chip is the trigger, so the picker contributes only its
