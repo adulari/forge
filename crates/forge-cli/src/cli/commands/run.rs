@@ -14,6 +14,7 @@ use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
 use crate::*;
 
 mod autonomous;
+mod commit_prompt;
 pub(crate) use autonomous::*;
 
 mod gates;

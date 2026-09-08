@@ -438,20 +438,8 @@ pub(crate) async fn dispatch_command(
         // it through the ordinary shell tool (and its permission gate); Forge never pushes here.
         CommandAction::Commit(hint) => {
             app.note("⎇ committing this session's work…");
-            let hint = if hint.is_empty() {
-                String::new()
-            } else {
-                format!("\n\nThe user's hint for the commit: {hint}")
-            };
             return Ok(DispatchOutcome::RunTurn {
-                prompt: format!(
-                    "Commit the uncommitted work in this repository. Run `git status` and `git \
-diff` first, group the changes into one or more focused commits (one coherent unit each), stage \
-the specific files for each (never `git add -A`; skip files you did not change unless they clearly \
-belong to the same change, and never stage secrets, credentials, logs or build output), and write \
-conventional-commit messages (feat/fix/refactor/docs/test/chore) that say what and why. Do NOT \
-push. Finish by listing the commits you made with their hashes.{hint}"
-                ),
+                prompt: super::commit_prompt::commit_prompt(&hint),
                 guidance: Vec::new(),
                 tier: Some(forge_types::TaskTier::Standard),
             });
