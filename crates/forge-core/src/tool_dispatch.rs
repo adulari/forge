@@ -416,6 +416,19 @@ impl Session {
         // the tool with an opaque message; instead return an actionable error naming what's missing
         // plus the required fields, so the model self-corrects on the next step instead of thrashing.
         if let Err(reason) = validate_tool_args(&tool.schema(), &effective_args) {
+            // Observed 2026-09-08: a session routed through a Headroom proxy (`[mesh] headroom`)
+            // degraded into `{}` tool calls turn after turn — the proxy rewrites prior turns and
+            // tool schemas, and the model lost the arguments. Name the likely cause once so the
+            // operator can switch the proxy off instead of watching the model retry.
+            if forge_config::headroom_route().is_some() && !self.headroom_args_warned {
+                self.headroom_args_warned = true;
+                self.presenter.emit(PresenterEvent::Warning(
+                    "tool call arrived with invalid arguments while requests are routed through \
+                     the Headroom proxy — if this repeats, set `[mesh] headroom = \"off\"` \
+                     (docs/features/token-savings.md)"
+                        .to_string(),
+                ));
+            }
             let result = format!("error: invalid arguments for `{}` — {reason}", call.name);
             self.presenter.emit(PresenterEvent::ToolResult {
                 name: call.name.clone(),

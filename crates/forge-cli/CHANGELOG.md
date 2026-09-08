@@ -33,7 +33,10 @@ All notable changes to Forge are documented here. The format follows
   for ~0.4 s added latency per request (Forge already bounds and prunes tool output). The doc also
   records the Headroom bug that made it compress nothing on Codex — Codex sends tool results as a
   list of text parts, which Headroom's extractor did not recognise — with the patch that fixes it
-  (`docs/patches/`, 3,478 → 2,556 tokens on one tool result once applied).
+  (`docs/patches/`, 3,478 → 2,556 tokens on one tool result once applied). A session routed
+  through the proxy was also observed degrading into empty `{}` tool calls (the proxy rewrites
+  prior turns and tool schemas); Forge now warns once, naming the proxy, when a tool call arrives
+  with invalid arguments while routing is active.
 - **`FORGE_SQL_PROFILE=<file>`** appends one `<micros>\t<thread>\t<sql>` line per executed
   statement on every store connection — the tool that found the startup I/O below.
 

@@ -1630,6 +1630,8 @@ pub struct Session {
     /// Bumped whenever the transcript is rewritten from outside the model loop (rewind, uncompact,
     /// full reload) — see [`forge_provider::CheckpointContext::epoch`].
     history_epoch: u64,
+    /// One-shot latch for the "invalid tool arguments while routed through Headroom" warning.
+    headroom_args_warned: bool,
     /// Session-scoped "always" answer to the auto-compact-on-switch consent prompt: once the user
     /// picks "always", a mesh failover to a model that needs compaction proceeds silently for the
     /// rest of this session (reset next launch). `false` = ask each time.
