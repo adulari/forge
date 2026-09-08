@@ -66,6 +66,7 @@ pub mod snapshot;
 pub(crate) mod stall_guard;
 pub mod steer;
 pub mod subagent;
+pub(crate) mod task_staleness;
 mod text_policy;
 pub mod tokens;
 mod tool_dispatch;
@@ -1640,6 +1641,9 @@ pub struct Session {
     steer: steer::SteerInbox,
     /// Commit discipline: which files this session wrote and whether they are still uncommitted.
     git_hygiene: git_hygiene::Tracker,
+    /// Counts how long each unfinished task has stood still (task_staleness.rs), so a task the
+    /// model can no longer resolve stops re-driving the session.
+    stale_tasks: task_staleness::Tracker,
     /// Bumped whenever the transcript is rewritten from outside the model loop (rewind, uncompact,
     /// full reload) — see [`forge_provider::CheckpointContext::epoch`].
     history_epoch: u64,
@@ -3017,6 +3021,32 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     &nudge.render(),
                 )?;
             }
+        }
+
+        // Stalled tasks (task_staleness.rs): a task nobody is moving keeps the completion gate
+        // re-driving the model every turn, and re-reading files to work out what it means counts
+        // as progress — so the nudge budget never runs out. Force a decision after three still
+        // turns, and remove the task ourselves if the decision never comes.
+        let mut stale = std::mem::take(&mut self.stale_tasks);
+        let verdict = stale.turn(&self.tasks);
+        self.stale_tasks = stale;
+        if let Some(verdict) = verdict {
+            if !verdict.dropped.is_empty() {
+                self.tasks.retain(|t| !verdict.dropped.contains(&t.title));
+                self.persist_tasks();
+                self.presenter
+                    .emit(PresenterEvent::Tasks(self.tasks.clone()));
+                self.presenter
+                    .emit(PresenterEvent::Warning(task_staleness::dropped_warning(
+                        &verdict.dropped,
+                    )));
+            }
+            self.inject_context(
+                &mut context_pack,
+                context_pack::ContextSource::Tasks,
+                "tasks that stopped moving",
+                &verdict.render(),
+            )?;
         }
 
         // ★ Auto-retrieve relevant code from the Lattice index and inject it as a system message
@@ -4679,6 +4709,9 @@ mod tests {
 
     #[path = "stall_guard.rs"]
     mod stall_guard_tests;
+
+    #[path = "stale_tasks.rs"]
+    mod stale_tasks_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {

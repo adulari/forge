@@ -657,11 +657,8 @@ impl Session {
                     // calling the tool, or signs off with tasks still open. If the tracked task list
                     // still has unfinished items, this is a premature stall: drive it onward
                     // (bounded) so the work completes instead of ending the turn mid-task.
-                    let unfinished = self
-                        .tasks
-                        .iter()
-                        .filter(|t| !matches!(t.status, forge_types::TodoStatus::Done))
-                        .count();
+                    let open_titles = nudge_policy::open_titles(&self.tasks);
+                    let unfinished = open_titles.len();
                     const MAX_CONTINUE_NUDGES: usize = 4;
                     if unfinished > 0 {
                         // Work is still open — any earlier "all done" verification is stale.
@@ -686,16 +683,17 @@ impl Session {
                                         MAX_CONTINUE_NUDGES,
                                     ),
                                 ));
-                                let nudge = nudge_policy::CONTINUE_NUDGE;
+                                let nudge =
+                                    nudge_policy::continue_nudge(&open_titles, continue_nudges);
                                 let nseq = self.next_seq();
                                 let _ = self.store.add_message(
                                     &self.id,
                                     nseq,
                                     Role::System,
-                                    nudge,
+                                    &nudge,
                                     None,
                                 );
-                                self.transcript.push(Message::system(nudge));
+                                self.transcript.push(Message::system(&nudge));
                                 continue;
                             }
                             ContinueNudge::BlockedStop => {

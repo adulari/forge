@@ -20,6 +20,8 @@ pub enum ContextSource {
     Harness,
     /// Commit-discipline reminder (git_hygiene.rs): uncommitted files this session edited.
     Git,
+    /// Stalled-task escalation (task_staleness.rs): tasks the list has carried without movement.
+    Tasks,
 }
 
 /// One persisted system-context contribution.
