@@ -34,6 +34,7 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 |---|---|---|
 | `interrupt` | Ctrl-C | Stop current turn (idle: quit; in an overlay: close it) |
 | — | Esc | Stop current turn (idle: press twice to open the rewind picker; never quits) |
+| — | Ctrl-Home | Full-screen: jump to the most recent user message above the view; again = the one before (the "↑ Previous message" bar at the top does the same on click) |
 | — | ↑/↓ · 1–9 · Space · Enter · ←/→ · o · n · Esc | Inside an `ask_user` form: move · pick · toggle · confirm · switch question · other / note · dismiss ([docs](ask-user-question.md)) |
 | `command_palette` | / | Open slash-command palette |
 | `skip_model` | Ctrl-Shift-K | Mid-turn: abort so you can retry on another model |

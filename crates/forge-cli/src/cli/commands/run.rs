@@ -1190,6 +1190,9 @@ pub(crate) async fn run_chat_tui(
                         } else if app.fullscreen && matches!(key, KeyKind::JumpBottom) {
                             app.transcript_to_bottom();
                             dirty = true;
+                        } else if app.fullscreen && matches!(key, KeyKind::JumpPrevUser) {
+                            app.transcript_to_prev_user();
+                            dirty = true;
                         }
                     }
                     _ => {}
@@ -1270,6 +1273,9 @@ pub(crate) async fn run_chat_tui(
                             MouseKind::Down => {
                                 if app.jump_bar_hit(col, row) {
                                     app.transcript_to_bottom();
+                                } else if app.prev_bar_hit(col, row) {
+                                    app.transcript_to_prev_user();
+                                    dirty = true;
                                 } else if app.toggle_tool_card_at(col, row) {
                                     // A click on a tool card opens/closes it. Selection is not
                                     // started here: a card row is a control, and beginning a
@@ -2676,6 +2682,13 @@ pub(crate) async fn run_chat_tui(
             // floating jump-to-bottom bar).
             if app.fullscreen && matches!(key, KeyKind::JumpBottom) {
                 app.transcript_to_bottom();
+                dirty = true;
+                continue;
+            }
+            if app.fullscreen && matches!(key, KeyKind::JumpPrevUser) {
+                if !app.transcript_to_prev_user() {
+                    app.note("no earlier message above");
+                }
                 dirty = true;
                 continue;
             }

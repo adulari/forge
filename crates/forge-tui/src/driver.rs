@@ -438,6 +438,9 @@ impl Tui {
                         KeyKind::WordRight
                     }
                     KeyCode::Right => KeyKind::Right,
+                    KeyCode::Home if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::JumpPrevUser
+                    }
                     KeyCode::Home => KeyKind::Home,
                     KeyCode::End if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::JumpBottom
