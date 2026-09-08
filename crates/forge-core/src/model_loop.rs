@@ -115,6 +115,7 @@ impl Session {
         // not a final answer. Give it one bounded chance to perform the promised action.
         let mut followup_intent_nudges = 0usize;
         let mut doom_nudged = false;
+        let mut narration = crate::stall_guard::NarrationTracker::default();
         // Failure-loop guard (complements the identical-call doom-loop): counts tool failures by
         // (tool name, error kind) ACROSS the turn, so a model retrying the same KIND of error with
         // different args (edits that never match, reads of paths that don't exist) is caught even
@@ -781,6 +782,11 @@ impl Session {
                 break;
             }
 
+            if self.narration_stalled(&mut narration, &resp.content) {
+                halted_by_loop_guard = true;
+                hit_step_cap = false;
+                break;
+            }
             if self
                 .execute_model_tool_step(
                     &msg_id,

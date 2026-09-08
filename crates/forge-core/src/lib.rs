@@ -63,6 +63,7 @@ mod session_history;
 mod session_lifecycle;
 mod session_virtual_tools;
 pub mod snapshot;
+pub(crate) mod stall_guard;
 pub mod steer;
 pub mod subagent;
 mod text_policy;
@@ -4675,6 +4676,9 @@ mod tests {
 
     #[path = "commit_nudge.rs"]
     mod commit_nudge_tests;
+
+    #[path = "stall_guard.rs"]
+    mod stall_guard_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {
