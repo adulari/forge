@@ -6,6 +6,15 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Narration-stall guard.** A 27k-message session spent 23 steps opening every reply with the
+  same sentence ("You're right — I looped. Answering the 429 question …") while reading a slightly
+  different slice of the same file each time. Neither existing loop guard could see it: the
+  identical-call guard needs identical arguments, the failure guard needs failures. The model loop
+  now tracks the opening of each tool-calling reply; the fifth near-identical opening in a row gets
+  one nudge to answer in text from what it already read, two more end the turn with a clear error
+  instead of running to the step cap. (`crates/forge-core/src/stall_guard.rs`)
+
 ### Added
 - **Commit discipline.** A model left alone in a repository edited for days and hardly ever
   committed (one real session: 2,600 edits, 49 commits, 2 pushes, two whole days at zero). Forge
