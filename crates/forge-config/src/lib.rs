@@ -1087,12 +1087,52 @@ fn default_update_check() -> bool {
 }
 
 /// Git integration settings.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitConfig {
     /// When true, `forge git setup` installs a prepare-commit-msg hook that strips
     /// Claude/Codex co-author lines and adds `Co-Authored-By: Forge <forge@adulari.dev>`.
     #[serde(default)]
     pub coauthor: bool,
+    /// Commit discipline (docs/features/commit-discipline.md). While the files this session has
+    /// edited are still uncommitted, every turn starts with a one-line reminder of them, and a
+    /// further reminder lands mid-turn once `commit_nudge_edits` more successful edits have
+    /// accumulated since the last commit or reminder. A week-long session that never committed
+    /// motivated this: 49 commits and 2 pushes against 2,600 edits, with two whole days at zero.
+    /// `false` turns both reminders (and the push reminder) off; the system prompt still asks the
+    /// model to commit verified units of work.
+    #[serde(default = "default_commit_nudge")]
+    pub commit_nudge: bool,
+    /// Successful write-tool calls since the last commit (or the last reminder) before the
+    /// mid-turn reminder fires again. `0` disables the mid-turn reminder only.
+    #[serde(default = "default_commit_nudge_edits")]
+    pub commit_nudge_edits: u32,
+    /// Commits the current branch may run ahead of its upstream before the turn-start reminder
+    /// asks the model to offer the user a push (Forge never pushes on its own). `0` disables it.
+    #[serde(default = "default_push_nudge_ahead")]
+    pub push_nudge_ahead: u32,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            coauthor: false,
+            commit_nudge: default_commit_nudge(),
+            commit_nudge_edits: default_commit_nudge_edits(),
+            push_nudge_ahead: default_push_nudge_ahead(),
+        }
+    }
+}
+
+fn default_commit_nudge() -> bool {
+    true
+}
+
+fn default_commit_nudge_edits() -> u32 {
+    10
+}
+
+fn default_push_nudge_ahead() -> u32 {
+    3
 }
 
 /// LSP-backed live diagnostics. After an edit, Forge asks a language server for diagnostics on the

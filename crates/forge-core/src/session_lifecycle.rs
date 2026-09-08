@@ -227,6 +227,7 @@ impl Session {
             extra_tool_roots,
             pending_hints: vec![],
             steer: crate::steer::SteerInbox::default(),
+            git_hygiene: crate::git_hygiene::Tracker::default(),
             history_epoch: 0,
             headroom_args_warned: false,
             always_compact_on_switch: false,

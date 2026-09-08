@@ -33,6 +33,7 @@ export default function CardSlot() {
         question={snapshot.question}
         options={snapshot.question_options}
         allowOther={snapshot.question_allow_other}
+        form={snapshot.question_form ?? null}
         promptSeq={snapshot.prompt_seq}
         send={send}
         onQueueAnswer={setPendingAnswer}

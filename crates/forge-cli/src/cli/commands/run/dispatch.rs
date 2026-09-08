@@ -434,6 +434,28 @@ pub(crate) async fn dispatch_command(
         }
         // `/compact` makes a model call → run it as a background task so the spinner ticks.
         CommandAction::Compact => return Ok(DispatchOutcome::RunCompact),
+        // `/commit [hint]` — one turn that commits the session's uncommitted work. The model does
+        // it through the ordinary shell tool (and its permission gate); Forge never pushes here.
+        CommandAction::Commit(hint) => {
+            app.note("⎇ committing this session's work…");
+            let hint = if hint.is_empty() {
+                String::new()
+            } else {
+                format!("\n\nThe user's hint for the commit: {hint}")
+            };
+            return Ok(DispatchOutcome::RunTurn {
+                prompt: format!(
+                    "Commit the uncommitted work in this repository. Run `git status` and `git \
+diff` first, group the changes into one or more focused commits (one coherent unit each), stage \
+the specific files for each (never `git add -A`; skip files you did not change unless they clearly \
+belong to the same change, and never stage secrets, credentials, logs or build output), and write \
+conventional-commit messages (feat/fix/refactor/docs/test/chore) that say what and why. Do NOT \
+push. Finish by listing the commits you made with their hashes.{hint}"
+                ),
+                guidance: Vec::new(),
+                tier: Some(forge_types::TaskTier::Standard),
+            });
+        }
         // `/btw <question>` also makes a model call — same background-task shape as `/compact`.
         CommandAction::Btw(question) => return Ok(DispatchOutcome::RunBtw { question }),
         // `/uncompact` makes no model call (pure store + in-memory restore) → handled inline,

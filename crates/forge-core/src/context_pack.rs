@@ -18,6 +18,8 @@ pub enum ContextSource {
     /// Continual Harness (`/refine`): learned prompt/skill/subagent entries injected as
     /// supplemental context (context_pipeline::harness_context_block).
     Harness,
+    /// Commit-discipline reminder (git_hygiene.rs): uncommitted files this session edited.
+    Git,
 }
 
 /// One persisted system-context contribution.

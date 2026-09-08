@@ -8,8 +8,11 @@ impl App {
     /// broadcast. Plain fields only (no ratatui types), so `forge-tui` needn't depend on the
     /// remote module — the caller maps this into the snapshot type.
     pub fn remote_snapshot(&self) -> RemoteSnapshot {
-        let (question_options, question_allow_other) = match &self.question {
-            Some((opts, allow_other)) => (opts.clone(), *allow_other),
+        let (question_options, question_allow_other) = match &self.form {
+            Some(form) => {
+                let q = form.question();
+                (q.options.clone(), q.allow_other)
+            }
             None => (Vec::new(), false),
         };
         RemoteSnapshot {
@@ -100,7 +103,7 @@ impl App {
             // question that has no pending permission reply, so taps were silent no-ops and the
             // real options were unreachable. While a question is active, the prompt is its input
             // hint — never a permission gate — so suppress it here.
-            permission_prompt: if self.question.is_some() {
+            permission_prompt: if self.form.is_some() {
                 None
             } else {
                 self.prompt.clone()
@@ -108,6 +111,8 @@ impl App {
             question: self.question_prompt.clone(),
             question_options,
             question_allow_other,
+            question_form: self.form.as_ref().map(|f| f.questions.clone()),
+            question_index: self.form.as_ref().map_or(0, |f| f.current),
             diff: self.remote_diff(),
             plan: self.plan.clone(),
             suggested_prompt: self.suggested_prompt.clone(),
@@ -665,6 +670,11 @@ pub struct RemoteSnapshot {
     pub question: Option<String>,
     pub question_options: Vec<crate::QChoice>,
     pub question_allow_other: bool,
+    /// The whole `ask_user` form (v11 additive): every question with its options, multi-select
+    /// flag and note allowance. `question`/`question_options` mirror the CURRENT one for older
+    /// clients.
+    pub question_form: Option<Vec<forge_types::Question>>,
+    pub question_index: usize,
     /// The structured diff card (v7) — see [`DiffSnapshot`]. `None` when nothing changed.
     pub diff: Option<DiffSnapshot>,
     /// The most recent plan proposal (v7), for the remote plan-approval card.

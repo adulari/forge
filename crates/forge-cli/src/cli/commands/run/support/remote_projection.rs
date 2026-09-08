@@ -132,6 +132,8 @@ pub(crate) fn build_snapshot_frame(
             })
             .collect(),
         question_allow_other: view.question_allow_other,
+        question_form: view.question_form,
+        question_index: view.question_index,
         // The generic overlay projection: whatever modal surface owns the keyboard
         // (palette / any picker / config / usage / mesh / workflow).
         overlay: app.remote_overlay().map(map_overlay_snapshot),

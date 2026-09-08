@@ -322,7 +322,21 @@ pub(crate) fn statusline_hint(app: &App) -> &'static str {
     if let Some(label) = app.loading {
         return label;
     }
-    if app.command_center.open {
+    if let Some(form) = &app.form {
+        if form.editing.is_some() {
+            "type · ⏎ save · esc back"
+        } else if form.len() > 1 {
+            if form.question().multi {
+                "↑↓ move · space toggle · ⏎ next · ←→ question · n note · esc dismiss"
+            } else {
+                "↑↓ move · ⏎ choose · ←→ question · o other · n note · esc dismiss"
+            }
+        } else if form.question().multi {
+            "↑↓ move · space toggle · ⏎ done · o other · n note · esc dismiss"
+        } else {
+            "↑↓ move · ⏎ choose · o other · n note · esc dismiss"
+        }
+    } else if app.command_center.open {
         "↑↓ select · ⏎ open · esc close"
     } else if app.palette.open {
         "↑↓ move · ⏎ run · esc close"

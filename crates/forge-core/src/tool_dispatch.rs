@@ -538,6 +538,22 @@ impl Session {
                         );
                         // Count this successful write so the autofix stage knows edits happened.
                         self.edits_this_turn += 1;
+                        // Commit discipline: every N successful edits since the last commit or
+                        // reminder, remind the model (right after this result) that its work is
+                        // uncommitted. `git status` runs only when the reminder is due.
+                        if self.config.git.commit_nudge
+                            && self.git_hygiene.record_edit(
+                                self.workspace.root(),
+                                path,
+                                self.config.git.commit_nudge_edits,
+                            )
+                        {
+                            if let Some(nudge) =
+                                self.git_hygiene.mid_turn_nudge(self.workspace.root())
+                            {
+                                self.pending_hints.push(nudge.render());
+                            }
+                        }
                         // Reindex the touched file in-turn so later retrieval/queries this turn
                         // reflect the edit (code-intelligence.md — post-edit freshness).
                         if let Some(lat) = &self.lattice {
@@ -582,6 +598,20 @@ impl Session {
 
         if ok {
             self.failure_tracker.record_success(&call.name);
+            // A shell command that may have moved HEAD (commit, amend, reset, …) is the moment the
+            // commit-discipline tracker forgets whatever is no longer dirty.
+            if self.config.git.commit_nudge
+                && call.name == "shell"
+                && call
+                    .args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(crate::git_hygiene::may_move_head)
+            {
+                let root = self.workspace.root();
+                let head = crate::git_head(Some(root));
+                self.git_hygiene.observe_head(root, head);
+            }
         } else if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
             self.presenter
                 .emit(PresenterEvent::Warning(warning.clone()));

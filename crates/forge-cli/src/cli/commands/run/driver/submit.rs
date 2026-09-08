@@ -96,12 +96,16 @@ impl DriverState {
                         "⚠ stale answer ignored — the prompt changed; review the current one",
                     );
                 } else if self.app.awaiting_question() {
-                    if let Some(ans) = self.app.resolve_question(&text) {
-                        if let Some(tx) = self.pending_question.take() {
-                            let _ = tx.send(ans);
+                    match self.app.resolve_remote_answer(&text) {
+                        forge_tui::app::RemoteAnswer::Complete(answers) => {
+                            if let Some(tx) = self.pending_question.take() {
+                                let _ = tx.send(answers);
+                            }
                         }
-                    } else {
-                        self.app.note("⚠ remote answer was invalid — re-asking");
+                        forge_tui::app::RemoteAnswer::Partial => {}
+                        forge_tui::app::RemoteAnswer::Invalid => {
+                            self.app.note("⚠ remote answer was invalid — re-asking");
+                        }
                     }
                 }
             }

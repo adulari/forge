@@ -95,13 +95,11 @@ pub enum UiMsg {
         side_effect: SideEffect,
         reply: Sender<crate::ConfirmOutcome>,
     },
-    /// An interactive question (AskUserQuestion): the loop shows it + the options and replies
-    /// with the chosen label or a free-text answer.
+    /// An interactive `ask_user` form: the loop shows the questions and replies with one
+    /// [`forge_types::Answer`] per question (empty when dismissed).
     Question {
-        question: String,
-        options: Vec<crate::QChoice>,
-        allow_other: bool,
-        reply: Sender<String>,
+        questions: Vec<forge_types::Question>,
+        reply: Sender<Vec<forge_types::Answer>>,
     },
 }
 
@@ -159,20 +157,30 @@ impl Presenter for ChannelPresenter {
     }
 
     fn ask(&mut self, question: &str, options: &[crate::QChoice], allow_other: bool) -> String {
+        let answers = self.ask_form(&[forge_types::Question::single(
+            question,
+            options,
+            allow_other,
+        )]);
+        match answers.first() {
+            Some(a) if !a.is_empty() => a.summary(),
+            _ => crate::NO_ANSWER.to_string(),
+        }
+    }
+
+    fn ask_form(&mut self, questions: &[forge_types::Question]) -> Vec<forge_types::Answer> {
         let (reply, answer) = std::sync::mpsc::channel();
         if self
             .tx
             .send(UiMsg::Question {
-                question: question.to_string(),
-                options: options.to_vec(),
-                allow_other,
+                questions: questions.to_vec(),
                 reply,
             })
             .is_err()
         {
-            return crate::NO_ANSWER.to_string();
+            return Vec::new();
         }
-        recv_blocking(&answer).unwrap_or_else(|_| crate::NO_ANSWER.to_string())
+        recv_blocking(&answer).unwrap_or_default()
     }
 
     fn read_line(&mut self) -> Option<String> {
@@ -544,7 +552,11 @@ mod tests {
         let render = tokio::spawn(async move {
             loop {
                 if let Ok(UiMsg::Question { reply, .. }) = rx.try_recv() {
-                    let _ = reply.send("A".to_string());
+                    let _ = reply.send(vec![forge_types::Answer {
+                        selected: vec!["A".to_string()],
+                        other: None,
+                        note: None,
+                    }]);
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
