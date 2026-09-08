@@ -44,6 +44,54 @@ fn parse_role_with_diagnostic(session_id: &str, seq: Option<i64>, raw: &str) -> 
 }
 
 impl Store {
+    /// Prompts the user typed, oldest first, for the composer's ↑/↓ history: this session's own
+    /// prompts (every row, rewound and compacted ones included — history is what was typed, not
+    /// what the model still sees), preceded by the newest prompts from other sessions in the same
+    /// workspace up to `limit` in total. Consecutive duplicates collapse; harness-authored user
+    /// rows (continuation nudges, mid-turn steers are kept) are dropped.
+    pub fn recent_user_prompts(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let mut own_stmt = conn.prepare_cached(
+            "SELECT content FROM message WHERE session_id = ?1 AND role = 'user' ORDER BY seq",
+        )?;
+        let own: Vec<String> = own_stmt
+            .query_map([session_id], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut history: Vec<String> = Vec::with_capacity(limit);
+        if own.len() < limit {
+            let mut other_stmt = conn.prepare_cached(
+                "SELECT m.content FROM message m JOIN session s ON s.id = m.session_id
+                 WHERE s.cwd = ?1 AND m.session_id != ?2 AND m.role = 'user'
+                 ORDER BY m.created_at DESC, m.seq DESC LIMIT ?3",
+            )?;
+            let mut others: Vec<String> = other_stmt
+                .query_map(
+                    rusqlite::params![cwd, session_id, (limit - own.len()) as i64],
+                    |row| row.get(0),
+                )?
+                .collect::<std::result::Result<_, _>>()?;
+            others.reverse();
+            history.extend(others);
+        }
+        history.extend(own);
+        let mut out: Vec<String> = Vec::with_capacity(history.len());
+        for text in history {
+            let text = text.trim().to_string();
+            if text.is_empty() || is_harness_authored(&text) || out.last() == Some(&text) {
+                continue;
+            }
+            out.push(text);
+        }
+        if out.len() > limit {
+            out.drain(..out.len() - limit);
+        }
+        Ok(out)
+    }
     /// All *active* messages of a session, in turn order (by seq). Soft-deleted rows (those a
     /// `/undo` rewound past) are excluded — they remain in the table for audit/redo. If a
     /// compaction summary exists (written by [`compact_session_store`](Self::compact_session_store)),
@@ -585,5 +633,58 @@ mod tail_tests {
         assert_eq!(store.min_active_seq(&sid).unwrap(), Some(4));
         store.uncompact_session_store(&sid).unwrap();
         assert_eq!(store.min_active_seq(&sid).unwrap(), Some(0));
+    }
+}
+
+/// User-role rows the harness wrote itself (continuation nudges), which a person never typed.
+fn is_harness_authored(text: &str) -> bool {
+    text.starts_with("Your last response was empty.")
+        || text.starts_with("You ended your reply, but tasks on your list")
+}
+
+#[cfg(test)]
+mod prompt_history_tests {
+    use super::*;
+    use forge_types::Role;
+
+    #[test]
+    fn own_prompts_come_last_and_workspace_prompts_fill_in_before_them() {
+        let store = Store::open_in_memory().unwrap();
+        store.ensure_session("old", "/ws", "Ask").unwrap();
+        store.ensure_session("new", "/ws", "Ask").unwrap();
+        store.ensure_session("elsewhere", "/other", "Ask").unwrap();
+        for (i, p) in ["first old", "second old"].iter().enumerate() {
+            store
+                .add_message("old", i as i64, Role::User, p, None)
+                .unwrap();
+        }
+        store
+            .add_message("elsewhere", 0, Role::User, "not ours", None)
+            .unwrap();
+        store
+            .add_message("new", 0, Role::User, "mine", None)
+            .unwrap();
+        store
+            .add_message("new", 1, Role::Assistant, "ok", None)
+            .unwrap();
+        store
+            .add_message(
+                "new",
+                2,
+                Role::User,
+                "Your last response was empty. Continue.",
+                None,
+            )
+            .unwrap();
+        store
+            .add_message("new", 3, Role::User, "mine", None)
+            .unwrap();
+        store
+            .add_message("new", 4, Role::User, " mine 2 ", None)
+            .unwrap();
+        let h = store.recent_user_prompts("new", "/ws", 50).unwrap();
+        assert_eq!(h, ["first old", "second old", "mine", "mine 2"]);
+        let capped = store.recent_user_prompts("new", "/ws", 2).unwrap();
+        assert_eq!(capped, ["mine", "mine 2"], "the newest survive the cap");
     }
 }

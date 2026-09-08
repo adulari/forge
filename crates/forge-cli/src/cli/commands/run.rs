@@ -7,6 +7,10 @@ use std::sync::Arc;
 /// and rendering it first cost seconds on a 20k-message session.
 pub(crate) const REPLAY_TAIL_MESSAGES: usize = 600;
 
+/// How many past prompts the composer's ↑/↓ history is seeded with on start (this session's
+/// own first, then the workspace's most recent from other sessions).
+const PROMPT_HISTORY_LIMIT: usize = 500;
+
 use forge_core::Session;
 use forge_tools::ToolRegistry;
 use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
@@ -902,7 +906,19 @@ pub(crate) async fn run_chat_tui(
     let mut last_input_at = std::time::Instant::now();
     // Last model written to `$GIT_DIR/forge-model` for commit attribution (only when coauthor on).
     let mut last_model_written = String::new();
-    let mut prompt_history: Vec<String> = Vec::new();
+    // ↑/↓ prompt history. Seeded from the store so it survives closing the session: this
+    // session's own prompts, preceded by recent prompts from other sessions in this workspace.
+    // Anything typed from here on is appended in memory and persists as the turn's user message.
+    let mut prompt_history: Vec<String> = {
+        let s = session.lock().await;
+        s.store
+            .recent_user_prompts(
+                s.session_id(),
+                &session_workspace.display().to_string(),
+                PROMPT_HISTORY_LIMIT,
+            )
+            .unwrap_or_default()
+    };
     let mut history_pos: Option<usize> = None;
     let mut history_draft = String::new();
     // The prompt of the turn currently running (or last run), so `tier_up`/`tier_down` can abort
