@@ -93,6 +93,9 @@ impl Presenter for HeadlessPresenter {
                 self.end_reasoning();
                 println!();
             }
+            PresenterEvent::Steered(text) => {
+                println!("  ⚡ steer: {text}");
+            }
             PresenterEvent::Warning(msg) => {
                 println!("  ⚠ {msg}");
             }

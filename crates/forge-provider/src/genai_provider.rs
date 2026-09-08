@@ -561,6 +561,25 @@ pub(crate) fn build_client_full(
 ) -> Client {
     let resolver = ServiceTargetResolver::from_resolver_fn(
         move |st: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
+            resolve_service_target(st, &pool, azure.as_ref()).map(route_via_headroom)
+        },
+    );
+    Client::builder()
+        .with_reqwest(build_reqwest_client())
+        .with_service_target_resolver(resolver)
+        .build()
+}
+
+/// The provider-specific retarget (Azure, custom OpenAI-compatible endpoints, ollama's `/v1`,
+/// key rotation) — everything that decides WHERE a model is called before Headroom, if active,
+/// decides how the request gets there.
+fn resolve_service_target(
+    st: ServiceTarget,
+    pool: &KeyPool,
+    azure: Option<&AzureProvider>,
+) -> Result<ServiceTarget, genai::resolver::Error> {
+    {
+        {
             // Azure OpenAI (`azure::<deployment>`): genai has no Azure adapter and the deployment URL +
             // `api-version` query + `api-key` header don't fit the standard OpenAI resolver, so build a
             // per-request override. Key precedence mirrors the custom branch: rotated pool key > env var.
@@ -652,12 +671,71 @@ pub(crate) fn build_client_full(
                 });
             }
             Ok(st)
+        }
+    }
+}
+
+/// Send `st` through the Headroom proxy when routing is active (`forge_config::headroom_route`).
+///
+/// OpenAI-wire adapters (native and custom) become a `RequestOverride` at the proxy's
+/// `/v1/chat/completions` carrying the bearer key and the real upstream in `x-headroom-base-url`;
+/// Anthropic and Gemini only need their endpoint swapped, since the proxy forwards those wire
+/// formats to their canonical hosts itself. A target whose key cannot be materialised here
+/// (`RequestOverride`/`None` auth, or an unset env var) goes direct rather than half-routed, and
+/// so do Responses-API adapters and everything else the proxy does not speak.
+pub(crate) fn route_via_headroom(st: ServiceTarget) -> ServiceTarget {
+    let Some(proxy) = forge_config::headroom_route() else {
+        return st;
+    };
+    route_via_headroom_at(st, proxy)
+}
+
+fn route_via_headroom_at(st: ServiceTarget, proxy: &str) -> ServiceTarget {
+    use genai::adapter::AdapterKind as K;
+    match st.model.adapter_kind {
+        K::OpenAI
+        | K::Groq
+        | K::Fireworks
+        | K::Together
+        | K::Nebius
+        | K::Xai
+        | K::DeepSeek
+        | K::Moonshot
+        | K::Mimo
+        | K::Aihubmix
+        | K::OpenRouter
+        | K::MiniMax
+        | K::Zai => {
+            let key = match &st.auth {
+                AuthData::Key(k) => k.clone(),
+                AuthData::FromEnv(var) => match std::env::var(var) {
+                    Ok(k) if !k.is_empty() => k,
+                    _ => return st,
+                },
+                _ => return st,
+            };
+            let upstream = st.endpoint.base_url().trim_end_matches('/').to_string();
+            let url = format!("{proxy}/v1/chat/completions");
+            let headers = Headers::from(vec![
+                ("Authorization".to_string(), format!("Bearer {key}")),
+                ("x-headroom-base-url".to_string(), upstream),
+            ]);
+            ServiceTarget {
+                endpoint: Endpoint::from_owned(format!("{proxy}/v1/")),
+                auth: AuthData::RequestOverride { url, headers },
+                model: st.model,
+            }
+        }
+        K::Anthropic => ServiceTarget {
+            endpoint: Endpoint::from_owned(format!("{proxy}/v1/")),
+            ..st
         },
-    );
-    Client::builder()
-        .with_reqwest(build_reqwest_client())
-        .with_service_target_resolver(resolver)
-        .build()
+        K::Gemini => ServiceTarget {
+            endpoint: Endpoint::from_owned(format!("{proxy}/v1beta/")),
+            ..st
+        },
+        _ => st,
+    }
 }
 
 /// Build ollama's OpenAI-compatible base URL from an `OLLAMA_HOST` value. The host is often bare
@@ -2674,5 +2752,79 @@ mod tests {
         );
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].name, "shell");
+    }
+}
+
+#[cfg(test)]
+mod headroom_routing_tests {
+    use super::*;
+    use genai::adapter::AdapterKind;
+
+    fn target(kind: AdapterKind, endpoint: &str, auth: AuthData) -> ServiceTarget {
+        ServiceTarget {
+            endpoint: Endpoint::from_owned(endpoint.to_string()),
+            auth,
+            model: ModelIden::new(kind, "m"),
+        }
+    }
+
+    #[test]
+    fn openai_wire_targets_become_a_proxy_override_with_the_upstream_header() {
+        let st = target(
+            AdapterKind::Groq,
+            "https://api.groq.com/openai/v1/",
+            AuthData::from_single("sk-1"),
+        );
+        let routed = route_via_headroom_at(st, "http://127.0.0.1:8787");
+        let AuthData::RequestOverride { url, headers } = routed.auth else {
+            panic!("expected a request override");
+        };
+        assert_eq!(url, "http://127.0.0.1:8787/v1/chat/completions");
+        let hs = format!("{headers:?}");
+        assert!(hs.contains("Bearer sk-1"), "{hs}");
+        assert!(hs.contains("https://api.groq.com/openai/v1"), "{hs}");
+    }
+
+    #[test]
+    fn anthropic_and_gemini_swap_the_endpoint_only() {
+        let a = route_via_headroom_at(
+            target(
+                AdapterKind::Anthropic,
+                "https://api.anthropic.com/v1/",
+                AuthData::from_env("X"),
+            ),
+            "http://p:1",
+        );
+        assert_eq!(a.endpoint.base_url(), "http://p:1/v1/");
+        assert!(matches!(a.auth, AuthData::FromEnv(_)));
+        let g = route_via_headroom_at(
+            target(
+                AdapterKind::Gemini,
+                "https://generativelanguage.googleapis.com/v1beta/",
+                AuthData::from_env("X"),
+            ),
+            "http://p:1",
+        );
+        assert_eq!(g.endpoint.base_url(), "http://p:1/v1beta/");
+    }
+
+    #[test]
+    fn unroutable_targets_go_direct() {
+        // Responses-API adapter: the proxy would need a different route; leave it alone.
+        let st = target(
+            AdapterKind::OpenCodeGo,
+            "https://opencode.ai/zen/v1/",
+            AuthData::from_single("k"),
+        );
+        let routed = route_via_headroom_at(st, "http://p:1");
+        assert_eq!(routed.endpoint.base_url(), "https://opencode.ai/zen/v1/");
+        // An env-var key that is not set cannot be forwarded as a bearer: go direct.
+        let st = target(
+            AdapterKind::OpenAI,
+            "https://api.openai.com/v1/",
+            AuthData::from_env("FORGE_TEST_UNSET_KEY_VAR"),
+        );
+        let routed = route_via_headroom_at(st, "http://p:1");
+        assert_eq!(routed.endpoint.base_url(), "https://api.openai.com/v1/");
     }
 }

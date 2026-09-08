@@ -815,6 +815,28 @@ fn default_inject_budget() -> usize {
     3000
 }
 
+/// A three-state switch for integrations Forge can detect on its own: `auto` (default) turns the
+/// feature on when its prerequisite is present, `on` forces it, `off` disables it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoToggle {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl AutoToggle {
+    /// Resolve against whether the prerequisite was detected.
+    pub fn resolve(self, detected: bool) -> bool {
+        match self {
+            AutoToggle::Auto => detected,
+            AutoToggle::On => true,
+            AutoToggle::Off => false,
+        }
+    }
+}
+
 /// Settings for the `shell` tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellConfig {
@@ -859,6 +881,20 @@ pub struct ShellConfig {
     /// TOML key: `shell.scoped_cargo_target_dir`
     #[serde(default)]
     pub scoped_cargo_target_dir: Option<String>,
+    /// Route eligible shell commands through RTK (`rtk`, the Rust Token Killer) so the model reads
+    /// its compacted output — `cargo test` collapses to a one-line summary plus the failures,
+    /// `ls`/`find`/`wc` to their essentials (docs/features/token-savings.md). `auto` (default):
+    /// on when `rtk` is on `PATH`; `on` / `off` force it. Only commands whose RTK rendering is
+    /// lossless for an agent are rewritten; the result header says when it happened.
+    ///
+    /// TOML key: `shell.rtk`
+    #[serde(default)]
+    pub rtk: AutoToggle,
+    /// Programs (first word, e.g. `"cargo"`) to never route through RTK.
+    ///
+    /// TOML key: `shell.rtk_skip`
+    #[serde(default)]
+    pub rtk_skip: Vec<String>,
 }
 
 impl Default for ShellConfig {
@@ -869,6 +905,8 @@ impl Default for ShellConfig {
             sandbox_writable: Vec::new(),
             scoped_cargo_target: false,
             scoped_cargo_target_dir: None,
+            rtk: AutoToggle::Auto,
+            rtk_skip: Vec::new(),
         }
     }
 }
@@ -1835,6 +1873,22 @@ pub struct MeshConfig {
     /// `forge memory` command still works for manual entries).
     #[serde(default = "default_auto_memory")]
     pub auto_memory: bool,
+    /// Route direct-API model calls through a local Headroom proxy (`headroom proxy`, the
+    /// context-optimization layer) so its compression/caching applies to Forge's traffic
+    /// (docs/features/token-savings.md). `off` (default — measured on Forge's own traffic the
+    /// proxy removed 0.2% of input tokens for ~0.4 s added latency per request, because Forge
+    /// already bounds and prunes tool output itself); `auto`: on when a healthy proxy answers at
+    /// `headroom_url`; `on` forces it. Covers OpenAI-wire, Anthropic and Gemini adapters plus the
+    /// `claude` CLI bridge; Responses-API adapters (OpenCode Go/Zen) go direct.
+    ///
+    /// TOML key: `mesh.headroom`
+    #[serde(default = "default_headroom_toggle")]
+    pub headroom: AutoToggle,
+    /// Base URL of the Headroom proxy. Default `http://127.0.0.1:8787`.
+    ///
+    /// TOML key: `mesh.headroom_url`
+    #[serde(default)]
+    pub headroom_url: Option<String>,
     /// Auto-orchestrate: inject the Forge orchestration framework as a standing system instruction
     /// at the start of every session. The model is guided to check skills first, choose the
     /// highest-level tool that fits, and use subagents/MCP/web/Lattice appropriately — without
@@ -1979,6 +2033,10 @@ fn default_self_review() -> bool {
 
 fn default_failover_cooldown_secs() -> u64 {
     60
+}
+
+fn default_headroom_toggle() -> AutoToggle {
+    AutoToggle::Off
 }
 
 fn default_auto_memory() -> bool {
@@ -2466,6 +2524,8 @@ impl Default for Config {
                 max_output_tokens: default_max_output_tokens(),
                 credit_mode: CreditMode::Normal,
                 auto_memory: default_auto_memory(),
+                headroom: default_headroom_toggle(),
+                headroom_url: None,
                 auto_orchestrate: false,
                 self_review: default_self_review(),
                 architect_mode: false,

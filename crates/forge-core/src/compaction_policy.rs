@@ -618,6 +618,7 @@ impl Session {
             serde_json::json!({ "before": before, "after": after }),
         )
         .await;
+        self.history_epoch += 1;
         Ok((before, after))
     }
 

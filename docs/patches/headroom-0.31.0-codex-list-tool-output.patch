@@ -1,0 +1,89 @@
+--- /tmp/claude-1000/-home-floris-Documents-Repositories-Personal-AI-forge/72d179c6-329f-4a60-8e1a-27993271aed3/scratchpad/openai.py.orig	2026-09-08 17:10:11.798380455 +0200
++++ /home/floris/.local/share/uv/tools/headroom-ai/lib/python3.12/site-packages/headroom/proxy/handlers/openai.py	2026-09-08 17:13:07.886021410 +0200
+@@ -407,6 +407,38 @@
+     return "plain_text_like"
+ 
+ 
++_RESPONSES_OUTPUT_TEXT_PART_TYPES = ("input_text", "output_text", "text")
++
++
++def _responses_output_slot(output: Any) -> tuple[str, tuple[str, int | None]] | None:
++    """Locate the compressible text of a Responses tool-output item.
++
++    Older clients send ``output`` as a plain string. Codex (0.15x, WebSocket transport) sends
++    ``custom_tool_call_output``/``function_call_output`` with ``output`` as a LIST of content
++    parts — ``[{"type": "input_text", "text": "..."}]``. Only the string form was recognised, so
++    every Codex tool result was classed ``output_type_without_text_slot`` and no Codex frame ever
++    produced a compression unit (``codex_ws.units_total == 0`` while ``frames_attempted`` grew).
++    An all-text part list is addressed as ``("output_parts", 0)``: the parts are joined for the
++    compressor and the replacement lands in the first part (the others are emptied).
++    """
++    if isinstance(output, str):
++        return output, ("output", None)
++    if isinstance(output, list) and output:
++        # Codex splits one tool result into several text parts (a status header such as
++        # "Script completed / Wall time …" followed by the body). Only an all-text list is
++        # addressed: the parts are joined for compression and the replacement is written back
++        # into the first part with the rest emptied, so the item keeps its shape. A list with
++        # any non-text part (an image, an unknown modality) is left alone.
++        if all(
++            isinstance(part, dict)
++            and part.get("type") in _RESPONSES_OUTPUT_TEXT_PART_TYPES
++            and isinstance(part.get("text"), str)
++            for part in output
++        ):
++            return "\n".join(part["text"] for part in output), ("output_parts", 0)
++    return None
++
++
+ def _json_debug_dumps(value: Any) -> str:
+     return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
+ 
+@@ -1175,9 +1207,7 @@
+             # remain as defense-in-depth.
+             type_tag = item.get("type")
+             if type_tag in self.OPENAI_RESPONSES_OUTPUT_TYPES:
+-                output = item.get("output")
+-                if isinstance(output, str):
+-                    return output, ("output", None)
++                return _responses_output_slot(item.get("output"))
+             return None
+ 
+         def _set_slot_text(
+@@ -1185,9 +1215,16 @@
+             slot: tuple[str, int | None],
+             replacement: str,
+         ) -> None:
+-            kind, _ = slot
++            kind, part_idx = slot
+             if kind == "output":
+                 item["output"] = replacement
++            elif kind == "output_parts":
++                output = item.get("output")
++                if isinstance(output, list) and output and isinstance(output[0], dict):
++                    output[0]["text"] = replacement
++                    for part in output[1:]:
++                        if isinstance(part, dict):
++                            part["text"] = ""
+ 
+         headroom_retrieve_call_ids: set[str] = set()
+         # Map each Responses tool call to its name so that outputs belonging to
+@@ -1275,14 +1312,15 @@
+                     # Protected from lossy compression — but grep/log/json output
+                     # can still be losslessly compacted. Reuse the router helper
+                     # so the Responses path matches the chat/Anthropic behavior.
+-                    excl_out = item.get("output")
++                    excl_slot = _responses_output_slot(item.get("output"))
++                    excl_out = excl_slot[0] if excl_slot is not None else None
+                     fold = (
+                         router._lossless_compact_excluded(excl_out)
+                         if isinstance(excl_out, str)
+                         else None
+                     )
+-                    if fold is not None:
+-                        lossless_excluded.append((idx, ("output", None), fold[0], excl_out))
++                    if fold is not None and excl_slot is not None:
++                        lossless_excluded.append((idx, excl_slot[1], fold[0], excl_out))
+                     if debug_enabled:
+                         extraction_debug.append(
+                             {

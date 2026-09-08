@@ -30,6 +30,16 @@ fn render_statusline_widget<'a>(
                     "  │  ",
                     Style::default().fg(SEPCOL).bg(STATUSBG),
                 ));
+            } else if let (Some(label), true) = (app.loading, w >= 40) {
+                let f = SPINNER[app.tick % SPINNER.len()];
+                spans.push(Span::styled(
+                    format!("{f} {label}"),
+                    Style::default().fg(ACCENT).bold().bg(STATUSBG),
+                ));
+                spans.push(Span::styled(
+                    "  │  ",
+                    Style::default().fg(SEPCOL).bg(STATUSBG),
+                ));
             } else if app.busy && w >= 40 {
                 let f = SPINNER[app.tick % SPINNER.len()];
                 spans.push(Span::styled(
@@ -309,6 +319,9 @@ fn render_statusline_widget<'a>(
 /// actionable keybind for the current mode is what the user sees. Returns a `&'static str` so
 /// the render path never allocates per frame.
 pub(crate) fn statusline_hint(app: &App) -> &'static str {
+    if let Some(label) = app.loading {
+        return label;
+    }
     if app.command_center.open {
         "↑↓ select · ⏎ open · esc close"
     } else if app.palette.open {
@@ -319,8 +332,10 @@ pub(crate) fn statusline_hint(app: &App) -> &'static str {
         "F apply fix · esc"
     } else if app.busy {
         "esc stop · Ctrl↑ escalate"
+    } else if app.esc_hint_active() {
+        "esc again to rewind · Ctrl-C quit"
     } else if app.done {
-        "done · esc quit"
+        "done · esc esc rewind · Ctrl-C quit"
     } else if app.input.is_empty() {
         "Ctrl+K actions · / · ? keys"
     } else {

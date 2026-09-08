@@ -15,6 +15,17 @@ impl Session {
     /// `offset` (0 when not compacted) maps the seq back to the transcript index for truncation.
     pub fn rewind_to(&mut self, db_seq: i64) -> Result<RewindOutcome, CoreError> {
         let db_seq = db_seq.max(0);
+        // A compacted session's in-memory transcript is `[summary, recent tail]`. A target that
+        // lies inside the folded-away history has to reactivate it first: truncating the tail
+        // alone would leave the model with nothing while the store kept the originals soft-deleted
+        // as "compacted", so the rewound-to conversation would never come back.
+        if self.was_compacted() {
+            let first_active = self.store.min_active_seq(&self.id)?.unwrap_or(0);
+            if db_seq <= first_active {
+                self.store.uncompact_session_store(&self.id)?;
+                self.reload_full_context()?;
+            }
+        }
         // DB seq → transcript INDEX. Deactivation/snapshot work in DB seq; transcript ops in index.
         let offset = self.seq - self.transcript.len() as i64;
         let idx = (db_seq - offset).max(0) as usize;
@@ -44,10 +55,39 @@ impl Session {
         self.store.deactivate_messages_from(&self.id, db_seq)?;
         self.transcript.truncate(idx);
         self.seq = db_seq;
+        self.after_history_rewrite();
         Ok(RewindOutcome {
             restore,
             rewound_prompt,
         })
+    }
+
+    /// Re-derive every piece of session state that describes the transcript, after the transcript
+    /// was rewritten from outside the model loop. Truncating the message list alone left the rest
+    /// of the session believing the removed turns still existed: the bridge kept resuming its own
+    /// server-side copy of them, the "already injected" latches kept AGENTS.md / white-hot guidance
+    /// out even though the messages carrying them were gone, queued hints and images from the
+    /// removed turn were delivered into the next one, and `/undo` chained from a stale turn seq.
+    fn after_history_rewrite(&mut self) {
+        self.history_epoch += 1;
+        self.pending_hints.clear();
+        self.pending_images.clear();
+        self.steer.clear();
+        let offset = self.seq - self.transcript.len() as i64;
+        self.current_turn_seq = self
+            .transcript
+            .iter()
+            .rposition(|m| m.role == Role::User)
+            .map_or(-1, |i| i as i64 + offset);
+        self.whitehot_guidance_injected = self
+            .transcript
+            .iter()
+            .any(|m| m.role == Role::System && m.content == workflow::WHITEHOT_GUIDANCE);
+        // The per-turn AGENTS.md refresh re-injects the file only when the transcript no longer
+        // carries its exact text; dropping the fingerprint makes it look again on the next turn.
+        self.project_prompt_injected = !self.transcript.is_empty();
+        self.cached_agents_md = None;
+        self.agents_md_fingerprint = None;
     }
 
     /// Undo the last user turn: rewind to (and including) the most recent user message, dropping
@@ -109,6 +149,7 @@ impl Session {
             root: root.to_string_lossy().into_owned(),
             workspace: self.workspace.root().to_string_lossy().into_owned(),
             mode: self.temper().key().to_string(),
+            epoch: self.history_epoch,
         }
     }
 
@@ -171,6 +212,33 @@ impl Session {
         }
     }
 
+    /// The newest `limit` messages as replay items, plus the session's total message count — what
+    /// a resume renders into scrollback. The log ring is bounded, so rendering the whole history
+    /// of a 20k-message session only to trim it again was seconds of markdown work per start.
+    pub fn replay_items_tail(&self, limit: usize) -> (Vec<forge_types::ReplayItem>, usize) {
+        match self.store.load_message_tail(&self.id, limit) {
+            Ok((stored, total)) => {
+                let msgs: Vec<Message> = stored
+                    .into_iter()
+                    .map(|m| Message {
+                        role: m.role,
+                        content: m.content,
+                        tool_calls: m.tool_calls,
+                        tool_call_id: m.tool_call_id,
+                        images: Vec::new(),
+                        visibility: m.visibility,
+                    })
+                    .collect();
+                (messages_to_replay_items(&msgs), total)
+            }
+            Err(_) => {
+                let items = self.replay_items();
+                let n = items.len();
+                (items, n)
+            }
+        }
+    }
+
     /// Whether this session was compacted at least once (its model context is a summary, not the
     /// full history) — the signal for offering "continue compacted vs reload full" on resume.
     pub fn was_compacted(&self) -> bool {
@@ -198,6 +266,7 @@ impl Session {
                 visibility: m.visibility,
             })
             .collect();
+        self.history_epoch += 1;
         Ok(())
     }
 

@@ -61,7 +61,7 @@ pub fn matches(combo: &KeyCombo, ev: &KeyEvent) -> bool {
 /// Map a configurable action name to the `KeyKind` variant it should produce.
 pub fn action_to_key_kind(action: &str) -> Option<KeyKind> {
     match action {
-        "interrupt" => Some(KeyKind::Esc),
+        "interrupt" => Some(KeyKind::Interrupt),
         "command_center" => Some(KeyKind::OpenCommandCenter),
         "skip_model" => Some(KeyKind::SkipModel),
         "tier_up" => Some(KeyKind::TierUp),
@@ -187,13 +187,13 @@ mod tests {
         KeyEvent::new(code, mods)
     }
 
-    /// Ctrl-C must resolve to interrupt (Esc), NOT copy_last — they share key `c`+ctrl and differ
+    /// Ctrl-C must resolve to interrupt, NOT copy_last — they share key `c`+ctrl and differ
     /// only by shift. A regression here makes Ctrl-C copy instead of stopping the turn.
     #[test]
     fn ctrl_c_is_interrupt_not_copy() {
         let kb = KeybindsConfig::default();
         let plain = ev(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(resolve_action(&kb, &plain), Some(KeyKind::Esc));
+        assert_eq!(resolve_action(&kb, &plain), Some(KeyKind::Interrupt));
 
         let with_shift = ev(
             KeyCode::Char('c'),

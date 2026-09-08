@@ -382,7 +382,7 @@ impl Tui {
                 }
                 let key = match k.code {
                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::Esc
+                        KeyKind::Interrupt
                     }
                     KeyCode::Char('o') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::ToggleSubagentDetail

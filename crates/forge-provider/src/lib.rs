@@ -16,6 +16,7 @@ mod codex_websocket;
 mod embedder;
 mod error;
 mod genai_provider;
+pub mod headroom;
 mod mock;
 mod oauth_responses;
 mod tool_recovery;
@@ -710,6 +711,11 @@ pub struct CheckpointContext {
     pub workspace: String,
     /// Parent's live permission temper key (`FORGE_PERMISSION_MODE`).
     pub mode: String,
+    /// The conversation's history epoch: bumped whenever the transcript is rewritten from the
+    /// outside (`/rewind`, `/uncompact`, a full-history reload). A CLI bridge that resumes its own
+    /// server-side session must key that resume on this too — after a rewind the bridge's session
+    /// still holds the turns Forge just removed, and a resumed delta would re-attach them.
+    pub epoch: u64,
 }
 
 /// A provider-neutral structured-output request (OpenAI `response_format`). Backends that support

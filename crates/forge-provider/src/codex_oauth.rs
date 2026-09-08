@@ -1367,6 +1367,7 @@ mod tests {
             root: "/tmp/checkpoints".into(),
             workspace: "/tmp/workspace".into(),
             mode: "ask".into(),
+            epoch: 0,
         };
         let first = provider.turn_websocket_state(
             &checkpoint,
@@ -1468,6 +1469,7 @@ mod tests {
             root: "/tmp/checkpoints".into(),
             workspace: "/tmp/workspace".into(),
             mode: "ask".into(),
+            epoch: 0,
         };
         let busy = provider.turn_websocket_state(
             &checkpoint(0),
@@ -1519,6 +1521,7 @@ mod tests {
             root: "/tmp/checkpoints".into(),
             workspace: "/tmp/workspace".into(),
             mode: "ask".into(),
+            epoch: 0,
         };
         let busy = (0..MAX_TURN_WEBSOCKET_SESSIONS)
             .map(|session| {
@@ -1699,6 +1702,7 @@ mod tests {
             root: "/tmp/checkpoints".into(),
             workspace: "/tmp/workspace".into(),
             mode: "ask".into(),
+            epoch: 0,
         };
         let ws_url = format!("ws://{address}/responses");
         let first = serde_json::json!({
@@ -1862,6 +1866,7 @@ mod tests {
             root: "/tmp/checkpoints".into(),
             workspace: "/tmp/workspace".into(),
             mode: "ask".into(),
+            epoch: 0,
         };
         let ws_url = format!("ws://{address}/responses");
         let body_with = |input: serde_json::Value| {

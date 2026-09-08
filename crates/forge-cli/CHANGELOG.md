@@ -6,6 +6,57 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Steer a running turn from the queue.** A prompt typed while Forge is busy was queued and only
+  sent after the whole turn finished. It is now handed to the model at the turn's next boundary —
+  after a tool step's results, or where the response would otherwise have ended the turn — as a
+  persisted user message, echoed in place as `you ⚡ steer` and dropped from the pending list;
+  anything still queued when the turn ends starts the next turn as before. Same semantics as
+  Claude Code / Codex (docs/features/steering.md).
+- **`/rewind` (alias `/undo`) and Esc Esc.** Rewinding now also removes the rewound turns from
+  the model's *context*, not just the transcript: the CLI bridge's server-side session is keyed on
+  a per-session history epoch so a rewound `claude`/`codex` conversation is never resumed (it
+  still held every removed turn — and a rewind followed by a re-prompt often leaves the transcript
+  the same length, so the old "did it shrink?" check passed); AGENTS.md / white-hot "already
+  injected" latches are re-derived from what survived; a rewind into compacted history undoes the
+  compaction first instead of leaving the model with nothing; turn seq, queued hints, pending
+  images and steers are reset. Two idle Esc presses open the picker; a bare Esc no longer quits
+  (Ctrl-C does) (docs/features/rewind.md).
+- **Native RTK and Headroom token savings** (docs/features/token-savings.md). `[shell] rtk = auto`
+  routes eligible shell commands (`cargo test/check/build/clippy`, `ls`, `find`, `wc`, `git
+  status`, JS test/lint runners) through `rtk` when it is on `PATH`; measured 68–99% fewer tokens on
+  cargo output, 70–87% on directory listings, with compile errors preserved in full. Commands whose
+  RTK rendering was measured lossy (`grep`/`rg`, `cat`, `git diff/show`) are never rewritten and the
+  result header says when a rewrite happened. `[mesh] headroom = auto` routes direct-API calls
+  (OpenAI-wire, Anthropic, Gemini adapters) and the `claude` bridge through a running Headroom
+  proxy. Default `off`: measured on Forge's own traffic the proxy removed 0.2% of input tokens
+  for ~0.4 s added latency per request (Forge already bounds and prunes tool output). The doc also
+  records the Headroom bug that made it compress nothing on Codex — Codex sends tool results as a
+  list of text parts, which Headroom's extractor did not recognise — with the patch that fixes it
+  (`docs/patches/`, 3,478 → 2,556 tokens on one tool result once applied).
+- **`FORGE_SQL_PROFILE=<file>`** appends one `<micros>\t<thread>\t<sql>` line per executed
+  statement on every store connection — the tool that found the startup I/O below.
+
+### Fixed
+- **Mobile/remote transcript showed every tool call twice, with a stray "running" line.** The
+  expandable tool card rows are laid out for a terminal width (status pushed to the right margin,
+  `◍ running` until the result lands); the phone's transcript ring is append-only, so the padded
+  running row wrapped into its own "running" line and stayed there next to the finished row.
+  Tool rows now enter the ring with padding collapsed and the transient mark dropped.
+
+### Changed
+- **`forge chat` opens instantly and resumes big sessions in a fraction of the time.** The terminal
+  is drawn first and the session (store, keyring, catalog, skills, MCP) comes up behind a
+  `starting session…` spinner instead of a blank screen. The background Lattice update no longer
+  starts the moment the session exists: it waits 1.5 s and runs at idle I/O + low CPU priority,
+  because on a cold page cache it pulled ~100 MB of a multi-GB store through the same disk the
+  first frame was waiting on (3.2 s to first frame cold, measured). Resuming renders only the
+  newest 600 messages into scrollback — the log ring holds a few thousand lines, so the rest was
+  loaded, markdown-rendered and immediately trimmed again. And the real cost of resuming that
+  23k-message session turned out to be one unindexed join: `routing_decision` had no index on
+  `message_id`, so the per-session model lookup at resume walked it for every message row —
+  5.5 s in a single statement. Migration 34 adds `idx_routing_decision_message`.
+
 ## [2.15.0] - 2026-09-08
 
 ### Added

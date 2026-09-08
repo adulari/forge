@@ -11,8 +11,10 @@ pub(crate) fn sandboxed_shell_tool_in(
     config: &forge_config::Config,
     workspace: &std::path::Path,
 ) -> Option<forge_tools::ShellTool> {
+    let rtk = rtk_rewriter(config);
     if !(config.shell.sandbox || config.shell.scoped_cargo_target) {
-        return None;
+        // No sandbox knobs: keep the default (unconfined) shell tool, RTK-routed when enabled.
+        return rtk.map(|r| forge_tools::ShellTool::default().with_rtk(Some(r)));
     }
     let writable = config
         .shell
@@ -28,14 +30,39 @@ pub(crate) fn sandboxed_shell_tool_in(
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("forge-cargo-target"))
     });
-    Some(forge_tools::ShellTool::with_policy_in_workspace(
-        forge_tools::SandboxPolicy {
-            enabled: config.shell.sandbox,
-            writable,
-            cargo_target_base,
-        },
-        workspace,
-    ))
+    Some(
+        forge_tools::ShellTool::with_policy_in_workspace(
+            forge_tools::SandboxPolicy {
+                enabled: config.shell.sandbox,
+                writable,
+                cargo_target_base,
+            },
+            workspace,
+        )
+        .with_rtk(rtk),
+    )
+}
+
+/// The RTK rewriter for `[shell] rtk` (docs/features/token-savings.md): `auto` uses a genuine
+/// `rtk` found on `PATH` (probed once per process — the probe spawns `rtk --version`), `on`
+/// insists on `rtk` even when the probe failed (a missing binary then surfaces as the command's
+/// own error instead of silently running unfiltered), `off` never rewrites.
+pub(crate) fn rtk_rewriter(config: &forge_config::Config) -> Option<forge_tools::RtkRewriter> {
+    use forge_config::AutoToggle;
+    static DETECTED: std::sync::OnceLock<Option<forge_tools::RtkRewriter>> =
+        std::sync::OnceLock::new();
+    if config.shell.rtk == AutoToggle::Off {
+        return None;
+    }
+    let detected = DETECTED
+        .get_or_init(forge_tools::RtkRewriter::detect)
+        .clone();
+    let rewriter = match (config.shell.rtk, detected) {
+        (AutoToggle::On, None) => forge_tools::RtkRewriter::at("rtk"),
+        (_, Some(r)) => r,
+        (_, None) => return None,
+    };
+    Some(rewriter.skipping(config.shell.rtk_skip.clone()))
 }
 
 #[allow(dead_code)]

@@ -226,6 +226,8 @@ impl Session {
             workspace,
             extra_tool_roots,
             pending_hints: vec![],
+            steer: crate::steer::SteerInbox::default(),
+            history_epoch: 0,
             always_compact_on_switch: false,
             project_prompt_injected,
             agents_md_fingerprint: None,

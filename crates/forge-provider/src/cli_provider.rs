@@ -978,28 +978,8 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 /// Cap on captured stderr (for error messages) so a chatty CLI can't blow memory.
 const STDERR_CAP: usize = 16 * 1024;
 
-/// Cross-call session-continuity state for the bridge (claude `--resume`). After the first turn we
-/// hold the CLI's own `session_id` and how many transcript messages it has already seen; the next
-/// turn RESUMES that session and sends ONLY the new messages, so claude reloads its context from its
-/// own store instead of Forge re-rendering + re-sending the whole transcript every re-drive. That is
-/// the headline bridge-efficiency win (fewer tokens in *and* a prompt-cache hit on claude's side).
-#[derive(Default)]
-struct ResumeState {
-    /// The CLI session id captured from a prior turn's stream (`None` → next turn is fresh).
-    session_id: Option<String>,
-    /// Count of transcript messages already handed to that session (the resume "high-water mark").
-    sent: usize,
-    /// The bare model the live session was started under. Resuming it under a DIFFERENT model (after
-    /// a mesh re-route / failover) would be wrong, so a model change forces a fresh session.
-    model: String,
-    /// The identifying id ([`CheckpointContext::session`]) of the conversation that recorded this
-    /// slot. This single `ResumeState` slot is shared by every caller of this `CliProvider`
-    /// instance — the main session AND any subagents spawned within it — so without this key a
-    /// resume decided for one conversation could `--resume` a DIFFERENT conversation's live
-    /// claude/codex session, cross-wiring their turns. `None` when the call carried no checkpoint
-    /// context (legacy inherited-env fallback).
-    owner: Option<String>,
-}
+mod resume;
+use resume::ResumeState;
 
 /// A [`Provider`] that delegates the completion to an external agent CLI.
 pub struct CliProvider {
@@ -1091,7 +1071,14 @@ impl CliProvider {
     /// Record a live session after a successful turn so the next call can `--resume` it. `owner` is
     /// the calling conversation's [`CheckpointContext::session`] id, so a later call from a
     /// DIFFERENT conversation sharing this provider never reuses this slot (see [`ResumeState::owner`]).
-    fn record_session(&self, id: Option<String>, sent: usize, model: &str, owner: Option<&str>) {
+    fn record_session(
+        &self,
+        id: Option<String>,
+        sent: usize,
+        model: &str,
+        owner: Option<&str>,
+        epoch: u64,
+    ) {
         if let Ok(mut st) = self.resume.lock() {
             // Always overwrite — `None` CLEARS a stale id. Keeping the old id on a turn that produced
             // no session handle (e.g. a fresh-transcript turn where the CLI emitted no thread id) made
@@ -1100,7 +1087,24 @@ impl CliProvider {
             st.sent = sent;
             st.model = model.to_string();
             st.owner = owner.map(str::to_string);
+            st.epoch = epoch;
         }
+    }
+
+    /// Whether the recorded CLI session may be resumed for a call over `messages_len` messages of
+    /// `model` from the conversation `checkpoint` describes. Every clause guards a way the CLI's
+    /// server-side history could diverge from the transcript Forge is about to send a delta of:
+    /// the transcript shrank (compaction/reset), the model changed, another conversation shares
+    /// this provider instance, or the history was rewritten in place (`/rewind`, `/uncompact` —
+    /// the epoch), which can leave the length equal while the content differs.
+    fn can_resume(
+        &self,
+        st: &ResumeState,
+        messages_len: usize,
+        model: &str,
+        checkpoint: Option<&CheckpointContext>,
+    ) -> bool {
+        resume::allowed(self.resumes(), st, messages_len, model, checkpoint)
     }
 
     /// Forget the session (after a resumed turn failed, or the transcript shrank) so the next call
@@ -1577,23 +1581,6 @@ fn apply_resume_reminder(harness: bool, kind: CliKind, prompt: String) -> String
     }
 }
 
-/// Render only the NEW User/System messages in `tail` (the slice of the transcript not yet sent to a
-/// resumed CLI session). Assistant + Tool messages are skipped: the resumed session already holds the
-/// model's own prior turn and the tool results it produced, so re-sending Forge's record of them
-/// would duplicate. The result is the just the new instruction(s) — a `continue` nudge, or a new user
-/// turn. Empty if `tail` carries nothing the model still needs to act on.
-fn render_resume_delta(tail: &[Message]) -> String {
-    let mut out = Vec::new();
-    for m in tail {
-        match m.role {
-            Role::System => out.push(m.content.clone()),
-            Role::User => out.push(format!("User: {}", m.content)),
-            Role::Assistant | Role::Tool => {} // the resumed session already has these
-        }
-    }
-    out.join("\n\n")
-}
-
 /// Extract claude's stream-json `session_id` from one raw NDJSON line (every line carries it). Used
 /// to capture the session so the next turn can `--resume` it. `None` if absent / unparseable.
 fn claude_session_id(line: &str) -> Option<String> {
@@ -1852,15 +1839,9 @@ impl CliProvider {
                 .resume
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let can_resume = self.resumes()
-                && st.session_id.is_some()
-                && st.sent <= messages.len()
-                && st.model == bare_model(model) // a model change → fresh session
-                // A different conversation (main session vs. a subagent, or two subagents) sharing
-                // this provider instance must never resume ANOTHER conversation's live session.
-                && st.owner.as_deref() == checkpoint.map(|c| c.session.as_str());
+            let can_resume = self.can_resume(&st, messages.len(), model, checkpoint);
             if can_resume {
-                let delta = render_resume_delta(&messages[st.sent..]);
+                let delta = resume::render_resume_delta(&messages[st.sent..]);
                 if delta.trim().is_empty() {
                     // Nothing new to act on (shouldn't normally happen) — fall back to a fresh render.
                     (
@@ -2323,6 +2304,7 @@ impl CliProvider {
                 messages.len(),
                 bare_model(model),
                 checkpoint.map(|c| c.session.as_str()),
+                checkpoint.map_or(0, |c| c.epoch),
             );
         }
 
@@ -2587,6 +2569,9 @@ struct LiveSession {
     model: String,
     /// Transcript messages already consumed by the live process (the delta high-water mark).
     sent: usize,
+    /// [`CheckpointContext::epoch`] at spawn — see [`ResumeState::epoch`]. A rewind mid-session
+    /// forces a respawn so the parked process's context can't outlive the history it came from.
+    epoch: u64,
     /// `FORGE_CHECKPOINT_SEQ` captured at spawn. A NEW user turn bumps it, and the served
     /// `forge mcp-serve` snapshots edits against it — so a change forces a respawn to keep
     /// bridge-edit `/undo` granularity correct. Re-drives WITHIN a turn keep the same seq and reuse
@@ -3021,6 +3006,7 @@ impl CliProvider {
             pgid,
             model: bare.to_string(),
             sent: 0,
+            epoch: checkpoint.map_or(0, |c| c.epoch),
             checkpoint_seq,
             permission_mode,
             effort,
@@ -3059,8 +3045,9 @@ impl CliProvider {
         // context is stale after a compaction/reset), belongs to the same user turn (checkpoint), and
         // isn't mid-turn from a prior call that never finished (see `LiveSession::turn_in_flight`) —
         // reusing that one would write a new turn into a stream whose read position is ambiguous.
+        let epoch = checkpoint.map_or(0, |c| c.epoch);
         let reuse = matches!(&*guard, Some(s)
-            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.checkpoint_seq == checkpoint_seq && s.permission_mode == permission_mode && s.effort == effort && !s.turn_in_flight);
+            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.epoch == epoch && s.checkpoint_seq == checkpoint_seq && s.permission_mode == permission_mode && s.effort == effort && !s.turn_in_flight);
         if !reuse {
             if let Some(old) = guard.take() {
                 old.teardown().await;
@@ -3082,7 +3069,7 @@ impl CliProvider {
         let payload = if sess.sent == 0 {
             apply_harness_preamble(self.harness, self.kind, render_prompt(messages))
         } else {
-            let delta = render_resume_delta(&messages[sess.sent..]);
+            let delta = resume::render_resume_delta(&messages[sess.sent..]);
             if delta.trim().is_empty() {
                 apply_harness_preamble(self.harness, self.kind, render_prompt(messages))
             } else {
@@ -3323,6 +3310,12 @@ fn put_in_own_process_group(cmd: &mut Command) {
 fn apply_claude_bridge_home(kind: CliKind, cmd: &mut Command) {
     if kind != CliKind::ClaudeCode {
         return;
+    }
+    // Headroom routing (docs/features/token-savings.md): the claude CLI honours
+    // `ANTHROPIC_BASE_URL`, so the bridge's own API traffic goes through the same proxy the direct
+    // path uses. Decided once at startup by `headroom::configure`.
+    if let Some(proxy) = forge_config::headroom_route() {
+        cmd.env("ANTHROPIC_BASE_URL", proxy);
     }
     let Some(real_home) = crate::claude_bridge_home::real_claude_config_dir() else {
         return;
@@ -3946,6 +3939,40 @@ mod tests {
     }
 
     #[test]
+    fn a_rewound_history_epoch_forbids_resuming_the_cli_session() {
+        let provider = CliProvider::claude_code();
+        let ctx = |epoch: u64| CheckpointContext {
+            session: "conv-1".into(),
+            seq: 3,
+            root: "/tmp/cp".into(),
+            workspace: "/tmp/ws".into(),
+            mode: "ask".into(),
+            epoch,
+        };
+        provider.record_session(Some("sid".into()), 4, "opus", Some("conv-1"), 0);
+        let st = provider.resume.lock().unwrap();
+        // Same epoch, transcript grew: resume.
+        assert!(provider.can_resume(&st, 6, "claude-cli::opus", Some(&ctx(0))));
+        // Same length as before but the history was rewritten (rewind then re-prompt): fresh.
+        assert!(!provider.can_resume(&st, 6, "claude-cli::opus", Some(&ctx(1))));
+        // The pre-existing guards still hold.
+        assert!(
+            !provider.can_resume(&st, 3, "claude-cli::opus", Some(&ctx(0))),
+            "shrank"
+        );
+        assert!(
+            !provider.can_resume(&st, 6, "claude-cli::sonnet", Some(&ctx(0))),
+            "model"
+        );
+        let mut other = ctx(0);
+        other.session = "conv-2".into();
+        assert!(
+            !provider.can_resume(&st, 6, "claude-cli::opus", Some(&other)),
+            "owner"
+        );
+    }
+
+    #[test]
     fn render_resume_delta_sends_only_new_user_and_system_messages() {
         use forge_types::Message;
         // A resumed session already holds the model's prior turn + tool results, so the delta is just
@@ -3956,7 +3983,7 @@ mod tests {
             Message::system("The plan is NOT finished — continue."),
             Message::user("also handle the edge case"),
         ];
-        let delta = render_resume_delta(&tail);
+        let delta = resume::render_resume_delta(&tail);
         assert!(delta.contains("The plan is NOT finished"));
         assert!(delta.contains("User: also handle the edge case"));
         assert!(
@@ -3965,7 +3992,7 @@ mod tests {
         );
         assert!(!delta.contains("ok"), "tool result is not re-sent");
         // Nothing actionable → empty (caller falls back to a fresh full render).
-        assert!(render_resume_delta(&[Message::assistant("x")]).is_empty());
+        assert!(resume::render_resume_delta(&[Message::assistant("x")]).is_empty());
     }
 
     #[test]
@@ -4081,7 +4108,7 @@ mod tests {
             if turn == 0 {
                 on_bytes += render_prompt(&messages).len();
             } else {
-                on_bytes += render_resume_delta(&messages[sent..]).len();
+                on_bytes += resume::render_resume_delta(&messages[sent..]).len();
             }
             sent = messages.len();
             // The bridge produced a (chunky) assistant turn + a tool result; then a re-drive nudge.
@@ -4387,6 +4414,7 @@ mod tests {
                 root: "/tmp/checkpoints".to_string(),
                 workspace: "/tmp/workspace".to_string(),
                 mode: mode.label().to_string(),
+                epoch: 0,
             };
             let mcp_env = bridge_mcp_env(None, Some(&ctx));
 
@@ -4433,6 +4461,7 @@ mod tests {
             root: "/tmp/checkpoints".to_string(),
             workspace: "/tmp/workspace".to_string(),
             mode: mode.label().to_string(),
+            epoch: 0,
         };
         let key =
             |mode: PermissionMode| live_permission_mode(&bridge_mcp_env(None, Some(&ctx(mode))));
@@ -4462,6 +4491,7 @@ mod tests {
             root: "/tmp/checkpoints".to_string(),
             workspace: "/tmp/workspace".to_string(),
             mode: PermissionMode::Bypass.label().to_string(),
+            epoch: 0,
         };
         let env = bridge_mcp_env(None, Some(&ctx));
         assert_eq!(
@@ -4473,6 +4503,7 @@ mod tests {
 
         let ask = CheckpointContext {
             mode: PermissionMode::Default.label().to_string(),
+            epoch: 0,
             ..ctx.clone()
         };
         let ask_env = bridge_mcp_env(None, Some(&ask));
@@ -4494,6 +4525,7 @@ mod tests {
             root: "/abs/checkpoints".to_string(),
             workspace: "/abs/workspace".to_string(),
             mode: "accept-edits".to_string(),
+            epoch: 0,
         };
         let sink = std::path::PathBuf::from("/tmp/sink.jsonl");
         let env = bridge_mcp_env(Some(sink.as_path()), Some(&ctx));
@@ -4525,6 +4557,7 @@ mod tests {
                 root: "/tmp/checkpoints".to_string(),
                 workspace: "/tmp/workspace".to_string(),
                 mode: mode.to_string(),
+                epoch: 0,
             };
             let env = bridge_mcp_env(None, Some(&ctx));
             assert_eq!(
@@ -4543,6 +4576,7 @@ mod tests {
             root: "/tmp/checkpoints".to_string(),
             workspace: "/tmp/workspace".to_string(),
             mode: "yolo".to_string(),
+            epoch: 0,
         };
         let env = bridge_mcp_env(None, Some(&invalid));
         assert_eq!(
@@ -6004,6 +6038,7 @@ done
                     .to_string(),
                 workspace: workspace.path().display().to_string(),
                 mode: "bypass".to_string(),
+                epoch: 0,
             }),
             ..CompletionOptions::default()
         };

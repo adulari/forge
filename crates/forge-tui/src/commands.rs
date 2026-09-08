@@ -114,9 +114,9 @@ pub const COMMANDS: &[Command] = &[
         usage: "/new",
     },
     Command {
-        name: "undo",
-        desc: "pick a past message to rewind to (chat + file edits)",
-        usage: "/undo",
+        name: "rewind",
+        desc: "pick a past message to rewind to — chat, context AND file edits (alias /undo, Esc Esc)",
+        usage: "/rewind",
     },
     Command {
         name: "checkpoint",
@@ -626,7 +626,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "new" | "n" => CommandAction::New,
         "mode" | "m" | "temper" => CommandAction::Mode,
         "assay" | "analyze" | "analyse" => assay_action(&arg),
-        "undo" | "u" => CommandAction::Undo,
+        "rewind" | "undo" | "u" => CommandAction::Undo,
         "checkpoint" | "cp" => CommandAction::Checkpoint((!arg.is_empty()).then_some(arg)),
         "checkpoints" => CommandAction::ListCheckpoints,
         "compact" => CommandAction::Compact,
@@ -796,8 +796,8 @@ pub struct CommandCenterEntry {
 pub fn command_category(name: &str) -> &'static str {
     match name {
         "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
-        "sessions" | "resume" | "replay" | "undo" | "checkpoint" | "checkpoints" | "compact"
-        | "uncompact" | "refine" | "clear" | "btw" | "export" => "Session",
+        "sessions" | "resume" | "replay" | "rewind" | "undo" | "checkpoint" | "checkpoints"
+        | "compact" | "uncompact" | "refine" | "clear" | "btw" | "export" => "Session",
         "model" | "models" | "mode" | "effort" | "subagents" | "thinking" | "mesh" | "usage" => {
             "Model & usage"
         }
@@ -1238,6 +1238,7 @@ mod tests {
         assert_eq!(parse_command("/mode"), CommandAction::Mode);
         assert_eq!(parse_command("/m"), CommandAction::Mode);
         assert_eq!(parse_command("/undo"), CommandAction::Undo);
+        assert_eq!(parse_command("/rewind"), CommandAction::Undo);
         assert_eq!(parse_command("/compact"), CommandAction::Compact);
         assert_eq!(parse_command("/uncompact"), CommandAction::Uncompact);
         assert_eq!(

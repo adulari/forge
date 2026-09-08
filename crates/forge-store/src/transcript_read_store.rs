@@ -129,6 +129,47 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// The NEWEST `limit` messages of a session in turn order — soft-deleted rows included, no
+    /// summary marker — plus the session's total message count. The scrollback replay on resume
+    /// only ever shows the tail (`forge-tui`'s log ring is bounded), so loading and rendering all
+    /// 20k+ messages of a long session just to trim them again cost seconds on every start.
+    pub fn load_message_tail(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<(Vec<StoredMessage>, usize)> {
+        let conn = self.lock()?;
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM message WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility
+             FROM message WHERE session_id = ?1 ORDER BY seq DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map((session_id, limit as i64), |row| {
+            let role: String = row.get(0)?;
+            let tool_calls_json: Option<String> = row.get(3)?;
+            let tool_calls =
+                parse_tool_calls_with_diagnostic(session_id, None, tool_calls_json.as_deref());
+            let visibility: String = row.get(5)?;
+            Ok(StoredMessage {
+                role: parse_role_with_diagnostic(session_id, None, &role),
+                content: row.get(1)?,
+                model: row.get(2)?,
+                tool_calls,
+                tool_call_id: row.get(4)?,
+                visibility: Visibility::parse(&visibility),
+            })
+        })?;
+        let mut msgs = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)?;
+        msgs.reverse();
+        Ok((msgs, total.max(0) as usize))
+    }
+
     /// One page of a session's user-facing transcript, NEWEST first — the remote-control
     /// scrollback pagination seam (docs/features/remote-control.md). Returns user + assistant
     /// turns plus `visibility='ui'` notes (they are part of the visible conversation); tool
@@ -495,5 +536,54 @@ mod tests {
         let replay = store.load_replay(&session).unwrap();
         assert_eq!(replay.len(), 1);
         assert!(replay[0].tool_calls.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+
+    #[test]
+    fn load_message_tail_returns_the_newest_rows_in_order_with_the_total() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        for i in 0..12i64 {
+            let role = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            store
+                .add_message(&sid, i, role, &format!("m{i}"), None)
+                .unwrap();
+        }
+        // Soft-deleted rows are part of the user's history and stay included.
+        store.deactivate_messages_from(&sid, 11).unwrap();
+        let (tail, total) = store.load_message_tail(&sid, 5).unwrap();
+        assert_eq!(total, 12);
+        assert_eq!(
+            tail.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
+            vec!["m7", "m8", "m9", "m10", "m11"]
+        );
+        let (all, total) = store.load_message_tail(&sid, 100).unwrap();
+        assert_eq!((all.len(), total), (12, 12));
+        assert_eq!(all[0].content, "m0");
+    }
+
+    #[test]
+    fn min_active_seq_tracks_compaction_and_rewinds() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        assert_eq!(store.min_active_seq(&sid).unwrap(), None);
+        for i in 0..6i64 {
+            store
+                .add_message(&sid, i, Role::User, &format!("m{i}"), None)
+                .unwrap();
+        }
+        assert_eq!(store.min_active_seq(&sid).unwrap(), Some(0));
+        store.compact_session_store(&sid, "s", 2).unwrap();
+        assert_eq!(store.min_active_seq(&sid).unwrap(), Some(4));
+        store.uncompact_session_store(&sid).unwrap();
+        assert_eq!(store.min_active_seq(&sid).unwrap(), Some(0));
     }
 }

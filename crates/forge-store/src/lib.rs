@@ -59,7 +59,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 33;
+const SCHEMA_VERSION: i64 = 34;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -424,6 +424,54 @@ struct SqliteManager {
     source: ConnSource,
 }
 
+/// `FORGE_SQL_PROFILE=<file>`: append one `<micros>\t<sql>` line per executed statement on every
+/// pooled connection. A startup that touches tens of megabytes of a multi-gigabyte store has no
+/// other way to name the statement responsible — `strace` is not on most machines and SQLite's
+/// own page reads carry no query identity. Off (no callback installed) unless the variable is set.
+fn install_sql_profiler(conn: &Connection) {
+    if sql_profile_path().is_none() {
+        return;
+    }
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+    conn.trace_v2(
+        TraceEventCodes::SQLITE_TRACE_PROFILE,
+        Some(|event: TraceEvent<'_>| {
+            use std::io::Write;
+            let TraceEvent::Profile(stmt, elapsed) = event else {
+                return;
+            };
+            let Some(path) = sql_profile_path() else {
+                return;
+            };
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let sql = stmt.sql();
+                let one_line = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+                let _ = writeln!(
+                    f,
+                    "{}\t{:?}\t{}",
+                    elapsed.as_micros(),
+                    std::thread::current().id(),
+                    one_line
+                );
+            }
+        }),
+    );
+}
+
+fn sql_profile_path() -> Option<&'static str> {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        std::env::var("FORGE_SQL_PROFILE")
+            .ok()
+            .filter(|p| !p.is_empty())
+    })
+    .as_deref()
+}
+
 impl r2d2::ManageConnection for SqliteManager {
     type Connection = Connection;
     type Error = rusqlite::Error;
@@ -450,6 +498,7 @@ impl r2d2::ManageConnection for SqliteManager {
         // and it never shrinks again; see [`WAL_SIZE_LIMIT_BYTES`]. Per-connection and not
         // persisted, hence set here rather than once during migration.
         conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
+        install_sql_profiler(&conn);
         Ok(conn)
     }
 

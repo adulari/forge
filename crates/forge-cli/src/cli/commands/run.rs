@@ -2,6 +2,11 @@ use anyhow::{Context, Result};
 use std::io::IsTerminal;
 use std::sync::Arc;
 
+/// How many of a resumed session's newest messages are rendered into scrollback. The log ring
+/// holds a few thousand lines, so anything older would be trimmed straight back out — but loading
+/// and rendering it first cost seconds on a 20k-message session.
+pub(crate) const REPLAY_TAIL_MESSAGES: usize = 600;
+
 use forge_core::Session;
 use forge_tools::ToolRegistry;
 use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
@@ -455,19 +460,81 @@ pub(crate) async fn run_chat_tui(
     };
     let tx_mcp = tx.clone(); // clone before tx is moved into ChannelPresenter
     let tx_custom = tx.clone(); // held for the render loop's shell-backed custom-widget refresh
-    let session = build_session_with(
-        Box::new(ChannelPresenter::new(tx)),
-        mock,
-        mode,
-        resume_id,
-        pin,
-        true, // suppress initial "reconnecting" announce; re-announce fires after connect_active
-    )
-    .await?;
+
+    // Inline-mode banner: print BEFORE ratatui creates the inline viewport so the terminal's own
+    // line-ending handling clears the full row width. ratatui's draw_lines_over_cleared uses
+    // old.diff(&new) which skips default-style cells at cols 42+ (empty == empty in the diff),
+    // leaving old terminal content visible to the right of the 42-char logo when the terminal has
+    // prior content (e.g. Claude Code hook output). Full-screen has no scrollback; banner goes
+    // into the transcript log after Tui::new().
+    if matches!(resume_mode, ResumeMode::Fresh) && !fullscreen {
+        print_banner_direct();
+    }
+    // Mouse capture (full-screen wheel scroll) is opt-in: it disables native click-drag text
+    // selection, so it stays off unless the user enables `[tui] mouse_capture`.
+    let mouse_capture = tui_config.tui.mouse_capture;
+    let mut tui = Tui::new(fullscreen, mouse_capture, tui_config.keybinds.clone())
+        .context("initializing TUI")?;
+    let mut app = App::default();
+    app.fullscreen = fullscreen;
+    app.transcript_follow = true;
+    // Wire statusline config from the loaded config.
+    app.statusline_config = tui_config.statusline.clone();
+    app.keybinds = tui_config.keybinds.clone();
+    // Full-screen banner goes into the transcript log (no native scrollback in full-screen mode).
+    // Inline banner was already printed directly to stdout above.
+    if matches!(resume_mode, ResumeMode::Fresh) && fullscreen {
+        let banner = banner_lines(tui.width());
+        app.push_scrollback(banner);
+    }
+
+    // The terminal is live from here on: the session (store, keyring, provider catalog, skills,
+    // MCP) comes up behind a spinner instead of in front of a blank screen. Warm, that phase is a
+    // few hundred milliseconds; on a cold page cache it is seconds, and a blank terminal for
+    // seconds reads as a hang.
+    let session = {
+        app.loading = Some("starting session…");
+        tui.draw(&app);
+        let build = build_session_with(
+            Box::new(ChannelPresenter::new(tx)),
+            mock,
+            mode,
+            resume_id,
+            pin,
+            true, // suppress initial "reconnecting" announce; re-announce fires after connect_active
+        );
+        tokio::pin!(build);
+        let mut ticker = tokio::time::interval(Duration::from_millis(80));
+        let session = loop {
+            tokio::select! {
+                built = &mut build => break built?,
+                _ = ticker.tick() => {
+                    app.tick = app.tick.wrapping_add(1);
+                    while let Ok(msg) = rx.try_recv() {
+                        match msg {
+                            UiMsg::Event(e) => app.apply(e),
+                            UiMsg::Permission { reply, .. } => {
+                                let _ = reply.send(ConfirmOutcome::Deny);
+                            }
+                            UiMsg::Question { reply, .. } => {
+                                let _ = reply.send(forge_tui::NO_ANSWER.to_string());
+                            }
+                        }
+                    }
+                    tui.draw(&app);
+                }
+            }
+        };
+        app.loading = None;
+        session
+    };
     // Grab the MCP connect-done receiver before moving the session into the Arc. When the
     // background connect_active() completes, re-announce so the TUI shows connected/failed
     // state rather than the "reconnecting" placeholder from the initial announce.
     let mcp_done_rx = session.mcp_connect_done();
+    // Held by this loop for the life of the process: prompts typed while a turn runs go in here as
+    // well as into `queued_prompts`, so the running turn can pick them up at its next boundary.
+    let steer = session.steer_handle();
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
     if let Some(mut rx) = mcp_done_rx {
         let s = session.clone();
@@ -520,26 +587,6 @@ pub(crate) async fn run_chat_tui(
         }
     }
 
-    // Inline-mode banner: print BEFORE ratatui creates the inline viewport so the terminal's own
-    // line-ending handling clears the full row width. ratatui's draw_lines_over_cleared uses
-    // old.diff(&new) which skips default-style cells at cols 42+ (empty == empty in the diff),
-    // leaving old terminal content visible to the right of the 42-char logo when the terminal has
-    // prior content (e.g. Claude Code hook output). Full-screen has no scrollback; banner goes
-    // into the transcript log after Tui::new().
-    if matches!(resume_mode, ResumeMode::Fresh) && !fullscreen {
-        print_banner_direct();
-    }
-    // Mouse capture (full-screen wheel scroll) is opt-in: it disables native click-drag text
-    // selection, so it stays off unless the user enables `[tui] mouse_capture`.
-    let mouse_capture = tui_config.tui.mouse_capture;
-    let mut tui = Tui::new(fullscreen, mouse_capture, tui_config.keybinds.clone())
-        .context("initializing TUI")?;
-    let mut app = App::default();
-    app.fullscreen = fullscreen;
-    app.transcript_follow = true;
-    // Wire statusline config from the loaded config.
-    app.statusline_config = tui_config.statusline.clone();
-    app.keybinds = tui_config.keybinds.clone();
     let session_workspace = session.lock().await.workspace_root().to_path_buf();
     // Statusline metadata must describe the resumed session workspace, not the
     // directory from which the launcher happened to start.
@@ -580,12 +627,6 @@ pub(crate) async fn run_chat_tui(
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
         });
-    // Full-screen banner goes into the transcript log (no native scrollback in full-screen mode).
-    // Inline banner was already printed directly to stdout above.
-    if matches!(resume_mode, ResumeMode::Fresh) && fullscreen {
-        let banner = banner_lines(tui.width());
-        app.push_scrollback(banner);
-    }
     let project = forge_config::project_initialization(&session_workspace);
     if !project.initialized {
         app.apply(forge_tui::PresenterEvent::Warning(
@@ -681,12 +722,18 @@ pub(crate) async fn run_chat_tui(
         // had cost nothing while the store knew otherwise, which reads exactly like restarting
         // wiped the spend. The totals were always persisted; only the display started at zero.
         s.emit_restored_totals();
-        let items = s.replay_items_full();
+        let (items, total) = s.replay_items_tail(REPLAY_TAIL_MESSAGES);
         if !items.is_empty() {
             let sid8: String = s.session_id().chars().take(8).collect();
-            let n = items.len();
             app.replay_history(&items);
-            app.push_resume_separator(&format!("— resumed session {sid8} ({n} entries) —"));
+            let label = if total > REPLAY_TAIL_MESSAGES {
+                format!(
+                    "— resumed session {sid8} (showing the last {REPLAY_TAIL_MESSAGES} of {total} messages) —"
+                )
+            } else {
+                format!("— resumed session {sid8} ({total} messages) —")
+            };
+            app.push_resume_separator(&label);
             // Restore the on-screen view (activity panel, viewer, scroll) saved on the last turn,
             // so resume reopens exactly where the user left off.
             if let Some(json) = s.view_snapshot() {
@@ -1257,6 +1304,24 @@ pub(crate) async fn run_chat_tui(
                     continue;
                 }
                 forge_tui::InputEvent::Key(k) => k,
+            };
+
+            // Ctrl-C (`Interrupt`): mid-turn it stops the response exactly like Esc (handled below);
+            // inside any overlay it closes that overlay like Esc; idle with nothing open it quits.
+            // A bare Esc no longer quits — see the idle-Esc branch below.
+            let key = if matches!(key, KeyKind::Interrupt) {
+                if !busy
+                    && pending.is_none()
+                    && !app.awaiting_question()
+                    && app.viewer.is_none()
+                    && !any_remote_modal_open(&app)
+                {
+                    quit = true;
+                    break;
+                }
+                KeyKind::Esc
+            } else {
+                key
             };
 
             // The workflow view is modal while open: ↑↓ move the row selection, Enter zooms into
@@ -2493,7 +2558,10 @@ pub(crate) async fn run_chat_tui(
                                 };
                                 s.reset_resumed(&session_id)
                                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                                let (items, view) = (s.replay_items_full(), s.view_snapshot());
+                                let (items, view) = (
+                                    s.replay_items_tail(REPLAY_TAIL_MESSAGES).0,
+                                    s.view_snapshot(),
+                                );
                                 drop(s);
                                 tui.clear_screen();
                                 app.clear_transcript();
@@ -2751,8 +2819,13 @@ pub(crate) async fn run_chat_tui(
                     dirty = true;
                     continue;
                 }
-                quit = true;
-                break;
+                // Idle Esc never quits (Ctrl-C does): a double-tap opens the rewind picker, a single
+                // press arms it and the statusline says "esc again to rewind".
+                if app.esc_tap() {
+                    open_checkpoint_picker(&session, &mut app, "rewind to a message").await?;
+                }
+                dirty = true;
+                continue;
             }
             if let Some((tool, reply)) = pending.take() {
                 // Answering a permission prompt.
@@ -2810,9 +2883,10 @@ pub(crate) async fn run_chat_tui(
                         app.note("⏳ commands run when the turn is idle — finish or Esc first");
                     } else {
                         queued_prompts.push(line.clone());
+                        steer.push(line.clone());
                         app.set_queued(&queued_prompts);
                         app.note(&format!(
-                            "⏳ queued ({} pending) — runs after this turn",
+                            "⏳ queued ({} pending) — sent at this turn's next step",
                             queued_prompts.len()
                         ));
                     }
@@ -3370,7 +3444,17 @@ pub(crate) async fn run_chat_tui(
         while let Ok(msg) = rx.try_recv() {
             dirty = true;
             match msg {
-                UiMsg::Event(e) => app.apply(e),
+                UiMsg::Event(e) => {
+                    // The running turn consumed a queued prompt: it must not run again as its own
+                    // turn once this one ends.
+                    if let forge_tui::PresenterEvent::Steered(text) = &e {
+                        if let Some(i) = queued_prompts.iter().position(|q| q == text) {
+                            queued_prompts.remove(i);
+                            app.set_queued(&queued_prompts);
+                        }
+                    }
+                    app.apply(e)
+                }
                 UiMsg::Permission {
                     tool,
                     side_effect,
@@ -3434,13 +3518,14 @@ pub(crate) async fn run_chat_tui(
                 // behaves exactly like a normal Prompt.
                 let input = match input {
                     remote::RemoteInput::Steer { text } if busy => {
+                        steer.push(text.clone());
                         forge_core::fleet::insert_into_queue(
                             &mut queued_prompts,
                             forge_core::fleet::MessageMode::Steer,
                             text,
                         );
                         app.set_queued(&queued_prompts);
-                        app.note("⚡ steered — next up when this turn ends");
+                        app.note("⚡ steered — sent at this turn's next step");
                         continue;
                     }
                     remote::RemoteInput::Steer { text } => remote::RemoteInput::Prompt {
@@ -3511,9 +3596,10 @@ pub(crate) async fn run_chat_tui(
                                 );
                             } else {
                                 queued_prompts.push(text.clone());
+                                steer.push(text.clone());
                                 app.set_queued(&queued_prompts);
                                 app.note(&format!(
-                                    "⏳ queued ({} pending) — runs after this turn",
+                                    "⏳ queued ({} pending) — sent at this turn's next step",
                                     queued_prompts.len()
                                 ));
                             }
@@ -4662,6 +4748,9 @@ pub(crate) async fn run_chat_tui(
                 tui.insert_lines(flushed);
                 dirty = true;
             }
+        }
+        if app.expire_esc_hint() {
+            dirty = true;
         }
         // Adaptive frame pacing. When the user is actively interacting (a key/paste was handled
         // this iteration) and no turn is streaming, loop back quickly so typing/selection in the

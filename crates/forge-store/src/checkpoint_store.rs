@@ -15,6 +15,17 @@ impl Store {
         )?)
     }
 
+    /// The lowest `seq` still active for a session, or `None` when nothing is active. A rewind
+    /// target below this boundary on a compacted session lands inside the folded-away history,
+    /// which has to be reactivated first ([`Session::rewind_to`]).
+    pub fn min_active_seq(&self, session_id: &str) -> Result<Option<i64>> {
+        Ok(self.lock()?.query_row(
+            "SELECT MIN(seq) FROM message WHERE session_id = ?1 AND active = 1",
+            [session_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?)
+    }
+
     /// Save a checkpoint (rewind point) at `seq`. `label` NULL = an auto per-turn checkpoint.
     pub fn add_checkpoint(
         &self,

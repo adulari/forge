@@ -390,6 +390,23 @@ fn build_custom_registry(runtime: &[RuntimeCustomProvider]) -> Vec<CustomProvide
     out
 }
 
+static HEADROOM_ROUTE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Record, once per process, whether direct-API calls route through a Headroom proxy and where it
+/// listens (no trailing slash). Decided at startup from `[mesh] headroom` + a health probe; read
+/// by the provider layer on every request (`headroom_route`). A second call is a no-op.
+pub fn set_headroom_route(url: Option<String>) {
+    let _ = HEADROOM_ROUTE.set(url.map(|u| u.trim_end_matches('/').to_string()));
+}
+
+/// The Headroom proxy base URL when routing is active, else `None`.
+pub fn headroom_route() -> Option<&'static str> {
+    HEADROOM_ROUTE.get().and_then(|o| o.as_deref())
+}
+
+/// The default Headroom proxy address (`headroom proxy` binds here).
+pub const HEADROOM_DEFAULT_URL: &str = "http://127.0.0.1:8787";
+
 /// Leak a `String` to `&'static str`. Only ever called on the bounded, build-once provider registry
 /// (a few entries for the whole process), so the leak is intentional and negligible.
 fn leak_str(s: String) -> &'static str {

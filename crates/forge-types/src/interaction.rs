@@ -62,6 +62,10 @@ pub enum PresenterEvent {
     AssistantDelta(String),
     Reasoning(String),
     AssistantDone,
+    /// A prompt the user queued while this turn was running has just been handed to the model
+    /// mid-turn (at a tool boundary or before the turn would otherwise have ended). Surfaces
+    /// echo it where it landed in the conversation and drop it from their pending queue.
+    Steered(String),
     Warning(String),
     Error(String),
     ModelSearch {

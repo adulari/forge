@@ -540,7 +540,11 @@ pub(crate) async fn picker_accept(
                 let mut s = session.lock().await;
                 s.reset_resumed(&row.id)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                (s.replay_items_full(), s.was_compacted(), s.view_snapshot())
+                (
+                    s.replay_items_tail(super::REPLAY_TAIL_MESSAGES).0,
+                    s.was_compacted(),
+                    s.view_snapshot(),
+                )
             };
             if let Some(tui) = tui {
                 tui.clear_screen();

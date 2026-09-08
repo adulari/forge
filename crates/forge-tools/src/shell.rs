@@ -40,7 +40,9 @@ use crate::sandbox::{self, SandboxPolicy};
 use crate::{str_arg, Tool, ToolError};
 mod background;
 mod pty;
+mod rtk;
 pub use background::ShellJobTool;
+pub use rtk::RtkRewriter;
 mod output;
 use output::{render_streams, stream_text, truncate_for_model};
 
@@ -71,6 +73,8 @@ const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct ShellTool {
     pub policy: SandboxPolicy,
     workspace: Option<std::path::PathBuf>,
+    /// RTK output compaction (`shell/rtk.rs`); `None` = run every command as written.
+    rtk: Option<RtkRewriter>,
 }
 
 impl ShellTool {
@@ -78,6 +82,7 @@ impl ShellTool {
         Self {
             policy,
             workspace: None,
+            rtk: None,
         }
     }
 
@@ -85,6 +90,7 @@ impl ShellTool {
         Self {
             policy,
             workspace: Some(workspace.to_path_buf()),
+            rtk: None,
         }
     }
 
@@ -92,7 +98,18 @@ impl ShellTool {
         Self {
             policy: SandboxPolicy::default(),
             workspace: Some(workspace.to_path_buf()),
+            rtk: None,
         }
+    }
+
+    /// Route eligible commands through RTK (see [`RtkRewriter`]).
+    pub fn with_rtk(mut self, rtk: Option<RtkRewriter>) -> Self {
+        self.rtk = rtk;
+        self
+    }
+
+    pub fn rtk_enabled(&self) -> bool {
+        self.rtk.is_some()
     }
 }
 
@@ -223,10 +240,15 @@ impl Tool for ShellTool {
             return Ok(run_poll(command, &cwd, budget, interval, &self.policy).await);
         }
         if use_pty {
-            Ok(pty::run_command_pty(command, &cwd, timeout_secs).await)
-        } else {
-            Ok(run_command(command, &cwd, timeout_secs, &self.policy).await)
+            return Ok(pty::run_command_pty(command, &cwd, timeout_secs).await);
         }
+        // RTK only on the plain path: a PTY run wants the real program's terminal behaviour, and
+        // background/poll runs report through their own channels.
+        if let Some(rewritten) = self.rtk.as_ref().and_then(|r| r.rewrite(command)) {
+            let result = run_command(&rewritten, &cwd, timeout_secs, &self.policy).await;
+            return Ok(rtk::tag_result(result));
+        }
+        Ok(run_command(command, &cwd, timeout_secs, &self.policy).await)
     }
 }
 
@@ -1122,6 +1144,7 @@ mod tests {
                     cargo_target_base: None,
                 },
                 workspace: None,
+                rtk: None,
             };
             let out = tool
                 .run(&serde_json::json!({"command": "echo hi", "pty": true}))
