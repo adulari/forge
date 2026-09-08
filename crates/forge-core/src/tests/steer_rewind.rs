@@ -46,15 +46,14 @@ impl Provider for ToolThenFinal {
     }
 }
 
-fn steer_session(
-    tool_on_first: bool,
-    steer_on_call: usize,
-) -> (
+type SteerFixture = (
     Session,
     Arc<Mutex<Vec<PresenterEvent>>>,
     Arc<Store>,
     Arc<std::sync::atomic::AtomicUsize>,
-) {
+);
+
+fn steer_session(tool_on_first: bool, steer_on_call: usize) -> SteerFixture {
     let store = Arc::new(Store::open_in_memory().unwrap());
     let capture = CapturePresenter {
         attended: true,

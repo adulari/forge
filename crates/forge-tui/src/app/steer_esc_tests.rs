@@ -30,8 +30,10 @@ fn a_second_idle_esc_inside_the_window_opens_rewind() {
 
 #[test]
 fn statusline_hint_reflects_esc_arming_and_startup_loading() {
-    let mut app = App::default();
-    app.loading = Some("starting session…");
+    let mut app = App {
+        loading: Some("starting session…"),
+        ..Default::default()
+    };
     assert_eq!(
         crate::app::render::status_line::statusline_hint(&app),
         "starting session…"
@@ -51,8 +53,10 @@ fn statusline_hint_reflects_esc_arming_and_startup_loading() {
 
 #[test]
 fn a_steered_prompt_is_echoed_as_a_user_line() {
-    let mut app = App::default();
-    app.fullscreen = true;
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
     app.apply(PresenterEvent::Steered("also rename the helper".into()));
     let text = app
         .flush
