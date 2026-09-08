@@ -30,6 +30,7 @@ export const BUILTIN_COMMANDS: string[] = [
   "/config",
   "/compact",
   "/uncompact",
+  "/commit",
   "/clear",
   "/undo",
   "/rewind",

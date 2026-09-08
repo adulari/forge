@@ -106,7 +106,7 @@ function FloorTileBase({ row, active }: FloorTileProps) {
       {tail ? <Text style={[typeScale.sub, { color: tokens.ink2 }]} numberOfLines={3}>{tail}</Text> : null}
       {tool ? <ToolOutputBlock row={tool} /> : null}
       {snapshot?.permission_prompt != null ? <PermissionCard prompt={snapshot.permission_prompt} diff={snapshot.diff} promptSeq={snapshot.prompt_seq} send={send} /> : null}
-      {snapshot?.question != null ? <QuestionCard question={snapshot.question} options={snapshot.question_options} allowOther={snapshot.question_allow_other} promptSeq={snapshot.prompt_seq} send={send} /> : null}
+      {snapshot?.question != null ? <QuestionCard question={snapshot.question} options={snapshot.question_options} allowOther={snapshot.question_allow_other} form={snapshot.question_form ?? null} promptSeq={snapshot.prompt_seq} send={send} /> : null}
       {snapshot?.subagents.length ? <View style={styles.subagents}>{snapshot.subagents.slice(0, 3).map((agent) => <Text key={agent.agent} style={[typeScale.meta, styles.subagent, { color: tokens.ink3 }]} numberOfLines={1}>{agent.agent} · {agent.model ?? "—"} · {agent.last}</Text>)}</View> : null}
       <View style={styles.footer}>
         {taskCount > 0 ? <Text style={[typeScale.monoMeta, tabularNums, styles.mono, { color: tokens.ink3 }]}>{tasksDone}/{taskCount} tasks</Text> : null}

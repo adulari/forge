@@ -129,6 +129,23 @@ export interface QuestionOption {
   description: string;
 }
 
+/** One question of an `ask_user` form (v11 additive; see `Snapshot.question_form`). */
+export interface FormQuestion {
+  header: string;
+  text: string;
+  options: QuestionOption[];
+  multi: boolean;
+  allow_other: boolean;
+  allow_note: boolean;
+}
+
+/** The answer to one `FormQuestion`, sent back as `answer{text: JSON.stringify({answers})}`. */
+export interface FormAnswer {
+  selected: string[];
+  other?: string | null;
+  note?: string | null;
+}
+
 export interface Snapshot {
   protocol: number;
   session_id: string;
@@ -162,6 +179,10 @@ export interface Snapshot {
   question: string | null;
   question_options: QuestionOption[];
   question_allow_other: boolean;
+  /** v11 additive: the whole `ask_user` form. Absent from an older host — fall back to the
+   * single `question` fields. */
+  question_form?: FormQuestion[] | null;
+  question_index?: number;
   overlay: Overlay | null;
   diff: Diff | null;
   plan: Plan | null;

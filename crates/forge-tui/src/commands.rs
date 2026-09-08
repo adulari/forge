@@ -134,6 +134,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/compact",
     },
     Command {
+        name: "commit",
+        desc: "commit this session's verified work in focused conventional commits (no push)",
+        usage: "/commit [message hint]",
+    },
+    Command {
         name: "uncompact",
         desc: "restore full transcript after a /compact",
         usage: "/uncompact",
@@ -316,6 +321,8 @@ pub enum CommandAction {
     ListCheckpoints,
     /// Summarize older transcript messages to free up context (`/compact`).
     Compact,
+    /// Ask the model to commit the session's uncommitted work (`/commit [hint]`).
+    Commit(String),
     /// Restore the full pre-compaction transcript after a `/compact` (`/uncompact`).
     Uncompact,
     /// Continual Harness: review the trajectory and persist learned harness state (prompt notes,
@@ -630,6 +637,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "checkpoint" | "cp" => CommandAction::Checkpoint((!arg.is_empty()).then_some(arg)),
         "checkpoints" => CommandAction::ListCheckpoints,
         "compact" => CommandAction::Compact,
+        "commit" => CommandAction::Commit(arg.to_string()),
         "uncompact" => CommandAction::Uncompact,
         "refine" => crate::refine_args::refine_action(&arg),
         "lattice" | "lat" => CommandAction::Lattice(arg),
@@ -792,24 +800,9 @@ pub struct CommandCenterEntry {
     pub category: &'static str,
 }
 
-/// Product-facing categories for the stable command registry.
-pub fn command_category(name: &str) -> &'static str {
-    match name {
-        "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
-        "sessions" | "resume" | "replay" | "rewind" | "undo" | "checkpoint" | "checkpoints"
-        | "compact" | "uncompact" | "refine" | "clear" | "btw" | "export" => "Session",
-        "model" | "models" | "mode" | "effort" | "subagents" | "thinking" | "mesh" | "usage" => {
-            "Model & usage"
-        }
-        "assay" | "lattice" | "pr" => "Review & ship",
-        "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" => "Integrations",
-        "config" | "statusline" | "keys" | "help" | "init" | "remember" | "memories" => {
-            "Settings & help"
-        }
-        "copy" | "quit" => "Utilities",
-        _ => "More",
-    }
-}
+#[path = "commands/category.rs"]
+mod category;
+pub use category::command_category;
 
 fn command_category_rank(category: &str) -> usize {
     match category {

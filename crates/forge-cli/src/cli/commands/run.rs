@@ -14,6 +14,7 @@ use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
 use crate::*;
 
 mod autonomous;
+mod commit_prompt;
 pub(crate) use autonomous::*;
 
 mod gates;
@@ -256,7 +257,7 @@ pub(crate) fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
 pub(crate) fn abort_turn_before_quit(
     turn_handle: &mut Option<tokio::task::JoinHandle<()>>,
     pending: &mut Option<(String, std::sync::mpsc::Sender<forge_tui::ConfirmOutcome>)>,
-    pending_question: &mut Option<std::sync::mpsc::Sender<String>>,
+    pending_question: &mut Option<std::sync::mpsc::Sender<Vec<forge_types::Answer>>>,
     app: &mut forge_tui::App,
 ) {
     if let Some(handle) = turn_handle.take() {
@@ -517,7 +518,7 @@ pub(crate) async fn run_chat_tui(
                                 let _ = reply.send(ConfirmOutcome::Deny);
                             }
                             UiMsg::Question { reply, .. } => {
-                                let _ = reply.send(forge_tui::NO_ANSWER.to_string());
+                                let _ = reply.send(Vec::new());
                             }
                         }
                     }
@@ -772,7 +773,7 @@ pub(crate) async fn run_chat_tui(
     // `/goal` state: mirrors `loop_state`, driven off the tracked task plan instead of a sentinel.
     let mut goal_state: Option<GoalState> = None;
     let mut pending: Option<(String, std::sync::mpsc::Sender<ConfirmOutcome>)> = None;
-    let mut pending_question: Option<std::sync::mpsc::Sender<String>> = None;
+    let mut pending_question: Option<std::sync::mpsc::Sender<Vec<forge_types::Answer>>> = None;
     // `/duel`: the background task writes its finished report + still-alive worktree guards here
     // (it can't return a value through `turn_handle`, a `JoinHandle<()>`); the done-signal drain
     // below takes it and opens the picker. `duel_state` then holds it across picker frames until
@@ -2745,8 +2746,7 @@ pub(crate) async fn run_chat_tui(
                                                 let _ = reply.send(ConfirmOutcome::Deny);
                                             }
                                             UiMsg::Question { reply, .. } => {
-                                                let _ =
-                                                    reply.send(forge_tui::NO_ANSWER.to_string());
+                                                let _ = reply.send(Vec::new());
                                             }
                                         }
                                     }
@@ -2846,23 +2846,20 @@ pub(crate) async fn run_chat_tui(
                     }
                 }
             } else if app.awaiting_question() {
-                // Answering an AskUserQuestion (the turn task is blocked in `ask()`): the input
-                // line collects a number or free-text answer; submit resolves + replies.
-                match handle_key(&mut app.input, &mut app.input_cursor, key) {
-                    InputOutcome::Submit(line) => {
-                        if let Some(ans) = app.resolve_question(&line) {
-                            if let Some(tx) = pending_question.take() {
-                                let _ = tx.send(ans);
-                            }
-                        } else {
-                            app.input.clear(); // invalid → re-prompt (question stays open)
+                // Answering an `ask_user` form (the turn task is blocked in `ask_form()`): the
+                // form owns the keyboard; Submit/Cancel reply on the channel.
+                match app.form_key(key) {
+                    Some(forge_tui::FormOutcome::Submit(answers)) => {
+                        if let Some(tx) = pending_question.take() {
+                            let _ = tx.send(answers);
                         }
                     }
-                    InputOutcome::Quit => {
-                        quit = true;
-                        break;
+                    Some(forge_tui::FormOutcome::Cancel) => {
+                        if let Some(tx) = pending_question.take() {
+                            let _ = tx.send(Vec::new());
+                        }
                     }
-                    InputOutcome::Editing => {}
+                    Some(forge_tui::FormOutcome::Open) | None => {}
                 }
             } else if busy {
                 // Mid-turn: let the user keep typing and QUEUE submitted prompts to run after the
@@ -3466,13 +3463,8 @@ pub(crate) async fn run_chat_tui(
                     // now carry a stale seq and are ignored instead of approving this one.
                     prompt_seq += 1;
                 }
-                UiMsg::Question {
-                    question,
-                    options,
-                    allow_other,
-                    reply,
-                } => {
-                    app.set_question(&question, &options, allow_other);
+                UiMsg::Question { questions, reply } => {
+                    app.open_form(questions);
                     pending_question = Some(reply);
                     prompt_seq += 1;
                 }
@@ -3942,12 +3934,16 @@ pub(crate) async fn run_chat_tui(
                                 "⚠ stale answer ignored — the prompt changed; review the current one",
                             );
                         } else if app.awaiting_question() {
-                            if let Some(ans) = app.resolve_question(&text) {
-                                if let Some(tx) = pending_question.take() {
-                                    let _ = tx.send(ans);
+                            match app.resolve_remote_answer(&text) {
+                                forge_tui::app::RemoteAnswer::Complete(answers) => {
+                                    if let Some(tx) = pending_question.take() {
+                                        let _ = tx.send(answers);
+                                    }
                                 }
-                            } else {
-                                app.note("⚠ remote answer was invalid — re-asking");
+                                forge_tui::app::RemoteAnswer::Partial => {}
+                                forge_tui::app::RemoteAnswer::Invalid => {
+                                    app.note("⚠ remote answer was invalid — re-asking");
+                                }
                             }
                         }
                     }

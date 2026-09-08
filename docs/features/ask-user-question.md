@@ -1,86 +1,124 @@
-# Feature: AskUserQuestion — interactive questions the agent can ask mid-task
+# Feature: ask_user — interactive questions the agent asks mid-task
 
-> Status: **DESIGN + BUILD** (2026-06-15).
+> Status: **SHIPPED** (single question 2026-06-15; multi-question form with multi-select, free
+> text and notes 2026-09-08). Code: `crates/forge-core/src/session_virtual_tools.rs`
+> (`ask_user`, `parse_questions`, `render_answers`), `crates/forge-tui/src/question_form.rs`
+> (state machine), `crates/forge-tui/src/app/render/question.rs` (TUI), `mobile/src/components/
+> cards/QuestionCard.tsx` (companion app).
 
-## 1. Problem (JTBD)
+## 1. Problem
 
-> **As** the Forge agent, **I want** to pause and ask the user a focused question with good
-> suggested answers, **so that** I resolve a genuine fork (a value choice, a missing decision)
-> instead of guessing — the way Claude's AskUserQuestion works.
+The agent hits a fork only the user can resolve — a value choice, a missing requirement, which
+of several valid designs. Guessing is expensive; a dozen one-line "which one?" round trips are
+worse. The tool should let the model ask everything it needs in one go, with good suggested
+answers, and the surface should make answering feel like a form, not a quiz typed into the chat
+line.
 
-Today the only interactive prompt is the **permission** y/n (`Presenter::confirm`). The agent has
-no way to ask the user a real question with curated options mid-turn.
+## 2. The tool
 
-### Non-goals
-- A general forms engine. Multi-question wizards. Rich widgets beyond a single-select list with
-  an optional open-ended answer. (One question per call; the model can ask again.)
+`ask_user` is a core-owned virtual tool (it needs the presenter, which ordinary tools cannot
+reach). Two argument shapes are accepted:
 
-## 2. Scope (MoSCoW)
+```jsonc
+// the form
+{ "questions": [
+    { "header": "Database",                      // ≤ 16 chars, shown as the tab label
+      "question": "Which database should sessions use?",
+      "options": [ { "label": "Postgres", "description": "recommended — already provisioned" },
+                   { "label": "SQLite",   "description": "single file, no ops" } ],
+      "multi_select": false,                     // default false
+      "allow_other": true,                       // default true; forced when there are no options
+      "allow_note": true },                      // default true
+    { "header": "Scope", "question": "Which features go in the MVP?", "multi_select": true,
+      "options": [ { "label": "Auth" }, { "label": "Billing" }, { "label": "Search" } ] }
+] }
 
-**Must**
-- M1 — A core-owned **virtual tool** `ask_user` (same mechanism as `spawn_agents`: it needs the
-  presenter, which ordinary tools can't reach). Schema: `{ question: string, options: [{label,
-  description?}], allow_other?: bool }`.
-- M2 — **Interactive TUI**: render the question + a numbered/﻿arrow-selectable option list; Enter
-  selects; if `allow_other` (default true) a final "Other…" entry lets the user type a free
-  answer. Returns the chosen label (or the typed text) to the agent as the tool result.
-- M3 — **Headless fallback**: print the question + numbered options, read a line; a number picks
-  that option, anything else is the free-text answer (if allowed) else re-prompt once.
-- M4 — Reuses the existing turn↔UI reply-channel plumbing (`UiMsg`/blocking `recv`) that
-  `confirm()` already uses, so a question blocks only the turn task, not the render loop.
-
-**Should**
-- S1 — Good defaults: if the model omits options, treat as open-ended (free text).
-- S2 — Non-interactive/headless-no-tty: return a sentinel ("(no answer — non-interactive)") so the
-  agent can proceed rather than hang.
-
-**Won't** — multiSelect, nested questions, per-option side effects.
-
-## 3. Acceptance criteria
-
-```
-Given the model calls ask_user with a question + 3 options (allow_other default)
-When rendered in the TUI and the user selects option 2
-Then the tool result is option 2's label, and the turn continues with that answer
-
-Given allow_other and the user picks "Other…" and types "use postgres"
-Then the tool result is "use postgres"
-
-Given the headless presenter and the user types "3"
-Then the tool result is the 3rd option's label
-
-Given a non-interactive (piped) session
-When ask_user is called
-Then it returns a non-interactive sentinel immediately (never blocks forever)
+// the original single-question shorthand (still accepted; old transcripts and models emit it)
+{ "question": "…", "options": [ … ], "allow_other": true }
 ```
 
-## 4. Design
+Limits: 1–6 questions per call, each with non-empty text. Malformed calls return an
+`error: ask_user: …` tool result instead of blocking the turn.
 
-- **Tool spec** advertised to the model alongside the registry tools (like `spawn_agents`):
-  `ask_user`. `Session::invoke_tool` intercepts `call.name == "ask_user"`, parses
-  `{question, options, allow_other}`, calls `self.presenter.ask(...)`, returns the answer string
-  as the tool result (recorded as a tool_call for transcript fidelity).
-- **Presenter trait** gains:
-  `fn ask(&mut self, q: &str, options: &[QChoice], allow_other: bool) -> String;`
-  - `HeadlessPresenter`: numbered list + `read_line`; number→label, else free text (if allowed).
-    Non-tty → sentinel.
-  - `ChannelPresenter` (TUI): send `UiMsg::Question { question, options, allow_other, reply:
-    Sender<String> }`; block on `reply.recv()` (mirrors `confirm()`).
-- **TUI app/loop**: a `Question` view (like the permission bar but a list). `App` holds an
-  optional `question: Option<QuestionView>` with cursor state; keys: digits/↑↓ move, Enter
-  selects, on "Other…" switch to text entry (reuse the input line). On submit, send the reply
-  over the channel and clear the view.
-- **QChoice** type in forge-tui (label + optional description), shared with the tool's parsed args.
+**Result** the model reads back:
 
-### Impact
-| Layer | Change |
-|-------|--------|
-| forge-tui | `PresenterEvent`/`UiMsg::Question`; `Presenter::ask`; `App` question view + render + key handling; `QChoice` |
-| forge-core | `ask_user` virtual tool spec + `invoke_tool` intercept → `presenter.ask` |
-| forge-cli | TUI loop: handle `UiMsg::Question` (show selector, capture answer, reply) |
+- one question → one line: `Postgres — note: managed, please`, or `Auth, Billing, other: SSO`
+  for a multi-select with a typed extra;
+- several → a numbered list, one line per question, labelled by header (or the question text):
+  ```
+  1. Database: Postgres — note: managed, please
+  2. Scope: Auth, Billing, other: SSO
+  ```
+- dismissed / non-interactive → `(no answer — non-interactive)` (the original sentinel), so the
+  model proceeds instead of hanging.
 
-## 5. Definition of done
-- [ ] §3 criteria pass (TUI select, Other→free text, headless number/text, non-interactive sentinel).
-- [ ] `ask_user` advertised to the model; intercepted in core; result flows back into the turn.
-- [ ] Reuses the reply-channel pattern (no render-loop blocking).
-- [ ] fmt + clippy `-D warnings` + green; TUI render tested via TestBackend.
+## 3. Surfaces
+
+### TUI (`forge chat`)
+
+The form takes the live region while open (like the pickers); the transcript above is untouched.
+
+```
+  ❓ question 2 of 3    ✓ Database   ▸ Scope   · Deploy
+     Which features go in the MVP?  (choose all that apply)
+
+     ▸ ☑ 1 Auth        login, sessions
+       ☐ 2 Billing     stripe
+       ☑ 3 Search
+       ○ Other…        type your own answer
+       ✎ note          optional — anything the model should know
+```
+
+| key | does |
+|---|---|
+| `↑` `↓` / `j` `k` | move between rows |
+| `1`–`9` | pick that option (single-select: also moves on) |
+| `Space` | toggle the option (multi-select) / select it / open Other or note when on that row |
+| `Enter` | single-select: choose the highlighted option and move on · multi-select: confirm and move on · on **Other…** / **note**: start typing; `Enter` again saves |
+| `o` / `n` | jump straight into Other… / the note |
+| `←` `→` / `Shift-Tab` `Tab` | previous / next question (answers are kept) |
+| `Esc` | while typing: leave the field · otherwise dismiss the whole form (no answer) |
+
+Enter on the last question submits. If an earlier question was skipped, the form parks on it and
+says so instead of sending a half-empty answer. A single-select question with a typed "Other"
+replaces the chosen option; a multi-select keeps both. The statusline shows the keys that apply
+to the current row. When the form closes, each question and its answer are written to scrollback
+(`❓ … ↳ Postgres — note: …`) so the record survives.
+
+### Companion app / web (`forge serve`)
+
+The snapshot carries the whole form (`question_form`, protocol v11 additive) next to the legacy
+`question` / `question_options` fields, which mirror the *current* question so older clients keep
+working. The `QuestionCard` renders a stepper for several questions, radio / checkbox rows,
+an "other" input, an optional note, and one **send answers** button. It answers once, as
+`answer{ text: JSON.stringify({ "answers": [ { "selected": [...], "other": …, "note": … }, … ] }),
+seq }`, and locks until a new `prompt_seq` arrives (ARCHITECTURE.md §3). Against a pre-v11 host
+it falls back to the original single-question card and answers the 1-based option number.
+
+A legacy plain-text `answer` (an option number or free text) is still accepted by the host: it
+answers the current question and, on a multi-question form, advances to the next one.
+
+### Headless (`forge run` on a TTY)
+
+Each question prints with numbered options; a single number (or `1,3` on a multi-select) picks,
+anything else is the free-text answer when allowed, then `note (Enter to skip):`. Three invalid
+tries → no answer. Without a TTY the tool returns the sentinel immediately.
+
+### Other presenters
+
+`Presenter::ask_form` has a default implementation that asks each question through the older
+`Presenter::ask` (label or free text), so MCP / stream-json / test presenters keep working; they
+lose multi-select and notes but never block.
+
+## 4. Plan approval
+
+`present_plan`'s "Build this plan?" still rides the single-question path (`App::set_question` →
+a one-question form), so the same keys answer it: `Enter` builds, `2` cancels, `o` types changes.
+
+## 5. Tests
+
+- `session_virtual_tools::ask_user_form_tests` — both argument shapes, limits, result rendering.
+- `question_form::tests` — every key path above, remote text and structured answers.
+- `app::tests` — the form renders in the live region and never looks like a permission prompt;
+  the remote snapshot suppresses `permission_prompt` while a question is active.
+- `serve.rs` plan-approval e2e — the page's `Answer("1")` still approves.

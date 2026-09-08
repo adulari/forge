@@ -127,36 +127,61 @@ impl Presenter for TuiPresenter {
     }
 
     fn ask(&mut self, question: &str, options: &[crate::QChoice], allow_other: bool) -> String {
-        self.app.set_question(question, options, allow_other);
-        self.app.input.clear();
+        let answers = self.ask_form(&[forge_types::Question::single(
+            question,
+            options,
+            allow_other,
+        )]);
+        match answers.first() {
+            Some(a) if !a.is_empty() => a.summary(),
+            _ => crate::NO_ANSWER.to_string(),
+        }
+    }
+
+    fn ask_form(&mut self, questions: &[forge_types::Question]) -> Vec<forge_types::Answer> {
+        self.app.open_form(questions.to_vec());
         self.flush();
         self.draw();
         loop {
             match event::read() {
                 Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                     let key = match k.code {
+                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                            KeyKind::Interrupt
+                        }
                         KeyCode::Char(c) => KeyKind::Char(c),
                         KeyCode::Backspace => KeyKind::Backspace,
                         KeyCode::Enter => KeyKind::Enter,
+                        KeyCode::Esc => KeyKind::Esc,
+                        KeyCode::Up => KeyKind::Up,
+                        KeyCode::Down => KeyKind::Down,
+                        KeyCode::Left => KeyKind::Left,
+                        KeyCode::Right => KeyKind::Right,
+                        KeyCode::Home => KeyKind::Home,
+                        KeyCode::End => KeyKind::End,
+                        KeyCode::Tab => KeyKind::Tab,
+                        KeyCode::BackTab => KeyKind::CycleTemper,
                         _ => continue,
                     };
-                    match handle_key(&mut self.app.input, &mut self.app.input_cursor, key) {
-                        InputOutcome::Submit(line) => {
-                            if let Some(ans) = self.app.resolve_question(&line) {
-                                self.flush();
-                                self.draw();
-                                return ans;
-                            }
-                            // Invalid → keep the question open, clear the line, re-prompt.
-                            self.app.input.clear();
+                    match self.app.form_key(key) {
+                        Some(crate::FormOutcome::Submit(answers)) => {
+                            self.flush();
                             self.draw();
+                            return answers;
                         }
-                        InputOutcome::Quit => return crate::NO_ANSWER.to_string(),
-                        InputOutcome::Editing => self.draw(),
+                        Some(crate::FormOutcome::Cancel) | None => {
+                            self.flush();
+                            self.draw();
+                            return Vec::new();
+                        }
+                        Some(crate::FormOutcome::Open) => self.draw(),
                     }
                 }
                 Ok(_) => {}
-                Err(_) => return crate::NO_ANSWER.to_string(),
+                Err(_) => {
+                    self.app.finish_form(None);
+                    return Vec::new();
+                }
             }
         }
     }

@@ -3,7 +3,10 @@
 //! UI. v0.1 ships the [`HeadlessPresenter`] (line output for scripting/pipes/CI); the
 //! ratatui+crossterm interactive renderer is the next increment behind this same trait.
 
-pub use forge_types::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, ReplayItem, NO_ANSWER};
+pub use forge_types::{
+    Answer, ConfirmOutcome, Presenter, PresenterEvent, QChoice, Question, ReplayItem, NO_ANSWER,
+};
+pub use question_form::{parse_structured_answers, FormOutcome, QuestionForm};
 
 /// How a model id reads to a person. A bare bridge id (`claude-cli::`) is a real, valid pin
 /// meaning "whatever model that CLI is configured to use" — it is the first entry in the built-in
@@ -17,6 +20,7 @@ pub fn display_model(id: &str) -> String {
 }
 
 pub mod answer;
+pub mod question_form;
 pub use answer::resolve_answer;
 pub mod app;
 mod app_remote;

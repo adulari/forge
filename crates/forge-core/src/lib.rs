@@ -39,6 +39,7 @@ mod detached_subagents;
 pub mod duel;
 mod failure_verdict;
 pub mod fleet;
+pub(crate) mod git_hygiene;
 pub mod heartbeat;
 pub mod hooks;
 pub mod llm_router;
@@ -186,7 +187,16 @@ Communication:
 - Report outcomes truthfully: if a test failed, verification was skipped, or something is \
 uncertain, say so plainly instead of reporting success.
 - When the task is done, stop and give a short summary of what changed. Don't ask whether to \
-proceed on work you can just do.";
+proceed on work you can just do.
+
+Version control:
+- In a git repository, commit each verified unit of work as you finish it, before starting the \
+next one: stage the specific files you changed (never `git add -A`), write a focused \
+conventional-commit message (feat/fix/refactor/docs/test/chore), and leave unrelated changes in \
+the tree alone. Do not end a long task with your edits uncommitted; if the work is not ready to \
+commit, say so.
+- Never push, force-push, or rewrite published history unless the user asked for it. When the \
+branch has commits its upstream lacks, ask the user (ask_user) whether to push.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
@@ -1627,6 +1637,8 @@ pub struct Session {
     pending_hints: Vec<String>,
     /// Prompts queued by the surface while a turn runs; drained by the model loop (`steer.rs`).
     steer: steer::SteerInbox,
+    /// Commit discipline: which files this session wrote and whether they are still uncommitted.
+    git_hygiene: git_hygiene::Tracker,
     /// Bumped whenever the transcript is rewritten from outside the model loop (rewind, uncompact,
     /// full reload) — see [`forge_provider::CheckpointContext::epoch`].
     history_epoch: u64,
@@ -2981,6 +2993,31 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // unchanged file costs one `stat` per turn and nothing else).
         self.refresh_project_instructions(&mut context_pack).await?;
 
+        // Commit discipline (git_hygiene.rs): while files this session edited are still
+        // uncommitted, say so once per turn; when the branch is well ahead of its upstream, ask
+        // the model to offer a push. `git status` is a process spawn, so it runs off the executor.
+        if self.config.git.commit_nudge {
+            let root = self.workspace.root().to_path_buf();
+            let push_ahead = self.config.git.push_nudge_ahead;
+            let mut tracker = std::mem::take(&mut self.git_hygiene);
+            let (tracker, nudge) = tokio::task::spawn_blocking(move || {
+                let head = git_head(Some(&root));
+                let nudge = tracker.turn_start_nudge(&root, head, push_ahead);
+                (tracker, nudge)
+            })
+            .await
+            .unwrap_or_default();
+            self.git_hygiene = tracker;
+            if let Some(nudge) = nudge {
+                self.inject_context(
+                    &mut context_pack,
+                    context_pack::ContextSource::Git,
+                    "uncommitted work from this session",
+                    &nudge.render(),
+                )?;
+            }
+        }
+
         // ★ Auto-retrieve relevant code from the Lattice index and inject it as a system message
         // before the first provider call (code-intelligence.md §5.1). Retrieve into an owned value
         // first so the `&self.lattice` borrow is released before we mutate the transcript. The
@@ -3985,16 +4022,62 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 fn ask_user_spec() -> ToolSpec {
     ToolSpec {
         name: ASK_USER_TOOL.to_string(),
-        description: "Ask the user a single focused question when you hit a real decision only \
-            they can make (a value choice, a missing requirement). Provide 2–4 suggested \
-            `options` with short labels (+ optional descriptions); set `allow_other` (default \
-            true) to also accept a free-text answer. Returns the user's choice. Don't use it for \
-            things you can decide yourself."
+        description: "Ask the user one or more focused questions when you hit a real decision \
+            only they can make (a value choice, a missing requirement, which of several valid \
+            approaches). Batch related decisions into ONE call with up to 6 `questions`; the user \
+            answers them as a single form. Give each question 2–4 concrete `options` with short \
+            labels (+ one-line descriptions); set `multi_select` when several may apply; \
+            `allow_other` (default true) accepts a typed answer; `allow_note` (default true) \
+            lets the user attach a note. Put the recommended option first and say so in its \
+            description. Returns the answers (one line per question). Don't use it for things \
+            you can decide yourself."
             .to_string(),
         schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "question": { "type": "string", "description": "the question to ask" },
+                "questions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 6,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "header": {
+                                "type": "string",
+                                "description": "short tab label for the question (≤ 16 chars), e.g. \"Database\""
+                            },
+                            "question": { "type": "string", "description": "the question, ending in ?" },
+                            "options": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": { "type": "string", "description": "1–5 words" },
+                                        "description": { "type": "string", "description": "one line: what choosing it means" }
+                                    },
+                                    "required": ["label"]
+                                }
+                            },
+                            "multi_select": {
+                                "type": "boolean",
+                                "description": "several options may be chosen (default false)"
+                            },
+                            "allow_other": {
+                                "type": "boolean",
+                                "description": "accept a free-text answer beyond the options (default true)"
+                            },
+                            "allow_note": {
+                                "type": "boolean",
+                                "description": "let the user attach an optional note (default true)"
+                            }
+                        },
+                        "required": ["question"]
+                    }
+                },
+                "question": {
+                    "type": "string",
+                    "description": "single-question shorthand (same as one entry in `questions`)"
+                },
                 "options": {
                     "type": "array",
                     "items": {
@@ -4006,12 +4089,8 @@ fn ask_user_spec() -> ToolSpec {
                         "required": ["label"]
                     }
                 },
-                "allow_other": {
-                    "type": "boolean",
-                    "description": "allow a free-text answer beyond the options (default true)"
-                }
-            },
-            "required": ["question"]
+                "allow_other": { "type": "boolean" }
+            }
         }),
     }
 }
@@ -4593,6 +4672,9 @@ mod tests {
 
     #[path = "steer_rewind.rs"]
     mod steer_rewind_tests;
+
+    #[path = "commit_nudge.rs"]
+    mod commit_nudge_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {

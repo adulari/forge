@@ -122,6 +122,8 @@ pub fn render_live(frame: &mut Frame, app: &App) {
         } else {
             render_at_path_picker(frame, popup, app);
         }
+    } else if app.form.is_some() {
+        super::question::render_question_form(frame, areas[0], app);
     } else if app.picker.open {
         render_picker(frame, areas[0], app);
     } else if app.fullscreen {

@@ -693,6 +693,7 @@ click it (or `Ctrl+T` for the most recent) to expand the full arguments and the 
 | `/new` · `/resume [id]` · `/sessions` | Start fresh · resume · browse past sessions |
 | `/rewind` (alias `/undo`, or Esc Esc) · `/checkpoint [label]` · `/checkpoints` | Rewind chat + context + files to a message · save · rewind to a checkpoint ([docs](docs/features/rewind.md)) |
 | `/compact` · `/uncompact` | Summarize older context to free the window (also auto-triggers at 80% gauge) · undo it — restore the full transcript |
+| `/commit [hint]` | Commit this session's verified work in focused conventional commits, no push ([docs](docs/features/commit-discipline.md)) |
 | `/refine [instructions]` · `/refine status` · `/refine rollback <id>` | Capture durable session/project lessons, inspect the refinement journal, or reverse a prior batch |
 | `/btw <question>` · `/side <question>` | Ask a background side question without adding it to the session transcript |
 | `/heartbeat every <interval> <prompt>` · `/heartbeat [pause\|resume\|clear]` | Queue recurring prompts into this live session; inspect status with bare `/heartbeat` |
@@ -724,7 +725,7 @@ click it (or `Ctrl+T` for the most recent) to expand the full arguments and the 
 prompt on the mesh's next-ranked model (excludes ones already skipped this turn) · `Ctrl+↑`/`Ctrl+↓`
 bias the routing tier up/down, re-running immediately if mid-turn · `Ctrl+O` activity viewer ·
 `Ctrl+T` expand/collapse the most recent tool call · `Ctrl+J` newline · `Esc` interrupt (mid-turn) / `Esc Esc` rewind (idle) · `Ctrl+C` quit · `↑/↓` navigate ·
-`y/n/a` allow/deny/always-allow a permission prompt · `Alt+M` model picker · `Alt+E` cycle effort ·
+`y/n/a` allow/deny/always-allow a permission prompt · in an `ask_user` form `↑/↓` `1-9` `Space` `Enter` answer, `←/→` switch question, `o`/`n` other/note, `Esc` dismiss ([docs](docs/features/ask-user-question.md)) · `Alt+M` model picker · `Alt+E` cycle effort ·
 `Ctrl+N` new session · `Ctrl+S` checkpoint · `Ctrl+Z` undo last write · `Ctrl+L` compact ·
 `Ctrl+R` toggle reasoning display · `Ctrl+,` edit keybinds · `F1` full keybind reference.
 

@@ -5,6 +5,7 @@ use super::*;
 pub(crate) mod input;
 pub(crate) mod live;
 mod overlays;
+mod question;
 pub(crate) mod status_line;
 mod status_widgets;
 mod transcript;

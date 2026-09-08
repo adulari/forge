@@ -197,6 +197,17 @@ struct TurnActivity {
     tool_calls: usize,
 }
 
+/// What a remote `Answer` text did to the open form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteAnswer {
+    /// The whole form is answered; deliver these.
+    Complete(Vec<forge_types::Answer>),
+    /// Answered the current question of a multi-question form; the next one is now current.
+    Partial,
+    /// Not a valid answer for the current question.
+    Invalid,
+}
+
 /// All state the TUI needs to render the pinned live region, plus the scrollback outbox.
 #[derive(Debug, Clone, Default)]
 pub struct App {
@@ -250,9 +261,9 @@ pub struct App {
     pub effort: Option<forge_types::EffortLevel>,
     /// True while the effort slider popup is visible above the input bar (Ctrl+R).
     pub effort_slider: bool,
-    /// An in-flight AskUserQuestion: the choices + whether free text is allowed. The question
-    /// text + options are already in scrollback; the input line collects the answer.
-    pub(crate) question: Option<(Vec<QChoice>, bool)>,
+    /// An in-flight `ask_user` form (one or more questions), answered in the live region with
+    /// arrow keys / digits / Space; see `question_form.rs`.
+    pub form: Option<crate::QuestionForm>,
     /// A pending permission question shown while the loop blocks on the user's y/n.
     pub prompt: Option<String>,
     /// The text of a pending AskUserQuestion (set by `set_question`, cleared on resolve), so a
@@ -2039,60 +2050,118 @@ impl App {
         self.temper = label.to_string();
     }
 
-    /// Begin an AskUserQuestion: render the question + numbered options into scrollback and arm
-    /// the input line to collect the answer (a number picks an option; free text if allowed).
+    /// Begin a single-question `ask_user` (the original shape; also what plan approval uses).
     pub fn set_question(&mut self, question: &str, options: &[QChoice], allow_other: bool) {
-        self.flush.push(TextLine::from(vec![
-            Span::styled("❓ ", Style::default().fg(ORANGE).bold()),
-            Span::styled(question.to_string(), Style::default().fg(USER).bold()),
-        ]));
-        for (i, o) in options.iter().enumerate() {
-            let mut spans = vec![
-                Span::styled(format!("  {}) ", i + 1), Style::default().fg(ORANGE)),
-                Span::raw(o.label.clone()),
-            ];
-            if !o.description.is_empty() {
-                spans.push(Span::styled(
-                    format!("  — {}", o.description),
-                    Style::default().fg(DIM),
-                ));
-            }
-            self.flush.push(TextLine::from(spans));
+        self.open_form(vec![forge_types::Question::single(
+            question,
+            options,
+            allow_other,
+        )]);
+    }
+
+    /// Begin an `ask_user` form. The questions render in the live region (not scrollback) until
+    /// answered; the answers are then recorded in scrollback by [`App::finish_form`].
+    pub fn open_form(&mut self, questions: Vec<forge_types::Question>) {
+        if questions.is_empty() {
+            return;
         }
-        self.prompt = Some(if allow_other {
-            "type a number, or your own answer".to_string()
-        } else {
-            "type the number of your choice".to_string()
-        });
-        self.question = Some((options.to_vec(), allow_other));
-        self.question_prompt = Some(question.to_string());
+        self.question_prompt = Some(questions[0].text.clone());
+        self.form = Some(crate::QuestionForm::new(questions));
+        self.prompt = None;
     }
 
     /// True while a question is awaiting an answer.
     pub fn awaiting_question(&self) -> bool {
-        self.question.is_some()
+        self.form.is_some()
     }
 
     /// Drop any in-flight question/permission prompt (e.g. when the turn is interrupted).
     pub fn clear_question(&mut self) {
-        self.question = None;
+        self.form = None;
         self.prompt = None;
         self.question_prompt = None;
     }
 
-    /// Try to resolve a submitted line against the active question. `Some(answer)` clears the
-    /// question; `None` means invalid input — keep the question open and re-prompt.
-    pub fn resolve_question(&mut self, line: &str) -> Option<String> {
-        let (opts, allow_other) = self.question.as_ref()?;
-        let ans = crate::resolve_answer(line, opts, *allow_other)?;
-        self.question = None;
+    /// Feed a key to the open form. `None` when no form is open; otherwise the form's verdict,
+    /// with `Submit`/`Cancel` already torn down and recorded in scrollback.
+    pub fn form_key(&mut self, key: KeyKind) -> Option<crate::FormOutcome> {
+        let form = self.form.as_mut()?;
+        let outcome = form.key(key);
+        match &outcome {
+            crate::FormOutcome::Open => {
+                self.question_prompt = Some(form.question().text.clone());
+            }
+            crate::FormOutcome::Submit(answers) => {
+                let answers = answers.clone();
+                self.finish_form(Some(&answers));
+            }
+            crate::FormOutcome::Cancel => self.finish_form(None),
+        }
+        Some(outcome)
+    }
+
+    /// Close the form and write a compact record of each question + answer to scrollback.
+    pub fn finish_form(&mut self, answers: Option<&[forge_types::Answer]>) {
+        let Some(form) = self.form.take() else {
+            return;
+        };
         self.prompt = None;
         self.question_prompt = None;
-        self.flush.push(TextLine::from(vec![
-            Span::styled("  ↳ ", Style::default().fg(DIM)),
-            Span::styled(ans.clone(), Style::default().fg(OKGREEN)),
-        ]));
-        Some(ans)
+        for (i, q) in form.questions.iter().enumerate() {
+            self.flush.push(TextLine::from(vec![
+                Span::styled("❓ ", Style::default().fg(ORANGE).bold()),
+                Span::styled(q.text.clone(), Style::default().fg(USER).bold()),
+            ]));
+            let (text, color) = match answers.and_then(|a| a.get(i)) {
+                Some(a) if !a.is_empty() => (a.summary(), OKGREEN),
+                Some(_) => ("(no answer)".to_string(), DIM),
+                None => ("(dismissed)".to_string(), DIM),
+            };
+            self.flush.push(TextLine::from(vec![
+                Span::styled("  ↳ ", Style::default().fg(DIM)),
+                Span::styled(text, Style::default().fg(color)),
+            ]));
+        }
+    }
+
+    /// Apply a remote answer (`RemoteInput::Answer` text): either the structured form body or
+    /// the legacy option-number / free-text shape for the current question.
+    pub fn resolve_remote_answer(&mut self, text: &str) -> RemoteAnswer {
+        let Some(form) = self.form.as_mut() else {
+            return RemoteAnswer::Invalid;
+        };
+        if let Some(answers) = crate::parse_structured_answers(text) {
+            form.apply_structured(&answers);
+            let answers = form.answers();
+            self.finish_form(Some(&answers));
+            return RemoteAnswer::Complete(answers);
+        }
+        if !form.apply_text(text) {
+            return RemoteAnswer::Invalid;
+        }
+        if form.current + 1 < form.len() {
+            form.current += 1;
+            self.question_prompt = Some(form.question().text.clone());
+            return RemoteAnswer::Partial;
+        }
+        let answers = form.answers();
+        self.finish_form(Some(&answers));
+        RemoteAnswer::Complete(answers)
+    }
+
+    /// Try to resolve a submitted line against a single active question, returning the answer
+    /// as the original tool did (an option label or the free text). `None` = invalid input.
+    pub fn resolve_question(&mut self, line: &str) -> Option<String> {
+        match self.resolve_remote_answer(line) {
+            RemoteAnswer::Complete(answers) => Some(
+                answers
+                    .first()
+                    .map(forge_types::Answer::summary)
+                    .unwrap_or_else(|| crate::NO_ANSWER.to_string()),
+            ),
+            RemoteAnswer::Partial => Some(String::new()),
+            RemoteAnswer::Invalid => None,
+        }
     }
 
     /// Flush accumulated reasoning into scrollback as a dim "thinking" block (once), if any.
@@ -4032,10 +4101,14 @@ mod tests {
             false,
         );
         let screen = screen_wh(&app, 80, LIVE_H);
-        assert_eq!(prompt_height(&app), 1);
+        assert_eq!(prompt_height(&app), 0, "the form is not a permission bar");
         assert!(
-            screen.contains("ANSWER"),
-            "question state is labelled: {screen}"
+            screen.contains("Which migration should Forge run?"),
+            "question rendered in the live region: {screen}"
+        );
+        assert!(
+            screen.contains("Safe migration"),
+            "options rendered as rows: {screen}"
         );
         assert!(
             screen.contains("answer"),
@@ -4494,16 +4567,29 @@ mod tests {
         ];
         app.set_question("which database?", &options, true);
         assert!(app.awaiting_question());
-        let sb = flush_text(&mut app);
-        assert!(sb.contains("which database?"), "question shown: {sb}");
+        let screen = screen_wh(&app, 80, LIVE_H);
         assert!(
-            sb.contains("1) Postgres") && sb.contains("2) SQLite"),
-            "options numbered: {sb}"
+            screen.contains("which database?"),
+            "question shown in the live region: {screen}"
+        );
+        assert!(
+            screen.contains("1 Postgres") && screen.contains("2 SQLite"),
+            "options numbered: {screen}"
+        );
+        assert!(
+            screen.contains("Other"),
+            "free text allowed → Other row: {screen}"
         );
 
-        // A number selects; the question clears.
+        // A number selects (remote/legacy text path); the question clears and the record lands
+        // in scrollback.
         assert_eq!(app.resolve_question("2").as_deref(), Some("SQLite"));
         assert!(!app.awaiting_question());
+        let sb = flush_text(&mut app);
+        assert!(
+            sb.contains("which database?") && sb.contains("SQLite"),
+            "answered question recorded: {sb}"
+        );
 
         // Invalid input keeps the question open (None).
         app.set_question("again?", &options, false);
@@ -4512,6 +4598,71 @@ mod tests {
             app.awaiting_question(),
             "invalid answer keeps the question open"
         );
+    }
+
+    #[test]
+    fn question_form_renders_tabs_checkboxes_other_and_note_rows() {
+        let mut app = App::default();
+        let opt = |l: &str, d: &str| QChoice {
+            label: l.into(),
+            description: d.into(),
+        };
+        app.open_form(vec![
+            forge_types::Question {
+                header: "Database".into(),
+                ..forge_types::Question::single(
+                    "Which database should sessions use?",
+                    &[opt("Postgres", "recommended"), opt("SQLite", "single file")],
+                    true,
+                )
+            },
+            forge_types::Question {
+                header: "Scope".into(),
+                multi: true,
+                allow_note: true,
+                ..forge_types::Question::single(
+                    "Which features go in the MVP?",
+                    &[opt("Auth", ""), opt("Billing", "stripe"), opt("Search", "")],
+                    true,
+                )
+            },
+        ]);
+        // Answer question 1 with Enter, toggle two boxes on question 2, start a note.
+        assert_eq!(app.form_key(KeyKind::Enter), Some(crate::FormOutcome::Open));
+        app.form_key(KeyKind::Char('1'));
+        app.form_key(KeyKind::Char('3'));
+        app.form_key(KeyKind::Char('n'));
+        for c in "later".chars() {
+            app.form_key(KeyKind::Char(c));
+        }
+        let screen = screen_wh(&app, 90, LIVE_H);
+        println!("{screen}");
+        assert!(screen.contains("question 2 of 2"), "{screen}");
+        assert!(
+            screen.contains("✓ Database") && screen.contains("✓ Scope"),
+            "tab strip: {screen}"
+        );
+        assert!(
+            screen.contains("☑ 1 Auth") && screen.contains("☐ 2 Billing"),
+            "{screen}"
+        );
+        assert!(screen.contains("☑ 3 Search"), "{screen}");
+        assert!(screen.contains("Other…"), "{screen}");
+        assert!(screen.contains("note later"), "inline note field: {screen}");
+        assert!(screen.contains("choose all that apply"), "{screen}");
+        // Enter saves the note; Enter again (on the note row, answered) submits.
+        assert_eq!(app.form_key(KeyKind::Enter), Some(crate::FormOutcome::Open));
+        match app.form_key(KeyKind::Enter) {
+            Some(crate::FormOutcome::Submit(a)) => {
+                assert_eq!(a[0].selected, ["Postgres"]);
+                assert_eq!(a[1].selected, ["Auth", "Search"]);
+                assert_eq!(a[1].note.as_deref(), Some("later"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!app.awaiting_question());
+        let sb = flush_text(&mut app);
+        assert!(sb.contains("Auth, Search — note: later"), "{sb}");
     }
 
     #[test]

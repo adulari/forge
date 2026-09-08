@@ -314,7 +314,7 @@ struct DriverState {
     loop_state: Option<LoopState>,
     goal_state: Option<GoalState>,
     pending: Option<(String, std::sync::mpsc::Sender<ConfirmOutcome>)>,
-    pending_question: Option<std::sync::mpsc::Sender<String>>,
+    pending_question: Option<std::sync::mpsc::Sender<Vec<forge_types::Answer>>>,
     pending_duel: Arc<std::sync::Mutex<PendingDuel>>,
     duel_state: PendingDuel,
     assay_lenses: Vec<forge_types::FindingCategory>,
@@ -542,13 +542,8 @@ async fn drive_session(
                     // New prompt, new identity: stale remote answers must never resolve it.
                     st.prompt_seq += 1;
                 }
-                UiMsg::Question {
-                    question,
-                    options,
-                    allow_other,
-                    reply,
-                } => {
-                    st.app.set_question(&question, &options, allow_other);
+                UiMsg::Question { questions, reply } => {
+                    st.app.open_form(questions);
                     st.pending_question = Some(reply);
                     st.prompt_seq += 1;
                 }

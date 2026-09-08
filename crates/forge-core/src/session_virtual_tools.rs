@@ -5,59 +5,30 @@
 use super::*;
 
 impl Session {
-    /// Handle an `ask_user` call: parse the question + options, ask the user through the
-    /// presenter (interactive multi-choice / open-ended), and return their answer as the tool
-    /// result (docs/features/ask-user-question.md).
+    /// Handle an `ask_user` call: parse one question (legacy shape) or a `questions` form, ask
+    /// the user through the presenter, and return their answers as the tool result
+    /// (docs/features/ask-user-question.md).
     pub(crate) fn ask_user(
         &mut self,
         msg_id: &str,
         call: &forge_types::ToolCall,
     ) -> Result<String, CoreError> {
         let args_json = serde_json::to_string(&call.args)?;
-        let question = call
-            .args
-            .get("question")
-            .and_then(|q| q.as_str())
-            .unwrap_or("")
-            .to_string();
-        if question.trim().is_empty() {
-            let result = "error: ask_user requires a non-empty `question`".to_string();
-            self.store
-                .record_tool_call(msg_id, &call.name, &args_json, &result, "allowed", "error")?;
-            return Ok(result);
-        }
-        let options: Vec<forge_types::QChoice> = call
-            .args
-            .get("options")
-            .and_then(|o| o.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|o| {
-                        let label = o.get("label").and_then(|l| l.as_str())?;
-                        Some(forge_types::QChoice {
-                            label: label.to_string(),
-                            description: o
-                                .get("description")
-                                .and_then(|d| d.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Default to allowing a free-text answer (and force it when there are no options).
-        let allow_other = call
-            .args
-            .get("allow_other")
-            .and_then(|a| a.as_bool())
-            .unwrap_or(true)
-            || options.is_empty();
-
-        let answer = self.presenter.ask(&question, &options, allow_other);
+        let questions = match parse_questions(&call.args) {
+            Ok(q) => q,
+            Err(reason) => {
+                let result = format!("error: {reason}");
+                self.store.record_tool_call(
+                    msg_id, &call.name, &args_json, &result, "allowed", "error",
+                )?;
+                return Ok(result);
+            }
+        };
+        let answers = self.presenter.ask_form(&questions);
+        let result = render_answers(&questions, &answers);
         self.store
-            .record_tool_call(msg_id, &call.name, &args_json, &answer, "allowed", "ok")?;
-        Ok(answer)
+            .record_tool_call(msg_id, &call.name, &args_json, &result, "allowed", "ok")?;
+        Ok(result)
     }
 
     /// Replace the session's task list (the `update_tasks` virtual tool): parse the full list,
@@ -389,3 +360,210 @@ pub fn remember_spec() -> ToolSpec {
 
 /// The interactive-question virtual tool name (AskUserQuestion).
 pub(crate) const ASK_USER_TOOL: &str = "ask_user";
+
+/// Most questions one `ask_user` call may carry — enough for a real decision, few enough that
+/// the form stays answerable on a phone.
+pub(crate) const MAX_QUESTIONS: usize = 6;
+
+fn parse_choice(o: &serde_json::Value) -> Option<forge_types::QChoice> {
+    let label = o
+        .get("label")
+        .and_then(|l| l.as_str())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())?;
+    Some(forge_types::QChoice {
+        label: label.to_string(),
+        description: o
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+    })
+}
+
+fn parse_one(q: &serde_json::Value, index: usize) -> Result<forge_types::Question, String> {
+    let text = q
+        .get("question")
+        .or_else(|| q.get("text"))
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    if text.is_empty() {
+        return Err(format!("ask_user: question {} has no text", index + 1));
+    }
+    let options: Vec<forge_types::QChoice> = q
+        .get("options")
+        .and_then(|o| o.as_array())
+        .map(|arr| arr.iter().filter_map(parse_choice).collect())
+        .unwrap_or_default();
+    let flag = |name: &str, default: bool| q.get(name).and_then(|v| v.as_bool()).unwrap_or(default);
+    Ok(forge_types::Question {
+        header: q
+            .get("header")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(24)
+            .collect(),
+        text: text.to_string(),
+        multi: flag("multi_select", false) || flag("multi", false),
+        allow_other: flag("allow_other", true) || options.is_empty(),
+        allow_note: flag("allow_note", true),
+        options,
+    })
+}
+
+/// Accept both the form shape (`{questions: [...]}`) and the original single-question shape
+/// (`{question, options, allow_other}`) — old transcripts and models still emit the latter.
+pub(crate) fn parse_questions(
+    args: &serde_json::Value,
+) -> Result<Vec<forge_types::Question>, String> {
+    if let Some(list) = args.get("questions").and_then(|q| q.as_array()) {
+        if list.is_empty() {
+            return Err("ask_user: `questions` is empty".to_string());
+        }
+        if list.len() > MAX_QUESTIONS {
+            return Err(format!(
+                "ask_user: at most {MAX_QUESTIONS} questions per call (got {})",
+                list.len()
+            ));
+        }
+        return list
+            .iter()
+            .enumerate()
+            .map(|(i, q)| parse_one(q, i))
+            .collect();
+    }
+    if args.get("question").is_some() {
+        return Ok(vec![parse_one(args, 0)?]);
+    }
+    Err("ask_user requires a non-empty `question` or a `questions` list".to_string())
+}
+
+/// The tool result the model reads back. One question answers as a bare line (what the original
+/// tool returned, so existing prompts keep working); a form answers as a numbered list.
+pub(crate) fn render_answers(
+    questions: &[forge_types::Question],
+    answers: &[forge_types::Answer],
+) -> String {
+    if answers.iter().all(forge_types::Answer::is_empty) {
+        return forge_types::NO_ANSWER.to_string();
+    }
+    if questions.len() == 1 {
+        return answers
+            .first()
+            .map(forge_types::Answer::summary)
+            .unwrap_or_else(|| forge_types::NO_ANSWER.to_string());
+    }
+    questions
+        .iter()
+        .enumerate()
+        .map(|(i, q)| {
+            let label = if q.header.is_empty() {
+                q.text.as_str()
+            } else {
+                q.header.as_str()
+            };
+            let answer = answers
+                .get(i)
+                .map(forge_types::Answer::summary)
+                .unwrap_or_else(|| "(no answer)".to_string());
+            format!("{}. {label}: {answer}", i + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod ask_user_form_tests {
+    use super::*;
+    use forge_types::{Answer, QChoice, Question};
+
+    #[test]
+    fn the_legacy_single_question_shape_still_parses() {
+        let q = parse_questions(&serde_json::json!({
+            "question": "Which DB?",
+            "options": [{"label": "Postgres", "description": "relational"}, {"label": "SQLite"}],
+            "allow_other": false
+        }))
+        .unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].text, "Which DB?");
+        assert_eq!(q[0].options.len(), 2);
+        assert!(!q[0].allow_other);
+        assert!(!q[0].multi);
+    }
+
+    #[test]
+    fn a_form_parses_multi_select_headers_and_notes() {
+        let q = parse_questions(&serde_json::json!({
+            "questions": [
+                {"header": "Scope", "question": "Which features?", "multi_select": true,
+                 "options": [{"label": "Auth"}, {"label": "Billing"}], "allow_note": false},
+                {"question": "Anything else?"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].header, "Scope");
+        assert!(q[0].multi);
+        assert!(!q[0].allow_note);
+        assert!(q[1].allow_other, "no options → free text");
+        assert!(q[1].allow_note);
+    }
+
+    #[test]
+    fn empty_or_oversized_forms_are_rejected() {
+        assert!(parse_questions(&serde_json::json!({"questions": []})).is_err());
+        let many: Vec<_> = (0..7)
+            .map(|i| serde_json::json!({"question": format!("q{i}")}))
+            .collect();
+        assert!(parse_questions(&serde_json::json!({"questions": many})).is_err());
+        assert!(parse_questions(&serde_json::json!({"questions": [{"question": " "}]})).is_err());
+        assert!(parse_questions(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn one_question_answers_as_a_bare_line_and_a_form_as_a_list() {
+        let pg = QChoice {
+            label: "Postgres".into(),
+            description: String::new(),
+        };
+        let single = vec![Question::single(
+            "Which DB?",
+            std::slice::from_ref(&pg),
+            true,
+        )];
+        let answer = Answer {
+            selected: vec!["Postgres".into()],
+            other: None,
+            note: Some("managed, please".into()),
+        };
+        assert_eq!(
+            render_answers(&single, std::slice::from_ref(&answer)),
+            "Postgres — note: managed, please"
+        );
+        let form = vec![
+            Question {
+                header: "DB".into(),
+                ..Question::single("Which DB?", std::slice::from_ref(&pg), true)
+            },
+            Question::single("Which features?", &[], true),
+        ];
+        let features = Answer {
+            selected: vec!["Auth".into(), "Billing".into()],
+            other: Some("SSO".into()),
+            note: None,
+        };
+        assert_eq!(
+            render_answers(&form, &[answer, features]),
+            "1. DB: Postgres — note: managed, please\n2. Which features?: Auth, Billing, other: SSO"
+        );
+        assert_eq!(
+            render_answers(&single, &[Answer::default()]),
+            forge_types::NO_ANSWER
+        );
+    }
+}

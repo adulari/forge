@@ -12,10 +12,115 @@ use crate::{
 pub const NO_ANSWER: &str = "(no answer — non-interactive)";
 
 /// One choice in a user question.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QChoice {
     pub label: String,
+    #[serde(default)]
     pub description: String,
+}
+
+/// One question in an `ask_user` form (docs/features/ask-user-question.md).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Question {
+    /// Short tab label (≤ ~16 chars) shown when several questions are asked at once.
+    #[serde(default)]
+    pub header: String,
+    pub text: String,
+    #[serde(default)]
+    pub options: Vec<QChoice>,
+    /// Several options may be chosen (checkboxes) instead of exactly one (radio).
+    #[serde(default)]
+    pub multi: bool,
+    /// A free-text answer is accepted beyond the options (forced when there are none).
+    #[serde(default = "default_true")]
+    pub allow_other: bool,
+    /// The user may attach an optional free-text note to their choice.
+    #[serde(default = "default_true")]
+    pub allow_note: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Question {
+    pub fn single(text: &str, options: &[QChoice], allow_other: bool) -> Self {
+        Self {
+            header: String::new(),
+            text: text.to_string(),
+            options: options.to_vec(),
+            multi: false,
+            allow_other: allow_other || options.is_empty(),
+            allow_note: false,
+        }
+    }
+}
+
+/// The user's answer to one [`Question`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Answer {
+    /// Labels of the chosen options (one for a single-select question).
+    #[serde(default)]
+    pub selected: Vec<String>,
+    /// A free-text answer typed instead of / in addition to the options.
+    #[serde(default)]
+    pub other: Option<String>,
+    /// An optional note attached to the choice.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+impl Answer {
+    pub fn is_empty(&self) -> bool {
+        self.selected.is_empty() && self.other.as_deref().is_none_or(|t| t.trim().is_empty())
+    }
+
+    /// Wrap a legacy single-string answer (an option label or free text).
+    pub fn from_text(text: &str, options: &[QChoice]) -> Self {
+        let t = text.trim();
+        if options.iter().any(|o| o.label == t) {
+            Self {
+                selected: vec![t.to_string()],
+                ..Self::default()
+            }
+        } else {
+            Self {
+                other: Some(t.to_string()),
+                ..Self::default()
+            }
+        }
+    }
+
+    /// The answer as one line for the model: `a, b (other: …) — note: …`.
+    pub fn summary(&self) -> String {
+        let mut parts: Vec<String> = self.selected.clone();
+        if let Some(o) = self
+            .other
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            if parts.is_empty() {
+                parts.push(o.to_string());
+            } else {
+                parts.push(format!("other: {o}"));
+            }
+        }
+        let mut line = if parts.is_empty() {
+            "(no answer)".to_string()
+        } else {
+            parts.join(", ")
+        };
+        if let Some(n) = self
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            line.push_str(&format!(" — note: {n}"));
+        }
+        line
+    }
 }
 
 /// Things the session core wants to show as a turn progresses.
@@ -205,6 +310,21 @@ pub trait Presenter: Send {
     fn emit(&mut self, event: PresenterEvent);
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> ConfirmOutcome;
     fn ask(&mut self, question: &str, options: &[QChoice], allow_other: bool) -> String;
+    /// Ask several questions as one form (multi-select, free text, notes). Surfaces without a
+    /// form UI fall back to asking each question through [`Presenter::ask`], one at a time.
+    fn ask_form(&mut self, questions: &[Question]) -> Vec<Answer> {
+        questions
+            .iter()
+            .map(|q| {
+                let text = self.ask(&q.text, &q.options, q.allow_other);
+                if text == NO_ANSWER {
+                    Answer::default()
+                } else {
+                    Answer::from_text(&text, &q.options)
+                }
+            })
+            .collect()
+    }
     fn read_line(&mut self) -> Option<String>;
     /// Whether a human is present to answer a prompt on this surface. `false` for headless
     /// `forge run` and other unattended surfaces, where "paused — send `continue`" is a silent

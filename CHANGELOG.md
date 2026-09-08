@@ -7,6 +7,27 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Commit discipline.** A model left alone in a repository edited for days and hardly ever
+  committed (one real session: 2,600 edits, 49 commits, 2 pushes, two whole days at zero). Forge
+  now carries the habit: the system prompt asks for a focused conventional commit per verified
+  unit of work (specific files, never `git add -A`, never push unasked); while files *this
+  session* edited are still uncommitted every turn opens with one line naming them; every
+  `[git] commit_nudge_edits` (default 10) further edits a mid-turn reminder lands after the tool
+  result; and when the branch is `push_nudge_ahead` (default 3) commits ahead of its upstream the
+  model is told to ask the user whether to push. Files the user dirtied themselves are never
+  mentioned; a commit made outside Forge, a revert or a `/rewind` silences the reminder. New
+  `/commit [hint]` runs one turn that groups the uncommitted work into conventional commits and
+  reports the hashes without pushing. `[git] commit_nudge = false` turns the reminders off.
+  (docs/features/commit-discipline.md)
+- **`ask_user` is a form.** One call can carry up to 6 questions (`questions: [...]`), each with
+  a short `header`, `options`, `multi_select`, `allow_other` and `allow_note`. The TUI answers
+  them in the live region with a tab strip, radio / checkbox rows, an inline "Other…" field and an
+  optional note per question (`↑↓`/digits/`Space`/`Enter`, `←→` between questions, `Esc`
+  dismisses); the companion app gets a stepper card with the same affordances and sends the whole
+  form in one `answer`; headless prompts accept `1,3` on a multi-select and ask for a note. The
+  original single-question call shape, the page's numeric answers and plan approval keep working.
+  The model reads back one line per question (`Database: Postgres — note: managed`).
+  (docs/features/ask-user-question.md)
 - **Steer a running turn from the queue.** A prompt typed while Forge is busy was queued and only
   sent after the whole turn finished. It is now handed to the model at the turn's next boundary —
   after a tool step's results, or where the response would otherwise have ended the turn — as a

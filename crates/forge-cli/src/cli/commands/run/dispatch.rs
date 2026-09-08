@@ -434,6 +434,16 @@ pub(crate) async fn dispatch_command(
         }
         // `/compact` makes a model call → run it as a background task so the spinner ticks.
         CommandAction::Compact => return Ok(DispatchOutcome::RunCompact),
+        // `/commit [hint]` — one turn that commits the session's uncommitted work. The model does
+        // it through the ordinary shell tool (and its permission gate); Forge never pushes here.
+        CommandAction::Commit(hint) => {
+            app.note("⎇ committing this session's work…");
+            return Ok(DispatchOutcome::RunTurn {
+                prompt: super::commit_prompt::commit_prompt(&hint),
+                guidance: Vec::new(),
+                tier: Some(forge_types::TaskTier::Standard),
+            });
+        }
         // `/btw <question>` also makes a model call — same background-task shape as `/compact`.
         CommandAction::Btw(question) => return Ok(DispatchOutcome::RunBtw { question }),
         // `/uncompact` makes no model call (pure store + in-memory restore) → handled inline,

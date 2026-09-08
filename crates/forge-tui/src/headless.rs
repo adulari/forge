@@ -3,7 +3,9 @@
 use std::io::{IsTerminal, Write};
 
 use forge_types::SideEffect;
-use forge_types::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, NO_ANSWER};
+use forge_types::{
+    Answer, ConfirmOutcome, Presenter, PresenterEvent, QChoice, Question, NO_ANSWER,
+};
 
 use crate::answer::resolve_answer;
 use crate::render;
@@ -334,6 +336,43 @@ impl Presenter for HeadlessPresenter {
         NO_ANSWER.to_string()
     }
 
+    fn ask_form(&mut self, questions: &[Question]) -> Vec<Answer> {
+        if !self.interactive {
+            return Vec::new();
+        }
+        let total = questions.len();
+        questions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                if total > 1 {
+                    let head = if q.header.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", q.header)
+                    };
+                    println!("\n❓ question {} of {total}{head}", i + 1);
+                }
+                let selected = ask_one_headless(q);
+                let note = if q.allow_note && !selected.is_empty() {
+                    print!("  note (Enter to skip): ");
+                    let _ = std::io::stdout().flush();
+                    let mut line = String::new();
+                    if std::io::stdin().read_line(&mut line).is_ok() {
+                        Some(line.trim().to_string()).filter(|t| !t.is_empty())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let mut answer = selected;
+                answer.note = note;
+                answer
+            })
+            .collect()
+    }
+
     fn is_attended(&self) -> bool {
         self.interactive
     }
@@ -349,6 +388,65 @@ impl Presenter for HeadlessPresenter {
             Ok(_) => Some(line),
         }
     }
+}
+
+/// One question on a line-oriented terminal: numbers pick options (`1,3` on a multi-select),
+/// anything else is the free-text answer when allowed. Three tries, then no answer.
+fn ask_one_headless(q: &Question) -> Answer {
+    for _ in 0..3 {
+        println!("\n❓ {}", q.text);
+        for (i, o) in q.options.iter().enumerate() {
+            if o.description.is_empty() {
+                println!("  {}) {}", i + 1, o.label);
+            } else {
+                println!("  {}) {} — {}", i + 1, o.label, o.description);
+            }
+        }
+        let how = match (q.multi, q.allow_other) {
+            (true, true) => "numbers separated by commas, or type your own answer: ",
+            (true, false) => "numbers separated by commas: ",
+            (false, true) => "choose a number, or type your own answer: ",
+            (false, false) => "choose a number: ",
+        };
+        print!("  {how}");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            return Answer::default();
+        }
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let picks: Option<Vec<usize>> = t
+            .split(',')
+            .map(|p| p.trim().parse::<usize>().ok())
+            .map(|n| n.filter(|n| *n >= 1 && *n <= q.options.len()))
+            .collect();
+        match picks {
+            Some(ns) if !ns.is_empty() && (q.multi || ns.len() == 1) => {
+                let mut seen = std::collections::BTreeSet::new();
+                return Answer {
+                    selected: ns
+                        .into_iter()
+                        .filter(|n| seen.insert(*n))
+                        .map(|n| q.options[n - 1].label.clone())
+                        .collect(),
+                    other: None,
+                    note: None,
+                };
+            }
+            _ if q.allow_other => {
+                return Answer {
+                    selected: Vec::new(),
+                    other: Some(t.to_string()),
+                    note: None,
+                };
+            }
+            _ => {}
+        }
+    }
+    Answer::default()
 }
 
 #[cfg(test)]

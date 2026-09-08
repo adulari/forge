@@ -1069,6 +1069,15 @@ pub struct Snapshot {
     pub question_options: Vec<SnapOption>,
     /// Whether the pending question accepts a free-text answer in addition to its options.
     pub question_allow_other: bool,
+    /// The whole pending `ask_user` form (v11 additive): every question, its options, whether
+    /// several may be chosen and whether a note is accepted. `question`/`question_options`
+    /// mirror the current one so older clients keep working. A client answers the whole form
+    /// with one `answer` whose text is `{"answers":[{"selected":[…],"other":…,"note":…},…]}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_form: Option<Vec<forge_types::Question>>,
+    /// Index of the question the legacy fields mirror.
+    #[serde(default)]
+    pub question_index: usize,
     /// The open modal overlay (palette / picker / config / usage / mesh / workflow), if any —
     /// see [`SnapOverlay`]. `None` when nothing modal is open.
     pub overlay: Option<SnapOverlay>,
@@ -1140,6 +1149,8 @@ impl Default for Snapshot {
             question: None,
             question_options: Vec::new(),
             question_allow_other: false,
+            question_form: None,
+            question_index: 0,
             overlay: None,
             diff: None,
             plan: None,
@@ -2172,6 +2183,8 @@ mod tests {
                 description: "do it".into(),
             }],
             question_allow_other: true,
+            question_form: None,
+            question_index: 0,
             overlay: Some(SnapOverlay {
                 kind: "picker:model_pin".into(),
                 title: "⊕ pin model".into(),

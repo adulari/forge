@@ -37,7 +37,17 @@
     },
     "git": {
       "type": "object",
-      "description": "Git integration (co-authoring, hook installation).",
+      "description": "Git integration (co-authoring, hook installation, commit discipline).",
+      "properties": {
+        "coauthor": { "type": "boolean", "default": false },
+        "commit_nudge": {
+          "type": "boolean",
+          "default": true,
+          "description": "Remind the model, at turn start and every commit_nudge_edits edits, that files it edited this session are still uncommitted; and to offer a push when the branch is push_nudge_ahead commits ahead."
+        },
+        "commit_nudge_edits": { "type": "integer", "minimum": 0, "default": 10 },
+        "push_nudge_ahead": { "type": "integer", "minimum": 0, "default": 3 }
+      },
       "additionalProperties": true
     },
     "lsp": {
