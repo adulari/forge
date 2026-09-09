@@ -55,6 +55,15 @@ impl Session {
         // `--model` pin. A rate limit on a pinned model is waited out with exponential backoff on
         // the SAME model (see `pinned_backoff_delay`) instead of failing the turn.
         let pinned_turn = self.pinned_model.is_some() || decision.is_some_and(|d| d.pinned);
+        // A pin overrides the health table, so an already-benched model keeps being called with
+        // nothing said about it (model_health_notice.rs). Say it once, at the top of the turn.
+        if pinned_turn {
+            if let Some(w) =
+                crate::model_health_notice::benched_pin_warning(&self.store, &active_model)
+            {
+                self.presenter.emit(PresenterEvent::Warning(w));
+            }
+        }
         let mut pinned_rl_attempts = 0u32;
         let mut pinned_rl_waited = std::time::Duration::ZERO;
         // Pinned outage backoff (pinned-outage-resilience §1): a SEPARATE attempt/budget pair so
@@ -349,12 +358,15 @@ impl Session {
                     // an empty final chunk, like kimi-k2.6 in the dogfooding run) is broken for this
                     // turn — BENCH it and FAIL OVER to the next chain model instead of dead-ending
                     // the turn short of a working model (the subscription bridge sat untried below).
+                    // Bench BEFORE asking whether failover can help: on a pinned turn (failover
+                    // off) this is the only record that survives, and it is what makes the next
+                    // turn's pin warning true.
+                    let _ = self.store.bench_for(
+                        &active_model,
+                        default_cooldown,
+                        "empty response (no text, no tool call)",
+                    );
                     if failover_enabled {
-                        let _ = self.store.bench_for(
-                            &active_model,
-                            default_cooldown,
-                            "empty response (no text, no tool call)",
-                        );
                         let mut picked = None;
                         for next in chain.by_ref() {
                             match self.admit_failover_model(&next).await {
@@ -380,9 +392,9 @@ impl Session {
                             continue;
                         }
                     }
+                    // A pinned turn has no chain to fall to: name the pin and the way out.
                     self.presenter.emit(PresenterEvent::Error(
-                        "model returned an empty response (no text, no tool call) — stopping the turn"
-                            .to_string(),
+                        crate::model_health_notice::empty_response_stop(&active_model, pinned_turn),
                     ));
                     // Keep an answer the model already gave. Execution falls through to the
                     // terminal below, which does `final_text = resp.content` — and `resp.content`
