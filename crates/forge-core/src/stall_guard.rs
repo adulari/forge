@@ -26,9 +26,14 @@ const NUDGE_AFTER: usize = 4;
 /// Further repeats tolerated after the nudge before halting.
 const HALT_AFTER_NUDGE: usize = 2;
 
+/// Openings remembered for the comparison. Live, the model alternated between two phrasings
+/// ("Reverting the failed live-reuse path …" / "Cutting the failed live-reuse path …"), so
+/// comparing with only the previous step saw a change every time.
+const WINDOW: usize = 3;
+
 #[derive(Debug, Default)]
 pub(crate) struct NarrationTracker {
-    last: Option<Vec<String>>,
+    recent: std::collections::VecDeque<Vec<String>>,
     repeats: usize,
     nudged: bool,
     repeats_since_nudge: usize,
@@ -41,8 +46,11 @@ impl NarrationTracker {
         if words.is_empty() {
             return Stall::Fine;
         }
-        let same = self.last.as_ref().is_some_and(|prev| similar(prev, &words));
-        self.last = Some(words);
+        let same = self.recent.iter().any(|prev| similar(prev, &words));
+        self.recent.push_back(words);
+        if self.recent.len() > WINDOW {
+            self.recent.pop_front();
+        }
         if !same {
             self.repeats = 0;
             self.nudged = false;
@@ -167,6 +175,21 @@ mod tests {
                 Stall::Fine,
                 Stall::Halt
             ],
+            "{verdicts:?}"
+        );
+    }
+
+    #[test]
+    fn two_alternating_phrasings_still_count_as_the_same_stall() {
+        let a = "Reverting the failed live-reuse path — keeping the proven wins, restoring fresh-connection + finish PUT.";
+        let b = "Cutting the failed live-reuse path and keeping the proven perf wins.";
+        let mut t = NarrationTracker::default();
+        let verdicts: Vec<Stall> = [a, b, a, b, a, b, a, b]
+            .iter()
+            .map(|s| t.observe(s))
+            .collect();
+        assert!(
+            verdicts.contains(&Stall::Nudge) && verdicts.last() == Some(&Stall::Halt),
             "{verdicts:?}"
         );
     }
