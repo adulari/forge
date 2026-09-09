@@ -6,6 +6,18 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Stalled tasks stop driving the session.** Forge treats an unfinished task as "the turn is not
+  over" and re-drives the model — which loops forever once a task becomes unresolvable (a real
+  session lost the context behind one to a compaction and then spent days re-reading files to work
+  out what it meant; re-reading counts as progress, so the nudge budget never ran out). A task
+  whose title and status have not moved for three turns now gets one system line naming it and the
+  ways out — do it, mark it Done, drop it, or `ask_user`; two further unchanged turns and Forge
+  removes it from the list itself, telling both the model and the user. When a compaction happened
+  while the task was open the escalation says so, because that is why the model cannot reconstruct
+  it. Inside a turn, the second and later continue-nudges now name the open tasks instead of
+  repeating the same generic instruction. See `docs/features/stalled-tasks.md`.
+
 ### Fixed
 - **Narration-stall guard.** A 27k-message session spent 23 steps opening every reply with the
   same sentence ("You're right — I looped. Answering the 429 question …") while reading a slightly

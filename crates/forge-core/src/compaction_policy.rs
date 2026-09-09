@@ -619,6 +619,10 @@ impl Session {
         )
         .await;
         self.history_epoch += 1;
+        // Every task still open just lost the part of the conversation that explains it. The
+        // staleness tracker remembers that, so if one of them then stops moving the escalation can
+        // say why the model cannot work out what it meant (task_staleness.rs).
+        self.stale_tasks.note_compaction();
         Ok((before, after))
     }
 

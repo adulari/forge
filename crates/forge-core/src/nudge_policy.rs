@@ -57,6 +57,54 @@ pub(crate) const CONTINUE_NUDGE: &str =
      update_tasks and say why. Do not reply again without either calling a tool or marking a task \
      Done.";
 
+/// Maximum unfinished titles quoted back to the model; a 30-task list would otherwise re-enter the
+/// prompt in full on every nudge.
+const NAMED_TASKS: usize = 6;
+
+/// The titles of the tasks that are not Done — what the completion gate counts, and what a repeat
+/// nudge quotes back.
+pub(crate) fn open_titles(tasks: &[forge_types::TodoItem]) -> Vec<String> {
+    tasks
+        .iter()
+        .filter(|t| t.status != forge_types::TodoStatus::Done)
+        .map(|t| t.title.clone())
+        .collect()
+}
+
+/// The nudge to send, given how many have already gone out this turn.
+///
+/// The first one is the generic instruction above. From the second on it names the tasks that are
+/// still open and demands a decision about them, because by then the generic version has demonstrably
+/// not worked: the model answered it and the work is still open. On the session that motivated
+/// this, what it answered with was another round of reading to decide what one task meant — which
+/// [`decide`] scores as progress, so the budget kept refilling. Naming the task and listing the
+/// ways out (finish it, mark it Done, drop it, ask the user) is what ends that.
+pub(crate) fn continue_nudge(unfinished: &[String], sent: usize) -> String {
+    if sent <= 1 || unfinished.is_empty() {
+        return CONTINUE_NUDGE.to_string();
+    }
+    let named = unfinished
+        .iter()
+        .take(NAMED_TASKS)
+        .map(|t| format!("- {t}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let more = unfinished.len().saturating_sub(NAMED_TASKS);
+    let more = if more > 0 {
+        format!("\n- (and {more} more)")
+    } else {
+        String::new()
+    };
+    format!(
+        "{CONTINUE_NUDGE}\n\nThis is nudge {sent} of this turn and these tasks are still \
+         open:\n{named}{more}\n\nGathering more information about them does not count. Pick the \
+         first one and, in this step, either carry it out with a concrete tool call, or resolve it \
+         on the list: mark it Done via update_tasks and say in one line what you did, or remove it \
+         via update_tasks because it is moot, or call ask_user if only the user can decide what it \
+         means."
+    )
+}
+
 pub(crate) fn continuing_warning(unfinished: usize, sent: usize, max: usize) -> String {
     format!("model stopped with {unfinished} task(s) unfinished — continuing it ({sent}/{max})")
 }
@@ -81,6 +129,31 @@ pub(crate) fn budget_spent_warning(unfinished: usize, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_nudge_is_the_plain_instruction() {
+        assert_eq!(continue_nudge(&["a".into()], 1), CONTINUE_NUDGE);
+        // No tracked titles to name (bridge paths track them separately) — stay generic.
+        assert_eq!(continue_nudge(&[], 3), CONTINUE_NUDGE);
+    }
+
+    #[test]
+    fn a_repeat_nudge_names_the_open_tasks_and_the_ways_out() {
+        let text = continue_nudge(&["Strip live-reuse".into(), "Re-run the bench".into()], 2);
+        assert!(text.contains("- Strip live-reuse"));
+        assert!(text.contains("- Re-run the bench"));
+        assert!(text.contains("ask_user"));
+        assert!(text.contains("does not count"));
+    }
+
+    #[test]
+    fn a_long_list_is_capped_rather_than_pasted_back_whole() {
+        let titles: Vec<String> = (0..12).map(|i| format!("task {i}")).collect();
+        let text = continue_nudge(&titles, 2);
+        assert!(text.contains("- task 5"));
+        assert!(!text.contains("- task 6"));
+        assert!(text.contains("(and 6 more)"));
+    }
 
     #[test]
     fn the_first_nudge_is_always_worth_sending() {
