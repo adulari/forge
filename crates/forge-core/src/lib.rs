@@ -44,6 +44,7 @@ pub mod heartbeat;
 pub mod hooks;
 pub mod llm_router;
 mod lsp_hints;
+pub(crate) mod model_health_notice;
 mod model_loop;
 mod model_request;
 mod model_response;

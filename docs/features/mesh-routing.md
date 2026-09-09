@@ -964,6 +964,26 @@ a context-overflow error rides the same `Unavailable` classification, but after 
 retries are spent, *waiting can never shrink the input* — backing off would burn the whole
 outage budget on a lost cause, so it is explicitly carved out of `transient_outage`.
 
+**A pin whose model is dead** (`crates/forge-core/src/model_health_notice.rs`). A pin also
+overrides the health table — that is the point of pinning — so Forge will happily keep calling a
+model it has already benched, and until 2026-09-09 it did so with nothing said about it. Session
+`07ca114e` was pinned to `meta::muse-spark-1.3-contributor` after that route began answering with
+HTTP success, no text, no tool call and **zero tokens billed**; twelve consecutive turns died on it
+while `forge models` had been printing that exact id as `benched` the whole time. The turn's own
+error ("model returned an empty response … stopping the turn") never mentioned the pin, the bench,
+or `/model`, so it read like a corrupted session.
+
+Three changes, none of which override the pin:
+
+1. A pinned turn whose model is currently benched opens with one warning naming the model, the
+   bench reason, roughly how long is left, and the two ways out (`/model`, `forge models --probe`).
+2. An empty-response model is benched **before** the failover question is asked, not inside the
+   `failover_enabled` branch. On a pinned turn failover is off, so the bench used to be skipped
+   entirely — which is why the health table never learned about it and the next turn repeated the
+   whole thing.
+3. The stopping error names the pin when there was one and says the conversation continues once the
+   pin is cleared, instead of implying the session itself failed.
+
 ### 9.1 Subagent pin inheritance
 
 A pin active on the session — whether the router's `--model` pin or the in-session `/model` pin

@@ -19,6 +19,14 @@ All notable changes to Forge are documented here. The format follows
   repeating the same generic instruction. See `docs/features/stalled-tasks.md`.
 
 ### Fixed
+- **A dead pinned model no longer looks like a broken session.** A pin overrides routing *and* the
+  health table, so Forge kept calling a model it had already benched and said nothing: one session
+  spent twelve turns on zero-token empty completions while `forge models` listed that exact id as
+  `benched`, and the turn error never mentioned the pin. Now a pinned turn whose model is benched
+  opens with a warning naming the model, the reason, the time left and the ways out (`/model`,
+  `forge models --probe`); an empty-responding model is benched even when failover is off (it used
+  to be skipped on pinned turns, so the health table never learned); and the stopping error names
+  the pin and says the conversation resumes once it is cleared.
 - **Narration-stall guard.** A 27k-message session spent 23 steps opening every reply with the
   same sentence ("You're right — I looped. Answering the 429 question …") while reading a slightly
   different slice of the same file each time. Neither existing loop guard could see it: the
