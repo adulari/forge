@@ -724,7 +724,7 @@ click it (or `Ctrl+T` for the most recent) to expand the full arguments and the 
 **Keyboard shortcuts:** `SHIFT+TAB`/`Alt+T` cycle temper · `Ctrl+Shift+K` mid-turn — abort + retry the same
 prompt on the mesh's next-ranked model (excludes ones already skipped this turn) · `Ctrl+↑`/`Ctrl+↓`
 bias the routing tier up/down, re-running immediately if mid-turn · `Ctrl+O` activity viewer ·
-`Ctrl+T` expand/collapse the most recent tool call · `Ctrl+J` newline · `Esc` interrupt (mid-turn) / `Esc Esc` rewind (idle) · `Ctrl+C` quit · `↑/↓` navigate ·
+`Ctrl+T` expand/collapse the most recent tool call · `Ctrl+J` newline · `Esc` interrupt (mid-turn) / `Esc Esc` rewind (idle) · `Ctrl+C` quit · `↑/↓` navigate · `Ctrl+Home` previous user message (again: the one before) · `Ctrl+End` bottom ·
 `y/n/a` allow/deny/always-allow a permission prompt · in an `ask_user` form `↑/↓` `1-9` `Space` `Enter` answer, `←/→` switch question, `o`/`n` other/note, `Esc` dismiss ([docs](docs/features/ask-user-question.md)) · `Alt+M` model picker · `Alt+E` cycle effort ·
 `Ctrl+N` new session · `Ctrl+S` checkpoint · `Ctrl+Z` undo last write · `Ctrl+L` compact ·
 `Ctrl+R` toggle reasoning display · `Ctrl+,` edit keybinds · `F1` full keybind reference.

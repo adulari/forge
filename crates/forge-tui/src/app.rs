@@ -472,6 +472,9 @@ pub struct App {
     /// Screen geometry of the floating "jump to bottom" bar (row, col0, width) when shown, for
     /// click hit-testing. `None` when at the bottom (bar hidden).
     jump_bar_geom: std::cell::Cell<Option<(u16, u16, u16)>>,
+    /// Screen geometry of the floating "previous message" bar at the top of the transcript
+    /// (row, col0, width) when shown, for click hit-testing.
+    prev_bar_geom: std::cell::Cell<Option<(u16, u16, u16)>>,
     /// Full-screen viewer scroll geometry `(wrapped_len, body_h)` of the selected entry, written by
     /// the (immutable-`&self`) render path so `viewer_key` can re-enable follow when the user scrolls
     /// back to the bottom (it has no other way to know the wrapped length at keypress time).
@@ -806,6 +809,9 @@ pub enum KeyKind {
     PageDown,
     /// Ctrl+End — jump the full-screen transcript to the bottom and resume following (shell-handled).
     JumpBottom,
+    /// Ctrl+Home — jump the full-screen transcript to the most recent user message above the
+    /// current view; pressed again, to the one before it (shell-handled).
+    JumpPrevUser,
     /// Ctrl+R — toggle the effort-level slider popup above the input bar.
     ToggleEffortSlider,
     /// Mid-turn: abort + retry with next mesh model.
@@ -1042,6 +1048,7 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::PageUp
         | KeyKind::PageDown
         | KeyKind::JumpBottom
+        | KeyKind::JumpPrevUser
         | KeyKind::SkipModel
         | KeyKind::TierUp
         | KeyKind::TierDown
@@ -2771,6 +2778,57 @@ impl App {
         self.transcript_scroll = usize::MAX / 2;
     }
 
+    /// Wrapped-row indices where a user message starts, ascending, at the last rendered width.
+    fn user_message_rows(&self) -> Vec<usize> {
+        let Some(g) = self.transcript_geom.get() else {
+            return Vec::new();
+        };
+        self.ensure_wrapped_main(g.width);
+        let cache = self.wrap_cache.borrow();
+        let mut rows = Vec::new();
+        for (row, &line) in cache.origins.iter().enumerate() {
+            if row > 0 && cache.origins[row - 1] == line {
+                continue; // a later wrapped row of the same line
+            }
+            let is_header = self
+                .main_log
+                .get(line)
+                .is_some_and(|l| l.spans.len() == 1 && l.spans[0].content.as_ref() == "  you");
+            if is_header {
+                rows.push(row);
+            }
+        }
+        rows
+    }
+
+    /// Whether at least one user message starts above the row the last frame scrolled to — i.e.
+    /// whether the "previous message" bar has somewhere to go.
+    pub fn has_user_message_above(&self) -> bool {
+        let Some(g) = self.transcript_geom.get() else {
+            return false;
+        };
+        self.user_message_rows()
+            .first()
+            .is_some_and(|&r| r < g.scroll)
+    }
+
+    /// Jump the full-screen transcript so the most recent user message ABOVE the current view
+    /// sits at the top; pressed again it walks to the one before it. Pauses follow. Uses the
+    /// geometry of the last rendered frame, so it is a no-op before the first draw or when
+    /// nothing is above.
+    pub fn transcript_to_prev_user(&mut self) -> bool {
+        let Some(g) = self.transcript_geom.get() else {
+            return false;
+        };
+        let rows = self.user_message_rows();
+        let Some(&target) = rows.iter().rev().find(|&&r| r < g.scroll) else {
+            return false;
+        };
+        self.transcript_follow = false;
+        self.transcript_scroll = target;
+        true
+    }
+
     /// Wrap the in-loop activity viewer's selected entry to `width` (already the wrap width, i.e.
     /// one column short of the area), reusing the previous frame's rows unless the selection, the
     /// width, or that entry's content revision changed. The viewer redraws at the render loop's full
@@ -2918,6 +2976,14 @@ impl App {
             return None;
         }
         Some((g.scroll + (row - g.row0) as usize, col - g.col0))
+    }
+
+    /// True if a screen cell is on the floating "previous message" bar.
+    pub fn prev_bar_hit(&self, col: u16, row: u16) -> bool {
+        match self.prev_bar_geom.get() {
+            Some((br, c0, w)) => row == br && col >= c0 && col < c0 + w,
+            None => false,
+        }
     }
 
     /// True if a screen cell is on the floating jump-to-bottom bar.
@@ -4663,6 +4729,49 @@ mod tests {
         assert!(!app.awaiting_question());
         let sb = flush_text(&mut app);
         assert!(sb.contains("Auth, Search — note: later"), "{sb}");
+    }
+
+    #[test]
+    fn previous_message_jump_walks_user_messages_upward() {
+        let mut app = App {
+            fullscreen: true,
+            ..Default::default()
+        };
+        for i in 0..3 {
+            app.submit_user(&format!("prompt {i}"));
+            app.apply(PresenterEvent::AssistantText("a\nb\nc\nd".into()));
+            let _ = app.drain_flush();
+        }
+        // Render once (tail) so the geometry exists; the view is at the bottom.
+        // A short frame (body ≈ 8 rows) so the 18 transcript rows scroll and older prompts sit above.
+        app.transcript_to_bottom();
+        let _ = screen_wh(&app, 80, 12);
+        assert!(
+            app.has_user_message_above(),
+            "older prompts sit above the tail view: geom={:?} rows={:?}",
+            app.transcript_geom.get(),
+            app.user_message_rows()
+        );
+        assert!(app.transcript_to_prev_user());
+        let first = app.transcript_scroll;
+        let _ = screen_wh(&app, 80, 12);
+        assert!(app.transcript_to_prev_user(), "again → the one before");
+        assert!(app.transcript_scroll < first);
+        assert_eq!(
+            app.transcript_scroll, 0,
+            "two presses from the tail reach the first prompt (rows 0 and 6 are above; 12 is in view)"
+        );
+        let _ = screen_wh(&app, 80, 12);
+        assert!(!app.has_user_message_above());
+        assert!(
+            !app.transcript_to_prev_user(),
+            "nothing above the first prompt"
+        );
+        // The bar is drawn only while there is somewhere to go.
+        app.transcript_to_bottom();
+        let screen = screen_wh(&app, 80, 12);
+        assert!(screen.contains("Previous message"), "{screen}");
+        assert!(app.prev_bar_hit(79 - 10, 0));
     }
 
     #[test]

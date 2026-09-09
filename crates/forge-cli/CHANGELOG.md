@@ -22,6 +22,16 @@ All notable changes to Forge are documented here. The format follows
   Stop kept next to it. Queued prompts show as ⚡ chips (tap to dequeue). Ships over the air.
 
 ### Added
+- **Prompt history survives closing the session.** The composer's ↑/↓ history used to start
+  empty every time `forge chat` opened. It is now seeded from the store: the session's own past
+  prompts (rewound and compacted ones included — history is what you typed), preceded by the most
+  recent prompts from other sessions in the same workspace, up to 500. Harness-written user rows
+  (continuation nudges) are skipped; consecutive duplicates collapse.
+- **"↑ Previous message" bar.** The full-screen transcript had a jump-to-bottom bar but no way
+  back up: a bar at the top (and `Ctrl+Home`) jumps to the most recent user message above the
+  view; pressing it again walks to the one before, and so on.
+
+### Added
 - **Commit discipline.** A model left alone in a repository edited for days and hardly ever
   committed (one real session: 2,600 edits, 49 commits, 2 pushes, two whole days at zero). Forge
   now carries the habit: the system prompt asks for a focused conventional commit per verified

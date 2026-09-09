@@ -108,6 +108,23 @@ pub(crate) fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // Floating "previous message" bar at the top — only while a user message starts above the
+    // view. Pressing/clicking it again walks to the one before.
+    if area.height > 1 && app.has_user_message_above() {
+        let label = " ↑ Previous message · Ctrl+Home ";
+        let w = (label.chars().count() as u16).min(area.width);
+        let x = area.x + area.width.saturating_sub(w + 1);
+        let y = area.y;
+        let bar = Paragraph::new(TextLine::from(Span::styled(
+            label,
+            Style::default().fg(STATUSBG).bg(USER).bold(),
+        )));
+        frame.render_widget(bar, Rect::new(x, y, w, 1));
+        app.prev_bar_geom.set(Some((y, x, w)));
+    } else {
+        app.prev_bar_geom.set(None);
+    }
+
     // Floating "jump to bottom" bar — only while scrolled up off the tail.
     if scroll < max_scroll && area.height > 0 {
         let label = " ↓ Jump to bottom · Ctrl+End ";
