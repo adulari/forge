@@ -19,6 +19,14 @@ All notable changes to Forge are documented here. The format follows
   repeating the same generic instruction. See `docs/features/stalled-tasks.md`.
 
 ### Fixed
+- **A tool-call id reused across turns no longer 400s the whole request.** Tool ids are only unique
+  within a turn (`shell:0` is that turn's first shell call), and `normalize_tool_pairs` deduplicated
+  them only *inside* one assistant message — so once a compaction retained two turns' tails, the
+  request went out with two `shell:0` tool responses and every turn died on "Duplicate tool response
+  for tool_call_id='shell:0'. Each tool_call must have exactly one matching tool response". A live
+  session hit this on every retry, including straight after compacting 465 messages to 7. Ids are now
+  unique across the whole request: a repeat is renamed (`shell:0#2`) and its call and result are
+  renamed in lockstep, so both turns keep their real context instead of one pair being dropped.
 - **A dead pinned model no longer looks like a broken session.** A pin overrides routing *and* the
   health table, so Forge kept calling a model it had already benched and said nothing: one session
   spent twelve turns on zero-token empty completions while `forge models` listed that exact id as
