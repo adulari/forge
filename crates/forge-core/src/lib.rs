@@ -5656,6 +5656,7 @@ mod tests {
             let usage = Usage::default();
             if messages.iter().any(|m| m.role == Role::Tool) {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "done".into(),
                     tool_calls: vec![],
                     usage,
@@ -5663,6 +5664,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: "asking".into(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -5729,6 +5731,7 @@ mod tests {
             let usage = Usage::default();
             if messages.iter().any(|m| m.role == Role::Tool) {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "done".into(),
                     tool_calls: vec![],
                     usage,
@@ -5736,6 +5739,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -5869,6 +5873,7 @@ mod tests {
             use forge_types::{new_id, ToolCall, Usage};
             if messages.iter().any(|m| m.role == Role::Tool) {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "done".into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
@@ -5876,6 +5881,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -5973,6 +5979,7 @@ mod tests {
             let usage = Usage::default();
             if messages.iter().any(|m| m.role == Role::Tool) {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "done".into(),
                     tool_calls: vec![],
                     usage,
@@ -5980,6 +5987,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: "planning".into(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -6059,6 +6067,7 @@ mod tests {
             let resp = match n {
                 // Read-only evidence + mark the only task Done.
                 0 => ModelResponse {
+                    reasoning: String::new(),
                     content: "starting".into(),
                     tool_calls: vec![
                         read(),
@@ -6073,6 +6082,7 @@ mod tests {
                 },
                 // Completion explicitly explains that this read-only task needs no change.
                 1 => ModelResponse {
+                    reasoning: String::new(),
                     content: "Goal complete: no changes are needed; Cargo.toml exists.".into(),
                     tool_calls: vec![],
                     usage,
@@ -6148,6 +6158,7 @@ mod tests {
             let usage = Usage::default();
             let resp = if n == 0 {
                 ModelResponse {
+                    reasoning: String::new(),
                     content: "working".into(),
                     tool_calls: vec![
                         ToolCall {
@@ -6167,6 +6178,7 @@ mod tests {
             } else {
                 // The initial read is read-only completion evidence; later turns only state no change is needed.
                 ModelResponse {
+                    reasoning: String::new(),
                     content: "no changes are required; it's already satisfied".into(),
                     tool_calls: vec![],
                     usage,
@@ -6231,6 +6243,7 @@ mod tests {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(if n == 0 {
                 ModelResponse {
+                    reasoning: String::new(),
                     content: "checking".into(),
                     tool_calls: vec![
                         ToolCall {
@@ -6255,6 +6268,7 @@ mod tests {
                 // unrelated messages), so a repetition detector keyed on text could not separate
                 // them from ordinary on-topic work. The signal is structural, not textual.
                 ModelResponse {
+                    reasoning: String::new(),
                     content: format!(
                         "attempt {n}: login cannot be completed reliably; this needs a human \
                          decision before I continue"
@@ -6345,6 +6359,7 @@ mod tests {
             };
             Ok(if n == 0 {
                 ModelResponse {
+                    reasoning: String::new(),
                     content: "starting".into(),
                     tool_calls: vec![
                         ToolCall {
@@ -6362,6 +6377,7 @@ mod tests {
             } else if n % 2 == 1 {
                 // Narrates the next action without doing it — the slip the nudge is FOR.
                 ModelResponse {
+                    reasoning: String::new(),
                     content: "now I'll check the next file".into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
@@ -6370,6 +6386,7 @@ mod tests {
             } else {
                 // The nudge worked: it acted.
                 ModelResponse {
+                    reasoning: String::new(),
                     content: "checked".into(),
                     tool_calls: vec![read],
                     usage: Usage::default(),
@@ -6442,6 +6459,7 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "all done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -6560,6 +6578,7 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             use forge_types::{new_id, ToolCall, Usage};
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "let me read it again".into(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -6745,6 +6764,7 @@ mod tests {
                 serde_json::json!({"path": "Cargo.toml"}) // succeeds → clears failure streak
             };
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "still poking at it".into(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -6826,6 +6846,7 @@ mod tests {
                 serde_json::json!({"path": "Cargo.toml"})
             };
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: if n < 9 {
                     vec![ToolCall {
@@ -6900,6 +6921,7 @@ mod tests {
             use forge_types::{new_id, ToolCall, Usage};
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "let me try a different file".into(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -7175,6 +7197,7 @@ mod tests {
                 args: serde_json::json!({"path": format!("does-not-exist-{n}-{suffix}.rs")}),
             };
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "reading two more files".into(),
                 tool_calls: vec![mk("a"), mk("b")],
                 usage: Usage::default(),
@@ -7242,6 +7265,7 @@ mod tests {
                 args: serde_json::json!({"path": "Cargo.toml"}),
             };
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "reading again".into(),
                 tool_calls: vec![mk(), mk()],
                 usage: Usage::default(),
@@ -7332,6 +7356,7 @@ mod tests {
                 .calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "still working".into(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -7381,6 +7406,7 @@ mod tests {
                 Vec::new()
             };
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "all done".into(),
                 tool_calls,
                 usage: Usage {
@@ -7665,6 +7691,7 @@ mod tests {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             let resp = match n {
                 0 => ModelResponse {
+                    reasoning: String::new(),
                     content: "starting".into(),
                     tool_calls: task("in_progress"),
                     usage,
@@ -7673,18 +7700,21 @@ mod tests {
                 // Premature stall: narrates, no tool call, task still unfinished. The harness must
                 // NOT accept this as the final answer — it should nudge and drive on.
                 1 => ModelResponse {
+                    reasoning: String::new(),
                     content: "I'll keep going on this.".into(),
                     tool_calls: vec![],
                     usage,
                     quotas: Vec::new(),
                 },
                 2 => ModelResponse {
+                    reasoning: String::new(),
                     content: "finishing".into(),
                     tool_calls: task("done"),
                     usage,
                     quotas: Vec::new(),
                 },
                 _ => ModelResponse {
+                    reasoning: String::new(),
                     content: "all done".into(),
                     tool_calls: vec![],
                     usage,
@@ -7761,6 +7791,7 @@ mod tests {
                 Vec::new() // narrate, never finish
             };
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "still working on it".into(),
                 tool_calls,
                 usage: Usage::default(),
@@ -7887,6 +7918,7 @@ mod tests {
                 vec![]
             };
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: if n == 0 {
                     "checking".into()
                 } else {
@@ -7993,6 +8025,7 @@ mod tests {
             _on_event: &mut forge_provider::EventSink<'_>,
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -8064,6 +8097,7 @@ mod tests {
                 ));
             }
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: if call == 0 {
                     String::new()
                 } else {
@@ -8112,6 +8146,7 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             if self.bad.contains(model) {
                 return Ok(forge_provider::ModelResponse {
+                    reasoning: String::new(),
                     content: String::new(),
                     tool_calls: vec![],
                     usage: forge_types::Usage::default(),
@@ -8120,6 +8155,7 @@ mod tests {
             }
             on_event(StreamEvent::Text(model.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: model.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -8165,6 +8201,7 @@ mod tests {
             _on_event: &mut forge_provider::EventSink<'_>,
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 // `<invoke …>` markup is detected by `looks_like_unexecuted_tool_call`, but with no
                 // structured `tool_calls` it never runs — the honest-failure guard must catch it.
                 content: "I'll do it now: <invoke name=\"shell\">git push</invoke>".into(),
@@ -8477,6 +8514,7 @@ mod tests {
             use forge_types::{new_id, ToolCall, Usage};
             if messages.iter().any(|m| m.role == Role::Tool) {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "done".into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
@@ -8484,6 +8522,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -8508,6 +8547,7 @@ mod tests {
             _on_event: &mut forge_provider::EventSink<'_>,
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "SUMMARY: built the parser, wired the CLI.".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -8532,6 +8572,7 @@ mod tests {
                 m.role == Role::System && m.content.starts_with("Relevant code (Lattice):")
             });
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: if saw { "SAW_INJECTION" } else { "NO_INJECTION" }.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -8676,6 +8717,7 @@ mod tests {
                 .any(|m| m.role == Role::System && m.content.starts_with("A shell command run by"))
             {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "The command is not installed. Fix: install it first.".into(),
                     tool_calls: vec![],
                     usage,
@@ -8684,6 +8726,7 @@ mod tests {
             }
             if messages.iter().any(|m| m.role == Role::Tool) {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "done".into(),
                     tool_calls: vec![],
                     usage,
@@ -8691,6 +8734,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -8778,6 +8822,7 @@ mod tests {
             }
             if messages.iter().any(|m| m.role == Role::Tool) {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "done".into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
@@ -8785,6 +8830,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -8895,6 +8941,7 @@ mod tests {
             use forge_types::{new_id, ToolCall, Usage};
             if messages.iter().any(|m| m.role == Role::Tool) {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "done".into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
@@ -8902,6 +8949,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -8931,6 +8979,7 @@ mod tests {
             if let Some(t) = messages.iter().rev().find(|m| m.role == Role::Tool) {
                 let saw = t.content.contains("DEMO_SKILL_MARKER");
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: if saw { "SAW_SKILL" } else { "NO_SKILL" }.into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
@@ -8938,6 +8987,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -9052,6 +9102,7 @@ mod tests {
             use forge_types::{new_id, ToolCall, Usage};
             if messages.iter().any(|m| m.role == Role::Tool) {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "done".into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
@@ -9059,6 +9110,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -10127,6 +10179,7 @@ mod tests {
             };
             on_event(StreamEvent::Text(content.to_string()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: content.to_string(),
                 tool_calls: Vec::new(),
                 usage: forge_types::Usage {
@@ -10845,6 +10898,7 @@ mod tests {
                     let content = "child finding: ok";
                     on_event(StreamEvent::Text(content.into()));
                     return Ok(ModelResponse {
+                        reasoning: String::new(),
                         content: content.into(),
                         tool_calls: vec![],
                         usage,
@@ -10852,6 +10906,7 @@ mod tests {
                     });
                 }
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "reading".into(),
                     tool_calls: vec![ToolCall {
                         id: new_id(),
@@ -10867,6 +10922,7 @@ mod tests {
                 let content = "synthesized from subagents";
                 on_event(StreamEvent::Text(content.into()));
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: content.into(),
                     tool_calls: vec![],
                     usage,
@@ -10874,6 +10930,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: "delegating".into(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -11007,6 +11064,7 @@ mod tests {
                 };
                 on_event(StreamEvent::Text(content.clone()));
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content,
                     tool_calls: vec![],
                     usage,
@@ -11043,6 +11101,7 @@ mod tests {
                 }
             };
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content,
                 tool_calls: calls,
                 usage,
@@ -11182,6 +11241,7 @@ mod tests {
             };
             if used_tool {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "leaf answer".into(),
                     tool_calls: vec![],
                     usage,
@@ -11189,6 +11249,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: "delegating deeper".into(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -11452,6 +11513,7 @@ mod tests {
             }
             on_event(StreamEvent::Text("recovered".into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "recovered".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -11499,6 +11561,7 @@ mod tests {
             }
             on_event(StreamEvent::Text(model.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: model.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -11605,6 +11668,7 @@ mod tests {
             };
             on_event(StreamEvent::Text(text.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: text.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -11677,6 +11741,7 @@ mod tests {
             }
             on_event(StreamEvent::Text("recovered".into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "recovered".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -11779,6 +11844,7 @@ mod tests {
             }
             on_event(StreamEvent::Text(model.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: model.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -11918,6 +11984,7 @@ mod tests {
             }
             on_event(StreamEvent::Text(model.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: model.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -11951,6 +12018,7 @@ mod tests {
             }
             on_event(StreamEvent::Text(model.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: model.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -12079,6 +12147,7 @@ mod tests {
             }
             on_event(StreamEvent::Text(model.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: model.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -12123,6 +12192,7 @@ mod tests {
             }
             on_event(StreamEvent::Text(model.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: model.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -12519,6 +12589,7 @@ mod tests {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n == 0 {
                 return Ok(forge_provider::ModelResponse {
+                    reasoning: String::new(),
                     content: String::new(),
                     tool_calls: vec![forge_types::ToolCall {
                         id: forge_types::new_id(),
@@ -12536,6 +12607,7 @@ mod tests {
             };
             on_event(StreamEvent::Text(text.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: text.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -12816,6 +12888,7 @@ mod tests {
                 let text = "explored the repo — here is how you would fix it";
                 on_event(StreamEvent::Text(text.into()));
                 return Ok(forge_provider::ModelResponse {
+                    reasoning: String::new(),
                     content: text.into(),
                     tool_calls: vec![],
                     usage: forge_types::Usage::default(),
@@ -12825,6 +12898,7 @@ mod tests {
             let text = "still only describing after the nudge";
             on_event(StreamEvent::Text(text.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: text.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -13072,6 +13146,7 @@ mod tests {
             let text = "I can't edit — no writable tool is exposed here.";
             on_event(StreamEvent::Text(text.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: text.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -13585,6 +13660,7 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![forge_types::ToolCall {
                     id: forge_types::new_id(),
@@ -13880,6 +13956,7 @@ mod tests {
                 // creates → exit 0 → the failure streak never reached the threshold. Distinct target
                 // per `n` keeps the identical-call doom-loop guard out of the way.
                 return Ok(forge_provider::ModelResponse {
+                    reasoning: String::new(),
                     content: String::new(),
                     tool_calls: vec![forge_types::ToolCall {
                         id: forge_types::new_id(),
@@ -13894,6 +13971,7 @@ mod tests {
             }
             on_event(StreamEvent::Text("stopping the provisioning fight".into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "stopping the provisioning fight".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -14066,6 +14144,7 @@ mod tests {
                 ));
             }
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "recovered automatically".into(),
                 tool_calls: Vec::new(),
                 usage: forge_types::Usage::default(),
@@ -14134,6 +14213,7 @@ mod tests {
             }
             on_event(StreamEvent::Text("working".into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "working".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -14191,6 +14271,7 @@ mod tests {
             };
             on_event(StreamEvent::Text(content.into()));
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: content.into(),
                 tool_calls,
                 usage: forge_types::Usage::default(),
@@ -14262,6 +14343,7 @@ mod tests {
                 }
             }
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: if n >= 3 { "finished and verified" } else { "" }.into(),
                 tool_calls: Vec::new(),
                 usage: forge_types::Usage::default(),
@@ -14459,6 +14541,7 @@ mod tests {
                 }
                 on_event(StreamEvent::Text("working".into()));
                 Ok(forge_provider::ModelResponse {
+                    reasoning: String::new(),
                     content: "working".into(),
                     tool_calls: vec![],
                     usage: forge_types::Usage::default(),
@@ -15422,6 +15505,7 @@ mod tests {
             let usage = Usage::default();
             if messages.iter().any(|m| m.role == Role::Tool) {
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: "done".into(),
                     tool_calls: vec![],
                     usage,
@@ -15429,6 +15513,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: "writing".into(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
@@ -15654,6 +15739,7 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "too late".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -15737,6 +15823,7 @@ mod tests {
                 "[]".to_string()
             };
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content,
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -15999,6 +16086,7 @@ mod tests {
                 Vec::new()
             };
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "done".into(),
                 tool_calls,
                 usage: Usage::default(),
@@ -16067,6 +16155,7 @@ mod tests {
                 _ => Vec::new(),
             };
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "done".into(),
                 tool_calls,
                 usage: Usage::default(),

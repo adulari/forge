@@ -79,6 +79,7 @@ impl Session {
         let transcript = stored
             .into_iter()
             .map(|m| Message {
+                reasoning: None,
                 role: m.role,
                 content: m.content,
                 tool_calls: m.tool_calls,

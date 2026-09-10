@@ -19,6 +19,17 @@ All notable changes to Forge are documented here. The format follows
   repeating the same generic instruction. See `docs/features/stalled-tasks.md`.
 
 ### Fixed
+- **DeepSeek can use tools.** `deepseek::*` models are thinking-mode-only and enforce an echo: every
+  assistant message in the transcript must carry `reasoning_content`, or the next request fails with
+  `The reasoning_content in the thinking mode must be passed back to the API`. Text-only replies
+  worked because they never make a follow-up request; every tool-using turn died the moment the
+  first tool result came back. Forge now keeps a reply's reasoning (`Message::reasoning`, live-turn
+  only — it is not persisted) and replays it. Two details the live API settled: a reply that calls a
+  tool often streams no reasoning at all, and presence of the field is what is checked, so an empty
+  value is sent where there is none; and a reply carrying both prose and tool calls becomes two
+  assistant messages, both of which need the field. Also fixed in the vendored genai: the streamer's
+  tool-call branch consumed the delta without ever reading `reasoning_content`, so exactly the
+  replies that needed it lost it.
 - **A dead pinned model no longer looks like a broken session.** A pin overrides routing *and* the
   health table, so Forge kept calling a model it had already benched and said nothing: one session
   spent twelve turns on zero-token empty completions while `forge models` listed that exact id as

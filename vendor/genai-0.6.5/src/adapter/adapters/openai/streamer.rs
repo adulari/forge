@@ -288,6 +288,22 @@ impl futures::Stream for OpenAIStreamer {
 								.flatten()
 								.or_else(|| first_choice.x_take::<Option<String>>("/delta/reasoning").ok().flatten());
 
+							// Capture reasoning BEFORE the content branch. These were an if/else-if, so a
+							// chunk carrying both answer text and reasoning returned on the content arm
+							// and dropped the reasoning entirely. That is the normal shape of a
+							// tool-calling reply from DeepSeek, whose API then rejects the follow-up
+							// request with `The reasoning_content in the thinking mode must be passed
+							// back to the API` — reasoning it had sent, and we had thrown away.
+							let reasoning_content = reasoning_content.filter(|r| !r.is_empty());
+							if let Some(reasoning_content) = reasoning_content.as_ref()
+								&& self.options.capture_reasoning_content
+							{
+								match self.captured_data.reasoning_content {
+									Some(ref mut c) => c.push_str(reasoning_content),
+									None => self.captured_data.reasoning_content = Some(reasoning_content.clone()),
+								}
+							}
+
 							if let Some(content) = content
 								&& !content.is_empty()
 							{
@@ -298,15 +314,7 @@ impl futures::Stream for OpenAIStreamer {
 									}
 								}
 								return Poll::Ready(Some(Ok(InterStreamEvent::Chunk(content))));
-							} else if let Some(reasoning_content) = reasoning_content
-								&& !reasoning_content.is_empty()
-							{
-								if self.options.capture_reasoning_content {
-									match self.captured_data.reasoning_content {
-										Some(ref mut c) => c.push_str(&reasoning_content),
-										None => self.captured_data.reasoning_content = Some(reasoning_content.clone()),
-									}
-								}
+							} else if let Some(reasoning_content) = reasoning_content {
 								return Poll::Ready(Some(Ok(InterStreamEvent::ReasoningChunk(reasoning_content))));
 							}
 
@@ -330,6 +338,28 @@ impl futures::Stream for OpenAIStreamer {
 						else if let Ok(delta_tool_calls) = first_choice.x_take::<Value>("/delta/tool_calls")
 							&& delta_tool_calls.as_array().is_some_and(|calls| !calls.is_empty())
 						{
+							// DeepSeek streams `reasoning_content` in the SAME deltas that carry the
+							// tool calls. This branch used to `continue` without ever reading it, so a
+							// tool-calling reply lost its reasoning entirely while a plain reply kept
+							// it — and DeepSeek then rejected the follow-up request with `The
+							// reasoning_content in the thinking mode must be passed back to the API`,
+							// making every tool-using turn impossible.
+							if self.options.capture_reasoning_content
+								&& let Some(reasoning_content) = first_choice
+									.x_take::<Option<String>>("/delta/reasoning_content")
+									.ok()
+									.flatten()
+									.or_else(|| {
+										first_choice.x_take::<Option<String>>("/delta/reasoning").ok().flatten()
+									})
+									.filter(|r| !r.is_empty())
+							{
+								match self.captured_data.reasoning_content {
+									Some(ref mut c) => c.push_str(&reasoning_content),
+									None => self.captured_data.reasoning_content = Some(reasoning_content),
+								}
+							}
+
 							// A single SSE delta can carry MORE THAN ONE tool-call entry — vLLM-based
 							// backends (e.g. NVIDIA NIM) commonly batch every parallel call's initial
 							// name-bearing delta into one message. Capturing only `.first()` here (the

@@ -795,7 +795,20 @@ fn hoist_system_messages(messages: &[Message]) -> Vec<&Message> {
     ordered
 }
 
-fn to_genai_messages(messages: &[Message]) -> Vec<ChatMessage> {
+/// Whether this model's API rejects a follow-up request that omits the assistant's
+/// `reasoning_content`.
+///
+/// DeepSeek's models are thinking-mode-only and enforce the echo: without the field the next
+/// request fails with `The reasoning_content in the thinking mode must be passed back to the API`,
+/// which made every tool-using turn impossible while plain replies worked. Verified against the
+/// live API (2026-09-10): omitting the field errors, an EMPTY string is accepted, and the real
+/// reasoning is accepted — so the field's presence is what matters, not its content. That matters
+/// because a reply that calls a tool does not always stream any reasoning to capture.
+fn requires_reasoning_echo(model: &str) -> bool {
+    model.starts_with("deepseek::")
+}
+
+fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMessage> {
     // Providers replay the whole transcript on every call, and several enforce a hard cap
     // (e.g. "At most 1 image(s) may be provided in one prompt") on the total images in a
     // request. Images are only useful on the turn that introduced them, so only the most
@@ -827,8 +840,35 @@ fn to_genai_messages(messages: &[Message]) -> Vec<ChatMessage> {
                 out.push(ChatMessage::user(MessageContent::from_parts(parts)));
             }
             Role::Assistant => {
+                // Thinking-mode APIs want the reply's own reasoning back verbatim, attached to the
+                // message the reasoning produced. When the reply called tools that is the tool-call
+                // message — and it is the case that matters, because a tool call with no prose
+                // would otherwise carry no reasoning at all and DeepSeek rejects the next request.
+                // genai renders this as the `ContentPart::ReasoningContent` its adapters serialize
+                // to `reasoning_content`; providers that never ask for it ignore the part.
+                let reasoning_rides_on_calls = !m.tool_calls.is_empty();
+                // `Some("")` where the API demands the field but the reply streamed no reasoning:
+                // presence is what DeepSeek checks, and a tool-calling reply often has none.
+                let reasoning = m
+                    .reasoning
+                    .clone()
+                    .or_else(|| echo_reasoning.then(String::new));
                 if !m.content.is_empty() {
-                    out.push(ChatMessage::assistant(m.content.clone()));
+                    let assistant = ChatMessage::assistant(m.content.clone());
+                    // A reply with both prose and tool calls becomes TWO assistant messages here,
+                    // and DeepSeek checks the field on every assistant message in the transcript —
+                    // so when the API demands the echo, both carry it. The real reasoning still
+                    // rides with the calls; the prose message gets an empty field, which the API
+                    // accepts (verified live).
+                    out.push(if reasoning_rides_on_calls {
+                        if echo_reasoning {
+                            assistant.with_reasoning_content(Some(String::new()))
+                        } else {
+                            assistant
+                        }
+                    } else {
+                        assistant.with_reasoning_content(reasoning.clone())
+                    });
                 }
                 if !m.tool_calls.is_empty() {
                     let calls: Vec<GenAiToolCall> = m
@@ -841,7 +881,7 @@ fn to_genai_messages(messages: &[Message]) -> Vec<ChatMessage> {
                             thought_signatures: None,
                         })
                         .collect();
-                    out.push(ChatMessage::from(calls));
+                    out.push(ChatMessage::from(calls).with_reasoning_content(reasoning.clone()));
                 }
             }
             Role::Tool => {
@@ -998,7 +1038,7 @@ impl Provider for GenAiProvider {
     ) -> Result<ModelResponse, ProviderError> {
         let model_name = to_genai_model(model);
 
-        let mut genai_messages = to_genai_messages(messages);
+        let mut genai_messages = to_genai_messages(messages, requires_reasoning_echo(&model_name));
         mark_cache_breakpoints(&mut genai_messages);
         let mut req = ChatRequest::new(genai_messages);
         if !tools.is_empty() {
@@ -1036,6 +1076,12 @@ impl Provider for GenAiProvider {
         {
             options = options.with_prompt_cache_key(cache_key);
         }
+
+        // Keep the reply's own thinking. Some APIs are thinking-mode-only and REQUIRE it echoed
+        // back on the next request (DeepSeek rejects the turn otherwise); the End event carries the
+        // whole block, which is more reliable than accumulating deltas — a chunk that arrives with
+        // answer text alongside it never reaches the reasoning branch of genai's stream reader.
+        options = options.with_capture_reasoning_content(true);
 
         let mut reasoning_engaged = qwencloud_thinking;
         // Apply the caller's reasoning-effort hint when set (e.g. from `/effort high`). Which rung
@@ -1250,6 +1296,7 @@ impl Provider for GenAiProvider {
 
         let mut stream = res.stream;
         let mut content = String::new();
+        let mut reasoning = String::new();
         let mut usage = Usage::default();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut emitted_output = false;
@@ -1376,11 +1423,22 @@ impl Provider for GenAiProvider {
                 }
                 ChatStreamEvent::ReasoningChunk(chunk) => {
                     emitted_output = true;
-                    // Extended-thinking delta: streamed for display, not part of the answer.
+                    // Extended-thinking delta: streamed for display, not part of the answer — and
+                    // accumulated, because thinking-mode APIs demand it back on the next request.
+                    // The deltas are the reliable source: a reply that ALSO calls a tool ends with
+                    // an End event carrying no reasoning at all, which is exactly the reply whose
+                    // reasoning DeepSeek insists on seeing again.
+                    reasoning.push_str(&chunk.content);
                     on_event(StreamEvent::Reasoning(chunk.content.clone()));
                 }
                 ChatStreamEvent::End(end) => {
                     saw_end = true;
+                    // Prefer the End event's copy only when the deltas gave us nothing.
+                    if reasoning.is_empty() {
+                        if let Some(r) = &end.captured_reasoning_content {
+                            reasoning = r.clone();
+                        }
+                    }
                     let output_limit_reached = end
                         .captured_stop_reason
                         .as_ref()
@@ -1451,6 +1509,7 @@ impl Provider for GenAiProvider {
             content,
             tool_calls,
             usage,
+            reasoning,
             quotas: Vec::new(),
         })
     }
@@ -1486,6 +1545,103 @@ fn is_phantom_truncation(saw_end: bool, has_tool_calls: bool, usage: &Usage) -> 
 
 #[cfg(test)]
 mod tests {
+    /// DeepSeek in thinking mode answers `The reasoning_content in the thinking mode must be
+    /// passed back to the API` and rejects the whole request when the assistant's reasoning is
+    /// missing. That killed every tool-using turn on `deepseek::*` right after the first tool
+    /// result: text-only replies worked because they never make a follow-up request.
+    #[test]
+    fn an_assistant_tool_call_replays_its_reasoning() {
+        let call = forge_types::ToolCall {
+            id: "call-1".to_string(),
+            name: "shell".to_string(),
+            args: serde_json::json!({}),
+        };
+        // The shape that failed live: a tool call with no prose at all.
+        let silent = vec![
+            Message::assistant_tool_calls("", vec![call.clone()]).with_reasoning("why I ran it"),
+            Message::tool_result("call-1", "output"),
+        ];
+        let out = to_genai_messages(&silent, false);
+        assert!(
+            has_reasoning(&out, "why I ran it"),
+            "a wordless tool call must still carry its reasoning"
+        );
+
+        // With prose, the reasoning rides on the tool-call message and is not duplicated onto the
+        // text message — DeepSeek pairs it with the call.
+        let spoken = vec![
+            Message::assistant_tool_calls("running it", vec![call]).with_reasoning("why I ran it"),
+            Message::tool_result("call-1", "output"),
+        ];
+        let out = to_genai_messages(&spoken, false);
+        assert_eq!(reasoning_parts(&out).len(), 1, "exactly one reasoning part");
+        assert!(has_reasoning(&out, "why I ran it"));
+    }
+
+    /// DeepSeek checks the field on EVERY assistant message, and a reply carrying both prose and
+    /// tool calls is split into two of them here. Verified against the live API (2026-09-10):
+    /// omitting `reasoning_content` errors, an empty string is accepted. A tool-calling reply
+    /// frequently streams no reasoning at all, so the empty echo is what makes those turns work.
+    #[test]
+    fn an_api_that_demands_the_field_gets_it_on_every_assistant_message() {
+        let call = forge_types::ToolCall {
+            id: "call-1".to_string(),
+            name: "shell".to_string(),
+            args: serde_json::json!({}),
+        };
+        let messages = vec![Message::assistant_tool_calls("running it", vec![call])];
+
+        let echoed = to_genai_messages(&messages, true);
+        let assistants = echoed.len();
+        assert_eq!(assistants, 2, "prose and calls are separate messages");
+        assert_eq!(
+            reasoning_parts(&echoed).len(),
+            2,
+            "both assistant messages carry the field"
+        );
+
+        // Providers that never ask for it must not gain empty fields.
+        assert!(reasoning_parts(&to_genai_messages(&messages, false)).is_empty());
+    }
+
+    #[test]
+    fn only_deepseek_is_forced_to_echo_its_reasoning() {
+        assert!(requires_reasoning_echo("deepseek::deepseek-flash"));
+        assert!(requires_reasoning_echo("deepseek::deepseek-v4-pro"));
+        assert!(!requires_reasoning_echo("openai::gpt-4o-mini"));
+        // A DeepSeek model served by someone else does not enforce the echo.
+        assert!(!requires_reasoning_echo("nvidia::deepseek-ai/deepseek-r1"));
+    }
+
+    #[test]
+    fn a_reply_with_no_reasoning_carries_no_reasoning_part() {
+        let out = to_genai_messages(&[Message::assistant("plain answer")], false);
+        assert!(
+            reasoning_parts(&out).is_empty(),
+            "providers that never send reasoning must not gain an empty part"
+        );
+    }
+
+    fn reasoning_parts(messages: &[ChatMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|m| {
+                m.content
+                    .parts()
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::ReasoningContent(r) => Some(r.to_string()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn has_reasoning(messages: &[ChatMessage], want: &str) -> bool {
+        reasoning_parts(messages).iter().any(|r| r == want)
+    }
+
     /// The temperature gate is the model family, not the effort flag: OpenAI's reasoning line
     /// rejects a custom temperature whether or not an effort hint engaged it this turn. Live
     /// failure this pins: OpenCode Go's Responses-served `gpt-5.6-luna` answered `Unsupported
@@ -1740,7 +1896,7 @@ mod tests {
             Message::assistant("hello"),
             Message::user("fix this bug"),
         ];
-        let mut genai = to_genai_messages(&msgs);
+        let mut genai = to_genai_messages(&msgs, false);
         mark_cache_breakpoints(&mut genai);
         // System (idx 0) and final user message (idx 3) carry a cache breakpoint; the middle
         // turns don't, so the cache reads the largest stable prefix.
@@ -1763,7 +1919,7 @@ mod tests {
             Message::system("AGENTS.md"),
             Message::user("do it"),
         ];
-        let mut genai = to_genai_messages(&msgs);
+        let mut genai = to_genai_messages(&msgs, false);
         mark_cache_breakpoints(&mut genai);
         assert!(genai[0].options.is_none(), "not just the first system");
         assert!(genai[1].options.is_none());
@@ -1993,7 +2149,7 @@ mod tests {
             ),
             Message::tool_result("call_1", "file contents"),
         ];
-        let out = to_genai_messages(&msgs);
+        let out = to_genai_messages(&msgs, false);
         // system, user, assistant-text, assistant-tool-call, tool-response = 5
         assert_eq!(out.len(), 5, "every role maps to a genai message");
     }
@@ -2012,7 +2168,7 @@ mod tests {
             Message::assistant("ok"),
             Message::user_with_images("second", vec![img("bbb")]),
         ];
-        let out = to_genai_messages(&msgs);
+        let out = to_genai_messages(&msgs, false);
         let all_binaries: Vec<_> = out.iter().flat_map(|m| m.content.binaries()).collect();
         assert_eq!(
             all_binaries.len(),
@@ -2038,7 +2194,7 @@ mod tests {
                 args: json!({}),
             }],
         )];
-        let out = to_genai_messages(&msgs);
+        let out = to_genai_messages(&msgs, false);
         assert_eq!(out.len(), 1, "no empty assistant text message");
     }
 

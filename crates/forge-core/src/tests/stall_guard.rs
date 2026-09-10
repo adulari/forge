@@ -18,6 +18,7 @@ impl Provider for SameSentenceReader {
     ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(forge_provider::ModelResponse {
+            reasoning: String::new(),
             content: "You're right — I looped. Answering the question from evidence, then \
                       finishing the revert I left half-done."
                 .into(),

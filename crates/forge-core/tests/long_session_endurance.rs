@@ -43,6 +43,7 @@ impl Provider for InterruptibleProvider {
             std::future::pending::<()>().await;
         }
         Ok(ModelResponse {
+            reasoning: String::new(),
             content: "recovered after repeated interruption".to_string(),
             tool_calls: Vec::new(),
             usage: Usage::default(),
@@ -100,6 +101,7 @@ impl Provider for EnduranceProvider {
             "acknowledged".to_string()
         };
         Ok(ModelResponse {
+            reasoning: String::new(),
             content,
             tool_calls: Vec::new(),
             usage: Usage::default(),

@@ -2340,6 +2340,7 @@ impl CliProvider {
         }
 
         Ok(ModelResponse {
+            reasoning: String::new(),
             content,
             tool_calls,
             usage,
@@ -2539,6 +2540,7 @@ fn finish_persistent_turn(binary: &str, turn: TurnData) -> Result<ModelResponse,
         return Err(empty_turn::error(binary, phrase, &turn.quotas));
     }
     Ok(ModelResponse {
+        reasoning: String::new(),
         content,
         tool_calls,
         usage: turn.usage,

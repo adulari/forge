@@ -52,6 +52,7 @@ async fn stream_words(text: &str, on_event: &mut EventSink<'_>) {
 
 fn resp(content: &str, tool_calls: Vec<ToolCall>, input: u64, output: u64) -> ModelResponse {
     ModelResponse {
+        reasoning: String::new(),
         content: content.to_string(),
         tool_calls,
         usage: Usage {

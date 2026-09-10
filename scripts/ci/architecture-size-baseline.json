@@ -75,7 +75,7 @@
     "crates/forge-tools/src/shell.rs": 879,
     "crates/forge-tui/src/app.rs": 7208,
     "crates/forge-tui/src/commands.rs": 1180,
-    "crates/forge-types/src/lib.rs": 1346,
+    "crates/forge-types/src/lib.rs": 1349,
     "crates/forge-core/src/model_loop.rs": 849
   },
   "schema": 1,

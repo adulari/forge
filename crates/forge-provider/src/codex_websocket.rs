@@ -304,6 +304,7 @@ impl CodexTurnWebsocket {
 
         let last_response_items = std::mem::take(&mut acc.output_items);
         let response = ModelResponse {
+            reasoning: String::new(),
             content: acc.content,
             tool_calls: acc.tool_calls,
             usage: acc.usage,
@@ -530,6 +531,7 @@ pub async fn run(
     }
 
     Ok(ModelResponse {
+        reasoning: String::new(),
         content: acc.content,
         tool_calls: acc.tool_calls,
         usage: acc.usage,

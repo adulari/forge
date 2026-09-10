@@ -21,6 +21,7 @@ impl Provider for Editor {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if n >= self.final_on {
             return Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -28,6 +29,7 @@ impl Provider for Editor {
             });
         }
         Ok(forge_provider::ModelResponse {
+            reasoning: String::new(),
             content: String::new(),
             tool_calls: vec![forge_types::ToolCall {
                 id: forge_types::new_id(),
