@@ -41,6 +41,10 @@ forge-store.workspace = true
 forge-voice.workspace = true
 crossterm.workspace = true
 forge-tui.workspace = true
+# `forge board` owns its own full-screen terminal (crates/forge-cli/src/board.rs) and hands the
+# frame to `forge_tui::board::BoardApp::draw`, so the binary names ratatui's Terminal/backend
+# directly rather than going through the chat TUI's `Tui` (which is bound to a chat session).
+ratatui.workspace = true
 libc.workspace = true
 clap.workspace = true
 tokio = { workspace = true }

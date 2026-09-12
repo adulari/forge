@@ -7,6 +7,14 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **A live project board in the CLI — `forge board`.** A full-screen kanban view of every session
+  on a project — Needs you · Working · Ready · Done — so "what needs me" has one answer instead of
+  `forge sessions`, `journalctl`, and a handful of tmux panes. Cards show model, current task, last
+  line, cost, context fill, and the signals that used to require digging by hand: a pinned model
+  Forge has already benched, a turn repeating its own opening sentence, a stalled task, a turn gone
+  quiet or silent. Opening a card gets five tabs (Overview/Live/Tasks/Changes/Tools) and the same
+  seq-checked answer/allow/interrupt/re-pin/mode/archive actions the remote-control page has, over
+  exactly its daemon surface. See docs/features/project-board.md.
 - **Stalled tasks stop driving the session.** Forge treats an unfinished task as "the turn is not
   over" and re-drives the model — which loops forever once a task becomes unresolvable (a real
   session lost the context behind one to a compaction and then spent days re-reading files to work

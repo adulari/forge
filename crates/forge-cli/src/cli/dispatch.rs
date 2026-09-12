@@ -68,6 +68,12 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             token,
             list,
         } => crate::attach::attach_cmd(id, url, token, list).await,
+        Command::Board {
+            url,
+            token,
+            project,
+            all,
+        } => crate::board::board_cmd(url, token, project, all).await,
         Command::Send {
             target,
             message,

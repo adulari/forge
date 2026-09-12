@@ -931,6 +931,11 @@ and keep going."
                 }
             }
         }
+        // `/board` — the project board drives the whole fleet from its own full-screen client, so
+        // this session can only point at it.
+        CommandAction::Board => {
+            app.note("the project board is its own screen — run `forge board` in another terminal or pane");
+        }
         // `/memories` — list this project's memories.
         CommandAction::Memories => {
             let scope = session.lock().await.workspace_scope();

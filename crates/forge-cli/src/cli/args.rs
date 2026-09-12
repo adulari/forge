@@ -439,6 +439,31 @@ pub(crate) enum Command {
         #[arg(long)]
         list: bool,
     },
+    /// Watch every Forge session working on a project at once, on a full-screen board: Needs you ·
+    /// Working · Ready · Done. Each card says which agent is doing what and what is blocking it;
+    /// opening one shows the live tail, tasks, changes and tool calls, with the actions that
+    /// resolve it — answer a permission prompt, prompt or steer, interrupt, change the mode,
+    /// archive, resume, or drop into the session with `forge attach`. Sessions keep running when the board closes.
+    /// Defaults target the local daemon (loopback + the persisted daemon token); `--url` /
+    /// `--token` override.
+    Board {
+        /// Daemon base URL (e.g. `http://127.0.0.1:7420`). Defaults to the local daemon's
+        /// loopback origin on the configured `[remote] port` (7420).
+        #[arg(long)]
+        url: Option<String>,
+        /// Daemon token. Defaults to the persisted `serve-token` in the config dir (what
+        /// `forge serve` reads).
+        #[arg(long)]
+        token: Option<String>,
+        /// Show only this project (a directory's last path component, as the cards name it).
+        /// Defaults to the project the current directory belongs to, when a session is running
+        /// there.
+        #[arg(long)]
+        project: Option<String>,
+        /// Start on every project the daemon knows, instead of preselecting the current one.
+        #[arg(long, conflicts_with = "project")]
+        all: bool,
+    },
     /// Send a message to another daemon-hosted (fleet) session's `forge serve` daemon, without
     /// attaching. `--follow-up` (default) queues the message for delivery when the target session
     /// goes idle / at its current turn's end; `--steer` jumps the queue, delivered at the
