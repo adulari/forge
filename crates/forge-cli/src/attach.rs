@@ -105,6 +105,7 @@ pub(crate) async fn attach_cmd(
         }
         if !list {
             println!("\nattach with:  forge attach <id>   (a unique prefix works)");
+            println!("or run `forge board` for the live overview");
         }
         return Ok(());
     };
