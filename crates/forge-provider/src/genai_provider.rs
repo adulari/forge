@@ -927,9 +927,14 @@ fn to_genai_tool(spec: &ToolSpec) -> Tool {
 
 /// How long to wait for the model to start responding before treating it as down.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// How long a started stream may go silent before we treat it as stalled. This is per-chunk:
-/// a long generation keeps resetting it, so only a genuinely hung stream trips it.
-const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// Per-chunk backstop for a *genuinely* hung stream on the direct/probe paths that do not wrap the
+/// call in forge-core's `stream_with_idle_timeout`. The real per-turn governor is that outer
+/// timeout: it is configurable (`config.mesh.stream_idle_timeout_secs`), tool-aware (it doubles
+/// while a tool legitimately runs), and it resets on every streamed event. This must therefore sit
+/// well ABOVE the outer's largest effective value, or it would pre-empt it and kill a stream the
+/// outer would have kept — which is exactly what a hardcoded 90s did to long reasoning bursts on
+/// large-context sessions (killed a working stream → transient failover → full re-do).
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Build the retryable error for a connect/stream stall (so the mesh fails over).
 fn stall_error(what: &str, after: std::time::Duration) -> ProviderError {
@@ -2331,6 +2336,28 @@ mod tests {
         assert!(matches!(e, ProviderError::Unavailable(_)));
         assert!(e.is_retryable(), "a stall must fail over");
         assert!(e.to_string().contains("90s"));
+    }
+
+    // Regression: a hardcoded 90s inner idle timeout used to sit BELOW the configurable outer
+    // governor (`config.mesh.stream_idle_timeout_secs`, tool-doubled), so it pre-empted it and
+    // killed long reasoning bursts the outer would have kept. The inner backstop must stay above the
+    // outer's largest effective value or the config knob is dead again.
+    #[test]
+    fn inner_idle_backstop_never_preempts_the_configurable_outer_governor() {
+        let outer_default = forge_config::Config::default()
+            .mesh
+            .stream_idle_timeout_secs;
+        let outer_max_effective = outer_default * 2; // stream_with_idle_timeout doubles while a tool runs
+        assert!(
+            IDLE_TIMEOUT.as_secs() > outer_max_effective,
+            "inner backstop {}s must exceed the outer governor's max {}s",
+            IDLE_TIMEOUT.as_secs(),
+            outer_max_effective,
+        );
+        assert!(
+            crate::oauth_responses::IDLE_TIMEOUT.as_secs() > outer_max_effective,
+            "the /responses backstop must also exceed the outer governor's max",
+        );
     }
 
     #[test]

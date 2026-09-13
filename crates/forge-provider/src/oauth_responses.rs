@@ -12,7 +12,12 @@ use crate::{CompletionOptions, EventSink, ModelResponse, ProviderError, StreamEv
 pub const REFRESH_SKEW_SECS: i64 = 120;
 
 pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-pub const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// Per-chunk backstop for a genuinely hung `/responses` SSE (and codex websocket) stream. The real
+/// per-turn governor is forge-core's `stream_with_idle_timeout` — configurable and tool-aware — so
+/// this sits well above its largest effective value and only catches a stream the outer layer isn't
+/// wrapping (direct/probe paths). A hardcoded 90s here killed long reasoning bursts on large-context
+/// sessions before the outer, configurable cutoff could apply.
+pub const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Wrap `inner` so a caller can tell whether anything USER-VISIBLE was already streamed by the
 /// time a request fails. That is the condition deciding whether a retry — a next-account hop, a
