@@ -40,6 +40,9 @@ sha2.workspace = true
 tempfile = "3"
 libc.workspace = true
 hex = "0.4"
+# Wall-clock time for the per-turn `[time]` context line (clock.rs): the model was never told what
+# day it is, so it answered "today" from its training cutoff.
+chrono.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

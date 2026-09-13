@@ -30,6 +30,7 @@ pub mod assay;
 mod auxiliary_policy;
 mod btw_policy;
 pub mod capsule;
+pub(crate) mod clock;
 mod compaction_policy;
 mod completeness;
 pub(crate) mod completion;
@@ -3006,6 +3007,18 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // branch uses, and inject only a body the transcript does not already carry (so an
         // unchanged file costs one `stat` per turn and nothing else).
         self.refresh_project_instructions(&mut context_pack).await?;
+
+        // The model is told WHERE it is by the `<env>` preamble but was never told WHEN: with no
+        // clock anywhere in the prompt or the tool set it answers "today" from its training cutoff.
+        // Injected here, per turn, rather than into the system preamble — that preamble is the
+        // provider's prompt-cache anchor, and a per-second clock in it would break the cached
+        // prefix on every request (clock.rs explains the trade-off).
+        self.inject_context(
+            &mut context_pack,
+            context_pack::ContextSource::Time,
+            "current date and time",
+            &clock::now_line(),
+        )?;
 
         // Commit discipline (git_hygiene.rs): while files this session edited are still
         // uncommitted, say so once per turn; when the branch is well ahead of its upstream, ask
@@ -12825,7 +12838,69 @@ mod tests {
         assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(answer, "here is how you would fix it");
         assert!(!session.last_turn_contract().requires_changed_artifact());
-        assert!(session.last_context_pack().is_empty());
+        // The pack is no longer empty on any turn — every turn carries the `[time]` clock line
+        // (clock.rs). What this test is about is that an ADVISORY question adds no recovery/
+        // contract context, which is the mirror of the assertion in the test above.
+        assert!(
+            !session
+                .last_context_pack()
+                .entries()
+                .iter()
+                .any(|entry| entry.source() == context_pack::ContextSource::TurnContract),
+            "an advisory question must not arm the change contract: {:?}",
+            session
+                .last_context_pack()
+                .entries()
+                .iter()
+                .map(|e| e.source())
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn every_turn_tells_the_model_what_time_it_is() {
+        // The defect: Forge told the model WHERE it was (`working_directory`, `platform`,
+        // `git_branch`) but never WHEN. No date in the system prompt, none in the env preamble, and
+        // no date/time tool — so the model answered "today" from its training cutoff and mis-dated
+        // changelog entries, release ages and anything reading "recent". End-to-end here (not just
+        // the formatter in clock.rs) because the bug was the missing WIRING, not the wording.
+        let dir = clean_git_repo();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+        session
+            .run_turn("How would you fix the bug?")
+            .await
+            .unwrap();
+
+        assert!(
+            session
+                .last_context_pack()
+                .entries()
+                .iter()
+                .any(|entry| entry.source() == context_pack::ContextSource::Time),
+            "the turn must record the clock as auditable injected context"
+        );
+        let clock_line = session
+            .transcript
+            .iter()
+            .find(|m| m.role == Role::System && m.content.starts_with("[time] "))
+            .expect("the model actually receives a clock line");
+        assert!(
+            clock_line.content.contains("Current date and time: "),
+            "{}",
+            clock_line.content
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
