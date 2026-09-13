@@ -32,6 +32,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/sessions",
     },
     Command {
+        name: "board",
+        desc: "the live project board — runs in its own terminal (forge board)",
+        usage: "/board",
+    },
+    Command {
         name: "replay",
         desc:
             "show a session transcript inline (/replay <id>) or diff two sessions (/replay <a> <b>)",
@@ -292,6 +297,7 @@ pub enum CommandAction {
     /// Open the keybind help overlay (`/keys`) — the read-only keybind list (same as F1/ShowHelp).
     Keys,
     ListSessions,
+    Board,
     Resume(String),
     /// Pin a specific model for all subsequent turns in this session. `None` opens the picker.
     PinModel(Option<String>),
@@ -619,6 +625,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "help" | "h" | "?" => CommandAction::Help,
         "keys" | "keybinds" | "shortcuts" => CommandAction::Keys,
         "sessions" | "ls" => CommandAction::ListSessions,
+        "board" => CommandAction::Board,
         "resume" | "r" => {
             if arg.is_empty() {
                 CommandAction::ListSessions // /resume with no id → open the picker

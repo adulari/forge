@@ -77,6 +77,29 @@ assumed from different-model runs.
   winner, and feeds the outcome back into routing. No other agent has either.
 - **One fast native binary** — Rust, no Node/Python/Bun runtime, no Electron. Installs in one line.
 
+### 🗂️ Project board — `forge board`
+
+Running more than one session? `forge board` is a full-screen, live kanban view of every session
+on a project — **Needs you · Working · Ready · Done** — so "what needs me" has one answer instead
+of `forge sessions`, `journalctl`, and a handful of tmux panes. Cards show model, current task,
+last line, cost, and context fill, plus signals that used to mean digging by hand: a pinned model
+Forge has already benched, a turn repeating its own opening sentence, a stalled task.
+
+```
+ FORGE BOARD   ● live    forge ▾    14 sessions · 2 need you    $6.14 spent
+ ──────────────────────────────────────────────────────────────────────────
+  Needs you (2)         Working (2)          Ready (2)            Done (30)
+  ╭───────────────────╮ ╭───────────────────╮ ╭───────────────────╮ ╭───────────────────╮
+  │ ● fix-retry-backoff│ │ ⠹ migrate-schema  │ │ ○ tui-header-fix  │ │ ✓ add-push-notifs │
+  │   meta::muse-1.3   │ │   claude-cli::5   │ │   groq::llama-70b │ │   $0.42 · 2h ago  │
+  │   ⚠ pinned benched │ │   ▰▰▱▱▱▱▱▱▱▱ 23%  │ │   ▰▱▱▱▱▱▱▱▱▱  4%  │ │                   │
+  ╰───────────────────╯ ╰───────────────────╯ ╰───────────────────╯ ╰───────────────────╯
+```
+
+Open a card for its live tail, tasks, diffs, and tool calls, and act on it without leaving the
+board — answer a permission prompt, steer, re-pin the model, change the mode, or drop into the
+session with `forge attach`. See [`docs/features/project-board.md`](docs/features/project-board.md).
+
 ---
 
 <a id="the-mesh"></a>

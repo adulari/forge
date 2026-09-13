@@ -147,6 +147,22 @@ Forge reads your project, makes the changes, and exits. Add `--tui` for a live p
 
 ---
 
+## See everything at once: `forge board`
+
+Running more than one session at a time (a background `forge run`, a chat in another terminal, an
+overnight `/goal`)? `forge board` opens a full-screen board — **Needs you · Working · Ready ·
+Done** — so you can see which session needs a decision, what each is working on, and act on it
+(answer a prompt, send a message, re-pin the model, attach) without hunting across terminals:
+
+```bash
+forge board          # every session in the current project
+forge board --all    # every project the daemon knows about
+```
+
+See [`docs/features/project-board.md`](features/project-board.md) for the full card/key reference.
+
+---
+
 ## What's next?
 
 Once you're comfortable with the basics:

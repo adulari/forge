@@ -25,6 +25,7 @@ pub use answer::resolve_answer;
 pub mod app;
 mod app_remote;
 mod arg_parse;
+pub mod board;
 mod commands;
 pub mod config_editor;
 mod driver;
@@ -63,7 +64,7 @@ pub use commands::{
     RefineAction, RemoteMode, SlashToken, StatuslineAction, WorkflowAction, COMMANDS,
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
-pub use driver::{ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg};
+pub use driver::{install_panic_restore, ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg};
 pub use headless::HeadlessPresenter;
 pub use help::{run_help, HelpTab};
 pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};

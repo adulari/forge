@@ -2049,6 +2049,7 @@ dependencies = [
  "portable-pty",
  "qrcode",
  "rand 0.10.2",
+ "ratatui",
  "rcgen",
  "reqwest",
  "rmcp",

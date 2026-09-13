@@ -7,6 +7,14 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **A live project board in the CLI — `forge board`.** A full-screen kanban view of every session
+  on a project — Needs you · Working · Ready · Done — so "what needs me" has one answer instead of
+  `forge sessions`, `journalctl`, and a handful of tmux panes. Cards show model, current task, last
+  line, cost, context fill, and the signals that used to require digging by hand: a pinned model
+  Forge has already benched, a turn repeating its own opening sentence, a stalled task, a turn gone
+  quiet or silent. Opening a card gets five tabs (Overview/Live/Tasks/Changes/Tools) and the same
+  seq-checked answer/allow/interrupt/re-pin/mode/archive actions the remote-control page has, over
+  exactly its daemon surface. See docs/features/project-board.md.
 - **Stalled tasks stop driving the session.** Forge treats an unfinished task as "the turn is not
   over" and re-drives the model — which loops forever once a task becomes unresolvable (a real
   session lost the context behind one to a compaction and then spent days re-reading files to work
@@ -30,6 +38,14 @@ All notable changes to Forge are documented here. The format follows
   assistant messages, both of which need the field. Also fixed in the vendored genai: the streamer's
   tool-call branch consumed the delta without ever reading `reasoning_content`, so exactly the
   replies that needed it lost it.
+- **A tool-call id reused across turns no longer 400s the whole request.** Tool ids are only unique
+  within a turn (`shell:0` is that turn's first shell call), and `normalize_tool_pairs` deduplicated
+  them only *inside* one assistant message — so once a compaction retained two turns' tails, the
+  request went out with two `shell:0` tool responses and every turn died on "Duplicate tool response
+  for tool_call_id='shell:0'. Each tool_call must have exactly one matching tool response". A live
+  session hit this on every retry, including straight after compacting 465 messages to 7. Ids are now
+  unique across the whole request: a repeat is renamed (`shell:0#2`) and its call and result are
+  renamed in lockstep, so both turns keep their real context instead of one pair being dropped.
 - **A dead pinned model no longer looks like a broken session.** A pin overrides routing *and* the
   health table, so Forge kept calling a model it had already benched and said nothing: one session
   spent twelve turns on zero-token empty completions while `forge models` listed that exact id as

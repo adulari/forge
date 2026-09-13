@@ -59,6 +59,7 @@ mod balance;
 mod bench;
 mod benchmarks;
 mod blame;
+mod board;
 mod bridge_stats;
 mod cli;
 mod context_windows;

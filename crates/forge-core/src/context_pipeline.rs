@@ -146,10 +146,28 @@ fn valid_tool_call_id(id: &str) -> bool {
         && !id.chars().any(char::is_control)
 }
 
+/// A `{id}` already used earlier in the request, made unique.
+///
+/// Tool-call ids are only unique WITHIN a turn — `shell:0` is the first shell call of whichever
+/// turn emitted it. Two turns that both survive into one request therefore carry the same id, and
+/// the provider rejects the whole request ("Each tool_call must have exactly one matching tool
+/// response"). Renaming keeps the call and its result, where dropping the pair would silently
+/// delete real context.
+fn unique_call_id(id: &str, seen: &std::collections::HashSet<String>) -> String {
+    (2..)
+        .map(|n| format!("{id}#{n}"))
+        .find(|candidate| !seen.contains(candidate) && valid_tool_call_id(candidate))
+        .unwrap_or_else(|| unreachable!("an unbounded counter always yields an unused id"))
+}
+
 fn normalize_tool_pairs(messages: Vec<Message>) -> NormalizedMessages {
     let mut input: std::collections::VecDeque<Message> = messages.into();
     let mut out = Vec::with_capacity(input.len());
     let mut synthetic_tool_results = std::collections::HashSet::new();
+    // Uniqueness has to hold across the WHOLE request, not just inside one assistant message —
+    // `call_id_counts` below only ever saw a single message, so a `shell:0` in turn 1 and a
+    // `shell:0` in turn 2 both passed and the request went out with two identical ids.
+    let mut seen_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     while let Some(mut message) = input.pop_front() {
         if message.role == Role::Tool {
@@ -171,16 +189,21 @@ fn normalize_tool_pairs(messages: Vec<Message>) -> NormalizedMessages {
             continue;
         }
 
-        let call_ids: std::collections::HashSet<String> = message
-            .tool_calls
-            .iter()
-            .map(|call| call.id.clone())
-            .collect();
-        let call_order: Vec<String> = message
-            .tool_calls
-            .iter()
-            .map(|call| call.id.clone())
-            .collect();
+        // Rename before pairing, but keep the ORIGINAL id to match the results that follow — they
+        // were recorded against the id the model actually emitted.
+        let mut renames: Vec<(String, String)> = Vec::new();
+        for call in &mut message.tool_calls {
+            let original = call.id.clone();
+            if seen_call_ids.contains(&original) {
+                call.id = unique_call_id(&original, &seen_call_ids);
+            }
+            seen_call_ids.insert(call.id.clone());
+            renames.push((original, call.id.clone()));
+        }
+
+        let call_ids: std::collections::HashSet<String> =
+            renames.iter().map(|(old, _)| old.clone()).collect();
+        let call_order: Vec<(String, String)> = renames;
         let mut results = std::collections::HashMap::new();
         let mut deferred = Vec::new();
 
@@ -201,8 +224,9 @@ fn normalize_tool_pairs(messages: Vec<Message>) -> NormalizedMessages {
         }
 
         out.push(message);
-        for call_id in call_order {
-            if let Some(result) = results.remove(&call_id) {
+        for (original_id, call_id) in call_order {
+            if let Some(mut result) = results.remove(&original_id) {
+                result.tool_call_id = Some(call_id);
                 out.push(result);
             } else {
                 synthetic_tool_results.insert(out.len());
@@ -732,6 +756,44 @@ mod tests {
     }
 
     #[test]
+    fn the_same_tool_id_in_two_turns_is_renamed_not_dropped() {
+        // Ids restart per turn, so `shell:0` in turn 1 and `shell:0` in turn 2 collide the moment
+        // both survive into one request. Live: session 07ca114e failed every turn with
+        // "Duplicate tool response for tool_call_id='shell:0'" after a compaction retained two
+        // turns' tails. The old per-message check could not see across messages.
+        let messages = vec![
+            Message::assistant_tool_calls("first", vec![tool_call("shell:0")]),
+            Message::tool_result("shell:0", "first result"),
+            Message::assistant_tool_calls("second", vec![tool_call("shell:0")]),
+            Message::tool_result("shell:0", "second result"),
+        ];
+
+        let output = normalize_tool_pairs(messages).messages;
+
+        let ids: Vec<&str> = output
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        assert_eq!(ids, vec!["shell:0", "shell:0#2"], "ids must be unique");
+
+        // Both results survive, still attached to the call that produced them.
+        let bodies: Vec<&str> = output
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(bodies, vec!["first result", "second result"]);
+
+        // The assistant calls were renamed in lockstep, so every result still has its call.
+        let call_ids: Vec<String> = output
+            .iter()
+            .flat_map(|m| m.tool_calls.iter().map(|c| c.id.clone()))
+            .collect();
+        assert_eq!(call_ids, vec!["shell:0", "shell:0#2"]);
+    }
+
+    #[test]
     fn to_llm_keeps_real_sibling_results_before_synthetic_results() {
         let messages = vec![
             Message::assistant_tool_calls("", vec![tool_call("call-1"), tool_call("call-2")]),
@@ -779,7 +841,9 @@ mod tests {
 
         assert_eq!(output.len(), 5);
         assert_eq!(output[1].content, "first");
-        assert_eq!(output[4].tool_call_id.as_deref(), Some("reused"));
+        // The second batch reuses an id the first batch already spent. It used to keep `reused`,
+        // which is exactly the shape a provider rejects; it is now renamed so both survive.
+        assert_eq!(output[4].tool_call_id.as_deref(), Some("reused#2"));
         assert_eq!(
             output[4].content,
             "error: tool call interrupted before a result was recorded"
