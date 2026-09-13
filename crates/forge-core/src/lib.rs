@@ -3033,30 +3033,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         }
 
         // Stalled tasks (task_staleness.rs): a task nobody is moving keeps the completion gate
-        // re-driving the model every turn, and re-reading files to work out what it means counts
-        // as progress — so the nudge budget never runs out. Force a decision after three still
-        // turns, and remove the task ourselves if the decision never comes.
-        let mut stale = std::mem::take(&mut self.stale_tasks);
-        let verdict = stale.turn(&self.tasks);
-        self.stale_tasks = stale;
-        if let Some(verdict) = verdict {
-            if !verdict.dropped.is_empty() {
-                self.tasks.retain(|t| !verdict.dropped.contains(&t.title));
-                self.persist_tasks();
-                self.presenter
-                    .emit(PresenterEvent::Tasks(self.tasks.clone()));
-                self.presenter
-                    .emit(PresenterEvent::Warning(task_staleness::dropped_warning(
-                        &verdict.dropped,
-                    )));
-            }
-            self.inject_context(
-                &mut context_pack,
-                context_pack::ContextSource::Tasks,
-                "tasks that stopped moving",
-                &verdict.render(),
-            )?;
-        }
+        // re-driving the model every turn. Escalate a still task to the model, then — if it still
+        // does not move — ask the USER what to do with it (keep / done / remove) rather than delete
+        // it, and show the model the task list this new message lands on so a steer edits the plan
+        // instead of replacing it. The harness never removes a task on its own.
+        self.resolve_stale_tasks(&mut context_pack)?;
 
         // ★ Auto-retrieve relevant code from the Lattice index and inject it as a system message
         // before the first provider call (code-intelligence.md §5.1). Retrieve into an owned value
@@ -3977,6 +3958,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 break;
             }
         }
+
+        // Tell the staleness tracker whether this turn changed the workspace, so next turn's
+        // pass does not age a task whose shell-driven work IS the task (the live false positive
+        // that deleted real tasks). Consumed at the next turn's `resolve_stale_tasks`.
+        self.stale_tasks.note_work(self.mutations_this_turn);
 
         // ── No-op turn classification ─────────────────────────────────────────────────────────
         // A turn that ends with NO assistant text and NO successful mutating tool call produced
@@ -5511,6 +5497,8 @@ mod tests {
     struct CapturePresenter {
         events: Arc<Mutex<Vec<PresenterEvent>>>,
         attended: bool,
+        /// What `ask` returns; empty falls back to the first option (the old deterministic default).
+        ask_answer: String,
     }
     impl Presenter for CapturePresenter {
         fn emit(&mut self, event: PresenterEvent) {
@@ -5529,7 +5517,11 @@ mod tests {
             options: &[forge_types::QChoice],
             _allow_other: bool,
         ) -> String {
-            // Deterministic: pick the first option (or empty) so tests don't block on input.
+            // Deterministic: a scripted answer if set, else the first option (or empty), so tests
+            // don't block on input.
+            if !self.ask_answer.is_empty() {
+                return self.ask_answer.clone();
+            }
             options.first().map(|o| o.label.clone()).unwrap_or_default()
         }
         fn read_line(&mut self) -> Option<String> {
@@ -6360,10 +6352,12 @@ mod tests {
             use forge_provider::ModelResponse;
             use forge_types::{new_id, ToolCall, Usage};
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // A DIFFERENT read each act step, so this exercises the goalless guard (tools run, no
+            // task completes) rather than the identical-call doom-loop guard.
             let read = ToolCall {
                 id: new_id(),
                 name: "read_file".into(),
-                args: serde_json::json!({"path": "Cargo.toml"}),
+                args: serde_json::json!({"path": "Cargo.toml", "limit": 4 + n}),
             };
             Ok(if n == 0 {
                 ModelResponse {
@@ -6405,10 +6399,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_model_that_acts_after_each_nudge_still_gets_the_full_budget() {
-        // The guard must only withhold a nudge that the LAST nudge proved useless. A model that
-        // narrates, gets nudged, then actually runs a tool is exactly what the budget is for, and
-        // must still be re-driven the full four times before Forge gives up.
+    async fn a_model_that_keeps_acting_is_not_cut_off_at_the_old_fixed_cap() {
+        // The old behaviour gave up after exactly four nudges even while the model kept acting. It
+        // must now continue past that — a model that narrates, gets nudged, then runs a tool is
+        // exactly the case continuation is for — and end via the goalless guard (tools ran but no
+        // task ever completed), not by a fixed count and not as "blocked".
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
@@ -6439,12 +6434,18 @@ mod tests {
             })
             .collect();
         assert!(
-            warnings.iter().any(|w| w.contains("continuing it (4/4)")),
-            "progress between nudges must still earn the whole budget: {warnings:?}"
+            warnings
+                .iter()
+                .any(|w| w.contains("continuing it (nudge 5)")),
+            "continuation must run past the old fixed cap of 4: {warnings:?}"
         );
         assert!(
             !warnings.iter().any(|w| w.contains("blocked, not stalling")),
             "a model that acts after each nudge is not blocked: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("goalless")),
+            "tools that never finish a task must end via the goalless guard: {warnings:?}"
         );
     }
 

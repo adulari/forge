@@ -116,6 +116,10 @@ impl Session {
         // turn mid-task. `doom_nudged`: the doom-loop fires a "change approach" nudge BEFORE it
         // ever hard-stops, so a repeated call doesn't kill an otherwise-recoverable turn.
         let mut continue_nudges = 0usize;
+        // Consecutive continue-nudges that ran tools but completed no task — the goalless-loop
+        // signal. Reset whenever a task finishes; past `GOALLESS_NUDGE_LIMIT` the turn is handed
+        // back to the user instead of spinning (replaces the old fixed 4-nudge cap).
+        let mut goalless_nudges = 0usize;
         // (tools executed, tasks resolved) captured when the last continue-nudge was sent — see
         // `nudge_policy::decide`.
         let mut last_nudge_progress: Option<nudge_policy::Progress> = None;
@@ -671,7 +675,6 @@ impl Session {
                     // (bounded) so the work completes instead of ending the turn mid-task.
                     let open_titles = nudge_policy::open_titles(&self.tasks);
                     let unfinished = open_titles.len();
-                    const MAX_CONTINUE_NUDGES: usize = 4;
                     if unfinished > 0 {
                         // Work is still open — any earlier "all done" verification is stale.
                         verify_attempts = 0;
@@ -680,20 +683,28 @@ impl Session {
                             self.tasks.len().saturating_sub(unfinished),
                         );
                         match nudge_policy::decide(
-                            continue_nudges,
-                            MAX_CONTINUE_NUDGES,
+                            goalless_nudges,
                             last_nudge_progress,
                             progress_now,
                         ) {
                             ContinueNudge::Send => {
                                 continue_nudges += 1;
+                                // A completed task since the last nudge is real convergence and
+                                // clears the goalless streak; tool-only progress adds to it. This
+                                // is the ceiling that replaced the fixed 4-nudge cap: finishing
+                                // tasks keeps going indefinitely, spinning tools does not.
+                                let finished_a_task =
+                                    last_nudge_progress.is_some_and(|prev| progress_now.1 > prev.1);
+                                goalless_nudges = if finished_a_task {
+                                    0
+                                } else if last_nudge_progress.is_some() {
+                                    goalless_nudges + 1
+                                } else {
+                                    goalless_nudges
+                                };
                                 last_nudge_progress = Some(progress_now);
                                 self.presenter.emit(PresenterEvent::Warning(
-                                    nudge_policy::continuing_warning(
-                                        unfinished,
-                                        continue_nudges,
-                                        MAX_CONTINUE_NUDGES,
-                                    ),
+                                    nudge_policy::continuing_warning(unfinished, continue_nudges),
                                 ));
                                 let nudge =
                                     nudge_policy::continue_nudge(&open_titles, continue_nudges);
@@ -713,14 +724,12 @@ impl Session {
                                     nudge_policy::blocked_warning(continue_nudges, unfinished),
                                 ));
                             }
-                            ContinueNudge::BudgetSpent => {
-                                // The bridge path always warned here; the direct path used to fall
-                                // through silently, leaving the user wondering why it stopped.
+                            ContinueNudge::GoallessStop => {
+                                // Tools kept running but nothing finished — the "goalless work"
+                                // loop. Hand it back to the user rather than spend the whole step
+                                // budget spinning (the direct path used to fall through silently).
                                 self.presenter.emit(PresenterEvent::Warning(
-                                    nudge_policy::budget_spent_warning(
-                                        unfinished,
-                                        MAX_CONTINUE_NUDGES,
-                                    ),
+                                    nudge_policy::goalless_warning(unfinished, continue_nudges),
                                 ));
                             }
                         }
