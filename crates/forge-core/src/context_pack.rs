@@ -22,6 +22,9 @@ pub enum ContextSource {
     Git,
     /// Stalled-task escalation (task_staleness.rs): tasks the list has carried without movement.
     Tasks,
+    /// Current date and time (clock.rs): without it a model dates everything from its training
+    /// cutoff. Injected per turn rather than into the cache-anchored system preamble.
+    Time,
 }
 
 /// One persisted system-context contribution.
