@@ -4,6 +4,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::DeviceId;
 
+/// Maximum size of one complete encoded sync-record envelope.
+///
+/// Sync was the only Anywhere transport without a cap — commands, shares, capsules and relay blobs
+/// all check before sending. An oversized record was reserved anyway, the service answered a bare
+/// HTTP 400, and because the outbox drains strictly in `id` order and aborts the cycle on the first
+/// error, that one record blocked every later one indefinitely. A 14.9 MB tool result (sealed into
+/// a ~51 MiB envelope, since `serde_json` encodes `Vec<u8>` as a decimal array at ~3.6x) stalled a
+/// host's entire sync for three days. Matches the download-side limit so both directions agree.
+pub const MAX_SYNC_UPLOAD_ENVELOPE_BYTES: u64 = 32 * 1024 * 1024;
+
 /// V1 record classes eligible for encrypted cloud sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
