@@ -2097,9 +2097,12 @@ fn default_pin_outage_wait_secs() -> u64 {
 }
 
 fn default_stream_idle_timeout_secs() -> u64 {
-    // Long enough to never trip during normal generation (incl. slow reasoning models and a
-    // bridge running a slow tool), short enough to recover from a genuine stall in reasonable time.
-    120
+    // Long enough to never trip during normal generation, short enough to recover from a genuine
+    // stall in reasonable time. Raised from 120s: a reasoning model on a large-context session
+    // (~100k input tokens) can go silent for ~90s during a single reasoning burst before it emits,
+    // so 120 left too little margin and working streams were being killed and re-driven. A tool in
+    // flight still doubles this (see `stream_with_idle_timeout`).
+    180
 }
 
 fn default_compact_cap_tokens() -> u64 {
