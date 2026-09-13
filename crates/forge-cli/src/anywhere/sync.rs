@@ -7,7 +7,9 @@ use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use forge_anywhere_protocol::sync::{SyncOperation, SyncRecord, SyncRecordKind};
+use forge_anywhere_protocol::sync::{
+    SyncOperation, SyncRecord, SyncRecordKind, MAX_SYNC_UPLOAD_ENVELOPE_BYTES,
+};
 use forge_anywhere_protocol::{Envelope, EnvelopeKind, EnvelopeMetadata, RecipientKind};
 use forge_store::{RemoteSyncRecord, Store, SyncJournalEntry, SyncUploadEnvelope};
 use reqwest::header::{HeaderName, HeaderValue};
@@ -224,8 +226,11 @@ async fn download_change(
     http: &reqwest::Client,
     change: Change,
 ) -> Result<()> {
-    if change.ciphertext_bytes > 32 * 1024 * 1024 {
-        bail!("encrypted sync download exceeds 32 MiB");
+    if change.ciphertext_bytes > MAX_SYNC_UPLOAD_ENVELOPE_BYTES {
+        bail!(
+            "encrypted sync download exceeds {} MiB",
+            MAX_SYNC_UPLOAD_ENVELOPE_BYTES / (1024 * 1024)
+        );
     }
     let bytes = http
         .get(&change.download_url)
@@ -334,6 +339,13 @@ async fn upload_entry(
         Some(prepared) => prepared,
         None => prepare_envelope(store, state_store, entry)?,
     };
+    // The service refuses an oversized object with a bare HTTP 400, and this outbox drains strictly
+    // in `id` order and aborts the whole cycle on the first error — so retrying one such record
+    // forever blocks every later one. Checked here rather than only on fresh envelopes so a cached
+    // envelope sealed before this cap existed is skipped too.
+    if envelope_exceeds_cap(prepared.envelope.len()) {
+        return skip_oversized(store, entry, prepared.envelope.len());
+    }
     let content_hash: [u8; 32] = entry
         .content_hash
         .as_slice()
@@ -439,7 +451,38 @@ fn prepare_envelope(
     )?
     .encode()?;
     let ciphertext_sha256: [u8; 32] = Sha256::digest(&envelope).into();
+    // Never persist an envelope the service will refuse: the staging row would keep a multi-megabyte
+    // blob alive for a record that is about to be skipped anyway. The caller does the skipping, so
+    // that one decision lives in one place.
+    if envelope_exceeds_cap(envelope.len()) {
+        return Ok(SyncUploadEnvelope {
+            envelope,
+            ciphertext_sha256,
+        });
+    }
     Ok(store.store_sync_upload_envelope(entry.id, &envelope, ciphertext_sha256)?)
+}
+
+fn envelope_exceeds_cap(envelope_len: usize) -> bool {
+    envelope_len as u64 > MAX_SYNC_UPLOAD_ENVELOPE_BYTES
+}
+
+/// Give up on a record the service can never accept, so the strictly-ordered outbox keeps moving.
+///
+/// Marking it uploaded is the only way to advance: `uploaded_at IS NULL` *is* the outbox cursor.
+/// The record genuinely never reaches the other devices, which is the deliberate trade — losing one
+/// oversized record beats blocking every record behind it, which is what used to happen.
+fn skip_oversized(store: &Store, entry: &SyncJournalEntry, envelope_len: usize) -> Result<()> {
+    eprintln!(
+        "⚠ Forge Anywhere skipped {} {} — its encrypted envelope is {:.1} MiB, over the {} MiB \
+         limit. That record will not reach your other devices; everything after it still syncs.",
+        entry.record_kind,
+        entry.stable_id,
+        envelope_len as f64 / (1024.0 * 1024.0),
+        MAX_SYNC_UPLOAD_ENVELOPE_BYTES / (1024 * 1024)
+    );
+    store.mark_sync_journal_uploaded(&[entry.id], (now_ms() / 1_000) as i64)?;
+    Ok(())
 }
 
 fn sync_identity(state: &LocalState) -> Result<SyncIdentity> {
@@ -586,6 +629,54 @@ mod tests {
                 .expect("load cached envelope"),
             Some(prepared)
         );
+    }
+
+    /// The defect this fixes: sync was the only Anywhere transport with no size cap. A 14.9 MB tool
+    /// result sealed into a ~51 MiB envelope, the service answered HTTP 400, and because the outbox
+    /// drains strictly in `id` order and aborts the cycle on the first error, that one record
+    /// blocked 11,225 later ones for three days — the phone silently showed stale sessions.
+    #[test]
+    fn an_oversized_record_is_skipped_so_the_outbox_keeps_moving() {
+        let store = Store::open_in_memory().expect("open store");
+        for path in ["huge.md", "later.md"] {
+            store
+                .append_sync_file_journal(
+                    path,
+                    SyncJournalOperation::Upsert,
+                    1,
+                    4,
+                    Some([0x55; 32]),
+                    b"{}",
+                )
+                .expect("append journal");
+        }
+        let poison = store.pending_sync_journal(1).expect("pending").remove(0);
+        assert_eq!(poison.stable_id, "huge.md");
+
+        skip_oversized(&store, &poison, MAX_SYNC_UPLOAD_ENVELOPE_BYTES as usize + 1)
+            .expect("skip the oversized record");
+
+        let remaining: Vec<String> = store
+            .pending_sync_journal(10)
+            .expect("pending")
+            .into_iter()
+            .map(|entry| entry.stable_id)
+            .collect();
+        assert_eq!(
+            remaining,
+            vec!["later.md".to_string()],
+            "the record behind the skipped one must become reachable"
+        );
+    }
+
+    #[test]
+    fn the_cap_rejects_only_above_the_limit() {
+        assert!(!envelope_exceeds_cap(
+            MAX_SYNC_UPLOAD_ENVELOPE_BYTES as usize
+        ));
+        assert!(envelope_exceeds_cap(
+            MAX_SYNC_UPLOAD_ENVELOPE_BYTES as usize + 1
+        ));
     }
 }
 
