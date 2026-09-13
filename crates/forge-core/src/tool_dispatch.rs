@@ -38,6 +38,7 @@ impl Session {
             || name == USE_SKILL_TOOL
             || name == REMEMBER_TOOL
             || name == fleet::MESSAGE_SESSION_TOOL
+            || name == crate::dispatch::DISPATCH_SESSIONS_TOOL
             || name == heartbeat::MANAGE_HEARTBEATS_TOOL
         {
             return false;
@@ -240,6 +241,10 @@ impl Session {
         // never called, unless this session is forge-serve-hosted.
         if call.name == fleet::MESSAGE_SESSION_TOOL {
             return self.message_session(msg_id, call).await;
+        }
+        // Plan and dispatch: recorded through the host the daemon wires into coordinator sessions.
+        if call.name == crate::dispatch::DISPATCH_SESSIONS_TOOL {
+            return self.dispatch_sessions(msg_id, call).await;
         }
         // Agent-created heartbeats are core-owned (they persist to the store and are scoped away
         // from the user's own `/heartbeat`, which never goes through tool dispatch at all).

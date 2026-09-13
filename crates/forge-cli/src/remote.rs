@@ -1029,6 +1029,10 @@ pub struct Snapshot {
     /// `budget_exhausted`, `interrupted`, `no_output`), for callers that want the detail.
     #[serde(default)]
     pub last_stop_reason: Option<String>,
+    /// Turns this driver has finished (additive). Restarts at 0 when the driver restarts, so a
+    /// watcher detects a finished turn by the count growing, not by polling `busy` edges.
+    #[serde(default)]
+    pub turns_finished: u64,
     /// The active operating temper label (e.g. "Ask").
     pub temper: String,
     /// The canonical permission-mode key (`default`, `accept-edits`, `bypass`, or `plan`) (v10).
@@ -1131,6 +1135,7 @@ impl Default for Snapshot {
             done: false,
             last_turn_outcome: None,
             last_stop_reason: None,
+            turns_finished: 0,
             temper: String::new(),
             permission_mode: String::new(),
             effort: String::new(),

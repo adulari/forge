@@ -100,6 +100,13 @@ Open a card for its live tail, tasks, diffs, and tool calls, and act on it witho
 board — answer a permission prompt, steer, re-pin the model, change the mode, or drop into the
 session with `forge attach`. See [`docs/features/project-board.md`](docs/features/project-board.md).
 
+Press `D` on the board (or run `forge dispatch start "<request>"`, or `/dispatch` in chat) to
+turn one prompt into a parallel dispatch: a coordinator session reads the project, proposes a
+split into work items, and waits for you to approve all of it, approve a subset, revise, or
+cancel before anything starts. Approved items run as ordinary sessions — a worktree apiece by
+default — that you watch and merge back from the same board. See
+[`docs/features/plan-and-dispatch.md`](docs/features/plan-and-dispatch.md).
+
 ---
 
 <a id="the-mesh"></a>

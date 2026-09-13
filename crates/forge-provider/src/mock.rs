@@ -70,7 +70,7 @@ impl Provider for MockProvider {
         &self,
         _model: &str,
         messages: &[Message],
-        _tools: &[ToolSpec],
+        tools: &[ToolSpec],
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
         let last_user = messages
@@ -152,6 +152,47 @@ impl Provider for MockProvider {
                             {"title": "Move every clap struct and enum out of main.rs into cli/args.rs without changing any field, variant, attribute, or doc comment", "detail": "Keep the parsed CLI surface byte-for-byte identical across the whole refactor so no command, flag, or help string shifts position."},
                         ],
                         "notes": "Pure mechanical move; cargo build after each step.",
+                    }),
+                }],
+                30,
+                12,
+            ));
+        }
+
+        // Dispatch coordinator turn → propose the canned three-item split, then stop for review.
+        // Gated on the tool being offered as well: a dispatched worker's prompt quotes the
+        // coordinator's title (which carries the user's `mock:dispatch` request), and a worker must
+        // do its own item instead of proposing a split it has no tool for.
+        let wants_dispatch =
+            lu.contains("mock:dispatch") && tools.iter().any(|t| t.name == "dispatch_sessions");
+        if wants_dispatch {
+            let since_user = messages
+                .iter()
+                .rposition(|m| m.role == Role::User)
+                .map_or(messages, |i| &messages[i + 1..]);
+            let proposed = since_user.iter().any(|m| {
+                m.role == Role::Assistant
+                    && m.tool_calls.iter().any(|c| c.name == "dispatch_sessions")
+            }) && since_user.iter().any(|m| m.role == Role::Tool);
+            if proposed {
+                let content = "The split is ready for your review.";
+                stream_words(content, on_event).await;
+                return Ok(resp(content, vec![], 42, 18));
+            }
+            let content = "Proposing a split.";
+            stream_words(content, on_event).await;
+            return Ok(resp(
+                content,
+                vec![ToolCall {
+                    id: new_id(),
+                    name: "dispatch_sessions".to_string(),
+                    args: json!({
+                        "summary": "Mock split of the request into three parts.",
+                        "items": [
+                            {"title": "Notes file", "prompt": "mock:write create a file notes.md"},
+                            {"title": "Tasks", "prompt": "mock:tasks track the work"},
+                            {"title": "Summary", "prompt": "Reply with a one-line summary of the project.", "depends_on": [1]},
+                        ],
                     }),
                 }],
                 30,
@@ -337,6 +378,51 @@ mod tests {
         ];
         let res2 = p.complete("mock", &after, &[], &mut |_| {}).await.unwrap();
         assert!(!res2.wants_tools(), "stops after the plan is on screen");
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_prompt_calls_dispatch_sessions_then_stops() {
+        let p = MockProvider;
+        let tools = [ToolSpec {
+            name: "dispatch_sessions".into(),
+            description: String::new(),
+            schema: json!({}),
+        }];
+        let prompt = "<request>\nmock:dispatch split the work\n</request>";
+        let res = p
+            .complete("mock", &[Message::user(prompt)], &tools, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(res.tool_calls[0].name, "dispatch_sessions");
+        let args = &res.tool_calls[0].args;
+        assert_eq!(
+            args["summary"],
+            "Mock split of the request into three parts."
+        );
+        assert_eq!(args["items"].as_array().unwrap().len(), 3);
+        assert_eq!(args["items"][2]["depends_on"], json!([1]));
+
+        let after = vec![
+            Message::user(prompt),
+            Message::assistant_tool_calls("Proposing a split.", res.tool_calls.clone()),
+            Message::new(Role::Tool, "Proposal recorded: 3 sessions."),
+        ];
+        let res2 = p
+            .complete("mock", &after, &tools, &mut |_| {})
+            .await
+            .unwrap();
+        assert!(!res2.wants_tools(), "stops once the proposal is recorded");
+        assert_eq!(res2.content, "The split is ready for your review.");
+
+        let worker = p
+            .complete("mock", &[Message::user(prompt)], &[], &mut |_| {})
+            .await
+            .unwrap();
+        assert_ne!(
+            worker.tool_calls.first().map(|c| c.name.as_str()),
+            Some("dispatch_sessions"),
+            "a session without the tool never proposes a split"
+        );
     }
 
     #[tokio::test]

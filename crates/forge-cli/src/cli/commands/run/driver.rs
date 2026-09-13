@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use forge_tui::{handle_key, App, ChannelPresenter, ConfirmOutcome, InputOutcome, KeyKind, UiMsg};
 
+mod daemon_dispatch;
 mod daemon_fleet;
 mod input;
 mod submit;
@@ -57,6 +58,16 @@ pub(crate) struct DriverSpec {
     /// fleet messaging). When present, wires `message_session` on the constructed session —
     /// see [`daemon_fleet::DaemonFleetMessaging`].
     pub registry: Option<std::sync::Arc<crate::serve::SessionRegistry>>,
+    /// Start this session as a dispatch coordinator (`POST /api/dispatch`). Only meaningful with a
+    /// `registry`; a resumed session is re-wired from the store regardless of this flag.
+    pub dispatch_coordinator: bool,
+    /// Start this session as a dispatched worker. A worker does NOT get the worktree session's
+    /// lifetime code-change expectation: its turns are the coordinator's item prompt and the
+    /// coordinator's follow-up messages, and an item that investigates or verifies must not be
+    /// pushed with "implement the fix now". Each turn's own contract still demands a diff when the
+    /// prompt is an explicit change directive ("Add …", "Fix …"). A resumed session is recognised
+    /// from the store regardless of this flag.
+    pub dispatch_worker: bool,
 }
 
 /// The daemon-side handle to a running session driver — everything `forge serve`'s HTTP layer
@@ -215,11 +226,18 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     // gap: every completion guard Forge already built was inert outside `bench swe`). The nudge
     // still only triggers when tools actually ran and the tree is unchanged, so a pure-answer turn
     // that touches nothing is unaffected.
-    if spec.worktree.is_some() {
+    let resumed_worker = spec.resume.is_some()
+        && matches!(
+            session.store.dispatch_item_for_session(&session_id),
+            Ok(Some(_))
+        );
+    if spec.worktree.is_some() && !spec.dispatch_worker && !resumed_worker {
         session.set_expect_code_change(true);
     }
 
     if let Some(registry) = spec.registry.clone() {
+        let resumed = spec.resume.is_some();
+        daemon_dispatch::wire(&mut session, &registry, spec.dispatch_coordinator, resumed);
         session.set_fleet_messaging(Some(std::sync::Arc::new(
             daemon_fleet::DaemonFleetMessaging {
                 registry,
@@ -729,6 +747,7 @@ async fn drive_session(
         .app
         .last_stop_reason
         .map(|reason| reason.as_str().to_string());
+    closed.turns_finished = st.app.turns_finished;
     closed.closed = true;
     closed.revision += 1;
     let closed = std::sync::Arc::new(remote::SnapshotFrame::new(closed));

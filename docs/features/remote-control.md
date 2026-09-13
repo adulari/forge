@@ -393,6 +393,9 @@ death timeout, and per-session URLs.
    POST /<t>/api/sessions         create {cwd, worktree, title?, model?, resume?}
    POST /<t>/api/sessions/{id}/archive
    GET  /<t>/api/history?session=<id>&before&limit&include_tools
+   POST /<t>/api/dispatch                plan & dispatch: propose a split (plan-and-dispatch.md)
+   GET  /<t>/api/dispatches[/{id}]       list / show one dispatch and its items
+   POST /<t>/api/dispatches/{id}/approve|revise|cancel
 ```
 
 - **The SessionDriver seam.** `run/driver.rs` runs one session as a plain tokio task using
@@ -729,6 +732,7 @@ the normal cooldown rather than treating that child eviction as a daemon failure
 | `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui`; v4: `next_input_event` (remote keys join the local key loop), `apply_overlay_input` + `RemoteOverlayOp`, `/keys` host-only note, `remote_copy_text`; v5: `RemoteControl::broadcast` (frame → event log + watch), the `HistoryProvider` closure over the session's store |
 | `forge-cli/src/cli/commands/service.rs` | `forge service install\|uninstall\|status\|start\|stop\|restart` — user-level background daemon for `forge serve` (systemd `--user` / launchd / Task Scheduler backends, no root) |
 | `forge-tui/src/board/` + `forge-cli` board host | `forge board` — a full-screen fleet-wide view, a second consumer of this exact surface (`/api/sessions`, `/api/sessions/past`, `/ws?session=`, `/ws/fleet`, `/api/git/status`, `/api/history`, and the mutating routes), no new endpoint added. See `docs/features/project-board.md`. |
+| `forge-core/src/dispatch.rs`, `forge-store/src/dispatch_store.rs`, `forge-cli/src/serve_dispatch.rs`, `forge-cli/src/mcp_serve/dispatch.rs`, `forge-cli/src/cli/commands/dispatch.rs` | Plan and dispatch: `POST /api/dispatch`, `GET /api/dispatches[/{id}]`, `POST /api/dispatches/{id}/proposal\|approve\|revise\|cancel`; `GET /api/sessions` rows gain `dispatch_id`/`dispatch_role`/`dispatch_index`; `WS /ws/fleet` invalidates on dispatch changes and a session snapshot gains `turns_finished`. `forge dispatch`, `/dispatch`, and `D` on `forge board` are all thin clients of these same routes. See `docs/features/plan-and-dispatch.md`. |
 | `Cargo.toml` | `axum` (ws), `axum-server` (rustls), `rcgen`, `tokio-tungstenite`, `qrcode`; `tokio` `net` feature |
 | tests | snapshot wire-shape (v5 incl. overlay/copy_text/resync + `HistoryRow`), named-key table, overlay-verb units, per-`PickerKind` projection units, an e2e-style remote drive of the `/model` pin picker asserting the pin changed, `EventLog` replay/eviction/bounded units, history-page store units (windowing/ordering/ui-rows/session-scoping), manifest/base/SW/exposure-mapping units + two `--ignored` real-socket round-trips (page + WS + PWA assets; connect → drop → `?rev=` reconnect asserting exact gap-free replay + history pagination + token-gated 404) |
 

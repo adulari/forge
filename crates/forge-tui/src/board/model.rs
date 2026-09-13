@@ -151,6 +151,8 @@ pub struct Card {
     pub past: bool,
     pub archived: bool,
     pub message_count: i64,
+    /// The plan-and-dispatch run this card coordinates or works for (`dispatch::annotate`).
+    pub dispatch: Option<super::dispatch::CardDispatch>,
 }
 
 impl Card {
@@ -255,6 +257,7 @@ pub fn live_card(row: &FleetRow, snap: Option<&LiveSnapshot>, now: i64) -> Card 
         past: false,
         archived: false,
         message_count: 0,
+        dispatch: None,
     }
 }
 
@@ -300,6 +303,7 @@ pub fn past_card(row: &PastRow) -> Card {
         past: true,
         archived: row.archived,
         message_count: row.message_count,
+        dispatch: None,
     }
 }
 

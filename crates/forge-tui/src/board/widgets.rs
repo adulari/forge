@@ -14,11 +14,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::SPINNER;
 use crate::surface::{
-    self, SurfaceTone, ACCENT, DIM, ERRRED, OKGREEN, ORANGE, SELECT_BG, SEPARATOR, TEXT, TOOLCYAN,
-    VERY_DIM, WARNYEL,
+    SurfaceTone, ACCENT, DIM, ERRRED, OKGREEN, ORANGE, SEPARATOR, TEXT, TOOLCYAN, VERY_DIM, WARNYEL,
 };
 
-use super::keys::HELP;
+use super::dispatch::{dispatch_status, Role};
 use super::model::{fmt_cost, model_short, Card, Health};
 use super::state::{BoardApp, Button, ComposerMode, Focus, Hit, ToastLevel};
 use super::wire::{GitFile, Subagent};
@@ -327,7 +326,7 @@ pub(super) fn italic(color: Color) -> Style {
 // ──────────────────────────────────────────────────────────────────── keybar
 
 /// One keybar entry: the key, what it does, and whether it is the urgent one right now.
-type Bind = (&'static str, &'static str, bool);
+pub(super) type Bind = (&'static str, &'static str, bool);
 
 /// The contextual keybar, derived from the same semantics `keys.rs` implements.
 pub(super) fn keybar(app: &BoardApp) -> Vec<Bind> {
@@ -344,6 +343,14 @@ pub(super) fn keybar(app: &BoardApp) -> Vec<Bind> {
             }
             v
         }
+        Focus::Form => vec![
+            ("Enter", "start", true),
+            ("Tab", "next field", false),
+            ("←→", "change", false),
+            ("Ctrl+J", "new line", false),
+            ("Esc", "cancel", false),
+        ],
+        Focus::Detail if app.dispatch_tab_active() => super::dispatch_render::dispatch_keybar(app),
         Focus::Filter => vec![
             ("type", "to filter", false),
             ("Enter", "keep", false),
@@ -372,19 +379,29 @@ fn board_keybar(app: &BoardApp) -> Vec<Bind> {
         v.push(("1-n", "pick", true));
         v.push(("e", "type", true));
     }
-    if app.selected_card().is_some_and(|c| c.past) {
+    let card = app.selected_card();
+    if card.is_some_and(|c| c.past) {
         v.push(("r", "resume", false));
     }
+    let proposed = card
+        .and_then(|c| c.dispatch.as_ref())
+        .is_some_and(|d| d.role == Role::Coordinator && d.status == dispatch_status::PROPOSED);
+    let review = proposed && !app.dispatch_tab_active();
+    if review {
+        v.push(("Enter", "review the split", true));
+    }
+    v.push(("↑↓", "move", false));
+    // One Enter per bar: on a split waiting for review, Enter's job IS "review the split".
+    if !review {
+        v.push(("Enter", "open", false));
+    }
     v.extend_from_slice(&[
-        ("↑↓", "move", false),
-        ("←→", "column", false),
-        ("Enter", "open", false),
         ("a", "attach", false),
         ("p", "prompt", false),
         ("i", "interrupt", false),
-        ("m", "model", false),
         ("x", "archive", false),
         ("N", "new", false),
+        ("D", "dispatch", false),
         ("f", "project", false),
         ("/", "filter", false),
         ("?", "help", false),
@@ -439,129 +456,6 @@ pub(super) fn toast_items(app: &BoardApp) -> Vec<(String, Style)> {
             )
         })
         .collect()
-}
-
-// ─────────────────────────────────────────────────────────────────── overlays
-
-/// The one-line composer: label in the frame, the text with a real cursor, the send/cancel hint.
-pub(super) fn draw_composer(app: &BoardApp, frame: &mut Frame, area: Rect) {
-    let Some(c) = app.composer.as_ref() else {
-        return;
-    };
-    if area.width < 12 || area.height < 5 {
-        return;
-    }
-    let rect = surface::modal_area(area, area.width.saturating_sub(8).clamp(24, 96), 5);
-    let hint = match &c.mode {
-        ComposerMode::NewSession { .. } => "Enter send · Esc cancel · Tab: worktree on/off",
-        _ => "Enter send · Esc cancel",
-    };
-    let inner = surface::render_panel(
-        frame,
-        rect,
-        surface::title(clip_cells(&c.label(), 60), SurfaceTone::Accent),
-        Some(surface::hint(hint)),
-        SurfaceTone::Accent,
-    );
-    if inner.width < 2 || inner.height == 0 {
-        return;
-    }
-    let width = inner.width as usize;
-    let chars: Vec<char> = c.text.chars().collect();
-    let cursor = c.cursor.min(chars.len());
-    let start = (cursor + 1).saturating_sub(width);
-    let before: String = chars[start..cursor].iter().collect();
-    let (at, after) = match chars.get(cursor) {
-        Some(ch) => (
-            ch.to_string(),
-            chars[(cursor + 1).min(chars.len())..].iter().collect(),
-        ),
-        None => (" ".to_string(), String::new()),
-    };
-    let mut fit = Fit::new(width);
-    fit.add(before, Style::default().fg(TEXT));
-    fit.add(at, Style::default().fg(TEXT).bg(SELECT_BG));
-    fit.add(after, Style::default().fg(TEXT));
-    frame.render_widget(Paragraph::new(fit.line()), inner);
-}
-
-/// The archive-style confirmation: what it will do, then yes/no.
-pub(super) fn draw_confirm(app: &BoardApp, frame: &mut Frame, area: Rect) {
-    let Some(c) = app.confirm.as_ref() else {
-        return;
-    };
-    if area.width < 16 || area.height < 6 {
-        return;
-    }
-    let width = area.width.saturating_sub(10).clamp(24, 68);
-    let body = wrap(&c.body, width.saturating_sub(2) as usize);
-    let height = (body.len() as u16 + 3)
-        .min(area.height.saturating_sub(2))
-        .max(4);
-    let rect = surface::modal_area(area, width, height);
-    let inner = surface::render_panel(
-        frame,
-        rect,
-        surface::title(clip_cells(&c.title, 60), SurfaceTone::Warning),
-        Some(surface::hint("Enter yes · Esc no")),
-        SurfaceTone::Warning,
-    );
-    let lines: Vec<Line> = body
-        .into_iter()
-        .map(|l| Line::from(Span::styled(l, Style::default().fg(TEXT))))
-        .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// Every key the board answers to, in two columns, straight out of [`HELP`].
-pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
-    if area.width < 20 || area.height < 6 {
-        return;
-    }
-    // Two columns only when each gets room for the longest description; otherwise one column,
-    // clipped to the height rather than clipping the words.
-    let width = area.width.saturating_sub(6).clamp(24, 140);
-    let two_columns = width >= 122;
-    let rows = if two_columns {
-        HELP.len().div_ceil(2)
-    } else {
-        HELP.len()
-    };
-    let height = (rows as u16 + 2).min(area.height.saturating_sub(2)).max(4);
-    let rect = surface::modal_area(area, width, height);
-    let inner = surface::render_panel(
-        frame,
-        rect,
-        surface::title("forge board — keys", SurfaceTone::Brand),
-        Some(surface::hint("any key closes")),
-        SurfaceTone::Brand,
-    );
-    let half = inner.width as usize / 2;
-    let mut lines: Vec<Line> = Vec::new();
-    for i in 0..rows {
-        let mut fit = Fit::new(inner.width as usize);
-        if two_columns {
-            help_cell(&mut fit, HELP.get(i), half);
-            help_cell(&mut fit, HELP.get(i + rows), inner.width as usize - half);
-        } else {
-            help_cell(&mut fit, HELP.get(i), inner.width as usize);
-        }
-        lines.push(fit.line());
-    }
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-fn help_cell(fit: &mut Fit, entry: Option<&(&'static str, &'static str)>, width: usize) {
-    let Some((key, desc)) = entry else {
-        return;
-    };
-    let before = fit.used();
-    fit.add(format!("{key:>11}  "), Style::default().fg(ACCENT).bold());
-    fit.add(*desc, Style::default().fg(DIM));
-    let used = fit.used() - before;
-    if used < width {
-        fit.add(" ".repeat(width - used), Style::default());
-    }
 }
 
 /// A thin rule the width of `area`, used under column headers and the board header.
@@ -727,7 +621,8 @@ pub(super) fn action_chips(card: &Card) -> Vec<Chip> {
         ];
     }
     let live = !card.read_only;
-    vec![
+    let worktree = card.worktree.is_some() && !card.terminal;
+    let mut chips = vec![
         ("a", "attach", Button::Attach, live),
         ("p", "prompt", Button::Prompt, live),
         ("s", "steer", Button::Steer, live && card.busy),
@@ -736,7 +631,12 @@ pub(super) fn action_chips(card: &Card) -> Vec<Chip> {
         ("M", "mode", Button::Mode, live && !card.terminal),
         ("x", "archive", Button::Archive, !card.terminal),
         ("c", "copy", Button::Copy, true),
-    ]
+    ];
+    if worktree {
+        chips.insert(6, ("w", "merge", Button::Merge, true));
+        chips.insert(7, ("X", "discard", Button::Discard, true));
+    }
+    chips
 }
 
 fn chip_width(c: &Chip) -> u16 {

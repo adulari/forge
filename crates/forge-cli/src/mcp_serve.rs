@@ -78,6 +78,7 @@ fn append_sink_record(path: &str, record: &serde_json::Value) -> std::io::Result
 mod bridge_budget;
 use bridge_budget::*;
 
+mod dispatch;
 mod fleet;
 
 mod subagents;
@@ -164,7 +165,11 @@ impl ServerHandler for ForgeMcp {
     ) -> Result<ListToolsResult, McpError> {
         // rmcp 3 added spec-2026-07-28 fields (result_type, ttl_ms, cache_scope) to every
         // paginated result; `with_all_items` fills them with the spec defaults.
-        Ok(ListToolsResult::with_all_items(self.tool_list()))
+        let mut tools = self.tool_list();
+        if let Some(tool) = self.dispatch_sessions_tool().await {
+            tools.push(tool);
+        }
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
@@ -291,6 +296,10 @@ impl ForgeMcp {
 
         // Fleet agent-to-agent messaging — resolves against a running `forge serve` daemon over
         // HTTP (this process has no direct registry access; see `mcp_serve::fleet`).
+        // A bridge coordinator's proposal — recorded by the daemon over HTTP (`mcp_serve::dispatch`).
+        if name == forge_core::dispatch::DISPATCH_SESSIONS_TOOL {
+            return Ok(self.handle_dispatch_sessions(&args).await);
+        }
         if name == forge_core::fleet::MESSAGE_SESSION_TOOL {
             return Ok(self.handle_message_session(&args).await);
         }

@@ -74,6 +74,9 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             project,
             all,
         } => crate::board::board_cmd(url, token, project, all).await,
+        Command::Dispatch { cmd, url, token } => {
+            crate::cli::commands::dispatch::dispatch_cmd(cmd, url, token).await
+        }
         Command::Send {
             target,
             message,

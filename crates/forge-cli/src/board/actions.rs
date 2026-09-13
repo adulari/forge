@@ -10,6 +10,7 @@ use forge_tui::board::{BoardAction, BoardEvent, ToastLevel};
 use tokio::sync::mpsc;
 
 use super::client::{api_url, create_session, fetch_detail, post_action};
+use super::dispatch_client as dc;
 use super::sockets::SocketPool;
 use super::{short_id, Ev};
 
@@ -86,6 +87,67 @@ pub(crate) fn perform(action: BoardAction, host: &mut Host<'_>) -> After {
                 host.ev.clone(),
             ));
         }
+        BoardAction::StartDispatch {
+            cwd,
+            prompt,
+            worktree,
+            mode,
+            max_running,
+            max_items,
+        } => {
+            tokio::spawn(dc::start_dispatch(
+                host.http.clone(),
+                api_url(host.base, host.token, "api/dispatch"),
+                dc::start_body(&cwd, &prompt, worktree, &mode, max_running, max_items),
+                host.ev.clone(),
+                host.refresh.clone(),
+            ));
+        }
+        BoardAction::ApproveDispatch { id, selected } => host.dispatch_post(
+            &id,
+            "approve",
+            serde_json::json!({ "selected": selected }),
+            "split approved — sessions are starting",
+        ),
+        BoardAction::ReviseDispatch { id, feedback } => host.dispatch_post(
+            &id,
+            "revise",
+            serde_json::json!({ "feedback": feedback }),
+            "the coordinator is revising the split",
+        ),
+        BoardAction::CancelDispatch(id) => {
+            host.dispatch_post(&id, "cancel", serde_json::json!({}), "dispatch cancelled")
+        }
+        BoardAction::Merge(id) => {
+            tokio::spawn(dc::merge(
+                host.http.clone(),
+                host.base.to_string(),
+                host.token.to_string(),
+                id,
+                host.ev.clone(),
+                host.refresh.clone(),
+            ));
+        }
+        BoardAction::Discard(id) => {
+            tokio::spawn(dc::discard(
+                host.http.clone(),
+                host.base.to_string(),
+                host.token.to_string(),
+                id,
+                host.ev.clone(),
+                host.refresh.clone(),
+            ));
+        }
+        BoardAction::MergeFinished(id) => {
+            tokio::spawn(dc::merge_finished(
+                host.http.clone(),
+                host.base.to_string(),
+                host.token.to_string(),
+                id,
+                host.ev.clone(),
+                host.refresh.clone(),
+            ));
+        }
         BoardAction::Refresh => {
             let _ = host.refresh.send(());
         }
@@ -101,6 +163,21 @@ pub(crate) fn perform(action: BoardAction, host: &mut Host<'_>) -> After {
 }
 
 impl Host<'_> {
+    fn dispatch_post(&self, id: &str, verb: &str, body: serde_json::Value, ok: &str) {
+        tokio::spawn(dc::dispatch_post(
+            self.http.clone(),
+            api_url(
+                self.base,
+                self.token,
+                &format!("api/dispatches/{id}/{verb}"),
+            ),
+            body,
+            ok.to_string(),
+            self.ev.clone(),
+            self.refresh.clone(),
+        ));
+    }
+
     fn post(&self, path: &str, body: serde_json::Value, ok: String) {
         tokio::spawn(post_action(
             self.http.clone(),

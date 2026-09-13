@@ -17,10 +17,10 @@ use crate::surface::{
     VERY_DIM, WARNYEL,
 };
 
-use super::detail;
 use super::model::{fmt_age, fmt_cost, model_short, Card, Column, Health, SignalLevel};
 use super::state::{BoardApp, ConnState, Focus, Hit};
 use super::widgets as w;
+use super::{detail, dispatch_render as dr, form_render, overlays};
 
 /// Narrower than this and a column stops being readable, so fewer are shown.
 const MIN_COLUMN: u16 = 30;
@@ -71,12 +71,14 @@ pub fn draw(app: &mut BoardApp, frame: &mut Frame) {
 
     // Overlays own the screen while they are up, so they are painted over everything else.
     if app.confirm.is_some() {
-        w::draw_confirm(app, frame, area);
+        overlays::draw_confirm(app, frame, area);
     } else if app.composer.is_some() {
-        w::draw_composer(app, frame, area);
+        overlays::draw_composer(app, frame, area);
+    } else if app.dispatch.form.is_some() {
+        form_render::draw_form(app, frame, area);
     }
     if app.focus == Focus::Help {
-        w::draw_help(frame, area);
+        overlays::draw_help(frame, area);
     }
 }
 
@@ -118,6 +120,17 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
     };
     let r = row.add(label, Style::default().fg(ACCENT));
     w::push_hit(hits, r, area, Hit::ProjectFilter);
+    row.sep();
+    match dr::zoom_chip(app) {
+        Some((text, color)) => {
+            let r = row.add(text, Style::default().fg(color).bg(SELECT_BG).bold());
+            w::push_hit(hits, r, area, Hit::ClearZoom);
+        }
+        None => {
+            let r = row.add("◆ dispatch", Style::default().fg(ACCENT));
+            w::push_hit(hits, r, area, Hit::DispatchChip);
+        }
+    }
 
     let dot = if t.attention == 0 || w::pulse(app.tick) {
         "●"
@@ -454,7 +467,7 @@ fn draw_card(
     }
     w::push_hit(hits, rect, rect, Hit::Card(card.id.clone()));
 
-    let (glyph, gcolor) = w::health_glyph(card, app.tick);
+    let (glyph, gcolor) = dr::card_glyph(card).unwrap_or_else(|| w::health_glyph(card, app.tick));
     let age = fmt_age(app.now.saturating_sub(card.last_activity));
     let finished = app.just_finished(&card.id);
     let chip_w = if finished { 11 } else { 0 };
@@ -509,6 +522,9 @@ fn draw_card(
     let mut lines: Vec<Line> = Vec::new();
 
     let mut l1 = w::Fit::new(width);
+    if let Some((chip, color)) = dr::worker_chip(card) {
+        l1.add(chip, Style::default().fg(color).bold());
+    }
     if card.past {
         l1.add(
             format!("{} messages", card.message_count),
@@ -533,8 +549,13 @@ fn draw_card(
     }
     lines.push(l1.line());
 
+    let dispatch_line = dr::coordinator_line(app, card, width);
     if !compact {
-        lines.push(line_two(card, signal.as_ref(), width));
+        lines.push(
+            dispatch_line
+                .clone()
+                .unwrap_or_else(|| line_two(card, signal.as_ref(), width)),
+        );
         let mut l3 = w::Fit::new(width);
         if card.streaming {
             l3.add(
@@ -548,7 +569,10 @@ fn draw_card(
         }
         lines.push(l3.line());
     }
-    lines.push(gauges(card, if compact { signal } else { None }, width));
+    match dispatch_line.filter(|_| compact) {
+        Some(l) => lines.push(l),
+        None => lines.push(gauges(card, if compact { signal } else { None }, width)),
+    }
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -646,13 +670,16 @@ fn draw_hero(app: &BoardApp, frame: &mut Frame, area: Rect) {
     } else {
         "N  start one here   ·   or run: forge serve --local".to_string()
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(head, Style::default().fg(TEXT).bold())).centered(),
         Line::from(""),
         Line::from(Span::styled(sub, Style::default().fg(DIM))).centered(),
-        Line::from(""),
-        Line::from(Span::styled(conn, style)).centered(),
     ];
+    if !filtered {
+        lines.push(Line::from(Span::styled(dr::HERO_LINE, Style::default().fg(DIM))).centered());
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(conn, style)).centered());
     let h = lines.len() as u16;
     if area.height <= h {
         frame.render_widget(Paragraph::new(lines), area);
