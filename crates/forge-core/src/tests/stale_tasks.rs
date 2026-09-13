@@ -21,6 +21,7 @@ impl Provider for Talker {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if n == 0 {
             return Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 tool_calls: vec![forge_types::ToolCall {
                     id: forge_types::new_id(),
@@ -35,6 +36,7 @@ impl Provider for Talker {
             });
         }
         Ok(forge_provider::ModelResponse {
+            reasoning: String::new(),
             content: "Still working out what that task means.".into(),
             tool_calls: vec![],
             usage: forge_types::Usage::default(),

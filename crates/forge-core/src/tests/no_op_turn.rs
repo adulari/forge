@@ -46,6 +46,7 @@ impl Provider for ScriptedProvider {
             .cloned()
             .unwrap_or_default();
         Ok(forge_provider::ModelResponse {
+            reasoning: String::new(),
             content,
             tool_calls,
             usage: forge_types::Usage::default(),

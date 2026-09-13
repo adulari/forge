@@ -1320,6 +1320,7 @@ mod tests {
                 });
             }
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -1564,6 +1565,7 @@ mod tests {
                 std::future::pending().await
             } else {
                 Ok(forge_provider::ModelResponse {
+                    reasoning: String::new(),
                     content: "child recovered after stall".into(),
                     tool_calls: vec![],
                     usage: forge_types::Usage::default(),
@@ -1680,6 +1682,7 @@ mod tests {
                 String::new()
             };
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content,
                 tool_calls,
                 usage: forge_types::Usage::default(),
@@ -1907,6 +1910,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             self.active.fetch_sub(1, SeqCst);
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -1971,6 +1975,7 @@ mod tests {
             _on_event: &mut forge_provider::EventSink<'_>,
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "\n  \n".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -2082,6 +2087,7 @@ mod tests {
             self.completed
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
