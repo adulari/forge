@@ -77,7 +77,8 @@ cancels. Once approved, the same tab becomes a progress view:
 Each worker also shows up as its own card elsewhere on the board, tagged with a `◆ 2/3` chip in
 the dispatch's colour; the coordinator's card shows the same colour and a `◆` marker. `z` zooms
 the board down to just this dispatch's cards (`Esc` clears it); `w`/`X` merge or discard the
-selected worktree session; `A` (or the button above) merges every `succeeded` item in index order.
+selected worktree session; `A` (or the button above) merges every `succeeded` item in index order,
+one commit each (§7).
 See `docs/features/project-board.md` § "Plan and dispatch" for the exact keys and card fields.
 
 ## 3. How the coordinator splits the work
@@ -175,14 +176,42 @@ stomp each other's working tree. With `worktree: false` every item runs in the d
 `cwd`; the coordinator is told to keep items non-overlapping since nothing here prevents a
 collision.
 
-Merging and discarding a worker use the existing session routes:
-`POST /api/sessions/{id}/merge` stops the session, snapshots the worktree, and 3-way-merges its
-branch back; on success the item becomes `merged`. `POST /api/sessions/{id}/discard` stops the
-session and drops its worktree and branch without merging; the item becomes `discarded`. A merge
-**conflict** leaves the item's status exactly as it was (still `succeeded`, say) and the existing
-409 response with `conflicts` is returned — dispatch state never silently marks a conflicted merge
-as done. `A` on the board (or `POST` a merge per item) merges every `succeeded` item in index
-order, stopping at the first conflict or error and leaving the rest for a manual look.
+**One worker** (`w` on the board) uses the session routes: `POST /api/sessions/{id}/merge` stops
+the session, snapshots the worktree, and 3-way-merges its branch back; on success the item becomes
+`merged`. The result is left **staged, not committed**, for the user to review. The route refuses a
+base repo with uncommitted tracked changes (409 with `dirty_files`), because a conflict restores
+the base with `git reset --hard HEAD`, which is only safe from a clean tree.
+`POST /api/sessions/{id}/discard` stops the session and drops its worktree and branch without
+merging; the item becomes `discarded`. A merge **conflict** leaves the item's status exactly as it
+was (still `succeeded`, say) and the 409 response with `conflicts` is returned — dispatch state
+never silently marks a conflicted merge as done.
+
+**Every finished worker** (`A` on the board, `forge dispatch merge`) uses
+`POST /api/dispatches/{id}/merge`, under the dispatch's lock. Merging workers one after another
+through the session route would fail: the first merge leaves the base dirty, and the second is
+refused. So the batch route **commits each clean merge** on the base repo's current branch before
+starting the next. Every step starts from a clean HEAD, a conflict discards only its own partial
+apply, and the items merged before it are already in commits. The route:
+
+1. Refuses up front with 409 + `dirty_files` if the base has uncommitted tracked changes. That
+   includes a staged single-session merge from `w`: commit it first.
+2. Takes each `succeeded` item with a session in ascending index order. It merges the item exactly
+   as the session route does, marks it `merged`, and commits the staged result:
+
+   ```
+   Merge dispatch item <n>: <title>
+
+   From Forge dispatch <id8> — <first line of the request, ≤ 72 chars>. Session <session id8>, branch <branch>.
+   ```
+
+   The commit uses the repo's own git identity and hooks. A branch that adds nothing gets no
+   commit (`commit: null`).
+3. Stops at the first conflict or error. The conflicted session is respawned and keeps its
+   worktree; its item stays `succeeded`. A **commit** that fails (no git identity, a hook that
+   refuses) also stops the run: that item is merged and left staged, and the reason carries git's
+   message.
+
+The response is 200 even for a partial run, since it is a report (see §10).
 
 **Workers are not nudged into editing.** An ordinary worktree session is armed, for its whole
 life, to push back with "implement the fix now" whenever a turn ends without a diff. A dispatched
@@ -207,6 +236,7 @@ forge dispatch show <id>            # id or unique prefix
 forge dispatch approve <id> [--only 1,3]
 forge dispatch revise <id> "<what to change>"
 forge dispatch cancel <id>
+forge dispatch merge <id>           # every finished item, one commit each
 ```
 
 - `--cwd` — project directory (default: the current directory).
@@ -220,6 +250,9 @@ forge dispatch cancel <id>
 - `--model` — pins the coordinator's model only; item sessions route as usual.
 - `--only 1,3` on `approve` — approve just those item numbers; an item that depends on one left
   out does not start either (§4).
+- `merge` — calls `POST /api/dispatches/{id}/merge` (§7) and prints one line per merged item with
+  its commit's short sha (or `nothing to commit`), then the stop reason, conflicted files and the
+  items not merged yet, if the run stopped.
 - `--url`/`--token` (global on `forge dispatch`) — daemon base URL / token, same defaults as
   `forge attach`.
 
@@ -265,6 +298,17 @@ All routes live under `/<daemon-token>/`; a wrong token is a 404; errors are `{"
 | `POST /api/dispatches/{id}/approve` | `{selected?: [int]}` (omitted = all) | 200 `DispatchJson`; 400 on an invalid selection; 409 unless `proposed` |
 | `POST /api/dispatches/{id}/revise` | `{feedback}` | 200 `DispatchJson`; 400 if empty; 409 unless `proposed` |
 | `POST /api/dispatches/{id}/cancel` | — | 200 `DispatchJson`; 409 if already `done`/`cancelled` |
+| `POST /api/dispatches/{id}/merge` | — | 200 `MergeReport` (also for a partial run); 400 if `worktree` is false; 404; 409 if no item is `succeeded` with a session, or with `dirty_files` if the base repo has uncommitted tracked changes |
+
+`MergeReport` (§7):
+
+```
+{ "merged": [ { "index", "title", "commit": sha|null } ],
+  "stopped_at": { "index", "title", "reason", "conflicts": [file] } | null,
+  "remaining": [index],            // succeeded items after the stop, not attempted
+  "base_branch": string|null,      // the branch the commits landed on
+  "dispatch": DispatchJson }
+```
 
 `prompt` is required, non-empty after trim, capped at 16 KB. `cwd` defaults to the daemon's
 default cwd and is canonicalized; with `worktree: true` (the default) it must be a git repository

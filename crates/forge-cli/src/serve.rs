@@ -2145,7 +2145,7 @@ pub(crate) fn worktree_repo_and_branch(worktree: &str) -> Option<(std::path::Pat
 /// worktree dirs and other untracked cruft never count). A non-empty list means merging would
 /// apply a patch on top of uncommitted work — the merge route refuses rather than do that
 /// silently. Best-effort: a git failure returns empty (the 3-way apply is the real safety net).
-fn base_dirty_tracked(repo_root: &std::path::Path) -> Vec<String> {
+pub(crate) fn base_dirty_tracked(repo_root: &std::path::Path) -> Vec<String> {
     let out = std::process::Command::new("git")
         .args([
             "-C",
@@ -2353,19 +2353,81 @@ async fn merge_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    let Some(handle) = state.registry.get(&id).await else {
-        return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
+    match merge_session_core(&state, &id, true).await {
+        SessionMerge::Clean { branch } => json_response(&serde_json::json!({
+            "ok": true, "merged": true, "branch": branch,
+        })),
+        SessionMerge::Refused(status, message) => err_response(status, &message),
+        SessionMerge::Dirty(dirty) => conflict_json(serde_json::json!({
+            "error": "the base branch has uncommitted changes — commit or stash them, then merge",
+            "dirty_files": dirty,
+        })),
+        SessionMerge::Conflicts {
+            files,
+            branch,
+            worktree,
+        } => conflict_json(serde_json::json!({
+            "error": "merge conflicts — resolve them by hand in the worktree; the session remains resumable",
+            "conflicts": files, "branch": branch, "worktree": worktree,
+        })),
+        SessionMerge::Failed(message) => {
+            err_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &message)
+        }
+    }
+}
+
+pub(crate) fn conflict_json(body: serde_json::Value) -> Response {
+    (
+        axum::http::StatusCode::CONFLICT,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+/// What [`merge_session_core`] did with one session.
+pub(crate) enum SessionMerge {
+    /// Applied and staged; the worktree, branch and session are gone.
+    Clean { branch: String },
+    /// Refused before anything was touched (unknown session, no worktree, already claimed).
+    Refused(axum::http::StatusCode, String),
+    /// Refused because the base repo has uncommitted tracked changes; the session is untouched.
+    Dirty(Vec<String>),
+    /// Nothing merged; the session was respawned and keeps its worktree.
+    Conflicts {
+        files: Vec<String>,
+        branch: String,
+        worktree: String,
+    },
+    /// Nothing merged; the message says whether the session came back.
+    Failed(String),
+}
+
+/// The body of `POST /api/sessions/{id}/merge`, shared with the dispatch batch merge.
+/// `record_item` marks a dispatch worker `merged` through `worker_left`, which takes the dispatch
+/// lock — a caller already holding that lock passes `false` and records the item itself.
+pub(crate) async fn merge_session_core(
+    state: &DaemonState,
+    id: &str,
+    record_item: bool,
+) -> SessionMerge {
+    use axum::http::StatusCode;
+    let Some(handle) = state.registry.get(id).await else {
+        return SessionMerge::Refused(StatusCode::NOT_FOUND, "no such session".into());
     };
     let Some(worktree) = handle.worktree.clone() else {
-        return err_response(
-            axum::http::StatusCode::BAD_REQUEST,
-            "session has no worktree to merge",
+        return SessionMerge::Refused(
+            StatusCode::BAD_REQUEST,
+            "session has no worktree to merge".into(),
         );
     };
     let Some((repo_root, branch)) = worktree_repo_and_branch(&worktree) else {
-        return err_response(
-            axum::http::StatusCode::BAD_REQUEST,
-            "worktree path is not a recognised forge worktree",
+        return SessionMerge::Refused(
+            StatusCode::BAD_REQUEST,
+            "worktree path is not a recognised forge worktree".into(),
         );
     };
 
@@ -2377,19 +2439,7 @@ async fn merge_session(
             .unwrap_or_default()
     };
     if !dirty.is_empty() {
-        return (
-            axum::http::StatusCode::CONFLICT,
-            [
-                (axum::http::header::CONTENT_TYPE, "application/json"),
-                (axum::http::header::CACHE_CONTROL, "no-store"),
-            ],
-            serde_json::json!({
-                "error": "the base branch has uncommitted changes — commit or stash them, then merge",
-                "dirty_files": dirty,
-            })
-            .to_string(),
-        )
-            .into_response();
+        return SessionMerge::Dirty(dirty);
     }
 
     // Atomically claim ownership: `remove` is the only serialization point, so a concurrent
@@ -2397,13 +2447,13 @@ async fn merge_session(
     // bails — instead of two git sequences contending on the base repo index, which can
     // half-apply/duplicate a merge or `reset --hard` away another request's staged changes (base-
     // repo data loss). The dirty precondition above already ran on the pre-remove handle.
-    let Some(handle) = state.registry.remove(&id).await else {
-        return err_response(
-            axum::http::StatusCode::CONFLICT,
-            "session is already being merged or discarded",
+    let Some(handle) = state.registry.remove(id).await else {
+        return SessionMerge::Refused(
+            StatusCode::CONFLICT,
+            "session is already being merged or discarded".into(),
         );
     };
-    state.terminals.close_session(&id).await;
+    state.terminals.close_session(id).await;
     let resume_spec = DriverSpec {
         cwd: handle.cwd.clone(),
         worktree: handle.worktree.clone(),
@@ -2411,10 +2461,10 @@ async fn merge_session(
         mock: state.mock,
         model: state
             .store
-            .session_models(&id)
+            .session_models(id)
             .ok()
             .and_then(|models| models.last().cloned()),
-        resume: Some(id.clone()),
+        resume: Some(id.to_string()),
         temper: None,
         push: state.push.clone(),
         apns: state.apns.clone(),
@@ -2438,46 +2488,33 @@ async fn merge_session(
         return match (outcome, restart) {
             (MergeOutcome::Conflicts(files), Ok(handle)) => {
                 state.registry.insert(handle, &state.store).await;
-                (
-                    axum::http::StatusCode::CONFLICT,
-                    [
-                        (axum::http::header::CONTENT_TYPE, "application/json"),
-                        (axum::http::header::CACHE_CONTROL, "no-store"),
-                    ],
-                    serde_json::json!({
-                        "error": "merge conflicts — resolve them by hand in the worktree; the session remains resumable",
-                        "conflicts": files,
-                        "branch": branch,
-                        "worktree": worktree,
-                    })
-                    .to_string(),
-                )
-                    .into_response()
+                SessionMerge::Conflicts {
+                    files,
+                    branch,
+                    worktree,
+                }
             }
             (MergeOutcome::Error(msg), Ok(handle)) => {
                 state.registry.insert(handle, &state.store).await;
-                err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("merge failed: {msg} — nothing was merged, session left running"),
-                )
+                SessionMerge::Failed(format!(
+                    "merge failed: {msg} — nothing was merged, session left running"
+                ))
             }
-            (MergeOutcome::Conflicts(_), Err(e)) => err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("merge conflicts, but session restart failed: {e}"),
-            ),
-            (MergeOutcome::Error(msg), Err(e)) => err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("merge failed: {msg}; additionally the session failed to restart: {e}"),
-            ),
+            (MergeOutcome::Conflicts(_), Err(e)) => {
+                SessionMerge::Failed(format!("merge conflicts, but session restart failed: {e}"))
+            }
+            (MergeOutcome::Error(msg), Err(e)) => SessionMerge::Failed(format!(
+                "merge failed: {msg}; additionally the session failed to restart: {e}"
+            )),
             (MergeOutcome::Clean, _) => unreachable!("Clean is filtered out above"),
         };
     }
-    let _ = state.store.archive_session(&id);
-    crate::serve_dispatch::worker_left(&state, &id, forge_core::dispatch::item_status::MERGED)
-        .await;
-    json_response(&serde_json::json!({
-        "ok": true, "merged": true, "branch": branch,
-    }))
+    let _ = state.store.archive_session(id);
+    if record_item {
+        crate::serve_dispatch::worker_left(state, id, forge_core::dispatch::item_status::MERGED)
+            .await;
+    }
+    SessionMerge::Clean { branch }
 }
 
 /// `POST /api/sessions/{id}/discard` — stop the session and drop its worktree + branch WITHOUT

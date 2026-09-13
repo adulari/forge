@@ -904,6 +904,12 @@ pub(crate) enum DispatchCmd {
         /// Dispatch id (a unique prefix is accepted).
         id: String,
     },
+    /// Merge every finished item back into the project, in item order, one commit each on the
+    /// current branch. Stops at the first conflict; earlier merges stay committed.
+    Merge {
+        /// Dispatch id (a unique prefix is accepted).
+        id: String,
+    },
 }
 
 /// Permission mode of a dispatch's item sessions — `forge_types::PermissionMode` minus plan, which

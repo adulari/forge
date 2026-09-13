@@ -47,7 +47,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("Space", "Dispatch tab: tick or untick an item of the split"),
     (
         "A",
-        "Dispatch tab: merge every finished session (asks first)",
+        "Dispatch tab: merge every finished session, one commit each (asks first)",
     ),
     ("f", "cycle the project filter"),
     ("/", "filter cards by text"),

@@ -217,10 +217,81 @@ pub(crate) async fn discard(
     let _ = refresh.send(());
 }
 
-/// Merge every `succeeded` worker of a dispatch, in index order, one at a time. The dispatch is
-/// re-read first (the board's copy may be a refresh old), and the run stops at the first conflict
-/// or error — later merges could depend on the one that failed — naming the item that stopped it.
+/// Merge every `succeeded` worker of a dispatch through `POST /api/dispatches/{id}/merge`, which
+/// commits each merge before the next and stops at the first conflict. A daemon without that route
+/// (a bare 404) gets the older per-session loop.
 pub(crate) async fn merge_finished(
+    http: reqwest::Client,
+    base: String,
+    token: String,
+    dispatch_id: String,
+    ev: mpsc::UnboundedSender<Ev>,
+    refresh: mpsc::UnboundedSender<()>,
+) {
+    let url = api_url(
+        &base,
+        &token,
+        &format!("api/dispatches/{dispatch_id}/merge"),
+    );
+    match post_json(&http, &url, &serde_json::json!({})).await {
+        Ok(report) => {
+            let (level, text) = merge_report_words(&report);
+            toast(&ev, level, text);
+        }
+        Err(f) if f.status == Some(404) && f.body["error"].is_null() => {
+            merge_finished_per_session(http, base, token, dispatch_id, ev, refresh).await;
+            return;
+        }
+        Err(f) => toast(&ev, ToastLevel::Error, f.message),
+    }
+    let _ = refresh.send(());
+}
+
+/// The toast for a batch merge report: every item merged, or how far it got and why it stopped.
+pub(crate) fn merge_report_words(report: &serde_json::Value) -> (ToastLevel, String) {
+    let merged = report["merged"].as_array().map_or(&[][..], Vec::as_slice);
+    let remaining = report["remaining"].as_array().map_or(0, Vec::len);
+    let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    let stopped = &report["stopped_at"];
+    if stopped.is_null() {
+        let commits = merged.iter().filter(|m| m["commit"].is_string()).count();
+        let into = report["base_branch"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| report["dispatch"]["cwd"].as_str().map(project_name))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "the project".into());
+        return (
+            ToastLevel::Ok,
+            format!(
+                "merged {} into {into} ({})",
+                plural(merged.len(), "session"),
+                plural(commits, "commit")
+            ),
+        );
+    }
+    let conflicts = stopped["conflicts"].as_array().map_or(0, Vec::len);
+    let reason = if conflicts > 0 {
+        format!("conflicts in {}", plural(conflicts, "file"))
+    } else {
+        stopped["reason"].as_str().unwrap_or("stopped").to_string()
+    };
+    (
+        ToastLevel::Error,
+        format!(
+            "merged {} of {} · stopped at {} \"{}\": {reason}",
+            merged.len(),
+            merged.len() + 1 + remaining,
+            stopped["index"],
+            truncate(stopped["title"].as_str().unwrap_or(""), TITLE_IN_TOAST)
+        ),
+    )
+}
+
+/// Merge every `succeeded` worker of a dispatch, in index order, one session route at a time. The
+/// dispatch is re-read first (the board's copy may be a refresh old), and the run stops at the
+/// first conflict or error, naming the item that stopped it.
+async fn merge_finished_per_session(
     http: reqwest::Client,
     base: String,
     token: String,

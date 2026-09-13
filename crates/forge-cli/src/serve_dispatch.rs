@@ -28,6 +28,7 @@ use crate::serve::{
     DaemonState, SessionRegistry,
 };
 
+mod merge;
 mod messages;
 mod start;
 mod supervisor;
@@ -65,6 +66,10 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
         .route(
             &format!("{base}/api/dispatches/{{id}}/cancel"),
             post(cancel),
+        )
+        .route(
+            &format!("{base}/api/dispatches/{{id}}/merge"),
+            post(merge::merge_dispatch),
         )
 }
 

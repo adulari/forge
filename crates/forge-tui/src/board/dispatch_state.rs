@@ -321,9 +321,9 @@ impl BoardApp {
             kind: ConfirmKind::MergeFinished(d.id.clone()),
             title: "Merge every finished session?".into(),
             body: format!(
-                "Merges {} back into {}, in that order. Each merged session stops and its \
-                 worktree and branch are removed. The first conflict stops the run and leaves \
-                 that worktree as it was.",
+                "Merges {} into {}, one commit each, in that order. Each merged session stops \
+                 and its worktree and branch are removed. The first conflict stops the run: \
+                 earlier merges stay committed, that session keeps running.",
                 if ready.len() == 1 {
                     format!("item {}", ready[0])
                 } else {

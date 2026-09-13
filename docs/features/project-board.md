@@ -186,7 +186,10 @@ dependency-aware checklist while the split awaits approval (`Space` ticks/untick
 `e` revises, `n` cancels) and a per-item progress view once it runs. Every item runs as its own
 worker session and card, tagged with a `◆ n/total` chip in a colour shared with its coordinator;
 `z` zooms the board down to just one dispatch's cards (`Esc` clears it), `w`/`X` merge or discard
-the selected worktree session, and `A` merges every finished item at once. See
+the selected worktree session, and `A` merges every finished item at once. `A` commits each merge
+on the project's current branch before the next and stops at the first conflict, with the earlier
+merges already committed; `w` leaves its merge staged, and a staged merge has to be committed
+before `A` will run. See
 `docs/features/plan-and-dispatch.md` for the full design: how the split is proposed, approval and
 scheduling semantics, the CLI, and the HTTP API.
 
@@ -219,7 +222,7 @@ do.
 | `w` | Merge the selected worktree session back (asks first) |
 | `X` | Discard the selected worktree session (asks first) |
 | `Space` | Dispatch tab: tick or untick an item of the split |
-| `A` | Dispatch tab: merge every finished session (asks first) |
+| `A` | Dispatch tab: merge every finished session, one commit each (asks first) |
 | `f` | Cycle the project filter |
 | `/` | Filter cards by text |
 | `[ ]` | Switch the pane's section |

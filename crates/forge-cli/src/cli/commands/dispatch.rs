@@ -271,8 +271,98 @@ pub(crate) async fn dispatch_cmd(
             )?;
             println!("{}", cancelled_text(&dispatch));
         }
+        DispatchCmd::Merge { id } => {
+            let id = daemon.resolve_id(&id).await?;
+            let report: MergeReport = decode(
+                daemon
+                    .post(&format!("dispatches/{id}/merge"), &json!({}))
+                    .await?,
+            )?;
+            println!("{}", merge_text(&report));
+        }
     }
     Ok(())
+}
+
+/// `POST /api/dispatches/{id}/merge`'s report.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub(crate) struct MergeReport {
+    #[serde(default)]
+    merged: Vec<MergedView>,
+    #[serde(default)]
+    stopped_at: Option<StoppedView>,
+    #[serde(default)]
+    remaining: Vec<usize>,
+    #[serde(default)]
+    base_branch: Option<String>,
+    #[serde(default)]
+    dispatch: DispatchView,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct MergedView {
+    index: usize,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct StoppedView {
+    index: usize,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    conflicts: Vec<String>,
+}
+
+fn merge_text(r: &MergeReport) -> String {
+    let merged = r.merged.len();
+    let total = merged + usize::from(r.stopped_at.is_some()) + r.remaining.len();
+    let into = r
+        .base_branch
+        .as_deref()
+        .map(|b| format!(" into {b}"))
+        .unwrap_or_default();
+    let count = if r.stopped_at.is_some() {
+        format!("{merged} of {total} items")
+    } else {
+        format!("{merged} item{}", if merged == 1 { "" } else { "s" })
+    };
+    let mut out = format!(
+        "⚒ merged {count} of dispatch {}{into}",
+        short(&r.dispatch.id)
+    );
+    let width = r.merged.iter().map(|m| m.title.chars().count()).max();
+    for m in &r.merged {
+        let commit = m
+            .commit
+            .as_deref()
+            .map_or("nothing to commit", |sha| short(sha));
+        out.push_str(&format!(
+            "\n  {:>2}. {:<w$}  {commit}",
+            m.index,
+            m.title,
+            w = width.unwrap_or(0)
+        ));
+    }
+    if let Some(s) = &r.stopped_at {
+        out.push_str(&format!(
+            "\nstopped at {}. {}: {}",
+            s.index, s.title, s.reason
+        ));
+        if !s.conflicts.is_empty() {
+            out.push_str(&format!("\n  conflicts: {}", s.conflicts.join(", ")));
+        }
+        if !r.remaining.is_empty() {
+            let rest: Vec<String> = r.remaining.iter().map(usize::to_string).collect();
+            out.push_str(&format!("\n  not merged yet: {}", rest.join(", ")));
+        }
+    }
+    out
 }
 
 /// `/dispatch <request>` from chat: start a dispatch for this session's workspace and return the
@@ -721,6 +811,11 @@ mod tests {
             parse(&["dispatch", "revise", "ab12", "fewer items"]).0,
             DispatchCmd::Revise { id, feedback } if id == "ab12" && feedback == "fewer items"
         ));
+        assert!(matches!(
+            parse(&["dispatch", "merge", "ab12"]).0,
+            DispatchCmd::Merge { id } if id == "ab12"
+        ));
+        assert!(rejects(&["dispatch", "merge"]));
         let (cmd, _, token) = parse(&["dispatch", "cancel", "ab12", "--token", "t"]);
         assert!(matches!(cmd, DispatchCmd::Cancel { id } if id == "ab12"));
         assert_eq!(token.as_deref(), Some("t"));
@@ -983,6 +1078,37 @@ mod tests {
         assert!(
             refused.contains("worktree: /tmp is not a git repository"),
             "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_merge_report_lists_each_commit_then_the_stop_reason() {
+        let full: MergeReport = serde_json::from_value(json!({
+            "merged": [
+                {"index": 1, "title": "Notes file", "commit": "a1b2c3d4e5f6"},
+                {"index": 2, "title": "Tasks", "commit": null}
+            ],
+            "stopped_at": null, "remaining": [], "base_branch": "main",
+            "dispatch": {"id": "d1234567-abcd"}
+        }))
+        .unwrap();
+        assert_eq!(
+            merge_text(&full),
+            "⚒ merged 2 items of dispatch d1234567 into main\n   \
+             1. Notes file  a1b2c3d4\n   2. Tasks       nothing to commit"
+        );
+
+        let partial: MergeReport = serde_json::from_value(json!({
+            "merged": [{"index": 1, "title": "Notes file", "commit": "a1b2c3d4e5f6"}],
+            "stopped_at": {"index": 2, "title": "Tasks", "reason": "merge conflicts", "conflicts": ["f.txt", "g.txt"]},
+            "remaining": [3], "base_branch": null,
+            "dispatch": {"id": "d1234567-abcd"}
+        }))
+        .unwrap();
+        assert_eq!(
+            merge_text(&partial),
+            "⚒ merged 1 of 3 items of dispatch d1234567\n   1. Notes file  a1b2c3d4\n\
+             stopped at 2. Tasks: merge conflicts\n  conflicts: f.txt, g.txt\n  not merged yet: 3"
         );
     }
 

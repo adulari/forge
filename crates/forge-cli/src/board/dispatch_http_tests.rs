@@ -76,6 +76,45 @@ fn dispatch_json(id: &str) -> serde_json::Value {
     })
 }
 
+/// `POST /api/dispatches/{id}/merge` per fixture id; `old-1` plays a daemon without the route.
+fn merge_reply(id: &str) -> Response {
+    let merged = |index: usize, commit: Option<&str>| serde_json::json!({ "index": index, "title": format!("part {index}"), "commit": commit });
+    match id {
+        "d-1" => json(
+            StatusCode::OK,
+            serde_json::json!({
+                "merged": [merged(1, Some("aaa")), merged(2, Some("bbb")), merged(3, None)],
+                "stopped_at": null, "remaining": [], "base_branch": "main",
+                "dispatch": dispatch_json(id),
+            }),
+        ),
+        "d-conf" => json(
+            StatusCode::OK,
+            serde_json::json!({
+                "merged": [merged(1, Some("aaa"))],
+                "stopped_at": {
+                    "index": 2, "title": "part 2", "reason": "merge conflicts",
+                    "conflicts": ["src/a.rs", "src/b.rs"]
+                },
+                "remaining": [3], "base_branch": "main",
+                "dispatch": dispatch_json(id),
+            }),
+        ),
+        "d-shared" => json(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "this dispatch ran in a shared directory — there is nothing to merge" }),
+        ),
+        "d-dirty" => json(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": "the base repo has uncommitted changes — commit or stash them, then merge again",
+                "dirty_files": ["README.md"]
+            }),
+        ),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// `with_list`: whether the daemon knows `GET /api/dispatches` (an older one answers 404).
 async fn serve(fixture: Arc<Fixture>, with_list: bool) -> String {
     let mut app = Router::new()
@@ -103,6 +142,9 @@ async fn serve(fixture: Arc<Fixture>, with_list: bool) -> String {
                  Path((id, verb)): Path<(String, String)>,
                  body: Bytes| async move {
                     f.record(format!("{verb} {id}"), &body);
+                    if verb == "merge" {
+                        return merge_reply(&id);
+                    }
                     if id == "done-1" {
                         return json(
                             StatusCode::CONFLICT,
@@ -329,12 +371,63 @@ async fn merge_and_discard_report_success_and_a_conflict_names_files_and_worktre
 }
 
 #[tokio::test]
-async fn merge_finished_goes_in_index_order_and_stops_at_the_first_conflict() {
+async fn merge_finished_is_one_batch_call_and_reports_every_commit() {
     let fixture = Arc::new(Fixture::default());
     let base = serve(fixture.clone(), true).await;
     let run = perform_one(&base, BoardAction::MergeFinished("d-1".into())).await;
+    assert_eq!(fixture.paths(), vec!["merge d-1"]);
+    assert_eq!(
+        run.toasts()[0],
+        (
+            ToastLevel::Ok,
+            "merged 3 sessions into main (2 commits)".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_batch_merge_that_stops_names_what_merged_and_why() {
+    let fixture = Arc::new(Fixture::default());
+    let base = serve(fixture.clone(), true).await;
+    let run = perform_one(&base, BoardAction::MergeFinished("d-conf".into())).await;
+    assert_eq!(fixture.paths(), vec!["merge d-conf"]);
+    assert_eq!(
+        run.toasts()[0],
+        (
+            ToastLevel::Error,
+            "merged 1 of 3 · stopped at 2 \"part 2\": conflicts in 2 files".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_refused_batch_merge_reads_as_the_daemons_reason() {
+    let fixture = Arc::new(Fixture::default());
+    let base = serve(fixture.clone(), true).await;
+    let shared = perform_one(&base, BoardAction::MergeFinished("d-shared".into())).await;
+    let dirty = perform_one(&base, BoardAction::MergeFinished("d-dirty".into())).await;
+    assert_eq!(fixture.paths(), vec!["merge d-shared", "merge d-dirty"]);
+    assert_eq!(
+        shared.toasts()[0],
+        (
+            ToastLevel::Error,
+            "this dispatch ran in a shared directory — there is nothing to merge".to_string()
+        )
+    );
+    assert_eq!(dirty.toasts()[0].0, ToastLevel::Error);
+    assert!(dirty.toasts()[0].1.contains("commit or stash"));
+}
+
+#[tokio::test]
+async fn an_older_daemon_falls_back_to_merging_session_by_session() {
+    let fixture = Arc::new(Fixture::default());
+    let base = serve(fixture.clone(), true).await;
+    let run = perform_one(&base, BoardAction::MergeFinished("old-1".into())).await;
     // Items arrive as 3, 1, 2, 4: merged 1 then 2 (conflict) — never 3, never the failed 4.
-    assert_eq!(fixture.paths(), vec!["merge s-1", "merge s-2"]);
+    assert_eq!(
+        fixture.paths(),
+        vec!["merge old-1", "merge s-1", "merge s-2"]
+    );
     let (level, text) = run.toasts()[0].clone();
     assert_eq!(level, ToastLevel::Error);
     assert_eq!(

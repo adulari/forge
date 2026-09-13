@@ -665,7 +665,10 @@ fn merge_all_finished_asks_first_and_is_refused_when_there_is_nothing() {
         app.confirm.as_ref().unwrap().kind,
         ConfirmKind::MergeFinished("disp-1".into())
     );
-    assert!(app.confirm.as_ref().unwrap().body.contains("item 1"));
+    let body = &app.confirm.as_ref().unwrap().body;
+    assert!(body.contains("item 1"));
+    assert!(body.contains("one commit each"), "{body}");
+    assert!(body.contains("earlier merges stay committed"), "{body}");
     assert_eq!(
         handle_key(&mut app, key(KeyCode::Enter)),
         vec![BoardAction::MergeFinished("disp-1".into())]
