@@ -40,10 +40,24 @@ impl Session {
     ) -> Result<String, CoreError> {
         use forge_types::TodoStatus;
         let args_json = serde_json::to_string(&call.args)?;
-        self.tasks = merge_task_update(&self.tasks, parse_tasks(&call.args));
+        let before = std::mem::take(&mut self.tasks);
+        let after = merge_task_update(&before, parse_tasks(&call.args));
+        // A rewrite that silently drops still-open tasks is how a steer "abandons the plan": the
+        // model treats a new instruction as a fresh list. Surface it so the user sees which open
+        // work fell off — the update still applies (the model may have meant it), it is not silent.
+        let abandoned = crate::task_staleness::removed_unfinished(&before, &after);
+        self.tasks = after;
         self.persist_tasks();
         self.presenter
             .emit(PresenterEvent::Tasks(self.tasks.clone()));
+        if !abandoned.is_empty() {
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "update_tasks dropped {} still-open task(s) from the list: {}. If that was not \
+                 intended, ask to restore them.",
+                abandoned.len(),
+                abandoned.join(", ")
+            )));
+        }
 
         let done = self
             .tasks
