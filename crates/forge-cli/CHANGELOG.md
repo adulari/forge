@@ -7,6 +7,15 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Plan and dispatch — split one prompt into parallel sessions from the board.**
+  `forge dispatch start`, `/dispatch` in chat, or `D` on `forge board` sends a project to a
+  coordinator session that reads it and proposes a split into work items with the
+  `dispatch_sessions` tool, then stops for review. Approve all of it, a subset, ask for a
+  revision, or cancel; approved items run as ordinary sessions — a worktree apiece by default —
+  up to `max_running` at a time, held back while their dependencies are still running. The
+  daemon tells the coordinator each time an item finishes and asks it for a final summary once
+  everything is done; worker worktrees are merged back or discarded explicitly. See
+  docs/features/plan-and-dispatch.md.
 - **A live project board in the CLI — `forge board`.** A full-screen kanban view of every session
   on a project — Needs you · Working · Ready · Done — so "what needs me" has one answer instead of
   `forge sessions`, `journalctl`, and a handful of tmux panes. Cards show model, current task, last

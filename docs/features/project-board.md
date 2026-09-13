@@ -177,6 +177,22 @@ fresh one can never mis-fire.
 Prompt/steer/model/answer/new-session all route through the same one-line composer
 (`ComposerMode`); the label above it names which of these it is.
 
+## 7a. Plan and dispatch
+
+`D` opens a form: one prompt plus worktree/mode/parallelism choices. It starts a coordinator
+session that reads the project and proposes a split into work items; the board selects the
+coordinator's card and opens it on a new **Dispatch** tab the moment it appears. The tab shows a
+dependency-aware checklist while the split awaits approval (`Space` ticks/unticks, `y` starts,
+`e` revises, `n` cancels) and a per-item progress view once it runs. Every item runs as its own
+worker session and card, tagged with a `◆ n/total` chip in a colour shared with its coordinator;
+`z` zooms the board down to just one dispatch's cards (`Esc` clears it), `w`/`X` merge or discard
+the selected worktree session, and `A` merges every finished item at once. `A` commits each merge
+on the project's current branch before the next and stops at the first conflict, with the earlier
+merges already committed; `w` leaves its merge staged, and a staged merge has to be committed
+before `A` will run. See
+`docs/features/plan-and-dispatch.md` for the full design: how the split is proposed, approval and
+scheduling semantics, the CLI, and the HTTP API.
+
 ## 8. Keys
 
 Generated from `HELP` in `crates/forge-tui/src/board/keys.rs` — the same table the in-app `?`
@@ -192,15 +208,21 @@ do.
 | `a` | Attach: drop into the session in this terminal |
 | `p` | Send a prompt (queued while busy) |
 | `s` | Steer: jump the queue at the next turn boundary |
-| `y / n` | Allow / deny the pending permission |
+| `y / n` | Allow / deny the pending permission — else start / cancel a proposed split |
 | `1-9` | Pick an option of the pending question |
-| `e` | Answer the pending question in free text |
+| `e` | Answer the pending question in free text — else revise a proposed split |
 | `i` | Interrupt the running turn |
 | `m` | Re-pin the model (`/model`), empty clears |
 | `M` | Cycle the mode: default → accept-edits → bypass → plan |
 | `x` | Archive (asks first) |
 | `r` | Resume a Done session |
 | `N / W` | New session here / in a fresh worktree |
+| `D` | Plan & dispatch: one prompt, split into parallel sessions |
+| `z` | Zoom to the selected card's dispatch (`Esc` clears) |
+| `w` | Merge the selected worktree session back (asks first) |
+| `X` | Discard the selected worktree session (asks first) |
+| `Space` | Dispatch tab: tick or untick an item of the split |
+| `A` | Dispatch tab: merge every finished session, one commit each (asks first) |
 | `f` | Cycle the project filter |
 | `/` | Filter cards by text |
 | `[ ]` | Switch the pane's section |

@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use ratatui::layout::Rect;
 
+use super::dispatch_state::DispatchUi;
 use super::model::{live_card, past_card, Card, Column, Signal, SignalLevel};
 use super::wire::{FleetRow, GitInfo, HistoryRow, LiveSnapshot, PastRow};
 use super::{BoardAction, BoardEvent};
@@ -68,6 +69,8 @@ pub struct BoardApp {
     pub(crate) closed: HashSet<String>,
     /// Sessions the host was told to fetch detail for (so it is not asked twice per open).
     pub(crate) detail_requested: HashSet<String>,
+    /// Plan & dispatch: the dispatch list, the form, the checklist, zoom (`dispatch_state.rs`).
+    pub(crate) dispatch: DispatchUi,
 }
 
 impl BoardApp {
@@ -106,6 +109,7 @@ impl BoardApp {
             board_cwd,
             closed: HashSet::new(),
             detail_requested: HashSet::new(),
+            dispatch: DispatchUi::default(),
         }
     }
 
@@ -124,6 +128,11 @@ impl BoardApp {
                 self.past = past;
                 self.rebuild();
             }
+            BoardEvent::Dispatches(list) => self.apply_dispatches(list),
+            BoardEvent::DispatchStarted {
+                coordinator_session_id,
+                ..
+            } => self.dispatch_started(coordinator_session_id),
             BoardEvent::Snapshot(id, snap) => {
                 if snap.closed {
                     self.closed.insert(id.clone());
@@ -206,6 +215,7 @@ impl BoardApp {
                 cards.push(past_card(row));
             }
         }
+        super::dispatch::annotate(&mut cards, &self.rows, &self.dispatch.list);
         cards.retain(|c| self.passes_filter(c));
 
         for c in &cards {
@@ -255,9 +265,15 @@ impl BoardApp {
                         .map(|_| ())
                 });
         }
+        self.try_pending_select();
     }
 
     fn passes_filter(&self, c: &Card) -> bool {
+        if let Some(z) = &self.dispatch.zoom {
+            if c.dispatch.as_ref().is_none_or(|d| &d.id != z) {
+                return false;
+            }
+        }
         if let Some(p) = &self.project_filter {
             if &c.project() != p {
                 return false;
@@ -337,6 +353,7 @@ impl BoardApp {
     fn on_selection_changed(&mut self) {
         self.detail_scroll = 0;
         self.tail_follow = true;
+        self.sync_dispatch_cursor();
     }
 
     pub(crate) fn move_in_column(&mut self, delta: i32) {
@@ -420,6 +437,7 @@ impl BoardApp {
         self.focus = Focus::Detail;
         self.detail_scroll = 0;
         self.tail_follow = true;
+        self.prefer_dispatch_tab();
         self.detail_actions_for(&id)
     }
 
@@ -529,6 +547,15 @@ impl BoardApp {
                     self.toast(ToastLevel::Ok, "answer sent");
                 }
             }
+            ComposerMode::Revise { dispatch_id } => {
+                if !text.is_empty() {
+                    out.push(BoardAction::ReviseDispatch {
+                        id: dispatch_id,
+                        feedback: text,
+                    });
+                    self.toast(ToastLevel::Ok, "asked the coordinator to revise the split");
+                }
+            }
             ComposerMode::NewSession { cwd, worktree } => {
                 if !text.is_empty() {
                     out.push(BoardAction::NewSession {
@@ -592,6 +619,7 @@ impl BoardApp {
     /// Whether anything on screen is animating (spinners, pulses, flashes, toasts).
     pub fn needs_animation(&self) -> bool {
         !self.toasts.is_empty()
+            || self.dispatch_animating()
             || self.cards.iter().any(|c| c.busy || c.waiting)
             || self
                 .first_seen

@@ -29,6 +29,8 @@
 //! - `POST /api/sessions/{id}/discard` stop and drop the worktree + branch WITHOUT merging
 //! - `GET  /api/sessions/{id}/diff`    a forked session's worktree vs its fork point (read-only —
 //!   the same merge-base machinery `merge` uses, but nothing is committed); see [`crate::serve_git`]
+//! - `POST /api/dispatch`, `GET /api/dispatches[/{id}]`, `POST /api/dispatches/{id}/proposal|
+//!   approve|revise|cancel`  plan and dispatch ([`crate::serve_dispatch`])
 //! - `GET  /api/history?session=<id>&before=<seq>&limit=<n>`  scrollback pagination
 //! - `GET  /api/changelog?limit=<n>`  parsed "What's New" releases from the compiled-in CHANGELOG
 //! - `GET|POST /api/git/*`            the git review dock ([`crate::serve_git`]): status, per-file
@@ -286,12 +288,12 @@ impl SessionRegistry {
         }
     }
 
-    fn notify_fleet(&self) {
+    pub(crate) fn notify_fleet(&self) {
         let next = self.fleet_tx.borrow().wrapping_add(1);
         self.fleet_tx.send_replace(next);
     }
 
-    fn subscribe_fleet(&self) -> tokio::sync::watch::Receiver<u64> {
+    pub(crate) fn subscribe_fleet(&self) -> tokio::sync::watch::Receiver<u64> {
         self.fleet_tx.subscribe()
     }
 
@@ -300,7 +302,7 @@ impl SessionRegistry {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    fn is_draining(&self) -> bool {
+    pub(crate) fn is_draining(&self) -> bool {
         self.draining.load(std::sync::atomic::Ordering::Acquire)
     }
 
@@ -526,15 +528,15 @@ pub(crate) struct DaemonState {
     pub(crate) terminals: Arc<crate::serve_terminal::TerminalRegistry>,
     pub(crate) store: Arc<forge_store::Store>,
     /// `/ <token>` — injected into the page/manifest like the single-session server does.
-    base: String,
+    pub(crate) base: String,
     /// Sessions created from the page inherit this (testing: `forge serve --mock`).
-    mock: bool,
+    pub(crate) mock: bool,
     /// The daemon process's cwd — the default for new sessions.
     pub(crate) default_cwd: String,
     /// Canonical directories the remote project browser may enumerate. The create-session API
     /// still accepts any explicit directory because possession of the daemon token already grants
     /// full agent control; this list limits passive filesystem disclosure through browsing.
-    project_roots: Vec<PathBuf>,
+    pub(crate) project_roots: Vec<PathBuf>,
     /// The Web Push sender (`None` when the VAPID key couldn't be loaded/minted — the push
     /// routes then answer 503 and everything else works normally).
     pub(crate) push: Option<Arc<crate::push::PushNotifier>>,
@@ -543,10 +545,10 @@ pub(crate) struct DaemonState {
     pub(crate) apns: Option<Arc<crate::apns::ApnsNotifier>>,
     /// Local whisper.cpp speech-to-text (`POST /api/voice/transcribe`) — caches the loaded model
     /// across requests.
-    voice: crate::voice::VoiceState,
+    pub(crate) voice: crate::voice::VoiceState,
     /// Wakes the one-shot managed connector supervisor after `forge anywhere enable` updates an
     /// already-running daemon. Repeated notifications are harmless.
-    anywhere_enable: tokio::sync::watch::Sender<bool>,
+    pub(crate) anywhere_enable: tokio::sync::watch::Sender<bool>,
 }
 
 /// One row of `GET /api/sessions` — the fleet dashboard's data. `waiting` is the killer signal
@@ -602,6 +604,9 @@ struct SessionRow {
     /// not. See the struct doc comment.
     #[serde(default)]
     terminal: bool,
+    /// `dispatch_id` / `dispatch_role` / `dispatch_index` (additive; null outside a dispatch).
+    #[serde(flatten)]
+    dispatch: crate::serve_dispatch::SessionDispatchFields,
 }
 
 /// Fleet ordering: waiting-on-decision first (they need a human NOW), then busy, then idle —
@@ -624,27 +629,35 @@ fn sort_session_rows(rows: &mut [SessionRow]) {
 /// Body of `POST /api/sessions`.
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct CreateSessionReq {
+pub(crate) struct CreateSessionReq {
     /// Working directory; defaults to the daemon's cwd.
-    cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     /// Run the session in an isolated git worktree branched from HEAD of `cwd`.
     #[serde(default)]
-    worktree: bool,
+    pub(crate) worktree: bool,
     /// Optional display title.
-    title: Option<String>,
+    pub(crate) title: Option<String>,
     /// Optional model pin.
-    model: Option<String>,
+    pub(crate) model: Option<String>,
     /// Permission mode, using the same canonical vocabulary as `forge run --mode`.
     #[serde(alias = "permission_mode")]
-    mode: Option<String>,
+    pub(crate) mode: Option<String>,
     /// Resume an existing session id instead of starting fresh.
-    resume: Option<String>,
+    pub(crate) resume: Option<String>,
     /// Start the session directly in this temper/permission-mode instead of the default,
     /// avoiding a follow-up SHIFT+TAB/`/mode` round trip. Case-insensitive; accepts the same
     /// names the `/mode` picker shows (`Read-only`, `Ask`, `Auto-edit`, `Full`) — see
     /// [`forge_types::PermissionMode::from_label`]. An unrecognized value is a `400`, never a
     /// silent fallback to the default temper.
-    temper: Option<String>,
+    pub(crate) temper: Option<String>,
+    /// Wire the session as a dispatch coordinator. Never read from the request body: only
+    /// `POST /api/dispatch` sets it, and `deny_unknown_fields` still rejects the key.
+    #[serde(skip)]
+    pub(crate) dispatch_coordinator: bool,
+    /// Start the session as a dispatched worker. Never read from the request body: only the
+    /// dispatch scheduler sets it. See [`DriverSpec::dispatch_worker`].
+    #[serde(skip)]
+    pub(crate) dispatch_worker: bool,
 }
 
 pub(crate) async fn serve_cmd(
@@ -741,7 +754,13 @@ pub(crate) async fn serve_cmd(
     // someone issues an explicit resume by hand. Replays the ordinary create-with-resume route
     // rather than duplicating its spawn logic, so resurrected sessions are built exactly like
     // requested ones — including the model and effort pins restored from the session row.
-    tokio::spawn(resurrect_fleet(state.clone()));
+    // Dispatch supervision starts once the fleet is back, so a worker that is still being
+    // resurrected is never mistaken for one whose session ended.
+    let supervised = state.clone();
+    tokio::spawn(async move {
+        resurrect_fleet(supervised.clone()).await;
+        crate::serve_dispatch::run_supervisor(supervised).await;
+    });
 
     // Forge Anywhere gets a private loopback copy of the SAME router. The public LAN/local/tunnel
     // listener below is unchanged, while the connector never needs to upload the daemon token or
@@ -907,7 +926,7 @@ async fn drain_sessions(registry: &SessionRegistry, timeout: std::time::Duration
 
 /// The daemon's full route table over `state.base` — extracted from [`serve_cmd`] so tests can
 /// drive the real router (tower `oneshot`) without binding a socket.
-fn daemon_router(state: Arc<DaemonState>) -> Router {
+pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
     use tower_http::cors::CorsLayer;
     let base = state.base.clone();
     Router::new()
@@ -965,6 +984,7 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             &format!("{base}/api/sessions/{{id}}/diff"),
             get(crate::serve_git::session_diff),
         )
+        .merge(crate::serve_dispatch::routes(&base))
         .route(&format!("{base}/api/history"), get(history_page))
         .route(&format!("{base}/api/changelog"), get(changelog_page))
         // Git review dock (serve_git.rs) — every route is session-addressed and runs git only in
@@ -1260,6 +1280,7 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             last_activity: h.last_activity.load(std::sync::atomic::Ordering::Relaxed),
             read_only: false,
             terminal: false,
+            dispatch: Default::default(),
         });
     }
     let store = state.store.clone();
@@ -1294,7 +1315,11 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             // session whose input would be silently swallowed.
             read_only: local.control_url.is_none(),
             terminal: true,
+            dispatch: Default::default(),
         });
+    }
+    for row in &mut rows {
+        row.dispatch = crate::serve_dispatch::session_dispatch_fields(&state.store, &row.id);
     }
     sort_session_rows(&mut rows);
     json_response(&rows)
@@ -1314,33 +1339,92 @@ async fn create_session(
             );
         }
     };
+    match start_session(&state, req).await {
+        Ok(handle) => json_response(&serde_json::json!({
+            "id": handle.session_id,
+            "title": handle.title(),
+            "cwd": handle.cwd,
+            "worktree": handle.worktree,
+        })),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// Why [`start_session`] refused: the status, optional stable code, and message
+/// `POST /api/sessions` answers with.
+pub(crate) struct StartSessionError {
+    status: axum::http::StatusCode,
+    code: Option<&'static str>,
+    pub(crate) message: String,
+}
+
+impl StartSessionError {
+    fn new(status: axum::http::StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code: None,
+            message: message.into(),
+        }
+    }
+
+    fn coded(status: axum::http::StatusCode, code: &'static str, message: String) -> Self {
+        Self {
+            status,
+            code: Some(code),
+            message,
+        }
+    }
+
+    pub(crate) fn into_response(self) -> Response {
+        match self.code {
+            Some(code) => err_response_coded(self.status, code, &self.message),
+            None => err_response(self.status, &self.message),
+        }
+    }
+}
+
+/// The session-creation core behind `POST /api/sessions`, shared with dispatch (coordinators and
+/// workers are ordinary daemon sessions): validate, create the worktree, spawn and register the
+/// driver. A resume of an id that is already live returns the live handle.
+pub(crate) async fn start_session(
+    state: &DaemonState,
+    req: CreateSessionReq,
+) -> Result<Arc<SessionDriverHandle>, StartSessionError> {
+    use axum::http::StatusCode;
     if state.registry.is_draining() {
-        return err_response(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        return Err(StartSessionError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
             "daemon is draining for shutdown",
-        );
+        ));
     }
     // Validate mode before creating a worktree or driver.
     let mode = match req.mode.as_deref() {
-        Some(raw) => match parse_permission_mode(raw) {
-            Ok(mode) => Some(mode),
-            Err(msg) => return err_response(axum::http::StatusCode::BAD_REQUEST, &msg),
-        },
+        Some(raw) => Some(
+            parse_permission_mode(raw)
+                .map_err(|msg| StartSessionError::new(StatusCode::BAD_REQUEST, msg))?,
+        ),
         None => None,
     };
     let temper = match req.temper.as_deref() {
-        Some(raw) => match parse_temper(raw) {
-            Ok(mode) => Some(mode),
-            Err(msg) => return err_response(axum::http::StatusCode::BAD_REQUEST, &msg),
-        },
+        Some(raw) => Some(
+            parse_temper(raw)
+                .map_err(|msg| StartSessionError::new(StatusCode::BAD_REQUEST, msg))?,
+        ),
         None => None,
+    };
+    let unreadable = |what: &str, error: forge_store::StoreError| {
+        StartSessionError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_store_unreadable",
+            format!("loading resumed session {what} failed: {error}"),
+        )
     };
     let resume_metadata = if let Some(session_id) = req.resume.as_deref() {
         if req.worktree {
-            return err_response(
-                axum::http::StatusCode::BAD_REQUEST,
+            return Err(StartSessionError::new(
+                StatusCode::BAD_REQUEST,
                 "resume cannot create a new worktree; it restores the session's recorded workspace",
-            );
+            ));
         }
         // Store read failures below are classified `session_store_unreadable`: the session may be
         // fine, but the store itself could not answer — the remedy is repairing store access, not
@@ -1348,46 +1432,26 @@ async fn create_session(
         let cwd = match state.store.session_cwd(session_id) {
             Ok(Some(cwd)) => cwd,
             Ok(None) => {
-                return err_response(axum::http::StatusCode::NOT_FOUND, "session not found")
+                return Err(StartSessionError::new(
+                    StatusCode::NOT_FOUND,
+                    "session not found",
+                ))
             }
-            Err(error) => {
-                return err_response_coded(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "session_store_unreadable",
-                    &format!("loading resumed session workspace failed: {error}"),
-                )
-            }
+            Err(error) => return Err(unreadable("workspace", error)),
         };
-        let title = match state.store.session_title(session_id) {
-            Ok(title) => title.unwrap_or_default(),
-            Err(error) => {
-                return err_response_coded(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "session_store_unreadable",
-                    &format!("loading resumed session title failed: {error}"),
-                )
-            }
-        };
-        let worktree = match state.store.session_worktree(session_id) {
-            Ok(worktree) => worktree,
-            Err(error) => {
-                return err_response_coded(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "session_store_unreadable",
-                    &format!("loading resumed session worktree failed: {error}"),
-                )
-            }
-        };
-        let pinned_model = match state.store.session_pinned_model(session_id) {
-            Ok(pinned_model) => pinned_model,
-            Err(error) => {
-                return err_response_coded(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "session_store_unreadable",
-                    &format!("loading resumed session model pin failed: {error}"),
-                )
-            }
-        };
+        let title = state
+            .store
+            .session_title(session_id)
+            .map_err(|error| unreadable("title", error))?
+            .unwrap_or_default();
+        let worktree = state
+            .store
+            .session_worktree(session_id)
+            .map_err(|error| unreadable("worktree", error))?;
+        let pinned_model = state
+            .store
+            .session_pinned_model(session_id)
+            .map_err(|error| unreadable("model pin", error))?;
         Some((cwd, title, worktree, pinned_model))
     } else {
         None
@@ -1409,47 +1473,47 @@ async fn create_session(
     let resuming = resume_metadata.is_some();
     let cwd_path = std::path::Path::new(&cwd);
     if !cwd_path.is_dir() {
-        return if resuming {
-            err_response_coded(
-                axum::http::StatusCode::GONE,
+        return Err(if resuming {
+            StartSessionError::coded(
+                StatusCode::GONE,
                 "resume_workspace_missing",
-                &format!(
+                format!(
                     "the session's recorded workspace no longer exists: {cwd} — restore the \
                      directory or start a new session in another workspace"
                 ),
             )
         } else {
-            err_response(
-                axum::http::StatusCode::BAD_REQUEST,
-                &format!("cwd is not a directory: {cwd}"),
+            StartSessionError::new(
+                StatusCode::BAD_REQUEST,
+                format!("cwd is not a directory: {cwd}"),
             )
-        };
+        });
     }
 
     let cwd = match std::fs::canonicalize(&cwd) {
         Ok(path) if path.is_dir() => path.display().to_string(),
         Ok(path) => {
-            return err_response(
-                axum::http::StatusCode::BAD_REQUEST,
-                &format!("cwd is not a directory: {}", path.display()),
-            )
+            return Err(StartSessionError::new(
+                StatusCode::BAD_REQUEST,
+                format!("cwd is not a directory: {}", path.display()),
+            ))
         }
         Err(error) => {
-            return if resuming {
-                err_response_coded(
-                    axum::http::StatusCode::GONE,
+            return Err(if resuming {
+                StartSessionError::coded(
+                    StatusCode::GONE,
                     "resume_workspace_inaccessible",
-                    &format!(
+                    format!(
                         "the session's recorded workspace cannot be opened: {cwd}: {error} — \
                          check the directory's permissions"
                     ),
                 )
             } else {
-                err_response(
-                    axum::http::StatusCode::BAD_REQUEST,
-                    &format!("cwd is unavailable: {error}"),
+                StartSessionError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!("cwd is unavailable: {error}"),
                 )
-            }
+            })
         }
     };
 
@@ -1460,10 +1524,10 @@ async fn create_session(
         .and_then(|(_, _, worktree, _)| worktree.clone());
     let worktree_guard = if req.worktree {
         if !forge_core::worktree::is_git_repo(cwd_path) {
-            return err_response(
-                axum::http::StatusCode::BAD_REQUEST,
-                &format!("worktree: {cwd} is not a git repository"),
-            );
+            return Err(StartSessionError::new(
+                StatusCode::BAD_REQUEST,
+                format!("worktree: {cwd} is not a git repository"),
+            ));
         }
         let wt_id = forge_types::new_id().chars().take(12).collect::<String>();
         match forge_core::worktree::WorktreeGuard::create(cwd_path, &wt_id) {
@@ -1472,10 +1536,10 @@ async fn create_session(
                 Some(guard)
             }
             Err(e) => {
-                return err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("worktree create failed: {e}"),
-                );
+                return Err(StartSessionError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("worktree create failed: {e}"),
+                ));
             }
         }
     } else {
@@ -1487,16 +1551,16 @@ async fn create_session(
     if let Some(session_id) = req.resume.as_deref() {
         match state.store.session_handoff_blocked(session_id) {
             Ok(true) => {
-                return err_response(
-                    axum::http::StatusCode::CONFLICT,
+                return Err(StartSessionError::new(
+                    StatusCode::CONFLICT,
                     "session is frozen by an Anywhere handoff and cannot be resumed",
-                )
+                ))
             }
             Err(error) => {
-                return err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("handoff state check failed: {error}"),
-                )
+                return Err(StartSessionError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("handoff state check failed: {error}"),
+                ))
             }
             Ok(false) => {}
         }
@@ -1511,12 +1575,7 @@ async fn create_session(
     // extra short-lived driver rather than unbounded duplication.
     if let Some(rid) = req.resume.as_deref() {
         if let Some(existing) = state.registry.get(rid).await {
-            return json_response(&serde_json::json!({
-                "id": existing.session_id,
-                "title": existing.title(),
-                "cwd": existing.cwd,
-                "worktree": existing.worktree,
-            }));
+            return Ok(existing);
         }
     }
     // A resumed session's recorded worktree must still exist before a driver is pointed at it —
@@ -1526,14 +1585,14 @@ async fn create_session(
     if resuming {
         if let Some(recorded) = worktree.as_deref() {
             if !std::path::Path::new(recorded).is_dir() {
-                return err_response_coded(
-                    axum::http::StatusCode::GONE,
+                return Err(StartSessionError::coded(
+                    StatusCode::GONE,
                     "resume_worktree_missing",
-                    &format!(
+                    format!(
                         "the session's recorded worktree no longer exists: {recorded} — restore \
                          that directory to resume this session"
                     ),
-                );
+                ));
             }
         }
     }
@@ -1567,52 +1626,47 @@ async fn create_session(
         push: state.push.clone(),
         apns: state.apns.clone(),
         registry: Some(state.registry.clone()),
+        dispatch_coordinator: req.dispatch_coordinator,
+        dispatch_worker: req.dispatch_worker,
     };
-    match spawn_session_driver(spec).await {
-        Ok(handle) => {
-            if let Some(guard) = worktree_guard {
-                std::mem::forget(guard);
-            }
-            // Resuming is an explicit "bring this back" — an archived session (from the
-            // past-sessions browser) should stop being hidden once it's live again, the same
-            // way the archive button hid it.
-            if is_resume {
-                if let Err(error) = state.store.unarchive_session(&handle.session_id) {
-                    tracing::warn!(
-                        session_id = handle.session_id,
-                        %error,
-                        "serve: resumed session could not be un-archived; it stays hidden in \
-                         the past-sessions browser"
-                    );
-                }
-            }
-            // Record the pin so the next resume can restore it. Written after the driver exists
-            // because the session row is created as part of spawning it. Failing to persist the
-            // pin must not fail the request: the session is already live and correctly pinned,
-            // and only a later resume would lose it.
-            if let Some(model) = pinned_model.as_deref() {
-                let _ = state
-                    .store
-                    .set_session_pinned_model(&handle.session_id, Some(model));
-            }
-            let handle = state.registry.insert(handle, &state.store).await;
-            // Fleet membership has to outlive this process: without it a restart comes back with
-            // an empty fleet and a mid-task session is invisible until someone resumes it by hand.
-            let _ = state
-                .store
-                .set_session_daemon_live(&handle.session_id, true);
-            json_response(&serde_json::json!({
-                "id": handle.session_id,
-                "title": handle.title(),
-                "cwd": handle.cwd,
-                "worktree": handle.worktree,
-            }))
-        }
-        Err(e) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("session create failed: {e}"),
-        ),
+    let handle = spawn_session_driver(spec).await.map_err(|e| {
+        StartSessionError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("session create failed: {e}"),
+        )
+    })?;
+    if let Some(guard) = worktree_guard {
+        std::mem::forget(guard);
     }
+    // Resuming is an explicit "bring this back" — an archived session (from the past-sessions
+    // browser) should stop being hidden once it's live again, the same way the archive button
+    // hid it.
+    if is_resume {
+        if let Err(error) = state.store.unarchive_session(&handle.session_id) {
+            tracing::warn!(
+                session_id = handle.session_id,
+                %error,
+                "serve: resumed session could not be un-archived; it stays hidden in \
+                 the past-sessions browser"
+            );
+        }
+    }
+    // Record the pin so the next resume can restore it. Written after the driver exists because
+    // the session row is created as part of spawning it. Failing to persist the pin must not fail
+    // the request: the session is already live and correctly pinned, and only a later resume
+    // would lose it.
+    if let Some(model) = pinned_model.as_deref() {
+        let _ = state
+            .store
+            .set_session_pinned_model(&handle.session_id, Some(model));
+    }
+    let handle = state.registry.insert(handle, &state.store).await;
+    // Fleet membership has to outlive this process: without it a restart comes back with an
+    // empty fleet and a mid-task session is invisible until someone resumes it by hand.
+    let _ = state
+        .store
+        .set_session_daemon_live(&handle.session_id, true);
+    Ok(handle)
 }
 
 #[derive(serde::Deserialize)]
@@ -1667,6 +1721,8 @@ async fn fork_session(
         push: state.push.clone(),
         apns: state.apns.clone(),
         registry: Some(state.registry.clone()),
+        dispatch_coordinator: false,
+        dispatch_worker: false,
     };
     match spawn_session_driver(spec).await {
         Ok(handle) => {
@@ -2089,7 +2145,7 @@ pub(crate) fn worktree_repo_and_branch(worktree: &str) -> Option<(std::path::Pat
 /// worktree dirs and other untracked cruft never count). A non-empty list means merging would
 /// apply a patch on top of uncommitted work — the merge route refuses rather than do that
 /// silently. Best-effort: a git failure returns empty (the 3-way apply is the real safety net).
-fn base_dirty_tracked(repo_root: &std::path::Path) -> Vec<String> {
+pub(crate) fn base_dirty_tracked(repo_root: &std::path::Path) -> Vec<String> {
     let out = std::process::Command::new("git")
         .args([
             "-C",
@@ -2297,19 +2353,81 @@ async fn merge_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    let Some(handle) = state.registry.get(&id).await else {
-        return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
+    match merge_session_core(&state, &id, true).await {
+        SessionMerge::Clean { branch } => json_response(&serde_json::json!({
+            "ok": true, "merged": true, "branch": branch,
+        })),
+        SessionMerge::Refused(status, message) => err_response(status, &message),
+        SessionMerge::Dirty(dirty) => conflict_json(serde_json::json!({
+            "error": "the base branch has uncommitted changes — commit or stash them, then merge",
+            "dirty_files": dirty,
+        })),
+        SessionMerge::Conflicts {
+            files,
+            branch,
+            worktree,
+        } => conflict_json(serde_json::json!({
+            "error": "merge conflicts — resolve them by hand in the worktree; the session remains resumable",
+            "conflicts": files, "branch": branch, "worktree": worktree,
+        })),
+        SessionMerge::Failed(message) => {
+            err_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &message)
+        }
+    }
+}
+
+pub(crate) fn conflict_json(body: serde_json::Value) -> Response {
+    (
+        axum::http::StatusCode::CONFLICT,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+/// What [`merge_session_core`] did with one session.
+pub(crate) enum SessionMerge {
+    /// Applied and staged; the worktree, branch and session are gone.
+    Clean { branch: String },
+    /// Refused before anything was touched (unknown session, no worktree, already claimed).
+    Refused(axum::http::StatusCode, String),
+    /// Refused because the base repo has uncommitted tracked changes; the session is untouched.
+    Dirty(Vec<String>),
+    /// Nothing merged; the session was respawned and keeps its worktree.
+    Conflicts {
+        files: Vec<String>,
+        branch: String,
+        worktree: String,
+    },
+    /// Nothing merged; the message says whether the session came back.
+    Failed(String),
+}
+
+/// The body of `POST /api/sessions/{id}/merge`, shared with the dispatch batch merge.
+/// `record_item` marks a dispatch worker `merged` through `worker_left`, which takes the dispatch
+/// lock — a caller already holding that lock passes `false` and records the item itself.
+pub(crate) async fn merge_session_core(
+    state: &DaemonState,
+    id: &str,
+    record_item: bool,
+) -> SessionMerge {
+    use axum::http::StatusCode;
+    let Some(handle) = state.registry.get(id).await else {
+        return SessionMerge::Refused(StatusCode::NOT_FOUND, "no such session".into());
     };
     let Some(worktree) = handle.worktree.clone() else {
-        return err_response(
-            axum::http::StatusCode::BAD_REQUEST,
-            "session has no worktree to merge",
+        return SessionMerge::Refused(
+            StatusCode::BAD_REQUEST,
+            "session has no worktree to merge".into(),
         );
     };
     let Some((repo_root, branch)) = worktree_repo_and_branch(&worktree) else {
-        return err_response(
-            axum::http::StatusCode::BAD_REQUEST,
-            "worktree path is not a recognised forge worktree",
+        return SessionMerge::Refused(
+            StatusCode::BAD_REQUEST,
+            "worktree path is not a recognised forge worktree".into(),
         );
     };
 
@@ -2321,19 +2439,7 @@ async fn merge_session(
             .unwrap_or_default()
     };
     if !dirty.is_empty() {
-        return (
-            axum::http::StatusCode::CONFLICT,
-            [
-                (axum::http::header::CONTENT_TYPE, "application/json"),
-                (axum::http::header::CACHE_CONTROL, "no-store"),
-            ],
-            serde_json::json!({
-                "error": "the base branch has uncommitted changes — commit or stash them, then merge",
-                "dirty_files": dirty,
-            })
-            .to_string(),
-        )
-            .into_response();
+        return SessionMerge::Dirty(dirty);
     }
 
     // Atomically claim ownership: `remove` is the only serialization point, so a concurrent
@@ -2341,13 +2447,13 @@ async fn merge_session(
     // bails — instead of two git sequences contending on the base repo index, which can
     // half-apply/duplicate a merge or `reset --hard` away another request's staged changes (base-
     // repo data loss). The dirty precondition above already ran on the pre-remove handle.
-    let Some(handle) = state.registry.remove(&id).await else {
-        return err_response(
-            axum::http::StatusCode::CONFLICT,
-            "session is already being merged or discarded",
+    let Some(handle) = state.registry.remove(id).await else {
+        return SessionMerge::Refused(
+            StatusCode::CONFLICT,
+            "session is already being merged or discarded".into(),
         );
     };
-    state.terminals.close_session(&id).await;
+    state.terminals.close_session(id).await;
     let resume_spec = DriverSpec {
         cwd: handle.cwd.clone(),
         worktree: handle.worktree.clone(),
@@ -2355,14 +2461,16 @@ async fn merge_session(
         mock: state.mock,
         model: state
             .store
-            .session_models(&id)
+            .session_models(id)
             .ok()
             .and_then(|models| models.last().cloned()),
-        resume: Some(id.clone()),
+        resume: Some(id.to_string()),
         temper: None,
         push: state.push.clone(),
         apns: state.apns.clone(),
         registry: Some(state.registry.clone()),
+        dispatch_coordinator: false,
+        dispatch_worker: false,
     };
     stop_and_join(handle).await;
     let outcome = {
@@ -2380,44 +2488,33 @@ async fn merge_session(
         return match (outcome, restart) {
             (MergeOutcome::Conflicts(files), Ok(handle)) => {
                 state.registry.insert(handle, &state.store).await;
-                (
-                    axum::http::StatusCode::CONFLICT,
-                    [
-                        (axum::http::header::CONTENT_TYPE, "application/json"),
-                        (axum::http::header::CACHE_CONTROL, "no-store"),
-                    ],
-                    serde_json::json!({
-                        "error": "merge conflicts — resolve them by hand in the worktree; the session remains resumable",
-                        "conflicts": files,
-                        "branch": branch,
-                        "worktree": worktree,
-                    })
-                    .to_string(),
-                )
-                    .into_response()
+                SessionMerge::Conflicts {
+                    files,
+                    branch,
+                    worktree,
+                }
             }
             (MergeOutcome::Error(msg), Ok(handle)) => {
                 state.registry.insert(handle, &state.store).await;
-                err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("merge failed: {msg} — nothing was merged, session left running"),
-                )
+                SessionMerge::Failed(format!(
+                    "merge failed: {msg} — nothing was merged, session left running"
+                ))
             }
-            (MergeOutcome::Conflicts(_), Err(e)) => err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("merge conflicts, but session restart failed: {e}"),
-            ),
-            (MergeOutcome::Error(msg), Err(e)) => err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("merge failed: {msg}; additionally the session failed to restart: {e}"),
-            ),
+            (MergeOutcome::Conflicts(_), Err(e)) => {
+                SessionMerge::Failed(format!("merge conflicts, but session restart failed: {e}"))
+            }
+            (MergeOutcome::Error(msg), Err(e)) => SessionMerge::Failed(format!(
+                "merge failed: {msg}; additionally the session failed to restart: {e}"
+            )),
             (MergeOutcome::Clean, _) => unreachable!("Clean is filtered out above"),
         };
     }
-    let _ = state.store.archive_session(&id);
-    json_response(&serde_json::json!({
-        "ok": true, "merged": true, "branch": branch,
-    }))
+    let _ = state.store.archive_session(id);
+    if record_item {
+        crate::serve_dispatch::worker_left(state, id, forge_core::dispatch::item_status::MERGED)
+            .await;
+    }
+    SessionMerge::Clean { branch }
 }
 
 /// `POST /api/sessions/{id}/discard` — stop the session and drop its worktree + branch WITHOUT
@@ -2455,6 +2552,8 @@ async fn discard_session(
     state.terminals.close_session(&id).await;
     stop_and_join(handle).await;
     let _ = state.store.archive_session(&id);
+    crate::serve_dispatch::worker_left(&state, &id, forge_core::dispatch::item_status::DISCARDED)
+        .await;
     let errs = {
         let (root, br, wt) = (repo_root, branch.clone(), worktree);
         tokio::task::spawn_blocking(move || remove_worktree(&root, &wt, &br))
@@ -3361,7 +3460,7 @@ fn parse_temper(raw: &str) -> Result<forge_types::PermissionMode, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[tokio::test]
@@ -3864,6 +3963,8 @@ mod tests {
                     push: None,
                     apns: None,
                     registry: None,
+                    dispatch_coordinator: false,
+                    dispatch_worker: false,
                 })
                 .await
                 .unwrap(),
@@ -3946,7 +4047,7 @@ mod tests {
     /// stops the driver + hides the session while keeping its history.
     /// Serializes the tests that point `FORGE_DB` at a scratch database — the env var is
     /// process-wide, so two such tests running in parallel would race each other's stores.
-    static FORGE_DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(crate) static FORGE_DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn daemon_sessions_are_isolated_and_survive_zero_clients() {
@@ -3969,6 +4070,8 @@ mod tests {
             push: None,
             apns: None,
             registry: None,
+            dispatch_coordinator: false,
+            dispatch_worker: false,
         };
         let store_handle = forge_store::Store::open_in_memory().unwrap();
         let a = registry
@@ -4114,6 +4217,8 @@ mod tests {
             push: None,
             apns: None,
             registry: None,
+            dispatch_coordinator: false,
+            dispatch_worker: false,
         })
         .await
         .unwrap();
@@ -4334,6 +4439,8 @@ mod tests {
             push: None,
             apns: None,
             registry: None,
+            dispatch_coordinator: false,
+            dispatch_worker: false,
         })
         .await
         .unwrap();
@@ -4419,6 +4526,8 @@ mod tests {
                     push: None,
                     apns: None,
                     registry: None,
+                    dispatch_coordinator: false,
+                    dispatch_worker: false,
                 })
                 .await
                 .unwrap(),
@@ -4481,6 +4590,8 @@ mod tests {
                     push: None,
                     apns: None,
                     registry: None,
+                    dispatch_coordinator: false,
+                    dispatch_worker: false,
                 })
                 .await
                 .unwrap(),
@@ -4566,6 +4677,8 @@ mod tests {
                     push: None,
                     apns: None,
                     registry: None,
+                    dispatch_coordinator: false,
+                    dispatch_worker: false,
                 })
                 .await
                 .unwrap(),
@@ -4761,6 +4874,8 @@ mod tests {
                     push: None,
                     apns: None,
                     registry: None,
+                    dispatch_coordinator: false,
+                    dispatch_worker: false,
                 })
                 .await
                 .unwrap(),
@@ -4863,6 +4978,8 @@ mod tests {
             push: None,
             apns: None,
             registry: None,
+            dispatch_coordinator: false,
+            dispatch_worker: false,
         })
         .await
         .unwrap();
@@ -5193,6 +5310,8 @@ mod tests {
             push: None,
             apns: None,
             registry: None,
+            dispatch_coordinator: false,
+            dispatch_worker: false,
         };
         // A "past" session: driven to completion (so it has a user message) but NOT registered.
         let past = Arc::new(spawn_session_driver(mk("gone")).await.unwrap());
@@ -5305,6 +5424,8 @@ mod tests {
             push: None,
             apns: None,
             registry: None,
+            dispatch_coordinator: false,
+            dispatch_worker: false,
         };
         let archived = Arc::new(spawn_session_driver(mk("was-archived")).await.unwrap());
         archived
@@ -5816,6 +5937,8 @@ mod tests {
                     push: Some(notifier.clone()),
                     apns: None,
                     registry: None,
+                    dispatch_coordinator: false,
+                    dispatch_worker: false,
                 })
                 .await
                 .unwrap(),
@@ -6220,6 +6343,7 @@ mod tests {
             last_activity: created_at,
             read_only: false,
             terminal: false,
+            dispatch: Default::default(),
         };
         let mut rows = vec![
             mk("new-idle", false, 30),
@@ -6284,6 +6408,7 @@ mod tests {
                 last_activity: created_at,
                 read_only: false,
                 terminal,
+                dispatch: Default::default(),
             };
         // A terminal session that is BOTH waiting and newer than every daemon-hosted session must
         // still sort last. It is drivable now, but the daemon publishes no `waiting` state for it
@@ -6369,6 +6494,8 @@ mod tests {
                     push: None,
                     apns: None,
                     registry: None,
+                    dispatch_coordinator: false,
+                    dispatch_worker: false,
                 })
                 .await
                 .unwrap(),
@@ -6546,6 +6673,8 @@ mod tests {
             push: None,
             apns: None,
             registry: None,
+            dispatch_coordinator: false,
+            dispatch_worker: false,
         })
         .await
         .unwrap();
@@ -6655,6 +6784,8 @@ mod tests {
                     resume: None,
                     temper: None,
                     registry: None,
+                    dispatch_coordinator: false,
+                    dispatch_worker: false,
                     push: None,
                     apns: None,
                 })

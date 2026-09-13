@@ -37,6 +37,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/board",
     },
     Command {
+        name: "dispatch",
+        desc: "split a request into parallel sessions on the daemon (see forge board)",
+        usage: "/dispatch <request>",
+    },
+    Command {
         name: "replay",
         desc:
             "show a session transcript inline (/replay <id>) or diff two sessions (/replay <a> <b>)",
@@ -298,6 +303,8 @@ pub enum CommandAction {
     Keys,
     ListSessions,
     Board,
+    /// Start a plan-and-dispatch on the daemon for this workspace (`/dispatch <request>`).
+    Dispatch(String),
     Resume(String),
     /// Pin a specific model for all subsequent turns in this session. `None` opens the picker.
     PinModel(Option<String>),
@@ -626,6 +633,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "keys" | "keybinds" | "shortcuts" => CommandAction::Keys,
         "sessions" | "ls" => CommandAction::ListSessions,
         "board" => CommandAction::Board,
+        "dispatch" => CommandAction::Dispatch(arg),
         "resume" | "r" => {
             if arg.is_empty() {
                 CommandAction::ListSessions // /resume with no id → open the picker
@@ -1235,6 +1243,17 @@ mod tests {
 
     #[test]
     fn parses_new_commands() {
+        assert_eq!(
+            parse_command("/dispatch  split the parser work "),
+            CommandAction::Dispatch("split the parser work".into())
+        );
+        assert_eq!(
+            parse_command("/dispatch"),
+            CommandAction::Dispatch(String::new())
+        );
+        assert!(COMMANDS
+            .iter()
+            .any(|c| c.name == "dispatch" && c.usage == "/dispatch <request>"));
         assert_eq!(parse_command("/mode"), CommandAction::Mode);
         assert_eq!(parse_command("/m"), CommandAction::Mode);
         assert_eq!(parse_command("/undo"), CommandAction::Undo);

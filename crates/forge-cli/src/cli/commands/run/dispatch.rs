@@ -936,6 +936,12 @@ and keep going."
         CommandAction::Board => {
             app.note("the project board is its own screen — run `forge board` in another terminal or pane");
         }
+        // `/dispatch <request>` — the daemon runs the coordinator and its sessions; this session
+        // only starts it (bounded, so the render loop never waits long) and points at the board.
+        CommandAction::Dispatch(prompt) => {
+            let cwd = session.lock().await.workspace_root().to_path_buf();
+            app.note(&crate::cli::commands::dispatch::chat_dispatch_note(&prompt, &cwd).await);
+        }
         // `/memories` — list this project's memories.
         CommandAction::Memories => {
             let scope = session.lock().await.workspace_scope();

@@ -101,12 +101,7 @@ impl BoardApp {
         if !yes {
             return Vec::new();
         }
-        match c.kind {
-            ConfirmKind::Archive(id) => {
-                self.toast(ToastLevel::Info, "archiving…");
-                vec![BoardAction::Archive(id)]
-            }
-        }
+        self.resolve_dispatch_confirm(c.kind)
     }
 
     /// `default → accept-edits → bypass → plan → default`.

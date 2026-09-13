@@ -15,8 +15,11 @@
 
 mod actions;
 mod client;
+mod dispatch_client;
 mod sockets;
 
+#[cfg(test)]
+mod dispatch_http_tests;
 #[cfg(test)]
 mod http_tests;
 
@@ -88,6 +91,9 @@ pub(crate) async fn board_cmd(
     let past = client::fetch_past(&http, &base, &token, PAST_LIMIT)
         .await
         .unwrap_or_default();
+    let dispatches = dispatch_client::fetch_dispatches(&http, &base, &token)
+        .await
+        .unwrap_or_default();
 
     let cwd = std::env::current_dir()
         .ok()
@@ -97,6 +103,7 @@ pub(crate) async fn board_cmd(
     let mut app = BoardApp::new(cwd.clone(), now_unix());
     app.apply(BoardEvent::Fleet(fleet.clone()));
     app.apply(BoardEvent::Past(past));
+    app.apply(BoardEvent::Dispatches(dispatches));
     match project {
         Some(name) => app.set_project_filter(Some(name)),
         None if !all => {

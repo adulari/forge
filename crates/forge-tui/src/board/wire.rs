@@ -41,6 +41,74 @@ pub struct FleetRow {
     /// Runs in a terminal rather than hosted by the daemon; archive/mode are unavailable.
     #[serde(default)]
     pub terminal: bool,
+    /// The plan-and-dispatch run this session belongs to, when it belongs to one.
+    #[serde(default)]
+    pub dispatch_id: Option<String>,
+    /// `coordinator` | `worker`.
+    #[serde(default)]
+    pub dispatch_role: Option<String>,
+    /// 1-based item number, workers only.
+    #[serde(default)]
+    pub dispatch_index: Option<usize>,
+}
+
+/// One row of `GET /api/dispatches` — a plan-and-dispatch run and its items.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct DispatchInfo {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub coordinator_session_id: String,
+    #[serde(default)]
+    pub coordinator_title: String,
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub summary: String,
+    /// `planning` | `proposed` | `running` | `done` | `cancelled`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub worktree: bool,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub max_running: usize,
+    #[serde(default)]
+    pub max_items: usize,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+    #[serde(default)]
+    pub items: Vec<DispatchItemInfo>,
+}
+
+/// One work item of a dispatch.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct DispatchItemInfo {
+    /// 1-based.
+    #[serde(default)]
+    pub index: usize,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub depends_on: Vec<usize>,
+    /// `proposed | skipped | queued | running | succeeded | failed | stopped | cancelled | merged | discarded`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    #[serde(default)]
+    pub finished_at: Option<i64>,
 }
 
 /// One row of `GET /api/sessions/past` — persisted, not running.

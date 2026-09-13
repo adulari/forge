@@ -1,6 +1,7 @@
 //! The small value types the board's state is made of: focus, detail tabs, the composer, the
 //! confirmation dialog, toasts, connectivity, and the clickable regions render records.
 
+use super::form::FormHit;
 use super::model::{project_name, Column};
 
 /// Which surface owns the keyboard.
@@ -12,11 +13,15 @@ pub enum Focus {
     Confirm,
     Help,
     Filter,
+    /// The plan-and-dispatch form.
+    Form,
 }
 
 /// The detail pane's sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailTab {
+    /// Only on cards that coordinate or work for a dispatch, and then first.
+    Dispatch,
     Overview,
     Tail,
     Tasks,
@@ -25,7 +30,8 @@ pub enum DetailTab {
 }
 
 impl DetailTab {
-    pub const ALL: [DetailTab; 5] = [
+    pub const ALL: [DetailTab; 6] = [
+        DetailTab::Dispatch,
         DetailTab::Overview,
         DetailTab::Tail,
         DetailTab::Tasks,
@@ -35,6 +41,7 @@ impl DetailTab {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Dispatch => "Dispatch",
             Self::Overview => "Overview",
             Self::Tail => "Live",
             Self::Tasks => "Tasks",
@@ -43,14 +50,25 @@ impl DetailTab {
         }
     }
 
-    pub fn next(self) -> Self {
-        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        Self::ALL[(i + 1) % Self::ALL.len()]
+    /// The tabs a card has: the Dispatch tab exists only for dispatch cards.
+    pub fn tabs(has_dispatch: bool) -> &'static [DetailTab] {
+        if has_dispatch {
+            &Self::ALL
+        } else {
+            &Self::ALL[1..]
+        }
     }
 
-    pub fn prev(self) -> Self {
-        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
+    pub fn next_in(self, has_dispatch: bool) -> Self {
+        let tabs = Self::tabs(has_dispatch);
+        let i = tabs.iter().position(|t| *t == self).unwrap_or(0);
+        tabs[(i + 1) % tabs.len()]
+    }
+
+    pub fn prev_in(self, has_dispatch: bool) -> Self {
+        let tabs = Self::tabs(has_dispatch);
+        let i = tabs.iter().position(|t| *t == self).unwrap_or(0);
+        tabs[(i + tabs.len() - 1) % tabs.len()]
     }
 }
 
@@ -67,6 +85,8 @@ pub enum ComposerMode {
     Answer { seq: u64 },
     /// The first prompt of a brand-new session in `cwd`.
     NewSession { cwd: String, worktree: bool },
+    /// Feedback for a proposed split; the coordinator plans again.
+    Revise { dispatch_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +111,7 @@ impl Composer {
                 project_name(cwd),
                 if *worktree { " (worktree)" } else { "" }
             ),
+            ComposerMode::Revise { .. } => "what should change?".into(),
         }
     }
 
@@ -158,6 +179,19 @@ impl Composer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmKind {
     Archive(String),
+    /// Cancel a proposed dispatch, or the not-yet-started rest of a running one.
+    CancelDispatch(String),
+    /// Merge every succeeded worker of this dispatch, in index order.
+    MergeFinished(String),
+    Merge(String),
+    Discard(String),
+}
+
+impl ConfirmKind {
+    /// Irreversible — drawn in the danger tone instead of the warning tone.
+    pub fn is_danger(&self) -> bool {
+        matches!(self, Self::Discard(_))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +233,15 @@ pub enum Hit {
     CloseDetail,
     Help,
     ProjectFilter,
+    /// The header's `◆ dispatch` chip.
+    DispatchChip,
+    /// The header's zoom chip (`◆ <title> ✕`).
+    ClearZoom,
+    /// A row of the Dispatch tab, by position in the item list.
+    DispatchRow(usize),
+    /// The `[✓]` box of a proposed item, by position.
+    DispatchToggle(usize),
+    Form(FormHit),
 }
 
 /// The action buttons the detail pane draws.
@@ -218,4 +261,10 @@ pub enum Button {
     NewSession,
     Copy,
     ToggleTools,
+    Approve,
+    Revise,
+    CancelDispatch,
+    MergeAll,
+    Merge,
+    Discard,
 }

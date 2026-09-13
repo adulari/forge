@@ -16,8 +16,14 @@
 
 pub mod actions;
 pub mod detail;
+pub mod dispatch;
+pub mod dispatch_render;
+pub mod dispatch_state;
+pub mod form;
+pub mod form_render;
 pub mod keys;
 pub mod model;
+pub mod overlays;
 pub mod render;
 pub mod state;
 pub mod types;
@@ -25,8 +31,12 @@ pub mod widgets;
 pub mod wire;
 
 #[cfg(test)]
+mod dispatch_tests;
+#[cfg(test)]
 mod tests;
 
+pub use dispatch::{group_color, CardDispatch, Progress, Role};
+pub use form::{DispatchForm, FormField, FormHit};
 pub use keys::{handle_key, handle_mouse, handle_paste, HELP};
 pub use model::{
     fmt_age, fmt_cost, live_card, live_signals, model_short, past_card, project_name,
@@ -37,8 +47,9 @@ pub use state::{
     Hit, Toast, ToastLevel, Totals,
 };
 pub use wire::{
-    DiffCard, DiffFile, FleetRow, GitFile, GitInfo, HistoryRow, LiveSnapshot, PastRow, PlanCard,
-    PlanStep, QOption, Subagent, Task, TranscriptRow, WorkflowCard,
+    DiffCard, DiffFile, DispatchInfo, DispatchItemInfo, FleetRow, GitFile, GitInfo, HistoryRow,
+    LiveSnapshot, PastRow, PlanCard, PlanStep, QOption, Subagent, Task, TranscriptRow,
+    WorkflowCard,
 };
 
 /// Something the host learned and the board should reflect.
@@ -51,6 +62,13 @@ pub enum BoardEvent {
     Fleet(Vec<FleetRow>),
     /// A fresh `GET /api/sessions/past`.
     Past(Vec<PastRow>),
+    /// A fresh `GET /api/dispatches` (empty from a daemon that predates plan & dispatch).
+    Dispatches(Vec<DispatchInfo>),
+    /// `POST /api/dispatch` succeeded: the board selects the coordinator as soon as it appears.
+    DispatchStarted {
+        dispatch_id: String,
+        coordinator_session_id: String,
+    },
     /// One per-session snapshot frame from its WebSocket.
     Snapshot(String, LiveSnapshot),
     /// The session's WebSocket ended (the daemon closed it or the session was archived).
@@ -98,5 +116,34 @@ pub enum BoardAction {
     Refresh,
     /// Copy this text to the clipboard (OSC 52 / system clipboard, host's choice).
     Copy(String),
+    /// `POST /api/dispatch`; on success the host reports [`BoardEvent::DispatchStarted`].
+    StartDispatch {
+        cwd: String,
+        prompt: String,
+        worktree: bool,
+        /// Worker permission mode: `default` | `accept-edits` | `bypass`.
+        mode: String,
+        max_running: usize,
+        max_items: usize,
+    },
+    /// `POST /api/dispatches/{id}/approve`; `None` approves every item.
+    ApproveDispatch {
+        id: String,
+        selected: Option<Vec<usize>>,
+    },
+    /// `POST /api/dispatches/{id}/revise`.
+    ReviseDispatch {
+        id: String,
+        feedback: String,
+    },
+    /// `POST /api/dispatches/{id}/cancel`.
+    CancelDispatch(String),
+    /// `POST /api/sessions/{id}/merge`.
+    Merge(String),
+    /// `POST /api/sessions/{id}/discard`.
+    Discard(String),
+    /// Merge every `succeeded` worker of this dispatch in index order, stopping at the first
+    /// conflict or error.
+    MergeFinished(String),
     Quit,
 }

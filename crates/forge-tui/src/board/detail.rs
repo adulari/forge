@@ -41,7 +41,8 @@ fn render_pane(
     let card = app.selected_card()?;
     let snap = app.selected_snapshot();
     let tone = w::health_tone(card.health);
-    let (glyph, _) = w::health_glyph(card, app.tick);
+    let (glyph, _) =
+        super::dispatch_render::card_glyph(card).unwrap_or_else(|| w::health_glyph(card, app.tick));
     let head = format!(
         "{glyph} {}  {}",
         w::clip_cells(
@@ -153,7 +154,7 @@ fn draw_tabs(
     let tools = tool_calls(app, card).len();
 
     let mut row = w::Row::at(inner.x, inner.y);
-    for (i, tab) in DetailTab::ALL.iter().enumerate() {
+    for (i, tab) in DetailTab::tabs(card.dispatch.is_some()).iter().enumerate() {
         if i > 0 {
             row.sep();
         }
@@ -161,9 +162,10 @@ fn draw_tabs(
             DetailTab::Tasks if total > 0 => format!(" {done}/{total}"),
             DetailTab::Changes if changes > 0 => format!(" {changes}"),
             DetailTab::Tools if tools > 0 => format!(" {tools}"),
+            DetailTab::Dispatch => super::dispatch_render::tab_count(app, card),
             _ => String::new(),
         };
-        let style = if *tab == app.detail_tab {
+        let style = if *tab == app.effective_tab() {
             Style::default().fg(ACCENT).bg(SELECT_BG).bold()
         } else {
             Style::default().fg(DIM)
@@ -290,7 +292,10 @@ fn draw_body(
     hits: &mut Vec<(Rect, Hit)>,
 ) -> Option<usize> {
     let width = area.width as usize;
-    let lines = match app.detail_tab {
+    let lines = match app.effective_tab() {
+        DetailTab::Dispatch => {
+            return super::dispatch_render::draw_tab(app, frame, area, card, hits)
+        }
         DetailTab::Overview => overview(app, card, snap, width),
         DetailTab::Tail => tail(app, snap, width),
         DetailTab::Tasks => tasks(snap, width),

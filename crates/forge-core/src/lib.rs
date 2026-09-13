@@ -36,6 +36,7 @@ pub(crate) mod completion;
 pub mod context_pack;
 pub(crate) mod context_pipeline;
 mod detached_subagents;
+pub mod dispatch;
 pub mod duel;
 mod failure_verdict;
 pub mod fleet;
@@ -1597,6 +1598,8 @@ pub struct Session {
     /// this in — see `fleet.rs`). `None` outside `forge serve`, so `message_session` is simply
     /// not advertised there.
     fleet: Option<Arc<dyn fleet::FleetMessaging>>,
+    /// Plan-and-dispatch host, wired only into coordinator sessions (see [`dispatch`]).
+    dispatch: Option<Arc<dyn dispatch::SessionDispatch>>,
     /// In-session model pin set (`/model <id>`). When set, mesh routing still classifies the prompt
     /// (for stats), but this set is used instead of the routed pick. `None` = mesh routing.
     pinned_model: Option<Vec<String>>,
@@ -2294,6 +2297,11 @@ impl Session {
                 .is_none_or(|scope| scope.permits_tool(fleet::MESSAGE_SESSION_TOOL))
         {
             specs.push(fleet::message_session_spec());
+        }
+        // Plan and dispatch — only a coordinator session has a dispatch host, so neither an ordinary
+        // session nor a dispatched worker can start a dispatch of its own.
+        if let Some(host) = &self.dispatch {
+            specs.push(dispatch::dispatch_sessions_spec(host.max_items()));
         }
         // External MCP servers: the meta-tools (search/expose/resources/prompt) + any exposed
         // server tools (deferred loading keeps this bounded). Empty unless servers are connected.

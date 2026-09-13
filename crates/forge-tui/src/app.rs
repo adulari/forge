@@ -255,6 +255,9 @@ pub struct App {
     pub done: bool,
     /// Why the last turn ended; `None` before any turn completes or for lifecycle-only Done events.
     pub last_stop_reason: Option<forge_types::StopReason>,
+    /// Turns finished so far, bumped exactly where `last_stop_reason` is set. A daemon watching the
+    /// snapshot compares counts, so a turn that starts and ends between two polls is still seen.
+    pub turns_finished: u64,
     /// The active operating temper label (e.g. "Guarded"), shown in the statusline.
     pub temper: String,
     /// The active reasoning-effort pin, when set by config or `/effort`.
@@ -1573,6 +1576,7 @@ impl App {
                 self.throughput.on_turn_end(std::time::Instant::now());
                 self.done = true;
                 self.last_stop_reason = Some(stop_reason);
+                self.turns_finished += 1;
             }
             PresenterEvent::QuotaUpdate {
                 provider,

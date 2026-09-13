@@ -63,6 +63,7 @@ pub(crate) fn build_snapshot_frame(
             .to_string(),
         last_turn_outcome: view.last_stop_reason.map(|r| r.outcome().to_string()),
         last_stop_reason: view.last_stop_reason.map(|r| r.as_str().to_string()),
+        turns_finished: app.turns_finished,
         temper: view.temper,
         effort: view
             .effort

@@ -164,9 +164,10 @@ async fn refresh_once(
     ev: &mpsc::UnboundedSender<Ev>,
     offline: &mut bool,
 ) {
-    let (fleet, past) = tokio::join!(
+    let (fleet, past, dispatches) = tokio::join!(
         fetch_fleet(http, base, token),
-        fetch_past(http, base, token, PAST_LIMIT)
+        fetch_past(http, base, token, PAST_LIMIT),
+        super::dispatch_client::fetch_dispatches(http, base, token)
     );
     match fleet {
         Ok(rows) => {
@@ -192,6 +193,9 @@ async fn refresh_once(
     }
     if let Ok(rows) = past {
         let _ = ev.send(Ev::Board(BoardEvent::Past(rows)));
+    }
+    if let Ok(list) = dispatches {
+        let _ = ev.send(Ev::Board(BoardEvent::Dispatches(list)));
     }
 }
 

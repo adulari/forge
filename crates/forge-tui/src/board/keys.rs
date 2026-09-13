@@ -19,9 +19,15 @@ pub const HELP: &[(&str, &str)] = &[
     ("a", "attach: drop into the session in this terminal"),
     ("p", "send a prompt (queued while busy)"),
     ("s", "steer: jump the queue at the next turn boundary"),
-    ("y / n", "allow / deny the pending permission"),
+    (
+        "y / n",
+        "allow / deny the permission — else start / cancel a split",
+    ),
     ("1-9", "pick an option of the pending question"),
-    ("e", "answer the pending question in free text"),
+    (
+        "e",
+        "answer the question in free text — else revise a split",
+    ),
     ("i", "interrupt the running turn"),
     ("m", "re-pin the model (/model), empty clears"),
     (
@@ -31,6 +37,18 @@ pub const HELP: &[(&str, &str)] = &[
     ("x", "archive (asks first)"),
     ("r", "resume a Done session"),
     ("N / W", "new session here / in a fresh worktree"),
+    (
+        "D",
+        "plan & dispatch: one prompt, split into parallel sessions",
+    ),
+    ("z", "zoom to the selected card's dispatch (Esc clears)"),
+    ("w", "merge the selected worktree session back (asks first)"),
+    ("X", "discard the selected worktree session (asks first)"),
+    ("Space", "Dispatch tab: tick or untick an item of the split"),
+    (
+        "A",
+        "Dispatch tab: merge every finished session, one commit each (asks first)",
+    ),
     ("f", "cycle the project filter"),
     ("/", "filter cards by text"),
     ("[ ]", "switch the pane's section"),
@@ -64,6 +82,7 @@ pub fn handle_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
             Vec::new()
         }
         Focus::Filter => filter_key(app, key),
+        Focus::Form => super::form::form_key(app, key),
         Focus::Board | Focus::Detail => shared_key(app, key),
     }
 }
@@ -110,6 +129,7 @@ pub fn handle_paste(app: &mut BoardApp, text: &str) {
             app.query.push_str(&one_line);
             app.rebuild();
         }
+        Focus::Form => super::form::form_paste(app, text),
         _ => {}
     }
 }
@@ -138,6 +158,9 @@ fn filter_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
 fn shared_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
     let in_detail = app.focus == Focus::Detail;
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    if let Some(out) = super::dispatch_state::dispatch_tab_key(app, key) {
+        return out;
+    }
     match key.code {
         KeyCode::Char('q') => return vec![BoardAction::Quit],
         KeyCode::Char('?') => app.focus = Focus::Help,
@@ -146,6 +169,8 @@ fn shared_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
                 app.focus = Focus::Board;
             } else if app.detail_open {
                 app.close_detail();
+            } else if app.dispatch.zoom.is_some() {
+                app.clear_zoom();
             } else if !app.query.is_empty() {
                 app.query.clear();
                 app.rebuild();
@@ -229,12 +254,14 @@ fn shared_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
             return follow_selection(app);
         }
         KeyCode::Char(']') => {
-            app.detail_tab = app.detail_tab.next();
+            let has = app.selected_card().is_some_and(|c| c.dispatch.is_some());
+            app.detail_tab = app.effective_tab().next_in(has);
             app.detail_scroll = 0;
             app.tail_follow = true;
         }
         KeyCode::Char('[') => {
-            app.detail_tab = app.detail_tab.prev();
+            let has = app.selected_card().is_some_and(|c| c.dispatch.is_some());
+            app.detail_tab = app.effective_tab().prev_in(has);
             app.detail_scroll = 0;
             app.tail_follow = true;
         }
@@ -278,8 +305,19 @@ fn shared_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
                 }
             }
         }
-        KeyCode::Char('y') => return app.answer_permission(true),
-        KeyCode::Char('n') => return app.answer_permission(false),
+        KeyCode::Char(c @ ('y' | 'n')) => {
+            let out = app.answer_permission(c == 'y');
+            return if out.is_empty() {
+                app.dispatch_yes_no(c == 'y')
+            } else {
+                out
+            };
+        }
+        KeyCode::Char('D') => app.open_form(),
+        KeyCode::Char('z') => app.toggle_zoom(),
+        KeyCode::Char('w') => app.request_merge(),
+        KeyCode::Char('X') => app.request_discard(),
+        KeyCode::Char('A') => app.request_merge_finished(),
         KeyCode::Char(d @ '1'..='9') => {
             return app.answer_option(d.to_digit(10).unwrap_or(0) as usize);
         }
@@ -354,7 +392,10 @@ pub fn handle_mouse(app: &mut BoardApp, ev: MouseEvent) -> Vec<BoardAction> {
 }
 
 fn wheel(app: &mut BoardApp, col: u16, row: u16, dir: i32) -> Vec<BoardAction> {
-    if matches!(app.focus, Focus::Composer | Focus::Confirm | Focus::Help) {
+    if matches!(
+        app.focus,
+        Focus::Composer | Focus::Confirm | Focus::Help | Focus::Form
+    ) {
         return Vec::new();
     }
     // The pane spans from its left edge to the right edge of the screen; the close glyph sits at
@@ -386,6 +427,14 @@ fn click(app: &mut BoardApp, col: u16, row: u16) -> Vec<BoardAction> {
             return Vec::new();
         }
         Focus::Confirm => return Vec::new(),
+        // A stray click must never throw away a half-written prompt: only the form's own targets
+        // answer while it is open.
+        Focus::Form => {
+            return match app.hit_at(col, row).cloned() {
+                Some(Hit::Form(h)) => app.form_click(h),
+                _ => Vec::new(),
+            };
+        }
         Focus::Composer => {
             app.cancel_composer();
         }
@@ -426,6 +475,28 @@ fn click(app: &mut BoardApp, col: u16, row: u16) -> Vec<BoardAction> {
             Vec::new()
         }
         Hit::Button(b) => button(app, b),
+        Hit::DispatchChip => {
+            app.open_form();
+            Vec::new()
+        }
+        Hit::ClearZoom => {
+            app.clear_zoom();
+            Vec::new()
+        }
+        Hit::DispatchRow(pos) => {
+            app.focus = Focus::Detail;
+            if app.dispatch.cursor == pos {
+                return app.activate_dispatch_row(pos);
+            }
+            app.dispatch.cursor = pos;
+            Vec::new()
+        }
+        Hit::DispatchToggle(pos) => {
+            app.focus = Focus::Detail;
+            app.toggle_dispatch_item(pos);
+            Vec::new()
+        }
+        Hit::Form(h) => app.form_click(h),
     }
 }
 
@@ -486,6 +557,27 @@ fn button(app: &mut BoardApp, b: Button) -> Vec<BoardAction> {
         }
         Button::ToggleTools => {
             app.show_tools = !app.show_tools;
+            Vec::new()
+        }
+        Button::Approve => app.approve_dispatch(),
+        Button::Revise => {
+            app.revise_dispatch();
+            Vec::new()
+        }
+        Button::CancelDispatch => {
+            app.request_cancel_dispatch();
+            Vec::new()
+        }
+        Button::MergeAll => {
+            app.request_merge_finished();
+            Vec::new()
+        }
+        Button::Merge => {
+            app.request_merge();
+            Vec::new()
+        }
+        Button::Discard => {
+            app.request_discard();
             Vec::new()
         }
     }

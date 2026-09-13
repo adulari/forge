@@ -216,6 +216,7 @@ impl Session {
             lsp: None,
             skills: None,
             fleet: None,
+            dispatch: None,
             pinned_model: None,
             pinned_effort: None,
             subagent_pin_free: None,
