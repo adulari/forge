@@ -838,6 +838,7 @@ mod tests {
             _on_event: &mut EventSink<'_>,
         ) -> Result<ModelResponse, ProviderError> {
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -867,6 +868,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             self.active.fetch_sub(1, SeqCst);
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),

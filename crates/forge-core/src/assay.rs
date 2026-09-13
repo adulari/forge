@@ -605,6 +605,7 @@ mod tests {
                     "[]"
                 };
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: content.into(),
                     tool_calls: vec![],
                     usage,
@@ -620,6 +621,7 @@ mod tests {
                     r#"{"verdict":"uphold","confidence":"high"}"#
                 };
                 return Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: v.into(),
                     tool_calls: vec![],
                     usage,
@@ -627,6 +629,7 @@ mod tests {
                 });
             }
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: "[]".into(),
                 tool_calls: vec![],
                 usage,
@@ -683,6 +686,7 @@ mod tests {
                 "[]"
             };
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: content.into(),
                 tool_calls: vec![],
                 usage: Usage::default(),

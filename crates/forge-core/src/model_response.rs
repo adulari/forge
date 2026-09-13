@@ -16,8 +16,13 @@ impl Session {
         empty_nudges: &mut usize,
     ) -> Result<(String, bool), CoreError> {
         let provisional_completion = !resp.wants_tools() && !resp.content.trim().is_empty();
+        // Carry the reply's own thinking on the in-memory transcript. Thinking-mode APIs want it
+        // back on the NEXT request of this turn — DeepSeek rejects the request outright without it
+        // — so it has to survive from here to the tool-result round trip. It is deliberately not
+        // persisted: only the live turn needs it, and it is not part of the answer.
         let mut assistant_message =
-            Message::assistant_tool_calls(&resp.content, resp.tool_calls.clone());
+            Message::assistant_tool_calls(&resp.content, resp.tool_calls.clone())
+                .with_reasoning(resp.reasoning.clone());
         if provisional_completion {
             assistant_message = assistant_message.llm_only();
         }

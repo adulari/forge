@@ -198,6 +198,7 @@ impl Session {
                 let msgs: Vec<Message> = stored
                     .into_iter()
                     .map(|m| Message {
+                        reasoning: None,
                         role: m.role,
                         content: m.content,
                         tool_calls: m.tool_calls,
@@ -221,6 +222,7 @@ impl Session {
                 let msgs: Vec<Message> = stored
                     .into_iter()
                     .map(|m| Message {
+                        reasoning: None,
                         role: m.role,
                         content: m.content,
                         tool_calls: m.tool_calls,
@@ -258,6 +260,7 @@ impl Session {
         self.transcript = stored
             .into_iter()
             .map(|m| Message {
+                reasoning: None,
                 role: m.role,
                 content: m.content,
                 tool_calls: m.tool_calls,
@@ -352,6 +355,7 @@ impl Session {
         self.transcript = stored
             .into_iter()
             .map(|m| Message {
+                reasoning: None,
                 role: m.role,
                 content: m.content,
                 tool_calls: m.tool_calls,

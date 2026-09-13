@@ -529,6 +529,7 @@ pub async fn execute_responses_request(
     }
 
     Ok(ModelResponse {
+        reasoning: String::new(),
         content: acc.content,
         tool_calls: acc.tool_calls,
         usage: acc.usage,

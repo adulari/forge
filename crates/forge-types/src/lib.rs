@@ -117,6 +117,12 @@ pub struct Message {
     /// Who this message is for. `UiOnly` messages are stripped before every provider call.
     #[serde(default, skip_serializing_if = "Visibility::is_default")]
     pub visibility: Visibility,
+    /// An assistant reply's own private thinking, when the provider returned it apart from the
+    /// answer. Replayed to thinking-mode APIs that require it back verbatim (DeepSeek rejects the
+    /// next request without it, which killed every tool-using turn); ignored by everyone else.
+    /// Never rendered as the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 impl Message {
@@ -128,6 +134,7 @@ impl Message {
             tool_call_id: None,
             images: Vec::new(),
             visibility: Visibility::Llm,
+            reasoning: None,
         }
     }
     pub fn user(content: impl Into<String>) -> Self {
@@ -142,6 +149,7 @@ impl Message {
             tool_call_id: None,
             images,
             visibility: Visibility::Llm,
+            reasoning: None,
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -159,8 +167,19 @@ impl Message {
             tool_call_id: None,
             images: Vec::new(),
             visibility: Visibility::Llm,
+            reasoning: None,
         }
     }
+    /// Attach the reply's own private thinking (see [`Message::reasoning`]). Empty means the
+    /// provider returned none, which is stored as `None` rather than an empty string so the
+    /// replayed message carries no reasoning part at all.
+    #[must_use]
+    pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
+        let reasoning = reasoning.into();
+        self.reasoning = (!reasoning.is_empty()).then_some(reasoning);
+        self
+    }
+
     /// A tool result answering a specific call.
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -170,6 +189,7 @@ impl Message {
             tool_call_id: Some(call_id.into()),
             images: Vec::new(),
             visibility: Visibility::Llm,
+            reasoning: None,
         }
     }
     /// Mark this message as UI-only: shown to the user (and persisted), never sent to a model.

@@ -491,6 +491,7 @@ mod tests {
         ) -> Result<ModelResponse, ProviderError> {
             match &self.0 {
                 Ok(text) => Ok(ModelResponse {
+                    reasoning: String::new(),
                     content: text.clone(),
                     tool_calls: Vec::new(),
                     usage: Default::default(),
@@ -518,6 +519,7 @@ mod tests {
             self.calls.lock().unwrap().push(model.to_string());
             match self.responses.lock().unwrap().remove(0) {
                 Ok(content) => Ok(ModelResponse {
+                    reasoning: String::new(),
                     content,
                     tool_calls: Vec::new(),
                     usage: Default::default(),
@@ -548,6 +550,7 @@ mod tests {
                 .unwrap()
                 .push(messages[1].content.clone());
             Ok(ModelResponse {
+                reasoning: String::new(),
                 content: self.responses.lock().unwrap().remove(0),
                 tool_calls: Vec::new(),
                 usage: Default::default(),

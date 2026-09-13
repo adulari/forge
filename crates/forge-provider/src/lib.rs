@@ -614,6 +614,12 @@ pub struct ModelResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Usage,
+    /// The model's private thinking for THIS reply, when the provider returned it separately from
+    /// the answer. Kept because some thinking-mode APIs require it back verbatim on the next
+    /// request: DeepSeek answers `The reasoning_content in the thinking mode must be passed back
+    /// to the API` and rejects the turn, which made every tool-using turn die right after the
+    /// first tool result. Never shown as the answer and never part of `content`.
+    pub reasoning: String,
     /// Subscription quota observations surfaced by a CLI bridge this turn (Claude's
     /// `rate_limit_event` / Codex rollout). Empty for API providers / when the bridge
     /// reported nothing. Multiple entries when both the 5h and weekly windows were observed.
