@@ -259,7 +259,17 @@ impl Session {
         model: &str,
         specs: &[forge_provider::ToolSpec],
     ) -> Vec<Message> {
-        let preamble = self.system_preamble();
+        let mut preamble = self.system_preamble();
+        // Per-provider system-prompt override: when the user configured a custom prompt for this
+        // model's namespace, swap it in for the base coding-agent prompt (always the first preamble
+        // message). The live env block and any minimal-diff bias are kept.
+        if let Some(override_prompt) = self
+            .config
+            .system_prompt_overrides
+            .get(forge_config::provider_of(model))
+        {
+            preamble[0].content.clone_from(override_prompt);
+        }
         let window = self.effective_context_window(model) as usize;
         let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as usize;
         let preamble_tokens: usize = preamble.iter().map(message_tokens).sum();

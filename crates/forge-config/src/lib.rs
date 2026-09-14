@@ -137,6 +137,12 @@ pub struct Config {
     /// discovery + routing identically. Empty = inert.
     #[serde(default)]
     pub providers: ProvidersConfig,
+    /// Per-provider system-prompt overrides, keyed by provider namespace (e.g. `"kimi"`). When a
+    /// namespace has an entry, its models get that text as the base coding-agent prompt in the main
+    /// loop, replacing the built-in [`FORGE_SYSTEM`] prompt (the live env block and any minimal-diff
+    /// bias are kept). For experimentation; empty = inert.
+    #[serde(default)]
+    pub system_prompt_overrides: HashMap<String, String>,
     /// Remote control server (`/remote`): drive this session from a phone or browser. `auto`
     /// starts it at chat launch so the session is reachable without typing `/remote` first.
     #[serde(default)]
@@ -2597,6 +2603,7 @@ impl Default for Config {
             statusline: StatuslineConfig::default(),
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
+            system_prompt_overrides: HashMap::new(),
             remote: RemoteConfig::default(),
             anywhere: AnywhereConfig::default(),
             voice: VoiceConfig::default(),
