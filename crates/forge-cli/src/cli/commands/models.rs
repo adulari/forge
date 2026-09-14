@@ -365,7 +365,15 @@ pub(crate) async fn models(
             if !forge_mesh::pin_is_dispatchable(&m.id) {
                 tags.push("no key".into());
             }
-            println!("  {name:<30} {}", tags.join(" · "));
+            // A provider-published display name (Kimi Code's `kimi-for-coding` → "K2.8 Preview")
+            // shown beside the routing id, so opaque plan-slot ids say which model they are. Only
+            // when it adds information — skipped when it just restates the id.
+            let display = cat
+                .display_name(&m.id)
+                .filter(|d| !d.eq_ignore_ascii_case(name))
+                .map(|d| format!("  [{d}]"))
+                .unwrap_or_default();
+            println!("  {name:<30} {}{display}", tags.join(" · "));
         }
     }
     println!("\nmesh auto-pick per tier:");

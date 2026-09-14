@@ -295,10 +295,14 @@ pub async fn list_models(namespace: &str) -> Result<Vec<String>, ProviderError> 
 /// — current or future — with no per-provider code: the endpoint and key env var come from the
 /// registry row. genai has no SDK adapter for these providers (so [`list_models`] can't enumerate
 /// them), but their OpenAI-compatible `models` endpoint returns the full catalog the key can reach,
-/// so the mesh sees every model instead of a hand-seeded few. Returns `provider::id` ids; clearly
-/// non-chat ids (embedding / reranking) are dropped — they can't serve chat completions and would
-/// only add dead weight and failover churn to routing.
-pub async fn list_custom_models(namespace: &str) -> Result<Vec<String>, ProviderError> {
+/// so the mesh sees every model instead of a hand-seeded few. Returns `(provider::id, display_name)`
+/// pairs — the `display_name` is the provider's human label when it publishes one (`None`
+/// otherwise), so a provider whose ids are opaque plan slots (Kimi Code: `k3`, `kimi-for-coding`)
+/// can still be shown by the model it actually is. Clearly non-chat ids (embedding / reranking) are
+/// dropped — they can't serve chat completions and would only add dead weight and failover churn.
+pub async fn list_custom_models(
+    namespace: &str,
+) -> Result<Vec<(String, Option<String>)>, ProviderError> {
     let cp = forge_config::custom_provider(namespace)
         .ok_or_else(|| ProviderError::Request(format!("`{namespace}` is not a custom provider")))?;
     // A keyless local server (LM Studio / llama.cpp / vLLM with no auth) has no key — send a
@@ -318,7 +322,7 @@ async fn list_custom_models_at(
     namespace: &str,
     endpoint: &str,
     key: &str,
-) -> Result<Vec<String>, ProviderError> {
+) -> Result<Vec<(String, Option<String>)>, ProviderError> {
     let url = format!("{endpoint}models");
     // Bound the whole call so a hung load balancer can't stall catalog refresh / startup.
     with_discovery_timeout(&format!("{namespace} `/models` listing"), async move {
@@ -347,9 +351,21 @@ async fn list_custom_models_at(
         })?;
         Ok(data
             .iter()
-            .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
-            .map(|id| format!("{namespace}::{id}"))
-            .filter(|id| !forge_config::is_non_chat_model(id))
+            .filter_map(|m| {
+                let id = format!("{namespace}::{}", m.get("id").and_then(|i| i.as_str())?);
+                if forge_config::is_non_chat_model(&id) {
+                    return None;
+                }
+                // The provider's human label (Kimi Code's `display_name`, "K3" / "K2.8 Preview")
+                // when it publishes one, so opaque plan-slot ids can be shown as the model they are.
+                let display = m
+                    .get("display_name")
+                    .and_then(|d| d.as_str())
+                    .map(str::trim)
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_string);
+                Some((id, display))
+            })
             .collect())
     })
     .await
@@ -2702,8 +2718,40 @@ mod tests {
         assert_eq!(
             models,
             vec![
-                "qwencloud::qwen3.8-max-preview".to_string(),
-                "qwencloud::deepseek-v4-pro".to_string(),
+                ("qwencloud::qwen3.8-max-preview".to_string(), None),
+                ("qwencloud::deepseek-v4-pro".to_string(), None),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_discovery_captures_display_names_when_published() {
+        let server = httpmock::MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/coding/v1/models");
+            then.status(200).json_body(json!({
+                "data": [
+                    {"id": "k3", "display_name": "K3"},
+                    {"id": "kimi-for-coding", "display_name": "K2.8 Preview"},
+                    {"id": "bare", "display_name": ""},
+                    {"id": "plain"}
+                ]
+            }));
+        });
+        let endpoint = format!("{}/coding/v1/", server.base_url());
+        let models = list_custom_models_at("kimi", &endpoint, "k")
+            .await
+            .expect("discovery should succeed");
+        assert_eq!(
+            models,
+            vec![
+                ("kimi::k3".to_string(), Some("K3".to_string())),
+                (
+                    "kimi::kimi-for-coding".to_string(),
+                    Some("K2.8 Preview".to_string())
+                ),
+                ("kimi::bare".to_string(), None),
+                ("kimi::plain".to_string(), None),
             ]
         );
     }

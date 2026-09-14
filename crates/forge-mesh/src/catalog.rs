@@ -54,6 +54,12 @@ pub struct ModelCatalog {
     /// session, while the portable catalog remains static model metadata.
     #[serde(skip)]
     calibration: HashMap<String, RuntimeCalibration>,
+    /// Human display names a provider published for its models (Kimi Code's `display_name`: `k3` →
+    /// "K3", `kimi-for-coding` → "K2.8 Preview"), keyed by full id. Populated live at discovery and
+    /// not serialized — it is a display convenience for `forge models`, never a routing input, so a
+    /// cache load without it simply shows ids (the previous behaviour).
+    #[serde(skip)]
+    display_names: HashMap<String, String>,
 }
 
 /// Bounded, aggregate runtime evidence supplied by Forge's local outcome ledger.  Static
@@ -864,7 +870,21 @@ impl ModelCatalog {
             effort_ladders: HashMap::new(),
             burn_weights: HashMap::new(),
             calibration: HashMap::new(),
+            display_names: HashMap::new(),
         }
+    }
+
+    /// Attach provider-published display names (keyed by full id). Entries for ids not in the
+    /// catalog are harmless — they are only ever looked up by [`Self::display_name`].
+    pub fn with_display_names(mut self, display_names: HashMap<String, String>) -> Self {
+        self.display_names = display_names;
+        self
+    }
+
+    /// The provider's human label for `id`, if one was published at discovery (e.g. Kimi Code's
+    /// `k3` → "K3", `kimi-for-coding` → "K2.8 Preview"). `None` when the id is its own best name.
+    pub fn display_name(&self, id: &str) -> Option<&str> {
+        self.display_names.get(id).map(String::as_str)
     }
 
     /// Drop every model `keep` rejects, preserving the attached bench/pricing metadata. Used to
@@ -2808,6 +2828,22 @@ mod tests {
             pressured.1[0].model, "opencode_go::muse-spark-1.2-contributor",
             "window pressure must steer within the provider before displacing it"
         );
+    }
+
+    #[test]
+    fn display_names_annotate_ids_without_becoming_routing_keys() {
+        let cat = ModelCatalog::new(vec!["kimi::k3".into(), "kimi::kimi-for-coding".into()])
+            .with_display_names(HashMap::from([(
+                "kimi::kimi-for-coding".to_string(),
+                "K2.8 Preview".to_string(),
+            )]));
+        assert_eq!(
+            cat.display_name("kimi::kimi-for-coding"),
+            Some("K2.8 Preview")
+        );
+        assert_eq!(cat.display_name("kimi::k3"), None);
+        // The id set — the routing keys — is untouched by the display map.
+        assert_eq!(cat.models(), ["kimi::k3", "kimi::kimi-for-coding"]);
     }
 
     #[test]
