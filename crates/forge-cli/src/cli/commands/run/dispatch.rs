@@ -868,7 +868,7 @@ and keep going."
                 // but network-backed, while explain_routing itself is synchronous.
                 let store = { session_c.lock().await.store.clone() };
                 crate::cli::commands::models::refresh_codex_quota(&store).await;
-                crate::cli::commands::models::refresh_opencode_go_quota(&store).await;
+                crate::cli::commands::models::refresh_polled_quotas(&store).await;
                 let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
                     .await
                     .unwrap_or_default();

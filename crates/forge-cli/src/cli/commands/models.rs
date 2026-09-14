@@ -92,6 +92,16 @@ pub(crate) use codex_quota::refresh_codex_quota;
 mod opencode_go_quota;
 pub(crate) use opencode_go_quota::{refresh_opencode_go_quota, OPENCODE_GO_PROVIDER};
 
+mod kimi_quota;
+
+/// Refresh every subscription whose windows are observable only by polling (OpenCode Go, Kimi
+/// Code). Each refresher carries its own freshness gate and no-key early return, so callers on the
+/// routing path pay at most one plain GET per provider every few minutes.
+pub(crate) async fn refresh_polled_quotas(store: &forge_store::Store) {
+    refresh_opencode_go_quota(store).await;
+    kimi_quota::refresh_kimi_quota(store).await;
+}
+
 mod discovery;
 pub(crate) use discovery::{
     discover_catalog, discover_catalog_with_status, invalidate_catalog_cache, load_cached_catalog,
@@ -291,8 +301,8 @@ pub(crate) async fn models(
 
     let pricing = discovery::pricing_with_fetched_rates(&config);
     // Subscription windows are what decides whether a listed model can actually be used right
-    // now; OpenCode Go only publishes its three windows through a poll.
-    refresh_opencode_go_quota(&store).await;
+    // now; OpenCode Go and Kimi Code only publish their windows through a poll.
+    refresh_polled_quotas(&store).await;
     let subscription_windows = store.subscription_windows().unwrap_or_default();
     let benched = forge_core::readiness::ProviderReadiness::snapshot(&config, &store).health;
     let s = cat.stats(&pricing);
@@ -604,9 +614,9 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
     // Codex prefers a fresh account-wide OAuth header reading; a fresh CLI rollout is the
     // no-cost fallback. Expired readings are never allowed to bias this route.
     refresh_codex_quota(&store).await;
-    // OpenCode Go publishes its three windows only through a poll, so `forge mesh` refreshes them
-    // on the same cadence as Codex rather than showing an unobserved provider.
-    refresh_opencode_go_quota(&store).await;
+    // OpenCode Go and Kimi Code publish their windows only through a poll, so `forge mesh`
+    // refreshes them on the same cadence as Codex rather than showing an unobserved provider.
+    refresh_polled_quotas(&store).await;
     // `/mesh` must score exactly like a real session: static benchmark data remains dominant,
     // while sufficiently broad local outcome evidence provides a small quality/latency tie-break.
     let cat = apply_outcome_calibration(cat, &store);

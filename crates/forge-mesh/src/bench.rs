@@ -494,6 +494,9 @@ pub fn select_rung(
 /// model part's own tokens.
 fn id_tokens(id: &str) -> Vec<String> {
     let (provider, model) = id.split_once("::").unwrap_or(("", id));
+    if provider == "kimi" {
+        return tokens(kimi_code_benchmark_name(model));
+    }
     let mut toks = match provider {
         "claude-cli" | "anthropic" => vec!["claude".to_string()],
         "codex-cli" => vec!["gpt".to_string()],
@@ -502,6 +505,22 @@ fn id_tokens(id: &str) -> Vec<String> {
     };
     toks.extend(tokens(model));
     toks
+}
+
+/// The benchmark row a Kimi Code subscription id is measured by.
+///
+/// The endpoint names its models by plan slot, not by model: `k3` alone tokenises to a one-letter
+/// family that the fuzzy matcher (correctly) refuses, so without this the whole provider read as
+/// unscored and routed on heuristics. The mapping follows each id's own `/models` `display_name`
+/// (read 2026-09-14). `kimi-for-coding` is "K2.8 Preview", which has no published row, so it takes
+/// its predecessor's K2.7 Code score as the conservative prior — the same rule
+/// [`BenchmarkScores::predecessor_canon`] applies to other unrated successors.
+fn kimi_code_benchmark_name(model: &str) -> &str {
+    match model {
+        "k3" | "k3-256k" => "kimi-k3",
+        "kimi-for-coding" | "kimi-for-coding-highspeed" => "kimi-k2.7-code",
+        other => other,
+    }
 }
 
 /// Lowercased alphanumeric tokens, split on separators AND letter↔digit boundaries, so
@@ -930,6 +949,19 @@ mod tests {
         // `claude-cli::opus` has no version — must map to a Claude-Opus row (the higher one on tie).
         let s = b.score_for("claude-cli::opus").unwrap();
         assert_eq!(s.intelligence, 64.0, "bare opus → best Claude-Opus");
+    }
+
+    #[test]
+    fn kimi_code_plan_slots_map_to_their_measured_models() {
+        let mut b = BenchmarkScores::new();
+        b.insert("Kimi K3", 43.8, 76.2);
+        b.insert("Kimi K2.7 Code", 26.3, 60.8);
+        for id in ["kimi::k3", "kimi::k3-256k"] {
+            assert_eq!(b.score_for(id).unwrap().coding, 76.2, "{id}");
+        }
+        for id in ["kimi::kimi-for-coding", "kimi::kimi-for-coding-highspeed"] {
+            assert_eq!(b.score_for(id).unwrap().coding, 60.8, "{id}");
+        }
     }
 
     #[test]

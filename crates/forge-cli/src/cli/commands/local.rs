@@ -31,6 +31,7 @@ pub(crate) fn provider_label(provider: &str) -> &'static str {
         "openrouter" => "OpenRouter (gateway, many models) — paid + some :free",
         "groq" => "Groq — free tier (fast)",
         "opencode_go" => "OpenCode Go — subscription (curated coding models)",
+        "kimi" => "Kimi Code — subscription (K3, Kimi for Coding)",
         "opencode" => "OpenCode Zen — API credits + free tier",
         "github_copilot" => "GitHub Models — free inference",
         "mimo" => "Xiaomi MiMo — free",

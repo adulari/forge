@@ -572,7 +572,10 @@ fn quota_observation_is_current(provider: &str, window: &str, updated_at: i64, n
         "weekly" => 7 * 24 * 60 * 60,
         _ => 30 * 24 * 60 * 60,
     };
-    let freshness = if matches!(provider, "codex-oauth" | "codex-cli" | "opencode_go") {
+    let freshness = if matches!(
+        provider,
+        "codex-oauth" | "codex-cli" | "opencode_go" | "kimi"
+    ) {
         window_age.min(forge_types::CODEX_QUOTA_FRESHNESS_SECS)
     } else {
         window_age
@@ -583,8 +586,10 @@ fn quota_observation_is_current(provider: &str, window: &str, updated_at: i64, n
 /// Poll-only/shared accounts can be consumed outside Forge, so observations need a shorter
 /// source-freshness gate than their rolling-window lifetime.
 fn live_quota_is_fresh(provider: &str, updated_at: i64, now: i64) -> bool {
-    !matches!(provider, "codex-oauth" | "codex-cli" | "opencode_go")
-        || now.saturating_sub(updated_at) <= forge_types::CODEX_QUOTA_FRESHNESS_SECS
+    !matches!(
+        provider,
+        "codex-oauth" | "codex-cli" | "opencode_go" | "kimi"
+    ) || now.saturating_sub(updated_at) <= forge_types::CODEX_QUOTA_FRESHNESS_SECS
 }
 
 fn quota_status_from_str(status: &str) -> forge_types::QuotaStatus {

@@ -209,6 +209,18 @@ pub const CUSTOM_OPENAI_PROVIDERS: &[CustomProvider] = &[
         seed_models: &[],
     },
     CustomProvider {
+        // Kimi Code: Moonshot's flat coding subscription. OpenAI-compatible chat completions with
+        // automatic prefix caching (`prompt_tokens_details.cached_tokens`), a live `/models`
+        // listing with `context_length`, and a poll-only quota at `/usages`. Every model refuses
+        // any temperature but 1 — see `forge_types::effort::model_rejects_temperature`.
+        namespace: "kimi",
+        endpoint: "https://api.kimi.com/coding/v1/",
+        env_var: "KIMI_API_KEY",
+        free: false,
+        label: "Kimi Code — subscription (K3, Kimi for Coding)",
+        seed_models: &[],
+    },
+    CustomProvider {
         namespace: "cerebras",
         endpoint: "https://api.cerebras.ai/v1/",
         env_var: "CEREBRAS_API_KEY",

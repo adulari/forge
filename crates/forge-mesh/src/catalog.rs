@@ -100,7 +100,8 @@ fn de_named_models<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>
 /// opposed to a metered or genuinely-free API. Kept separate from "free" in the overview counts.
 /// OpenCode Go bills a flat subscription with $0 marginal cost, so it counts as subscription even
 /// though it is not a "free" tier; OpenCode Zen (the `opencode::` credit surface) is NOT — it is
-/// metered per-token and belongs in `is_free`'s per-model world.
+/// metered per-token and belongs in `is_free`'s per-model world. Kimi Code (`kimi::`) is the same
+/// shape as Go: a flat monthly plan metered only by a rolling window, never per token.
 /// Documented in docs/features/mesh-routing.md.
 pub fn is_subscription(id: &str) -> bool {
     id.starts_with("claude-cli::")
@@ -110,6 +111,7 @@ pub fn is_subscription(id: &str) -> bool {
         || id.starts_with("codex-oauth::")
         || id.starts_with("qwencloud::")
         || id.starts_with("opencode_go::")
+        || id.starts_with("kimi::")
 }
 
 /// Whether a model is genuinely free to call. "Free" needs *positive* evidence, not just a missing
@@ -2806,6 +2808,14 @@ mod tests {
             pressured.1[0].model, "opencode_go::muse-spark-1.2-contributor",
             "window pressure must steer within the provider before displacing it"
         );
+    }
+
+    #[test]
+    fn kimi_code_is_subscription_and_never_free() {
+        for id in ["kimi::k3", "kimi::kimi-for-coding-highspeed"] {
+            assert!(is_subscription(id), "{id}");
+            assert!(!is_free(id, 0.0, true), "{id}");
+        }
     }
 
     #[test]

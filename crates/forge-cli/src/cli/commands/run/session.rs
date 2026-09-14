@@ -194,12 +194,12 @@ pub(crate) async fn build_session_with_self_mcp(
         crate::cli::commands::models::refresh_codex_quota(&store).await;
         clock.mark("codex quota refresh");
     }
-    // OpenCode Go's windows only move when polled — its chat completions carry no rate-limit
-    // headers — so the same pre-routing refresh keeps its pacing from running on stale data. The
+    // OpenCode Go's and Kimi Code's windows only move when polled — their chat completions carry
+    // no rate-limit headers — so the same pre-routing refresh keeps pacing off stale data. Each
     // helper's own freshness gate bounds this to one request every few minutes.
     if should_refresh_opencode_go_quota(mock, pin.as_deref()) {
-        crate::cli::commands::models::refresh_opencode_go_quota(&store).await;
-        clock.mark("opencode go quota refresh");
+        crate::cli::commands::models::refresh_polled_quotas(&store).await;
+        clock.mark("polled subscription quota refresh");
     }
     let store_for_lattice = Arc::clone(&store);
     // Startup hint: if models are benched from a prior run/probe, tell the user how to recheck
