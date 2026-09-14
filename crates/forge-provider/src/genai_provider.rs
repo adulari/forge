@@ -811,6 +811,25 @@ fn requires_reasoning_echo(model: &str) -> bool {
     model.starts_with("deepseek::") || model.starts_with("kimi::")
 }
 
+/// The reasoning seed appended as a Kimi partial prefill. A constant so it is trivial to find,
+/// tune, or clear while comparing output quality.
+const KIMI_REASONING_PREFILL: &str = "I will continue the current task carefully and completely.";
+
+/// Kimi Code supports Moonshot's Partial Mode: appending a trailing assistant message whose
+/// `reasoning_content` seeds the start of the model's thinking, flagged `partial: true`. Scoped to
+/// `kimi::` and skipped for structured-output requests, which the API warns against mixing with
+/// Partial Mode.
+fn kimi_partial_prefill(model: &str, opts: &CompletionOptions) -> Option<ChatMessage> {
+    if !model.starts_with("kimi::") || opts.response_format.is_some() {
+        return None;
+    }
+    Some(
+        ChatMessage::assistant("")
+            .with_reasoning_content(Some(KIMI_REASONING_PREFILL.to_string()))
+            .with_partial(true),
+    )
+}
+
 fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMessage> {
     // Providers replay the whole transcript on every call, and several enforce a hard cap
     // (e.g. "At most 1 image(s) may be provided in one prompt") on the total images in a
@@ -1047,6 +1066,9 @@ impl Provider for GenAiProvider {
         let model_name = to_genai_model(model);
 
         let mut genai_messages = to_genai_messages(messages, requires_reasoning_echo(&model_name));
+        if let Some(prefill) = kimi_partial_prefill(&model_name, opts) {
+            genai_messages.push(prefill);
+        }
         mark_cache_breakpoints(&mut genai_messages);
         let mut req = ChatRequest::new(genai_messages);
         if !tools.is_empty() {
@@ -1622,6 +1644,33 @@ mod tests {
         // A thinking model served by another provider does not enforce the echo.
         assert!(!requires_reasoning_echo("nvidia::deepseek-ai/deepseek-r1"));
         assert!(!requires_reasoning_echo("nvidia::moonshotai/kimi-k3"));
+    }
+
+    #[test]
+    fn kimi_gets_a_partial_reasoning_prefill_unless_structured_output() {
+        let opts = CompletionOptions::default();
+        let prefill = kimi_partial_prefill("kimi::k3", &opts).expect("kimi prefills");
+        assert_eq!(prefill.role, ChatRole::Assistant);
+        assert_eq!(prefill.partial, Some(true), "flagged partial: true");
+        assert!(
+            prefill.content.texts().iter().all(|t| t.is_empty()),
+            "empty prose"
+        );
+        assert_eq!(
+            prefill.content.joined_reasoning_content().as_deref(),
+            Some(KIMI_REASONING_PREFILL)
+        );
+
+        // Only Kimi Code prefills.
+        assert!(kimi_partial_prefill("deepseek::deepseek-flash", &opts).is_none());
+        assert!(kimi_partial_prefill("openai::gpt-4o-mini", &opts).is_none());
+
+        // Structured output must not mix with Partial Mode.
+        let json = CompletionOptions {
+            response_format: Some(ResponseFormat::JsonObject),
+            ..CompletionOptions::default()
+        };
+        assert!(kimi_partial_prefill("kimi::k3", &json).is_none());
     }
 
     #[test]

@@ -393,6 +393,11 @@ impl OpenAIAdapter {
 					if !reasoning_parts.is_empty() {
 						message.x_insert("reasoning_content", reasoning_parts.join("\n"))?;
 					}
+					// Moonshot/Kimi partial prefill: a trailing assistant message flagged so the
+					// API seeds the model's thinking from `reasoning_content` instead of starting cold.
+					if msg.partial == Some(true) {
+						message.x_insert("partial", true)?;
+					}
 					messages.push(message);
 				}
 
@@ -602,6 +607,30 @@ mod tests {
 		assert_eq!(
 			assistant_json["reasoning_content"], "I should look up the weather.",
 			"reasoning_content should be present in serialized assistant message"
+		);
+	}
+
+	/// A Kimi partial-prefill assistant message must serialize `partial: true` alongside its
+	/// reasoning_content, so the API seeds the model's thinking.
+	#[test]
+	fn test_partial_prefill_serialized_on_assistant_message() {
+		let prefill = ChatMessage::assistant("")
+			.with_reasoning_content(Some(
+				"I will continue the current task carefully and completely.".to_string(),
+			))
+			.with_partial(true);
+
+		let chat_req = ChatRequest::new(vec![ChatMessage::user("task"), prefill]);
+
+		let parts = OpenAIAdapter::into_openai_request_parts(&test_model(), chat_req).expect("should serialize");
+
+		let assistant_json = &parts.messages[1];
+		assert_eq!(assistant_json["role"], "assistant");
+		assert_eq!(assistant_json["content"], "");
+		assert_eq!(assistant_json["partial"], true);
+		assert_eq!(
+			assistant_json["reasoning_content"], "I will continue the current task carefully and completely.",
+			"reasoning_content should ride on the partial prefill"
 		);
 	}
 
