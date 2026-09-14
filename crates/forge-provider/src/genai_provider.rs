@@ -804,8 +804,11 @@ fn hoist_system_messages(messages: &[Message]) -> Vec<&Message> {
 /// live API (2026-09-10): omitting the field errors, an EMPTY string is accepted, and the real
 /// reasoning is accepted — so the field's presence is what matters, not its content. That matters
 /// because a reply that calls a tool does not always stream any reasoning to capture.
+///
+/// Kimi Code advertises the same thinking-only contract (`supports_thinking_type: "only"` in its
+/// `/models` listing, read 2026-09-14) and takes the same echo.
 fn requires_reasoning_echo(model: &str) -> bool {
-    model.starts_with("deepseek::")
+    model.starts_with("deepseek::") || model.starts_with("kimi::")
 }
 
 fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMessage> {
@@ -1610,12 +1613,15 @@ mod tests {
     }
 
     #[test]
-    fn only_deepseek_is_forced_to_echo_its_reasoning() {
+    fn thinking_only_apis_are_forced_to_echo_their_reasoning() {
         assert!(requires_reasoning_echo("deepseek::deepseek-flash"));
         assert!(requires_reasoning_echo("deepseek::deepseek-v4-pro"));
+        assert!(requires_reasoning_echo("kimi::k3"));
+        assert!(requires_reasoning_echo("kimi::kimi-for-coding"));
         assert!(!requires_reasoning_echo("openai::gpt-4o-mini"));
-        // A DeepSeek model served by someone else does not enforce the echo.
+        // A thinking model served by another provider does not enforce the echo.
         assert!(!requires_reasoning_echo("nvidia::deepseek-ai/deepseek-r1"));
+        assert!(!requires_reasoning_echo("nvidia::moonshotai/kimi-k3"));
     }
 
     #[test]
