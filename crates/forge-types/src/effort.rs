@@ -58,6 +58,13 @@ const FULL_LADDER: &[EffortLevel] = &[
     EffortLevel::WhiteHot,
 ];
 
+/// Kimi Code's rungs. Its `/models` publishes `think_efforts.valid_efforts = ["low","high","max"]`
+/// for every model that has the control (read 2026-09-14) — no `medium` and no `xhigh`. Those three
+/// map onto Forge's Low / High / White-hot (whose wire spelling is `max`). Not a prefix of
+/// `FULL_LADDER`, so it is its own list rather than a slice: sending `medium`/`xhigh` would name a
+/// rung Kimi does not define.
+const KIMI_LADDER: &[EffortLevel] = &[EffortLevel::Low, EffortLevel::High, EffortLevel::WhiteHot];
+
 /// The rungs a provider surface accepts, weakest first. Empty means the surface has no control.
 ///
 /// `provider` is the namespace of a Forge id (`codex-oauth::gpt-6-astra` → `codex-oauth`).
@@ -75,10 +82,10 @@ pub fn ladder(provider: &str, model: &str) -> &'static [EffortLevel] {
         // own config. `max` is deliberately excluded — no evidence it is accepted, and being
         // clamped one rung down is recoverable where a rejected turn is not.
         "codex-cli" | "codex-oauth" => &FULL_LADDER[..4],
-        // Kimi Code: every model's `/models` entry is `supports_thinking_type: "only"`, and the
-        // endpoint accepted low, medium, high, xhigh and max live (2026-09-14). Keyed on the
-        // namespace because `k3` names no vendor family for the model check below to find.
-        "kimi" => &FULL_LADDER[..4],
+        // Kimi Code publishes `valid_efforts = ["low","high","max"]` — three rungs, not five (see
+        // KIMI_LADDER). Keyed on the namespace because `k3` names no vendor family for the model
+        // check below to find.
+        "kimi" => KIMI_LADDER,
         // Everything else goes over the generic (genai/OpenAI-compatible) path, where an effort
         // field is only meaningful for a reasoning model.
         _ => {
@@ -371,6 +378,29 @@ mod tests {
             assert!(model_rejects_temperature(id), "{id} only accepts 1");
             assert!(has_control(id), "{id} still takes reasoning_effort");
         }
+    }
+
+    #[test]
+    fn kimi_code_ladder_is_its_published_low_high_max_not_the_generic_five() {
+        // Kimi's own three rungs, mapped onto Forge levels whose wire spellings are low/high/max.
+        assert_eq!(
+            ladder("kimi", "k3"),
+            &[EffortLevel::Low, EffortLevel::High, EffortLevel::WhiteHot]
+        );
+        assert_eq!(wire_name(EffortLevel::WhiteHot), "max");
+        // A pin Kimi supports is sent verbatim; the top rung is `max`, never `xhigh`.
+        assert_eq!(
+            resolve("kimi", "k3", Some(EffortLevel::High)).sent,
+            Some(EffortLevel::High)
+        );
+        assert_eq!(
+            resolve("kimi", "k3", Some(EffortLevel::WhiteHot)).sent,
+            Some(EffortLevel::WhiteHot)
+        );
+        // A rung Kimi does not define clamps to its ceiling (`max`), not to a fabricated `xhigh`.
+        let x = resolve("kimi", "k3", Some(EffortLevel::XHigh));
+        assert_eq!(x.sent, Some(EffortLevel::WhiteHot));
+        assert_eq!(x.reason, EffortReason::ClampedToCeiling);
     }
 
     #[test]
