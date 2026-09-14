@@ -228,6 +228,53 @@ mod tests {
 
     const ASTRA: &str = "codex-oauth::gpt-6-astra";
 
+    /// Kimi K3's real ladder. The feed rates it at exactly TWO rungs — verified in
+    /// `benchmarks.json` on 2026-09-14: "Kimi K3 (low)" and "Kimi K3 (max)". There is no medium,
+    /// high or xhigh measurement, which is what makes it the interesting case: a gapped ladder.
+    fn kimi_k3_ladder() -> Vec<(BenchEffort, BenchScore)> {
+        [
+            (BenchEffort::Low, 30.5, 72.0),
+            (BenchEffort::Max, 43.8, 76.2),
+        ]
+        .into_iter()
+        .map(|(rung, intelligence, coding)| {
+            (
+                rung,
+                BenchScore {
+                    intelligence,
+                    coding,
+                },
+            )
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_ceiling_below_a_gapped_ladders_top_does_not_leave_the_model_at_max() {
+        let ladder = kimi_k3_ladder();
+        // Uncapped, max is the honest pick: 4.2 coding points above low, far outside the band.
+        assert_eq!(
+            crate::bench::select_rung(&ladder, None, true),
+            Some(EffortLevel::WhiteHot),
+            "uncapped, the measurably better rung wins"
+        );
+        // Every ceiling below the top must fall to the only lower rated rung — never stay at max.
+        // This is the mechanism a Kimi session depends on: its ladder has nothing between low and
+        // max, so a pin anywhere under the top can only mean low.
+        for cap in [
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::XHigh,
+        ] {
+            assert_eq!(
+                crate::bench::select_rung(&ladder, Some(cap), true),
+                Some(EffortLevel::Low),
+                "ceiling {cap:?} must cap the rung, not pin max"
+            );
+        }
+    }
+
     #[test]
     fn a_coding_turn_buys_the_cheap_step_to_the_best_coding_rung() {
         // high is Astra's best coding rung and costs only 1.22x medium — worth buying. This is the
