@@ -1134,15 +1134,24 @@ impl Provider for GenAiProvider {
         // this surface can be asked for — and whether it has a knob at all — is decided by
         // `effort::resolve`, so the generic path, the codex transports and the CLI bridges all
         // clamp against one table instead of three private matches that could drift apart.
-        let effort_decision = forge_types::effort::resolve("", &model_name, opts.effort);
+        // Resolve against the model's OWN provider ladder. Passing an empty provider fell through
+        // to the generic "any reasoning model" ladder (low/medium/high/xhigh), so a provider with
+        // its own published rungs was asked for rungs it does not define — Kimi Code was shown as
+        // `max` by the mesh while the request on the wire said `xhigh`.
+        let effort_decision = forge_types::effort::resolve_id(&model_name, opts.effort);
         if let Some(level) = effort_decision.sent {
             let re = match level {
                 EffortLevel::Low => ReasoningEffort::Low,
                 EffortLevel::Medium => ReasoningEffort::Medium,
                 EffortLevel::High => ReasoningEffort::High,
-                // This path tops out at xhigh — WhiteHot's extra lift is orchestration guidance in
-                // forge-core, not a provider knob — and `resolve` has already clamped to it.
-                EffortLevel::XHigh | EffortLevel::WhiteHot => ReasoningEffort::XHigh,
+                EffortLevel::XHigh => ReasoningEffort::XHigh,
+                // White-hot's spelling on the wire is `max` (`effort::wire_name`), and genai
+                // carries that variant. Collapsing it onto xhigh here meant a surface whose top
+                // documented rung IS `max` — Kimi Code publishes exactly low/high/max — could
+                // never actually be asked for it: the mesh displayed `max` while the request said
+                // `xhigh`. Only a ladder that offers WhiteHot reaches this arm, and on this path
+                // that is Kimi Code alone (the CLI bridges do not come through genai).
+                EffortLevel::WhiteHot => ReasoningEffort::Max,
             };
             options = options.with_reasoning_effort(re);
             reasoning_engaged = true;

@@ -26,6 +26,9 @@ pub enum EffortReason {
     AsRequested,
     /// The surface's ladder stops below the request, so the top rung it does have is sent.
     ClampedToCeiling,
+    /// The surface offers no such rung but does offer higher ones, so the closest rung BELOW the
+    /// request is sent. Only reachable on a ladder with a gap in it (Kimi Code: low/high/max).
+    ClampedToOffered,
     /// The surface exposes no reasoning-effort control at all; the pin cannot reach the model and
     /// only affects Forge-side routing.
     NoControl,
@@ -122,10 +125,33 @@ pub fn resolve(provider: &str, model: &str, requested: Option<EffortLevel>) -> E
             reason: EffortReason::AsRequested,
         };
     }
+    // The request names a rung this surface does not offer. Take the highest offered rung at or
+    // BELOW it — never above.
+    //
+    // Clamping straight to the ceiling was right only while every ladder was a prefix of
+    // `FULL_LADDER`, where "not offered" could only mean "above the top". A ladder with a hole in
+    // it (Kimi Code: low/high/max, no medium or xhigh) broke that assumption badly: `medium`
+    // jumped to the ceiling, so four of the five slider positions ran the model at its most
+    // expensive rung. Rounding down keeps the pin monotonic and never escalates spend the user
+    // did not ask for; for a prefix ladder it is identical to the old behaviour, because the only
+    // unoffered rungs are the ones above the ceiling.
+    let rank = |level: EffortLevel| FULL_LADDER.iter().position(|&l| l == level).unwrap_or(0);
+    let wanted = rank(requested_level);
+    let sent = rungs
+        .iter()
+        .rev()
+        .copied()
+        .find(|&rung| rank(rung) <= wanted)
+        // Below the lowest rung the surface has: its floor is the closest it can get.
+        .unwrap_or(rungs[0]);
     EffortDecision {
         requested,
-        sent: Some(ceiling),
-        reason: EffortReason::ClampedToCeiling,
+        sent: Some(sent),
+        reason: if sent == ceiling {
+            EffortReason::ClampedToCeiling
+        } else {
+            EffortReason::ClampedToOffered
+        },
     }
 }
 
@@ -388,19 +414,43 @@ mod tests {
             &[EffortLevel::Low, EffortLevel::High, EffortLevel::WhiteHot]
         );
         assert_eq!(wire_name(EffortLevel::WhiteHot), "max");
-        // A pin Kimi supports is sent verbatim; the top rung is `max`, never `xhigh`.
+        // Every slider position, in order. The rungs Kimi offers are sent verbatim; the ones it
+        // does not (medium, xhigh) round DOWN to the nearest offered rung. Only an explicit
+        // white-hot pin reaches `max` — the bug this pins down ran four of the five positions at
+        // `max`, because an unoffered rung used to clamp UP to the ceiling.
+        let sent = |level| resolve("kimi", "k3", Some(level)).sent;
+        assert_eq!(sent(EffortLevel::Low), Some(EffortLevel::Low));
+        assert_eq!(sent(EffortLevel::Medium), Some(EffortLevel::Low));
+        assert_eq!(sent(EffortLevel::High), Some(EffortLevel::High));
+        assert_eq!(sent(EffortLevel::XHigh), Some(EffortLevel::High));
+        assert_eq!(sent(EffortLevel::WhiteHot), Some(EffortLevel::WhiteHot));
         assert_eq!(
-            resolve("kimi", "k3", Some(EffortLevel::High)).sent,
-            Some(EffortLevel::High)
+            resolve("kimi", "k3", Some(EffortLevel::XHigh)).reason,
+            EffortReason::ClampedToOffered
         );
-        assert_eq!(
-            resolve("kimi", "k3", Some(EffortLevel::WhiteHot)).sent,
-            Some(EffortLevel::WhiteHot)
-        );
-        // A rung Kimi does not define clamps to its ceiling (`max`), not to a fabricated `xhigh`.
-        let x = resolve("kimi", "k3", Some(EffortLevel::XHigh));
-        assert_eq!(x.sent, Some(EffortLevel::WhiteHot));
-        assert_eq!(x.reason, EffortReason::ClampedToCeiling);
+    }
+
+    #[test]
+    fn rounding_down_leaves_every_prefix_ladder_exactly_as_it_was() {
+        // The only unoffered rungs on a prefix ladder are the ones above its ceiling, so
+        // round-down and the old clamp-to-ceiling agree — this is what makes the change safe.
+        for (provider, model) in [
+            ("agy-cli", ""),
+            ("codex-oauth", "gpt-6-astra"),
+            ("", "claude"),
+        ] {
+            let rungs = ladder(provider, model);
+            let ceiling = *rungs.last().unwrap();
+            for level in FULL_LADDER {
+                let d = resolve(provider, model, Some(*level));
+                let expected = if rungs.contains(level) {
+                    *level
+                } else {
+                    ceiling
+                };
+                assert_eq!(d.sent, Some(expected), "{provider}/{model} at {level:?}");
+            }
+        }
     }
 
     #[test]
