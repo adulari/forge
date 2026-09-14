@@ -139,6 +139,7 @@ import {
   updateLiveActivity,
   type LiveActivityState,
 } from "../../modules/live-activity";
+import { historyPageSize } from "./historyPaging";
 import { formatCwd } from "../theme/typography";
 
 // FleetWatcher receives immediate daemon invalidations over /ws/fleet. This slow poll is only a
@@ -146,7 +147,6 @@ import { formatCwd } from "../theme/typography";
 const SERVER_FLEET_POLL_MS = 5000;
 const SERVER_FLEET_BACKOFF_MS = 15000;
 const PAST_PAGE_SIZE = 50;
-const HISTORY_PAGE_SIZE = 60;
 const baselines = new Map<string, number>();
 
 function keys(baseUrl: string | null) {
@@ -344,21 +344,24 @@ export function useSessionSearch(query: string, limit = 30) {
 export function useHistory(sessionId: string | null, options: { includeTools?: boolean } = {}) {
   const { baseUrl } = useAuth();
   const includeTools = options.includeTools ?? false;
+  // A tools page is a different size class from a plain one, because it must survive the Anywhere
+  // relay's inline-body budget (see historyPaging.ts). Both the request and the last-page test
+  // below read the SAME value: comparing a 15-row page against 60 would read as "short page, stop
+  // paging" and kill scrollback after the first page.
+  const pageSize = historyPageSize(includeTools);
   return useInfiniteQuery<HistoryRow[]>({
     queryKey: keys(baseUrl).history(sessionId ?? "", includeTools),
     queryFn: ({ pageParam }) =>
       getHistory(baseUrl as string, {
         session: sessionId as string,
-        limit: HISTORY_PAGE_SIZE,
+        limit: pageSize,
         before: pageParam as number | undefined,
         include_tools: includeTools || undefined,
       }),
     enabled: baseUrl != null && sessionId != null,
     initialPageParam: undefined as number | undefined,
     getNextPageParam: (lastPage) =>
-      lastPage.length < HISTORY_PAGE_SIZE
-        ? undefined
-        : lastPage[lastPage.length - 1]?.seq,
+      lastPage.length < pageSize ? undefined : lastPage[lastPage.length - 1]?.seq,
   });
 }
 
