@@ -19,6 +19,12 @@ pub struct ChatMessage {
 
 	/// Optional per-message options (e.g., cache control).
 	pub options: Option<MessageOptions>,
+
+	/// Moonshot/Kimi partial-prefill marker: a trailing assistant message flagged `partial: true`
+	/// whose `reasoning_content` seeds the start of the model's thinking. `None` for ordinary
+	/// messages; the OpenAI-compatible adapters serialize it as `"partial": true`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub partial: Option<bool>,
 }
 
 // region:    --- Constructors
@@ -29,6 +35,7 @@ impl ChatMessage {
 			role,
 			content: content.into(),
 			options: None,
+			partial: None,
 		}
 	}
 
@@ -38,6 +45,7 @@ impl ChatMessage {
 			role: ChatRole::System,
 			content: content.into(),
 			options: None,
+			partial: None,
 		}
 	}
 
@@ -47,6 +55,7 @@ impl ChatMessage {
 			role: ChatRole::Assistant,
 			content: content.into(),
 			options: None,
+			partial: None,
 		}
 	}
 
@@ -56,6 +65,7 @@ impl ChatMessage {
 			role: ChatRole::User,
 			content: content.into(),
 			options: None,
+			partial: None,
 		}
 	}
 
@@ -65,6 +75,7 @@ impl ChatMessage {
 			role: ChatRole::Tool,
 			content: content.into(),
 			options: None,
+			partial: None,
 		}
 	}
 }
@@ -95,6 +106,13 @@ impl ChatMessage {
 		if let Some(reasoning) = reasoning {
 			self.content.push(ContentPart::ReasoningContent(reasoning));
 		}
+		self
+	}
+
+	/// Mark this message as a partial prefill: a trailing assistant message whose
+	/// `reasoning_content` seeds the start of the model's thinking (Moonshot/Kimi).
+	pub fn with_partial(mut self, partial: bool) -> Self {
+		self.partial = Some(partial);
 		self
 	}
 
@@ -205,6 +223,7 @@ impl From<Vec<ToolCall>> for ChatMessage {
 			role: ChatRole::Assistant,
 			content: MessageContent::from(tool_calls),
 			options: None,
+			partial: None,
 		}
 	}
 }

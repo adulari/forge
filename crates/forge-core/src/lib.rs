@@ -5444,6 +5444,46 @@ mod tests {
         assert!(msgs[1].content.contains("platform:"));
     }
 
+    #[test]
+    fn provider_system_prompt_override_replaces_the_base_prompt() {
+        let provider = Arc::new(FlakyProvider {
+            bad: std::collections::HashSet::new(),
+            err: rate_limited,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "kimi::k3".into(),
+            fallbacks: vec![],
+        });
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = Config::default();
+        config.mesh.rate_limit_wait_secs = 0;
+        config
+            .system_prompt_overrides
+            .insert("kimi".to_string(), "CUSTOM KIMI PROMPT".to_string());
+        let session = Session::start(
+            store,
+            provider,
+            router,
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        // The override replaces the base prompt for the matched namespace, env block intact.
+        let msgs = session.transcript_with_preamble_and_tools("kimi::k3", &[]);
+        assert_eq!(msgs[0].content, "CUSTOM KIMI PROMPT");
+        assert!(msgs[1].content.contains("<env>"), "env block still present");
+
+        // Other providers keep the built-in prompt.
+        let msgs = session.transcript_with_preamble_and_tools("m", &[]);
+        assert!(
+            msgs[0].content.contains("You are Forge"),
+            "unmatched provider keeps the base prompt"
+        );
+    }
+
     #[tokio::test]
     async fn readonly_batch_runs_concurrently_and_preserves_order() {
         let provider = Arc::new(FlakyProvider {

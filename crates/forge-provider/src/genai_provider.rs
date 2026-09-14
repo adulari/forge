@@ -295,10 +295,14 @@ pub async fn list_models(namespace: &str) -> Result<Vec<String>, ProviderError> 
 /// — current or future — with no per-provider code: the endpoint and key env var come from the
 /// registry row. genai has no SDK adapter for these providers (so [`list_models`] can't enumerate
 /// them), but their OpenAI-compatible `models` endpoint returns the full catalog the key can reach,
-/// so the mesh sees every model instead of a hand-seeded few. Returns `provider::id` ids; clearly
-/// non-chat ids (embedding / reranking) are dropped — they can't serve chat completions and would
-/// only add dead weight and failover churn to routing.
-pub async fn list_custom_models(namespace: &str) -> Result<Vec<String>, ProviderError> {
+/// so the mesh sees every model instead of a hand-seeded few. Returns `(provider::id, display_name)`
+/// pairs — the `display_name` is the provider's human label when it publishes one (`None`
+/// otherwise), so a provider whose ids are opaque plan slots (Kimi Code: `k3`, `kimi-for-coding`)
+/// can still be shown by the model it actually is. Clearly non-chat ids (embedding / reranking) are
+/// dropped — they can't serve chat completions and would only add dead weight and failover churn.
+pub async fn list_custom_models(
+    namespace: &str,
+) -> Result<Vec<(String, Option<String>)>, ProviderError> {
     let cp = forge_config::custom_provider(namespace)
         .ok_or_else(|| ProviderError::Request(format!("`{namespace}` is not a custom provider")))?;
     // A keyless local server (LM Studio / llama.cpp / vLLM with no auth) has no key — send a
@@ -318,7 +322,7 @@ async fn list_custom_models_at(
     namespace: &str,
     endpoint: &str,
     key: &str,
-) -> Result<Vec<String>, ProviderError> {
+) -> Result<Vec<(String, Option<String>)>, ProviderError> {
     let url = format!("{endpoint}models");
     // Bound the whole call so a hung load balancer can't stall catalog refresh / startup.
     with_discovery_timeout(&format!("{namespace} `/models` listing"), async move {
@@ -347,9 +351,21 @@ async fn list_custom_models_at(
         })?;
         Ok(data
             .iter()
-            .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
-            .map(|id| format!("{namespace}::{id}"))
-            .filter(|id| !forge_config::is_non_chat_model(id))
+            .filter_map(|m| {
+                let id = format!("{namespace}::{}", m.get("id").and_then(|i| i.as_str())?);
+                if forge_config::is_non_chat_model(&id) {
+                    return None;
+                }
+                // The provider's human label (Kimi Code's `display_name`, "K3" / "K2.8 Preview")
+                // when it publishes one, so opaque plan-slot ids can be shown as the model they are.
+                let display = m
+                    .get("display_name")
+                    .and_then(|d| d.as_str())
+                    .map(str::trim)
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_string);
+                Some((id, display))
+            })
             .collect())
     })
     .await
@@ -804,8 +820,30 @@ fn hoist_system_messages(messages: &[Message]) -> Vec<&Message> {
 /// live API (2026-09-10): omitting the field errors, an EMPTY string is accepted, and the real
 /// reasoning is accepted — so the field's presence is what matters, not its content. That matters
 /// because a reply that calls a tool does not always stream any reasoning to capture.
+///
+/// Kimi Code advertises the same thinking-only contract (`supports_thinking_type: "only"` in its
+/// `/models` listing, read 2026-09-14) and takes the same echo.
 fn requires_reasoning_echo(model: &str) -> bool {
-    model.starts_with("deepseek::")
+    model.starts_with("deepseek::") || model.starts_with("kimi::")
+}
+
+/// The reasoning seed appended as a Kimi partial prefill. A constant so it is trivial to find,
+/// tune, or clear while comparing output quality.
+const KIMI_REASONING_PREFILL: &str = "I will continue the current task carefully and completely.";
+
+/// Kimi Code supports Moonshot's Partial Mode: appending a trailing assistant message whose
+/// `reasoning_content` seeds the start of the model's thinking, flagged `partial: true`. Scoped to
+/// `kimi::` and skipped for structured-output requests, which the API warns against mixing with
+/// Partial Mode.
+fn kimi_partial_prefill(model: &str, opts: &CompletionOptions) -> Option<ChatMessage> {
+    if !model.starts_with("kimi::") || opts.response_format.is_some() {
+        return None;
+    }
+    Some(
+        ChatMessage::assistant("")
+            .with_reasoning_content(Some(KIMI_REASONING_PREFILL.to_string()))
+            .with_partial(true),
+    )
 }
 
 fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMessage> {
@@ -1044,6 +1082,9 @@ impl Provider for GenAiProvider {
         let model_name = to_genai_model(model);
 
         let mut genai_messages = to_genai_messages(messages, requires_reasoning_echo(&model_name));
+        if let Some(prefill) = kimi_partial_prefill(&model_name, opts) {
+            genai_messages.push(prefill);
+        }
         mark_cache_breakpoints(&mut genai_messages);
         let mut req = ChatRequest::new(genai_messages);
         if !tools.is_empty() {
@@ -1093,15 +1134,24 @@ impl Provider for GenAiProvider {
         // this surface can be asked for — and whether it has a knob at all — is decided by
         // `effort::resolve`, so the generic path, the codex transports and the CLI bridges all
         // clamp against one table instead of three private matches that could drift apart.
-        let effort_decision = forge_types::effort::resolve("", &model_name, opts.effort);
+        // Resolve against the model's OWN provider ladder. Passing an empty provider fell through
+        // to the generic "any reasoning model" ladder (low/medium/high/xhigh), so a provider with
+        // its own published rungs was asked for rungs it does not define — Kimi Code was shown as
+        // `max` by the mesh while the request on the wire said `xhigh`.
+        let effort_decision = forge_types::effort::resolve_id(&model_name, opts.effort);
         if let Some(level) = effort_decision.sent {
             let re = match level {
                 EffortLevel::Low => ReasoningEffort::Low,
                 EffortLevel::Medium => ReasoningEffort::Medium,
                 EffortLevel::High => ReasoningEffort::High,
-                // This path tops out at xhigh — WhiteHot's extra lift is orchestration guidance in
-                // forge-core, not a provider knob — and `resolve` has already clamped to it.
-                EffortLevel::XHigh | EffortLevel::WhiteHot => ReasoningEffort::XHigh,
+                EffortLevel::XHigh => ReasoningEffort::XHigh,
+                // White-hot's spelling on the wire is `max` (`effort::wire_name`), and genai
+                // carries that variant. Collapsing it onto xhigh here meant a surface whose top
+                // documented rung IS `max` — Kimi Code publishes exactly low/high/max — could
+                // never actually be asked for it: the mesh displayed `max` while the request said
+                // `xhigh`. Only a ladder that offers WhiteHot reaches this arm, and on this path
+                // that is Kimi Code alone (the CLI bridges do not come through genai).
+                EffortLevel::WhiteHot => ReasoningEffort::Max,
             };
             options = options.with_reasoning_effort(re);
             reasoning_engaged = true;
@@ -1610,12 +1660,42 @@ mod tests {
     }
 
     #[test]
-    fn only_deepseek_is_forced_to_echo_its_reasoning() {
+    fn thinking_only_apis_are_forced_to_echo_their_reasoning() {
         assert!(requires_reasoning_echo("deepseek::deepseek-flash"));
         assert!(requires_reasoning_echo("deepseek::deepseek-v4-pro"));
+        assert!(requires_reasoning_echo("kimi::k3"));
+        assert!(requires_reasoning_echo("kimi::kimi-for-coding"));
         assert!(!requires_reasoning_echo("openai::gpt-4o-mini"));
-        // A DeepSeek model served by someone else does not enforce the echo.
+        // A thinking model served by another provider does not enforce the echo.
         assert!(!requires_reasoning_echo("nvidia::deepseek-ai/deepseek-r1"));
+        assert!(!requires_reasoning_echo("nvidia::moonshotai/kimi-k3"));
+    }
+
+    #[test]
+    fn kimi_gets_a_partial_reasoning_prefill_unless_structured_output() {
+        let opts = CompletionOptions::default();
+        let prefill = kimi_partial_prefill("kimi::k3", &opts).expect("kimi prefills");
+        assert_eq!(prefill.role, ChatRole::Assistant);
+        assert_eq!(prefill.partial, Some(true), "flagged partial: true");
+        assert!(
+            prefill.content.texts().iter().all(|t| t.is_empty()),
+            "empty prose"
+        );
+        assert_eq!(
+            prefill.content.joined_reasoning_content().as_deref(),
+            Some(KIMI_REASONING_PREFILL)
+        );
+
+        // Only Kimi Code prefills.
+        assert!(kimi_partial_prefill("deepseek::deepseek-flash", &opts).is_none());
+        assert!(kimi_partial_prefill("openai::gpt-4o-mini", &opts).is_none());
+
+        // Structured output must not mix with Partial Mode.
+        let json = CompletionOptions {
+            response_format: Some(ResponseFormat::JsonObject),
+            ..CompletionOptions::default()
+        };
+        assert!(kimi_partial_prefill("kimi::k3", &json).is_none());
     }
 
     #[test]
@@ -2647,8 +2727,40 @@ mod tests {
         assert_eq!(
             models,
             vec![
-                "qwencloud::qwen3.8-max-preview".to_string(),
-                "qwencloud::deepseek-v4-pro".to_string(),
+                ("qwencloud::qwen3.8-max-preview".to_string(), None),
+                ("qwencloud::deepseek-v4-pro".to_string(), None),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_discovery_captures_display_names_when_published() {
+        let server = httpmock::MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/coding/v1/models");
+            then.status(200).json_body(json!({
+                "data": [
+                    {"id": "k3", "display_name": "K3"},
+                    {"id": "kimi-for-coding", "display_name": "K2.8 Preview"},
+                    {"id": "bare", "display_name": ""},
+                    {"id": "plain"}
+                ]
+            }));
+        });
+        let endpoint = format!("{}/coding/v1/", server.base_url());
+        let models = list_custom_models_at("kimi", &endpoint, "k")
+            .await
+            .expect("discovery should succeed");
+        assert_eq!(
+            models,
+            vec![
+                ("kimi::k3".to_string(), Some("K3".to_string())),
+                (
+                    "kimi::kimi-for-coding".to_string(),
+                    Some("K2.8 Preview".to_string())
+                ),
+                ("kimi::bare".to_string(), None),
+                ("kimi::plain".to_string(), None),
             ]
         );
     }

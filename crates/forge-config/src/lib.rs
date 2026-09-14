@@ -49,6 +49,8 @@ pub enum ConfigError {
     NoConfigDir,
     #[error("writing config failed: {0}")]
     Write(String),
+    #[error("failed to read system-prompt override file '{0}': {1}")]
+    PromptFile(String, String),
 }
 
 impl From<figment::Error> for ConfigError {
@@ -137,6 +139,12 @@ pub struct Config {
     /// discovery + routing identically. Empty = inert.
     #[serde(default)]
     pub providers: ProvidersConfig,
+    /// Per-provider system-prompt overrides, keyed by provider namespace (e.g. `"kimi"`). When a
+    /// namespace has an entry, its models get that text as the base coding-agent prompt in the main
+    /// loop, replacing the built-in [`FORGE_SYSTEM`] prompt (the live env block and any minimal-diff
+    /// bias are kept). For experimentation; empty = inert.
+    #[serde(default)]
+    pub system_prompt_overrides: HashMap<String, String>,
     /// Remote control server (`/remote`): drive this session from a phone or browser. `auto`
     /// starts it at chat launch so the session is reachable without typing `/remote` first.
     #[serde(default)]
@@ -2597,6 +2605,7 @@ impl Default for Config {
             statusline: StatuslineConfig::default(),
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
+            system_prompt_overrides: HashMap::new(),
             remote: RemoteConfig::default(),
             anywhere: AnywhereConfig::default(),
             voice: VoiceConfig::default(),
@@ -2730,6 +2739,7 @@ pub fn load() -> Result<Config, ConfigError> {
 
     let mut config: Config = fig.extract()?;
     migrate_legacy_keybinds(&mut config.keybinds);
+    resolve_system_prompt_overrides(&mut config)?;
     // Project-local `.forge/mcp.toml` is the dedicated home for MCP server declarations; when
     // present it sets the whole `[mcp]` section (overriding any `[mcp]` in config.toml). Keeping
     // it a separate file matches Claude-Code's `.mcp.json` convention and keeps server lists out
@@ -2776,6 +2786,42 @@ pub fn load() -> Result<Config, ConfigError> {
     }
 
     Ok(config)
+}
+
+/// Resolve `@path` system-prompt overrides. A value beginning with `@` names a file whose contents
+/// become the prompt (so large or shared prompts can live in a file instead of being inlined).
+/// `~/…` expands to the home directory, a bare relative path resolves against the Forge config
+/// directory, and an absolute path is used as-is. Inline values (no leading `@`) are left untouched.
+fn resolve_system_prompt_overrides(config: &mut Config) -> Result<(), ConfigError> {
+    let base = config_dir();
+    let overrides = std::mem::take(&mut config.system_prompt_overrides);
+    let mut resolved = HashMap::new();
+    for (provider, value) in overrides {
+        let Some(path_str) = value.strip_prefix('@') else {
+            resolved.insert(provider, value);
+            continue;
+        };
+        let path = resolve_prompt_path(path_str, base.as_deref());
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| ConfigError::PromptFile(path.display().to_string(), e.to_string()))?;
+        resolved.insert(provider, contents);
+    }
+    config.system_prompt_overrides = resolved;
+    Ok(())
+}
+
+fn resolve_prompt_path(raw: &str, base: Option<&Path>) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path
+    } else {
+        base.map(|b| b.join(&path)).unwrap_or(path)
+    }
 }
 
 /// The `[mesh.models]` tier keys one config file's text sets, in file order. Empty for a file
@@ -3490,6 +3536,39 @@ models = {}
         assert!(!opted_out.publish_local_sessions);
         assert!(!opted_out.publish_local_runs);
         assert!(!opted_out.interactive_local_sessions);
+    }
+
+    #[test]
+    fn system_prompt_override_resolves_at_file_paths() {
+        let dir = std::env::temp_dir().join(format!("forge-prompt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("kimi.md");
+        std::fs::write(&file, "custom prompt from a file").unwrap();
+
+        let mut config = Config::default();
+        config
+            .system_prompt_overrides
+            .insert("kimi".to_string(), format!("@{}", file.display()));
+        config
+            .system_prompt_overrides
+            .insert("openai".to_string(), "inline prompt".to_string());
+
+        resolve_system_prompt_overrides(&mut config).unwrap();
+        assert_eq!(
+            config.system_prompt_overrides["kimi"],
+            "custom prompt from a file"
+        );
+        assert_eq!(config.system_prompt_overrides["openai"], "inline prompt");
+
+        // A missing file is a clear startup error, not a literal prompt sent to the model.
+        let mut bad = Config::default();
+        bad.system_prompt_overrides
+            .insert("kimi".to_string(), format!("@{}/nope.md", dir.display()));
+        let err = resolve_system_prompt_overrides(&mut bad).unwrap_err();
+        assert!(matches!(err, ConfigError::PromptFile(_, _)), "got: {err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

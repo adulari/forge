@@ -284,11 +284,13 @@ pub(crate) async fn discover_catalog_with_status(
         .filter(|cp| forge_config::has_api_key(cp.namespace))
         .collect();
     let custom_lists = futures::future::join_all(custom.iter().map(|cp| async move {
+        // Seed ids carry no display name (they are only used when the live listing fails); pair
+        // each with `None` so both arms of this match yield the same `(id, display)` shape.
         let seeds = || {
             cp.seed_models
                 .iter()
-                .map(|m| format!("{}::{}", cp.namespace, m))
-                .collect::<Vec<_>>()
+                .map(|m| (format!("{}::{}", cp.namespace, m), None))
+                .collect::<Vec<(String, Option<String>)>>()
         };
         match tokio::time::timeout(
             Duration::from_secs(8),
@@ -353,8 +355,17 @@ pub(crate) async fn discover_catalog_with_status(
         }
     }))
     .await;
+    // Custom-provider display names (Kimi Code's `k3` → "K3"), collected here and attached to the
+    // catalog below. Ids stay the routing key; the display name is a `forge models` convenience.
+    let mut display_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for (list, status) in custom_lists {
-        models.extend(list);
+        for (id, display) in list {
+            if let Some(name) = display {
+                display_names.insert(id.clone(), name);
+            }
+            models.push(id);
+        }
         statuses.push(status);
     }
     // Azure OpenAI: deployments are configured (`[providers.azure]`), not enumerable via an API in our
@@ -476,7 +487,10 @@ pub(crate) async fn discover_catalog_with_status(
             "no credentialed or local model source found — skipping catalog enrichment \
              (context windows, prices, balances, benchmarks)"
         );
-        return (forge_mesh::ModelCatalog::new(models), statuses);
+        return (
+            forge_mesh::ModelCatalog::new(models).with_display_names(display_names),
+            statuses,
+        );
     }
     // Fetch + persist real per-model context windows (OpenRouter exposes `context_length`) so the
     // core can trim each turn to the routed model's window instead of overflowing it. Best-effort;
@@ -497,7 +511,9 @@ pub(crate) async fn discover_catalog_with_status(
     // first + incremental: only hits the API when a newly-discovered model has no rating yet.
     let bench = benchmarks::ensure(config, &models, false).await;
     (
-        forge_mesh::ModelCatalog::new(models).with_benchmarks(bench),
+        forge_mesh::ModelCatalog::new(models)
+            .with_benchmarks(bench)
+            .with_display_names(display_names),
         statuses,
     )
 }

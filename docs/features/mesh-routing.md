@@ -280,7 +280,7 @@ classes — the two-currencies split (§5) starts here:
   `gpt-5-pro` at "cost $0".
 - **1 = subscription** — `is_subscription` (`catalog.rs:61`): $0 marginal, burns plan quota (§5.2).
   Includes OpenCode Go (`opencode_go::`), a flat subscription — distinct from Zen's
-  credit-billed `opencode::` surface.
+  credit-billed `opencode::` surface — and Kimi Code (`kimi::`), Moonshot's flat coding plan.
 - **2 = metered/paid** — everything else; carries a real USD estimate (§5.1).
 
 ### 4.3 Per-tier cost preference
@@ -539,10 +539,18 @@ failover entirely (free + subscription only); an explicit `--model` pin still by
 
 ### 5.2 Subscriptions: which surfaces, and what "plan" means
 
-`catalog::is_subscription` (`crates/forge-mesh/src/catalog.rs:61`) names the six subscription
+`catalog::is_subscription` (`crates/forge-mesh/src/catalog.rs:61`) names the subscription
 surfaces: **`claude-cli::`**, **`codex-cli::`**, **`agy-cli::`** (CLI bridges),
-**`codex-oauth::`**, **`xai-oauth::`** (subscription OAuth providers), and **`qwencloud::`**
-(Token Plan API-key access). $0 marginal cost, real plan burn.
+**`codex-oauth::`**, **`xai-oauth::`** (subscription OAuth providers), and the API-key plans
+**`qwencloud::`** (Token Plan), **`opencode_go::`** and **`kimi::`** (Kimi Code). $0 marginal cost,
+real plan burn.
+
+OpenCode Go and Kimi Code publish their windows only through a poll (`/zen/go/v1/usage` and
+`/coding/v1/usages`); `refresh_polled_quotas` refreshes both before routing, `forge mesh`,
+`forge models`, `forge doctor` and the daemon's usage page, each behind a freshness gate. Kimi
+Code's plan slots (`k3`, `k3-256k`, `kimi-for-coding`, `kimi-for-coding-highspeed`) name no model
+family, so `bench::kimi_code_benchmark_name` maps each to the benchmark row its `/models`
+`display_name` identifies.
 
 The plan slug per provider (how much headroom the user pays for) comes from two sources, merged
 by `resolved_subscription_plans` (`crates/forge-core/src/lib.rs:1205`):
