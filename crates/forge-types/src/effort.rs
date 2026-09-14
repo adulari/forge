@@ -75,6 +75,10 @@ pub fn ladder(provider: &str, model: &str) -> &'static [EffortLevel] {
         // own config. `max` is deliberately excluded — no evidence it is accepted, and being
         // clamped one rung down is recoverable where a rejected turn is not.
         "codex-cli" | "codex-oauth" => &FULL_LADDER[..4],
+        // Kimi Code: every model's `/models` entry is `supports_thinking_type: "only"`, and the
+        // endpoint accepted low, medium, high, xhigh and max live (2026-09-14). Keyed on the
+        // namespace because `k3` names no vendor family for the model check below to find.
+        "kimi" => &FULL_LADDER[..4],
         // Everything else goes over the generic (genai/OpenAI-compatible) path, where an effort
         // field is only meaningful for a reasoning model.
         _ => {
@@ -152,8 +156,16 @@ pub fn bridge_args(provider: &str, level: EffortLevel) -> Vec<String> {
 /// questions, which is exactly why no non-OpenAI vendor ever received an effort: the only way to
 /// grant Claude or Gemini a rung was to also declare that they reject a temperature, which they do
 /// not.
+///
+/// The Kimi Code subscription endpoint (`kimi::`) is the other absolute refuser: every model it
+/// serves — `k3`, `k3-256k`, `kimi-for-coding`, `kimi-for-coding-highspeed` — answers
+/// `invalid temperature: only 1 is allowed for this model` (live, 2026-09-14), which killed every
+/// Forge turn before a single token. Keyed on the namespace because `k3` names no vendor family.
 pub fn model_rejects_temperature(model: &str) -> bool {
     let m = model.to_lowercase();
+    if m.starts_with("kimi::") {
+        return true;
+    }
     ["o1", "o1-", "o3", "o3-", "o4", "o4-", "gpt-5", "gpt-6"]
         .iter()
         .any(|needle| m == *needle || m.contains(&format!("::{needle}")) || m.contains(needle))
@@ -345,6 +357,19 @@ mod tests {
                 !model_rejects_temperature(id),
                 "{id} takes a temperature too — conflating these is what blocked its rung"
             );
+        }
+    }
+
+    #[test]
+    fn kimi_code_refuses_any_temperature_but_keeps_its_rung() {
+        for id in [
+            "kimi::k3",
+            "kimi::k3-256k",
+            "kimi::kimi-for-coding",
+            "kimi::kimi-for-coding-highspeed",
+        ] {
+            assert!(model_rejects_temperature(id), "{id} only accepts 1");
+            assert!(has_control(id), "{id} still takes reasoning_effort");
         }
     }
 
