@@ -219,6 +219,7 @@ impl Session {
             dispatch: None,
             pinned_model: None,
             pinned_effort: None,
+            exact_effort: None,
             subagent_pin_free: None,
             overflow_window_cap: None,
             whitehot_guidance_injected: false,

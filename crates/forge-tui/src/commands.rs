@@ -4,6 +4,7 @@
 //! the `Session`, which this crate must not depend on).
 
 mod btw_args;
+mod effort_args;
 mod subagent_args;
 
 /// One command's metadata, shown in the palette.
@@ -190,8 +191,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "effort",
-        desc: "pin the reasoning-effort level (low→xhigh, or whitehot: xhigh + auto-workflows), or clear",
-        usage: "/effort [low|medium|high|xhigh|whitehot]",
+        desc: "pin the reasoning-effort level (a ceiling the mesh optimises under), or with `exact` force the rung the provider actually runs at",
+        usage: "/effort [low|medium|high|xhigh|whitehot] | /effort exact <level> | /effort exact off",
     },
     Command {
         name: "subagents",
@@ -394,6 +395,9 @@ pub enum CommandAction {
     /// The level string is the raw user-supplied value (e.g. "high"); the binary parses + applies
     /// it. `None` clears the pin and returns to the provider default.
     SetEffort(Option<String>),
+    /// An EXACT rung (`/effort exact <level>`), sent as-is rather than capped — so it reaches rungs
+    /// the benchmark ladder cannot. `None` clears it. Raw text; the binary parses + validates it.
+    SetExactEffort(Option<String>),
     /// Release (`Some(true)`) or re-bind (`Some(false)`) this session's subagents from the active
     /// model pin — `/subagents free` / `/subagents pinned`. `None` = bare `/subagents`, which
     /// toggles and reports the resulting state.
@@ -673,7 +677,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         }
         "btw" | "side" => CommandAction::Btw(btw_args::parse_btw_arg(&arg)),
         "export" => CommandAction::Export((!arg.is_empty()).then(|| arg.trim().to_string())),
-        "effort" => CommandAction::SetEffort((!arg.is_empty()).then_some(arg)),
+        "effort" => effort_args::parse_effort_arg(&arg),
         "subagents" | "subagent" => {
             CommandAction::Subagents(subagent_args::parse_subagents_arg(&arg))
         }
@@ -1562,6 +1566,39 @@ mod tests {
             parse_command("/subagent FREE"),
             CommandAction::Subagents(Some(true))
         );
+    }
+
+    #[test]
+    fn parses_exact_effort_without_disturbing_the_ceiling_pin() {
+        // `exact` is the only word that switches meaning; everything else stays the ceiling pin.
+        assert_eq!(
+            parse_command("/effort exact high"),
+            CommandAction::SetExactEffort(Some("high".into()))
+        );
+        assert_eq!(
+            parse_command("/effort exact max"),
+            CommandAction::SetExactEffort(Some("max".into()))
+        );
+        // Three ways to clear it.
+        assert_eq!(
+            parse_command("/effort exact"),
+            CommandAction::SetExactEffort(None)
+        );
+        assert_eq!(
+            parse_command("/effort exact off"),
+            CommandAction::SetExactEffort(None)
+        );
+        assert_eq!(
+            parse_command("/effort exact none"),
+            CommandAction::SetExactEffort(None)
+        );
+        // The existing command is untouched — a bare level is still the ceiling pin, and a model
+        // whose name merely starts with "exact" is not swallowed as the subcommand.
+        assert_eq!(
+            parse_command("/effort high"),
+            CommandAction::SetEffort(Some("high".into()))
+        );
+        assert_eq!(parse_command("/effort"), CommandAction::SetEffort(None));
     }
 
     #[test]
