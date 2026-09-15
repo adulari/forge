@@ -819,6 +819,14 @@ the **quota-status penalties** (§4.7) are the hard backstop at Warning/Exhauste
 by the active effort level (`ranked_rows`, `catalog.rs:869`, is the untruncated,
 score-broken-out twin behind the inspector):
 
+> **The effort pin is a ceiling, `[model_effort]` is an instruction.** `/effort` and
+> `mesh.default_effort` cap the rung; the mesh then picks the best-value rung at or under that cap
+> from the model's MEASURED ladder (`rung_cost::best_value_rung`). That ladder holds only the rungs
+> a benchmark rated, which is not the set the provider offers — Kimi Code serves low/high/max but is
+> rated only at low and max, so no pin can reach its `high`. A `[model_effort]` entry (keyed by full
+> id or provider namespace, id winning) bypasses the benchmark rule entirely and is sent verbatim,
+> resolved against `effort::ladder` so it can still only name a rung the provider actually offers.
+
 - **High / XHigh / WhiteHot:** integer bench-score **band** first (`bench_band`,
   `catalog.rs:20` — `floor(score)`; unbenched models band to `i64::MIN`, below every benched
   one: at high effort you asked for proven quality), then route score, then the tie chain.

@@ -827,21 +827,23 @@ fn requires_reasoning_echo(model: &str) -> bool {
     model.starts_with("deepseek::") || model.starts_with("kimi::")
 }
 
-/// The reasoning seed appended as a Kimi partial prefill. A constant so it is trivial to find,
-/// tune, or clear while comparing output quality.
-const KIMI_REASONING_PREFILL: &str = "I will continue the current task carefully and completely.";
-
-/// Kimi Code supports Moonshot's Partial Mode: appending a trailing assistant message whose
-/// `reasoning_content` seeds the start of the model's thinking, flagged `partial: true`. Scoped to
-/// `kimi::` and skipped for structured-output requests, which the API warns against mixing with
-/// Partial Mode.
-fn kimi_partial_prefill(model: &str, opts: &CompletionOptions) -> Option<ChatMessage> {
-    if !model.starts_with("kimi::") || opts.response_format.is_some() {
+/// Moonshot's Partial Mode: a trailing assistant message whose `reasoning_content` seeds the start
+/// of the model's thinking, flagged `partial: true`.
+///
+/// Opt-in per provider via `[reasoning_prefill]`, and off unless configured: the flag is only
+/// understood by providers implementing Partial Mode, and seeding a thought changes how the model
+/// reasons, so it is never applied on the user's behalf. Skipped for structured-output requests,
+/// which the API warns against mixing with Partial Mode.
+///
+/// Takes the seed rather than reading config, so the rule stays a pure function.
+fn partial_prefill(seed: Option<&str>, opts: &CompletionOptions) -> Option<ChatMessage> {
+    if opts.response_format.is_some() {
         return None;
     }
+    let seed = seed.map(str::trim).filter(|s| !s.is_empty())?;
     Some(
         ChatMessage::assistant("")
-            .with_reasoning_content(Some(KIMI_REASONING_PREFILL.to_string()))
+            .with_reasoning_content(Some(seed.to_string()))
             .with_partial(true),
     )
 }
@@ -1082,7 +1084,11 @@ impl Provider for GenAiProvider {
         let model_name = to_genai_model(model);
 
         let mut genai_messages = to_genai_messages(messages, requires_reasoning_echo(&model_name));
-        if let Some(prefill) = kimi_partial_prefill(&model_name, opts) {
+        // Opt-in per provider (`[reasoning_prefill]`); absent for every provider by default.
+        let prefill_seed = model_name
+            .split_once("::")
+            .and_then(|(provider, _)| forge_config::reasoning_prefill_for(provider));
+        if let Some(prefill) = partial_prefill(prefill_seed.as_deref(), opts) {
             genai_messages.push(prefill);
         }
         mark_cache_breakpoints(&mut genai_messages);
@@ -1672,9 +1678,10 @@ mod tests {
     }
 
     #[test]
-    fn kimi_gets_a_partial_reasoning_prefill_unless_structured_output() {
+    fn a_configured_seed_prefills_and_an_absent_one_does_nothing() {
         let opts = CompletionOptions::default();
-        let prefill = kimi_partial_prefill("kimi::k3", &opts).expect("kimi prefills");
+        let seed = "I will continue the current task carefully and completely.";
+        let prefill = partial_prefill(Some(seed), &opts).expect("a configured seed prefills");
         assert_eq!(prefill.role, ChatRole::Assistant);
         assert_eq!(prefill.partial, Some(true), "flagged partial: true");
         assert!(
@@ -1683,19 +1690,21 @@ mod tests {
         );
         assert_eq!(
             prefill.content.joined_reasoning_content().as_deref(),
-            Some(KIMI_REASONING_PREFILL)
+            Some(seed)
         );
 
-        // Only Kimi Code prefills.
-        assert!(kimi_partial_prefill("deepseek::deepseek-flash", &opts).is_none());
-        assert!(kimi_partial_prefill("openai::gpt-4o-mini", &opts).is_none());
+        // Off by default: no configured seed, no prefill. A blank/whitespace entry is also off,
+        // so clearing the value in config disables it without deleting the key.
+        assert!(partial_prefill(None, &opts).is_none());
+        assert!(partial_prefill(Some(""), &opts).is_none());
+        assert!(partial_prefill(Some("   "), &opts).is_none());
 
         // Structured output must not mix with Partial Mode.
         let json = CompletionOptions {
             response_format: Some(ResponseFormat::JsonObject),
             ..CompletionOptions::default()
         };
-        assert!(kimi_partial_prefill("kimi::k3", &json).is_none());
+        assert!(partial_prefill(Some(seed), &json).is_none());
     }
 
     #[test]

@@ -125,6 +125,18 @@ pub fn select_rung_by_value(
         .and_then(|(rung, _, _)| rung.to_level())
 }
 
+/// The exact rung configured for `model` via `[model_effort]`, resolved against what the provider
+/// actually offers.
+///
+/// Kept a pure function of the configured text so the precedence rule is testable without touching
+/// process-wide config. An unparseable value yields `None` (the mesh's own choice stands) rather
+/// than a guess, and a rung the provider does not offer is resolved down to one it does — the same
+/// treatment any pin gets.
+fn configured_rung(model: &str, configured: Option<&str>) -> Option<EffortLevel> {
+    let level = EffortLevel::parse(configured?)?;
+    forge_types::effort::resolve_id(model, Some(level)).sent
+}
+
 /// The rung mesh would run `model` at, for surfaces that need the answer OUTSIDE a routing
 /// decision — the statusline the moment a pin lands, and the pin picker's best-value marking.
 ///
@@ -136,6 +148,14 @@ pub fn best_value_rung(
     ceiling: Option<EffortLevel>,
     code_heavy: bool,
 ) -> Option<EffortLevel> {
+    // An exact `[model_effort]` entry is an instruction, not a ceiling: it wins outright, before
+    // any benchmark reasoning. The measured ladder describes only the rungs somebody rated, which
+    // is not the same set the provider offers — Kimi Code serves low/high/max but is rated only at
+    // low and max, so the rule below can never choose its `high` however it is pinned. Asking for a
+    // rung the provider documents should not require a benchmark to exist for it.
+    if let Some(rung) = configured_rung(model, forge_config::model_effort_for(model).as_deref()) {
+        return Some(rung);
+    }
     let ladder = catalog.effort_ladder_for(model);
     let selected = select_rung_by_value(model, &ladder, ceiling, code_heavy, VALUE_LAMBDA)
         .or_else(|| crate::bench::select_rung(&ladder, ceiling, code_heavy))?;
@@ -227,6 +247,30 @@ mod tests {
     }
 
     const ASTRA: &str = "codex-oauth::gpt-6-astra";
+
+    #[test]
+    fn an_exact_model_effort_reaches_rungs_the_benchmark_ladder_cannot() {
+        // The case this exists for. Kimi Code serves low/high/max; the feed rates only low and max,
+        // so the benchmark rule can never return `high` at any pin. An explicit entry can.
+        assert_eq!(
+            configured_rung("kimi::k3", Some("high")),
+            Some(EffortLevel::High)
+        );
+        assert_eq!(
+            configured_rung("kimi::k3", Some("max")),
+            Some(EffortLevel::WhiteHot),
+            "`max` is Kimi's own name for its top rung"
+        );
+        // A rung the provider does not offer resolves down to one it does, never up.
+        assert_eq!(
+            configured_rung("kimi::k3", Some("medium")),
+            Some(EffortLevel::Low)
+        );
+        // Nothing configured, or nonsense: the mesh's own best-value choice stands.
+        assert_eq!(configured_rung("kimi::k3", None), None);
+        assert_eq!(configured_rung("kimi::k3", Some("turbo")), None);
+        assert_eq!(configured_rung("kimi::k3", Some("")), None);
+    }
 
     /// Kimi K3's real ladder. The feed rates it at exactly TWO rungs — verified in
     /// `benchmarks.json` on 2026-09-14: "Kimi K3 (low)" and "Kimi K3 (max)". There is no medium,
