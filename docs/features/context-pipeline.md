@@ -31,7 +31,11 @@ the model see?" was answered in more places.
   kept, newest-first fill, orphan-tool-result demotion) — which moved into the module wholesale.
 - **Accounting honesty**: `estimated_transcript_tokens` (gauge + auto-compaction threshold +
   `transcript_fits`) and the compaction summarizer's rendering both skip `UiOnly` rows — a note
-  the model never sees must not trigger compaction or cost summary tokens.
+  the model never sees must not trigger compaction or cost summary tokens. The same estimate
+  counts a reply's `reasoning`: thinking-mode providers get it back with the message on every
+  later call in the loop, so it is prompt the model bills for. Before it was counted, a 200-step
+  Kimi K3 turn read ~30K tokens low, and the 80% trigger and window-fit check both fired late.
+  A message clipped by `truncate_message_to_budget` drops its reasoning along with its text.
 
 ## 3. Persistence
 
