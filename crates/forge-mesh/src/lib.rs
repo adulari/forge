@@ -912,6 +912,10 @@ pub struct RoutingDecision {
     /// The reasoning rung to run `model` at, chosen from its MEASURED effort ladder and capped by
     /// the session's `/effort` pin (a ceiling, not an instruction — see `bench::select_rung`).
     ///
+    /// An exact `[model_effort]` entry overrides all of that and is sent verbatim: the measured
+    /// ladder covers only the rungs someone rated, which is not the set the provider offers, so a
+    /// documented rung with no benchmark behind it is otherwise unreachable at any pin.
+    ///
     /// `None` means mesh has no measured ladder for this model and expresses no opinion; the
     /// caller then falls back to the session pin, and sends nothing if there isn't one. It does
     /// NOT mean "no effort" — a rung Forge invented would be worse than the provider's own default.

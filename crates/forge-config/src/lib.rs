@@ -145,6 +145,22 @@ pub struct Config {
     /// bias are kept). For experimentation; empty = inert.
     #[serde(default)]
     pub system_prompt_overrides: HashMap<String, String>,
+    /// Per-provider reasoning prefill, keyed by provider namespace (e.g. `"kimi"`). An entry seeds
+    /// the START of the model's thinking with its text, via a trailing assistant message flagged
+    /// `partial: true` (Moonshot/Kimi "Partial Mode"). Absent or empty = off, which is the default:
+    /// the flag is only understood by providers that implement Partial Mode, and a seeded thought
+    /// changes how the model reasons, so it is never applied unless asked for.
+    #[serde(default)]
+    pub reasoning_prefill: HashMap<String, String>,
+    /// Exact reasoning rung per model, keyed by full id (`"kimi::k3"`) or provider namespace
+    /// (`"kimi"`), the id winning where both match. Unlike `mesh.default_effort` — which is a
+    /// CEILING the mesh then optimises under, using measured benchmark data — an entry here is an
+    /// INSTRUCTION: that rung is sent verbatim, provided the provider actually offers it
+    /// (`effort::ladder`). It exists because the benchmark ladder is not the provider's ladder: a
+    /// rung a provider supports but nobody measured (Kimi's `high`) is otherwise unreachable.
+    /// Empty = inert, and the mesh's own best-value choice stands.
+    #[serde(default)]
+    pub model_effort: HashMap<String, String>,
     /// Remote control server (`/remote`): drive this session from a phone or browser. `auto`
     /// starts it at chat launch so the session is reachable without typing `/remote` first.
     #[serde(default)]
@@ -2606,6 +2622,8 @@ impl Default for Config {
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
             system_prompt_overrides: HashMap::new(),
+            reasoning_prefill: HashMap::new(),
+            model_effort: HashMap::new(),
             remote: RemoteConfig::default(),
             anywhere: AnywhereConfig::default(),
             voice: VoiceConfig::default(),
@@ -2724,6 +2742,42 @@ fn merge_mcp_toml(config: &mut McpConfig, path: &std::path::Path) {
             Err(e) => tracing::warn!("ignoring malformed {}: {e}", path.display()),
         }
     }
+}
+
+/// Per-provider reasoning-prefill seeds (`[reasoning_prefill]`), read once for the process.
+static REASONING_PREFILL: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+
+/// The reasoning seed configured for `provider` (a namespace such as `"kimi"`), or `None` when it
+/// has no entry — the default, so no provider is prefilled unless asked for.
+///
+/// Cached: this is consulted on every completion, and re-reading the config file per request would
+/// put a disk read on the hot path.
+pub fn reasoning_prefill_for(provider: &str) -> Option<String> {
+    REASONING_PREFILL
+        .get_or_init(|| load().map(|c| c.reasoning_prefill).unwrap_or_default())
+        .get(provider)
+        .filter(|seed| !seed.trim().is_empty())
+        .cloned()
+}
+
+/// Exact per-model reasoning rungs (`[model_effort]`), read once for the process.
+static MODEL_EFFORT: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+
+/// The exact rung configured for `model` (a full `provider::model` id), as written in config.
+///
+/// The full id wins over a bare provider entry, so a provider-wide choice can be overridden for one
+/// model. Returned unparsed: the rung vocabulary lives in `forge-types`, and the caller validates it
+/// against what the provider actually offers. `None` — the default — leaves the mesh's own
+/// best-value choice untouched. Cached, since this is consulted per routing decision.
+pub fn model_effort_for(model: &str) -> Option<String> {
+    let configured =
+        MODEL_EFFORT.get_or_init(|| load().map(|c| c.model_effort).unwrap_or_default());
+    let namespace = model.split_once("::").map(|(provider, _)| provider);
+    configured
+        .get(model)
+        .or_else(|| namespace.and_then(|provider| configured.get(provider)))
+        .filter(|rung| !rung.trim().is_empty())
+        .cloned()
 }
 
 /// Load configuration with full layered precedence (lowest -> highest):
