@@ -156,6 +156,10 @@ impl Tool for ShellTool {
         })
     }
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
+        self.run_full(args).await.map(|run| run.model)
+    }
+
+    async fn run_full(&self, args: &Value) -> Result<crate::ToolRun, ToolError> {
         let command = str_arg(args, "command")?;
         let cwd = args
             .get("cwd")
@@ -192,11 +196,11 @@ impl Tool for ShellTool {
         // The PTY path can't carry the Landlock sandbox (portable-pty owns the spawn). Refuse pty
         // when the sandbox is on, otherwise it's a trivial escape hatch (always pass pty:true).
         if use_pty && self.policy.enabled {
-            return Ok(
+            return Ok(crate::ToolRun::from(
                 "shell: pty:true is disabled while the shell sandbox is enabled (the PTY path \
                  cannot be confined by Landlock). Re-run without pty."
                     .to_string(),
-            );
+            ));
         }
         if args
             .get("background")
@@ -204,20 +208,17 @@ impl Tool for ShellTool {
             .unwrap_or(false)
         {
             if use_pty {
-                return Ok(
+                return Ok(crate::ToolRun::from(
                     "shell: background:true is not supported with pty:true — a job that \
                            outlives the call has no terminal to attach to."
                         .to_string(),
-                );
+                ));
             }
             let workspace = background::bound_workspace().or_else(|| self.workspace.clone());
-            return Ok(background::start_background(
-                command,
-                &cwd,
-                workspace.as_deref(),
-                &self.policy,
-            )
-            .await);
+            return Ok(crate::ToolRun::from(
+                background::start_background(command, &cwd, workspace.as_deref(), &self.policy)
+                    .await,
+            ));
         }
         let poll = args
             .get("poll_until_exit_zero")
@@ -225,11 +226,11 @@ impl Tool for ShellTool {
             .unwrap_or(false);
         if poll {
             if use_pty {
-                return Ok(
+                return Ok(crate::ToolRun::from(
                     "shell: poll_until_exit_zero is not supported with pty:true — \
                            re-run without pty."
                         .to_string(),
-                );
+                ));
             }
             let interval = args
                 .get("poll_interval_secs")
@@ -237,18 +238,26 @@ impl Tool for ShellTool {
                 .unwrap_or(DEFAULT_POLL_INTERVAL_SECS)
                 .clamp(1, 60);
             let budget = timeout_secs.min(POLL_MAX_BUDGET_SECS);
-            return Ok(run_poll(command, &cwd, budget, interval, &self.policy).await);
+            return Ok(crate::ToolRun::from(
+                run_poll(command, &cwd, budget, interval, &self.policy).await,
+            ));
         }
         if use_pty {
-            return Ok(pty::run_command_pty(command, &cwd, timeout_secs).await);
+            let (model, full) = pty::run_command_pty(command, &cwd, timeout_secs).await;
+            return Ok(crate::ToolRun { model, full });
         }
         // RTK only on the plain path: a PTY run wants the real program's terminal behaviour, and
         // background/poll runs report through their own channels.
         if let Some(rewritten) = self.rtk.as_ref().and_then(|r| r.rewrite(command)) {
-            let result = run_command(&rewritten, &cwd, timeout_secs, &self.policy).await;
-            return Ok(rtk::tag_result(result));
+            let (result, full) =
+                run_command_full(&rewritten, &cwd, timeout_secs, &self.policy).await;
+            return Ok(crate::ToolRun {
+                model: rtk::tag_result(result),
+                full,
+            });
         }
-        Ok(run_command(command, &cwd, timeout_secs, &self.policy).await)
+        let (model, full) = run_command_full(command, &cwd, timeout_secs, &self.policy).await;
+        Ok(crate::ToolRun { model, full })
     }
 }
 
@@ -271,7 +280,7 @@ async fn run_poll(
         // Give each attempt the remaining budget as its own timeout so a single hung attempt
         // can never outlive the poll call.
         let attempt_timeout = budget.saturating_sub(start.elapsed()).as_secs().max(1);
-        let (result, code) = run_command_inner(command, cwd, attempt_timeout, policy).await;
+        let (result, code, _) = run_command_inner(command, cwd, attempt_timeout, policy).await;
         let elapsed = start.elapsed().as_secs();
         let body = result.split_once("\n\n").map(|(_, b)| b).unwrap_or("");
         if code == Some(0) {
@@ -319,14 +328,26 @@ pub async fn run_command(
         .0
 }
 
+/// [`run_command`], plus the complete captured output when the model's copy had to be cut.
+pub(crate) async fn run_command_full(
+    command: &str,
+    cwd: &str,
+    timeout_secs: u64,
+    policy: &SandboxPolicy,
+) -> (String, Option<String>) {
+    let (result, _, full) = run_command_inner(command, cwd, timeout_secs, policy).await;
+    (result, full)
+}
+
 /// Like [`run_command`] but also returns the child's exit code (`None` on timeout, spawn failure,
-/// or signal death). The poll loop uses the code to detect success without parsing the header.
+/// or signal death) and the uncut output when the model's copy was truncated. The poll loop uses
+/// the code to detect success without parsing the header.
 async fn run_command_inner(
     command: &str,
     cwd: &str,
     timeout_secs: u64,
     policy: &SandboxPolicy,
-) -> (String, Option<i32>) {
+) -> (String, Option<i32>, Option<String>) {
     let (shell, flag) = shell_invocation();
     let mut cmd = Command::new(shell);
     cmd.arg(flag)
@@ -373,6 +394,7 @@ async fn run_command_inner(
                  accept unconfined execution deliberately. (cwd {cwd})"
             ),
             None,
+            None,
         );
     }
     maybe_install_sandbox(&mut cmd, policy, cwd, scoped_target.as_deref());
@@ -380,14 +402,28 @@ async fn run_command_inner(
     let start = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return (format!("shell: failed to start (cwd {cwd}): {e}"), None),
+        Err(e) => {
+            return (
+                format!("shell: failed to start (cwd {cwd}): {e}"),
+                None,
+                None,
+            )
+        }
     };
     let pgid = child.id().map(|id| id as i32);
     let Some(stdout) = child.stdout.take() else {
-        return ("shell: failed to capture stdout pipe".to_string(), None);
+        return (
+            "shell: failed to capture stdout pipe".to_string(),
+            None,
+            None,
+        );
     };
     let Some(stderr) = child.stderr.take() else {
-        return ("shell: failed to capture stderr pipe".to_string(), None);
+        return (
+            "shell: failed to capture stderr pipe".to_string(),
+            None,
+            None,
+        );
     };
     let out_task = tokio::spawn(read_capped(stdout));
     let err_task = tokio::spawn(read_capped(stderr));
@@ -443,8 +479,8 @@ async fn run_command_inner(
     let (err_bytes, err_capped, err_error) = drain_reader(err_task).await;
     let duration_ms = start.elapsed().as_millis();
 
-    let body = render_streams(&out_bytes, &err_bytes);
-    let (body, truncated) = truncate_for_model(&body, MODEL_BUDGET);
+    let rendered = render_streams(&out_bytes, &err_bytes);
+    let (body, truncated) = truncate_for_model(&rendered, MODEL_BUDGET);
     let total = out_bytes.len() + err_bytes.len();
     let mut header = format!("shell: {status_line} in {duration_ms}ms{survivor_note}");
     if truncated || out_capped || err_capped {
@@ -455,12 +491,13 @@ async fn run_command_inner(
             header.push_str(&format!("  ({stream}: {error})"));
         }
     }
+    let full = truncated.then(|| format!("{header}\n\n{rendered}"));
     let result = if body.trim().is_empty() {
         header
     } else {
         format!("{header}\n\n{body}")
     };
-    (result, exit_code)
+    (result, exit_code, full)
 }
 
 /// What a drain timeout actually means, said in a way the model can act on.
@@ -1159,7 +1196,9 @@ mod tests {
         /// A plain `echo hello` under PTY must return "hello" in the output and exit 0.
         #[tokio::test]
         async fn pty_echo_hello() {
-            let out = super::super::pty::run_command_pty("echo hello", ".", 30).await;
+            let out = super::super::pty::run_command_pty("echo hello", ".", 30)
+                .await
+                .0;
             assert!(out.contains("hello"), "pty echo output: {out}");
             assert!(out.contains("exit 0"), "pty exit code: {out}");
         }
@@ -1171,7 +1210,8 @@ mod tests {
             // `test -t 1` exits 0 if fd 1 is a tty; we echo a marker based on that.
             let pty_out =
                 super::super::pty::run_command_pty("test -t 1 && echo TTY || echo NOTTY", ".", 10)
-                    .await;
+                    .await
+                    .0;
             assert!(
                 pty_out.contains("TTY") && !pty_out.contains("NOTTY"),
                 "pty:true should report TTY, got: {pty_out}"
@@ -1194,7 +1234,9 @@ mod tests {
         #[tokio::test]
         async fn pty_timeout_kills_fast() {
             let start = Instant::now();
-            let out = super::super::pty::run_command_pty("sleep 60", ".", 1).await;
+            let out = super::super::pty::run_command_pty("sleep 60", ".", 1)
+                .await
+                .0;
             assert!(out.contains("timed out"), "pty timeout reported: {out}");
             assert!(
                 start.elapsed() < Duration::from_secs(15),

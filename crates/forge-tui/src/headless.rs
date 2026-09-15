@@ -123,6 +123,10 @@ impl Presenter for HeadlessPresenter {
                 let mark = if ok { "✓" } else { "✗" };
                 println!("  {mark} {name}: {summary}");
             }
+            // Headless prints only the summary, so a script needs the path to read the rest.
+            PresenterEvent::ToolOutput { output, .. } => {
+                println!("    full output: {} ({} lines)", output.path, output.lines);
+            }
             PresenterEvent::Cost {
                 session_total_usd,
                 session_in,

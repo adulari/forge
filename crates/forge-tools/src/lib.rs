@@ -60,6 +60,21 @@ pub enum ToolError {
     Failed(String),
 }
 
+/// A tool's result: the text the model is given, plus the complete output when that text had to be
+/// cut to fit the model's budget. `full` never reaches the model; it is what a person reads when
+/// they open the call's full output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRun {
+    pub model: String,
+    pub full: Option<String>,
+}
+
+impl From<String> for ToolRun {
+    fn from(model: String) -> Self {
+        Self { model, full: None }
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -68,6 +83,12 @@ pub trait Tool: Send + Sync {
     /// JSON Schema for the arguments object (advertised to the model).
     fn schema(&self) -> Value;
     async fn run(&self, args: &Value) -> Result<String, ToolError>;
+
+    /// [`Tool::run`], plus the uncut output when the model's copy was truncated. Default: the
+    /// model's copy is the whole output.
+    async fn run_full(&self, args: &Value) -> Result<ToolRun, ToolError> {
+        self.run(args).await.map(ToolRun::from)
+    }
 
     /// Compute the proposed change *without touching disk*, for diff-review before the write
     /// is confirmed. Returns `None` for tools that don't mutate files, or when a preview

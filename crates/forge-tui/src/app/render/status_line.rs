@@ -1,4 +1,7 @@
 use super::*;
+use crate::git_location::GitHead;
+use crate::surface::{TEXT, TOOLCYAN};
+use unicode_width::UnicodeWidthStr;
 
 /// Render one statusline widget into a span list, or `None` if the widget has no data to show.
 fn render_statusline_widget<'a>(
@@ -464,8 +467,16 @@ pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     if narrow_stop {
         frame.render_widget(Paragraph::new(TextLine::from(left_spans)).style(bg), row1);
     } else if w >= 70 {
-        let right_text = format!("{version}  {hint}");
-        let right_len = right_text.chars().count() as u16;
+        let left_cells: usize = left_spans.iter().map(|s| s.content.width()).sum();
+        let budget =
+            (w as usize).saturating_sub(left_cells + version.width() + 2 + hint.width() + 3);
+        let mut right = location_spans(app, budget);
+        right.push(Span::styled(
+            format!("{version}  "),
+            Style::default().fg(DIM).bg(STATUSBG),
+        ));
+        right.push(Span::styled(hint, Style::default().fg(DIM).bg(STATUSBG)));
+        let right_len = right.iter().map(|s| s.content.width()).sum::<usize>() as u16;
         let cols =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(right_len)]).split(row1);
         frame.render_widget(
@@ -473,15 +484,9 @@ pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             cols[0],
         );
         frame.render_widget(
-            Paragraph::new(TextLine::from(vec![
-                Span::styled(
-                    format!("{version}  "),
-                    Style::default().fg(DIM).bg(STATUSBG),
-                ),
-                Span::styled(hint, Style::default().fg(DIM).bg(STATUSBG)),
-            ]))
-            .alignment(Alignment::Right)
-            .style(bg),
+            Paragraph::new(TextLine::from(right))
+                .alignment(Alignment::Right)
+                .style(bg),
             cols[1],
         );
     } else if w >= 40 {
@@ -638,6 +643,89 @@ pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// Where the chat is working, right-aligned beside the version: `forge ⎇ feat/x  │  `.
+///
+/// On by default rather than another opt-in widget: which repository and branch an agent is
+/// editing is the one piece of context that should never need configuring to see. It stays out
+/// when the layout already shows the branch or repository as a widget, and it is fitted to
+/// `budget` cells so it never pushes the model and cost off the row: the repository goes first,
+/// then the whole chip.
+fn location_spans(app: &App, budget: usize) -> Vec<Span<'static>> {
+    let Some(location) = &app.git_location else {
+        return Vec::new();
+    };
+    if layout_shows_location(&app.statusline_config) {
+        return Vec::new();
+    }
+    const SEP: &str = "  │  ";
+    const GLYPH: &str = "⎇ ";
+    // A detached HEAD is worth noticing: commits made there belong to no branch.
+    let (branch, branch_color) = match &location.head {
+        GitHead::Branch(name) => (name.clone(), TOOLCYAN),
+        GitHead::Detached(_) => (location.branch_label(), WARNYEL),
+    };
+    let worktree = if location.worktree { " ⧉" } else { "" };
+    let repo = middle_truncate(&location.repo, 24);
+    for with_repo in [true, false] {
+        let repo_cells = if with_repo { repo.width() + 1 } else { 0 };
+        let room =
+            budget.saturating_sub(repo_cells + GLYPH.width() + worktree.width() + SEP.width());
+        // A branch cut shorter than this no longer says which branch it is.
+        if room < 8 {
+            continue;
+        }
+        let mut spans = Vec::with_capacity(5);
+        if with_repo {
+            spans.push(Span::styled(
+                format!("{repo} "),
+                Style::default().fg(TEXT).bg(STATUSBG),
+            ));
+        }
+        spans.push(Span::styled(GLYPH, Style::default().fg(DIM).bg(STATUSBG)));
+        spans.push(Span::styled(
+            middle_truncate(&branch, room.min(40)),
+            Style::default().fg(branch_color).bg(STATUSBG),
+        ));
+        if location.worktree {
+            spans.push(Span::styled(
+                worktree,
+                Style::default().fg(DIM).bg(STATUSBG),
+            ));
+        }
+        spans.push(Span::styled(SEP, Style::default().fg(SEPCOL).bg(STATUSBG)));
+        return spans;
+    }
+    Vec::new()
+}
+
+fn layout_shows_location(config: &forge_config::StatuslineConfig) -> bool {
+    use forge_config::StatuslineWidget as W;
+    config
+        .left
+        .iter()
+        .chain(&config.center)
+        .chain(&config.right)
+        .chain(config.extra_rows.iter().flatten())
+        .any(|widget| matches!(widget, W::GitBranch | W::RepoName))
+}
+
+/// `feat/tool-output-viewer` in 14 cells is `feat/to…viewer`: a branch is recognised by both ends.
+fn middle_truncate(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let keep = max - 1;
+    let tail = keep / 2;
+    let head = keep - tail;
+    let head: String = chars[..head].iter().collect();
+    let tail: String = chars[chars.len() - tail..].iter().collect();
+    format!("{head}…{tail}")
+}
+
 /// Colour a throughput readout by band. A finished turn's average is always dim: it is a
 /// different measurement from the live rate (a turn is mostly tool calls, not generation) and
 /// must not read as the speed the model is running at right now.
@@ -654,4 +742,92 @@ fn throughput_style(shown: &crate::throughput::Throughput) -> Style {
         ACCENT
     };
     Style::default().fg(colour).bg(STATUSBG)
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+    use crate::git_location::GitLocation;
+
+    fn at(head: GitHead, worktree: bool) -> App {
+        App {
+            git_location: Some(GitLocation {
+                repo: "forge".into(),
+                head,
+                worktree,
+            }),
+            ..App::default()
+        }
+    }
+
+    fn branch(name: &str) -> GitHead {
+        GitHead::Branch(name.into())
+    }
+
+    fn text(spans: &[Span]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn the_chip_names_the_repository_and_the_branch() {
+        let app = at(branch("feat/tool-output-viewer"), false);
+        assert_eq!(
+            text(&location_spans(&app, 80)),
+            "forge ⎇ feat/tool-output-viewer  │  "
+        );
+    }
+
+    #[test]
+    fn a_worktree_and_a_detached_head_are_marked() {
+        let app = at(branch("dev"), true);
+        assert!(text(&location_spans(&app, 80)).contains("dev ⧉"));
+        let app = at(GitHead::Detached("e50b52d".into()), false);
+        assert!(text(&location_spans(&app, 80)).contains("⎇ @e50b52d"));
+    }
+
+    #[test]
+    fn a_tight_row_drops_the_repository_before_the_branch_and_then_the_chip() {
+        let app = at(branch("feat/tool-output-viewer"), false);
+        let tight = text(&location_spans(&app, 16));
+        assert!(!tight.contains("forge"), "{tight}");
+        assert!(tight.starts_with("⎇ feat"), "{tight}");
+        assert!(location_spans(&app, 10).is_empty());
+    }
+
+    #[test]
+    fn a_layout_that_already_shows_the_branch_gets_no_second_copy() {
+        let mut app = at(branch("main"), false);
+        app.statusline_config
+            .left
+            .push(forge_config::StatuslineWidget::GitBranch);
+        assert!(location_spans(&app, 80).is_empty());
+    }
+
+    #[test]
+    fn long_names_keep_both_ends() {
+        assert_eq!(
+            middle_truncate("feat/tool-output-viewer", 14),
+            "feat/to…viewer"
+        );
+        assert_eq!(middle_truncate("main", 14), "main");
+    }
+
+    #[test]
+    fn the_full_statusline_shows_it_beside_the_version() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let app = at(branch("feat/tool-output-viewer"), false);
+        let mut terminal = Terminal::new(TestBackend::new(160, 2)).unwrap();
+        terminal
+            .draw(|f| render_statusline(f, f.area(), &app))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(
+            row.contains("forge ⎇ feat/tool-output-viewer  │  v"),
+            "{row}"
+        );
+    }
 }

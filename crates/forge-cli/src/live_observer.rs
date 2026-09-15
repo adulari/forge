@@ -25,6 +25,12 @@ pub enum LiveEvent {
         #[serde(default)]
         detail: Option<String>,
     },
+    /// Where a call's complete output was kept (`PresenterEvent::ToolOutput`). A client too old to
+    /// know this frame fails to decode it and skips it, keeping the bounded preview.
+    ToolOutput {
+        name: String,
+        output: forge_types::ToolOutputRef,
+    },
     Routing {
         tier: String,
         model: String,
@@ -100,6 +106,10 @@ pub fn to_live_event(event: &PresenterEvent) -> Option<LiveEvent> {
             ok: *ok,
             summary: summary.clone(),
             detail: detail.clone(),
+        }),
+        PresenterEvent::ToolOutput { name, output } => Some(LiveEvent::ToolOutput {
+            name: name.clone(),
+            output: output.clone(),
         }),
         // The routed rung is deliberately not carried across this seam: `LiveEvent` is its own
         // versioned wire contract, and a remote observer showing no rung is honest degradation
@@ -201,6 +211,7 @@ pub fn live_event_to_presenter(event: LiveEvent) -> Option<PresenterEvent> {
             summary,
             detail,
         }),
+        LiveEvent::ToolOutput { name, output } => Some(PresenterEvent::ToolOutput { name, output }),
         LiveEvent::Routing {
             tier,
             model,

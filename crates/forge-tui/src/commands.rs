@@ -100,6 +100,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/thinking",
     },
     Command {
+        name: "output",
+        desc: "open the latest tool call's full output (search, copy, $PAGER)",
+        usage: "/output",
+    },
+    Command {
         name: "image",
         desc: "attach an image file to your next message (vision input)",
         usage: "/image <path>",
@@ -387,6 +392,8 @@ pub enum CommandAction {
     Anywhere,
     /// Toggle display of model reasoning/thinking blocks (`/thinking`).
     Thinking,
+    /// Open the latest tool call's complete output in the full-output viewer (`/output`).
+    ToolOutput,
     /// Attach an image file to the next prompt (vision input) — `/image <path>`.
     Image(String),
     /// Scan the repository and write `.forge/AGENTS.md` project memory (`/init`).
@@ -719,6 +726,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         }
         "anywhere" | "aw" => CommandAction::Anywhere,
         "thinking" | "think" => CommandAction::Thinking,
+        "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),
         "init" => CommandAction::Init,
         "plan" => CommandAction::Plan(arg),

@@ -43,6 +43,8 @@ pub(crate) struct ToolCard {
     pub(crate) summary: String,
     /// Bounded raw output, when the emitter had any to hand over.
     pub(crate) detail: Option<String>,
+    /// Where the call's complete output was kept, when the preview could not hold all of it.
+    pub(crate) full: Option<forge_types::ToolOutputRef>,
     pub(crate) expanded: bool,
     /// Where this card's rendered lines currently sit in `App::main_log`.
     pub(crate) start: usize,
@@ -58,6 +60,7 @@ impl ToolCard {
             status: CardStatus::Running,
             summary: String::new(),
             detail: None,
+            full: None,
             expanded: false,
             start: 0,
             len: 0,
@@ -68,7 +71,7 @@ impl ToolCard {
     /// A call with no arguments and no output stays a plain row rather than offering an empty
     /// drawer — the affordance must never lie about having something behind it.
     pub(crate) fn has_detail(&self) -> bool {
-        self.detail.is_some() || !arg_rows(&self.args).is_empty()
+        self.detail.is_some() || self.full.is_some() || !arg_rows(&self.args).is_empty()
     }
 }
 
@@ -127,11 +130,31 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
             }
         }
     }
+    // The preview above is bounded; this row is the way to everything. It sits directly above the
+    // collapse hint so `full_output_row` can find it without re-rendering the card.
+    if let Some(full) = &card.full {
+        out.push(TextLine::from(vec![
+            Span::styled("     ┆ ", Style::default().fg(VERY_DIM)),
+            Span::styled("⤢ view full output", Style::default().fg(TOOLCYAN).bold()),
+            Span::styled(
+                format!(
+                    "  {} · click here or /output",
+                    size_label(full.lines, full.bytes)
+                ),
+                Style::default().fg(DIM),
+            ),
+        ]));
+    }
     out.push(TextLine::from(Span::styled(
         "     ┆ click or Ctrl+T to collapse",
         Style::default().fg(VERY_DIM),
     )));
     out
+}
+
+/// Which of a card's rendered lines is its "view full output" row, when it shows one.
+pub(crate) fn full_output_row(card: &ToolCard) -> Option<usize> {
+    (card.expanded && card.full.is_some() && card.len >= 2).then(|| card.len - 2)
 }
 
 /// The always-present first row: `▸ shell   <call headline>          ✓ exit 0 in 132ms`.
@@ -174,6 +197,17 @@ fn header_line(card: &ToolCard, width: usize) -> TextLine<'static> {
 /// The right-hand outcome text: the result's own first line while it says something, else a
 /// generic ok/failed so the row is never blank on the right.
 fn status_text(card: &ToolCard) -> String {
+    let outcome = outcome_text(card);
+    match (&card.full, card.status) {
+        (Some(full), CardStatus::Ok | CardStatus::Failed) => {
+            format!("{outcome} · ⤢ {} lines", group(full.lines))
+        }
+        _ => outcome,
+    }
+}
+
+/// The outcome alone: the result's first line while it says something, else a generic ok/failed.
+pub(crate) fn outcome_text(card: &ToolCard) -> String {
     match card.status {
         CardStatus::Running => "running".to_string(),
         _ => {
@@ -200,7 +234,7 @@ fn status_text(card: &ToolCard) -> String {
 
 /// The one-line "what did this call do" text: the argument a human identifies the call BY (the
 /// shell command, the file path, the search pattern), never the raw JSON envelope.
-fn headline(name: &str, args: &str) -> String {
+pub(crate) fn headline(name: &str, args: &str) -> String {
     let Some(value) = serde_json::from_str::<Value>(args).ok() else {
         return oneline(args);
     };
@@ -289,7 +323,7 @@ fn display_path(path: &str, cwd: Option<&str>) -> String {
 
 /// Replace the home directory with `~` so a path row reads as a path, not as a margin-eating
 /// absolute prefix repeated on every call.
-fn shorten(path: &str) -> String {
+pub(crate) fn shorten(path: &str) -> String {
     match std::env::var("HOME") {
         Ok(home) if !home.is_empty() && path.starts_with(&home) => {
             format!("~{}", &path[home.len()..])
@@ -317,7 +351,7 @@ fn oneline(s: &str) -> String {
 
 /// Hard-wrap plain text to `width` cells. Never returns an empty vector, so a blank line in tool
 /// output still occupies a row (blank lines are structure in most command output).
-fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap_plain(text: &str, width: usize) -> Vec<String> {
     use unicode_width::UnicodeWidthChar;
     if width == 0 {
         return vec![text.to_string()];
@@ -339,7 +373,7 @@ fn wrap_plain(text: &str, width: usize) -> Vec<String> {
 }
 
 /// The display width of a string in terminal cells.
-fn cells(s: &str) -> usize {
+pub(crate) fn cells(s: &str) -> usize {
     use unicode_width::UnicodeWidthChar;
     s.chars()
         .map(|c| UnicodeWidthChar::width(c).unwrap_or(1))
@@ -348,7 +382,7 @@ fn cells(s: &str) -> usize {
 
 /// Truncate to `cells` display columns with an ellipsis, counting terminal cells (a CJK glyph is
 /// two) so the header's right-hand status column stays put on any content.
-fn truncate_cells(s: &str, cells: usize) -> String {
+pub(crate) fn truncate_cells(s: &str, cells: usize) -> String {
     use unicode_width::UnicodeWidthChar;
     if cells == 0 {
         return String::new();
@@ -372,6 +406,30 @@ fn truncate_cells(s: &str, cells: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// `1234567` → `1,234,567`.
+pub(crate) fn group(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `5,012 lines · 212 KB`.
+pub(crate) fn size_label(lines: usize, bytes: usize) -> String {
+    let size = match bytes {
+        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
+        b if b >= 1 << 10 => format!("{} KB", b.div_ceil(1 << 10)),
+        b => format!("{b} B"),
+    };
+    let unit = if lines == 1 { "line" } else { "lines" };
+    format!("{} {unit} · {size}", group(lines))
 }
 
 #[cfg(test)]
@@ -502,5 +560,49 @@ mod tests {
         c.expanded = true;
         let joined = text(&card_lines(&c, 80)).join("\n");
         assert!(joined.contains("not json at all"), "{joined}");
+    }
+
+    fn kept(lines: usize) -> forge_types::ToolOutputRef {
+        forge_types::ToolOutputRef {
+            path: "/tmp/out.log".into(),
+            lines,
+            bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn a_card_whose_output_was_kept_offers_the_full_view_from_its_open_drawer() {
+        let mut c = card("shell", r#"{"command":"cargo test"}"#);
+        c.status = CardStatus::Failed;
+        c.summary = "shell: exit 101 in 9s".into();
+        c.detail = Some("head\n… 4800 lines hidden · full output: /output\ntail".into());
+        c.full = Some(kept(5_012));
+        let collapsed = text(&card_lines(&c, 120));
+        assert!(
+            collapsed[0].contains("⤢ 5,012 lines"),
+            "the closed row already says there is more: {collapsed:?}"
+        );
+        c.expanded = true;
+        let lines = card_lines(&c, 120);
+        c.len = lines.len();
+        let rows = text(&lines);
+        let at = full_output_row(&c).expect("an open card with kept output has the row");
+        assert!(rows[at].contains("⤢ view full output"), "{rows:?}");
+        assert!(rows[at].contains("5,012 lines · 4 KB"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_closed_card_has_no_full_output_row_to_click() {
+        let mut c = card("shell", r#"{"command":"ls"}"#);
+        c.full = Some(kept(10));
+        c.len = 1;
+        assert_eq!(full_output_row(&c), None);
+        assert!(c.has_detail(), "kept output alone is worth a drawer");
+    }
+
+    #[test]
+    fn sizes_read_the_way_a_person_would_write_them() {
+        assert_eq!(size_label(1, 12), "1 line · 12 B");
+        assert_eq!(size_label(1_234_567, 3 << 20), "1,234,567 lines · 3.0 MB");
     }
 }

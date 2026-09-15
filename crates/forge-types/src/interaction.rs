@@ -11,6 +11,18 @@ use crate::{
 /// Sentinel used when a question cannot be answered interactively.
 pub const NO_ANSWER: &str = "(no answer — non-interactive)";
 
+/// How a bounded tool preview says where the rest of the output is. Surfaces look for it to tell a
+/// preview that stands in for more output from one that is the whole output.
+pub const FULL_OUTPUT_HINT: &str = "full output: /output";
+
+/// A tool call's complete output, kept on disk because its inline preview could not hold all of it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolOutputRef {
+    pub path: String,
+    pub lines: usize,
+    pub bytes: usize,
+}
+
 /// One choice in a user question.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QChoice {
@@ -191,6 +203,13 @@ pub enum PresenterEvent {
         /// produced nothing beyond the summary, or when the emitter has no output to hand over
         /// (a call refused before it ran).
         detail: Option<String>,
+    },
+    /// A call's complete output was kept on disk because its preview (`ToolResult::detail`) could
+    /// not hold all of it. Emitted right after that call's `ToolResult`, so a surface attaches it
+    /// to the call it just finished; a surface that cannot open files ignores it.
+    ToolOutput {
+        name: String,
+        output: ToolOutputRef,
     },
     Cost {
         session_total_usd: f64,

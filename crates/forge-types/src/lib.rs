@@ -12,7 +12,8 @@ mod subscription_pacing;
 mod turn_outcome;
 
 pub use interaction::{
-    Answer, ConfirmOutcome, Presenter, PresenterEvent, QChoice, Question, ReplayItem, NO_ANSWER,
+    Answer, ConfirmOutcome, Presenter, PresenterEvent, QChoice, Question, ReplayItem,
+    ToolOutputRef, FULL_OUTPUT_HINT, NO_ANSWER,
 };
 pub use subscription_pacing::{
     nominal_window_secs, SubscriptionPacing, SubscriptionWindow, SUBSCRIPTION_PACE_SPEND_FRACTION,

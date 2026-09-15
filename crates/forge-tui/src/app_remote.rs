@@ -259,6 +259,7 @@ impl App {
             || self.usage_overlay.open
             || self.mesh_overlay.open
             || self.voice.is_some()
+            || self.output_view.is_some()
     }
 
     fn command_center_overlay(&self) -> OverlaySnapshot {
