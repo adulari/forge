@@ -182,6 +182,7 @@ pub(crate) async fn dispatch_command(
             | CommandAction::ClearScreen
             | CommandAction::PinModel(_)
             | CommandAction::SetEffort(_)
+            | CommandAction::SetExactEffort(_)
             | CommandAction::Replay(_, _)
             | CommandAction::Export(_)
             | CommandAction::Usage
@@ -340,28 +341,15 @@ pub(crate) async fn dispatch_command(
         }
         CommandAction::PinModel(None) => open_model_pin_picker(session, app, "").await?,
         // `/effort <level>` pins the reasoning-effort level for subsequent turns.
-        // `/effort` (bare) opens the interactive effort slider above the input bar.
-        CommandAction::SetEffort(level) => match level {
-            Some(ref s) => match forge_types::EffortLevel::parse(s) {
-                Some(e) => {
-                    session.lock().await.set_effort(Some(e));
-                    app.apply(forge_tui::PresenterEvent::Effort(Some(e)));
-                    app.note(&format!(
-                        "◎ effort pinned: {} — use /effort to adjust",
-                        e.as_str()
-                    ));
-                }
-                None => {
-                    app.note(&format!(
-                        "⚠ unknown effort level '{s}' — use low/medium/high/xhigh"
-                    ));
-                }
-            },
-            None => {
-                // Bare /effort → open the slider (same as Ctrl+R).
-                app.effort_slider = true;
-            }
-        },
+        // `/effort [level]` pins the ceiling (bare opens the slider); `/effort exact <level>`
+        // forces the rung the provider actually runs at. Both bodies live in `run/effort.rs`: this
+        // file sits at its CI size ratchet (see `btw.rs` / `subagents.rs` for the same split).
+        CommandAction::SetEffort(level) => {
+            super::effort::set_effort_ceiling(session, app, level).await;
+        }
+        CommandAction::SetExactEffort(level) => {
+            super::effort::set_exact_effort(session, app, level).await;
+        }
         // `/subagents [free|pinned]` — whether children may route off this session's model pin.
         // The body lives in `run/subagents.rs`: this file sits at its CI size ratchet (see
         // `btw.rs` for the same split).

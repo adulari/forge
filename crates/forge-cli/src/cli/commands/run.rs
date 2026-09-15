@@ -166,6 +166,7 @@ pub(crate) use dispatch::*;
 mod driver;
 pub(crate) use driver::*;
 mod btw;
+mod effort;
 mod subagents;
 pub(crate) use btw::*;
 mod export;

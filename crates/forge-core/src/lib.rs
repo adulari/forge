@@ -39,6 +39,7 @@ pub(crate) mod context_pipeline;
 mod detached_subagents;
 pub mod dispatch;
 pub mod duel;
+mod exact_effort;
 mod failure_verdict;
 pub mod fleet;
 pub(crate) mod git_hygiene;
@@ -1607,6 +1608,16 @@ pub struct Session {
     /// In-session reasoning-effort pin (`/effort <level>`). When set, forwarded to the provider
     /// as a `ReasoningEffort` hint each turn. `None` = provider default (no hint sent).
     pinned_effort: Option<EffortLevel>,
+    /// In-session EXACT rung (`/effort exact <level>`). Where `pinned_effort` is a ceiling the mesh
+    /// then optimises under — using measured benchmark data, which only covers the rungs someone
+    /// rated — this is an instruction: the routed model runs at this rung, resolved against that
+    /// model's own provider ladder so it can still only name a rung the provider offers. It exists
+    /// because the two ladders differ: Kimi Code serves low/high/max but is rated only at low and
+    /// max, so no ceiling can reach its `high`. `None` = leave the mesh's choice alone.
+    ///
+    /// Deliberately session-scoped and NOT persisted: the durable form is `[model_effort]` in
+    /// config, and adding a column for an ad-hoc override would mean a schema migration.
+    exact_effort: Option<EffortLevel>,
     /// In-session override for subagent pin inheritance (`/subagents free|pinned`). `Some(true)`
     /// releases this session's children from the active model pin so they route the mesh on their
     /// own; `Some(false)` forces inheritance. `None` = follow `mesh.subagents.inherit_pin`.
@@ -2678,6 +2689,15 @@ impl Session {
                 decision.pinned = true;
             }
             decision.fallbacks.retain(|m| pin.iter().any(|p| p == m));
+        }
+        // Same reasoning as the pin backstop above, for the same reason: `decision.effort` is read
+        // at six call sites, so honouring an exact rung at each one is a bug waiting to happen.
+        // Clamp it once, here, after every routing path has produced a decision.
+        //
+        // Resolved against the ROUTED model's provider ladder — the pin may have just changed which
+        // model this is — so an exact rung can never name something the provider does not offer.
+        if let Some(exact) = self.exact_effort {
+            decision.effort = forge_types::effort::resolve_id(&decision.model, Some(exact)).sent;
         }
         let decision = decision;
         if decision.unroutable {
