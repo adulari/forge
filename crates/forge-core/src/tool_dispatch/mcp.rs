@@ -162,6 +162,7 @@ impl Session {
             summary: summarize(&result),
             detail: crate::tool_detail(&result),
         });
+        self.surface_full_output(&call.name, &call.id, None, &result);
         self.store.record_tool_call(
             msg_id,
             &call.name,

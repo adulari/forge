@@ -95,6 +95,11 @@ impl Presenter for StreamJsonPresenter {
                              "content": [ { "type": "tool_result", "tool_name": name,
                                             "is_error": !ok, "content": summary } ] }
             })),
+            PresenterEvent::ToolOutput { name, output } => self.line(serde_json::json!({
+                "type": "system", "subtype": "tool_output", "session_id": sid,
+                "tool_name": name, "path": output.path, "lines": output.lines,
+                "bytes": output.bytes
+            })),
             PresenterEvent::Cost {
                 session_total_usd,
                 session_in,

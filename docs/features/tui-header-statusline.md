@@ -139,6 +139,33 @@ Width handling: compute available cols; build segments in priority order
   `⚒ FORGE — model-mesh coding agent`.
 - Statusline: drop hints → mode → tier until it fits; never drop model/cost.
 
+### Repository and branch
+
+Row 1 names where the chat is working, right-aligned just before the version:
+
+```text
+ [complex] gpt-5.6  │  ◈ $0.0033  │  ◆ Auto-edit      forge ⎇ feat/tool-output-viewer  │  v2.15.0  Ctrl+K actions
+```
+
+It is on by default, not another opt-in widget: which repository and branch an agent is editing is
+context nobody should have to configure to see.
+
+- **Live.** The branch used to be read once at startup by spawning `git`, so a checkout during the
+  session left the statusline naming a branch the workspace had left. `git_location.rs` reads
+  `.git`, `HEAD` and `commondir` directly (no process) and the chat loop re-reads them at most
+  every two seconds.
+- **Worktrees name their repository.** The old repository name was the top-level directory's
+  basename, which in a linked worktree is the worktree's own directory (`dev`). A worktree now
+  shows the repository it belongs to, with a dim `⧉`. A submodule shows its checkout's name.
+- **Detached HEAD** shows as `⎇ @e50b52d` in amber: commits made there belong to no branch.
+- **Fitted, never pushing.** The chip is sized to what row 1 has left after the model, cost and
+  hints. A long branch is cut in the middle (`feat/to…viewer`) so both ends stay recognisable; when
+  space runs out the repository goes first, then the whole chip. The model and cost are never
+  pushed off for it.
+- **No duplicates.** A layout that already shows `git_branch` or `repo_name` as a widget gets no
+  chip; those widgets now read the same live location.
+- Outside a git checkout there is no chip.
+
 ### Edge cases
 | Edge case | Behaviour |
 |-----------|-----------|

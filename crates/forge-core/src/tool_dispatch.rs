@@ -102,18 +102,18 @@ impl Session {
         }
         // Phase 2 (concurrent): run every allowed tool's `run()` together. Borrows `self.tools`
         // immutably for the duration of the join; no `&mut self` is touched until it completes.
-        let results: Vec<(String, bool)> = {
+        let results: Vec<(String, Option<String>, bool)> = {
             let tools = &self.tools;
             let futs = pend.iter().map(|p| async move {
                 if !p.allowed {
-                    return ("permission denied by policy".to_string(), false);
+                    return ("permission denied by policy".to_string(), None, false);
                 }
                 match tools.get(&p.name) {
-                    Some(tool) => match tool.run(&p.args).await {
-                        Ok(out) => (out, true),
-                        Err(e) => (format!("error: {e}"), false),
+                    Some(tool) => match tool.run_full(&p.args).await {
+                        Ok(out) => (out.model, out.full, true),
+                        Err(e) => (format!("error: {e}"), None, false),
                     },
-                    None => (format!("error: unknown tool '{}'", p.name), false),
+                    None => (format!("error: unknown tool '{}'", p.name), None, false),
                 }
             });
             futures::future::join_all(futs).await
@@ -121,13 +121,14 @@ impl Session {
         // Phase 3 (serial): surface + persist + append each result in the ORIGINAL order, so every
         // tool_call_id is answered in sequence. Also classify each result for the failure-loop guard.
         let mut classified = Vec::with_capacity(pend.len());
-        for (p, (result, ok)) in pend.iter().zip(results) {
+        for (p, (result, full, ok)) in pend.iter().zip(results) {
             self.presenter.emit(PresenterEvent::ToolResult {
                 name: p.name.clone(),
                 ok,
                 summary: summarize(&result),
                 detail: crate::tool_detail(&result),
             });
+            self.surface_full_output(&p.name, &p.id, full.as_deref(), &result);
             self.store.record_tool_call(
                 msg_id,
                 &p.name,
@@ -530,8 +531,8 @@ impl Session {
             }
         }
 
-        let (result, ok) = if allowed {
-            match tool.run(&effective_args).await {
+        let (result, full, ok) = if allowed {
+            match tool.run_full(&effective_args).await {
                 Ok(out) => {
                     // Record what we wrote, so a later restore can warn on a manual edit.
                     if let Some(path) = &write_path {
@@ -578,12 +579,12 @@ impl Session {
                             }
                         }
                     }
-                    (out, true)
+                    (out.model, out.full, true)
                 }
-                Err(e) => (format!("error: {e}"), false),
+                Err(e) => (format!("error: {e}"), None, false),
             }
         } else {
-            ("permission denied by policy".to_string(), false)
+            ("permission denied by policy".to_string(), None, false)
         };
 
         self.presenter.emit(PresenterEvent::ToolResult {
@@ -592,6 +593,7 @@ impl Session {
             summary: summarize(&result),
             detail: crate::tool_detail(&result),
         });
+        self.surface_full_output(&call.name, &call.id, full.as_deref(), &result);
         self.store.record_tool_call(
             msg_id,
             &call.name,

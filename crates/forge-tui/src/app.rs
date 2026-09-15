@@ -392,10 +392,15 @@ pub struct App {
     /// as a `◉ remote` segment in the statusline so it's visible at a glance that the session is
     /// remotely controllable.
     pub remote_active: bool,
-    /// Cached git branch name (set at startup, not polled). Shown by the `GitBranch` widget.
+    /// Current git branch, kept fresh by `refresh_git_location`. Shown by the `GitBranch` widget.
     pub git_branch: Option<String>,
-    /// Cached project/repo directory name (set at startup, not polled). Shown by `RepoName`.
+    /// Repository name (the directory outside git), kept fresh the same way. Shown by `RepoName`.
     pub repo_name: Option<String>,
+    /// The workspace whose repository and branch the statusline follows.
+    pub(crate) git_workspace: Option<std::path::PathBuf>,
+    /// What the statusline's location chip shows; `None` outside a git checkout.
+    pub(crate) git_location: Option<crate::git_location::GitLocation>,
+    pub(crate) git_checked_at: Option<std::time::Instant>,
     /// Number of connected MCP servers (from the last `McpStatus` event). Shown by `McpStatus` widget.
     pub mcp_count: usize,
     /// The subscription window currently projected closest to exhaustion (from the latest
@@ -431,6 +436,12 @@ pub struct App {
     /// `(offset within this flush, card id, line count)`. Drained by `drain_flush`, which is the
     /// only place the final `main_log` position is known.
     pending_card_marks: Vec<(usize, u64, usize)>,
+    /// The card the latest `ToolResult` closed, which a following `ToolOutput` belongs to.
+    last_closed_card: Option<u64>,
+    /// The newest kept output, for `/output` where there is no card to open (inline mode).
+    last_tool_output: Option<(String, forge_types::ToolOutputRef)>,
+    /// The full-output viewer, while open (`/output`, or a card's "view full output" row).
+    pub output_view: Option<OutputView>,
     /// Attachment blocks shown inline as placeholders (pasted text or images): the placeholder
     /// lives in `input`, the backing content here. On submit, `resolve_paste_blocks()` substitutes
     /// text back inline and pulls images out as vision input.
@@ -1276,6 +1287,7 @@ impl App {
                         .push(tool_result_line(&name, ok, &summary, s.last_width.get()))
                 })
             }
+            PresenterEvent::ToolOutput { name, output } => self.attach_tool_output(&name, output),
             PresenterEvent::ContextInjected {
                 symbols,
                 files,
@@ -3166,6 +3178,7 @@ impl App {
         card.summary = sanitize_terminal_text(summary);
         card.detail = detail.map(|d| sanitize_terminal_text(&d));
         let id = card.id;
+        self.last_closed_card = Some(id);
         self.redraw_tool_card(id);
         // The redraw rewrote `main_log` directly; the remote transcript ring only ever sees
         // flushed lines, so hand it the finished row explicitly or the phone would be left
@@ -3881,9 +3894,11 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
     w.saturating_sub(reserve).max(min)
 }
 
+mod output_view;
 mod render;
 #[cfg(test)]
 mod steer_esc_tests;
+pub use output_view::{page_file, OutputAction, OutputView};
 mod tool_cards;
 pub(crate) use render::{human, mesh_pace_suffix, model_short, needs_phase_header};
 pub use render::{

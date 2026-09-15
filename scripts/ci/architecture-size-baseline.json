@@ -16,7 +16,7 @@
     "crates/forge-store/src/lib.rs": 8298,
     "crates/forge-tools/src/lib.rs": 286,
     "crates/forge-tui/src/lib.rs": 498,
-    "crates/forge-types/src/lib.rs": 1349,
+    "crates/forge-types/src/lib.rs": 1350,
     "crates/forge-voice/src/lib.rs": 44,
     "crates/forge-workflow/src/lib.rs": 345,
     "crates/xtasks/src/main.rs": 23
@@ -74,8 +74,8 @@
     "crates/forge-tools/src/core_tools.rs": 1671,
     "crates/forge-tools/src/shell.rs": 879,
     "crates/forge-tui/src/app.rs": 7208,
-    "crates/forge-tui/src/commands.rs": 1192,
-    "crates/forge-types/src/lib.rs": 1349,
+    "crates/forge-tui/src/commands.rs": 1200,
+    "crates/forge-types/src/lib.rs": 1350,
     "crates/forge-core/src/model_loop.rs": 858
   },
   "schema": 1,

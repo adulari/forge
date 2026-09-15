@@ -167,6 +167,7 @@ mod driver;
 pub(crate) use driver::*;
 mod btw;
 mod effort;
+mod output_view;
 mod subagents;
 pub(crate) use btw::*;
 mod export;
@@ -596,43 +597,7 @@ pub(crate) async fn run_chat_tui(
     let session_workspace = session.lock().await.workspace_root().to_path_buf();
     // Statusline metadata must describe the resumed session workspace, not the
     // directory from which the launcher happened to start.
-    app.git_branch = std::process::Command::new("git")
-        .current_dir(&session_workspace)
-        .args(["branch", "--show-current"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            } else {
-                None
-            }
-        });
-    // Repo/project name for the RepoName widget: the git top-level directory's name, falling back
-    // to the cwd's name outside a git repo (so the widget is still useful there).
-    app.repo_name = std::process::Command::new("git")
-        .current_dir(&session_workspace)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-            } else {
-                None
-            }
-        })
-        .or_else(|| Some(session_workspace.display().to_string()))
-        .and_then(|p| {
-            std::path::Path::new(&p)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-        });
+    app.watch_git_location(session_workspace.clone());
     let project = forge_config::project_initialization(&session_workspace);
     if !project.initialized {
         app.apply(forge_tui::PresenterEvent::Warning(
@@ -1083,6 +1048,12 @@ pub(crate) async fn run_chat_tui(
             }
         }
 
+        // The branch can change under a running session (the agent's checkout, or one in another
+        // terminal); the statusline re-reads `.git/HEAD` itself, at most every two seconds.
+        if app.refresh_git_location(std::time::Instant::now()) {
+            dirty = true;
+        }
+
         // Session heartbeats: turn-end already checks immediately (below); this coarse periodic
         // check catches a heartbeat coming due while the session just sits idle.
         if last_heartbeat_check.elapsed() >= std::time::Duration::from_secs(5) {
@@ -1149,7 +1120,9 @@ pub(crate) async fn run_chat_tui(
                     }
                     forge_tui::InputEvent::Scroll { up } => {
                         const STEP: usize = 3;
-                        if app.viewer.is_some() {
+                        if app.output_view_scroll(up, STEP) {
+                            // The full-output viewer took the wheel.
+                        } else if app.viewer.is_some() {
                             let key = if up { KeyKind::Up } else { KeyKind::Down };
                             for _ in 0..STEP {
                                 app.viewer_key(key);
@@ -1249,6 +1222,8 @@ pub(crate) async fn run_chat_tui(
                                 app.mesh_overlay.cursor = (app.mesh_overlay.cursor + 1).min(max);
                             }
                         }
+                    } else if app.output_view_scroll(up, STEP) {
+                        // The full-output viewer took the wheel.
                     } else if app.viewer.is_some() {
                         let key = if up { KeyKind::Up } else { KeyKind::Down };
                         for _ in 0..STEP {
@@ -1269,13 +1244,17 @@ pub(crate) async fn run_chat_tui(
                     // Full-screen mouse: drag to select text (copied on release), click the floating
                     // jump-to-bottom bar. Only meaningful in the transcript (not the activity viewer).
                     use forge_tui::MouseKind;
-                    if app.fullscreen && app.viewer.is_none() {
+                    if app.fullscreen && app.viewer.is_none() && app.output_view.is_none() {
                         match kind {
                             MouseKind::Down => {
                                 if app.jump_bar_hit(col, row) {
                                     app.transcript_to_bottom();
                                 } else if app.prev_bar_hit(col, row) {
                                     app.transcript_to_prev_user();
+                                    dirty = true;
+                                } else if app.open_tool_output_at(col, row) {
+                                    // Checked before the toggle: the "view full output" row sits
+                                    // inside the card, and a toggle would close the drawer instead.
                                     dirty = true;
                                 } else if app.toggle_tool_card_at(col, row) {
                                     // A click on a tool card opens/closes it. Selection is not
@@ -1371,6 +1350,14 @@ pub(crate) async fn run_chat_tui(
                         _ => {}
                     }
                 }
+                dirty = true;
+                continue;
+            }
+
+            // The full-output viewer is modal the same way: while open it owns every key, including
+            // the `/`, `q` and letters that would otherwise land in the prompt.
+            if let Some(action) = app.output_view_key(key) {
+                output_view::perform(action, &mut clipboard, &mut tui)?;
                 dirty = true;
                 continue;
             }

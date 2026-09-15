@@ -367,6 +367,7 @@ pub(crate) async fn dispatch_command(
         CommandAction::Config => {
             app.config_editor.open_with(config_editor_rows());
         }
+        CommandAction::ToolOutput => super::output_view::open(app, tui.as_deref_mut())?,
         // `/thinking` toggles model reasoning/thinking block display for this session.
         CommandAction::Thinking => {
             app.show_thinking = !app.show_thinking;

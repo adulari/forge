@@ -1,9 +1,11 @@
 # Feature: expandable tool cards in the chat transcript
 
-> One transcript row per tool call, click (or `Ctrl+T`) to open it. Touches
-> `forge-types` (`PresenterEvent::ToolResult.detail`), `forge-core` (`tool_detail`), `forge-cli`
-> (`LiveEvent.detail`, the mouse/keyboard seam) and `forge-tui`
-> (`app/tool_cards.rs`, the card lifecycle in `app.rs`).
+> One transcript row per tool call, click (or `Ctrl+T`) to open it, and a full-screen viewer for
+> everything it printed. Touches `forge-types` (`PresenterEvent::ToolResult.detail`,
+> `PresenterEvent::ToolOutput`), `forge-tools` (`Tool::run_full`), `forge-store`
+> (`Store::db_path`), `forge-core` (`tool_output.rs`), `forge-cli` (`LiveEvent`, the mouse/keyboard
+> seam, `/output`) and `forge-tui` (`app/tool_cards.rs`, `app/output_view.rs`, the card lifecycle
+> in `app.rs`).
 
 ## 1. Problem
 
@@ -52,10 +54,13 @@ and the output:
 
 ## 3. How it works
 
-`PresenterEvent::ToolResult` gained `detail: Option<String>` — a bounded slice of the raw result
-(`forge_core::tool_detail`: 200 lines / 8000 characters, whichever comes first, with an explicit
-truncation marker). Carrying the whole result instead would pin every megabyte of shell output in
-the UI's line ring for the life of the session; carrying nothing is what the old rendering did.
+`PresenterEvent::ToolResult` gained `detail: Option<String>` — a bounded preview of the raw result
+(`forge_core::tool_output::tool_detail`: the first 120 and last 60 lines within 8,000 characters,
+the middle folded into a `… N lines hidden · full output: /output` marker). It keeps both ends
+because a failing command prints its cause last: the first version kept only the head, which
+dropped exactly the part a person opens a failing call to read. Carrying the whole result instead
+would pin every megabyte of shell output in the UI's line ring for the life of the session;
+carrying nothing is what the old rendering did. Section 4 is where the rest goes.
 `LiveEvent::ToolResult` carries the same field (`#[serde(default)]`, so an older daemon's frames
 still deserialize), which is what makes cards work in `forge attach` and daemon-hosted sessions.
 
@@ -82,11 +87,69 @@ both look wrong and desynchronise hit-testing from the card's line range.
 scrollback, which cannot be rewritten after the fact, so a card there would be a control that
 never responds.
 
-## 4. Tests
+## 4. Full output
+
+The preview is bounded on purpose, so a card also offers everything the call printed:
+
+```
+  ▾ shell  cargo test --workspace                     ✖ exit 101 in 41s · ⤢ 5,012 lines
+     ┆ command  cargo test --workspace
+     ┆ output
+     ┆ running 812 tests
+     ┆ … 4,830 lines hidden · full output: /output
+     ┆ test result: FAILED. 811 passed; 1 failed
+     ┆ ⤢ view full output  5,012 lines · 212 KB · click here or /output
+     ┆ click or Ctrl+T to collapse
+```
+
+Clicking the `⤢` row, or `/output` for the latest call, opens the **full-output viewer**: a
+full-screen takeover in the chat's own terminal (like the activity viewer, so a running turn keeps
+streaming underneath) that pages the complete output with line numbers.
+
+| Key | Does |
+|---|---|
+| `↑` `↓`, `j` `k`, wheel | scroll a line |
+| `PgUp` `PgDn`, `u` `d`, space | scroll a page |
+| `g` `G`, `Home` `End` | top / end |
+| `/` then Enter | search; smartcase, so a capital letter makes it case-sensitive |
+| `n` `N` | next / previous match |
+| `w` | toggle wrapping; unwrapped, `←` `→` scroll sideways |
+| `y` | copy the whole output |
+| `o` | open the kept file in `$PAGER` (default `less -R`) |
+| `Esc` `q` | close |
+
+A successful call opens at the top and a failed one at the end, where its cause is. Inline mode has
+no cards and no room for the viewer, so `/output` there hands the latest kept file to `$PAGER`.
+
+**Where the full output comes from.** The model's copy is itself cut: the shell tool captures up to
+1 MiB per stream but gives the model 64 KB, head and tail. `Tool::run_full` returns that copy plus
+the uncut text when a cut happened (`ToolRun { model, full }`); every other tool keeps the default,
+whose model copy is already the whole output. After a call's `ToolResult`, core writes the uncut
+text (or the result itself, when it is longer than the preview) to
+`<store dir>/tool-output/<session>/<stamp>-<seq>-<call id>.log` and emits
+`PresenterEvent::ToolOutput { name, output }`, which the TUI attaches to the card that result just
+closed.
+
+- The file sits beside the session store (`Store::db_path`), so a test's `FORGE_DB` store keeps it
+  out of the real data directory and an in-memory store writes nothing at all.
+- Providers reuse call ids (some send `call_0` on every turn), so the file name carries a timestamp
+  and a counter; the id alone would let a later call overwrite an earlier card's output.
+- Kept outputs older than seven days are removed the first time a process keeps anything.
+- `LiveEvent::ToolOutput` carries the reference to `forge attach` and daemon-hosted sessions. The
+  path is only readable on the daemon's machine: a card whose file cannot be read opens its preview
+  instead, labelled as such. A client too old to know the frame fails to decode it and skips it.
+- A preview that stands in for more output than was kept is shown in the viewer as **preview
+  only**, never as though it were the whole output.
+
+## 5. Tests
 
 `crates/forge-tui/src/app/tool_cards.rs` covers the rendering (one row collapsed, full arguments
 and output when expanded, no triangle when there is nothing behind it, wrapping inside the row
-width, cwd-relative paths, malformed args). `crates/forge-tui/src/app.rs` covers the lifecycle
-(one row per finished call, click toggles in place, a later card stays clickable after an earlier
-one grows, `Ctrl+T` without a mouse, same-frame completion, inline mode untouched, and a result
-with no matching start still rendering). `forge-core` covers `tool_detail`'s bounds.
+width, cwd-relative paths, malformed args, the `⤢` row and its line count). `crates/forge-tui/src/app.rs`
+covers the lifecycle (one row per finished call, click toggles in place, a later card stays
+clickable after an earlier one grows, `Ctrl+T` without a mouse, same-frame completion, inline mode
+untouched, and a result with no matching start still rendering). `crates/forge-tui/src/app/output_view.rs`
+covers the viewer (opening position by outcome, reaching the last line of a long output, search and
+match cycling, Esc cancelling a search before the viewer, copy and pager actions, sideways scroll,
+preview-only labelling). `crates/forge-core/src/tool_output.rs` covers the preview's head-and-tail
+bounds, one enormous line, reused call ids never overwriting a kept file, and path safety.

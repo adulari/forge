@@ -1,6 +1,11 @@
 use super::*;
 
 pub fn render_live(frame: &mut Frame, app: &App) {
+    // The full-output viewer is opened on request, so it sits above every other takeover.
+    if let Some(view) = &app.output_view {
+        crate::app::output_view::render_output_view(frame, view);
+        return;
+    }
     // The dedicated workflow view takes over the whole frame while open (auto-opened when a
     // workflow starts; Esc backgrounds it). Same-terminal rendering, like the activity viewer.
     if app.workflow.open {

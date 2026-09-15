@@ -26,7 +26,11 @@ use super::{shell_invocation, stream_text, truncate_for_model};
 ///   so the reader task unblocks within milliseconds without needing cancellation.
 ///
 /// Output format is identical to [`run_command`]: `shell: <status> in <ms>ms\n\n<body>`.
-pub async fn run_command_pty(command: &str, cwd: &str, timeout_secs: u64) -> String {
+pub async fn run_command_pty(
+    command: &str,
+    cwd: &str,
+    timeout_secs: u64,
+) -> (String, Option<String>) {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::time::Instant;
 
@@ -40,7 +44,7 @@ pub async fn run_command_pty(command: &str, cwd: &str, timeout_secs: u64) -> Str
         pixel_height: 0,
     }) {
         Ok(p) => p,
-        Err(e) => return format!("shell(pty): failed to open pty: {e}"),
+        Err(e) => return (format!("shell(pty): failed to open pty: {e}"), None),
     };
 
     let (shell, flag) = shell_invocation();
@@ -52,7 +56,12 @@ pub async fn run_command_pty(command: &str, cwd: &str, timeout_secs: u64) -> Str
     // Spawn into the slave end.
     let mut child = match pair.slave.spawn_command(cb) {
         Ok(c) => c,
-        Err(e) => return format!("shell(pty): failed to spawn (cwd {cwd}): {e}"),
+        Err(e) => {
+            return (
+                format!("shell(pty): failed to spawn (cwd {cwd}): {e}"),
+                None,
+            )
+        }
     };
     // Drop the slave fd after spawn — when the child exits the master side will see EOF.
     drop(pair.slave);
@@ -62,7 +71,7 @@ pub async fn run_command_pty(command: &str, cwd: &str, timeout_secs: u64) -> Str
         Ok(r) => r,
         Err(e) => {
             let _ = child.kill();
-            return format!("shell(pty): failed to clone pty reader: {e}");
+            return (format!("shell(pty): failed to clone pty reader: {e}"), None);
         }
     };
 
@@ -147,7 +156,7 @@ pub async fn run_command_pty(command: &str, cwd: &str, timeout_secs: u64) -> Str
         .unwrap_or_default();
 
     // PTY merges stdout+stderr; render the combined bytes as a single stream.
-    let body = stream_text(&raw_bytes)
+    let rendered = stream_text(&raw_bytes)
         .map(|s| {
             if s.trim().is_empty() {
                 String::new()
@@ -156,15 +165,17 @@ pub async fn run_command_pty(command: &str, cwd: &str, timeout_secs: u64) -> Str
             }
         })
         .unwrap_or_default();
-    let (body, truncated) = truncate_for_model(&body, MODEL_BUDGET);
+    let (body, truncated) = truncate_for_model(&rendered, MODEL_BUDGET);
     let total = raw_bytes.len();
     let mut header = format!("shell: {status_line} in {duration_ms}ms");
     if truncated || capped {
         header.push_str(&format!("  ({total} bytes captured, output truncated)"));
     }
-    if body.trim().is_empty() {
+    let full = truncated.then(|| format!("{header}\n\n{rendered}"));
+    let result = if body.trim().is_empty() {
         header
     } else {
         format!("{header}\n\n{body}")
-    }
+    };
+    (result, full)
 }

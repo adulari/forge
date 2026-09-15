@@ -370,6 +370,7 @@ impl Drop for ModelReservation {
 pub struct Store {
     pool: r2d2::Pool<SqliteManager>,
     reservation_store_id: String,
+    db_path: Option<std::path::PathBuf>,
 }
 
 /// SQL fragment: derives a usage row's provider from its message model (aliased `m`).
@@ -1313,9 +1314,20 @@ impl Store {
         Self::build(ConnSource::Memory)
     }
 
+    /// The database file, or `None` for an in-memory store. Files that belong beside the session
+    /// store (kept tool output) are placed relative to it, so a test's temporary store keeps them
+    /// out of the real data directory and an in-memory store writes none at all.
+    pub fn db_path(&self) -> Option<&Path> {
+        self.db_path.as_deref()
+    }
+
     fn build(source: ConnSource) -> Result<Self> {
         let reservation_source = source.clone();
         let in_memory = matches!(source, ConnSource::Memory);
+        let db_path = match &source {
+            ConnSource::File(path) => Some(path.clone()),
+            ConnSource::Memory => None,
+        };
         let manager = SqliteManager { source };
         let builder = r2d2::Pool::builder().test_on_check_out(false);
         // A small pool lets WAL reads run concurrently instead of serializing behind a single mutex
@@ -1377,6 +1389,7 @@ impl Store {
         Ok(Self {
             pool,
             reservation_store_id,
+            db_path,
         })
     }
 
