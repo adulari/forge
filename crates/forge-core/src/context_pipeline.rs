@@ -444,11 +444,22 @@ pub(crate) fn message_tokens(m: &Message) -> usize {
     for tc in &m.tool_calls {
         n += tokens::count_text(&tc.name) + tokens::count_tool_args(&tc.id, &tc.args);
     }
+    // The reply's own thinking goes back to the provider with the message (thinking-mode APIs
+    // require it within a tool-call loop), so it is part of the prompt the model bills for.
+    // Leaving it out made the context gauge, the compaction trigger and the window-fit check all
+    // read low on a thinking model: a 200-step Kimi K3 turn was carrying every earlier step's
+    // reasoning while Forge counted none of it.
+    if let Some(reasoning) = &m.reasoning {
+        n += tokens::count_text(reasoning);
+    }
     n
 }
 
 fn truncate_message_to_budget(mut message: Message, budget_tokens: usize) -> Option<Message> {
     let chars: Vec<char> = message.content.chars().collect();
+    // A message clipped to fit does not keep its thinking: the reasoning is counted as prompt
+    // now, and on a thinking model it can outweigh the text it explains.
+    message.reasoning = None;
     message.content = MESSAGE_TRUNCATION_MARKER.to_string();
     if message_tokens(&message) > budget_tokens {
         return None;
@@ -677,6 +688,29 @@ pub(crate) fn clamp_chars(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A thinking model's reply carries its reasoning back to the provider on every later call in
+    /// the loop, so the estimate that drives compaction and the window-fit check must include it.
+    /// Observed 2026-09-16: a Kimi K3 session sat at a 200K real prompt while its estimate, blind
+    /// to ~30K of echoed reasoning, said it had room to spare.
+    #[test]
+    fn echoed_reasoning_counts_toward_the_transcript_estimate() {
+        let call = forge_types::ToolCall {
+            id: "call-1".into(),
+            name: "shell".into(),
+            args: serde_json::json!({ "command": "cargo test" }),
+        };
+        let silent = Message::assistant_tool_calls("", vec![call.clone()]);
+        let thinking = Message::assistant_tool_calls("", vec![call])
+            .with_reasoning("first check whether the failing test is the one I just touched");
+        let extra = message_tokens(&thinking) - message_tokens(&silent);
+        assert!(extra >= 10, "reasoning must be counted, got +{extra}");
+        // An empty reasoning is stored as `None` and costs nothing.
+        assert_eq!(
+            message_tokens(&Message::assistant("done").with_reasoning("")),
+            message_tokens(&Message::assistant("done"))
+        );
+    }
 
     /// The defect this pins: a Muse-driven fleet session on 2026-09-02 lost its brief mid-turn and
     /// answered "No task text came through" for the rest of the run, inventing work from the tool
