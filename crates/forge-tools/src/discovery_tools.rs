@@ -183,7 +183,15 @@ impl Tool for SearchTool {
                 // are skipped silently).
                 let content = std::fs::read_to_string(&root)
                     .map_err(|e| ToolError::Failed(format!("can't read {root}: {e}")))?;
-                append_search_matches(&root, &content, re.as_ref(), &query, context, &mut matches);
+                append_search_matches(
+                    &root,
+                    &content,
+                    re.as_ref(),
+                    &query,
+                    context,
+                    usize::MAX,
+                    &mut matches,
+                );
             } else {
                 let mut stack = vec![std::path::PathBuf::from(&root)];
                 'walk: while let Some(dir) = stack.pop() {
@@ -219,6 +227,7 @@ impl Tool for SearchTool {
                                     re.as_ref(),
                                     &query,
                                     context,
+                                    SEARCH_PER_FILE_CAP,
                                     &mut matches,
                                 ) {
                                     break 'walk; // an output cap was hit — stop searching
@@ -249,6 +258,7 @@ fn append_search_matches(
     re: Option<&regex::Regex>,
     query: &str,
     context: usize,
+    per_file_cap: usize,
     matches: &mut Vec<String>,
 ) -> bool {
     let lines: Vec<&str> = content.lines().collect();
@@ -268,7 +278,10 @@ fn append_search_matches(
         return true;
     }
     if context == 0 {
-        for &i in &hits {
+        // One file full of hits (a log, a lockfile, generated code) used to fill the whole budget
+        // and hide every other file. Show a sample per file and say how many more it has.
+        let shown = hits.len().min(per_file_cap);
+        for &i in &hits[..shown] {
             matches.push(format!(
                 "{label}:{}: {}",
                 i + 1,
@@ -282,6 +295,13 @@ fn append_search_matches(
                 matches.push("… (capped — narrow the query or file_pattern)".into());
                 return false;
             }
+        }
+        if hits.len() > shown {
+            matches.push(format!(
+                "{label}: … {} more matches in this file (search it with a narrower query or \
+                 read it directly)",
+                hits.len() - shown
+            ));
         }
     } else {
         for mut hunk in context_hunks(label, &lines, &hits, context) {
@@ -321,6 +341,9 @@ fn append_search_matches(
 /// ~3 KB log lines and returned 651,214 bytes (~163k tokens) in one tool result, more input than
 /// most whole sessions. A count cap cannot bound output; only a byte budget can.
 pub(crate) const SEARCH_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+
+/// Most matching lines shown per file in the default mode; the rest are counted.
+pub(crate) const SEARCH_PER_FILE_CAP: usize = 25;
 
 /// Trim one matched line to [`SEARCH_LINE_MAX_BYTES`], on a char boundary, saying how much was
 /// dropped so the model can tell a truncated line from a genuinely short one.

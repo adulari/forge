@@ -186,6 +186,7 @@ impl Session {
         match spool(&root, &self.id, call_id, text) {
             Ok(output) => {
                 let path = output.path.clone();
+                self.kept_outputs.insert(call_id.to_string(), path.clone());
                 self.presenter.emit(PresenterEvent::ToolOutput {
                     name: name.to_string(),
                     output,

@@ -41,6 +41,15 @@ the model see?" was answered in more places.
   viewer opens), so the model can `sed -n` the part it needs. Tool-specific caps existed but none
   bounded the whole — `search` returned 272K chars, `read_file` 262K — and elision spares the
   current turn, so each was resent on every step until the turn ended.
+- **A bounded working set inside a turn.** Before each request, `age_tool_rounds` cuts every
+  tool result older than the last `PRUNE_KEEP_ROUNDS` (4) rounds to a 1,500-char head — but only
+  once `AGE_BATCH_ROUNDS` (4) such rounds have piled up, so the prompt prefix (and the provider's
+  cache of it) changes once every four rounds, not every step. A cut result names the spooled
+  complete output when one exists, so the model reads that file instead of running the tool again.
+  Replaying a 30-request Kimi K3 turn: 5.5M chars of tool output sent before, 2.6M after.
+- **Search shows every file.** In a directory walk each file contributes at most
+  `SEARCH_PER_FILE_CAP` (25) lines plus a count of the rest; a single noisy log no longer fills the
+  64 KB budget and hides the file the model was looking for.
 - **Accounting honesty**: `estimated_transcript_tokens` (gauge + auto-compaction threshold +
   `transcript_fits`) and the compaction summarizer's rendering both skip `UiOnly` rows — a note
   the model never sees must not trigger compaction or cost summary tokens. The same estimate
