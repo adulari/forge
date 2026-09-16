@@ -14,7 +14,8 @@ set -euo pipefail
 # EXPO_DOCTOR_SKIP_DEPENDENCY_VERSION_CHECK knob, and network errors in the remaining checks are
 # downgraded to warnings. The other 18 doctor checks, ESLint, `tsc --noEmit` and Vitest all stay
 # fully enforcing — only the answer that lives outside the repository is dropped. Pull-request CI
-# keeps running the plain `npm run check`, where drift is actionable by a human.
+# enforces the comparison on PRs that change mobile/package.json or its lockfile, where drift is
+# actionable by a human, and reports it as a warning on every other PR (mobile-typecheck.yml).
 mobile_dir=${1:-"$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)/mobile"}
 
 [ -d "$mobile_dir" ] || {
@@ -22,7 +23,7 @@ mobile_dir=${1:-"$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)/mobil
   exit 1
 }
 
-echo "::notice::release-path check: expo-doctor's SDK version comparison is skipped (non-hermetic); PR CI still enforces it"
+echo "::notice::release-path check: expo-doctor's SDK version comparison is skipped (non-hermetic); PR CI enforces it on dependency changes"
 
 cd "$mobile_dir"
 EXPO_DOCTOR_SKIP_DEPENDENCY_VERSION_CHECK=1 \

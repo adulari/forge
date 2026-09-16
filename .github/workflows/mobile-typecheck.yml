@@ -26,6 +26,7 @@ jobs:
     outputs:
       mobile_app: ${{ steps.classify.outputs.mobile_app }}
       mobile_tauri: ${{ steps.classify.outputs.mobile_tauri }}
+      mobile_deps: ${{ steps.deps.outputs.changed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -37,6 +38,23 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash scripts/ci/changed-groups.sh
+      # Whether this PR touches the app's dependency manifests — the only PRs for which expo-doctor's
+      # SDK version comparison is something the author can act on (see the Check app step).
+      - id: deps
+        name: Detect dependency manifest changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            changed=true
+          elif git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- mobile/package.json mobile/package-lock.json; then
+            changed=false
+          else
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
   app:
     name: lint, typecheck, and tests
@@ -70,8 +88,24 @@ jobs:
         working-directory: .
         run: bash scripts/ci/test-npm-audit-gate.sh
 
+      # expo-doctor's SDK version comparison reads Expo's *current* patch versions over the network,
+      # so an Expo publish turns every open PR red with nothing changed in it. It stays enforcing on
+      # a PR that edits the dependency manifests — the one place the drift is fixable — and is a
+      # warning everywhere else. Bumping the packages from an unrelated PR is not free: any change to
+      # mobile/package.json locks iOS OTA delivery until the next native build
+      # (scripts/ci/eas-ota-safety.sh). The release path skips the comparison outright
+      # (scripts/ci/mobile-release-check.sh).
       - name: Check app
-        run: npm run check
+        env:
+          DEPS_CHANGED: ${{ needs.changes.outputs.mobile_deps }}
+        run: |
+          if [ "$DEPS_CHANGED" = "true" ]; then
+            npm run check
+          else
+            npx expo install --check \
+              || echo "::warning title=Expo SDK patch drift::installed Expo packages are behind the SDK's current patch versions; bump them in a PR that also plans a native build"
+            EXPO_DOCTOR_SKIP_DEPENDENCY_VERSION_CHECK=1 npm run check
+          fi
       - name: Export web app
         run: npx --no-install expo export -p web
         env:
