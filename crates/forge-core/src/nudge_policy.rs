@@ -16,7 +16,7 @@ pub(crate) type Progress = (u64, usize);
 pub(crate) enum ContinueNudge {
     /// Re-drive the model — it is still converging (or has not been tried yet).
     Send,
-    /// The last nudge changed nothing at all, so another cannot help — stop and say it is blocked.
+    /// Several nudges in a row changed nothing at all — stop and say it is blocked.
     BlockedStop,
     /// Tools keep running but no task has completed for many nudges — likely goalless. Stop and
     /// hand it back to the user rather than spend the whole step budget spinning.
@@ -31,12 +31,23 @@ pub(crate) enum ContinueNudge {
 /// `MAX_CONTINUE_NUDGES = 4`, which gave up on a model that WAS still finishing tasks.
 pub(crate) const GOALLESS_NUDGE_LIMIT: usize = 8;
 
+/// Consecutive nudges answered with nothing (no tool, no resolved task) before the model is judged
+/// blocked.
+///
+/// One was too few. Kimi K3 on a pruned 62K-token prompt ended with a one-line "next I will…" and
+/// no tool call on 3 of 5 identical requests (probed 2026-09-16), so a single idle answer is a coin
+/// flip, not evidence of a blocker — and stopping there meant the second nudge, the one that names
+/// the open tasks and the ways out, was never sent. Earlier that day that named nudge recovered the
+/// same session all three times it went out.
+pub(crate) const BLOCKED_IDLE_NUDGES: usize = 3;
+
 /// Decide what to do with a model that ended its reply with tasks still unfinished.
 ///
 /// The rules, in order:
-/// 1. Nothing moved since the last nudge (same tools, same Done count) → `BlockedStop`. A nudge
-///    that changed nothing cannot be improved on by repetition. (The direct path used to re-drive
-///    the whole budget here; observed live as four ~119k-input calls answered in prose each time.)
+/// 1. Nothing moved since the last nudge (same tools, same Done count), and this is the
+///    `BLOCKED_IDLE_NUDGES`th such answer in a row → `BlockedStop`; before that → `Send`, which is
+///    the named nudge. (The direct path used to re-drive the whole budget here; observed live as
+///    four ~119k-input calls answered in prose each time, so the count stays small.)
 /// 2. A task completed since the last nudge → `Send`, with no fixed ceiling. Real convergence is
 ///    allowed to run to completion — this is the "keep going until done" the user asked for.
 /// 3. Tools ran but no task completed, and this has now happened `GOALLESS_NUDGE_LIMIT` times in a
@@ -44,7 +55,8 @@ pub(crate) const GOALLESS_NUDGE_LIMIT: usize = 8;
 /// 4. Otherwise (tool progress, under the goalless ceiling) → `Send`.
 ///
 /// `tool_only_streak` is how many prior consecutive nudges ran tools without completing a task; the
-/// caller resets it to zero whenever a task completes.
+/// caller resets it to zero whenever a task completes. `idle_streak` is how many prior consecutive
+/// nudges changed nothing at all; the caller resets it whenever anything moves.
 ///
 /// Note what is deliberately NOT used: textual similarity between replies. On the session that
 /// motivated the original guard, consecutive stalled replies were only 0.18–0.32 word-set similar
@@ -52,6 +64,7 @@ pub(crate) const GOALLESS_NUDGE_LIMIT: usize = 8;
 /// also fire on ordinary on-topic work. The signal has to be structural.
 pub(crate) fn decide(
     tool_only_streak: usize,
+    idle_streak: usize,
     progress_at_last_nudge: Option<Progress>,
     progress_now: Progress,
 ) -> ContinueNudge {
@@ -59,7 +72,11 @@ pub(crate) fn decide(
         return ContinueNudge::Send; // nothing tried yet — the first nudge is always worth it
     };
     if progress_now == prev {
-        return ContinueNudge::BlockedStop;
+        return if idle_streak + 1 >= BLOCKED_IDLE_NUDGES {
+            ContinueNudge::BlockedStop
+        } else {
+            ContinueNudge::Send
+        };
     }
     if progress_now.1 > prev.1 {
         return ContinueNudge::Send; // a task completed — real progress, no ceiling
@@ -68,6 +85,25 @@ pub(crate) fn decide(
         return ContinueNudge::GoallessStop;
     }
     ContinueNudge::Send
+}
+
+/// The `(tool_only_streak, idle_streak)` pair to carry past a nudge that is being sent.
+///
+/// A completed task is real convergence and clears both; that is what lets finishing tasks keep
+/// going indefinitely where spinning tools does not. Tool-only progress extends the goalless streak
+/// and clears the idle one. An answer that moved nothing extends only the idle streak — it ran no
+/// tools, so it is not goalless work.
+pub(crate) fn next_streaks(
+    (tool_only, idle): (usize, usize),
+    progress_at_last_nudge: Option<Progress>,
+    progress_now: Progress,
+) -> (usize, usize) {
+    match progress_at_last_nudge {
+        None => (tool_only, 0),
+        Some(prev) if progress_now.1 > prev.1 => (0, 0),
+        Some(prev) if progress_now == prev => (tool_only, idle + 1),
+        Some(_) => (tool_only + 1, 0),
+    }
 }
 
 /// The re-drive instruction. Names the two things that count as progress, which is exactly what
@@ -180,38 +216,58 @@ mod tests {
     }
 
     #[test]
-    fn the_first_nudge_is_always_worth_sending() {
-        // Nothing has been tried yet, so there is no evidence it is pointless.
-        assert_eq!(decide(0, None, (0, 0)), ContinueNudge::Send);
+    fn streaks_track_what_the_last_nudge_actually_produced() {
+        assert_eq!(next_streaks((2, 1), None, (5, 1)), (2, 0));
+        assert_eq!(next_streaks((2, 1), Some((5, 1)), (5, 1)), (2, 2));
+        assert_eq!(next_streaks((2, 1), Some((5, 1)), (6, 1)), (3, 0));
+        assert_eq!(next_streaks((2, 1), Some((5, 1)), (6, 2)), (0, 0));
     }
 
     #[test]
-    fn a_nudge_that_changed_nothing_ends_the_turn_instead_of_spending_the_budget() {
-        // Same tool count, same resolved-task count: the model answered the nudge without doing
-        // either thing it asked for, so another cannot help.
-        assert_eq!(decide(0, Some((7, 2)), (7, 2)), ContinueNudge::BlockedStop);
-        assert_eq!(decide(3, Some((7, 2)), (7, 2)), ContinueNudge::BlockedStop);
+    fn the_first_nudge_is_always_worth_sending() {
+        // Nothing has been tried yet, so there is no evidence it is pointless.
+        assert_eq!(decide(0, 0, None, (0, 0)), ContinueNudge::Send);
+    }
+
+    #[test]
+    fn one_idle_answer_gets_the_named_nudge_before_the_turn_is_called_blocked() {
+        // Same tool count, same resolved-task count. A single such answer is noise on a model
+        // that stops mid-thought half the time, so the named nudge still goes out.
+        assert_eq!(decide(0, 0, Some((7, 2)), (7, 2)), ContinueNudge::Send);
+        assert_eq!(decide(0, 1, Some((7, 2)), (7, 2)), ContinueNudge::Send);
+    }
+
+    #[test]
+    fn repeated_idle_answers_end_the_turn_instead_of_spending_the_budget() {
+        assert_eq!(
+            decide(0, BLOCKED_IDLE_NUDGES - 1, Some((7, 2)), (7, 2)),
+            ContinueNudge::BlockedStop
+        );
+        assert_eq!(
+            decide(3, BLOCKED_IDLE_NUDGES + 4, Some((7, 2)), (7, 2)),
+            ContinueNudge::BlockedStop
+        );
     }
 
     #[test]
     fn completing_a_task_keeps_going_with_no_fixed_ceiling() {
         // A task moved to Done — real convergence. Allowed even far past the old cap of 4, and
         // even past the goalless ceiling, because completing tasks is exactly "progress".
-        assert_eq!(decide(0, Some((7, 2)), (8, 3)), ContinueNudge::Send);
-        assert_eq!(decide(100, Some((7, 2)), (99, 3)), ContinueNudge::Send);
+        assert_eq!(decide(0, 0, Some((7, 2)), (8, 3)), ContinueNudge::Send);
+        assert_eq!(decide(100, 0, Some((7, 2)), (99, 3)), ContinueNudge::Send);
     }
 
     #[test]
     fn tool_progress_without_finishing_anything_is_allowed_up_to_the_goalless_ceiling() {
         // Tools ran, no task completed: fine while under the ceiling...
-        assert_eq!(decide(0, Some((7, 2)), (8, 2)), ContinueNudge::Send);
+        assert_eq!(decide(0, 0, Some((7, 2)), (8, 2)), ContinueNudge::Send);
         assert_eq!(
-            decide(GOALLESS_NUDGE_LIMIT - 1, Some((7, 2)), (8, 2)),
+            decide(GOALLESS_NUDGE_LIMIT - 1, 0, Some((7, 2)), (8, 2)),
             ContinueNudge::Send
         );
         // ...but once it has run tools without finishing anything this many times, it is goalless.
         assert_eq!(
-            decide(GOALLESS_NUDGE_LIMIT, Some((7, 2)), (8, 2)),
+            decide(GOALLESS_NUDGE_LIMIT, 0, Some((7, 2)), (8, 2)),
             ContinueNudge::GoallessStop
         );
     }
