@@ -161,6 +161,16 @@ pub struct Config {
     /// Empty = inert, and the mesh's own best-value choice stands.
     #[serde(default)]
     pub model_effort: HashMap<String, String>,
+    /// Auto-compaction ceiling in tokens per model or provider, keyed like `model_effort` (full
+    /// id wins over a bare namespace). An entry replaces `mesh.compact_cap_tokens` (or the free
+    /// cap) for that model; the 80%-of-window trigger still applies on top. For a subscription
+    /// metered per request, a smaller ceiling trades continuity for a cheaper prompt on every step
+    /// of a long tool loop. Ships with `kimi = 120000`: Kimi Code's K3 window is 262K, its replies
+    /// carry thinking that goes back on every step, and a measured 198-step session averaged a
+    /// 130K prompt under the global 217,600 ceiling. Set a provider to `0` to fall back to the
+    /// global ceiling.
+    #[serde(default = "default_compact_cap")]
+    pub compact_cap: HashMap<String, u64>,
     /// Remote control server (`/remote`): drive this session from a phone or browser. `auto`
     /// starts it at chat launch so the session is reachable without typing `/remote` first.
     #[serde(default)]
@@ -2624,6 +2634,7 @@ impl Default for Config {
             system_prompt_overrides: HashMap::new(),
             reasoning_prefill: HashMap::new(),
             model_effort: HashMap::new(),
+            compact_cap: default_compact_cap(),
             remote: RemoteConfig::default(),
             anywhere: AnywhereConfig::default(),
             voice: VoiceConfig::default(),
@@ -2772,12 +2783,38 @@ static MODEL_EFFORT: std::sync::OnceLock<HashMap<String, String>> = std::sync::O
 pub fn model_effort_for(model: &str) -> Option<String> {
     let configured =
         MODEL_EFFORT.get_or_init(|| load().map(|c| c.model_effort).unwrap_or_default());
-    let namespace = model.split_once("::").map(|(provider, _)| provider);
-    configured
-        .get(model)
-        .or_else(|| namespace.and_then(|provider| configured.get(provider)))
+    by_model_or_provider(configured, model)
         .filter(|rung| !rung.trim().is_empty())
         .cloned()
+}
+
+/// The entry for `model` in a table keyed by full id or provider namespace, the id winning.
+fn by_model_or_provider<'a, V>(table: &'a HashMap<String, V>, model: &str) -> Option<&'a V> {
+    let namespace = model.split_once("::").map(|(provider, _)| provider);
+    table
+        .get(model)
+        .or_else(|| namespace.and_then(|provider| table.get(provider)))
+}
+
+fn default_compact_cap() -> HashMap<String, u64> {
+    HashMap::from([("kimi".to_string(), 120_000)])
+}
+
+/// Per-model auto-compaction ceilings (`[compact_cap]`), read once for the process.
+static COMPACT_CAP: std::sync::OnceLock<HashMap<String, u64>> = std::sync::OnceLock::new();
+
+/// The auto-compaction ceiling configured for `model`, in tokens. `None` — the common case — means
+/// the global `mesh.compact_cap_tokens` / free-model ceiling applies; so does an explicit `0`,
+/// which is how a user switches off a shipped default for one provider.
+pub fn compact_cap_for(model: &str) -> Option<u64> {
+    let configured = COMPACT_CAP.get_or_init(|| {
+        load()
+            .map(|c| c.compact_cap)
+            .unwrap_or_else(|_| default_compact_cap())
+    });
+    by_model_or_provider(configured, model)
+        .copied()
+        .filter(|cap| *cap > 0)
 }
 
 /// Load configuration with full layered precedence (lowest -> highest):
@@ -3534,6 +3571,39 @@ pub fn inject_provider_keys() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shipped `[compact_cap]` table halves Kimi Code's per-step prompt; every other provider
+    /// stays on the global ceiling, and a full model id overrides its provider's entry.
+    #[test]
+    fn compact_cap_ships_a_kimi_ceiling_and_the_full_id_wins() {
+        let table = default_compact_cap();
+        assert_eq!(
+            by_model_or_provider(&table, "kimi::k3-256k"),
+            Some(&120_000)
+        );
+        assert_eq!(by_model_or_provider(&table, "openai::gpt-5.6"), None);
+        let mut table = table;
+        table.insert("kimi::k3".into(), 200_000);
+        assert_eq!(by_model_or_provider(&table, "kimi::k3"), Some(&200_000));
+        assert_eq!(
+            by_model_or_provider(&table, "kimi::k3-256k"),
+            Some(&120_000)
+        );
+        // A config that omits the table entirely still gets the shipped default; one that names
+        // the provider with `0` opts back out of it.
+        let parsed: Config =
+            toml::from_str("permission_mode = \"accept-edits\"\n[mesh]\nmodels = {}\n")
+                .expect("a config with no [compact_cap] table parses");
+        assert_eq!(parsed.compact_cap.get("kimi"), Some(&120_000));
+        let mut table = default_compact_cap();
+        table.insert("kimi".into(), 0);
+        assert_eq!(
+            by_model_or_provider(&table, "kimi::k3")
+                .copied()
+                .filter(|c| *c > 0),
+            None
+        );
+    }
 
     #[test]
     fn local_sessions_and_runs_reach_the_fleet_unless_opted_out() {

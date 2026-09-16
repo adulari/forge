@@ -24,7 +24,14 @@ The gauge surfaces the fill level; compaction is the action that lowers it.
 
 **Shipped since the MVP**
 - **Auto-trigger**: `auto_compact_if_needed()` runs when the context gauge crosses 80% —
-  prune pass first (§3a), summarize only if pruning didn't reclaim enough.
+  prune pass first (§3a), summarize only if pruning didn't reclaim enough. The trigger is
+  `min(0.8 × window, ceiling)`, where the ceiling is `mesh.compact_cap_tokens` (217,600) for a
+  paid model, `mesh.free_model_cap_tokens` for a free one, or a `[compact_cap]` entry for the
+  model or its provider when one exists. `[compact_cap]` ships with `kimi = 120000`: Kimi Code
+  meters by request, its K3 window is 262K, and its replies carry thinking that is sent back on
+  every step, so a measured 198-step session averaged a 130K prompt under the global ceiling.
+  A lower ceiling there roughly halves that at the cost of summarising more often; set the
+  provider to `0` to go back to the global ceiling.
 - **Persistence**: compaction is durable across resume. Compacted messages are soft-deleted
   (`message.active = 0`) and the summary stored as a `session_compaction` row; `load_messages`
   reloads the compacted view, while the full history stays intact underneath.
