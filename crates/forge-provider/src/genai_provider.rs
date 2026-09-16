@@ -827,6 +827,16 @@ fn requires_reasoning_echo(model: &str) -> bool {
     model.starts_with("deepseek::") || model.starts_with("kimi::")
 }
 
+/// Whether this model's API takes `tool_choice: "required"`.
+///
+/// Kimi Code verified live (2026-09-16): K3 on a session that kept announcing its next step and
+/// stopping called a tool on 12 of 12 streamed requests with it, against 2 of 6 without. Other
+/// providers stay off until checked — some reject the value, and DeepSeek's thinking mode
+/// documents no support for it.
+fn accepts_required_tool_choice(model: &str) -> bool {
+    model.starts_with("kimi::")
+}
+
 /// Moonshot's Partial Mode: a trailing assistant message whose `reasoning_content` seeds the start
 /// of the model's thinking, flagged `partial: true`.
 ///
@@ -1108,6 +1118,10 @@ impl Provider for GenAiProvider {
             crate::effective_output_token_cap(self.max_output_tokens, opts.max_output_tokens)
         {
             options = options.with_max_tokens(cap);
+        }
+        if opts.require_tool_call && !tools.is_empty() && accepts_required_tool_choice(&model_name)
+        {
+            options = options.with_tool_choice(genai::chat::ToolChoice::Required);
         }
         // Keep this scoped to the preview model whose endpoint contract we have verified. Other
         // Token Plan models may be non-thinking or expose different optional parameters.
@@ -2090,6 +2104,13 @@ mod tests {
             !resp.content.trim().is_empty(),
             "expected a non-empty reply, got empty"
         );
+    }
+
+    #[test]
+    fn only_verified_providers_are_asked_for_a_required_tool_call() {
+        assert!(accepts_required_tool_choice("kimi::k3-256k"));
+        assert!(!accepts_required_tool_choice("deepseek::deepseek-v4"));
+        assert!(!accepts_required_tool_choice("openai::gpt-4o"));
     }
 
     #[test]

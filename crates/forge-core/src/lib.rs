@@ -1632,6 +1632,9 @@ pub struct Session {
     /// model that armed it, so a mid-turn failover to a DIFFERENT (e.g. larger-window) model ignores
     /// a cap derived from the overflowing model's window instead of needlessly over-trimming it.
     overflow_window_cap: Option<(String, u32)>,
+    /// The next main-loop request must answer with a tool call. Armed by a stall nudge while tasks
+    /// are open; consumed by that one request.
+    require_tool_call: bool,
     /// Whether white-hot effort's standing orchestration guidance has been injected this session
     /// (docs/features/whitehot-effort.md). One-shot per pin: re-armed by `set_effort` on any
     /// change, so toggling away and back re-injects for the new stretch of the transcript.
@@ -6268,9 +6271,24 @@ mod tests {
     /// tool calls up to a point, then repeated explanations with no tool call and no task resolved.
     struct BlockedAfterWorkingProvider {
         calls: std::sync::atomic::AtomicUsize,
+        required_tool_call: std::sync::Mutex<Vec<bool>>,
     }
     #[async_trait::async_trait]
     impl Provider for BlockedAfterWorkingProvider {
+        async fn complete_with(
+            &self,
+            model: &str,
+            messages: &[Message],
+            tools: &[ToolSpec],
+            opts: &forge_provider::CompletionOptions,
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            self.required_tool_call
+                .lock()
+                .unwrap()
+                .push(opts.require_tool_call);
+            self.complete(model, messages, tools, on_event).await
+        }
         async fn complete(
             &self,
             _model: &str,
@@ -6332,6 +6350,7 @@ mod tests {
         let events = capture.events.clone();
         let provider = Arc::new(BlockedAfterWorkingProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
+            required_tool_call: std::sync::Mutex::new(Vec::new()),
         });
         let mut config = Config::default();
         config.mesh.verify_completeness = false;
@@ -6372,6 +6391,14 @@ mod tests {
         assert!(
             warnings.iter().any(|w| w.contains("blocked, not stalling")),
             "the user must be told it is blocked and where the reason is: {warnings:?}"
+        );
+        // Each nudge makes exactly its next request demand a tool call; nothing before the first.
+        let required = provider.required_tool_call.lock().unwrap().clone();
+        assert_eq!(required.first(), Some(&false), "{required:?}");
+        assert_eq!(
+            required.iter().filter(|r| **r).count(),
+            nudge_policy::BLOCKED_IDLE_NUDGES,
+            "{required:?}"
         );
     }
 

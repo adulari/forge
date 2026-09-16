@@ -346,6 +346,7 @@ impl Session {
                     const MAX_EMPTY_NUDGES: usize = 2;
                     if empty_nudges < MAX_EMPTY_NUDGES {
                         empty_nudges += 1;
+                        self.require_tool_call = !nudge_policy::open_titles(&self.tasks).is_empty();
                         self.presenter.emit(PresenterEvent::Warning(format!(
                             "model returned an empty response — nudging it to continue ({empty_nudges}/{MAX_EMPTY_NUDGES})"
                         )));
@@ -700,6 +701,8 @@ impl Session {
                                     progress_now,
                                 );
                                 last_nudge_progress = Some(progress_now);
+                                // Kimi K3 answers a plain nudge by repeating its announcement.
+                                self.require_tool_call = true;
                                 self.presenter.emit(PresenterEvent::Warning(
                                     nudge_policy::continuing_warning(unfinished, continue_nudges),
                                 ));

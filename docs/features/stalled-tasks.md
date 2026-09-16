@@ -56,6 +56,15 @@ second on it names the tasks that are still open (capped at 6) and demands the s
 because by then the generic instruction has demonstrably not worked — the model answered it and
 the work is still open.
 
+**The request after a nudge must call a tool.** Kimi K3 answered plain nudges by repeating its
+last "next I will…" sentence word for word (observed 2026-09-16: one 129-char reply three times
+in a row). Every nudge — continue, or empty-response while tasks are open — therefore arms
+`require_tool_call` for the one request that follows, which the genai provider sends as
+`tool_choice: "required"` where the API is verified to take it (Kimi Code only for now: 12 of 12
+streamed requests called a tool, against 2 of 6 without). `update_tasks` still lets the model
+close a task it considers finished. The turn is judged blocked only after `BLOCKED_IDLE_NUDGES` (3)
+nudges in a row changed nothing.
+
 ## 3. Numbers
 
 | | before | after |

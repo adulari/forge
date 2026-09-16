@@ -487,6 +487,7 @@ Rules:\n\
             reuse_response_chain: false,
             response_chain_prefix_tokens: 0,
             response_format: None,
+            require_tool_call: false,
         };
 
         let mut chain = fallbacks.into_iter();
