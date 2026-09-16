@@ -12,6 +12,19 @@ impl Store {
         label: &str,
         usage: &Usage,
     ) -> Result<()> {
+        self.record_side_call_usage_for(session_id, label, None, usage)
+    }
+
+    /// [`Store::record_side_call_usage`], naming the model that answered. Without it a side call's
+    /// row cannot say which summarizer returned nothing.
+    pub fn record_side_call_usage_for(
+        &self,
+        session_id: &str,
+        label: &str,
+        model: Option<&str>,
+        usage: &Usage,
+    ) -> Result<()> {
+        let provider = model.and_then(|m| m.split_once("::")).map(|(p, _)| p);
         let msg_id = forge_types::new_id();
         let usage_id = forge_types::new_id();
         // IMMEDIATE: this SELECTs MAX(seq) then writes. A DEFERRED txn would take a read snapshot
@@ -42,11 +55,14 @@ impl Store {
             }
             tx.execute(
                 "INSERT INTO usage \
-                 (id, message_id, input_tokens, cached_input_tokens, output_tokens, cost_usd) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (id, message_id, provider, model, input_tokens, cached_input_tokens, \
+                  output_tokens, cost_usd) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 (
                     &usage_id,
                     msg_id.as_str(),
+                    provider,
+                    model,
                     usage.input_tokens as i64,
                     usage.cached_input_tokens.map(|c| c as i64),
                     usage.output_tokens as i64,
@@ -80,6 +96,8 @@ impl Store {
             let usage_payload = sync_json(serde_json::json!({
                 "id": usage_id,
                 "message_id": msg_id,
+                "provider": provider,
+                "model": model,
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
                 "cached_input_tokens": usage.cached_input_tokens,

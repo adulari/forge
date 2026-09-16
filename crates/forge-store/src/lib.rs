@@ -5643,6 +5643,28 @@ mod tests {
     }
 
     #[test]
+    fn side_call_usage_names_the_model_that_answered() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "ask").unwrap();
+        let usage = forge_types::Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            ..Default::default()
+        };
+        store
+            .record_side_call_usage_for(&sid, "compact/summarize", Some("kimi::k3-256k"), &usage)
+            .unwrap();
+        let conn = store.lock().unwrap();
+        let (provider, model): (Option<String>, Option<String>) = conn
+            .query_row("SELECT provider, model FROM usage", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(provider.as_deref(), Some("kimi"));
+        assert_eq!(model.as_deref(), Some("kimi::k3-256k"));
+    }
+
+    #[test]
     fn side_call_usage_survives_concurrent_writers() {
         // record_side_call_usage SELECTs MAX(seq) then writes — the read-then-write path that a
         // DEFERRED txn would lose to SQLITE_BUSY_SNAPSHOT. With IMMEDIATE + retry every cost row

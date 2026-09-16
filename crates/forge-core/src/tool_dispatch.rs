@@ -128,7 +128,8 @@ impl Session {
                 summary: summarize(&result),
                 detail: crate::tool_detail(&result),
             });
-            self.surface_full_output(&p.name, &p.id, full.as_deref(), &result);
+            let kept = self.surface_full_output(&p.name, &p.id, full.as_deref(), &result);
+            let result = crate::tool_output::fit_for_model(result, kept.as_deref());
             self.store.record_tool_call(
                 msg_id,
                 &p.name,
@@ -593,7 +594,8 @@ impl Session {
             summary: summarize(&result),
             detail: crate::tool_detail(&result),
         });
-        self.surface_full_output(&call.name, &call.id, full.as_deref(), &result);
+        let kept = self.surface_full_output(&call.name, &call.id, full.as_deref(), &result);
+        let result = crate::tool_output::fit_for_model(result, kept.as_deref());
         self.store.record_tool_call(
             msg_id,
             &call.name,

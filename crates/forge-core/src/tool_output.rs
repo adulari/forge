@@ -22,6 +22,14 @@ use super::*;
 const PREVIEW_HEAD_LINES: usize = 120;
 const PREVIEW_TAIL_LINES: usize = 60;
 const PREVIEW_MAX_CHARS: usize = 8_000;
+/// Most characters of one tool result the model is sent (~8K tokens).
+///
+/// Every tool had its own cap, and none of them bounded the whole: `search` returned 119,599 and
+/// 272,367 chars, `read_file` 261,966. Elision only shortens results from before the current turn,
+/// so inside a long turn each of those was resent on every step — one 120K-char search result is
+/// 30K tokens on every request until the turn ends. This is the single ceiling on what any tool
+/// result costs; the complete output stays on disk and the model is told where.
+pub(crate) const MODEL_RESULT_MAX_CHARS: usize = 32_000;
 /// Kept outputs older than this are removed the first time a process keeps anything.
 const RETAIN_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
@@ -68,6 +76,61 @@ pub(crate) fn tool_detail(result: &str) -> Option<String> {
     Some(parts.join("\n"))
 }
 
+/// `result` cut to [`MODEL_RESULT_MAX_CHARS`], start and end kept, with a note in the middle saying
+/// how much is missing and where the complete output is (`kept`, when it could be written).
+pub(crate) fn fit_for_model(result: String, kept: Option<&str>) -> String {
+    let total = result.chars().count();
+    if total <= MODEL_RESULT_MAX_CHARS {
+        return result;
+    }
+    let lines: Vec<&str> = result.lines().collect();
+    // Each kept line also costs its newline, which `take_within` does not count.
+    let within = |lines: &mut dyn Iterator<Item = &str>, budget: usize| {
+        let mut used = 0usize;
+        let mut out = Vec::new();
+        for line in lines {
+            let cost = line.chars().count() + 1;
+            if used + cost > budget {
+                if out.is_empty() {
+                    out.push(format!(
+                        "{}…",
+                        line.chars().take(budget).collect::<String>()
+                    ));
+                }
+                break;
+            }
+            used += cost;
+            out.push(line.to_string());
+        }
+        out
+    };
+    let head = within(&mut lines.iter().copied(), MODEL_RESULT_MAX_CHARS * 2 / 3);
+    let rest = &lines[head.len()..];
+    let mut tail = within(&mut rest.iter().rev().copied(), MODEL_RESULT_MAX_CHARS / 3);
+    tail.reverse();
+    let shown: usize = head.iter().chain(&tail).map(|l| l.chars().count()).sum();
+    let hidden_lines = lines.len().saturating_sub(head.len() + tail.len());
+    let first_hidden = head.len() + 1;
+    let where_ = match kept {
+        Some(path) => format!(
+            " The complete output is saved at {path} — read the part you need with \
+             `sed -n '{first_hidden},{}p' {path}` (or grep it), or narrow the call.",
+            head.len() + hidden_lines
+        ),
+        None => " Narrow the call (a path, pattern, or line range) to see it.".to_string(),
+    };
+    let marker = format!(
+        "[… {} of {total} chars omitted here (lines {first_hidden}–{}) to keep the context \
+         small.{where_}]",
+        total.saturating_sub(shown),
+        head.len() + hidden_lines
+    );
+    let mut parts = head;
+    parts.push(marker);
+    parts.extend(tail);
+    parts.join("\n")
+}
+
 fn exceeds_preview(text: &str) -> bool {
     text.lines().count() > PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES
         || text.chars().count() > PREVIEW_MAX_CHARS
@@ -108,28 +171,30 @@ impl Session {
         call_id: &str,
         full: Option<&str>,
         result: &str,
-    ) {
+    ) -> Option<String> {
         let text = match full {
             Some(full) => full,
             None if exceeds_preview(result.trim_end()) => result,
-            None => return,
+            None => return None,
         };
-        let Some(root) = self
+        let root = self
             .store
             .db_path()
             .and_then(Path::parent)
-            .map(|dir| dir.join("tool-output"))
-        else {
-            return;
-        };
+            .map(|dir| dir.join("tool-output"))?;
         prune_expired_once(&root);
         match spool(&root, &self.id, call_id, text) {
-            Ok(output) => self.presenter.emit(PresenterEvent::ToolOutput {
-                name: name.to_string(),
-                output,
-            }),
+            Ok(output) => {
+                let path = output.path.clone();
+                self.presenter.emit(PresenterEvent::ToolOutput {
+                    name: name.to_string(),
+                    output,
+                });
+                Some(path)
+            }
             Err(error) => {
-                tracing::warn!(%error, tool = name, "could not keep the full tool output")
+                tracing::warn!(%error, tool = name, "could not keep the full tool output");
+                None
             }
         }
     }

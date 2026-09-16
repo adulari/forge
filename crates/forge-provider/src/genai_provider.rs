@@ -1098,6 +1098,9 @@ impl Provider for GenAiProvider {
         let prefill_seed = model_name
             .split_once("::")
             .and_then(|(provider, _)| forge_config::reasoning_prefill_for(provider));
+        // The seed is written for the agent loop ("continue the current task"); a tool-less side
+        // call — a summary, a recap — is a different job and must not be told to carry on.
+        let prefill_seed = prefill_seed.filter(|_| !tools.is_empty());
         if let Some(prefill) = partial_prefill(prefill_seed.as_deref(), opts) {
             genai_messages.push(prefill);
         }

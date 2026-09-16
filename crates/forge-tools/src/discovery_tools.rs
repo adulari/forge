@@ -284,9 +284,23 @@ fn append_search_matches(
             }
         }
     } else {
-        for hunk in context_hunks(label, &lines, &hits, context) {
+        for mut hunk in context_hunks(label, &lines, &hits, context) {
             if !matches.is_empty() {
                 matches.push("--".into());
+            }
+            // Checked before pushing, not only after: one merged hunk over a dense file ran a
+            // "64 KB" result to 272 KB.
+            let room = SEARCH_OUTPUT_MAX_BYTES
+                .saturating_sub(matches.iter().map(String::len).sum::<usize>());
+            if hunk.len() > room {
+                let mut end = room;
+                while !hunk.is_char_boundary(end) {
+                    end -= 1;
+                }
+                hunk.truncate(end);
+                matches.push(hunk);
+                matches.push("… (capped — narrow the query or file_pattern)".into());
+                return false;
             }
             matches.push(hunk);
             if matches.iter().map(String::len).sum::<usize>() >= SEARCH_OUTPUT_MAX_BYTES {
@@ -347,7 +361,7 @@ fn context_hunks(rel: &str, lines: &[&str], hits: &[usize], ctx: usize) -> Vec<S
             (lo..=hi)
                 .map(|n| {
                     let sep = if hit_set.contains(&n) { ':' } else { '-' };
-                    format!("{rel}:{}{} {}", n + 1, sep, lines[n].trim_end())
+                    format!("{rel}:{}{} {}", n + 1, sep, cap_line(lines[n].trim_end()))
                 })
                 .collect::<Vec<_>>()
                 .join("\n")

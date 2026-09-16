@@ -457,7 +457,8 @@ impl Session {
     /// worth making rather than an empty one.
     pub(crate) fn compact_input_budget(&self, model: &str) -> usize {
         let window = self.effective_context_window(model) as usize;
-        let reserve = COMPACT_SUMMARY_RESERVE_TOKENS + tokens::count_message(COMPACT_SYSTEM);
+        let reserve = COMPACT_SUMMARY_RESERVE_TOKENS.min(window / 8).max(1_024)
+            + tokens::count_message(COMPACT_SYSTEM);
         (window.saturating_sub(reserve) * 95 / 100).max(512)
     }
 
@@ -569,6 +570,7 @@ impl Session {
         let mut chain = candidates.into_iter();
         let mut model = chain.next().expect("compact_candidate_chain is non-empty");
         let completion_opts = Self::auxiliary_completion_options(&self.id, "compact");
+        let mut best: Option<(String, forge_provider::ModelResponse)> = None;
         let resp = loop {
             let mut sink = |_: StreamEvent| {};
             // Fit the payload to THIS candidate's own window. Built inside the loop because the
@@ -595,15 +597,33 @@ impl Session {
                 // forgot its task. Walk the chain as for a failed call, but WITHOUT benching:
                 // the session's own model is last in the chain, and benching it would fail the
                 // very turn this compaction is trying to make room for.
-                Ok(r) if r.content.trim().is_empty() => {
-                    let _ =
-                        self.store
-                            .record_side_call_usage(&self.id, "compact/summarize", &r.usage);
+                Ok(r) if summary_too_thin(&r.content, &entries) => {
+                    if !r.content.trim().is_empty()
+                        && best
+                            .as_ref()
+                            .is_none_or(|(_, b)| b.content.trim().len() < r.content.trim().len())
+                    {
+                        best = Some((model.clone(), r.clone()));
+                    }
+                    let _ = self.store.record_side_call_usage_for(
+                        &self.id,
+                        "compact/summarize",
+                        Some(&model),
+                        &r.usage,
+                    );
                     self.presenter.emit(PresenterEvent::Warning(format!(
-                        "compaction: {model} returned an empty summary — trying the next model"
+                        "compaction: {model} returned an empty or too-short summary — trying the \
+                         next model"
                     )));
                     match chain.next() {
                         Some(next) => model = next,
+                        // Every candidate was thin. The fullest thin summary beats none: it still
+                        // replaces a transcript that has outgrown its ceiling.
+                        None if best.is_some() => {
+                            let (m, r) = best.take().expect("checked above");
+                            model = m;
+                            break r;
+                        }
                         None => {
                             self.abandon_compaction(before);
                             return Err(CoreError::Provider(
@@ -637,9 +657,12 @@ impl Session {
                 }
             }
         };
-        let _ = self
-            .store
-            .record_side_call_usage(&self.id, "compact/summarize", &resp.usage);
+        let _ = self.store.record_side_call_usage_for(
+            &self.id,
+            "compact/summarize",
+            Some(&model),
+            &resp.usage,
+        );
         let summary = resp.content;
 
         let mut compacted = Vec::with_capacity(COMPACT_KEEP_RECENT + 1);
@@ -837,39 +860,9 @@ pub(crate) fn needs_compaction(transcript_tokens: u64, trigger: u64, fits_window
 /// left behind would answer a call the provider cannot see. Moonshot rejects such a request
 /// outright, and everyone else loses those results to the pairing repair. Walking back to the
 /// call keeps a few more messages than `COMPACT_KEEP_RECENT`, which is the cheaper mistake.
-/// Most tokens of recent tool rounds a summary keeps verbatim next to it.
-const COMPACT_KEEP_ROUNDS_TOKENS: usize = 40_000;
-
-/// Where the verbatim tail after a summary starts: the last `keep_recent` messages, extended back
-/// over up to [`crate::context_pipeline::PRUNE_KEEP_ROUNDS`] whole tool rounds while they cost at
-/// most `token_budget`.
-///
-/// Six messages is one round of a model that reads six files at once, so a summary taken mid-task
-/// used to drop the files the model was working from and it read them again. The budget keeps a
-/// huge round from surviving every summary — the caller passes a quarter of the transcript, so a
-/// compaction always shrinks it.
-pub(crate) fn kept_tail_start(
-    messages: &[Message],
-    keep_recent: usize,
-    token_budget: usize,
-) -> usize {
-    let mut start = messages.len().saturating_sub(keep_recent);
-    let round_starts = messages
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(_, m)| m.role == Role::Assistant && !m.tool_calls.is_empty())
-        .map(|(i, _)| i)
-        .take(crate::context_pipeline::PRUNE_KEEP_ROUNDS);
-    for round_start in round_starts {
-        let cost: usize = messages[round_start..].iter().map(message_tokens).sum();
-        if cost > token_budget {
-            break;
-        }
-        start = start.min(round_start);
-    }
-    start
-}
+pub(crate) use crate::compaction_shape::{
+    kept_tail_start, summary_too_thin, COMPACT_KEEP_ROUNDS_TOKENS,
+};
 
 pub(crate) fn round_aligned_split(messages: &[Message], mut split: usize) -> usize {
     while split > 0 && split < messages.len() && messages[split].role == Role::Tool {
