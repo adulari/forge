@@ -50,6 +50,11 @@ the model see?" was answered in more places.
 - **Search shows every file.** In a directory walk each file contributes at most
   `SEARCH_PER_FILE_CAP` (25) lines plus a count of the rest; a single noisy log no longer fills the
   64 KB budget and hides the file the model was looking for.
+- **A large file read whole comes back as a map.** `read_file` without a line range returns a
+  file over 24 KB as its size, an outline (`L<start>-<end>  <kind> <signature>` from the Lattice
+  tree-sitter extractor, markdown headings otherwise, capped at 16K chars), and its opening 8K
+  chars, instead of 256 KB that the result ceiling then cut to two fragments. The model reads the
+  span it needs with `start_line`/`end_line`.
 - **Accounting honesty**: `estimated_transcript_tokens` (gauge + auto-compaction threshold +
   `transcript_fits`) and the compaction summarizer's rendering both skip `UiOnly` rows — a note
   the model never sees must not trigger compaction or cost summary tokens. The same estimate

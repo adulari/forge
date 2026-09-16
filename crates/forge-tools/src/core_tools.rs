@@ -248,7 +248,14 @@ impl Tool for ReadFileTool {
 
         let content = tokio::fs::read_to_string(path).await?;
         let out = if start_line.is_none() && end_line.is_none() {
-            content
+            if content.len() <= READ_WHOLE_MAX_BYTES {
+                content
+            } else {
+                let path = path.to_string();
+                return tokio::task::spawn_blocking(move || outline_read(&path, &content))
+                    .await
+                    .map_err(|e| ToolError::Failed(format!("read_file task failed: {e}")));
+            }
         } else {
             let lines: Vec<&str> = content.lines().collect();
             let start = start_line.unwrap_or(1).saturating_sub(1); // 0-indexed
@@ -260,6 +267,115 @@ impl Tool for ReadFileTool {
         };
         Ok(cap_read(out))
     }
+}
+
+/// Largest file `read_file` returns whole when no line range is given.
+///
+/// Anything bigger used to come back as its first 256 KB, and the core then cut that to 32K chars
+/// of start and end — the model got two fragments and no idea where anything was, so it read the
+/// file again in pieces, blind. It now gets a map of the file and its opening, and asks for the
+/// section it needs.
+const READ_WHOLE_MAX_BYTES: usize = 24 * 1024;
+/// Most characters of outline listed for one file; the rest are counted.
+const OUTLINE_MAX_CHARS: usize = 16_000;
+/// Opening lines shown under the outline, by characters.
+const OUTLINE_HEAD_CHARS: usize = 8_000;
+
+/// A too-large file as a map: its size, every definition with its line span (tree-sitter, for
+/// languages Lattice parses; markdown headings otherwise), then the opening lines.
+fn outline_read(path: &str, content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut entries = code_outline(path, content);
+    if entries.is_empty() {
+        entries = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with('#') && l.trim_start_matches('#').starts_with(' '))
+            .map(|(i, l)| format!("L{}  {}", i + 1, l.trim_end()))
+            .collect();
+    }
+    let total_entries = entries.len();
+    let mut outline_chars = 0usize;
+    let fits = entries
+        .iter()
+        .take_while(|e| {
+            outline_chars += e.len() + 1;
+            outline_chars <= OUTLINE_MAX_CHARS
+        })
+        .count();
+    entries.truncate(fits);
+    let mut head_end = 0usize;
+    let mut used = 0usize;
+    for line in &lines {
+        used += line.len() + 1;
+        if used > OUTLINE_HEAD_CHARS {
+            break;
+        }
+        head_end += 1;
+    }
+    let mut out = format!(
+        "[{path}: {} lines, {} KB — too large to return whole. Read a section with \
+         `start_line`/`end_line` (e.g. a span from the outline).]\n",
+        lines.len(),
+        content.len() / 1024
+    );
+    if entries.is_empty() {
+        out.push_str("\n(no outline for this file type)\n");
+    } else {
+        out.push_str("\nOutline:\n");
+        for entry in &entries {
+            out.push_str(entry);
+            out.push('\n');
+        }
+        if total_entries > entries.len() {
+            out.push_str(&format!(
+                "… {} more entries\n",
+                total_entries - entries.len()
+            ));
+        }
+    }
+    out.push_str(&format!("\n----- lines 1-{head_end} -----\n"));
+    out.push_str(&lines[..head_end].join("\n"));
+    out.push_str(&format!(
+        "\n----- lines {}-{} not shown -----",
+        head_end + 1,
+        lines.len()
+    ));
+    out
+}
+
+/// `L<start>-<end>  <kind> <signature or qualified name>`, indented by nesting depth.
+fn code_outline(path: &str, content: &str) -> Vec<String> {
+    let parsed = forge_index::extract(path, content);
+    let newlines: Vec<usize> = content.match_indices('\n').map(|(i, _)| i).collect();
+    let line_of = |byte: usize| newlines.partition_point(|&n| n < byte) + 1;
+    parsed
+        .defs
+        .iter()
+        .map(|def| {
+            let mut depth = 0usize;
+            let mut parent = def.parent;
+            while let Some(p) = parent {
+                depth += 1;
+                parent = parsed.defs.get(p).and_then(|d| d.parent);
+            }
+            let label = def
+                .signature
+                .as_deref()
+                .map(|s| s.lines().next().unwrap_or(s).trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| def.qualname.clone());
+            let label: String = label.chars().take(160).collect();
+            format!(
+                "{}L{}-{}  {} {}",
+                "  ".repeat(depth.min(6)),
+                def.line_start,
+                line_of(def.span_end),
+                def.kind,
+                label
+            )
+        })
+        .collect()
 }
 
 /// Per-file byte cap for a batched `read_file` (`paths`). Smaller than the single-file cap so one
@@ -913,6 +1029,44 @@ mod tests {
         assert!(!out.contains("target"), "must skip target/:\n{out}");
         assert!(!out.contains("g.txt"), "must skip .git/:\n{out}");
         assert!(!out.contains("n.txt"), "must skip node_modules/:\n{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_large_file_read_whole_comes_back_as_an_outline_and_its_opening() {
+        let dir = temp_dir("read-outline");
+        let mut src = String::from("//! big module\n");
+        for i in 0..2_000 {
+            src.push_str(&format!(
+                "pub fn function_{i}(x: u32) -> u32 {{\n    // body line one\n    x + {i}\n}}\n\n"
+            ));
+        }
+        let file = dir.join("big.rs");
+        std::fs::write(&file, &src).unwrap();
+
+        let out = ReadFileTool
+            .run(&json!({ "path": file.to_str().unwrap() }))
+            .await
+            .unwrap();
+
+        assert!(out.len() <= 26_000, "{} bytes", out.len());
+        assert!(out.contains("too large to return whole"), "{}", &out[..300]);
+        assert!(
+            out.contains("L2-5  function pub fn function_0(x: u32) -> u32"),
+            "{}",
+            &out[..600]
+        );
+        assert!(out.contains("more entries"));
+        assert!(out.starts_with("[") && out.contains("----- lines 1-"));
+        // A range still reads exactly what was asked for.
+        let part = ReadFileTool
+            .run(&json!({ "path": file.to_str().unwrap(), "start_line": 2, "end_line": 4 }))
+            .await
+            .unwrap();
+        assert_eq!(
+            part,
+            "pub fn function_0(x: u32) -> u32 {\n    // body line one\n    x + 0"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

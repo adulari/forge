@@ -16,6 +16,12 @@ pub fn temperature_for_wire(temperature: f32) -> f64 {
     (f64::from(temperature) * 100.0).round() / 100.0
 }
 
+/// Whether a stream ended because the provider detected a repetition loop (Kimi's
+/// `finish_reason: "repeat"`).
+pub(crate) fn cut_for_repetition(reason: Option<&genai::chat::StopReason>) -> bool {
+    matches!(reason, Some(genai::chat::StopReason::Other(r)) if r == "repeat")
+}
+
 impl ProviderError {
     /// Whether the credential itself is invalid or missing. Unlike a model capability failure,
     /// every alias for this provider will fail until the user re-authenticates.
