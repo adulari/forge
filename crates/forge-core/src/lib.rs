@@ -9719,6 +9719,89 @@ mod tests {
         assert_eq!(report[0].0, "bad::model");
     }
 
+    /// Answers the `blank` models with a well-formed reply that says nothing, everyone else with a
+    /// summary. The 2026-09-16 shape: a live summarizer returned 13 output tokens of nothing for
+    /// 52K tokens of transcript, and the empty string was committed as the session's memory.
+    struct BlankProvider {
+        blank: std::collections::HashSet<String>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for BlankProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let content = if self.blank.contains(model) {
+                "  \n".to_string()
+            } else {
+                "SUMMARY: recovered".to_string()
+            };
+            Ok(forge_provider::ModelResponse {
+                content,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_walks_past_a_summarizer_that_returns_nothing_without_benching_it() {
+        let provider = Arc::new(BlankProvider {
+            blank: ["blank::model".to_string()].into_iter().collect(),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "blank::model".into(),
+            fallbacks: vec!["good::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        for i in 0..12 {
+            session
+                .transcript
+                .push(Message::user(format!("message {i}")));
+        }
+        let (before, after) = session.compact(false).await.unwrap();
+        assert_eq!((before, after), (12, COMPACT_KEEP_RECENT + 1));
+        assert!(
+            session.transcript[0].content.contains("recovered"),
+            "the next model's summary is the one folded in: {}",
+            session.transcript[0].content
+        );
+        // An empty reply is not a provider failure: the session's own model sits last in the
+        // chain, and benching it here would fail the turn this compaction is making room for.
+        assert!(store.current_benched_report().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn compact_keeps_the_conversation_when_no_summarizer_says_anything() {
+        let provider = Arc::new(BlankProvider {
+            blank: ["blank::model".to_string(), "also::blank".to_string()]
+                .into_iter()
+                .collect(),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "blank::model".into(),
+            fallbacks: vec!["also::blank".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        for i in 0..12 {
+            session
+                .transcript
+                .push(Message::user(format!("message {i}")));
+        }
+        let err = session
+            .compact(false)
+            .await
+            .expect_err("an all-empty chain is a failure, not a fold");
+        assert!(err.to_string().contains("empty summary"), "{err}");
+        assert_eq!(session.transcript.len(), 12, "nothing was folded away");
+        assert!(
+            !session.was_compacted(),
+            "no summary row: a resume must rehydrate the full transcript"
+        );
+    }
+
     /// Records the payload the summarizer was actually handed, so a test can assert the request was
     /// fitted to the model's window BEFORE dispatch rather than after a round of overflow errors.
     #[derive(Default)]

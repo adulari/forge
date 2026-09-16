@@ -3696,6 +3696,29 @@ mod tests {
         assert_eq!(msgs[3].content, "msg 7");
     }
 
+    /// The summary replaces what it soft-deletes and the row is upserted, so an empty one would
+    /// erase both the history and the previous real summary. The store refuses it on its own.
+    #[test]
+    fn compact_session_store_refuses_an_empty_summary() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        for i in 0..8i64 {
+            store
+                .add_message(&sid, i, Role::User, &format!("msg {i}"), None)
+                .unwrap();
+        }
+        store
+            .compact_session_store(&sid, "A real summary.", 3)
+            .unwrap();
+        let err = store
+            .compact_session_store(&sid, " \n\t", 3)
+            .expect_err("an empty summary must be refused");
+        assert!(err.to_string().contains("empty"), "{err}");
+        let msgs = store.load_messages(&sid).unwrap();
+        assert_eq!(msgs.len(), 4, "the earlier compaction is untouched");
+        assert!(msgs[0].content.contains("A real summary."));
+    }
+
     #[test]
     fn compact_session_store_upserts_summary_on_second_compact() {
         let store = Store::open_in_memory().unwrap();
