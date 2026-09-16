@@ -32,6 +32,13 @@ The gauge surfaces the fill level; compaction is the action that lowers it.
   every step, so a measured 198-step session averaged a 130K prompt under the global ceiling.
   A lower ceiling there roughly halves that at the cost of summarising more often; set the
   provider to `0` to go back to the global ceiling.
+- **An empty summary is never committed.** The summary replaces every message it folds, and the
+  `session_compaction` row is upserted, so an empty one would erase the history *and* the previous
+  real summary. Observed 2026-09-16: a summarizer answered 52K tokens of transcript with 13 tokens
+  of nothing and the session forgot its task. `compact()` now treats a blank reply like a failed
+  call and walks the candidate chain — without benching the model, since the session's own model
+  is last in that chain — and returns an error with the transcript untouched when every candidate
+  is blank. `Store::compact_session_store` refuses an empty summary independently.
 - **Persistence**: compaction is durable across resume. Compacted messages are soft-deleted
   (`message.active = 0`) and the summary stored as a `session_compaction` row; `load_messages`
   reloads the compacted view, while the full history stays intact underneath.

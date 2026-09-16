@@ -574,6 +574,34 @@ impl Session {
                 .complete_with(&model, &messages, &[], &completion_opts, &mut sink)
                 .await
             {
+                // A reply that says nothing is not a summary. Folding it in would replace
+                // everything the session knew with an empty string — which is what happened on
+                // 2026-09-16: a summarizer answered 52K tokens of transcript with 13 tokens of
+                // nothing, the empty summary overwrote the previous real one, and the session
+                // forgot its task. Walk the chain as for a failed call, but WITHOUT benching:
+                // the session's own model is last in the chain, and benching it would fail the
+                // very turn this compaction is trying to make room for.
+                Ok(r) if r.content.trim().is_empty() => {
+                    let _ =
+                        self.store
+                            .record_side_call_usage(&self.id, "compact/summarize", &r.usage);
+                    self.presenter.emit(PresenterEvent::Warning(format!(
+                        "compaction: {model} returned an empty summary — trying the next model"
+                    )));
+                    match chain.next() {
+                        Some(next) => model = next,
+                        None => {
+                            self.abandon_compaction(before);
+                            return Err(CoreError::Provider(
+                                forge_provider::ProviderError::Unavailable(
+                                    "every summarizer returned an empty summary; the conversation \
+                                     was kept as it is"
+                                        .into(),
+                                ),
+                            ));
+                        }
+                    }
+                }
                 Ok(r) => break r,
                 // Advance on ANY error (not just retryable ones) while failover is on: a
                 // PERMANENT error on a cheap trivial model (e.g. "provider unavailable" because
@@ -583,10 +611,16 @@ impl Session {
                 Err(e) if failover => {
                     match self.advance_fallback(&model, &e, &mut chain, "compact") {
                         Some(next) => model = next,
-                        None => return Err(CoreError::Provider(e)),
+                        None => {
+                            self.abandon_compaction(before);
+                            return Err(CoreError::Provider(e));
+                        }
                     }
                 }
-                Err(e) => return Err(CoreError::Provider(e)),
+                Err(e) => {
+                    self.abandon_compaction(before);
+                    return Err(CoreError::Provider(e));
+                }
             }
         };
         let _ = self
@@ -627,6 +661,16 @@ impl Session {
         // say why the model cannot work out what it meant (task_staleness.rs).
         self.stale_tasks.note_compaction();
         Ok((before, after))
+    }
+
+    /// Leave the transcript exactly as it was when no summarizer could be had, and take down the
+    /// progress band `CompactionStarted` raised — otherwise the TUI keeps showing a compaction
+    /// that is no longer running.
+    fn abandon_compaction(&mut self, before: usize) {
+        self.presenter.emit(PresenterEvent::CompactionFinished {
+            before,
+            after: before,
+        });
     }
 
     /// Undo a `/compact`: reactivate every soft-deleted message in the store and reload the full

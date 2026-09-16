@@ -418,6 +418,15 @@ impl Store {
         summary: &str,
         keep_count: usize,
     ) -> Result<()> {
+        // The summary REPLACES every message it soft-deletes. An empty one would leave the session
+        // with nothing where its history was, and — because the row is upserted — erase the
+        // previous real summary too. Refuse it here regardless of what the caller checked.
+        if summary.trim().is_empty() {
+            return Err(StoreError::InvalidValue(
+                "compaction summary is empty; refusing to replace the transcript with nothing"
+                    .into(),
+            ));
+        }
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if keep_count == 0 {
