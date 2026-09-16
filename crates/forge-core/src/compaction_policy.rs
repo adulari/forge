@@ -187,7 +187,10 @@ impl Session {
     /// compact. Distinct from the failover consent path ([`admit_failover_model`]).
     pub(crate) async fn auto_compact_if_needed(&mut self, model: &str) {
         let window = self.base_context_window(model) as u64;
-        let cap = compaction_cap(self.router.model_is_free(model), &self.config.mesh);
+        // A `[compact_cap]` entry for this model or its provider is the ceiling; otherwise the
+        // global paid/free split below decides.
+        let cap = forge_config::compact_cap_for(model)
+            .unwrap_or_else(|| compaction_cap(self.router.model_is_free(model), &self.config.mesh));
         let trigger = auto_compact_trigger_tokens(window, cap, AUTO_COMPACT_THRESHOLD);
         if needs_compaction(
             self.estimated_transcript_tokens(),
@@ -784,6 +787,11 @@ pub(crate) fn needs_compaction(transcript_tokens: u64, trigger: u64, fits_window
 /// all, so the only remaining limit was `AUTO_COMPACT_THRESHOLD * window` — 838,860 tokens on a 1M
 /// window. Free buys tokens, not attention: a turn carrying 800k of mostly-stale tool output is not
 /// better than one carrying a compacted 400k, and every later turn re-sends the whole thing.
+///
+/// Both are the GLOBAL fallback. A per-model or per-provider ceiling (`[compact_cap]`,
+/// [`forge_config::compact_cap_for`]) takes precedence at the call site: a request-metered
+/// subscription with a mid-sized window (Kimi Code) is better served by a lower ceiling than a
+/// pay-per-token API with a 1M window, and one number cannot fit both.
 pub(crate) fn compaction_cap(free: bool, mesh: &forge_config::MeshConfig) -> u64 {
     if free {
         mesh.free_model_cap_tokens
