@@ -86,7 +86,12 @@ pub(crate) fn to_llm(
         tool_result_token_budget,
         keep_recent_tool_results,
     );
-    fit_messages_owned(elided, budget_tokens)
+    // Pair again AFTER fitting. Fitting keeps a suffix and can cut between a call and its
+    // results; the walk below strips the leading orphans it knows about, but pairing is the
+    // invariant the provider checks, so it is re-established here whatever the walk did. Moonshot
+    // rejects the whole request for one unpaired result (`tool_call_id … is not found`), seen live
+    // on 2026-09-16 the first time a 246K-token Kimi turn crossed its window budget.
+    normalize_tool_pairs(fit_messages_owned(elided, budget_tokens)).messages
 }
 
 const TURN_CONTRACT_PREFIX: &str = "Turn contract:";
@@ -593,7 +598,13 @@ fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Messa
     }
     let mut ordered: Vec<usize> = keep_idx.iter().copied().collect();
     ordered.sort_unstable();
+    // Strip tool results left at the head of the kept suffix: their call was cut. The anchor is
+    // older than the suffix and sorts first, so it must be stepped over rather than treated as
+    // the first kept message — stopping at it left the suffix's orphans in place.
     for i in ordered {
+        if Some(i) == anchor {
+            continue;
+        }
         if messages[i].role == Role::Tool {
             keep_idx.remove(&i);
         } else {
@@ -966,6 +977,58 @@ mod tests {
             serde_json::to_value(&once).unwrap(),
             serde_json::to_value(&twice).unwrap()
         );
+    }
+
+    /// Every tool result in a request must answer a call in the assistant message right before
+    /// it. Moonshot rejects the whole request otherwise, printing no id (`tool_call_id  is not
+    /// found`), which is what a live Kimi K3 turn hit the first time it outgrew the fit budget.
+    fn every_tool_result_is_paired(messages: &[Message]) -> bool {
+        messages.iter().enumerate().all(|(i, m)| {
+            m.role != Role::Tool
+                || (1..=i)
+                    .rev()
+                    .map(|j| &messages[j - 1])
+                    .take_while(|p| p.role == Role::Tool || !p.tool_calls.is_empty())
+                    .any(|p| {
+                        p.tool_calls
+                            .iter()
+                            .any(|c| Some(c.id.as_str()) == m.tool_call_id.as_deref())
+                    })
+        })
+    }
+
+    #[test]
+    fn a_budget_cut_between_a_call_and_its_results_leaves_no_orphans_behind_the_anchor() {
+        // The shape from the incident: the newest user message is pinned as the anchor, the cut
+        // lands on an assistant tool-call message, and its results are the head of the kept
+        // suffix. The orphan strip used to stop at the anchor and never reach them.
+        let big_args = serde_json::json!({ "command": "x".repeat(6_000) });
+        let call = forge_types::ToolCall {
+            id: "call-big".into(),
+            name: "shell".into(),
+            args: big_args,
+        };
+        let messages = vec![
+            Message::system("standing"),
+            Message::user("TASK: the anchor"),
+            Message::assistant_tool_calls("", vec![call]),
+            Message::tool_result("call-big", "first result"),
+            Message::tool_result("call-big", "second result"),
+        ];
+        let budget = message_tokens(&messages[1])
+            + message_tokens(&messages[3])
+            + message_tokens(&messages[4])
+            + 8;
+        let fitted = fit_messages(&messages, budget);
+        assert!(every_tool_result_is_paired(&fitted), "{fitted:?}");
+        assert_eq!(
+            fitted.len(),
+            2,
+            "system + anchor, no dangling results: {fitted:?}"
+        );
+
+        let sent = to_llm(&messages, budget, 4_096, 2);
+        assert!(every_tool_result_is_paired(&sent), "{sent:?}");
     }
 
     #[test]
