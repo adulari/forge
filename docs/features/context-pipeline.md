@@ -29,6 +29,12 @@ the model see?" was answered in more places.
 - **Phase 2 — `to_llm`**: called by `transcript_for` / `transcript_with_preamble`, i.e. every
   main-loop provider request. Pure: filter `UiOnly`, then `fit_messages` (system messages always
   kept, newest-first fill, orphan-tool-result demotion) — which moved into the module wholesale.
+- **Pairing is re-established after fitting.** `fit_messages` keeps the newest suffix that fits
+  and strips the orphan tool results at its head; the anchor (the newest user message, kept
+  regardless) sorts before that suffix and used to stop the strip early. `to_llm` now also runs
+  `normalize_tool_pairs` over the fitted output, so whatever the walk does, no request carries a
+  tool result whose call is missing — Moonshot fails the request for one (`tool_call_id  is not
+  found`, with no id printed).
 - **Accounting honesty**: `estimated_transcript_tokens` (gauge + auto-compaction threshold +
   `transcript_fits`) and the compaction summarizer's rendering both skip `UiOnly` rows — a note
   the model never sees must not trigger compaction or cost summary tokens. The same estimate

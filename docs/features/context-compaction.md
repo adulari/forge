@@ -39,6 +39,13 @@ The gauge surfaces the fill level; compaction is the action that lowers it.
   call and walks the candidate chain — without benching the model, since the session's own model
   is last in that chain — and returns an error with the transcript untouched when every candidate
   is blank. `Store::compact_session_store` refuses an empty summary independently.
+- **The kept tail never starts inside a tool round.** The split is `round_aligned_split`: if the
+  first kept message is a tool result, the split walks back to the assistant call that produced
+  it, so a few more than `COMPACT_KEEP_RECENT` messages survive rather than results whose call
+  is in the summary (Moonshot rejects that request; other providers lose the results silently).
+- **Checked every step.** `auto_compact_if_needed` runs before every model request in the tool
+  loop, not only at nudge/guard points. Observed 2026-09-16: a single Kimi turn grew 62K → 246K
+  tokens under a 120K ceiling because nothing mid-turn asked.
 - **Persistence**: compaction is durable across resume. Compacted messages are soft-deleted
   (`message.active = 0`) and the summary stored as a `session_compaction` row; `load_messages`
   reloads the compacted view, while the full history stays intact underneath.

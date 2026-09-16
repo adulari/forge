@@ -470,7 +470,10 @@ impl Session {
             serde_json::json!({ "trigger": if auto { "auto" } else { "manual" } }),
         )
         .await;
-        let split = before - COMPACT_KEEP_RECENT;
+        let split = round_aligned_split(&self.transcript, before - COMPACT_KEEP_RECENT);
+        if split < COMPACT_MIN_OLDER {
+            return Ok((before, before));
+        }
         let older = &self.transcript[..split];
         // Kept as one entry per message instead of a single pre-joined string: the candidate chain
         // deliberately crosses models with wildly different windows, so the payload has to be
@@ -816,6 +819,18 @@ mod auth_failure_tests {
 /// the window itself (832,307 tokens on a 1M-token model) no matter what the ceiling said.
 pub(crate) fn needs_compaction(transcript_tokens: u64, trigger: u64, fits_window: bool) -> bool {
     transcript_tokens > trigger || !fits_window
+}
+
+/// Move a compaction split back off the middle of a tool round. `split` is the first message kept
+/// verbatim; when that is a tool result its call would be folded into the summary and the results
+/// left behind would answer a call the provider cannot see. Moonshot rejects such a request
+/// outright, and everyone else loses those results to the pairing repair. Walking back to the
+/// call keeps a few more messages than `COMPACT_KEEP_RECENT`, which is the cheaper mistake.
+pub(crate) fn round_aligned_split(messages: &[Message], mut split: usize) -> usize {
+    while split > 0 && split < messages.len() && messages[split].role == Role::Tool {
+        split -= 1;
+    }
+    split
 }
 
 /// The absolute token ceiling at which a session auto-compacts, before the model's own window is

@@ -9611,6 +9611,55 @@ mod tests {
         assert_eq!(session.transcript.last().unwrap().content, "message 11");
     }
 
+    /// The keep-6 split used to land wherever the count said, including between an assistant's
+    /// tool calls and their results (a live fold on 2026-09-16 left one result with no call).
+    #[tokio::test]
+    async fn compact_never_starts_the_kept_tail_inside_a_tool_round() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(SummarizingProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            Config::default(),
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+        let call = |id: &str| forge_types::ToolCall {
+            id: id.into(),
+            name: "shell".into(),
+            args: serde_json::json!({}),
+        };
+        session.transcript.push(Message::user("task"));
+        for i in 0..3 {
+            session.transcript.push(Message::assistant_tool_calls(
+                "",
+                vec![call(&format!("a{i}"))],
+            ));
+            session
+                .transcript
+                .push(Message::tool_result(format!("a{i}"), "ok"));
+        }
+        // A round of six results: a bare count-of-six split keeps exactly these and folds their call.
+        session.transcript.push(Message::assistant_tool_calls(
+            "",
+            (0..6).map(|i| call(&format!("b{i}"))).collect(),
+        ));
+        for i in 0..6 {
+            session
+                .transcript
+                .push(Message::tool_result(format!("b{i}"), "ok"));
+        }
+        let (before, after) = session.compact(false).await.unwrap();
+        assert_eq!(before, 14);
+        assert_eq!(after, 1 + 7, "summary + the whole final round: {after}");
+        assert!(
+            !session.transcript[1].tool_calls.is_empty(),
+            "the kept tail starts at the call, not at its results"
+        );
+    }
+
     #[tokio::test]
     async fn ask_btw_writes_nothing_to_the_message_table() {
         let store = Arc::new(Store::open_in_memory().unwrap());
