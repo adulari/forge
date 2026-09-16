@@ -61,6 +61,41 @@ export interface AnywhereBridgeRequest {
   signal?: AbortSignal;
 }
 
+const utf8 = new TextDecoder();
+
+function isTextual(contentType: string): boolean {
+  return (
+    contentType.startsWith("text/")
+    || contentType.includes("json")
+    || contentType.includes("xml")
+    || contentType.includes("javascript")
+  );
+}
+
+/** The body a relayed response is built from: decoded text for a textual content type, the raw
+ * bytes otherwise.
+ *
+ * React Native's `Response` is whatwg-fetch, and its `text()`/`json()` on a byte body build the
+ * string one `String.fromCharCode` per byte — Latin-1. Every non-ASCII character a session carried
+ * reached the phone garbled ("—" rendered as "â"), and building a 100 KB history page one char at
+ * a time was the slowest step of loading it. A string body is used as-is by both. Binary bodies
+ * (images, audio, downloads) keep their bytes; an untyped body is text only if it decodes as
+ * UTF-8. */
+export function responseBodyInit(body: Uint8Array, headers?: [string, string][]): BodyInit {
+  const contentType = (
+    headers?.find(([name]) => name.toLowerCase() === "content-type")?.[1] ?? ""
+  ).toLowerCase();
+  if (isTextual(contentType)) return utf8.decode(body);
+  if (contentType === "" && body.length > 0) {
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(body);
+    } catch {
+      return body as unknown as BodyInit;
+    }
+  }
+  return body as unknown as BodyInit;
+}
+
 export interface AnywhereBridgeResponse {
   status: number;
   headers?: [string, string][];
@@ -121,7 +156,7 @@ export class AnywhereTransport implements RemoteTransport {
       body: encoded.bytes,
       signal: init?.signal ?? undefined,
     });
-    return new Response(response.body as unknown as BodyInit, {
+    return new Response(responseBodyInit(response.body, response.headers), {
       status: response.status,
       headers: response.headers,
     });
