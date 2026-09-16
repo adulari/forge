@@ -916,6 +916,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A merged context hunk over a dense file is one entry, and the byte check used to run only
+    /// after it was pushed — a "64 KB" search returned 272 KB.
+    #[tokio::test]
+    async fn one_huge_context_hunk_cannot_overshoot_the_output_budget() {
+        let dir = temp_dir("search-hunk");
+        let body: String = (0..20_000)
+            .map(|i| format!("needle line {i} {}", "y".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.join("dense.txt"), &body).unwrap();
+
+        let out = SearchTool
+            .run(&json!({ "query": "needle", "path": dir.to_str().unwrap(), "context": 2 }))
+            .await
+            .unwrap();
+
+        assert!(
+            out.len() <= SEARCH_OUTPUT_MAX_BYTES + 200,
+            "{} bytes",
+            out.len()
+        );
+        assert!(out.contains("capped"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The real failure this bounds: a `search` over a tree containing a log file returned
     /// 651,214 bytes — ~163k tokens — in ONE tool result, because the default (`context: 0`) path
     /// was bounded by a MATCH COUNT and nothing else. 200 matches of multi-kilobyte log lines is

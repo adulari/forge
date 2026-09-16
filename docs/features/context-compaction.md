@@ -43,6 +43,14 @@ The gauge surfaces the fill level; compaction is the action that lowers it.
   first kept message is a tool result, the split walks back to the assistant call that produced
   it, so a few more than `COMPACT_KEEP_RECENT` messages survive rather than results whose call
   is in the summary (Moonshot rejects that request; other providers lose the results silently).
+- **The summary has to be worth keeping.** `COMPACT_SYSTEM` asks for a sectioned working memory
+  (goal, current state, files and code, findings and decisions, errors, next steps) sized to the
+  conversation, and the call runs at the model's default effort instead of the cheap rung. A reply
+  under 600 chars for more than 20K chars of transcript counts as thin, like an empty one: the
+  chain moves on, and only when every candidate was thin is the fullest thin reply used. Kimi's
+  reasoning prefill is not applied to tool-less side calls, and the summary reserve is up to 6K
+  tokens (an eighth of a small window). Observed 2026-09-16: 189 chars stood in for 240K tokens.
+  Side-call usage rows now name the model (`Store::record_side_call_usage_for`).
 - **Recent tool rounds survive both passes.** Mid-turn, the prune pass leaves the last
   `PRUNE_KEEP_ROUNDS` (4) tool rounds whole, and a summary keeps those rounds verbatim beside it
   while they cost at most a quarter of the transcript (capped at 40K tokens). Observed 2026-09-16:

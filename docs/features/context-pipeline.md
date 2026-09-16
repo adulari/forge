@@ -35,6 +35,12 @@ the model see?" was answered in more places.
   `normalize_tool_pairs` over the fitted output, so whatever the walk does, no request carries a
   tool result whose call is missing — Moonshot fails the request for one (`tool_call_id  is not
   found`, with no id printed).
+- **One ceiling on any tool result.** Before a result enters the transcript it is cut to
+  `MODEL_RESULT_MAX_CHARS` (32K chars, ~8K tokens), start and end kept, with a note giving the
+  omitted line range and the path of the complete output (the same spool file the full-output
+  viewer opens), so the model can `sed -n` the part it needs. Tool-specific caps existed but none
+  bounded the whole — `search` returned 272K chars, `read_file` 262K — and elision spares the
+  current turn, so each was resent on every step until the turn ended.
 - **Accounting honesty**: `estimated_transcript_tokens` (gauge + auto-compaction threshold +
   `transcript_fits`) and the compaction summarizer's rendering both skip `UiOnly` rows — a note
   the model never sees must not trigger compaction or cost summary tokens. The same estimate

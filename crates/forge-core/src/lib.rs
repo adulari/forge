@@ -32,6 +32,7 @@ mod btw_policy;
 pub mod capsule;
 pub(crate) mod clock;
 mod compaction_policy;
+mod compaction_shape;
 mod completeness;
 pub(crate) mod completion;
 pub mod context_pack;
@@ -123,9 +124,23 @@ fn completion_prefix_tokens(messages: &[Message], tools: &[ToolSpec]) -> u64 {
 /// rest. Only compact when there are at least `COMPACT_MIN_OLDER` older messages to fold.
 pub(crate) const COMPACT_KEEP_RECENT: usize = 6;
 pub(crate) const COMPACT_MIN_OLDER: usize = 4;
-const COMPACT_SYSTEM: &str = "You are compacting a coding-assistant conversation to save context. \
-Summarize the messages below concisely but preserve: decisions made, key facts, file paths, \
-function/type names, and any open threads or TODOs. Output only the summary.";
+const COMPACT_SYSTEM: &str = "You are writing the working memory of a coding agent. The \
+conversation below is about to be removed from its context; your summary is ALL it will remember \
+of it, so a detail you leave out is lost for good. Do not continue the task, do not call tools, \
+and do not address the user — only write the summary.\n\n\
+Use these sections, in this order, as markdown headings:\n\
+1. Goal — what the user asked for, in their own words where it matters, including constraints \
+and preferences they stated.\n\
+2. Current state — what is done, what is in progress, and exactly where the work stopped.\n\
+3. Files and code — every file path, function, type, command, and config key that was read, \
+changed, or found relevant, each with one line on why.\n\
+4. Findings and decisions — facts established, causes found, approaches chosen and rejected, and \
+why.\n\
+5. Errors — failures seen and whether each was fixed.\n\
+6. Next steps — the concrete remaining work, in order.\n\n\
+Be specific: exact names, paths, numbers, and error text beat paraphrase. Scale the length to \
+the conversation — a long session needs a long summary; do not compress hours of work into a \
+paragraph.";
 
 const SHELL_DIAGNOSE_SYSTEM: &str = "A shell command run by a coding agent just failed. \
 Respond with exactly one or two lines:\n\
@@ -1285,7 +1300,7 @@ fn compact_candidate_chain(
 /// [`COMPACT_SYSTEM`] asks for a concise summary, not an unbounded answer, and reserving the main
 /// loop's 8k planning cushion would leave an 8k-window trivial summarizer with no input budget at
 /// all — the chain is trivial-tier first precisely because those models are cheap and small.
-const COMPACT_SUMMARY_RESERVE_TOKENS: usize = 2_048;
+const COMPACT_SUMMARY_RESERVE_TOKENS: usize = 6_144;
 
 /// Stands in for the messages a compaction payload had to drop. `{}` is the dropped count.
 ///
@@ -9640,6 +9655,31 @@ mod tests {
 
     /// The keep-6 split used to land wherever the count said, including between an assistant's
     /// tool calls and their results (a live fold on 2026-09-16 left one result with no call).
+    #[test]
+    fn an_oversized_tool_result_keeps_both_ends_and_says_where_the_rest_is() {
+        let body: String = (0..5_000)
+            .map(|i| format!("line {i} {}", "z".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fitted = tool_output::fit_for_model(body.clone(), Some("/tmp/out.log"));
+        assert!(fitted.chars().count() <= tool_output::MODEL_RESULT_MAX_CHARS + 400);
+        assert!(fitted.starts_with("line 0 "));
+        assert!(fitted.ends_with(&"z".repeat(40)) && fitted.contains("line 4999 "));
+        assert!(fitted.contains("/tmp/out.log") && fitted.contains("sed -n '"));
+        // Small results pass through untouched.
+        assert_eq!(tool_output::fit_for_model("ok".into(), None), "ok");
+    }
+
+    #[test]
+    fn a_short_summary_of_a_long_transcript_is_not_accepted() {
+        let big = vec!["x".repeat(30_000)];
+        let small = vec!["x".repeat(500)];
+        assert!(compaction_policy::summary_too_thin("", &small));
+        assert!(compaction_policy::summary_too_thin("done.", &big));
+        assert!(!compaction_policy::summary_too_thin("done.", &small));
+        assert!(!compaction_policy::summary_too_thin(&"s".repeat(800), &big));
+    }
+
     #[test]
     fn a_summary_keeps_recent_rounds_verbatim_within_its_budget() {
         let round = |id: &str, body: &str| {

@@ -88,7 +88,7 @@ impl Provider for EnduranceProvider {
             message.role == Role::System
                 && message
                     .content
-                    .starts_with("You are compacting a coding-assistant conversation")
+                    .starts_with("You are writing the working memory of a coding agent")
         });
         let content = if compacting {
             self.compactions.fetch_add(1, Ordering::Relaxed);

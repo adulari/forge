@@ -425,7 +425,9 @@ Rules:\n\
             _ => None,
         };
         CompletionOptions {
-            effort: Some(EffortLevel::Low),
+            // A summary replaces everything it folds; the cheap rung produced 189 chars for
+            // 240K tokens. Compaction runs at the model's own default.
+            effort: (purpose != "compact").then_some(EffortLevel::Low),
             prompt_cache_key: Some(format!("{session_id}:{purpose}")),
             max_output_tokens,
             ..CompletionOptions::default()
