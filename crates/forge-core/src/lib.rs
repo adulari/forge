@@ -1465,9 +1465,9 @@ fn should_retry_same_model_transient(model: &str, error: &forge_provider::Provid
 
 // `message_tokens`, `fit_messages`, and `prune_tool_results` moved to [`context_pipeline`] — the
 // one seam between the transcript and a provider request (imported below for existing call sites).
+use context_pipeline::{age_tool_rounds, message_tokens, prune_and_inject, to_llm};
 #[cfg(test)]
 use context_pipeline::{fit_messages, prune_tool_results, PRUNE_MARKER, PRUNE_TOOL_RESULT_MAX};
-use context_pipeline::{message_tokens, prune_and_inject, to_llm};
 
 /// Output of one execution of the shared model↔tool loop ([`Session::run_model_loop`]).
 /// Carries everything the caller needs; the caller holds `active_model` by value so it is
@@ -1650,6 +1650,8 @@ pub struct Session {
     /// The next main-loop request must answer with a tool call. Armed by a stall nudge while tasks
     /// are open; consumed by that one request.
     require_tool_call: bool,
+    /// Where each spooled tool output was written, by call id, so a result cut later can point at it.
+    kept_outputs: std::collections::HashMap<String, String>,
     /// Whether white-hot effort's standing orchestration guidance has been injected this session
     /// (docs/features/whitehot-effort.md). One-shot per pin: re-armed by `set_effort` on any
     /// change, so toggling away and back re-injects for the new stretch of the transcript.

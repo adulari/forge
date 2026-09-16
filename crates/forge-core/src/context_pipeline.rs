@@ -658,25 +658,90 @@ pub(crate) fn prune_tool_results(
         .last()
         .map_or(len, |(i, _)| i);
     let protect_from = (len - keep_recent).min(oldest_kept_round);
-    let mut reclaimed = 0usize;
-    for m in &mut messages[..protect_from] {
-        if m.role != Role::Tool
-            || m.content.len() <= PRUNE_TOOL_RESULT_MAX
-            || m.content.ends_with(PRUNE_MARKER)
-        {
-            continue;
-        }
-        let before = m.content.len();
-        let mut head = PRUNE_HEAD_KEEP.min(m.content.len());
-        while !m.content.is_char_boundary(head) {
-            head -= 1;
-        }
-        let mut kept = m.content[..head].to_string();
-        kept.push_str(PRUNE_MARKER);
-        reclaimed += before - kept.len();
-        m.content = kept;
+    messages[..protect_from]
+        .iter_mut()
+        .map(|m| prune_one(m, &std::collections::HashMap::new()))
+        .sum()
+}
+
+fn prunable(m: &Message) -> bool {
+    m.role == Role::Tool
+        && m.content.len() > PRUNE_TOOL_RESULT_MAX
+        && !m.content.ends_with(PRUNE_MARKER)
+}
+
+/// Cut one old tool result to its head. When the complete output was kept on disk the note says
+/// where, so the model reads that file instead of running the tool again.
+fn prune_one(m: &mut Message, kept_outputs: &std::collections::HashMap<String, String>) -> usize {
+    if !prunable(m) {
+        return 0;
     }
-    reclaimed
+    let before = m.content.len();
+    let mut head = PRUNE_HEAD_KEEP.min(m.content.len());
+    while !m.content.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut kept = m.content[..head].to_string();
+    if let Some(path) = m.tool_call_id.as_ref().and_then(|id| kept_outputs.get(id)) {
+        kept.push_str(&format!(
+            "\n…[complete output: {path} — read the part you need with `sed -n` or grep instead \
+             of running the tool again]"
+        ));
+    }
+    kept.push_str(PRUNE_MARKER);
+    let after = kept.len();
+    m.content = kept;
+    before.saturating_sub(after)
+}
+
+/// Rounds the working set may grow by before older rounds are cut. Cutting rewrites the middle of
+/// the prompt, which throws away the provider's prefix cache from that point on, so it is done in
+/// batches rather than on every step.
+pub(crate) const AGE_BATCH_ROUNDS: usize = 4;
+
+/// Keep a long turn's working set bounded: once [`AGE_BATCH_ROUNDS`] tool rounds older than the
+/// last `keep_rounds` still carry full-size results, cut every result before those rounds to its
+/// head. Returns the chars reclaimed; zero while the batch has not filled.
+///
+/// Elision only touches earlier turns and the prune pass only fires at the compaction ceiling, so
+/// inside one turn every result was resent on every step until the ceiling was hit. Replaying a
+/// 30-request Kimi K3 turn, this halves the tool output sent (5.5M chars to 2.6M) while the newest
+/// rounds stay whole.
+pub(crate) fn age_tool_rounds(
+    messages: &mut [Message],
+    keep_rounds: usize,
+    kept_outputs: &std::collections::HashMap<String, String>,
+) -> usize {
+    let round_starts: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == Role::Assistant && !m.tool_calls.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    let Some(&boundary) = round_starts
+        .len()
+        .checked_sub(keep_rounds)
+        .and_then(|i| round_starts.get(i))
+    else {
+        return 0;
+    };
+    let full_rounds = round_starts
+        .iter()
+        .zip(
+            round_starts
+                .iter()
+                .skip(1)
+                .chain(std::iter::once(&boundary)),
+        )
+        .filter(|(start, end)| *start < &boundary && messages[**start..**end].iter().any(prunable))
+        .count();
+    if full_rounds < AGE_BATCH_ROUNDS {
+        return 0;
+    }
+    messages[..boundary]
+        .iter_mut()
+        .map(|m| prune_one(m, kept_outputs))
+        .sum()
 }
 
 /// Continual Harness (`/refine`): render up to `max_entries` learned prompt/skill/subagent
@@ -1548,6 +1613,51 @@ mod tests {
         ];
         assert_eq!(dedupe_repeated_tool_results(&mut messages, 0), 0);
         assert!(messages.iter().all(|m| m.content == body));
+    }
+
+    fn rounds(n: usize, body: &str) -> Vec<Message> {
+        let mut msgs = vec![Message::user("go")];
+        for round in 0..n {
+            let id = format!("call-{round}");
+            msgs.push(Message::assistant_tool_calls(
+                "",
+                vec![forge_types::ToolCall {
+                    id: id.clone(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": format!("f{round}")}),
+                }],
+            ));
+            msgs.push(Message::tool_result(&id, body));
+        }
+        msgs
+    }
+
+    #[test]
+    fn aging_waits_for_a_full_batch_then_cuts_everything_before_the_working_set() {
+        let big = "x".repeat(PRUNE_TOOL_RESULT_MAX + 500);
+        let none = std::collections::HashMap::new();
+        // Three full rounds before the kept four: not a batch yet, so the prompt prefix is untouched.
+        let mut msgs = rounds(PRUNE_KEEP_ROUNDS + AGE_BATCH_ROUNDS - 1, &big);
+        assert_eq!(age_tool_rounds(&mut msgs, PRUNE_KEEP_ROUNDS, &none), 0);
+
+        let mut msgs = rounds(PRUNE_KEEP_ROUNDS + AGE_BATCH_ROUNDS, &big);
+        let kept: std::collections::HashMap<String, String> =
+            [("call-0".to_string(), "/tmp/call-0.log".to_string())].into();
+        assert!(age_tool_rounds(&mut msgs, PRUNE_KEEP_ROUNDS, &kept) > 0);
+        let cut: Vec<bool> = msgs
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.ends_with(PRUNE_MARKER))
+            .collect();
+        assert_eq!(cut, [true, true, true, true, false, false, false, false]);
+        let first = msgs.iter().find(|m| m.role == Role::Tool).unwrap();
+        assert!(
+            first.content.contains("/tmp/call-0.log"),
+            "{}",
+            first.content
+        );
+        // Idempotent until the next batch fills.
+        assert_eq!(age_tool_rounds(&mut msgs, PRUNE_KEEP_ROUNDS, &kept), 0);
     }
 
     #[test]

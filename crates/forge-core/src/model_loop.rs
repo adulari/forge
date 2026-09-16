@@ -247,6 +247,8 @@ impl Session {
                     .push(Message::system(DEADLINE_RECONCILE_NUDGE));
             }
             // Every step, not only at nudge points: a 120K-ceiling Kimi turn once grew to 246K.
+            let keep = crate::context_pipeline::PRUNE_KEEP_ROUNDS;
+            age_tool_rounds(&mut self.transcript, keep, &self.kept_outputs);
             self.auto_compact_if_needed(&active_model).await;
             let (tools_before, mut resp) = crate::model_request::request_provider_response(
                 self,

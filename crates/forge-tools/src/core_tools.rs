@@ -916,6 +916,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn one_noisy_file_cannot_hide_the_others() {
+        let dir = temp_dir("search-per-file");
+        let noisy: String = (0..500).map(|i| format!("hit {i}\n")).collect();
+        std::fs::write(dir.join("a_noisy.log"), noisy).unwrap();
+        std::fs::write(dir.join("z_real.rs"), "fn hit() {}\n").unwrap();
+
+        let out = SearchTool
+            .run(&json!({ "query": "hit", "path": dir.to_str().unwrap() }))
+            .await
+            .unwrap();
+
+        assert!(out.contains("z_real.rs:1:"), "{out}");
+        assert!(out.contains("475 more matches in this file"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A merged context hunk over a dense file is one entry, and the byte check used to run only
     /// after it was pushed — a "64 KB" search returned 272 KB.
     #[tokio::test]
@@ -967,7 +984,7 @@ mod tests {
             out.len()
         );
         assert!(
-            out.contains("capped"),
+            out.contains("capped") || out.contains("more matches in this file"),
             "a truncated result must say so rather than looking complete:\n{}",
             &out[..out.len().min(400)]
         );
