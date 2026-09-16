@@ -233,6 +233,7 @@ pub(super) async fn request_provider_response(
                 reuse_response_chain,
                 response_chain_prefix_tokens: completion_prefix_tokens(&sent, specs),
                 response_format: None,
+                require_tool_call: std::mem::take(&mut session.require_tool_call),
             };
             let fut =
                 provider.complete_with(active_model, &sent, specs, &completion_opts, &mut sink);

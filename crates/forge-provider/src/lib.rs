@@ -770,6 +770,10 @@ pub struct CompletionOptions {
     pub response_chain_prefix_tokens: u64,
     /// Structured-output request (OpenAI `response_format`). `None` = provider default (free text).
     pub response_format: Option<ResponseFormat>,
+    /// Ask the provider to answer with a tool call (`tool_choice: "required"`). Set for the one
+    /// request after the model narrated its next step and stopped with tasks still open. Honoured
+    /// only where the provider is known to accept it; elsewhere it is a no-op.
+    pub require_tool_call: bool,
 }
 
 pub(crate) fn effective_output_token_cap(

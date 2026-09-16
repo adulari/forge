@@ -222,6 +222,7 @@ impl Session {
             exact_effort: None,
             subagent_pin_free: None,
             overflow_window_cap: None,
+            require_tool_call: false,
             whitehot_guidance_injected: false,
             pinned_tier: None,
             route_affinity: None,
