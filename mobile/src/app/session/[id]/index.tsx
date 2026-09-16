@@ -53,7 +53,7 @@ import { type HistoryRow } from "../../../lib/api";
 import { reconcilePendingMessages } from "../../../lib/sessionReconciler";
 import { OFFLINE_QUEUE_CAP, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { haptics } from "../../../lib/haptics";
-import { useHistory, useSessions } from "../../../lib/queries";
+import { useHistory, useLiveHistoryRefresh, useSessions } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import { easings, useEmberdot, useForgeline } from "../../../theme/motion";
@@ -220,6 +220,17 @@ export default function SessionChat() {
   // The chat opts into tool rows so a turn's tool activity renders inline (ToolCallRow),
   // instead of the tool-less stream the fork picker and turn watcher still use.
   const historyQuery = useHistory(sessionId, { includeTools: true });
+  // The newest rows the snapshot carries change when a step finishes — the moment the history
+  // page has something new. Streaming text is deliberately not part of it.
+  const liveRowsSignal = useMemo(
+    () =>
+      (snapshot?.transcript_rows ?? [])
+        .slice(-2)
+        .map((row) => `${row.kind}:${row.tool ?? ""}:${row.text.length}`)
+        .join("|") + `#${snapshot?.transcript.length ?? 0}`,
+    [snapshot?.transcript_rows, snapshot?.transcript.length],
+  );
+  useLiveHistoryRefresh(sessionId, snapshot?.busy ?? false, liveRowsSignal, true);
   // `read_only` means there is genuinely no input path: a terminal session whose Forge build
   // predates the control channel, or whose user opted out of it. A terminal session that DID
   // publish one reports `read_only: false` — the daemon proxies this WS straight into it — so the

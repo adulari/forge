@@ -365,8 +365,15 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     [weeklySubscription, weeklyProvider, weeklyDeltaPct],
   );
   const transportProp = useMemo(
-    () => (signedIn ? { hostName: authHost ?? "this host", transport: "direct" as const } : undefined),
-    [signedIn, authHost],
+    () =>
+      signedIn
+        ? {
+            hostName: authHost ?? "this host",
+            // An Anywhere pairing's base URL is `fany://<host id>`; everything else is a direct URL.
+            transport: baseUrl?.startsWith("fany://") ? ("anywhere" as const) : ("direct" as const),
+          }
+        : undefined,
+    [signedIn, authHost, baseUrl],
   );
 
   const gutter = { paddingHorizontal: isCompact ? space.space16 : space.space24 };

@@ -2,6 +2,7 @@
 // never raw fetch. Query keys are namespaced by baseUrl so switching a paired server
 // never serves stale cross-server data from the persisted cache.
 import {
+  type InfiniteData,
   useInfiniteQuery,
   useMutation,
   useQueries,
@@ -9,6 +10,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { markFirstDataResolve } from "./performance";
+import { mergeNewestHistoryPage } from "./historyMerge";
 import { catalogHasModel } from "./modelCatalog";
 import { useEffect, useRef, useState } from "react";
 import { useIsFocused } from "expo-router";
@@ -363,6 +365,53 @@ export function useHistory(sessionId: string | null, options: { includeTools?: b
     getNextPageParam: (lastPage) =>
       lastPage.length < pageSize ? undefined : lastPage[lastPage.length - 1]?.seq,
   });
+}
+
+/** Least time between two live history refreshes of one session. */
+const LIVE_HISTORY_MIN_INTERVAL_MS = 4_000;
+
+/** Keep the newest history page current while a turn runs.
+ *
+ * History was only refetched when `busy` went false, so a turn that ran for hours showed the
+ * timeline as it was when the screen opened, plus the few rows the snapshot carries. Whenever
+ * `signal` changes during a turn (the caller derives it from the snapshot's newest rows), this
+ * fetches just the newest page — at most once per `LIVE_HISTORY_MIN_INTERVAL_MS`, trailing — and
+ * folds it into the loaded pages instead of refetching every page the user scrolled through. */
+export function useLiveHistoryRefresh(
+  sessionId: string | null,
+  busy: boolean,
+  signal: string,
+  includeTools: boolean,
+): void {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  const lastRun = useRef(0);
+  useEffect(() => {
+    if (!busy || baseUrl == null || sessionId == null) return;
+    let cancelled = false;
+    const wait = Math.max(0, LIVE_HISTORY_MIN_INTERVAL_MS - (Date.now() - lastRun.current));
+    const timer = setTimeout(() => {
+      lastRun.current = Date.now();
+      getHistory(baseUrl, {
+        session: sessionId,
+        limit: historyPageSize(includeTools),
+        include_tools: includeTools || undefined,
+      })
+        .then((fresh) => {
+          if (cancelled) return;
+          queryClient.setQueryData<InfiniteData<HistoryRow[], unknown>>(
+            keys(baseUrl).history(sessionId, includeTools),
+            (data) => mergeNewestHistoryPage(data, fresh),
+          );
+        })
+        // A missed refresh is recovered by the next change or by the turn-end refetch.
+        .catch(() => {});
+    }, wait);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [busy, baseUrl, sessionId, signal, includeTools, queryClient]);
 }
 
 export function useSessionTree() { const { baseUrl } = useAuth(); return useQuery<SessionTreeRow[]>({ queryKey: keys(baseUrl).sessionTree, queryFn: () => getSessionTree(baseUrl as string), enabled: baseUrl != null }); }

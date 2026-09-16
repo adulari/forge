@@ -633,9 +633,9 @@ class AnywhereRemoteSocket implements RemoteSocket {
 
   receive(bytes: Uint8Array, text = !this.binaryByDefault): void {
     if (this.state !== WebSocket.OPEN) return;
-    const data = text
-      ? this.textDecoder.decode(bytes, { stream: true })
-      : bytes.slice().buffer;
+    // One relayed frame is one whole WebSocket message, so it decodes on its own. `stream: true`
+    // kept Expo's TextDecoder off its fast path: every snapshot was rebuilt a char at a time.
+    const data = text ? this.textDecoder.decode(bytes) : bytes.slice().buffer;
     this.onmessage?.({ data, type: "message" } as MessageEvent);
   }
 

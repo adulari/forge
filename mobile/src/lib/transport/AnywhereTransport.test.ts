@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { AnywhereTransport, type AnywhereBridgeRequest, type AnywhereRelay } from "./AnywhereTransport";
+import {
+  AnywhereTransport,
+  responseBodyInit,
+  type AnywhereBridgeRequest,
+  type AnywhereRelay,
+} from "./AnywhereTransport";
 import type { RemoteSocket } from "./RemoteTransport";
 
 function socket(): RemoteSocket {
@@ -266,5 +271,40 @@ describe("AnywhereTransport", () => {
         "fany-ws://host-1/ws/terminal?session=session-7&terminal=bad%2Fid&cols=80&rows=24",
       ),
     ).toThrow("invalid Forge Anywhere terminal stream parameters");
+  });
+});
+
+describe("responseBodyInit", () => {
+  const bytes = new TextEncoder().encode(JSON.stringify([{ content: "Resuming — patch ✓" }]));
+
+  it("decodes a JSON body as UTF-8 so non-ASCII text survives the relay", async () => {
+    const body = responseBodyInit(bytes, [["Content-Type", "application/json"]]);
+    expect(typeof body).toBe("string");
+    const parsed = (await new Response(body).json()) as { content: string }[];
+    expect(parsed[0].content).toBe("Resuming — patch ✓");
+  });
+
+  it("keeps binary bodies as bytes", () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe]);
+    expect(responseBodyInit(png, [["content-type", "image/png"]])).toBe(png);
+  });
+
+  it("treats an untyped body as text only when it is valid UTF-8", () => {
+    expect(responseBodyInit(bytes)).toBe(new TextDecoder().decode(bytes));
+    const invalid = new Uint8Array([0xff, 0xfe, 0x00]);
+    expect(responseBodyInit(invalid)).toBe(invalid);
+  });
+});
+
+describe("responseBodyInit under React Native's fetch polyfill", () => {
+  it("fixes the Latin-1 decode whatwg-fetch applies to byte bodies", async () => {
+    // @ts-expect-error whatwg-fetch ships no type declarations
+    const polyfill = (await import("whatwg-fetch")) as { Response: typeof Response };
+    const RnResponse = polyfill.Response;
+    const bytes = new TextEncoder().encode("Resuming — patch");
+    // The defect, reproduced: a byte body comes back one char per byte.
+    expect(await new RnResponse(bytes).text()).not.toBe("Resuming — patch");
+    const body = responseBodyInit(bytes, [["content-type", "application/json"]]);
+    expect(await new RnResponse(body).text()).toBe("Resuming — patch");
   });
 });
