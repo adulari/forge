@@ -6325,8 +6325,8 @@ mod tests {
     async fn a_blocked_model_is_not_re_driven_through_the_whole_nudge_budget() {
         // Observed live (session 07ca114e): the model worked, hit a blocker, explained it, and was
         // then re-driven four times — four provider calls at ~119k input each, every one answered
-        // in prose. The nudge asks for "a tool call or a task marked Done"; when one nudge yields
-        // neither, the next cannot do better, so the budget must not be spent on it.
+        // in prose. A single idle answer is not proof of a blocker (a model can stop mid-thought),
+        // so the named nudges still go out, but the budget stops at `BLOCKED_IDLE_NUDGES`.
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
@@ -6365,9 +6365,9 @@ mod tests {
             .filter(|w| w.contains("continuing it"))
             .count();
         assert_eq!(
-            nudges, 1,
-            "one nudge, then stop — MAX_CONTINUE_NUDGES is 4, so the old path spent all four on a \
-             model that had already answered the first without acting: {warnings:?}"
+            nudges,
+            nudge_policy::BLOCKED_IDLE_NUDGES,
+            "the idle-nudge allowance, then stop — not the whole budget: {warnings:?}"
         );
         assert!(
             warnings.iter().any(|w| w.contains("blocked, not stalling")),

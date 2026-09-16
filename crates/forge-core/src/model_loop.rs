@@ -120,6 +120,8 @@ impl Session {
         // signal. Reset whenever a task finishes; past `GOALLESS_NUDGE_LIMIT` the turn is handed
         // back to the user instead of spinning (replaces the old fixed 4-nudge cap).
         let mut goalless_nudges = 0usize;
+        // Consecutive continue-nudges answered with nothing at all — the blocked signal.
+        let mut idle_nudges = 0usize;
         // (tools executed, tasks resolved) captured when the last continue-nudge was sent — see
         // `nudge_policy::decide`.
         let mut last_nudge_progress: Option<nudge_policy::Progress> = None;
@@ -686,24 +688,17 @@ impl Session {
                         );
                         match nudge_policy::decide(
                             goalless_nudges,
+                            idle_nudges,
                             last_nudge_progress,
                             progress_now,
                         ) {
                             ContinueNudge::Send => {
                                 continue_nudges += 1;
-                                // A completed task since the last nudge is real convergence and
-                                // clears the goalless streak; tool-only progress adds to it. This
-                                // is the ceiling that replaced the fixed 4-nudge cap: finishing
-                                // tasks keeps going indefinitely, spinning tools does not.
-                                let finished_a_task =
-                                    last_nudge_progress.is_some_and(|prev| progress_now.1 > prev.1);
-                                goalless_nudges = if finished_a_task {
-                                    0
-                                } else if last_nudge_progress.is_some() {
-                                    goalless_nudges + 1
-                                } else {
-                                    goalless_nudges
-                                };
+                                (goalless_nudges, idle_nudges) = nudge_policy::next_streaks(
+                                    (goalless_nudges, idle_nudges),
+                                    last_nudge_progress,
+                                    progress_now,
+                                );
                                 last_nudge_progress = Some(progress_now);
                                 self.presenter.emit(PresenterEvent::Warning(
                                     nudge_policy::continuing_warning(unfinished, continue_nudges),
