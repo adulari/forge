@@ -21,6 +21,16 @@ use crate::tokens;
 pub(crate) const PRUNE_TOOL_RESULT_MAX: usize = 3000;
 /// How much of a pruned tool result's head to keep (enough to see what the tool produced).
 const PRUNE_HEAD_KEEP: usize = 1500;
+/// Tool rounds (an assistant call and its results) at the end of the transcript that pruning never
+/// touches mid-turn, whatever `keep_recent` says.
+///
+/// Auto-compaction checks before every model request, and on a session sitting at its ceiling the
+/// prune pass therefore ran on every step with only the last 6 messages protected — one round of
+/// six file reads. Everything the model had read a step earlier came back as a 1,500-char head, so
+/// it read the same files again: observed 2026-09-16 on Kimi K3, one file read three times in five
+/// rounds and no task finished in fifteen minutes. Keeping a few rounds whole leaves the model the
+/// material it is working from; if that frees too little, the caller summarises instead.
+pub(crate) const PRUNE_KEEP_ROUNDS: usize = 4;
 /// Marker left in place of the dropped tail; also makes pruning idempotent (a result already ending
 /// with it is skipped).
 pub(crate) const PRUNE_MARKER: &str =
@@ -54,8 +64,12 @@ const MESSAGE_TRUNCATION_MARKER: &str =
 /// (truncating large old tool results); future injections/transforms that must SURVIVE in the
 /// transcript (rather than apply per-request) belong here, not scattered across call sites.
 /// Returns the number of chars reclaimed.
-pub(crate) fn prune_and_inject(messages: &mut [Message], keep_recent: usize) -> usize {
-    prune_tool_results(messages, keep_recent)
+pub(crate) fn prune_and_inject(
+    messages: &mut [Message],
+    keep_recent: usize,
+    keep_rounds: usize,
+) -> usize {
+    prune_tool_results(messages, keep_recent, keep_rounds)
 }
 
 /// messages, then elides bulky older tool results while retaining a balanced head and tail. The
@@ -622,16 +636,28 @@ fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Messa
 
 /// Zero-LLM context reclaim: truncate large OLD tool results in place so a long conversation fits
 /// without paying for an LLM summarize round-trip. Protects the most recent `keep_recent` messages
-/// and only touches `Tool` results longer than [`PRUNE_TOOL_RESULT_MAX`], keeping a
+/// and the last `keep_rounds` tool rounds, and only touches `Tool` results longer than [`PRUNE_TOOL_RESULT_MAX`], keeping a
 /// [`PRUNE_HEAD_KEEP`]-char head + a marker. Returns the number of chars reclaimed; idempotent (a
 /// result already ending with [`PRUNE_MARKER`] is skipped). The full text remains in the store for
 /// replay — only the model-facing transcript is trimmed.
-pub(crate) fn prune_tool_results(messages: &mut [Message], keep_recent: usize) -> usize {
+pub(crate) fn prune_tool_results(
+    messages: &mut [Message],
+    keep_recent: usize,
+    keep_rounds: usize,
+) -> usize {
     let len = messages.len();
     if len <= keep_recent {
         return 0;
     }
-    let protect_from = len - keep_recent;
+    let oldest_kept_round = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, m)| m.role == Role::Assistant && !m.tool_calls.is_empty())
+        .take(keep_rounds)
+        .last()
+        .map_or(len, |(i, _)| i);
+    let protect_from = (len - keep_recent).min(oldest_kept_round);
     let mut reclaimed = 0usize;
     for m in &mut messages[..protect_from] {
         if m.role != Role::Tool
@@ -1525,13 +1551,42 @@ mod tests {
     }
 
     #[test]
+    fn pruning_leaves_the_last_few_tool_rounds_whole() {
+        let big = "x".repeat(PRUNE_TOOL_RESULT_MAX + 500);
+        let mut msgs = vec![Message::user("go")];
+        for round in 0..(PRUNE_KEEP_ROUNDS + 2) {
+            let id = format!("call-{round}");
+            msgs.push(Message::assistant_tool_calls(
+                "",
+                vec![forge_types::ToolCall {
+                    id: id.clone(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": format!("f{round}")}),
+                }],
+            ));
+            msgs.push(Message::tool_result(&id, &big));
+        }
+        prune_tool_results(&mut msgs, 6, PRUNE_KEEP_ROUNDS);
+        let pruned: Vec<bool> = msgs
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.ends_with(PRUNE_MARKER))
+            .collect();
+        assert_eq!(
+            pruned,
+            [true, true, false, false, false, false],
+            "{pruned:?}"
+        );
+    }
+
+    #[test]
     fn prune_and_inject_delegates_to_tool_result_reclaim() {
         let mut msgs = vec![
             Message::tool_result("c1", "y".repeat(10_000)),
             Message::user("recent 1"),
             Message::user("recent 2"),
         ];
-        let reclaimed = prune_and_inject(&mut msgs, 2);
+        let reclaimed = prune_and_inject(&mut msgs, 2, 0);
         assert!(reclaimed > 0);
         assert!(msgs[0].content.ends_with(PRUNE_MARKER));
     }

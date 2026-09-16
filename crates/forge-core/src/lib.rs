@@ -2558,7 +2558,7 @@ impl Session {
         // makes long sessions grow quadratically. Reclaim them at every user-turn boundary instead
         // of waiting until the model is already near context exhaustion. The newest messages stay
         // verbatim; current-turn tool results are added only after this boundary.
-        let _ = prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT);
+        let _ = prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT, 0);
         let recap_tasks_before = self.tasks.clone();
         let working_tree_baseline = working_tree_status(Some(self.workspace.root()));
         self.last_context_pack = context_pack::ContextPack::default();
@@ -5300,7 +5300,7 @@ mod tests {
             Message::user("b"),                        // 7
             Message::tool_result("c4", big.clone()),   // 8  recent + large → protected
         ];
-        let reclaimed = prune_tool_results(&mut msgs, COMPACT_KEEP_RECENT);
+        let reclaimed = prune_tool_results(&mut msgs, COMPACT_KEEP_RECENT, 0);
         assert!(reclaimed > 0);
         assert!(msgs[1].content.ends_with(PRUNE_MARKER) && msgs[1].content.len() < big.len());
         assert_eq!(msgs[2].content, small, "small old result untouched");
@@ -5313,7 +5313,7 @@ mod tests {
         assert_eq!(msgs[1].tool_call_id.as_deref(), Some("c1"));
         assert_eq!(msgs[1].role, Role::Tool);
         // Idempotent: a second pass reclaims nothing.
-        assert_eq!(prune_tool_results(&mut msgs, COMPACT_KEEP_RECENT), 0);
+        assert_eq!(prune_tool_results(&mut msgs, COMPACT_KEEP_RECENT, 0), 0);
     }
 
     #[test]
@@ -9640,6 +9640,35 @@ mod tests {
 
     /// The keep-6 split used to land wherever the count said, including between an assistant's
     /// tool calls and their results (a live fold on 2026-09-16 left one result with no call).
+    #[test]
+    fn a_summary_keeps_recent_rounds_verbatim_within_its_budget() {
+        let round = |id: &str, body: &str| {
+            vec![
+                Message::assistant_tool_calls(
+                    "",
+                    vec![forge_types::ToolCall {
+                        id: id.into(),
+                        name: "read_file".into(),
+                        args: serde_json::json!({"path": id}),
+                    }],
+                ),
+                Message::tool_result(id, body),
+            ]
+        };
+        let mut msgs = vec![Message::user("task")];
+        for i in 0..6 {
+            msgs.extend(round(&format!("r{i}"), &"word ".repeat(200)));
+        }
+        // Budget for everything: the tail reaches back PRUNE_KEEP_ROUNDS rounds, no further.
+        let start = compaction_policy::kept_tail_start(&msgs, 1, usize::MAX);
+        assert_eq!(start, msgs.len() - 2 * context_pipeline::PRUNE_KEEP_ROUNDS);
+        // No budget: the plain keep-recent count.
+        assert_eq!(
+            compaction_policy::kept_tail_start(&msgs, 1, 0),
+            msgs.len() - 1
+        );
+    }
+
     #[tokio::test]
     async fn compact_never_starts_the_kept_tail_inside_a_tool_round() {
         let store = Arc::new(Store::open_in_memory().unwrap());

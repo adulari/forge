@@ -43,6 +43,13 @@ The gauge surfaces the fill level; compaction is the action that lowers it.
   first kept message is a tool result, the split walks back to the assistant call that produced
   it, so a few more than `COMPACT_KEEP_RECENT` messages survive rather than results whose call
   is in the summary (Moonshot rejects that request; other providers lose the results silently).
+- **Recent tool rounds survive both passes.** Mid-turn, the prune pass leaves the last
+  `PRUNE_KEEP_ROUNDS` (4) tool rounds whole, and a summary keeps those rounds verbatim beside it
+  while they cost at most a quarter of the transcript (capped at 40K tokens). Observed 2026-09-16:
+  with only 6 messages protected and the check running every step, a Kimi K3 session sitting at
+  its 120K ceiling had each step's file reads cut to 1,500 chars before the next step, and read
+  the same files again for fifteen minutes. The turn-boundary prune still trims finished turns
+  down to the last 6 messages.
 - **Checked every step.** `auto_compact_if_needed` runs before every model request in the tool
   loop, not only at nudge/guard points. Observed 2026-09-16: a single Kimi turn grew 62K → 246K
   tokens under a 120K ceiling because nothing mid-turn asked.

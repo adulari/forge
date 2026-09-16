@@ -199,7 +199,12 @@ impl Session {
         ) {
             // Cheap first: the pipeline's mutating phase — prune bulky OLD tool results in place
             // (no model call). Often reclaims enough that the LLM summarize below isn't needed.
-            if prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT) > 0 {
+            if prune_and_inject(
+                &mut self.transcript,
+                COMPACT_KEEP_RECENT,
+                crate::context_pipeline::PRUNE_KEEP_ROUNDS,
+            ) > 0
+            {
                 self.emit_context_gauge(model);
             }
             if needs_compaction(
@@ -470,7 +475,13 @@ impl Session {
             serde_json::json!({ "trigger": if auto { "auto" } else { "manual" } }),
         )
         .await;
-        let split = round_aligned_split(&self.transcript, before - COMPACT_KEEP_RECENT);
+        let tail_budget = usize::try_from(self.estimated_transcript_tokens() / 4)
+            .unwrap_or(usize::MAX)
+            .min(COMPACT_KEEP_ROUNDS_TOKENS);
+        let split = round_aligned_split(
+            &self.transcript,
+            kept_tail_start(&self.transcript, COMPACT_KEEP_RECENT, tail_budget),
+        );
         if split < COMPACT_MIN_OLDER {
             return Ok((before, before));
         }
@@ -826,6 +837,40 @@ pub(crate) fn needs_compaction(transcript_tokens: u64, trigger: u64, fits_window
 /// left behind would answer a call the provider cannot see. Moonshot rejects such a request
 /// outright, and everyone else loses those results to the pairing repair. Walking back to the
 /// call keeps a few more messages than `COMPACT_KEEP_RECENT`, which is the cheaper mistake.
+/// Most tokens of recent tool rounds a summary keeps verbatim next to it.
+const COMPACT_KEEP_ROUNDS_TOKENS: usize = 40_000;
+
+/// Where the verbatim tail after a summary starts: the last `keep_recent` messages, extended back
+/// over up to [`crate::context_pipeline::PRUNE_KEEP_ROUNDS`] whole tool rounds while they cost at
+/// most `token_budget`.
+///
+/// Six messages is one round of a model that reads six files at once, so a summary taken mid-task
+/// used to drop the files the model was working from and it read them again. The budget keeps a
+/// huge round from surviving every summary — the caller passes a quarter of the transcript, so a
+/// compaction always shrinks it.
+pub(crate) fn kept_tail_start(
+    messages: &[Message],
+    keep_recent: usize,
+    token_budget: usize,
+) -> usize {
+    let mut start = messages.len().saturating_sub(keep_recent);
+    let round_starts = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, m)| m.role == Role::Assistant && !m.tool_calls.is_empty())
+        .map(|(i, _)| i)
+        .take(crate::context_pipeline::PRUNE_KEEP_ROUNDS);
+    for round_start in round_starts {
+        let cost: usize = messages[round_start..].iter().map(message_tokens).sum();
+        if cost > token_budget {
+            break;
+        }
+        start = start.min(round_start);
+    }
+    start
+}
+
 pub(crate) fn round_aligned_split(messages: &[Message], mut split: usize) -> usize {
     while split > 0 && split < messages.len() && messages[split].role == Role::Tool {
         split -= 1;
