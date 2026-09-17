@@ -591,6 +591,12 @@ export type PushUnsubscribeRequest =
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const LARGE_UPLOAD_TIMEOUT_MS = 120_000;
+// Spawning a session is the one read/write that does real work before it answers: the daemon
+// builds the workspace (and a git worktree when asked), starts the session and, since the
+// `prompt` field, kicks off its first turn. Measured 4.4s over loopback on a busy daemon, and
+// the phone adds the encrypted relay on top — the 15s default aborted it and left the composer
+// showing "request timed out" for a session that was in fact being created.
+const CREATE_SESSION_TIMEOUT_MS = 90_000;
 
 async function request<T>(
   baseUrl: string,
@@ -705,10 +711,12 @@ export function createSession(
   baseUrl: string,
   body: CreateSessionRequest,
 ): Promise<CreateSessionResponse> {
-  return request(baseUrl, "/api/sessions", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return request(
+    baseUrl,
+    "/api/sessions",
+    { method: "POST", body: JSON.stringify(body) },
+    CREATE_SESSION_TIMEOUT_MS,
+  );
 }
 
 export function setSessionPermissionMode(
