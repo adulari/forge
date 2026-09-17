@@ -112,7 +112,7 @@ function ConfigurationScreenBody() {
     <Segmented options={[{ value: "user", label: "Save everywhere" }, { value: "project", label: "Save in project" }]} value={scope} onChange={(value) => setScope(value as Scope)} />
     <SearchField value={search} onChangeText={setSearch} placeholder="Search settings" accessibilityLabel="Search settings" />
     <Text style={[type.sub, { color: tokens.ink4 }]}>Saved settings apply to new Forge sessions. Restart forge serve to reload daemon-wide behavior.</Text>
-    {query.isError ? <Text style={[type.body, { color: tokens.danger }]}>Could not load configuration. Pull to retry.</Text> : null}
+    {query.isError ? <Text style={[type.body, { color: tokens.danger }]}>{`Could not load configuration: ${query.error?.message || "unknown error"}. Pull to retry.`}</Text> : null}
     {query.isLoading ? <Text style={[type.body, { color: tokens.ink3 }]}>Loading your effective configuration…</Text> : null}
     {!query.isLoading && !query.isError && fields.length === 0 ? <Text style={[type.body, { color: tokens.ink3 }]}>No settings match that search.</Text> : null}
     {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader>{fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} showSeparator={index < fields.length - 1} />)}</View>)}

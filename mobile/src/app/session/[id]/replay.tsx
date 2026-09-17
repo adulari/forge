@@ -30,6 +30,7 @@ export default function SessionReplayScreen() {
         rows={rows}
         loading={query.isLoading}
         error={query.isError}
+        errorMessage={query.error?.message}
         onRetry={() => void query.refetch()}
         refreshing={query.isFetching && !query.isFetchingNextPage}
         onRefresh={() => void query.refetch()}

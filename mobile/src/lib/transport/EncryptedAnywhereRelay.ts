@@ -537,23 +537,55 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       throw new Error("Anywhere bridge response inline body exceeds 256 KiB");
     }
     if (!pending) return { deliver: () => {} };
-    const preparedBlob = payload.body_blob === undefined
-      ? undefined
-      : await this.prepareBlob(payload.body_blob, senderId);
-    const response: AnywhereBridgeResponse = {
-      status: payload.status,
-      headers: payload.headers,
-      body: preparedBlob?.plaintext ?? new Uint8Array(payload.body ?? []),
-    };
-    return {
-      consume: preparedBlob?.consume,
-      precedingSequences: preparedBlob === undefined ? undefined : [preparedBlob.sequence],
-      deliver: () => {
-        clearTimeout(pending.timeout);
-        this.pending.delete(bytesToHex(requestId));
-        pending.resolve(response);
-      },
-    };
+    if (payload.body_blob === undefined) {
+      const response: AnywhereBridgeResponse = {
+        status: payload.status,
+        headers: payload.headers,
+        body: new Uint8Array(payload.body ?? []),
+      };
+      return {
+        deliver: () => {
+          clearTimeout(pending.timeout);
+          this.pending.delete(bytesToHex(requestId));
+          pending.resolve(response);
+        },
+      };
+    }
+    // The outer envelope carrying this reference is already authenticated by the time we get
+    // here (signature verified in `handleEnvelope`, sequence checked right after we return). A
+    // failure claiming, downloading or decrypting the referenced blob is THIS response's problem
+    // — a transient object-storage hiccup, say — not evidence the channel itself is compromised.
+    // It used to propagate out of `prepareBridgeResponse` into `handleEnvelope`'s catch, which
+    // closed the whole relay connection and rejected every OTHER in-flight request along with it
+    // (`connectionClosed` sweeps `this.pending`) — one bad blob fetch for `/api/models` could take
+    // down a concurrent `/api/config` request that had nothing wrong with it. Failing just this
+    // one pending request keeps the connection, and every other in-flight request, alive.
+    try {
+      const preparedBlob = await this.prepareBlob(payload.body_blob, senderId);
+      const response: AnywhereBridgeResponse = {
+        status: payload.status,
+        headers: payload.headers,
+        body: preparedBlob.plaintext,
+      };
+      return {
+        consume: preparedBlob.consume,
+        precedingSequences: [preparedBlob.sequence],
+        deliver: () => {
+          clearTimeout(pending.timeout);
+          this.pending.delete(bytesToHex(requestId));
+          pending.resolve(response);
+        },
+      };
+    } catch (error) {
+      const failure = asError(error);
+      return {
+        deliver: () => {
+          clearTimeout(pending.timeout);
+          this.pending.delete(bytesToHex(requestId));
+          pending.reject(failure);
+        },
+      };
+    }
   }
 
   private async prepareStreamFrame(plaintext: Uint8Array, senderId: string): Promise<PreparedDelivery> {
@@ -580,18 +612,30 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       throw new Error("Anywhere close frame cannot contain blob bytes");
     }
     if (!stream) return { deliver: () => {} };
-    const preparedBlob = payload.bytes_blob === undefined
-      ? undefined
-      : await this.prepareBlob(payload.bytes_blob, senderId);
-    const frameBytes = preparedBlob?.plaintext ?? new Uint8Array(payload.bytes ?? []);
-    return {
-      consume: preparedBlob?.consume,
-      precedingSequences: preparedBlob === undefined ? undefined : [preparedBlob.sequence],
-      deliver: () => {
-        if (payload.kind === "close") stream.remoteClose();
-        else stream.receive(frameBytes, payload.text);
-      },
-    };
+    if (payload.bytes_blob === undefined) {
+      const frameBytes = new Uint8Array(payload.bytes ?? []);
+      return {
+        deliver: () => {
+          if (payload.kind === "close") stream.remoteClose();
+          else stream.receive(frameBytes, payload.text);
+        },
+      };
+    }
+    // Same reasoning as the bridge-response blob path above: the outer envelope is already
+    // authenticated, so a failed blob fetch fails only this one stream, not the whole connection.
+    try {
+      const preparedBlob = await this.prepareBlob(payload.bytes_blob, senderId);
+      return {
+        consume: preparedBlob.consume,
+        precedingSequences: [preparedBlob.sequence],
+        deliver: () => {
+          if (payload.kind === "close") stream.remoteClose();
+          else stream.receive(preparedBlob.plaintext, payload.text);
+        },
+      };
+    } catch (error) {
+      return { deliver: () => stream.fail(asError(error)) };
+    }
   }
 
   private connectionClosed(error = new Error("Forge Anywhere relay disconnected")): void {

@@ -94,6 +94,9 @@ export interface ReplayViewProps {
   rows: HistoryRow[];
   loading?: boolean;
   error?: boolean;
+  /** The query's own thrown message (a relay transfer failure, a decode error, an HTTP status) —
+   * shown verbatim instead of the generic "could not load" text when the caller has one. */
+  errorMessage?: string;
   onRetry?: () => void;
   /** Pull-to-refresh (native) — mirrors BoundedList's `refreshing`/`onRefresh`. */
   refreshing?: boolean;
@@ -110,6 +113,7 @@ export function ReplayView({
   rows,
   loading = false,
   error = false,
+  errorMessage,
   onRetry,
   refreshing = false,
   onRefresh,
@@ -175,7 +179,8 @@ export function ReplayView({
     );
   }
   if (error) {
-    return <EmptyState icon={Clock} message="Could not load this replay." action={onRetry ? <RetryLink onPress={onRetry} /> : undefined} />;
+    const message = errorMessage ? `Could not load this replay: ${errorMessage}` : "Could not load this replay.";
+    return <EmptyState icon={Clock} message={message} action={onRetry ? <RetryLink onPress={onRetry} /> : undefined} />;
   }
   if (rows.length === 0) {
     return <EmptyState icon={RouteIcon} message="No saved messages yet." />;
