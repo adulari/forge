@@ -54,7 +54,14 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
   const reduced = useReducedMotion();
   const depth = scheme === "dark" ? depthDark : depthLight;
 
-  const maxSheetHeight = windowHeight * maxHeightRatio * Math.max(...snapPoints.map((point) => Math.max(0, Math.min(1, point))));
+  // Capped by `insets.top` so a near-full-height sheet (e.g. the compact command palette,
+  // `maxHeightRatio={1}`) can never rise above the status bar — Android's forced edge-to-edge
+  // (Modal `statusBarTranslucent`) means the sheet's own top edge is otherwise free to reach
+  // y=0.
+  const maxSheetHeight = Math.min(
+    windowHeight * maxHeightRatio * Math.max(...snapPoints.map((point) => Math.max(0, Math.min(1, point)))),
+    windowHeight - insets.top,
+  );
   const [contentHeight, setContentHeight] = useState(0);
   const sheetHeight = contentHeight > 0 ? Math.min(contentHeight, maxSheetHeight) : maxSheetHeight;
   const restY = 0;
@@ -123,21 +130,26 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
     return () => window.removeEventListener("keydown", handler);
   }, [visible, close]);
 
-  // iOS: the Modal covers the full screen with no window resize to compensate, so an
-  // open keyboard sits on top of a `bottom: 0` sheet. `keyboardWillShow`/`keyboardWillHide`
-  // fire on iOS only — Android already reflows via the default `adjustResize` softInputMode
-  // (shifting this too would double the keyboard offset there), and react-native-web's
-  // Keyboard module never fires these listeners, so this is a natural no-op elsewhere.
+  // The Modal covers the full screen with no window resize to compensate, so an open keyboard
+  // sits on top of a `bottom: 0` sheet on every platform — Android 15+ enforces edge-to-edge,
+  // so `adjustResize` no longer shrinks the window there either (the old assumption that it
+  // did was wrong: it left the rename field in SessionLifecycleSheet fully covered). iOS only
+  // has `keyboardWillShow`/`keyboardWillHide`; Android only has the "Did" pair (no native
+  // "Will" event — see RN's Keyboard.js), firing with real metrics independent of any window
+  // resize. react-native-web's Keyboard module never fires either pair, so this stays a
+  // natural no-op there.
   useEffect(() => {
-    if (!visible || Platform.OS !== "ios") {
+    if (!visible || Platform.OS === "web") {
       keyboardOffset.value = 0;
       return;
     }
-    const show = Keyboard.addListener("keyboardWillShow", (e) => {
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const show = Keyboard.addListener(showEvent, (e) => {
       const height = e.endCoordinates.height;
       keyboardOffset.value = reduced ? height : withTiming(height, { duration: e.duration || durations.base, easing: easings.standard });
     });
-    const hide = Keyboard.addListener("keyboardWillHide", (e) => {
+    const hide = Keyboard.addListener(hideEvent, (e) => {
       keyboardOffset.value = reduced ? 0 : withTiming(0, { duration: e.duration || durations.fast, easing: easings.exit });
     });
     return () => {
@@ -235,7 +247,18 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
   );
 
   return (
-    <Modal visible={mounted} transparent animationType="none" onRequestClose={close} statusBarTranslucent>
+    <Modal
+      visible={mounted}
+      transparent
+      animationType="none"
+      onRequestClose={close}
+      statusBarTranslucent
+      // Android: paired with `statusBarTranslucent` so this dialog window extends under BOTH
+      // system bars consistently (RN's own Modal docs: unset, the window is not guaranteed to
+      // draw under the nav bar the same way it draws under the status bar) — previously only
+      // half of that pair was set, which was the root of #21's missing bottom inset.
+      navigationBarTranslucent={Platform.OS === "android"}
+    >
       {body}
     </Modal>
   );

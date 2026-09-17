@@ -1,6 +1,6 @@
 // DESIGN_SYSTEM.md §6 IconButton — 44x44 hit area, 20px icon, D/P/F/X, optional badge dot.
 import React, { useState } from "react";
-import { Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
+import { Platform, Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import Animated from "react-native-reanimated";
 
 import { useStrike } from "../../theme/motion";
@@ -56,7 +56,12 @@ export function IconButton({
             borderRadius: radii.radius8,
             opacity: disabled ? 0.4 : 1,
             backgroundColor: hovered && !disabled ? tokens.bg3 : "transparent",
-            borderColor: focused ? tokens.accent : "transparent",
+            // `:focus-visible` is a keyboard/pointer affordance — on native, closing a Sheet
+            // (Modal) can hand RN focus back to whatever button opened it or sits nearby (e.g.
+            // the header back button after "Session actions" closes), firing `onFocus` for a
+            // touch interaction that never asked for a focus ring. Only web has a real
+            // keyboard-navigation story where this border is meaningful.
+            borderColor: Platform.OS === "web" && focused ? tokens.accent : "transparent",
           },
           style,
         ]}
