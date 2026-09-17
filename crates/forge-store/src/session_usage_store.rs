@@ -306,6 +306,7 @@ impl Store {
             &[],
             None,
             Visibility::UiOnly,
+            false,
         )
     }
 
@@ -331,6 +332,7 @@ impl Store {
             tool_calls,
             tool_call_id,
             Visibility::Llm,
+            false,
         )
     }
 
@@ -356,11 +358,12 @@ impl Store {
             tool_calls,
             tool_call_id,
             Visibility::LlmOnly,
+            false,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn insert_message(
+    pub(crate) fn insert_message(
         &self,
         session_id: &str,
         seq: i64,
@@ -370,6 +373,7 @@ impl Store {
         tool_calls: &[ToolCall],
         tool_call_id: Option<&str>,
         visibility: Visibility,
+        nudge: bool,
     ) -> Result<String> {
         let id = forge_types::new_id();
         let tool_calls_json = if tool_calls.is_empty() {
@@ -387,10 +391,10 @@ impl Store {
             let mut s = seq;
             loop {
                 let r = tx.execute(
-                    "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id, visibility)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id, visibility, nudge)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                      ON CONFLICT(session_id, seq) DO NOTHING",
-                    (&id, session_id, s, role.as_str(), content, model, &tool_calls_json, tool_call_id, visibility.as_str()),
+                    (&id, session_id, s, role.as_str(), content, model, &tool_calls_json, tool_call_id, visibility.as_str(), nudge),
                 );
                 match r {
                     Ok(1) => break,
@@ -415,6 +419,7 @@ impl Store {
                 "tool_calls": tool_calls,
                 "tool_call_id": tool_call_id,
                 "visibility": visibility.as_str(),
+                "nudge": nudge,
             }))?;
             append_sync_revision(&tx, "message", &id, SyncJournalOperation::Upsert, &payload)?;
             tx.commit()?;

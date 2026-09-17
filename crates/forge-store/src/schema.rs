@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS message (
     visibility      TEXT NOT NULL DEFAULT 'llm',  -- 'ui' = user-facing note, stripped from provider calls (also migration_0007)
     active          INTEGER NOT NULL DEFAULT 1,   -- 0 = soft-deleted by /undo or /compact (kept for audit/redo)
     compacted       INTEGER NOT NULL DEFAULT 0,   -- 1 = soft-deleted by /compact (uncompact reactivates only these; also migration_0012)
+    nudge           INTEGER NOT NULL DEFAULT 0,   -- 1 = harness-injected continuation nudge, stored role='user' for the model but not typed by the person (also migration_0036)
     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_message_session ON message(session_id, seq);

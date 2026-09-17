@@ -374,23 +374,33 @@ export interface SessionSearchResult {
 }
 
 /** Mirrors `TranscriptKind` in lib/ws.ts — same vocabulary on both wires, declared here so the
- * HTTP client keeps no dependency on the socket module. */
-export type TranscriptKind = "user" | "assistant" | "tool" | "system";
+ * HTTP client keeps no dependency on the socket module.
+ *
+ * `"nudge"` (additive) only ever appears on `/api/history`: a harness-injected continuation
+ * nudge (e.g. the empty-response nudge) is stored `role: "user"` — the provider needs its next
+ * request to end on a legal user turn — but is flagged `nudge=1` server-side (migration_0036) so
+ * it reads as its own kind instead of claiming the person typed it. The live socket's
+ * `transcript_rows` never sends it today (a nudge isn't echoed into the live scrollback), so
+ * `lib/ws.ts`'s `TranscriptRow.kind` stays the same union for forward compatibility, not because
+ * the server currently emits it there. */
+export type TranscriptKind = "user" | "assistant" | "tool" | "system" | "nudge";
 
 export interface HistoryRow {
   seq: number;
   /** `"tool"` only ever appears on a page fetched with `include_tools` — the daemon serves the
    * stored role verbatim (remote_projection.rs `map_history_row`), and tool rows are the one
-   * role the default page never selects. */
+   * role the default page never selects. A `kind: "nudge"` row still carries `role: "user"` here
+   * — the raw stored role, not the derived kind. */
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   model: string | null;
   created_at: number;
   visibility: "llm" | "ui";
   /** v9 additive: the row's provenance, so a paged-in replay row renders like a live transcript
-   * row. Absent from a pre-v9 daemon — derive from `role` in that case. `"tool"` appears ONLY on
-   * a page fetched with `include_tools`; without it the store selects just user/assistant turns
-   * plus `ui` notes, leaving tool activity out of the stream. */
+   * row. Absent from a pre-v9 daemon — derive from `role` in that case (see `isHarnessNudge`'s
+   * text-match fallback for the one case a pre-v10 daemon needs it: a nudge). `"tool"` appears
+   * ONLY on a page fetched with `include_tools`; without it the store selects just user/assistant
+   * turns plus `ui` notes, leaving tool activity out of the stream. */
   kind?: TranscriptKind;
   /** The tool a `kind === "tool"` row belongs to — same field the live socket's transcript rows
    * use, so one renderer handles both. Null when the call carrier is no longer recoverable from

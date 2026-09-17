@@ -143,10 +143,11 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const [isFresh] = useState(() => Date.now() / 1000 - row.created_at < 5);
   const entrance = useForgeline(Math.max(0, row.seq), isFresh);
   const { baseUrl, sessionId } = useSessionStable();
-  // A harness-injected continuation nudge is stored as a plain `role: "user"` row (the daemon has
-  // no way to tag it otherwise — see lib/harnessNudge.ts) — treat it as NOT the user everywhere
-  // below (bubble style, mention parsing, speaker label) so it never claims to be their words.
-  const isNudge = isHarnessNudge(row.role, row.content);
+  // A harness-injected continuation nudge is stored as a plain `role: "user"` row; a v10+ daemon
+  // tags it `kind: "nudge"` (see lib/harnessNudge.ts), with the exact-text match kept only as a
+  // fallback for an older daemon. Treat it as NOT the user everywhere below (bubble style,
+  // mention parsing, speaker label) so it never claims to be their words.
+  const isNudge = isHarnessNudge(row.role, row.content, row.kind);
   const isUser = row.role === "user" && !isNudge;
   // A `kind: "tool"` row (only ever on an `include_tools` page) is machine output, not a turn —
   // the chat renders those through ToolCallRow, and this guard keeps any that slip through from

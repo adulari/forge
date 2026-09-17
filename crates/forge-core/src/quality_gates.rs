@@ -281,8 +281,7 @@ impl Session {
             failures.join("\n\n")
         );
         let seq = self.next_seq();
-        self.store
-            .add_message(&self.id, seq, Role::User, &body, None)?;
+        self.store.add_nudge_message(&self.id, seq, &body)?;
         self.transcript.push(Message::user(&body));
 
         Ok(false)

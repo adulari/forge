@@ -359,9 +359,7 @@ impl Session {
                         // Provider chat APIs require a continuation request to end in a user
                         // message. Appending this as System after the empty Assistant response made
                         // the recovery request invalid (`last message role must be 'user'`).
-                        let _ = self
-                            .store
-                            .add_message(&self.id, nseq, Role::User, nudge, None);
+                        let _ = self.store.add_nudge_message(&self.id, nseq, nudge);
                         self.transcript.push(Message::user(nudge));
                         continue;
                     }

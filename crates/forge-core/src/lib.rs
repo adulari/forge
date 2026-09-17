@@ -3374,13 +3374,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         // near the window, so the nudge has room to actually do the work.
                         self.auto_compact_if_needed(&active_model).await;
                         let seq = self.next_seq();
-                        self.store.add_message(
-                            &self.id,
-                            seq,
-                            Role::User,
-                            EMPTY_DIFF_NUDGE,
-                            None,
-                        )?;
+                        self.store
+                            .add_nudge_message(&self.id, seq, EMPTY_DIFF_NUDGE)?;
                         self.transcript.push(Message::user(EMPTY_DIFF_NUDGE));
                         let tokens_before = context_tokens;
                         let nudge_specs = self.tool_specs();
@@ -3447,8 +3442,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     test_edits.join("\n- ")
                 );
                 let gseq = self.next_seq();
-                self.store
-                    .add_message(&self.id, gseq, Role::User, &guard, None)?;
+                self.store.add_nudge_message(&self.id, gseq, &guard)?;
                 self.transcript.push(Message::user(&guard));
                 let guard_specs = self.tool_specs();
                 let guard_outcome = self
@@ -4011,8 +4005,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             // decision: no cross-model failover for the continuation, like the autofix re-run).
             let cont = format!("[stop hook] {reason}");
             let seq = self.next_seq();
-            self.store
-                .add_message(&self.id, seq, Role::User, &cont, None)?;
+            self.store.add_nudge_message(&self.id, seq, &cont)?;
             self.transcript.push(Message::user(&cont));
             let cont_specs = self.tool_specs();
             let cont_outcome = self
@@ -4749,6 +4742,12 @@ mod tests {
 
     #[path = "stale_tasks.rs"]
     mod stale_tasks_tests;
+
+    #[path = "reasoning_carrier.rs"]
+    mod reasoning_carrier_tests;
+
+    #[path = "nudge_marker.rs"]
+    mod nudge_marker_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {

@@ -63,7 +63,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 35;
+const SCHEMA_VERSION: i64 = 36;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1463,6 +1463,10 @@ pub struct HistoryRow {
     /// Which half of a tool interaction this row is (see [`Store::load_history_page_with`]).
     /// `None` on every non-tool row, and on the whole default page.
     pub tool_phase: Option<ToolPhase>,
+    /// Whether this is a harness-injected continuation/empty-response nudge rather than
+    /// something the person typed — stored `role=user` either way (see `migration_0036` and
+    /// [`Store::add_nudge_message`]). Always `false` on a synthesized `Role::Tool` call/result row.
+    pub nudge: bool,
 }
 
 /// Which half of a tool interaction a `Role::Tool` [`HistoryRow`] is: the CALL the model made
@@ -2585,6 +2589,40 @@ mod tests {
             .unwrap();
         let page = store.load_history_page(&sid, None, 10).unwrap();
         assert_eq!(page.len(), 5, "other session's rows excluded");
+    }
+
+    /// A harness-injected continuation nudge is stored `role=user` (the provider's next request
+    /// needs a legal user turn) but marked `nudge=1` so a client can tell it apart from something
+    /// the person actually typed, regardless of the exact wording (migration_0036).
+    #[test]
+    fn a_nudge_message_round_trips_its_marker_through_the_history_page() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "do the thing", None)
+            .unwrap();
+        store
+            .add_nudge_message(
+                &sid,
+                1,
+                "You have not modified any files. Implement the fix now.",
+            )
+            .unwrap();
+        store
+            .add_message(&sid, 2, Role::Assistant, "on it", None)
+            .unwrap();
+
+        let page = store.load_history_page(&sid, None, 10).unwrap();
+        let rows: Vec<(i64, Role, bool)> = page.iter().map(|r| (r.seq, r.role, r.nudge)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                (2, Role::Assistant, false),
+                (1, Role::User, true),
+                (0, Role::User, false),
+            ],
+            "only the injected nudge carries the marker; the real prompt does not"
+        );
     }
 
     #[test]
