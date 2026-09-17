@@ -53,3 +53,33 @@ export function isKnownGitRepo(
   const match = [...catalog.roots, ...catalog.recent].find((row) => row.path === cwd);
   return match ? match.is_git_repo : null;
 }
+
+/** Remembers, at most, the one project the user explicitly turned "Isolated git worktree" off
+ * for while composing a task (new-session.tsx) — `null` once cleared by turning it back on, or
+ * if it never happened. Needed to tell that apart from the toggle auto-disabling itself because
+ * the currently selected project isn't a git repo, which must NOT stick to a project the user
+ * never touched the switch for. */
+export interface WorktreePreference {
+  disabledForCwd: string | null;
+}
+
+export const DEFAULT_WORKTREE_PREFERENCE: WorktreePreference = { disabledForCwd: null };
+
+/** The toggle's value for `cwd` right now: off with no git repo underneath (full stop, matching
+ * `isKnownGitRepo`'s "unknown treated as yes" contract — `null` and `true` both recommend on),
+ * else on UNLESS the user explicitly turned it off for this exact project. Without tracking the
+ * project the override belongs to, switching from a non-git project (auto-off) to a git one left
+ * the toggle off — the auto-disable was mistaken for a standing user choice. */
+export function recommendedWorktree(
+  cwd: string,
+  cwdIsGitRepo: boolean | null,
+  pref: WorktreePreference,
+): boolean {
+  if (cwdIsGitRepo === false) return false;
+  return pref.disabledForCwd !== cwd;
+}
+
+/** Records (or clears) the user's explicit choice after they flip the switch by hand. */
+export function withWorktreeToggled(pref: WorktreePreference, cwd: string, value: boolean): WorktreePreference {
+  return { disabledForCwd: value ? null : cwd };
+}
