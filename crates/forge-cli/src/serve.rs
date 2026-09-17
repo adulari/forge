@@ -2110,7 +2110,19 @@ async fn past_sessions(
             .filter(|s| before.is_none_or(|b| s.last_activity < b))
             .take(limit)
             .map(|s| PastSessionRow {
-                title: s.title.clone().unwrap_or_default(),
+                // A saved title wins; an untitled session (most of them — only the daemon
+                // driver, the rename route, and subagents ever write `session.title`) falls
+                // back to its opening prompt instead of showing nothing, the same fallback the
+                // CLI's own session picker and the live fleet's terminal-local rows already use
+                // (`run::support::restore::session_title`, `Store::local_live_sessions`) — without
+                // it the page showed a bare `#<id-prefix>` for the common case.
+                title: s
+                    .title
+                    .clone()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| {
+                        crate::cli::commands::run::session_title(s.preview.as_deref())
+                    }),
                 cwd: s.cwd,
                 worktree: s.worktree_path,
                 archived: s.archived,
@@ -5546,6 +5558,92 @@ pub(crate) mod tests {
                 h.join(std::time::Duration::from_secs(5)).await;
             }
         }
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An untitled session (nothing ever called `/title` or the daemon rename route — the common
+    /// case) must not show up on `/api/sessions/past` as a bare id: the title falls back to the
+    /// opening prompt, the same fallback the CLI's own session picker and the live fleet's
+    /// terminal-local rows already use. A session that DOES have a stored title keeps it
+    /// untouched. Synthetic store rows only — no real driver/turn involved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn past_sessions_falls_back_to_the_first_prompt_when_untitled() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir =
+            std::env::temp_dir().join(format!("forge-serve-past-title-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("past-title.db"));
+
+        let store = crate::open_store().unwrap();
+        let untitled = store
+            .create_session(&dir.display().to_string(), "default")
+            .unwrap();
+        store
+            .add_message(
+                &untitled,
+                0,
+                forge_types::Role::User,
+                "  please   fix the   flaky retry test\nit fails about half the time  ",
+                None,
+            )
+            .unwrap();
+
+        let titled = store
+            .create_session(&dir.display().to_string(), "default")
+            .unwrap();
+        store
+            .set_session_title(&titled, "Retry test flake")
+            .unwrap();
+        store
+            .add_message(&titled, 0, forge_types::Role::User, "go", None)
+            .unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: Arc::new(crate::open_store().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+        let resp = router
+            .oneshot(
+                axum::http::Request::get("/tok/api/sessions/past?limit=50")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let rows = json_body(resp).await;
+        let rows = rows.as_array().unwrap();
+
+        let untitled_row = rows
+            .iter()
+            .find(|r| r["id"] == untitled)
+            .expect("untitled session listed");
+        assert_eq!(
+            untitled_row["title"], "please fix the flaky retry test it fails about half the time",
+            "falls back to the collapsed opening prompt, not a bare id: {untitled_row}"
+        );
+
+        let titled_row = rows
+            .iter()
+            .find(|r| r["id"] == titled)
+            .expect("titled session listed");
+        assert_eq!(
+            titled_row["title"], "Retry test flake",
+            "a real stored title is never overridden by the prompt: {titled_row}"
+        );
+
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
     }

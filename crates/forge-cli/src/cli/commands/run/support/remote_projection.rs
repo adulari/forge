@@ -174,8 +174,13 @@ pub(crate) fn map_history_row(
     let visibility = row.visibility.as_str().to_string();
     let role = row.role.as_str().to_string();
     // `ui` rows are Forge talking to the user (notices, command feedback), not a turn of the
-    // conversation — they carry role='assistant' in the store but read as system lines.
-    let kind = if visibility == "ui" {
+    // conversation — they carry role='assistant' in the store but read as system lines. A
+    // harness-injected continuation nudge (v10 additive `nudge` column, see `migration_0036`)
+    // is checked first: it is stored `role='user'` for the model, but it's Forge talking, not
+    // the person, and a client must not render it as "You".
+    let kind = if row.nudge {
+        "nudge"
+    } else if visibility == "ui" {
         "system"
     } else {
         match role.as_str() {
