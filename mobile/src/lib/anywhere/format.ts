@@ -148,10 +148,14 @@ export function syncGlyph(status: SyncStatus, nowMs: number = Date.now()): SyncG
     case "downloading":
       return { glyph: "↓", colorKey: "accent", text: `downloading ${formatBytes(status.bytes)}` };
     case "offline-cache":
+      // Renamed from "offline — device-encrypted cache…": this kind means "nothing has round-
+      // tripped through the relay for this row yet", which is true whether or not the device or
+      // host actually has connectivity right now — History used it for every row before any real
+      // per-row sync existed, and the word "offline" read as a (frequently false) network claim.
       return {
         glyph: "◌",
         colorKey: "ink3",
-        text: `offline — device-encrypted cache from ${formatRelativeTime(status.cachedAt, nowMs)} ago`,
+        text: `local, device-encrypted cache · ${formatRelativeTime(status.cachedAt, nowMs)} ago`,
       };
     case "retrying":
       return {

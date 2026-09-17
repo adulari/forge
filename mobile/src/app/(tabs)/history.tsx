@@ -438,9 +438,15 @@ const styles = StyleSheet.create({
   headerRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   title: { flex: 1 },
   cwd: {},
-  footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  // `gap` guarantees a minimum separation between the timestamp and the meta cluster even when
+  // `space-between`'s elastic gap collapses toward zero on a narrow/full row — without it the two
+  // could render with no space at all ("18h" immediately followed by "8 msgs" -> "18h8 msgs").
+  footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.space8 },
   footerWithActions: { paddingRight: space.space32 },
-  metaRight: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  // flexShrink lets the sync status text (the longest piece here, e.g. "offline —
+  // device-encrypted cache") ellipsize instead of running past the card's own
+  // `overflow: hidden` edge uncut.
+  metaRight: { flexDirection: "row", alignItems: "center", gap: space.space8, flexShrink: 1, minWidth: 0 },
   mono: { fontFamily: monoFamily.regular },
   actionsButton: { position: "absolute", right: space.space16, bottom: space.space16 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
