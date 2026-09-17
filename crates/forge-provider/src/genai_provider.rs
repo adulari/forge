@@ -1091,6 +1091,47 @@ impl Provider for GenAiProvider {
         opts: &CompletionOptions,
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
+        let mut output_spent = 0u64;
+        let mut attempt = 0usize;
+        loop {
+            let mut repeated = false;
+            let mut resp = self
+                .complete_attempt(model, messages, tools, opts, on_event, &mut repeated)
+                .await?;
+            // Input stays the last attempt's: it is the live context size the gauge shows.
+            resp.usage.output_tokens += output_spent;
+            if !repeated || !resp.tool_calls.is_empty() || attempt == MAX_REPEAT_RESAMPLES {
+                return Ok(resp);
+            }
+            attempt += 1;
+            output_spent = resp.usage.output_tokens;
+            tracing::warn!(model, attempt, "reply cut for repetition; resampling");
+            on_event(StreamEvent::Reasoning(
+                "\n[the provider cut this reply because it was repeating itself — asking again]\n"
+                    .to_string(),
+            ));
+        }
+    }
+}
+
+/// Fresh samples asked for when the provider ends a reply for repeating itself.
+///
+/// Kimi's API ends a degenerate generation with `finish_reason: "repeat"`, typically after
+/// thousands of reasoning tokens and no text or tool call. Forge used to take that as an ordinary
+/// empty answer and nudge, with the looping reply now part of the prompt. Replaying the same
+/// request instead gives a fresh sample (seen 2026-09-16: 1 of 6 identical requests hit it).
+const MAX_REPEAT_RESAMPLES: usize = 2;
+
+impl GenAiProvider {
+    async fn complete_attempt(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        opts: &CompletionOptions,
+        on_event: &mut EventSink<'_>,
+        repeated: &mut bool,
+    ) -> Result<ModelResponse, ProviderError> {
         let model_name = to_genai_model(model);
 
         let mut genai_messages = to_genai_messages(messages, requires_reasoning_echo(&model_name));
@@ -1511,6 +1552,8 @@ impl Provider for GenAiProvider {
                 }
                 ChatStreamEvent::End(end) => {
                     saw_end = true;
+                    *repeated =
+                        crate::wire_params::cut_for_repetition(end.captured_stop_reason.as_ref());
                     // Prefer the End event's copy only when the deltas gave us nothing.
                     if reasoning.is_empty() {
                         if let Some(r) = &end.captured_reasoning_content {
@@ -2107,6 +2150,22 @@ mod tests {
             !resp.content.trim().is_empty(),
             "expected a non-empty reply, got empty"
         );
+    }
+
+    #[test]
+    fn only_a_repeat_finish_counts_as_a_repetition_cut() {
+        use crate::wire_params::cut_for_repetition;
+        use genai::chat::StopReason;
+        assert!(cut_for_repetition(Some(&StopReason::from(
+            "repeat".to_string()
+        ))));
+        assert!(!cut_for_repetition(Some(&StopReason::from(
+            "stop".to_string()
+        ))));
+        assert!(!cut_for_repetition(Some(&StopReason::from(
+            "length".to_string()
+        ))));
+        assert!(!cut_for_repetition(None));
     }
 
     #[test]

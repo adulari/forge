@@ -65,6 +65,12 @@ streamed requests called a tool, against 2 of 6 without). `update_tasks` still l
 close a task it considers finished. The turn is judged blocked only after `BLOCKED_IDLE_NUDGES` (3)
 nudges in a row changed nothing.
 
+**A reply cut for repetition is asked again.** Kimi ends a degenerate generation with
+`finish_reason: "repeat"`, usually after thousands of reasoning tokens and no text or tool call —
+which Forge used to treat as an empty answer and nudge, with the looping reply now in the prompt.
+The genai provider now re-sends the same request (up to `MAX_REPEAT_RESAMPLES`, 2) when a reply ends
+that way without a tool call, adding the discarded attempts' output tokens to the usage.
+
 ## 3. Numbers
 
 | | before | after |
