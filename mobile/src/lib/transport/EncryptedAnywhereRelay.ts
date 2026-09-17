@@ -6,6 +6,9 @@ import type {
 import { sha256 } from "@noble/hashes/sha2.js";
 import type { RemoteSocket } from "./RemoteTransport";
 import {
+  ANYWHERE_HEADER_BYTES,
+  ANYWHERE_SIGNATURE_BYTES,
+  ANYWHERE_TAG_BYTES,
   bytesFromHex,
   bytesToHex,
   decodeEnvelope,
@@ -33,6 +36,18 @@ const MAX_INLINE_BYTES = 256 * 1024;
 // 64 KiB worst-cases to ~229 KiB sealed, leaving room for headers, metadata and the envelope.
 const MAX_OUTBOUND_INLINE_BYTES = 64 * 1024;
 const MAX_BLOB_CIPHERTEXT_BYTES = 32 * 1024 * 1024;
+
+// The relay service (forge-anywhere-service/src/relay_blob.rs `MIN_RELAY_BLOB_BYTES`) rejects a
+// `POST /v1/relay/blobs` reservation whose ciphertext is not strictly larger than this — a 400
+// `invalid_object_size`. `uploadBlob` pads the plaintext so every blob it uploads clears this
+// threshold, which is why a body between MAX_OUTBOUND_INLINE_BYTES and this size (the real-world
+// `/api/models`/`/api/config` range, history pages, short voice clips) failed outright before: it
+// was too big to send inline and too small for the service to accept as a blob.
+const MIN_RELAY_BLOB_CIPHERTEXT_BYTES = 256 * 1024;
+// Fixed expansion `sealEnvelope` adds on top of the plaintext, independent of its size: the
+// authenticated header, the AEAD tag, and the sender signature.
+const ANYWHERE_ENVELOPE_OVERHEAD_BYTES = ANYWHERE_HEADER_BYTES + ANYWHERE_TAG_BYTES + ANYWHERE_SIGNATURE_BYTES;
+
 // The fallback deadline for a caller that supplies no signal of its own.
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -50,6 +65,13 @@ export interface RelayBlobReference {
   blob_id: string;
   ciphertext_bytes: number;
   ciphertext_sha256: string;
+  /**
+   * True plaintext length before padding added to clear the relay service's minimum blob size.
+   * Older peers omit this and use the (padded) plaintext as-is; every blob we send today carries
+   * a JSON body, and JSON parsers ignore trailing whitespace after the top-level value, so an
+   * older receiver still parses it successfully.
+   */
+  plaintext_bytes?: number;
 }
 
 export interface AnywhereRelayCredentials {
@@ -311,14 +333,14 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
   }
 
   private async uploadBlob(hostId: string, plaintext: Uint8Array): Promise<RelayBlobReference> {
-    const envelope = await this.seal(8, hostId, plaintext);
+    const truePlaintextBytes = plaintext.length;
+    const padded = padForRelayMinimum(plaintext);
+    const envelope = await this.seal(8, hostId, padded);
     if (envelope.length > MAX_BLOB_CIPHERTEXT_BYTES) {
       throw new Error("Anywhere relay blob exceeds the 32 MiB ciphertext limit");
     }
-    const reference = {
-      ciphertext_bytes: envelope.length,
-      ciphertext_sha256: base64Url(sha256(envelope)),
-    };
+    const ciphertextBytes = envelope.length;
+    const ciphertextSha256 = base64Url(sha256(envelope));
     const reservationKey = this.idempotencyKey();
     const reservationResponse = await this.serviceFetchRetryOnce("/v1/relay/blobs", {
       method: "POST",
@@ -329,7 +351,8 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       body: JSON.stringify({
         recipient_kind: "host",
         recipient_id: hostId,
-        ...reference,
+        ciphertext_bytes: ciphertextBytes,
+        ciphertext_sha256: ciphertextSha256,
       }),
     });
     await requireOk(reservationResponse, "reserve relay blob");
@@ -352,7 +375,13 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       });
       await requireOk(complete, "complete relay blob");
     }
-    return { blob_id: blobId, ...reference };
+    const reference: RelayBlobReference = {
+      blob_id: blobId,
+      ciphertext_bytes: ciphertextBytes,
+      ciphertext_sha256: ciphertextSha256,
+    };
+    if (padded.length !== truePlaintextBytes) reference.plaintext_bytes = truePlaintextBytes;
+    return reference;
   }
 
   private async prepareBlob(
@@ -405,8 +434,15 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     }
     const signingKey = await this.credentials.signingPublicKey(senderId);
     const opened = openEnvelope(envelope, dataKey, signingKey);
+    let plaintext = opened.plaintext;
+    if (reference.plaintext_bytes !== undefined) {
+      if (reference.plaintext_bytes > plaintext.length) {
+        throw new Error("Anywhere relay blob plaintext_bytes exceeds its decrypted length");
+      }
+      plaintext = plaintext.slice(0, reference.plaintext_bytes);
+    }
     return {
-      plaintext: opened.plaintext,
+      plaintext,
       sequence: opened.metadata.sequence,
       consume: async () => {
         const response = await this.serviceFetch(`/v1/relay/blobs/${reference.blob_id}`, {
@@ -767,6 +803,30 @@ function assertBlobReference(reference: RelayBlobReference): void {
   if (typeof reference?.ciphertext_sha256 !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(reference.ciphertext_sha256)) {
     throw new Error("Anywhere relay blob ciphertext SHA-256 is invalid");
   }
+  if (
+    reference.plaintext_bytes !== undefined
+    && (!Number.isSafeInteger(reference.plaintext_bytes) || reference.plaintext_bytes < 0)
+  ) {
+    throw new Error("Anywhere relay blob plaintext_bytes is invalid");
+  }
+}
+
+/**
+ * Pads `plaintext` with ASCII spaces, when needed, so the sealed envelope clears the relay
+ * service's minimum blob ciphertext size (see MIN_RELAY_BLOB_CIPHERTEXT_BYTES). Padding with
+ * spaces rather than zero bytes matters because every blob uploaded today carries a JSON body:
+ * JSON parsers ignore trailing whitespace after the top-level value, so a receiver that does not
+ * know about `plaintext_bytes` still parses the padded body successfully.
+ */
+function padForRelayMinimum(plaintext: Uint8Array): Uint8Array {
+  if (plaintext.length + ANYWHERE_ENVELOPE_OVERHEAD_BYTES > MIN_RELAY_BLOB_CIPHERTEXT_BYTES) {
+    return plaintext;
+  }
+  const targetLength = MIN_RELAY_BLOB_CIPHERTEXT_BYTES + 1 - ANYWHERE_ENVELOPE_OVERHEAD_BYTES;
+  const padded = new Uint8Array(targetLength);
+  padded.set(plaintext);
+  padded.fill(0x20, plaintext.length);
+  return padded;
 }
 
 function assertOptionalByteArray(label: string, value: number[] | undefined): void {
