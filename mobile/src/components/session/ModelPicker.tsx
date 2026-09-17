@@ -124,7 +124,7 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
               mono
               value={manualModel}
               onChangeText={setManualModel}
-              placeholder="provider/model-id"
+              placeholder="provider::model"
               autoCapitalize="none"
               autoCorrect={false}
               returnKeyType="done"

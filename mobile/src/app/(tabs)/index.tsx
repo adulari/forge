@@ -31,7 +31,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
 import { filterSessions, isOfflineError, sessionPickerState } from "../../lib/sessionPicker";
 import { radii, space } from "../../theme/tokens";
-import { formatCost, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
+import { formatCostSummary, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
 // DESIGN_ELEVATION.md Move 3 — the one identity moment: the ⚒ mark beside the Fleet
@@ -81,7 +81,7 @@ function FleetSummary({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: 
     >
       <Text style={[typeScale.sub, { color: waitingCount > 0 ? tokens.danger : tokens.ink3 }]}>{waitingCount} needs you</Text>
       <Text style={[typeScale.sub, { color: tokens.ink3 }]}> · {busyCount} forging · </Text>
-      <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{formatCost(totalCost)}</Text>
+      <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{formatCostSummary(totalCost)}</Text>
       <Text style={[typeScale.sub, { color: tokens.ink3 }]}> today</Text>
     </Pressable>
   );
