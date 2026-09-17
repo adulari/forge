@@ -98,7 +98,18 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
                 <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Loading model catalog…</Text>
               </View>
             ) : null}
-            {!query.isLoading && filtered.length === 0 ? (
+            {/* A query error (network/decode failure) is a distinct state from an empty catalog —
+                collapsing them into "no catalog" hid the real reason (e.g. a relay transfer
+                failure) and gave no way to retry short of closing and reopening the sheet. */}
+            {!query.isLoading && query.isError ? (
+              <View style={styles.errorState}>
+                <Text style={[typeScale.sub, styles.empty, { color: tokens.danger }]}>
+                  {`Could not load the model catalog: ${errorMessage(query.error)}`}
+                </Text>
+                <Button label="Retry" variant="secondary" onPress={() => void query.refetch()} />
+              </View>
+            ) : null}
+            {!query.isLoading && !query.isError && filtered.length === 0 ? (
               <Text style={[typeScale.sub, styles.empty, { color: tokens.ink3 }]}>
                 {catalog.length === 0
                   ? "No model catalog is available from this Forge host."
@@ -174,6 +185,13 @@ function ModelOption({ title, subtitle, selected, health, onPress }: { title: st
   );
 }
 
+/** The catalog query's own thrown message (a relay transfer failure, a decode error, a plain
+ * HTTP status) is the whole point of showing this state instead of the generic "no catalog"
+ * text, so it is surfaced verbatim rather than mapped to a canned string. */
+function errorMessage(error: Error | null): string {
+  return error?.message || "unknown error";
+}
+
 const styles = StyleSheet.create({
   label: { marginBottom: space.space4 },
   trigger: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space12, paddingVertical: space.space8, borderWidth: 1, borderRadius: radii.radius8 },
@@ -186,6 +204,7 @@ const styles = StyleSheet.create({
   optionTitle: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   optionName: { flex: 1 },
   statusRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: space.space8, padding: space.space16 },
+  errorState: { alignItems: "center", justifyContent: "center", gap: space.space8, padding: space.space16 },
   empty: { padding: space.space16, textAlign: "center" },
   manual: { gap: space.space8, paddingTop: space.space16, borderTopWidth: StyleSheet.hairlineWidth },
 });
