@@ -84,6 +84,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/app/session/[id]/index.tsx",
+    "platform": "android",
+    "reason": "Android-only gate withholding the transcript FlatList's real data until this screen's own navigation transition settles, to avoid a Fabric view-reparenting crash when the daemon-run first turn's history rows try to mount into the list while the dismissing new-session modal is still animating out (see transcriptMountGate.ts)",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/app/shares/[id].tsx",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
