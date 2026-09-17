@@ -157,9 +157,10 @@ export const webInputTextStyle: TextStyle = Platform.OS === "web" ? { fontSize: 
 // Format helpers (§2)
 // ---------------------------------------------------------------------------
 
-/** `$0.0421` (4dp) under $1, `$12.48` (2dp) at/above $1. */
+/** `$0.0421` (4dp) under a cent, `$12.48` (2dp) otherwise; nothing spent reads `$0.00`. */
 export function formatCost(usd: number): string {
   const magnitude = Math.abs(usd);
+  if (magnitude === 0) return "$0.00";
   return magnitude < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
 }
 
