@@ -739,7 +739,11 @@ where
                         response.body.clear();
                         response.body_blob = Some(reference);
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        eprintln!(
+                            "⚠ Forge Anywhere could not offload a {} B response as a relay blob: {error:#}",
+                            response.body.len()
+                        );
                         response = bridge_error(
                             request.request_id,
                             502,
