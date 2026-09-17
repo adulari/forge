@@ -112,6 +112,20 @@ impl App {
         self.refresh_git_location(Instant::now());
     }
 
+    /// Point the statusline at `workspace` unless it already is. True when it moved.
+    ///
+    /// The session's workspace can change after startup: `forge chat --resume` with no id opens the
+    /// picker inside a session started in the launch directory, and `/resume` switches sessions in
+    /// place. Following only the startup workspace left the statusline naming the launch
+    /// directory's repository and branch for a session working somewhere else.
+    pub fn follow_git_workspace(&mut self, workspace: &Path) -> bool {
+        if self.git_workspace.as_deref() == Some(workspace) {
+            return false;
+        }
+        self.watch_git_location(workspace.to_path_buf());
+        true
+    }
+
     /// Re-read the location at most every two seconds. True when what the statusline shows changed.
     pub fn refresh_git_location(&mut self, now: Instant) -> bool {
         let Some(workspace) = &self.git_workspace else {
@@ -229,6 +243,24 @@ mod tests {
         assert!(app.refresh_git_location(start + REFRESH_EVERY));
         assert_eq!(app.git_branch.as_deref(), Some("feat/x"));
         assert_eq!(app.repo_name.as_deref(), Some("forge"));
+    }
+
+    #[test]
+    fn a_session_that_moves_to_another_repository_takes_the_statusline_with_it() {
+        let launch = scratch("forge");
+        write(&launch.join(".git/HEAD"), "ref: refs/heads/fix/rustls\n");
+        let resumed = scratch("ss-ultimate");
+        write(&resumed.join(".git/HEAD"), "ref: refs/heads/main\n");
+        let mut app = App::default();
+        app.watch_git_location(launch.clone());
+        assert!(
+            !app.follow_git_workspace(&launch),
+            "same workspace: nothing to do"
+        );
+
+        assert!(app.follow_git_workspace(&resumed));
+        assert_eq!(app.repo_name.as_deref(), Some("ss-ultimate"));
+        assert_eq!(app.git_branch.as_deref(), Some("main"));
     }
 
     #[test]
