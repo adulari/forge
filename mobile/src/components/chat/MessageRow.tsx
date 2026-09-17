@@ -151,12 +151,10 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   // A `kind: "tool"` row (only ever on an `include_tools` page) is machine output, not a turn —
   // the chat renders those through ToolCallRow, and this guard keeps any that slip through from
   // being formatted as assistant prose.
-  // `kind: "system"` (a completion/status note, e.g. "All tasks complete…") carries
-  // `role: "assistant"` on the wire — matching only `role` here missed it, so it rendered as an
-  // ordinary chat bubble (verb/target summarization meant for tool output, not prose) instead of
-  // through SystemOutput. `rowKind()`'s own classification in toolRows.ts already treats `kind`
-  // as authoritative; this now agrees with it.
-  const isSystem = row.role === "system" || row.role === "tool" || row.kind === "tool" || row.kind === "system";
+  // `kind: "system"` is NOT a system line here: the daemon projects every `ui`-visibility row as
+  // "system", and the turn's accepted answer is published as exactly such a row
+  // (`publish_terminal_answer`). Keying on it rendered every final reply as dim tool output.
+  const isSystem = row.role === "system" || row.role === "tool" || row.kind === "tool";
   // Hearth: no on-row chrome at all — message actions live behind long-press (native and
   // touch-web) and right-click (desktop/web). Hover buttons were tried and cut.
 

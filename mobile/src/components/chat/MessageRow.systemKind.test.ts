@@ -9,12 +9,11 @@ import messageRowSource from "./MessageRow.tsx?raw";
 const normalizedSource = messageRowSource.replace(/\s+/g, " ");
 
 describe("MessageRow system-row classification", () => {
-  it("treats kind: \"system\" as a system row even when role is \"assistant\"", () => {
-    // The daemon's completion/status notes carry `role: "assistant"` + `kind: "system"` on the
-    // wire (remote_projection.rs) — matching only `role` here routed them through the ordinary
-    // chat-bubble path instead of SystemOutput.
+  it("renders a kind: \"system\" assistant row (the published answer) as prose", () => {
+    // The daemon projects every ui-visibility row as kind "system", and the accepted answer of a
+    // turn is published as one, so kind must not route a row to SystemOutput.
     expect(normalizedSource).toMatch(
-      /const isSystem = row\.role === "system" \|\| row\.role === "tool" \|\| row\.kind === "tool" \|\| row\.kind === "system";/,
+      /const isSystem = row\.role === "system" \|\| row\.role === "tool" \|\| row\.kind === "tool";/,
     );
   });
 });
