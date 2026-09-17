@@ -16,7 +16,8 @@
 //! - `GET  /api/sessions`             running sessions (id, title, cwd, busy, cost, activity)
 //! - `GET  /api/sessions/past?limit=&before=`  persisted sessions NOT currently running — the
 //!   resurrection browser's data; `resume` one with `POST /api/sessions {resume:<id>}`
-//! - `POST /api/sessions`             create ({cwd, worktree, title?, model?, resume?, mode?})
+//! - `POST /api/sessions`             create ({cwd, worktree, title?, model?, resume?, mode?,
+//!   prompt?}) — `prompt` runs the first turn immediately (ignored on `resume`)
 //!   — `mode` uses the same values as `forge run --mode`: `default`, `accept-edits`, `bypass`,
 //!   or `plan`; omitted leaves the configured default unchanged
 //! - `POST /api/sessions/{id}/mode`    change a live session's permission mode
@@ -650,6 +651,15 @@ pub(crate) struct CreateSessionReq {
     /// [`forge_types::PermissionMode::from_label`]. An unrecognized value is a `400`, never a
     /// silent fallback to the default temper.
     pub(crate) temper: Option<String>,
+    /// Run the new session's first turn with this text, exactly as if it had been sent over the
+    /// WebSocket right after creation — added so a client never has to win a race between "the
+    /// session socket reaches `open`" and "the screen is still mounted" just to deliver the very
+    /// first prompt (mobile's task composer hit this: the socket-flush path silently dropped the
+    /// prompt when the WS never opened in time). Ignored (not an error) on a `resume`: resuming
+    /// restores the session's own history rather than starting a new turn on the caller's behalf.
+    /// Blank/whitespace-only is treated as absent.
+    #[serde(default)]
+    pub(crate) prompt: Option<String>,
     /// Wire the session as a dispatch coordinator. Never read from the request body: only
     /// `POST /api/dispatch` sets it, and `deny_unknown_fields` still rejects the key.
     #[serde(skip)]
@@ -1339,13 +1349,36 @@ async fn create_session(
             );
         }
     };
+    // Captured before `req` moves into `start_session` — a resumed session ignores it (see the
+    // field doc on `CreateSessionReq::prompt`): it restores the session's own history rather than
+    // starting a new turn on the caller's behalf.
+    let initial_prompt = req
+        .prompt
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .filter(|_| req.resume.is_none());
     match start_session(&state, req).await {
-        Ok(handle) => json_response(&serde_json::json!({
-            "id": handle.session_id,
-            "title": handle.title(),
-            "cwd": handle.cwd,
-            "worktree": handle.worktree,
-        })),
+        Ok(handle) => {
+            if let Some(text) = initial_prompt {
+                // Same send used to kick off a dispatch coordinator/worker's first turn
+                // (serve_dispatch/start.rs, serve_dispatch.rs::start_worker): queue it on the
+                // freshly spawned driver's own input channel rather than waiting for a client to
+                // connect over the WebSocket.
+                let _ = handle
+                    .input_tx
+                    .send(remote::RemoteInput::Prompt {
+                        text,
+                        attachments: Vec::new(),
+                    })
+                    .await;
+            }
+            json_response(&serde_json::json!({
+                "id": handle.session_id,
+                "title": handle.title(),
+                "cwd": handle.cwd,
+                "worktree": handle.worktree,
+            }))
+        }
         Err(error) => error.into_response(),
     }
 }
@@ -7353,6 +7386,113 @@ pub(crate) mod tests {
 
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `POST /api/sessions` with a `prompt` runs the session's first turn immediately — the
+    /// server-side counterpart of a client sending `RemoteInput::Prompt` over the WS right after
+    /// create, added so the app never has to win a race between "the new session's socket
+    /// reaches open" and "the screen is still mounted" just to deliver the very first prompt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_session_runs_its_first_turn_from_the_prompt_field() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FORGE_DB", dir.path().join("prompt-turn.db"));
+        let store = Arc::new(crate::open_store().unwrap());
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.path().display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state.clone());
+
+        let resp = router
+            .clone()
+            .oneshot(post_json_req(
+                "/api/sessions",
+                serde_json::json!({ "prompt": "mock:write please" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let id = json_body(resp).await["id"]
+            .as_str()
+            .expect("create-session response carries an id")
+            .to_string();
+
+        let handle = state
+            .registry
+            .get(&id)
+            .await
+            .expect("the created session is registered live");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !handle.snapshot_rx.borrow().snapshot.busy {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the prompt field never started a turn"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        std::env::remove_var("FORGE_DB");
+    }
+
+    /// A blank/whitespace-only `prompt` is exactly "no prompt" — it must not start a turn (an
+    /// empty first message would otherwise burn a step on nothing).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_session_ignores_a_blank_prompt() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FORGE_DB", dir.path().join("prompt-blank.db"));
+        let store = Arc::new(crate::open_store().unwrap());
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.path().display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state.clone());
+
+        let resp = router
+            .clone()
+            .oneshot(post_json_req(
+                "/api/sessions",
+                serde_json::json!({ "prompt": "   " }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let id = json_body(resp).await["id"]
+            .as_str()
+            .expect("create-session response carries an id")
+            .to_string();
+        let handle = state
+            .registry
+            .get(&id)
+            .await
+            .expect("the created session is registered live");
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !handle.snapshot_rx.borrow().snapshot.busy,
+            "a blank prompt must not start a turn"
+        );
+
+        std::env::remove_var("FORGE_DB");
     }
 
     #[test]
