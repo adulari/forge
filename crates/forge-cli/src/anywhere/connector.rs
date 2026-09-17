@@ -127,7 +127,19 @@ struct ClaimBlobResponse {
 struct RelayBlobClient<'a> {
     http: &'a Client,
     service_url: &'a str,
-    access_token: &'a str,
+    /// Resolved per request, never captured: an account access token lives about an hour, while
+    /// this connector stays up for days. A token cloned once at connect time kept being sent long
+    /// after it expired, and the service answered every blob reservation with 401 — so every
+    /// response over 64 KiB (the model catalog, the effective configuration, a tool-heavy history
+    /// page) failed for the phone until the connector happened to reconnect.
+    store: &'a StateStore,
+}
+
+impl RelayBlobClient<'_> {
+    async fn access_token(&self) -> Result<String> {
+        let mut state = self.store.load()?;
+        ensure_access_token(self.store, &mut state).await
+    }
 }
 
 struct DurableCommandClient<'a> {
@@ -359,7 +371,7 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
     let blobs = RelayBlobClient {
         http: &http,
         service_url: &service_url,
-        access_token: &access_token,
+        store: &store,
     };
     loop {
         tokio::select! {
@@ -881,6 +893,7 @@ async fn resolve_inbound_blob(
         bail!("encrypted relay blob exceeds 32 MiB");
     }
 
+    let claim_token = blobs.access_token().await?;
     let claim: ClaimBlobResponse = send_json(
         blobs
             .http
@@ -889,7 +902,7 @@ async fn resolve_inbound_blob(
                 blobs.service_url,
                 hex::encode(reference.blob_id)
             ))
-            .bearer_auth(blobs.access_token),
+            .bearer_auth(&claim_token),
     )
     .await
     .context("claim encrypted relay blob")?;
@@ -1034,11 +1047,12 @@ async fn upload_blob(
     }
     let ciphertext_sha256: [u8; 32] = Sha256::digest(&encoded).into();
     let reserve_key = idempotency_key();
+    let token = blobs.access_token().await?;
     let reserve_request = || {
         blobs
             .http
             .post(format!("{}/v1/relay/blobs", blobs.service_url))
-            .bearer_auth(blobs.access_token)
+            .bearer_auth(&token)
             .header("Idempotency-Key", &reserve_key)
             .json(&ReserveBlobRequest {
                 recipient_kind: "device",
@@ -1087,7 +1101,7 @@ async fn upload_blob(
                 blobs.service_url,
                 hex::encode(blob_id)
             ))
-            .bearer_auth(blobs.access_token)
+            .bearer_auth(&token)
             .header("Idempotency-Key", &completion_key)
     };
     send_transport_retry_once(complete_request, "complete encrypted relay blob")
@@ -1110,7 +1124,7 @@ async fn consume_blob(blobs: &RelayBlobClient<'_>, blob_id: [u8; 16]) -> Result<
             blobs.service_url,
             hex::encode(blob_id)
         ))
-        .bearer_auth(blobs.access_token)
+        .bearer_auth(blobs.access_token().await?)
         .header("Idempotency-Key", idempotency_key())
         .send()
         .await
@@ -1381,6 +1395,42 @@ mod tests {
     use std::time::Instant;
 
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    #[tokio::test]
+    async fn the_blob_client_reads_the_current_token_for_every_request() {
+        // The captured-once token expired under a long-lived connector and every blob reservation
+        // came back 401, which surfaced as "could not be transferred as a temporary blob" for any
+        // response over 64 KiB.
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore {
+            path: dir.path().join("state.json"),
+        };
+        let valid_for_an_hour = now_ms() + 60 * 60 * 1000;
+        store
+            .update(|state| {
+                state.version = 1;
+                state.access_token = Some("first-token".into());
+                state.access_expires_at_ms = Some(valid_for_an_hour);
+                Ok(())
+            })
+            .unwrap();
+        let http = Client::new();
+        let blobs = RelayBlobClient {
+            http: &http,
+            service_url: "https://example.invalid",
+            store: &store,
+        };
+        assert_eq!(blobs.access_token().await.unwrap(), "first-token");
+
+        store
+            .update(|state| {
+                state.access_token = Some("rotated-token".into());
+                state.access_expires_at_ms = Some(valid_for_an_hour);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(blobs.access_token().await.unwrap(), "rotated-token");
+    }
 
     #[test]
     fn relay_heartbeat_times_out_only_after_missing_pongs() {
