@@ -1049,8 +1049,12 @@ pub(crate) async fn run_chat_tui(
         }
 
         // The branch can change under a running session (the agent's checkout, or one in another
-        // terminal); the statusline re-reads `.git/HEAD` itself, at most every two seconds.
-        if app.refresh_git_location(std::time::Instant::now()) {
+        // terminal); the statusline re-reads `.git/HEAD` itself, at most every two seconds. The
+        // workspace itself moves when the resume picker or `/resume` switches sessions.
+        let moved = remote_workspace
+            .read()
+            .is_ok_and(|workspace| app.follow_git_workspace(&workspace));
+        if moved || app.refresh_git_location(std::time::Instant::now()) {
             dirty = true;
         }
 
