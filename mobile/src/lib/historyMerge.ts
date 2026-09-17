@@ -26,3 +26,23 @@ export function mergeNewestHistoryPage(
     pageParams: data.pageParams,
   };
 }
+
+/**
+ * Whether REAL (non-blank) content has landed in `rows` (newest-first) at a seq newer than
+ * `baselineSeq` — used to decide when it's safe to stop showing the chat screen's retained/
+ * streamed-answer bridge (`SessionChat`'s `finalizing` state, session/[id]/index.tsx) and let the
+ * settled history row take over.
+ *
+ * A history row landing with only whitespace content is a known daemon gap (its real text can
+ * live only on tool-call rows an `include_tools`-less page never fetched) — that must NOT count
+ * as "the reply arrived": clearing the bridge on ANY new row, blank or not, is what made the
+ * reply disappear the instant the (blank) row landed, since the blank row itself is filtered out
+ * of the rendered history transcript too (see toolRows.ts's buildTranscript).
+ */
+export function historyHasRealContentSince(rows: readonly HistoryRow[], baselineSeq: number): boolean {
+  for (const row of rows) {
+    if (row.seq <= baselineSeq) break; // newest-first: nothing at or before baseline is "since"
+    if (row.content.trim() !== "") return true;
+  }
+  return false;
+}

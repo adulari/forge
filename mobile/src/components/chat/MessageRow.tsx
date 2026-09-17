@@ -6,6 +6,7 @@ import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import type { HistoryRow } from "../../lib/api";
+import { isHarnessNudge } from "../../lib/harnessNudge";
 import { parseReasoning } from "../../lib/reasoning";
 import { haptics } from "../../lib/haptics";
 import { useSessionStable } from "../../lib/sessionContext";
@@ -107,19 +108,22 @@ export function shortModel(model: string | null | undefined): string {
  * not a legible difference. Every turn now names its speaker in a micro-caps eyebrow: the user's
  * in neutral ink, Forge's in accent with the answering model beside it.
  */
-export function SpeakerTag({ speaker, model }: { speaker: "you" | "forge"; model?: string | null }) {
+export function SpeakerTag({ speaker, model }: { speaker: "you" | "forge" | "nudge"; model?: string | null }) {
   const tokens = useTokens();
   const isUser = speaker === "you";
+  // A harness-injected continuation nudge (see lib/harnessNudge.ts) arrives as an ordinary
+  // `role: "user"` row — labeling it "You" claims the person typed it, when Forge did.
+  const isNudge = speaker === "nudge";
   const name = shortModel(model);
+  const label = isNudge ? "Forge nudge" : isUser ? "You" : "Forge";
+  const tint = isNudge ? tokens.warn : isUser ? tokens.ink4 : tokens.accent;
   return (
     <View style={styles.speaker}>
-      <View
-        style={[styles.speakerDot, { backgroundColor: isUser ? tokens.ink4 : tokens.accent }]}
-      />
-      <Text style={[typeScale.section, { color: isUser ? tokens.ink3 : tokens.accent }]}>
-        {isUser ? "You" : "Forge"}
+      <View style={[styles.speakerDot, { backgroundColor: tint }]} />
+      <Text style={[typeScale.section, { color: isNudge ? tokens.warn : isUser ? tokens.ink3 : tokens.accent }]}>
+        {label}
       </Text>
-      {!isUser && name ? (
+      {!isUser && !isNudge && name ? (
         <Text
           style={[typeScale.monoMeta, styles.speakerModel, { color: tokens.ink4 }]}
           numberOfLines={1}
@@ -139,11 +143,20 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const [isFresh] = useState(() => Date.now() / 1000 - row.created_at < 5);
   const entrance = useForgeline(Math.max(0, row.seq), isFresh);
   const { baseUrl, sessionId } = useSessionStable();
-  const isUser = row.role === "user";
+  // A harness-injected continuation nudge is stored as a plain `role: "user"` row (the daemon has
+  // no way to tag it otherwise — see lib/harnessNudge.ts) — treat it as NOT the user everywhere
+  // below (bubble style, mention parsing, speaker label) so it never claims to be their words.
+  const isNudge = isHarnessNudge(row.role, row.content);
+  const isUser = row.role === "user" && !isNudge;
   // A `kind: "tool"` row (only ever on an `include_tools` page) is machine output, not a turn —
   // the chat renders those through ToolCallRow, and this guard keeps any that slip through from
   // being formatted as assistant prose.
-  const isSystem = row.role === "system" || row.role === "tool" || row.kind === "tool";
+  // `kind: "system"` (a completion/status note, e.g. "All tasks complete…") carries
+  // `role: "assistant"` on the wire — matching only `role` here missed it, so it rendered as an
+  // ordinary chat bubble (verb/target summarization meant for tool output, not prose) instead of
+  // through SystemOutput. `rowKind()`'s own classification in toolRows.ts already treats `kind`
+  // as authoritative; this now agrees with it.
+  const isSystem = row.role === "system" || row.role === "tool" || row.kind === "tool" || row.kind === "system";
   // Hearth: no on-row chrome at all — message actions live behind long-press (native and
   // touch-web) and right-click (desktop/web). Hover buttons were tried and cut.
 
@@ -223,7 +236,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         {historyFileAttachments.length > 0 ? (
           <AttachmentRow attachments={historyFileAttachments} />
         ) : null}
-        {isSystem ? null : <SpeakerTag speaker={isUser ? "you" : "forge"} model={row.model} />}
+        {isSystem ? null : <SpeakerTag speaker={isNudge ? "nudge" : isUser ? "you" : "forge"} model={row.model} />}
         {isSystem ? (
           <SystemOutput content={row.content} />
         ) : parsed ? (
