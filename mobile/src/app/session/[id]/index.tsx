@@ -50,7 +50,7 @@ import { EmptyState } from "../../../components/ds/EmptyState";
 import { Screen } from "../../../components/ds/Screen";
 import { useToast } from "../../../components/ds/ToastHost";
 import { type HistoryRow } from "../../../lib/api";
-import { historyHasRealContentSince } from "../../../lib/historyMerge";
+import { historyHasRealContentSince, shouldRetryEmptyHistory } from "../../../lib/historyMerge";
 import { reconcilePendingMessages } from "../../../lib/sessionReconciler";
 import { OFFLINE_QUEUE_CAP, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { haptics } from "../../../lib/haptics";
@@ -451,11 +451,35 @@ export default function SessionChat() {
     prevOnlineRef.current = online;
     if (online && !was) void historyRefetch();
   }, [online, historyRefetch]);
-  const historyContradicted =
-    historyQuery.data !== undefined && historyRows.length === 0 && (snapshot?.transcript.length ?? 0) > 0;
+  // Blind-attempt counter for `shouldRetryEmptyHistory` — reset whenever this screen shows real
+  // rows, or switches to a different session. The session-id reset is state adjusted during
+  // render (same pattern `track` below uses — https://react.dev/learn/you-might-not-need-an-effect
+  // — not a ref, since reading/writing a ref during render is unsound), so the very first render
+  // for a new session never reads a stale count left over from the last one.
+  const [historyRecovery, setHistoryRecovery] = useState({ sessionId, attempts: 0 });
+  if (historyRecovery.sessionId !== sessionId) {
+    setHistoryRecovery({ sessionId, attempts: 0 });
+  }
+  useEffect(() => {
+    if (historyRows.length === 0) return;
+    setHistoryRecovery((prev) => (prev.attempts === 0 ? prev : { ...prev, attempts: 0 }));
+  }, [historyRows.length]);
+
+  const historyContradicted = shouldRetryEmptyHistory({
+    historySettled: historyQuery.data !== undefined,
+    rowsEmpty: historyRows.length === 0,
+    snapshotHasContent: (snapshot?.transcript.length ?? 0) > 0,
+    blindAttempts: historyRecovery.attempts,
+  });
   useEffect(() => {
     if (!historyContradicted) return;
+    // Fire once right away — a freshly created session's chat screen otherwise waits a full
+    // `HISTORY_RECOVERY_POLL_MS` before its first correction attempt, which read as "renders
+    // nothing until you leave and come back" when the daemon's rows landed just after the
+    // screen's own first (empty) fetch.
+    void historyRefetch();
     const timer = setInterval(() => {
+      setHistoryRecovery((prev) => ({ ...prev, attempts: prev.attempts + 1 }));
       void historyRefetch();
     }, HISTORY_RECOVERY_POLL_MS);
     return () => clearInterval(timer);

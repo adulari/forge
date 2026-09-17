@@ -46,3 +46,35 @@ export function historyHasRealContentSince(rows: readonly HistoryRow[], baseline
   }
   return false;
 }
+
+/** Bounded retries for the "no live-snapshot evidence yet" branch of
+ * `shouldRetryEmptyHistory` — a session that genuinely has no messages must stop polling. */
+export const HISTORY_RECOVERY_MAX_BLIND_ATTEMPTS = 4;
+
+/**
+ * Whether a settled-but-empty `useHistory` page (SessionChat, session/[id]/index.tsx) should be
+ * retried against the daemon.
+ *
+ * A brand-new session's chat screen mounts and fires its first `useHistory` fetch immediately —
+ * before the daemon has necessarily started (or finished) the turn, and before this device's own
+ * WebSocket has necessarily reached the daemon at all. Without a live snapshot to compare against,
+ * a `true` transcript.length>0 disagreement (`snapshotHasContent`) is the strong signal that
+ * rows exist and just haven't been (re)fetched — worth retrying without limit, since a slow turn
+ * can legitimately take a while. Absent that signal there is no evidence either way (most likely
+ * because the WebSocket hasn't connected yet), so retries are capped at `maxBlindAttempts`: a
+ * session that really has zero messages (created blank, never sent anything) must not poll
+ * forever.
+ */
+export function shouldRetryEmptyHistory(
+  input: {
+    historySettled: boolean;
+    rowsEmpty: boolean;
+    snapshotHasContent: boolean;
+    blindAttempts: number;
+  },
+  maxBlindAttempts: number = HISTORY_RECOVERY_MAX_BLIND_ATTEMPTS,
+): boolean {
+  if (!input.historySettled || !input.rowsEmpty) return false;
+  if (input.snapshotHasContent) return true;
+  return input.blindAttempts < maxBlindAttempts;
+}

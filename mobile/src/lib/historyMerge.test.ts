@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { HistoryRow } from "./api";
-import { historyHasRealContentSince, mergeNewestHistoryPage } from "./historyMerge";
+import { historyHasRealContentSince, mergeNewestHistoryPage, shouldRetryEmptyHistory } from "./historyMerge";
 
 const row = (seq: number, content = `r${seq}`): HistoryRow => ({
   seq,
@@ -57,5 +57,35 @@ describe("historyHasRealContentSince", () => {
     expect(
       historyHasRealContentSince([row(5, "All tasks complete."), row(4, "\n\n\n"), row(3)], 3),
     ).toBe(true);
+  });
+});
+
+describe("shouldRetryEmptyHistory", () => {
+  const base = { historySettled: true, rowsEmpty: true, snapshotHasContent: false, blindAttempts: 0 };
+
+  it("never retries before the first fetch has settled", () => {
+    expect(shouldRetryEmptyHistory({ ...base, historySettled: false })).toBe(false);
+  });
+
+  it("never retries once real rows have landed", () => {
+    expect(shouldRetryEmptyHistory({ ...base, rowsEmpty: false, blindAttempts: 99 })).toBe(false);
+  });
+
+  it("retries without limit once the live snapshot disagrees — a slow turn can take a while", () => {
+    expect(shouldRetryEmptyHistory({ ...base, snapshotHasContent: true, blindAttempts: 1000 })).toBe(true);
+  });
+
+  it("retries a bounded number of times with no snapshot evidence either way", () => {
+    // Reproduces the reported bug: a freshly created session's chat screen fetches history
+    // before the daemon has started (or this device's WS has even reached) the turn, so there
+    // is no live snapshot to disagree with `useHistory` coming back empty.
+    expect(shouldRetryEmptyHistory({ ...base, blindAttempts: 0 })).toBe(true);
+    expect(shouldRetryEmptyHistory({ ...base, blindAttempts: 3 })).toBe(true);
+  });
+
+  it("stops blind retries at the cap — a genuinely empty session must not poll forever", () => {
+    expect(shouldRetryEmptyHistory({ ...base, blindAttempts: 4 })).toBe(false);
+    expect(shouldRetryEmptyHistory({ ...base, blindAttempts: 4 }, 2)).toBe(false);
+    expect(shouldRetryEmptyHistory({ ...base, blindAttempts: 1 }, 2)).toBe(true);
   });
 });
