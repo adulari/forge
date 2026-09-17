@@ -9,7 +9,7 @@
 // to de-duplicate by content. Turn-completion history invalidation (busy true->false) is already wired by the
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { router } from "expo-router";
+import { router, useIsFocused, useNavigation } from "expo-router";
 import { ChevronDown, ChevronUp, Clock, Hammer, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -17,6 +17,7 @@ import {
   FlatList,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -51,6 +52,7 @@ import { Screen } from "../../../components/ds/Screen";
 import { useToast } from "../../../components/ds/ToastHost";
 import { type HistoryRow } from "../../../lib/api";
 import { historyHasRealContentSince, shouldRetryEmptyHistory } from "../../../lib/historyMerge";
+import { shouldMountTranscript } from "../../../lib/transcriptMountGate";
 import { reconcilePendingMessages } from "../../../lib/sessionReconciler";
 import { OFFLINE_QUEUE_CAP, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { haptics } from "../../../lib/haptics";
@@ -67,6 +69,9 @@ import { tabularNums, type as typeScale } from "../../../theme/typography";
 const JUMP_THRESHOLD_PX = 240;
 // How often an empty history page is re-asked for while the live snapshot shows a transcript.
 const HISTORY_RECOVERY_POLL_MS = 5_000;
+// Safety net for the Android transcript-mount gate below, in case `transitionEnd` never fires
+// for this route (e.g. a screen that was already the active route with nothing to animate).
+const TRANSCRIPT_MOUNT_FALLBACK_MS = 1_200;
 
 type TimelineItem =
   | { kind: "streaming"; id: string; text: string; streaming: boolean }
@@ -75,6 +80,8 @@ type TimelineItem =
   | { kind: "filler"; id: string; text: string }
   | { kind: "note"; id: string; text: string }
   | { kind: "pendingSent"; id: string; text: string; attachments: SentAttachment[] };
+
+const EMPTY_TIMELINE: TimelineItem[] = [];
 
 // How long an optimistic "pendingSent" bubble is allowed to linger without a real history row
 // ever landing for it (session closed mid-turn, WS never came back, etc.) — a safety net, not
@@ -265,6 +272,44 @@ export default function SessionChat() {
   useEffect(() => {
     showJumpRef.current = showJump;
   }, [showJump]);
+
+  // ---------------------------------------------------------------------
+  // Android modal-dismiss reparenting race (see transcriptMountGate.ts doc). `new-session.tsx`
+  // reaches this screen via `dismissTo`, which dismisses its modal and pushes this screen in one
+  // native stack transition; the daemon-run first turn means real history rows can now land and
+  // want to mount into the transcript FlatList while that transition is still moving views
+  // around, which is what throws Fabric's "already has a parent" and kills the React instance.
+  //
+  // `transitionEnd` (react-native-screens' native onAppear signal for THIS route, closing:false)
+  // is the actual "the native transition settled" event — unlike `InteractionManager`, which
+  // native-stack's real (non-JS-animated) transitions never register a handle with, so it would
+  // resolve immediately and not gate anything. `useNavigation()`'s default typing doesn't carry
+  // native-stack's event map without reaching into expo-router's internal module path, hence the
+  // narrow local cast below instead of an internal deep import.
+  // ---------------------------------------------------------------------
+  const isFocused = useIsFocused();
+  const navigation = useNavigation();
+  const [transitionSettled, setTransitionSettled] = useState(() => Platform.OS !== "android");
+  useEffect(() => {
+    if (transitionSettled) return;
+    const settle = () => setTransitionSettled(true);
+    const withTransitionEvents = navigation as unknown as {
+      addListener: (type: "transitionEnd", listener: (event: { data: { closing: boolean } }) => void) => () => void;
+    };
+    const unsubscribe = withTransitionEvents.addListener("transitionEnd", (event) => {
+      if (!event.data.closing) settle();
+    });
+    const fallback = setTimeout(settle, TRANSCRIPT_MOUNT_FALLBACK_MS);
+    return () => {
+      unsubscribe();
+      clearTimeout(fallback);
+    };
+  }, [transitionSettled, navigation]);
+  const transcriptReady = shouldMountTranscript({
+    isAndroid: Platform.OS === "android",
+    isFocused,
+    transitionSettled,
+  });
 
   // ---------------------------------------------------------------------
   // Offline prompt queue (ARCHITECTURE §4.2): per server+session AsyncStorage queue, cap 20,
@@ -838,17 +883,18 @@ export default function SessionChat() {
         <BoundedList<TimelineItem>
           ref={listRef}
           // Only invert when there's content — an inverted FlatList mirrors its
-          // ListEmptyComponent upside-down, so the empty state must render upright.
-          inverted={items.length > 0}
-          data={items}
+          // ListEmptyComponent upside-down, so the empty state must render upright. Withheld
+          // (see transcriptMountGate.ts) while `!transcriptReady`, same as `data` below.
+          inverted={transcriptReady && items.length > 0}
+          data={transcriptReady ? items : EMPTY_TIMELINE}
           renderItem={renderItem}
           keyExtractor={keyExtractor}
           onScroll={onScroll}
           scrollEventThrottle={32}
           onEndReached={onEndReached}
-          loadingMore={historyQuery.isFetchingNextPage}
+          loadingMore={transcriptReady && historyQuery.isFetchingNextPage}
           ListEmptyComponent={
-            (snapshot == null && !snapshotTimedOut) || (!historySettled && !historyQuery.isError) ? (
+            !transcriptReady || (snapshot == null && !snapshotTimedOut) || (!historySettled && !historyQuery.isError) ? (
               <View style={styles.connectingRow}>
                 <ActivityIndicator size="small" color={tokens.accent} />
                 <Text style={[typeScale.meta, { color: tokens.ink3 }]}>
