@@ -115,4 +115,33 @@ describe("buildTranscript", () => {
     const out = buildTranscript(rows);
     expect(out.map((e) => e.kind)).toEqual(["message", "message"]);
   });
+
+  it("drops a whitespace-only assistant turn instead of rendering an empty bubble", () => {
+    // Reproduces the reported bug: the daemon persisted "\n\n\n" for the assistant row of a turn
+    // whose real prose lived only on tool-call rows this page never fetched — rendering that
+    // blank content produced a "Forge" bubble with nothing under it, which read as the reply
+    // having vanished.
+    const rows = [
+      row({ seq: 3, role: "assistant", kind: "assistant", content: "\n\n\n" }),
+      row({ seq: 2, role: "assistant", kind: "assistant", content: "Done." }),
+      row({ seq: 1, role: "user", kind: "user", content: "reply with pong" }),
+    ];
+    const out = buildTranscript(rows);
+    expect(out.map((e) => e.kind)).toEqual(["message", "message"]);
+    expect(out.map((e) => (e.kind === "message" ? e.row.seq : null))).toEqual([2, 1]);
+  });
+
+  it("never drops a whitespace-prefixed kind:\"system\" completion note, even though it carries role: assistant", () => {
+    const rows = [
+      row({ seq: 1, role: "assistant", kind: "system", visibility: "ui", content: "\n\nAll tasks complete." }),
+    ];
+    const out = buildTranscript(rows);
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe("message");
+  });
+
+  it("never drops a genuinely blank user turn (the filter is assistant-only)", () => {
+    const rows = [row({ seq: 1, role: "user", kind: "user", content: "" })];
+    expect(buildTranscript(rows)).toHaveLength(1);
+  });
 });

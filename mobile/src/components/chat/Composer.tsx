@@ -773,9 +773,12 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
             <View style={styles.metaRow}>
               {model ? (
                 <MetaChip
-                  label={model}
+                  // The daemon sends the literal sentinel "—" for an Automatic session (no
+                  // model pinned yet) — same value StatusStrip already special-cases. A raw
+                  // dash on the chip reads as broken/missing data, not as "automatic".
+                  label={model === "—" ? "auto" : model}
                   color={tokens.ink2}
-                  accessibilityLabel={`model: ${model} — change model`}
+                  accessibilityLabel={`model: ${model === "—" ? "auto" : model} — change model`}
                   testID="composer-model-chip"
                   onPress={openModelPicker}
                 />

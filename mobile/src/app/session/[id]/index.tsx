@@ -50,8 +50,9 @@ import { EmptyState } from "../../../components/ds/EmptyState";
 import { Screen } from "../../../components/ds/Screen";
 import { useToast } from "../../../components/ds/ToastHost";
 import { type HistoryRow } from "../../../lib/api";
+import { historyHasRealContentSince } from "../../../lib/historyMerge";
 import { reconcilePendingMessages } from "../../../lib/sessionReconciler";
-import { OFFLINE_QUEUE_CAP, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
+import { OFFLINE_QUEUE_CAP, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { haptics } from "../../../lib/haptics";
 import { useHistory, useLiveHistoryRefresh, useSessions } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
@@ -63,14 +64,9 @@ import { tabularNums, type as typeScale } from "../../../theme/typography";
 
 // T3.3's CardSlot.tsx landed during this task (was a HANDOFF stub) — wired in directly above.
 
-const OFFLINE_QUEUE_PREFIX = "forge.offlineQueue";
 const JUMP_THRESHOLD_PX = 240;
 // How often an empty history page is re-asked for while the live snapshot shows a transcript.
 const HISTORY_RECOVERY_POLL_MS = 5_000;
-
-function offlineQueueKey(baseUrl: string | null, sessionId: string): string {
-  return `${OFFLINE_QUEUE_PREFIX}:${baseUrl ?? "unknown"}:${sessionId}`;
-}
 
 type TimelineItem =
   | { kind: "streaming"; id: string; text: string; streaming: boolean }
@@ -522,10 +518,16 @@ export default function SessionChat() {
 
   const { finalizing } = track;
 
-  // Clear once the finalized row has actually arrived (state cleanup only — see comment above).
+  // Clear once the finalized row has actually arrived with REAL content (state cleanup only —
+  // see comment above). Checking for any seq advancement at all (rather than real content)
+  // cleared this the instant a blank placeholder row landed — a known daemon gap where a turn's
+  // prose lives only on tool rows this page didn't fetch — dropping the reply from view entirely
+  // (it's not shown here via the bridge anymore, and buildTranscript filters the blank row out of
+  // the rendered history too). historyHasRealContentSince keeps the bridge up until a row with
+  // actual content shows up; the timeout below still bounds how long that can take.
   useEffect(() => {
     if (!finalizing) return;
-    if ((historyRows[0]?.seq ?? -1) !== finalizing.baselineSeq) {
+    if (historyHasRealContentSince(historyRows, finalizing.baselineSeq)) {
       setTrack((prev) => (prev.finalizing === finalizing ? { ...prev, finalizing: null } : prev));
     }
   }, [finalizing, historyRows]);
@@ -540,8 +542,11 @@ export default function SessionChat() {
     return () => clearTimeout(t);
   }, [finalizing]);
 
+  // Stays active until REAL content lands (not merely until `historyRows[0]` advances at all —
+  // see historyHasRealContentSince): a blank placeholder row landing first must not blank out
+  // this bridge before the real reply is actually visible anywhere.
   const finalizingActive =
-    !busy && finalizing !== null && (historyRows[0]?.seq ?? -1) === finalizing.baselineSeq;
+    !busy && finalizing !== null && !historyHasRealContentSince(historyRows, finalizing.baselineSeq);
   // Bridge the mid-busy empty tick too (root cause of the residual flicker): the daemon flushes
   // the reply out of `streaming` into `transcript` one or more frames BEFORE `busy` flips false
   // (verified live — `streaming` goes "" while still busy). Falling back to `track.retainedText`

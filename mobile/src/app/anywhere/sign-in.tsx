@@ -157,14 +157,18 @@ export default function AnywhereSignInScreen() {
             <Text accessibilityRole="alert" style={[typeScale.body, styles.measure, { color: tokens.danger }]}>
               {anywhere.error ?? "That code expired or access was denied."}
             </Text>
-            <View style={styles.chipRow}>
-              <View style={[styles.chip, { borderColor: tokens.border }]}>
-                <Text style={[typeScale.meta, { color: tokens.ink2 }]}>Code expired · get a new one</Text>
+            {/* These chips name GitHub-side outcomes — showing them for a network failure (no
+                answer from GitHub at all) would tell the person the wrong thing happened. */}
+            {!anywhere.errorIsOffline ? (
+              <View style={styles.chipRow}>
+                <View style={[styles.chip, { borderColor: tokens.border }]}>
+                  <Text style={[typeScale.meta, { color: tokens.ink2 }]}>Code expired · get a new one</Text>
+                </View>
+                <View style={[styles.chip, { borderColor: tokens.border }]}>
+                  <Text style={[typeScale.meta, { color: tokens.ink2 }]}>Access denied · start over</Text>
+                </View>
               </View>
-              <View style={[styles.chip, { borderColor: tokens.border }]}>
-                <Text style={[typeScale.meta, { color: tokens.ink2 }]}>Access denied · start over</Text>
-              </View>
-            </View>
+            ) : null}
             <Button
               label="Start over"
               icon={<RefreshCw size={17} color={tokens.onAccent} />}

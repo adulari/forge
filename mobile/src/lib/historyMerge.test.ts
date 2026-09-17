@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { HistoryRow } from "./api";
-import { mergeNewestHistoryPage } from "./historyMerge";
+import { historyHasRealContentSince, mergeNewestHistoryPage } from "./historyMerge";
 
 const row = (seq: number, content = `r${seq}`): HistoryRow => ({
   seq,
@@ -34,5 +34,28 @@ describe("mergeNewestHistoryPage", () => {
     expect(mergeNewestHistoryPage(undefined, page(1))).toBeUndefined();
     const data = { pages: [page(3)], pageParams: [undefined] };
     expect(mergeNewestHistoryPage(data, [])).toBe(data);
+  });
+});
+
+describe("historyHasRealContentSince", () => {
+  it("is false while nothing newer than the baseline has landed yet", () => {
+    expect(historyHasRealContentSince(page(3, 2, 1), 3)).toBe(false);
+  });
+
+  it("is false when the only new row is blank — a known daemon gap for the turn's prose", () => {
+    // Reproduces the reported bug: a turn's assistant row lands with only whitespace content
+    // (its prose lived on tool rows this page didn't fetch) — that must not count as "arrived",
+    // or the retained live-stream bridge clears and the reply disappears from view entirely.
+    expect(historyHasRealContentSince([row(4, "\n\n\n"), row(3), row(2), row(1)], 3)).toBe(false);
+  });
+
+  it("is true once a real (non-blank) row lands newer than the baseline", () => {
+    expect(historyHasRealContentSince([row(4, "Done."), row(3), row(2), row(1)], 3)).toBe(true);
+  });
+
+  it("keeps scanning past a blank row to find real content further ahead", () => {
+    expect(
+      historyHasRealContentSince([row(5, "All tasks complete."), row(4, "\n\n\n"), row(3)], 3),
+    ).toBe(true);
   });
 });

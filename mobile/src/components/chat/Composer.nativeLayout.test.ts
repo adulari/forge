@@ -19,6 +19,15 @@ function sourceRegion(start: string, end: string, message: string): string {
   return normalizedSource.slice(startIndex, endIndex);
 }
 
+describe("composer model chip", () => {
+  it("labels an Automatic session's dash sentinel as \"auto\", not a raw dash", () => {
+    expectSource(
+      /label=\{model === "—" \? "auto" : model\}/,
+      "the daemon's unset-model sentinel (\"—\") must render as \"auto\" on the chip",
+    );
+  });
+});
+
 describe("native composer layout contract", () => {
   it("platform-gates a named mirror fed by the local native draft", () => {
     expectSource(

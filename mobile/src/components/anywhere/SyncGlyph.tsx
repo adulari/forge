@@ -28,8 +28,9 @@ export function SyncGlyph({ status, showText = true }: SyncGlyphProps) {
       <Text style={[typeScale.monoMeta, tabularNums, { color }]}>{glyph}</Text>
       {showText ? (
         <Text
-          style={[typeScale.monoMeta, tabularNums, { color: fullLineColor ? color : tokens.ink2 }]}
+          style={[typeScale.monoMeta, tabularNums, styles.text, { color: fullLineColor ? color : tokens.ink2 }]}
           numberOfLines={1}
+          ellipsizeMode="tail"
         >
           {text}
         </Text>
@@ -39,5 +40,9 @@ export function SyncGlyph({ status, showText = true }: SyncGlyphProps) {
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: "row", alignItems: "center", gap: space.space4 },
+  // Shrinkable: a row like History's "18h · N msgs · $X · <glyph>" can run out of width for the
+  // longest status text ("offline — device-encrypted cache") — without this it silently ran past
+  // the card's `overflow: hidden` edge instead of ellipsizing.
+  row: { flexDirection: "row", alignItems: "center", gap: space.space4, flexShrink: 1 },
+  text: { flexShrink: 1 },
 });
