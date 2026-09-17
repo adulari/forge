@@ -819,14 +819,10 @@ async fn approve_pairing(encoded_challenge: &str) -> Result<()> {
     let safety_code = pairing_safety_code(&challenge, &details.signing_public_key, &account_id)?;
     let account = state.github_login.as_deref().unwrap_or("signed-in account");
     let remaining = challenge.expires_at_ms.saturating_sub(now_ms()) / 1_000;
-    println!("Forge Anywhere device approval");
-    println!("  Device: {}", safe_display_text(&details.device_name));
-    println!("  Platform: Forge CLI");
-    println!("  Account: @{account}");
-    println!("  Expires in: {remaining} seconds");
-    println!("  Safety code: {safety_code}");
-    println!("Compare the safety code with the new device before continuing.");
-    print!("Type APPROVE to approve, or DENY to deny: ");
+    print!(
+        "{}",
+        format_approval_prompt(&details.device_name, account, remaining, &safety_code)
+    );
     std::io::stdout().flush().context("show approval prompt")?;
     let mut answer = String::new();
     std::io::stdin()
@@ -1025,6 +1021,31 @@ fn safe_display_text(value: &str) -> String {
     } else {
         value
     }
+}
+
+/// The `forge anywhere approve` confirmation banner (#4). There used to be a hardcoded
+/// "Platform: Forge CLI" line here — always wrong for any device that isn't this same CLI (a
+/// pairing device reported "Forge on Android" and still saw "Forge CLI"). The pairing service's
+/// wire format ([`PairingDetails`]) carries no platform field at all, only `device_name`, so a
+/// platform line has nothing real to show. Rather than guess from the APPROVING machine (which
+/// tells you nothing about the device being approved), the line is dropped; `device_name` is
+/// already the service's own description of the requesting device.
+fn format_approval_prompt(
+    device_name: &str,
+    account: &str,
+    remaining_secs: u64,
+    safety_code: &str,
+) -> String {
+    format!(
+        "Forge Anywhere device approval\n\
+         \x20 Device: {}\n\
+         \x20 Account: @{account}\n\
+         \x20 Expires in: {remaining_secs} seconds\n\
+         \x20 Safety code: {safety_code}\n\
+         Compare the safety code with the new device before continuing.\n\
+         Type APPROVE to approve, or DENY to deny: ",
+        safe_display_text(device_name)
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1440,6 +1461,11 @@ async fn doctor() -> Result<()> {
             "not configured".to_string()
         }
     );
+    // #5: a typo like `[anywhere] nabled = true` silently leaves the connector disabled with no
+    // clue why — "connector: not configured" alone reads as "never set up", not "misspelled".
+    for warning in forge_config::anywhere_config_warnings() {
+        println!("  config: {warning}");
+    }
     let command_error = current_command_error()?;
     println!(
         "  commands: {}",
@@ -2234,6 +2260,34 @@ fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_prompt_shows_the_requesting_devices_own_name_not_a_hardcoded_platform() {
+        // #4: this used to print a hardcoded "Platform: Forge CLI" line for every pairing, even
+        // one from "Forge on Android". The service's pairing details carry no platform field at
+        // all — only `device_name` — so there's nothing real to show on a separate line; the fix
+        // drops the line rather than guess.
+        let prompt = format_approval_prompt("Forge on Android", "floris", 118, "1234-5678-9012");
+        assert!(
+            prompt.contains("Device: Forge on Android"),
+            "the requesting device's own name must appear verbatim: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Platform:"),
+            "no platform line — the service reports no such field: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Forge CLI"),
+            "no hardcoded guess: {prompt}"
+        );
+        assert!(prompt.contains("Account: @floris"));
+        assert!(prompt.contains("Expires in: 118 seconds"));
+        assert!(prompt.contains("Safety code: 1234-5678-9012"));
+        assert!(
+            prompt.ends_with("Type APPROVE to approve, or DENY to deny: "),
+            "still ends on the same prompt line for the caller's stdin read: {prompt}"
+        );
+    }
 
     #[test]
     fn persisted_command_error_makes_doctor_report_unhealthy() {

@@ -242,7 +242,12 @@ fn explicitly_preserves_public_api(prompt: &str) -> bool {
     .any(|needle| prompt.contains(needle))
 }
 
-fn explicitly_requests_change(prompt: &str) -> bool {
+/// Exposed to the H8 empty-diff gate: a session-wide `expect_code_change` masks the per-turn
+/// `ContractSource::ExplicitChange` (see `derive` above), so the gate needs this check directly
+/// to tell "reply with the word pong only" (nothing to implement) apart from "fix the bug" (an
+/// empty diff to a request that DID ask for a change) when both carry the same `HarnessExpectation`
+/// source.
+pub(crate) fn explicitly_requests_change(prompt: &str) -> bool {
     let prompt = prompt.trim_start().to_ascii_lowercase();
     let prompt = prompt.strip_prefix("please ").unwrap_or(&prompt);
     let prompt = prompt.strip_prefix("please, ").unwrap_or(prompt);

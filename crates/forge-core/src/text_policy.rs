@@ -100,3 +100,52 @@ pub(crate) fn sanitize_suggestion(content: &str, prev_prompt: &str) -> Option<St
 pub(crate) fn memory_scope_at(root: &Path) -> String {
     root.display().to_string()
 }
+
+/// Drop leading blank lines from a completion note before it's shown/persisted. A bridge's final
+/// wrap-up text sometimes opens with one or more empty lines (formatting artifacts of its own
+/// output), which the `/api/history` non-tool view then rendered as a note that visibly starts
+/// with dead space (#28: "\n\nAll tasks complete. ..."). Only LEADING blanks are removed —
+/// intentional blank lines further into the note are left alone.
+pub(crate) fn trim_leading_blank_lines(content: &str) -> &str {
+    let mut rest = content;
+    while let Some(after_newline) = rest
+        .split_once('\n')
+        .filter(|(line, _)| line.trim().is_empty())
+        .map(|(_, after)| after)
+    {
+        rest = after_newline;
+    }
+    rest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_leading_blank_lines;
+
+    #[test]
+    fn trim_leading_blank_lines_drops_only_the_leading_run() {
+        assert_eq!(
+            trim_leading_blank_lines("\n\nAll tasks complete. Everything shipped."),
+            "All tasks complete. Everything shipped."
+        );
+        assert_eq!(
+            trim_leading_blank_lines("  \n\t\n\nDone."),
+            "Done.",
+            "whitespace-only lines count as blank, not just empty ones"
+        );
+        assert_eq!(
+            trim_leading_blank_lines("No leading blanks here."),
+            "No leading blanks here."
+        );
+        assert_eq!(
+            trim_leading_blank_lines("First line.\n\nSecond paragraph."),
+            "First line.\n\nSecond paragraph.",
+            "a blank line further in is intentional formatting, not dead space to strip"
+        );
+        assert_eq!(
+            trim_leading_blank_lines("\n\n"),
+            "",
+            "an all-blank note collapses to empty, same as one with nothing to say"
+        );
+    }
+}

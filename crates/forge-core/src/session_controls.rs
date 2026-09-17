@@ -112,6 +112,10 @@ impl Session {
         if content.trim().is_empty() {
             return Ok(());
         }
+        // A bridge's wrap-up text sometimes opens with blank lines (#28: the daemon's history
+        // served "\n\nAll tasks complete. ..."); this is the ONE place every terminal answer is
+        // published, so trimming here covers every caller.
+        let content = crate::text_policy::trim_leading_blank_lines(content);
         let seq = self.next_seq();
         self.store
             .add_ui_note(&self.id, seq, Role::Assistant, content)?;
