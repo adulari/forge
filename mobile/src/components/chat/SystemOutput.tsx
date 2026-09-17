@@ -87,7 +87,7 @@ function SystemOutputBody({ content }: SystemOutputProps) {
         style={styles.summaryRow}
         hitSlop={8}
       >
-        <Text style={[type.codeSmall, { fontFamily: monoFamily.regular }]} numberOfLines={1} selectable>
+        <Text style={[type.codeSmall, styles.summaryText, { fontFamily: monoFamily.regular }]} numberOfLines={3} selectable>
           <Text style={{ color: failed ? tokens.danger : tokens.ink3 }}>{verb}</Text>
           {target ? <Text style={{ color: failed ? tokens.danger : tokens.ink }}>{` ${target}`}</Text> : null}
           {added > 0 ? <Text style={{ color: tokens.success }}>{` +${added}`}</Text> : null}
@@ -146,7 +146,12 @@ function SystemOutputBody({ content }: SystemOutputProps) {
 
 const styles = StyleSheet.create({
   container: { gap: space.space4 },
-  summaryRow: { flexDirection: "row", alignItems: "center", gap: space.space8, alignSelf: "flex-start" },
+  // No `alignSelf: "flex-start"` — a real tool summary is short and stays on one line
+  // regardless, but a longer non-tool notice (e.g. a "N model(s) benched…" warning routed
+  // through this same row) needs the parent's actual width to wrap against; hugging content
+  // width here left it with no bound to wrap at, so `numberOfLines` above just hard-cut it.
+  summaryRow: { flexDirection: "row", alignItems: "flex-start", gap: space.space8 },
+  summaryText: { flexShrink: 1 },
   body: {
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,

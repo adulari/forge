@@ -69,7 +69,13 @@ export function Screen({
       {keyboardAvoiding ? (
         <KeyboardAvoidingView
           style={styles.flex}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          // Android 15+ enforces edge-to-edge, so `adjustResize` no longer shrinks the window
+          // for the keyboard — `undefined` here used to be a deliberate no-op relying on that
+          // resize. RN's `Keyboard` module still fires `keyboardDidShow`/`keyboardDidHide` with
+          // real metrics on Android independent of that (see Keyboard.js: only API<30 depended
+          // on window-resize layout diffing), so `"height"` — RN's own documented Android
+          // pairing for `"padding"` on iOS — works without any native config change.
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
           keyboardVerticalOffset={keyboardVerticalOffset}
         >
           {content}

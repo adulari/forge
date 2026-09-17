@@ -19,6 +19,7 @@ import { ActivityIndicator, AppState, Platform, StyleSheet, Text, View } from "r
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { Button } from "./ds/Button";
+import { biometricLabel, biometricLabelDefault } from "../lib/biometricLabel";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
@@ -30,15 +31,18 @@ async function readAppLockEnabled(): Promise<boolean> {
   return raw === "true";
 }
 
-const AUTH_ERROR_COPY: Partial<Record<LocalAuthenticationError, string>> = {
-  user_cancel: "cancelled — tap unlock to try again.",
-  system_cancel: "cancelled — tap unlock to try again.",
-  user_fallback: "tap unlock to try again.",
-  lockout: "too many attempts — unlock your device, then reopen Forge.",
-  not_enrolled: "no Face ID/Touch ID enrolled on this device.",
-  not_available: "biometric authentication isn't available on this device.",
-  passcode_not_set: "set a device passcode to use app lock.",
-};
+function authErrorCopy(error: LocalAuthenticationError, label: string): string {
+  const copy: Partial<Record<LocalAuthenticationError, string>> = {
+    user_cancel: "cancelled — tap unlock to try again.",
+    system_cancel: "cancelled — tap unlock to try again.",
+    user_fallback: "tap unlock to try again.",
+    lockout: "too many attempts — unlock your device, then reopen Forge.",
+    not_enrolled: `no ${label} enrolled on this device.`,
+    not_available: "biometric authentication isn't available on this device.",
+    passcode_not_set: "set a device passcode to use app lock.",
+  };
+  return copy[error] ?? "authentication failed — try again.";
+}
 
 type LockPhase = "checking" | "locked" | "unlocked";
 
@@ -47,6 +51,16 @@ export function AppLock({ children }: { children: React.ReactNode }) {
   const [phase, setPhase] = useState<LockPhase>("checking");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authenticating, setAuthenticating] = useState(false);
+  const [label, setLabel] = useState(biometricLabelDefault);
+  useEffect(() => {
+    let cancelled = false;
+    void biometricLabel().then((resolved) => {
+      if (!cancelled) setLabel(resolved);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const appStateRef = useRef(AppState.currentState);
   // Last-read value of the pref, kept in sync by `evaluateLock` so the AppState listener can
   // decide synchronously whether to re-cover the screen the instant the app backgrounds
@@ -74,7 +88,7 @@ export function AppLock({ children }: { children: React.ReactNode }) {
         setPhase("unlocked");
       } else {
         setPhase("locked");
-        setAuthError(AUTH_ERROR_COPY[result.error] ?? "authentication failed — try again.");
+        setAuthError(authErrorCopy(result.error, label));
       }
     } catch {
       // authenticateAsync rejected (rather than resolving with success:false) — surface the
@@ -84,7 +98,7 @@ export function AppLock({ children }: { children: React.ReactNode }) {
     } finally {
       setAuthenticating(false);
     }
-  }, []);
+  }, [label]);
 
   // Re-reads the persisted pref, then either passes through, or verifies hardware is still
   // usable (fail-open if not, rather than locking the user out forever), then locks + prompts.
@@ -158,7 +172,7 @@ export function AppLock({ children }: { children: React.ReactNode }) {
           <Lock size={32} color={tokens.accent} strokeWidth={1.75} />
           <Text style={[type.heading, styles.title, { color: tokens.ink }]}>Forge is locked</Text>
           <Text style={[type.sub, styles.message, { color: tokens.ink2 }]}>
-            unlock with Face ID to continue.
+            unlock with {label} to continue.
           </Text>
           {authError ? (
             <Text style={[type.sub, styles.message, { color: tokens.danger }]}>{authError}</Text>

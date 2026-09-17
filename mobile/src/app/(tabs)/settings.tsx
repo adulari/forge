@@ -45,6 +45,7 @@ import { useToast } from "../../components/ds/ToastHost";
 import { entitlementBadge } from "../../lib/anywhere/format";
 import { useVersionMeta } from "../../lib/appVersion";
 import { useAnywhere } from "../../lib/anywhere/store";
+import { biometricLabel, biometricLabelDefault } from "../../lib/biometricLabel";
 import { type StoredServer, useAuth } from "../../lib/auth";
 import { connectionHealthFromFleet } from "../../lib/connectionHealth";
 import { checkNotifyPermission, getNotifyPermission, notify, type NotifyPermission } from "../../lib/notify";
@@ -313,6 +314,16 @@ export function SettingsScreen() {
   const serverQueries = useServerFleets(servers);
   const [appLock, setAppLock] = useState(false);
   const [appLockLoaded, setAppLockLoaded] = useState(false);
+  const [appLockLabel, setAppLockLabel] = useState(biometricLabelDefault);
+  useEffect(() => {
+    let cancelled = false;
+    void biometricLabel().then((label) => {
+      if (!cancelled) setAppLockLabel(label);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [hapticsEnabled, setHapticsEnabledState] = useState(isHapticsEnabled);
   const [anonymousTelemetry, setAnonymousTelemetry] = useState(true);
   const [anonymousTelemetryLoaded, setAnonymousTelemetryLoaded] = useState(false);
@@ -557,12 +568,15 @@ export function SettingsScreen() {
                 }
               >
                 <View style={styles.serverName}>
-                  <Text style={[type.bodyBold, { color: active ? tokens.ink : tokens.ink2 }]} numberOfLines={1}>
+                  <Text
+                    style={[type.bodyBold, styles.serverNameText, { color: active ? tokens.ink : tokens.ink2 }]}
+                    numberOfLines={1}
+                  >
                     {server.name}
                   </Text>
                   {active ? (
                     <View style={[styles.activeTag, { backgroundColor: tokens.selection }]}>
-                      <Text style={[type.meta, { color: tokens.accent }]}>active</Text>
+                      <Text style={[type.meta, { color: tokens.accent }]} numberOfLines={1}>active</Text>
                     </View>
                   ) : null}
                 </View>
@@ -620,14 +634,18 @@ export function SettingsScreen() {
           ) : null}
           <DenseRow
             showSeparator={false}
-            accessibilityLabel="Require Face ID"
+            accessibilityLabel={`Require ${appLockLabel}`}
             trailing={
               appLockLoaded ? (
-                <Switch value={appLock} onValueChange={onAppLockChange} accessibilityLabel="Require Face ID" />
+                <Switch
+                  value={appLock}
+                  onValueChange={onAppLockChange}
+                  accessibilityLabel={`Require ${appLockLabel}`}
+                />
               ) : undefined
             }
           >
-            <Text style={[type.body, { color: tokens.ink }]}>Require Face ID</Text>
+            <Text style={[type.body, { color: tokens.ink }]}>Require {appLockLabel}</Text>
           </DenseRow>
         </View>
 
@@ -816,7 +834,11 @@ const styles = StyleSheet.create({
   denseBody: { flex: 1, minWidth: 0, justifyContent: "center" },
   denseSeparator: { height: StyleSheet.hairlineWidth, marginLeft: space.space16 },
   serverName: { flexDirection: "row", alignItems: "center", gap: space.space4, minWidth: 0 },
-  activeTag: { paddingHorizontal: space.space8, paddingVertical: 1, borderRadius: radii.radius4 },
+  // RN's default flexShrink is 0 (unlike web) — without an explicit shrink/no-shrink pair here,
+  // neither the name nor the "active" chip yielded space to the other, and the chip (whichever
+  // one Yoga happened to squeeze) rendered its text one character per line.
+  serverNameText: { flexShrink: 1, minWidth: 0 },
+  activeTag: { flexShrink: 0, paddingHorizontal: space.space8, paddingVertical: 1, borderRadius: radii.radius4 },
   serverTrailing: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   navTrailing: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   reachabilityDot: { width: 6, height: 6, borderRadius: 3 },
