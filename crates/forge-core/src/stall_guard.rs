@@ -76,6 +76,12 @@ pub(crate) struct NarrationTracker {
     freq_history: std::collections::VecDeque<Vec<String>>,
     freq_trigger: Option<Vec<String>>,
     freq_repeats_since_nudge: usize,
+    /// How many times each EXACT statement has been made this turn. The detectors above are
+    /// deliberately fuzzy so they can catch a model that rephrases its way around them; that same
+    /// fuzziness makes them the wrong input for the sampling ladder, where a false positive would
+    /// quietly run a healthy turn hotter. Verbatim repetition is unambiguous, so pressure is
+    /// driven by this instead.
+    exact_counts: std::collections::HashMap<String, usize>,
 }
 
 impl NarrationTracker {
@@ -85,6 +91,8 @@ impl NarrationTracker {
         if words.is_empty() {
             return Stall::Fine;
         }
+
+        *self.exact_counts.entry(words.join(" ")).or_insert(0) += 1;
 
         let freq_stall = self.observe_frequency(&words);
         let consecutive_stall = self.observe_consecutive(&words);
@@ -163,6 +171,24 @@ impl NarrationTracker {
     pub(crate) fn repeats(&self) -> usize {
         self.repeats
     }
+
+    /// How hard this turn is currently repeating itself, as a rung on the sampling ladder.
+    ///
+    /// The detectors above exist to END a turn that is already stuck. This reports the same
+    /// evidence EARLY, while the turn is still salvageable, so the next request can be given a
+    /// different shape (a higher temperature, a repetition penalty) instead of being sent again
+    /// identically. 0 = nothing seen, 1 = it has restated itself at least once, 2 = it is doing
+    /// so persistently.
+    pub(crate) fn pressure(&self) -> u8 {
+        let verbatim = self.exact_counts.values().copied().max().unwrap_or(0);
+        if verbatim >= 3 || self.nudged || self.freq_repeats_since_nudge > 0 {
+            return 2;
+        }
+        if verbatim >= 2 {
+            return 1;
+        }
+        0
+    }
 }
 
 /// The first sentence-ish of the reply as lowercase alphanumeric words. Only the opening is
@@ -204,7 +230,11 @@ impl crate::Session {
     /// Feed this step's narration to the guard; queue the nudge or report that the turn must
     /// halt. Lives here so the model loop stays a dispatcher.
     pub(crate) fn narration_stalled(&mut self, tracker: &mut NarrationTracker, text: &str) -> bool {
-        match tracker.observe(text) {
+        let stall = tracker.observe(text);
+        // Carried into the NEXT request's sampling (see `model_request`): a turn that has started
+        // restating itself must not be asked again at the same near-deterministic temperature.
+        self.repetition_pressure = tracker.pressure();
+        match stall {
             Stall::Fine => false,
             Stall::Nudge => {
                 self.presenter
@@ -406,6 +436,40 @@ mod tests {
             ],
             "{verdicts:?}"
         );
+    }
+
+    /// Pressure is the EARLY signal: it must rise on the first restatement, long before the
+    /// nudge/halt bar, because it is what changes the next request's sampling while the turn can
+    /// still be saved. A turn that narrates something new each step must stay at zero, or every
+    /// healthy turn would silently run hotter.
+    #[test]
+    fn pressure_rises_on_the_first_restatement_and_stays_flat_for_healthy_work() {
+        let mut healthy = NarrationTracker::default();
+        for narration in [
+            "The failing assertion compares the trimmed path, so I will look at the helper next",
+            "That helper never saw a Windows separator; checking who calls it",
+            "Only the importer calls it, and it passes a raw string",
+            "Adding the normalisation at the boundary instead of inside the helper",
+            "Running the focused test for the importer now",
+            "Green. Extending the case list to cover a trailing separator",
+            "Also worth a note in the module docs about the boundary",
+            "Full suite passes, so this is done",
+        ] {
+            healthy.observe(narration);
+        }
+        assert_eq!(healthy.pressure(), 0);
+
+        let mut repeating = NarrationTracker::default();
+        repeating.observe("Inspecting the diff to identify the missing fix, then applying it");
+        assert_eq!(repeating.pressure(), 0, "one statement is not a repeat");
+        repeating.observe("Inspecting the diff to identify the missing fix, then applying it");
+        assert_eq!(
+            repeating.pressure(),
+            1,
+            "restating once already changes sampling"
+        );
+        repeating.observe("Inspecting the diff to identify the missing fix, then applying it");
+        assert_eq!(repeating.pressure(), 2, "persistent repetition escalates");
     }
 
     #[test]

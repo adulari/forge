@@ -693,6 +693,8 @@ mod tests {
         // so `/effort` moved routing and nothing else on this surface.
         let messages = vec![Message::user("hi")];
         let opts = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             effort: Some(forge_types::EffortLevel::High),
             ..Default::default()
         };
@@ -718,6 +720,8 @@ mod tests {
     fn white_hot_is_clamped_to_what_this_surface_accepts() {
         let messages = vec![Message::user("hi")];
         let opts = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             effort: Some(forge_types::EffortLevel::WhiteHot),
             ..Default::default()
         };
@@ -923,6 +927,8 @@ mod tests {
             schema: serde_json::json!({"type": "object"}),
         }];
         let opts = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             temperature: Some(0.2),
             prompt_cache_key: Some("forge-session-123".into()),
             ..Default::default()
@@ -1004,6 +1010,8 @@ mod tests {
                 &[Message::user("hi")],
                 &[],
                 &CompletionOptions {
+                    frequency_penalty: None,
+                    presence_penalty: None,
                     prompt_cache_key: Some("forge-session-1".into()),
                     ..Default::default()
                 },

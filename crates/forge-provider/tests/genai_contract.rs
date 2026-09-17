@@ -171,6 +171,8 @@ async fn strict_openai_gateway_retries_without_prompt_cache_key() {
             &[Message::user("hi")],
             &[],
             &CompletionOptions {
+                frequency_penalty: None,
+                presence_penalty: None,
                 prompt_cache_key: Some("forge-session-1".into()),
                 ..Default::default()
             },

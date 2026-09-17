@@ -747,6 +747,13 @@ pub struct CompletionOptions {
     /// Sampling temperature. `None` = provider default; coding turns set a low value so edits and
     /// patches are deterministic rather than creatively varied.
     pub temperature: Option<f32>,
+    /// Penalties applied ONLY while a turn is under repetition pressure (the model has already
+    /// restated itself). A coding turn runs at a low temperature on purpose, which also makes a
+    /// repeated context produce a repeated continuation; these give the next request a different
+    /// shape instead of asking the model again with the same one. `None` = send nothing, which is
+    /// what every ordinary step does. Providers that do not accept them must omit them.
+    pub frequency_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
     /// Checkpoint context handed explicitly to a CLI-bridge child. `None` for non-bridge calls and
     /// the base `complete` path, which fall back to inherited process env for legacy compatibility.
     pub checkpoint: Option<CheckpointContext>,
