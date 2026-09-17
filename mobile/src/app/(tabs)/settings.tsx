@@ -550,7 +550,6 @@ export function SettingsScreen() {
                 leading={<View style={[styles.reachabilityDot, { backgroundColor: fleet.isLoading ? tokens.warn : reachable ? tokens.success : tokens.danger }]} />}
                 trailing={
                   <View style={styles.serverTrailing}>
-                    <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>{`${maskToken(server.token)} · ${statusWord} · ${waitingCount} waiting`}</Text>
                     <IconButton
                       icon={<Pencil size={16} strokeWidth={1.75} color={tokens.ink4} />}
                       accessibilityLabel={`Rename server ${server.name}`}
@@ -580,6 +579,11 @@ export function SettingsScreen() {
                     </View>
                   ) : null}
                 </View>
+                {/* The status line lives under the name: as a trailing caption beside two icon
+                    buttons it took the whole row on a phone and squeezed the name to nothing. */}
+                <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>
+                  {`${server.transport === "anywhere" ? "anywhere" : maskToken(server.token)} · ${statusWord} · ${waitingCount} waiting`}
+                </Text>
               </DenseRow>
             );
           })}
