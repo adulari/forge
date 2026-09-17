@@ -18,8 +18,10 @@ import {
   type AnywhereSubscription,
   anywhereRequest,
   base64Url,
+  describeAnywhereError,
   fromBase64Url,
   idempotencyKey,
+  isAnywhereNetworkError,
   isAnywhereSessionInvalid,
   observeAnywhereUnauthorized,
   preflightAnywhere,
@@ -218,6 +220,11 @@ export interface AnywhereContextValue {
   hostTransportPreferences: HostTransportPreferences;
   approvalError: string | null;
   error: string | null;
+  /** True when `error` is a network-layer failure (offline/DNS/timeout) rather than an answer
+   * that actually came back from GitHub or the Anywhere service — the sign-in screen uses this
+   * to suppress its "code expired"/"access denied" chips, which would otherwise misrepresent an
+   * offline device as one GitHub explicitly rejected. */
+  errorIsOffline: boolean;
   pushStatus: AnywherePushStatus;
   remoteJobs: PendingRemoteJob[];
   /** Returns a fresh short-lived token for first-party Anywhere clients; never persist it. */
@@ -289,6 +296,10 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const approvalRetryAtMs = useRef(0);
   const [error, setError] = useState<string | null>(null);
+  // Scoped to the GitHub device-code sign-in flow (startLogin/its poll below) — a network-layer
+  // failure there should not also flash the "code expired"/"access denied" chips, which imply a
+  // real answer came back from GitHub/the service. Not touched by other flows' own error states.
+  const [errorIsOffline, setErrorIsOffline] = useState(false);
   const [pushStatus, setPushStatus] = useState<AnywherePushStatus>("unsubscribed");
   const [remoteJobs, setRemoteJobs] = useState<PendingRemoteJob[]>([]);
   const mutationQueue = useRef(Promise.resolve());
@@ -688,6 +699,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     const reservedWindow = Platform.OS === "web" ? reserveBrowserAuthWindow() : null;
     browserAuthWindow.current = reservedWindow;
     setError(null);
+    setErrorIsOffline(false);
     setPhase("starting");
     try {
       await preflightAnywhere(SERVICE_URL);
@@ -723,6 +735,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       reservedWindow?.close();
       if (browserAuthWindow.current === reservedWindow) browserAuthWindow.current = null;
       setError(message(reason));
+      setErrorIsOffline(isAnywhereNetworkError(reason));
       setPhase("error");
     }
   }, []);
@@ -747,6 +760,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         browserAuthWindow.current?.close();
         browserAuthWindow.current = null;
         setError("GitHub login expired. Start again to receive a new code.");
+        setErrorIsOffline(false);
         setPhase("error");
         return;
       }
@@ -798,6 +812,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
           browserAuthWindow.current?.close();
           browserAuthWindow.current = null;
           setError(message(reason));
+          setErrorIsOffline(isAnywhereNetworkError(reason));
           setPhase("error");
         }
       });
@@ -1179,6 +1194,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     setRecoverySetup(null);
     setClaimantPairing(null);
     setError(null);
+    setErrorIsOffline(false);
     void enrollmentStore.clear();
     setPhase(phaseAfterSetupRestart(
       Boolean(credentialsRef.current),
@@ -1597,7 +1613,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       expiresAtMs: details.expires_at_ms,
     })),
     hostTransportPreferences,
-    approvalError, error, pushStatus, remoteJobs,
+    approvalError, error, errorIsOffline, pushStatus, remoteJobs,
     accessToken, startLogin, openLoginPage, confirmNewRecovery, recoverExisting, scheduleCleanReset, cancelCleanReset, registerPasskey: registerRecoveryPasskey, recoverWithPasskey, renamePasskey: renameRecoveryPasskey, revokePasskey: revokeRecoveryPasskey, useRecoveryInstead, restartSetup, refresh, checkout, openBillingPortal,
     revokeDevice, revokeHost, renameHost, setHostDisabled, setHostTransportPreference, exportAccountData, selectHost, approvePairing, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
     enablePush, disablePush, logout,
@@ -1613,7 +1629,7 @@ export function useAnywhere(): AnywhereContextValue {
 }
 
 function message(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "Forge Anywhere could not complete the request";
+  return describeAnywhereError(reason);
 }
 
 function delay(milliseconds: number): Promise<void> {

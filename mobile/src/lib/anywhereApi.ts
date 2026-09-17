@@ -168,6 +168,41 @@ export function isAnywhereSessionInvalid(reason: unknown): reason is AnywhereApi
   return reason instanceof AnywhereApiError && reason.status === 401;
 }
 
+export const ANYWHERE_OFFLINE_MESSAGE = "Can't reach Forge Anywhere — check your internet connection.";
+
+// `anywhereRequest` only ever throws `AnywhereApiError` for a response it actually got back from
+// the service — anything else means `fetch()` itself failed before a response existed (no
+// connectivity, DNS resolution failure, TLS handshake failure, timeout). Those come back from
+// RN's networking stack as raw platform exception text (e.g. Android's
+// "fetch failed: java.net.UnknownHostException: Unable to resolve host ...") that reads like a
+// crash log, not a message meant for a person — match on well-known signatures rather than
+// showing that text verbatim.
+const NETWORK_ERROR_PATTERNS = [
+  /network request failed/i,
+  /failed to fetch/i,
+  /fetch failed/i,
+  /unknownhostexception/i,
+  /econnrefused/i,
+  /enotfound/i,
+  /eai_again/i,
+  /timed? ?out/i,
+  /no address associated with hostname/i,
+  /internet connection appears to be offline/i,
+];
+
+export function isAnywhereNetworkError(reason: unknown): boolean {
+  if (reason instanceof AnywhereApiError) return false;
+  const text = reason instanceof Error ? reason.message : String(reason);
+  return NETWORK_ERROR_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/** Human-facing message for an error thrown by `anywhereRequest`/`preflightAnywhere` — a plain
+ * offline notice for a network-layer failure, the server/validation message otherwise. */
+export function describeAnywhereError(reason: unknown): string {
+  if (isAnywhereNetworkError(reason)) return ANYWHERE_OFFLINE_MESSAGE;
+  return reason instanceof Error ? reason.message : "Forge Anywhere could not complete the request";
+}
+
 /** Observe authenticated 401s without ever putting bearer credentials in URLs or logs. */
 export function observeAnywhereUnauthorized(listener: AnywhereUnauthorizedListener): () => void {
   unauthorizedListeners.add(listener);
