@@ -1461,6 +1461,11 @@ async fn doctor() -> Result<()> {
             "not configured".to_string()
         }
     );
+    // #5: a typo like `[anywhere] nabled = true` silently leaves the connector disabled with no
+    // clue why — "connector: not configured" alone reads as "never set up", not "misspelled".
+    for warning in forge_config::anywhere_config_warnings() {
+        println!("  config: {warning}");
+    }
     let command_error = current_command_error()?;
     println!(
         "  commands: {}",
