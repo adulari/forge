@@ -1,5 +1,6 @@
 //! Managed encrypted relay connector for `forge serve`.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use forge_anywhere_protocol::bridge::{
     BridgeRequest, BridgeResponse, FrameDirection, RelayBlobReference, RouteId, WebSocketFrame,
     WebSocketFrameKind,
 };
+use forge_anywhere_protocol::envelope::{HEADER_LEN, SIGNATURE_LEN, TAG_LEN};
 use forge_anywhere_protocol::{
     CommandAcknowledgement, CommandErrorCode, CommandId, CommandResult, Envelope, EnvelopeKind,
     EnvelopeMetadata, QueuedCommandList, QueuedCommandMetadata, RecipientKind,
@@ -43,6 +45,19 @@ const MAX_INLINE_BODY: usize = 256 * 1024;
 /// offload did not engage until that same 256 KiB. Everything in between simply failed.
 const MAX_OUTBOUND_INLINE_BODY: usize = 64 * 1024;
 const MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The relay service (`forge-anywhere-service/src/relay_blob.rs` `MIN_RELAY_BLOB_BYTES`) rejects
+/// a `POST /v1/relay/blobs` reservation whose ciphertext is not strictly larger than this — a
+/// 400 `invalid_object_size`. `upload_blob` pads the plaintext so every blob it uploads clears
+/// this threshold, which is why a body between `MAX_OUTBOUND_INLINE_BODY` and this size (roughly
+/// `/api/models`, `/api/config`, history pages, short voice clips) failed outright before: it was
+/// too big to send inline and too small for the service to accept as a blob.
+const MIN_RELAY_BLOB_CIPHERTEXT_BYTES: u64 = 256 * 1024;
+
+/// Fixed expansion `Envelope::seal`/`encode` adds on top of the plaintext, independent of its
+/// size: the authenticated header, the AEAD tag, and the sender signature. Used to compute how
+/// much plaintext padding is needed to clear `MIN_RELAY_BLOB_CIPHERTEXT_BYTES`.
+const ENVELOPE_OVERHEAD_BYTES: u64 = (HEADER_LEN + TAG_LEN + SIGNATURE_LEN) as u64;
 const MAX_QUERY_LEN: usize = 4096;
 const RECONNECT_MIN_DELAY: Duration = Duration::from_secs(1);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);
@@ -964,14 +979,39 @@ fn verify_blob_object(
         bail!("encrypted relay blob routing metadata does not match its reference");
     }
     let sequence = metadata.sequence;
-    let plaintext = envelope
+    let mut plaintext = envelope
         .open(&identity.data_key, verifying_key)
         .context("authenticate and decrypt relay blob")?;
+    if let Some(true_len) = reference.plaintext_bytes {
+        let true_len =
+            usize::try_from(true_len).context("relay blob plaintext_bytes does not fit usize")?;
+        if true_len > plaintext.len() {
+            bail!("relay blob plaintext_bytes exceeds its decrypted length");
+        }
+        plaintext.truncate(true_len);
+    }
     Ok(VerifiedBlob {
         blob_id: reference.blob_id,
         plaintext,
         sequence,
     })
+}
+
+/// Pads `plaintext` with ASCII spaces, when needed, so the sealed envelope clears the relay
+/// service's minimum blob ciphertext size. Padding with spaces rather than zero bytes matters
+/// because every blob uploaded today carries a JSON body: JSON parsers ignore trailing whitespace
+/// after the top-level value, so a receiver that does not know about `plaintext_bytes` still
+/// parses the padded body successfully. Returns the true (pre-padding) length only when padding
+/// was actually added.
+fn pad_for_relay_minimum(plaintext: &[u8]) -> (Cow<'_, [u8]>, Option<u64>) {
+    let true_len = plaintext.len() as u64;
+    if true_len + ENVELOPE_OVERHEAD_BYTES > MIN_RELAY_BLOB_CIPHERTEXT_BYTES {
+        return (Cow::Borrowed(plaintext), None);
+    }
+    let target_len = (MIN_RELAY_BLOB_CIPHERTEXT_BYTES + 1 - ENVELOPE_OVERHEAD_BYTES) as usize;
+    let mut padded = plaintext.to_vec();
+    padded.resize(target_len, b' ');
+    (Cow::Owned(padded), Some(true_len))
 }
 
 async fn upload_blob(
@@ -980,12 +1020,13 @@ async fn upload_blob(
     recipient_device_id: [u8; 16],
     plaintext: &[u8],
 ) -> Result<RelayBlobReference> {
+    let (padded_plaintext, plaintext_bytes) = pad_for_relay_minimum(plaintext);
     let encoded = seal_for_recipient(
         store,
         EnvelopeKind::Blob,
         RecipientKind::Device,
         recipient_device_id,
-        plaintext,
+        &padded_plaintext,
     )?;
     let ciphertext_bytes = encoded.len() as u64;
     if ciphertext_bytes > MAX_BLOB_BYTES {
@@ -1017,6 +1058,7 @@ async fn upload_blob(
             blob_id,
             ciphertext_bytes,
             ciphertext_sha256,
+            plaintext_bytes,
         });
     }
     let upload_url = reservation
@@ -1056,6 +1098,7 @@ async fn upload_blob(
         blob_id,
         ciphertext_bytes,
         ciphertext_sha256,
+        plaintext_bytes,
     })
 }
 
@@ -1535,6 +1578,7 @@ mod tests {
             blob_id: [0x99; 16],
             ciphertext_bytes: encoded.len() as u64,
             ciphertext_sha256: Sha256::digest(&encoded).into(),
+            plaintext_bytes: None,
         };
 
         let verified = verify_blob_object(
@@ -1562,6 +1606,130 @@ mod tests {
             &identity,
             &sender_signing_key.verifying_key(),
             [0x78; 16],
+            reference,
+            &encoded,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_body_at_least_as_large_as_the_relay_minimum_is_not_padded() {
+        let large = vec![0x42; MIN_RELAY_BLOB_CIPHERTEXT_BYTES as usize];
+        let (padded, plaintext_bytes) = pad_for_relay_minimum(&large);
+        assert_eq!(plaintext_bytes, None);
+        assert_eq!(padded.as_ref(), large.as_slice());
+    }
+
+    #[test]
+    fn padding_clears_the_relay_minimum_and_round_trips_exact_bytes() {
+        // A 70 KB body, like the real-world `/api/models` and `/api/config` responses that used
+        // to fail: too big for MAX_OUTBOUND_INLINE_BODY, too small for the service's blob minimum.
+        let original = vec![0x41_u8; 70_000];
+        let (padded, plaintext_bytes) = pad_for_relay_minimum(&original);
+        assert_eq!(plaintext_bytes, Some(70_000));
+        assert!(padded.len() > original.len());
+        assert!(padded[original.len()..].iter().all(|&byte| byte == b' '));
+        assert!(
+            padded.len() as u64 + ENVELOPE_OVERHEAD_BYTES > MIN_RELAY_BLOB_CIPHERTEXT_BYTES,
+            "padded plaintext must seal into a ciphertext over the relay's minimum blob size",
+        );
+
+        let sender_signing_key = SigningKey::from_bytes(&[0xaa; 32]);
+        let identity = Identity {
+            account_id: [0x11; 16],
+            device_id: [0x22; 16],
+            host_id: [0x33; 16],
+            data_key: [0x55; 32],
+            data_key_epochs: BTreeMap::from([(3, [0x55; 32])]),
+            key_epoch: 3,
+            signing_key: SigningKey::from_bytes(&[0xbb; 32]),
+        };
+        let envelope = Envelope::seal(
+            EnvelopeMetadata {
+                kind: EnvelopeKind::Blob,
+                flags: 0,
+                account_id: identity.account_id,
+                sender_device_id: [0x77; 16],
+                recipient_kind: RecipientKind::Host,
+                recipient_id: identity.host_id,
+                key_epoch: identity.key_epoch,
+                sequence: 5,
+                created_at_ms: 1,
+                nonce: [0x99; 24],
+            },
+            &padded,
+            &identity.data_key,
+            &sender_signing_key,
+        )
+        .expect("seal padded blob");
+        let encoded = envelope.encode().expect("encode padded blob");
+        assert!(
+            encoded.len() as u64 > MIN_RELAY_BLOB_CIPHERTEXT_BYTES,
+            "sealed ciphertext of {} bytes must clear the service minimum",
+            encoded.len(),
+        );
+
+        let reference = RelayBlobReference {
+            blob_id: [0xcc; 16],
+            ciphertext_bytes: encoded.len() as u64,
+            ciphertext_sha256: Sha256::digest(&encoded).into(),
+            plaintext_bytes,
+        };
+        let verified = verify_blob_object(
+            &identity,
+            &sender_signing_key.verifying_key(),
+            [0x77; 16],
+            reference,
+            &encoded,
+        )
+        .expect("verify padded blob");
+        assert_eq!(
+            verified.plaintext, original,
+            "padding must not survive verification"
+        );
+    }
+
+    #[test]
+    fn plaintext_bytes_exceeding_the_decrypted_length_is_rejected() {
+        let sender_signing_key = SigningKey::from_bytes(&[0x11; 32]);
+        let identity = Identity {
+            account_id: [0x11; 16],
+            device_id: [0x22; 16],
+            host_id: [0x33; 16],
+            data_key: [0x55; 32],
+            data_key_epochs: BTreeMap::from([(3, [0x55; 32])]),
+            key_epoch: 3,
+            signing_key: SigningKey::from_bytes(&[0x66; 32]),
+        };
+        let envelope = Envelope::seal(
+            EnvelopeMetadata {
+                kind: EnvelopeKind::Blob,
+                flags: 0,
+                account_id: identity.account_id,
+                sender_device_id: [0x77; 16],
+                recipient_kind: RecipientKind::Host,
+                recipient_id: identity.host_id,
+                key_epoch: identity.key_epoch,
+                sequence: 8,
+                created_at_ms: 1,
+                nonce: [0x88; 24],
+            },
+            b"short",
+            &identity.data_key,
+            &sender_signing_key,
+        )
+        .expect("seal blob");
+        let encoded = envelope.encode().expect("encode blob");
+        let reference = RelayBlobReference {
+            blob_id: [0x99; 16],
+            ciphertext_bytes: encoded.len() as u64,
+            ciphertext_sha256: Sha256::digest(&encoded).into(),
+            plaintext_bytes: Some(1_000),
+        };
+        assert!(verify_blob_object(
+            &identity,
+            &sender_signing_key.verifying_key(),
+            [0x77; 16],
             reference,
             &encoded,
         )

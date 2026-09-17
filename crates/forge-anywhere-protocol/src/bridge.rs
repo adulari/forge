@@ -67,6 +67,12 @@ pub struct RelayBlobReference {
     pub ciphertext_bytes: u64,
     #[serde(with = "base64_hash")]
     pub ciphertext_sha256: [u8; 32],
+    /// True plaintext length before padding added to clear the relay service's minimum blob
+    /// size. Older peers omit this field and use the (padded) plaintext as-is; every blob we
+    /// send today carries a JSON body, and JSON parsers ignore trailing whitespace after the
+    /// top-level value, so an older receiver still parses it successfully.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaintext_bytes: Option<u64>,
 }
 
 mod hex_id {
@@ -221,6 +227,7 @@ mod tests {
             blob_id: [2; 16],
             ciphertext_bytes: 4096,
             ciphertext_sha256: [3; 32],
+            plaintext_bytes: None,
         };
         let response = BridgeResponse {
             request_id: [1; 16],
@@ -254,5 +261,42 @@ mod tests {
             .expect("encode frame")
             .get("bytes_blob")
             .is_none());
+    }
+
+    #[test]
+    fn plaintext_bytes_is_omitted_when_absent_and_round_trips_when_present() {
+        let reference = RelayBlobReference {
+            blob_id: [9; 16],
+            ciphertext_bytes: 262_145,
+            ciphertext_sha256: [7; 32],
+            plaintext_bytes: None,
+        };
+        let encoded = serde_json::to_value(reference).expect("encode reference");
+        assert!(encoded.get("plaintext_bytes").is_none());
+        assert_eq!(
+            serde_json::from_value::<RelayBlobReference>(encoded).expect("decode reference"),
+            reference
+        );
+
+        let padded = RelayBlobReference {
+            plaintext_bytes: Some(70_000),
+            ..reference
+        };
+        let encoded = serde_json::to_value(padded).expect("encode padded reference");
+        assert_eq!(encoded["plaintext_bytes"], 70_000);
+        assert_eq!(
+            serde_json::from_value::<RelayBlobReference>(encoded).expect("decode padded reference"),
+            padded
+        );
+
+        // An older peer's reference, encoded before this field existed, still decodes.
+        let mut legacy = serde_json::to_value(reference).expect("encode legacy reference");
+        legacy
+            .as_object_mut()
+            .expect("reference is an object")
+            .remove("plaintext_bytes");
+        let decoded: RelayBlobReference =
+            serde_json::from_value(legacy).expect("decode legacy reference");
+        assert_eq!(decoded.plaintext_bytes, None);
     }
 }
