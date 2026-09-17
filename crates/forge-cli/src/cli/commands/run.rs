@@ -4855,6 +4855,7 @@ mod tests {
             visibility: vis,
             tool_name: None,
             tool_phase: None,
+            nudge: false,
         };
         let epoch = Some(1_000);
 
@@ -4896,6 +4897,29 @@ mod tests {
         assert_eq!(note.kind, "system");
         assert_eq!(note.role, "assistant", "the raw role still rides the wire");
 
+        // A harness-injected continuation nudge is stored `role='user'` (see
+        // `Store::add_nudge_message`) but must read as its own kind, not "user" — a client must
+        // never claim the person typed it.
+        let nudge = map_history_row(
+            forge_store::HistoryRow {
+                seq: 7,
+                role: forge_types::Role::User,
+                content: "You have not modified any files. Implement the fix now.".into(),
+                model: None,
+                created_at: 1_040,
+                visibility: forge_types::Visibility::Llm,
+                tool_name: None,
+                tool_phase: None,
+                nudge: true,
+            },
+            epoch,
+        );
+        assert_eq!(nudge.kind, "nudge");
+        assert_eq!(
+            nudge.role, "user",
+            "the raw role stays 'user' — the model still needs a legal user turn"
+        );
+
         // No epoch (a session with nothing visible yet) means no offset — not a fake zero.
         assert_eq!(
             map_history_row(
@@ -4918,6 +4942,7 @@ mod tests {
                 visibility: forge_types::Visibility::Llm,
                 tool_name: Some("read_file".into()),
                 tool_phase: Some(forge_store::ToolPhase::Result),
+                nudge: false,
             },
             epoch,
         );
@@ -4938,6 +4963,7 @@ mod tests {
                 visibility: forge_types::Visibility::Llm,
                 tool_name: Some("read_file".into()),
                 tool_phase: Some(forge_store::ToolPhase::Call),
+                nudge: false,
             },
             epoch,
         );
@@ -4956,6 +4982,7 @@ mod tests {
                 visibility: forge_types::Visibility::UiOnly,
                 tool_name: None,
                 tool_phase: Some(forge_store::ToolPhase::Result),
+                nudge: false,
             },
             epoch,
         );

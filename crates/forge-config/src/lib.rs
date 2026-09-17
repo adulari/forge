@@ -327,6 +327,84 @@ impl AnywhereConfig {
     }
 }
 
+/// Keys `AnywhereConfig` actually recognizes. A user typo here (`nabled` for `enabled`) is
+/// silently dropped by Figment/serde — the field just keeps its default, with no error and no
+/// warning — so `[anywhere] nabled = true` left the connector disabled with `forge anywhere
+/// doctor` reporting only "connector: not configured", no pointer at the real cause (#5).
+const ANYWHERE_KNOWN_KEYS: &[&str] = &["enabled", "host_name", "sync", "service_url"];
+
+/// Unrecognized keys in `raw_toml`'s `[anywhere]` table, each paired with the closest known key
+/// when the two are close enough (edit distance <= 2) to be a plausible typo.
+fn anywhere_unknown_keys(raw_toml: &str) -> Vec<(String, Option<&'static str>)> {
+    let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
+        return Vec::new();
+    };
+    let Some(table) = value.get("anywhere").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    table
+        .keys()
+        .filter(|key| !ANYWHERE_KNOWN_KEYS.contains(&key.as_str()))
+        .map(|key| (key.clone(), closest_anywhere_key(key)))
+        .collect()
+}
+
+fn closest_anywhere_key(key: &str) -> Option<&'static str> {
+    ANYWHERE_KNOWN_KEYS
+        .iter()
+        .copied()
+        .map(|known| (known, levenshtein(key, known)))
+        .filter(|(_, dist)| *dist <= 2)
+        .min_by_key(|(_, dist)| *dist)
+        .map(|(known, _)| known)
+}
+
+/// Classic Wagner-Fischer edit distance, used only for the small "did you mean" hint above — not
+/// performance-sensitive (a handful of short config-key comparisons per load).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, &ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, &cb) in b.iter().enumerate() {
+            cur[j + 1] = if ca == cb {
+                prev[j]
+            } else {
+                1 + prev[j].min(prev[j + 1]).min(cur[j])
+            };
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// Human-readable warnings for unrecognized `[anywhere]` keys across every config file
+/// [`load`] reads (user config dir + project `./.forge/config.toml`). Shared by the loader's own
+/// warning and `forge anywhere doctor`, so both name the same typo the same way.
+pub fn anywhere_config_warnings() -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(dir) = config_dir() {
+        paths.push(dir.join("config.toml"));
+    }
+    paths.push(PathBuf::from("./.forge/config.toml"));
+    let mut warnings = Vec::new();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (key, suggestion) in anywhere_unknown_keys(&text) {
+            warnings.push(match suggestion {
+                Some(known) => {
+                    format!("unknown key `{key}` in [anywhere] — did you mean `{known}`?")
+                }
+                None => format!("unknown key `{key}` in [anywhere]"),
+            });
+        }
+    }
+    warnings
+}
+
 /// The default `forge serve` port when `[remote] port` is unset (see [`RemoteConfig::port`]).
 pub const DEFAULT_SERVE_PORT: u16 = 7420;
 
@@ -2876,6 +2954,14 @@ pub fn load() -> Result<Config, ConfigError> {
         }
     }
 
+    // A typo in `[anywhere]` (e.g. `nabled` for `enabled`) is otherwise silent: Figment/serde drop
+    // an unrecognized key with no error, so the connector just stays off (#5). `forge anywhere
+    // doctor` surfaces the same warnings on request; this is the passive path for anyone who never
+    // runs doctor.
+    for warning in anywhere_config_warnings() {
+        tracing::warn!("{warning}");
+    }
+
     Ok(config)
 }
 
@@ -3722,6 +3808,44 @@ models = {}
     fn no_explicit_tiers_without_a_mesh_models_table() {
         assert!(configured_model_tiers("[mesh]\nauto_discover = true\n").is_empty());
         assert!(configured_model_tiers("").is_empty());
+    }
+
+    #[test]
+    fn anywhere_typo_is_caught_with_a_did_you_mean_hint() {
+        // #5: `[anywhere] nabled = true` silently disabled the connector with zero diagnostic.
+        let unknown = anywhere_unknown_keys("[anywhere]\nnabled = true\n");
+        assert_eq!(unknown, vec![("nabled".to_string(), Some("enabled"))]);
+    }
+
+    #[test]
+    fn anywhere_known_keys_produce_no_warning() {
+        let unknown = anywhere_unknown_keys(
+            "[anywhere]\nenabled = true\nhost_name = \"laptop\"\nsync = false\n\
+             service_url = \"http://localhost:8080\"\n",
+        );
+        assert!(unknown.is_empty(), "{unknown:?}");
+    }
+
+    #[test]
+    fn anywhere_unknown_key_far_from_any_known_key_gets_no_guess() {
+        // A key with no plausible match should say so rather than propose a random near-miss.
+        let unknown = anywhere_unknown_keys("[anywhere]\nxyz_totally_unrelated = 1\n");
+        assert_eq!(unknown, vec![("xyz_totally_unrelated".to_string(), None)]);
+    }
+
+    #[test]
+    fn anywhere_unknown_keys_ignore_other_tables_and_malformed_toml() {
+        assert!(anywhere_unknown_keys("[mesh]\nnabled = true\n").is_empty());
+        assert!(anywhere_unknown_keys("not valid toml {{{").is_empty());
+        assert!(anywhere_unknown_keys("").is_empty());
+    }
+
+    #[test]
+    fn levenshtein_matches_known_distances() {
+        assert_eq!(levenshtein("enabled", "enabled"), 0);
+        assert_eq!(levenshtein("nabled", "enabled"), 1);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("", "abc"), 3);
     }
 
     #[test]

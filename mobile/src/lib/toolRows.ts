@@ -135,7 +135,15 @@ export function buildTranscript(rowsNewestFirst: HistoryRow[]): TranscriptEntry[
   let n = 0;
   for (let i = rowsNewestFirst.length - 1; i >= 0; i--) {
     const row = rowsNewestFirst[i];
-    if (rowKind(row) !== "tool") {
+    const kind = rowKind(row);
+    if (kind !== "tool") {
+      // A whitespace-only assistant turn has nothing to show — its real text may live only on
+      // tool rows this page didn't fetch (`include_tools`), or the daemon hasn't persisted prose
+      // for it yet. Rendering it produces an empty "Forge" bubble with nothing under it, which
+      // reads as "the reply vanished" rather than as a turn that legitimately said nothing — so
+      // it's skipped. A `kind: "system"` row (a completion/status note) is exempt: it's never
+      // blank in practice and must still render even though it also carries `role: "assistant"`.
+      if (kind !== "system" && row.role === "assistant" && row.content.trim() === "") continue;
       out.push({ kind: "message", key: `h${row.seq}-${n++}`, row });
       continue;
     }

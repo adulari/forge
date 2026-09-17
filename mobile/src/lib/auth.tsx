@@ -16,7 +16,7 @@ import { isTauri } from "./platform";
 import { getIdentity, probeConnection } from "./api";
 import { deleteSecureItem, getSecureItem, setSecureItem } from "./secureStore";
 import { parseConnectUrl } from "./connectUrl";
-import { applyServerIdentity, reconcileAnywhereHosts, repointMovedDaemons, type ManagedAnywhereHost, type StoredServer } from "./serverTargets";
+import { applyServerIdentity, reconcileAnywhereHosts, repointMovedDaemons, selectActiveServerAfterSync, type ManagedAnywhereHost, type StoredServer } from "./serverTargets";
 import { detectForgeServe } from "./desktopServe";
 export { parseConnectUrl, type ParsedConnectUrl } from "./connectUrl";
 export { type StoredServer } from "./serverTargets";
@@ -260,11 +260,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const next = await reconcileAnywhereHosts(loadServers, saveServers, hosts);
         setServers(next);
         const active = await getSecureItem(ACTIVE_SERVER_KEY);
-        if (active && !next.some((server) => server.id === active)) {
-          const fallback = next[0]?.id ?? null;
-          if (fallback) await setSecureItem(ACTIVE_SERVER_KEY, fallback);
+        const nextActive = selectActiveServerAfterSync(active, next);
+        if (nextActive !== active) {
+          if (nextActive) await setSecureItem(ACTIVE_SERVER_KEY, nextActive);
           else await deleteSecureItem(ACTIVE_SERVER_KEY);
-          setActiveServerId(fallback);
+          setActiveServerId(nextActive);
         }
       });
     },

@@ -9,9 +9,10 @@
 // backdrop dimming on web, so this screen renders its own centered 600pt card + scrim,
 // matching the desktop "Forge a Task" modal — same pattern OverlayPanel/CommandPalette use
 // for their wide variant.
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router, useLocalSearchParams } from "expo-router";
 import { Check, ChevronDown, X } from "lucide-react-native";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -36,7 +37,9 @@ import { useAuth } from "../lib/auth";
 import { useIncomingShare } from "../lib/incomingShare";
 import { appendIncomingShareText } from "../lib/incomingShareCore";
 import { goBackOr } from "../lib/nav";
-import { lastProjectStorageKey } from "../lib/projectSelection";
+import { buildInitialPromptQueue, offlineQueueKey } from "../lib/offlineQueue";
+import { isKnownGitRepo, lastProjectStorageKey } from "../lib/projectSelection";
+import { transportForBaseUrl } from "../lib/serverTargets";
 import { useCreateSession, useProjects } from "../lib/queries";
 import { getSecureItem, setSecureItem } from "../lib/secureStore";
 import { useTheme, useTokens } from "../theme/ThemeProvider";
@@ -74,18 +77,25 @@ function HostPicker({
   value,
   onChange,
   activeServerName,
+  activeServerTransport,
   hosts,
 }: {
   value: HostChoice;
   onChange: (choice: HostChoice) => void;
   activeServerName: string;
+  /** The active server's real transport — a server paired through Forge Anywhere has a
+   * `fany://` baseUrl and is only ever reachable over the relay, never "direct", even though
+   * it's also today's "This device" default. */
+  activeServerTransport: "anywhere" | "direct";
   hosts: AnywhereHost[];
 }) {
   const tokens = useTokens();
   const [visible, setVisible] = useState(false);
 
   const selectedLabel = value.kind === "default" ? activeServerName : value.host.name;
-  const selectedMeta = value.kind === "default" ? "direct · default" : `${hostStateText(value.host)} · anywhere`;
+  const selectedMeta = value.kind === "default"
+    ? `${activeServerTransport} · default`
+    : `${hostStateText(value.host)} · anywhere`;
 
   const select = (choice: HostChoice) => {
     onChange(choice);
@@ -115,7 +125,7 @@ function HostPicker({
             <SectionHeader>This device</SectionHeader>
             <ListRow
               title={`${activeServerName} (default)`}
-              subtitle="direct"
+              subtitle={activeServerTransport}
               leading={<View style={[styles.defaultHostDot, { backgroundColor: tokens.success }]} />}
               trailing={value.kind === "default" ? <Check size={16} strokeWidth={2} color={tokens.success} /> : undefined}
               onPress={() => select({ kind: "default" })}
@@ -165,7 +175,7 @@ export default function NewSessionScreen() {
     ? params.incomingShare[0]
     : params.incomingShare;
   const { pendingShare, consumeShare } = useIncomingShare();
-  const { activeServerId, servers } = useAuth();
+  const { activeServerId, servers, baseUrl } = useAuth();
   const projects = useProjects();
   const importedShareId = useRef<string | null>(null);
   const initializedProjectKey = useRef<string | null>(null);
@@ -177,6 +187,14 @@ export default function NewSessionScreen() {
   const [temper, setTemper] = useState<Temper>("Ask");
   const create = useCreateSession();
   const toast = useToast();
+
+  // A worktree needs a git repo underneath it — the daemon's own default cwd is very often just
+  // a home/workspace folder, not one (see projectSelection.ts). `null` means "the catalog never
+  // told us" (manual path, still loading) — only an explicit `false` turns the toggle off.
+  const cwdIsGitRepo = useMemo(() => isKnownGitRepo(cwd, projects.data ?? null), [cwd, projects.data]);
+  useEffect(() => {
+    if (cwdIsGitRepo === false) setWorktree(false);
+  }, [cwdIsGitRepo]);
 
   useEffect(() => {
     if (
@@ -194,6 +212,7 @@ export default function NewSessionScreen() {
   const { signedIn: anywhereSignedIn } = useAnywhere();
   const { hosts: anywhereHosts } = useAnywhereHosts();
   const activeServerName = servers.find((s) => s.id === activeServerId)?.name ?? "this server";
+  const activeServerTransport = transportForBaseUrl(baseUrl);
   const showHostPicker = anywhereSignedIn && anywhereHosts.length > 0;
   const [hostChoice, setHostChoice] = useState<HostChoice>({ kind: "default" });
   const isOfflineHostQueue =
@@ -270,11 +289,28 @@ export default function NewSessionScreen() {
         onSuccess: (res) => {
           if (incomingShareId) void consumeShare(incomingShareId);
           if (activeServerId) void setSecureItem(lastProjectStorageKey(activeServerId), res.cwd);
-          router.replace(`/session/${res.id}`);
+          // The daemon has no initial-prompt param (see CreateSessionRequest) — the task text
+          // rides the same durable offline-prompt queue a live chat screen already drains on
+          // its first socket-open edge, so it survives the gap between "session created" and
+          // "this new screen's WS connects" instead of being silently dropped.
+          const initialQueue = buildInitialPromptQueue(task);
+          const seedQueue = initialQueue.length > 0
+            ? AsyncStorage.setItem(offlineQueueKey(baseUrl, res.id), JSON.stringify(initialQueue)).catch(() => {
+                // best-effort — worst case the composer opens with no queued first prompt
+              })
+            : Promise.resolve();
+          void seedQueue.then(() => {
+            // This screen is a `presentation: "modal"` Stack.Screen (see app/_layout.tsx) — a
+            // plain `replace` leaves the native modal transition in place and the target route
+            // renders behind/under it as a blank screen on Android. `dismissTo` pops the modal
+            // off the stack and lands on `/session/[id]` in its place (falling back to a normal
+            // navigate when that route isn't already in history, which it never is here).
+            router.dismissTo(`/session/${res.id}`);
+          });
         },
       },
     );
-  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktree, temper, activeServerId, consumeShare, incomingShareId]);
+  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktree, temper, activeServerId, baseUrl, consumeShare, incomingShareId]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
 
@@ -319,7 +355,13 @@ export default function NewSessionScreen() {
       <View>
         <ProjectPicker value={cwd} onChange={rememberProject} />
         {showHostPicker ? (
-          <HostPicker value={hostChoice} onChange={setHostChoice} activeServerName={activeServerName} hosts={anywhereHosts} />
+          <HostPicker
+            value={hostChoice}
+            onChange={setHostChoice}
+            activeServerName={activeServerName}
+            activeServerTransport={activeServerTransport}
+            hosts={anywhereHosts}
+          />
         ) : null}
         <ModelPicker value={model} onChange={setModel} />
       </View>
@@ -328,9 +370,16 @@ export default function NewSessionScreen() {
         <Text style={[typeScale.sub, { color: tokens.ink3 }]}>{TEMPER_HINT[temper]}</Text>
       </View>
       <View style={styles.worktreeRow}>
-        <Switch value={worktree} onValueChange={setWorktree} accessibilityLabel="Isolated git worktree" />
+        <Switch
+          value={worktree}
+          onValueChange={setWorktree}
+          disabled={cwdIsGitRepo === false}
+          accessibilityLabel="Isolated git worktree"
+        />
         <Text style={[typeScale.body, styles.worktreeLabel, { color: tokens.ink }]}>Isolated git worktree</Text>
-        <Text style={[typeScale.meta, { color: tokens.ink4 }]}>recommended</Text>
+        <Text style={[typeScale.meta, { color: tokens.ink4 }]}>
+          {cwdIsGitRepo === false ? "not a git project" : "recommended"}
+        </Text>
       </View>
       {showHostPicker && hostChoice.kind === "anywhere" ? (
         isOfflineHostQueue ? (

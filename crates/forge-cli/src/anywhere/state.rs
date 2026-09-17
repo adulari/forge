@@ -9,6 +9,107 @@ pub(crate) const PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 pub(crate) const PAIRING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) const LINK_STALE_AFTER: Duration = Duration::from_secs(90);
 
+/// A crashed or killed process's atomic-write temp file that outlives it is left alone this long
+/// before `StateStore::platform` sweeps it — long enough that an in-flight write from a live
+/// process is never mistaken for an orphan.
+const STALE_TEMP_FILE_AFTER: Duration = Duration::from_secs(10 * 60);
+
+/// Removes its target path on drop unless [`disarm`](Self::disarm) is called first. Guarantees an
+/// atomic-write temp file is cleaned up on any error between its creation and the rename that
+/// installs it — not only the rename failure, which used to be the only path handled explicitly.
+struct RemoveOnDrop {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl RemoveOnDrop {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Builds a temp-file path in the pattern the sweep in [`sweep_stale_temp_files`] recognizes:
+/// `.<prefix>-<pid>-<16 hex digits>.tmp`.
+fn temp_path(parent: &Path, prefix: &str) -> PathBuf {
+    parent.join(format!(
+        ".{prefix}-{}-{:016x}.tmp",
+        std::process::id(),
+        rand::random::<u64>()
+    ))
+}
+
+/// Sweeps `.state-*.tmp`, `.link-state-*.tmp`, and `.command-state-*.tmp` files left behind by a
+/// process that crashed or was killed between creating its atomic-write temp file and renaming it
+/// into place — some of which are full copies of `state.json`, which holds live credentials. Never
+/// touches anything else in `dir`: real state files don't start with `.` or end in `.tmp`.
+fn sweep_stale_temp_files(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(pid) = stale_temp_file_pid(name) else {
+            continue;
+        };
+        let is_stale = !process_is_alive(pid) || older_than(&entry, STALE_TEMP_FILE_AFTER);
+        if is_stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Parses the pid embedded in a temp file name matching one of the three atomic-write prefixes,
+/// returning `None` for anything else so the sweep leaves it untouched.
+fn stale_temp_file_pid(name: &str) -> Option<u32> {
+    for prefix in [".state-", ".link-state-", ".command-state-"] {
+        if let Some(rest) = name
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+        {
+            return rest.split('-').next()?.parse().ok();
+        }
+    }
+    None
+}
+
+fn older_than(entry: &std::fs::DirEntry, age: Duration) -> bool {
+    let Ok(metadata) = entry.metadata() else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    SystemTime::now()
+        .duration_since(modified)
+        .is_ok_and(|elapsed| elapsed > age)
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    // Signal zero performs permission/liveness validation without delivering a signal.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct LinkState {
     pub(crate) daemon_pid: u32,
@@ -74,18 +175,13 @@ impl LinkStateStore {
             .context("Anywhere link state path has no parent")?;
         std::fs::create_dir_all(parent).context("create Forge Anywhere state directory")?;
         set_owner_directory_permissions(parent)?;
-        let temp = parent.join(format!(
-            ".link-state-{}-{:016x}.tmp",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
+        let temp = temp_path(parent, "link-state");
+        let guard = RemoveOnDrop::new(temp.clone());
         let bytes = serde_json::to_vec(state).context("serialize Forge Anywhere link state")?;
         std::fs::write(&temp, bytes).context("write Forge Anywhere link state")?;
         set_owner_file_permissions(&temp)?;
-        if let Err(error) = std::fs::rename(&temp, &self.path) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(error).context("install Forge Anywhere link state");
-        }
+        std::fs::rename(&temp, &self.path).context("install Forge Anywhere link state")?;
+        guard.disarm();
         Ok(())
     }
 }
@@ -127,18 +223,13 @@ impl CommandStateStore {
             .context("Anywhere command state path has no parent")?;
         std::fs::create_dir_all(parent).context("create Forge Anywhere state directory")?;
         set_owner_directory_permissions(parent)?;
-        let temp = parent.join(format!(
-            ".command-state-{}-{:016x}.tmp",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
+        let temp = temp_path(parent, "command-state");
+        let guard = RemoveOnDrop::new(temp.clone());
         let bytes = serde_json::to_vec(state).context("serialize Forge Anywhere command state")?;
         std::fs::write(&temp, bytes).context("write Forge Anywhere command state")?;
         set_owner_file_permissions(&temp)?;
-        if let Err(error) = std::fs::rename(&temp, &self.path) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(error).context("install Forge Anywhere command state");
-        }
+        std::fs::rename(&temp, &self.path).context("install Forge Anywhere command state")?;
+        guard.disarm();
         Ok(())
     }
 }
@@ -261,6 +352,9 @@ impl StateStore {
             .context("no Forge platform data directory is available")?
             .join("anywhere")
             .join("state.json");
+        if let Some(parent) = path.parent() {
+            sweep_stale_temp_files(parent);
+        }
         Ok(Self { path })
     }
 
@@ -297,8 +391,8 @@ impl StateStore {
         std::fs::create_dir_all(parent).context("create Forge Anywhere state directory")?;
         set_owner_directory_permissions(parent)?;
 
-        let suffix = rand::random::<u64>();
-        let temp = parent.join(format!(".state-{}-{suffix:016x}.tmp", std::process::id()));
+        let temp = temp_path(parent, "state");
+        let guard = RemoveOnDrop::new(temp.clone());
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -315,10 +409,8 @@ impl StateStore {
         file.sync_all().context("sync Forge Anywhere state")?;
         drop(file);
         set_owner_file_permissions(&temp)?;
-        if let Err(error) = std::fs::rename(&temp, &self.path) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(error).context("install Forge Anywhere state");
-        }
+        std::fs::rename(&temp, &self.path).context("install Forge Anywhere state")?;
+        guard.disarm();
         set_owner_file_permissions(&self.path)?;
         sync_directory(parent).context("sync Forge Anywhere state directory")
     }
@@ -412,4 +504,113 @@ pub(crate) fn set_owner_directory_permissions(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 pub(crate) fn set_owner_directory_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_on_drop_cleans_up_unless_disarmed() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join(".state-1-0000000000000000.tmp");
+
+        std::fs::write(&path, b"partial write").expect("write temp file");
+        drop(RemoveOnDrop::new(path.clone()));
+        assert!(
+            !path.exists(),
+            "an armed guard removes its temp file on drop"
+        );
+
+        std::fs::write(&path, b"partial write").expect("recreate temp file");
+        RemoveOnDrop::new(path.clone()).disarm();
+        assert!(path.exists(), "a disarmed guard leaves its temp file alone");
+    }
+
+    #[test]
+    fn save_removes_its_temp_file_when_the_final_rename_fails() {
+        // Renaming a regular file onto an existing, non-empty path that is itself a directory is
+        // a deterministic, portable way to force the rename step of `save` to fail without
+        // relying on filesystem permission tricks.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let blocked = temp_dir.path().join("blocked");
+        std::fs::create_dir(&blocked).expect("create blocking directory");
+        let store = StateStore { path: blocked };
+
+        let result = store.save(&LocalState {
+            version: STATE_VERSION,
+            ..LocalState::default()
+        });
+        assert!(result.is_err(), "renaming onto a directory must fail");
+
+        let leftovers: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .expect("read temp dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".state-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed rename must not leak its temp file: {leftovers:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_removes_temp_files_whose_pid_is_dead_but_leaves_live_ones_and_real_state_alone() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let dir = temp_dir.path();
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn short-lived helper process");
+        let dead_pid = child.id();
+        child.wait().expect("wait for helper process to exit");
+
+        let dead = dir.join(format!(".state-{dead_pid}-aaaaaaaaaaaaaaaa.tmp"));
+        std::fs::write(&dead, b"leaked credentials").expect("write dead-pid temp file");
+
+        let live_pid = std::process::id();
+        let live = dir.join(format!(".command-state-{live_pid}-bbbbbbbbbbbbbbbb.tmp"));
+        std::fs::write(&live, b"in flight").expect("write live-pid temp file");
+
+        let real_state = dir.join("state.json");
+        std::fs::write(&real_state, b"{}").expect("write real state file");
+        let lock = dir.join("state.lock");
+        std::fs::write(&lock, b"").expect("write lock file");
+
+        sweep_stale_temp_files(dir);
+
+        assert!(
+            !dead.exists(),
+            "a temp file for a dead process must be swept"
+        );
+        assert!(
+            live.exists(),
+            "a temp file for a live, recent process must be left alone"
+        );
+        assert!(
+            real_state.exists(),
+            "sweep must never touch the real state file"
+        );
+        assert!(lock.exists(), "sweep must never touch the lock file");
+    }
+
+    #[test]
+    fn stale_temp_file_pid_ignores_files_outside_the_three_known_patterns() {
+        assert_eq!(stale_temp_file_pid("state.json"), None);
+        assert_eq!(stale_temp_file_pid("state.lock"), None);
+        assert_eq!(stale_temp_file_pid("outgoing-jobs.json"), None);
+        assert_eq!(
+            stale_temp_file_pid(".state-123-aaaaaaaaaaaaaaaa.tmp"),
+            Some(123)
+        );
+        assert_eq!(
+            stale_temp_file_pid(".link-state-456-bbbbbbbbbbbbbbbb.tmp"),
+            Some(456)
+        );
+        assert_eq!(
+            stale_temp_file_pid(".command-state-789-cccccccccccccccc.tmp"),
+            Some(789)
+        );
+    }
 }

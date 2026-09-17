@@ -49,7 +49,7 @@ export function ProjectPicker({ value, onChange, error }: ProjectPickerProps) {
   const browser = useBrowseProjects(browsePath, visible && mode === "browse");
 
   const choices = useMemo(
-    () => (projects.data ? projectChoices(projects.data.default_cwd, projects.data.recent) : []),
+    () => (projects.data ? projectChoices(projects.data.default_cwd, projects.data.recent, projects.data.roots) : []),
     [projects.data],
   );
 

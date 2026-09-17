@@ -12,6 +12,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { DiffLines } from "./DiffLines";
+import { headEllipsis } from "./pathTruncate";
 import { ReviewCommentSheet } from "./ReviewCommentSheet";
 import { type DiffCell, toUnifiedRows } from "../git/diffModel";
 import { Badge, type BadgeTone } from "../ds/Badge";
@@ -44,14 +45,7 @@ export interface DiffCardProps {
   maxHeight?: number;
 }
 
-const HEAD_ELLIPSIS_MAX = 42;
 const COPY_RESET_MS = 1200;
-
-/** Mono "head-ellipsis": keeps the tail of a long path, prefixed with an ellipsis. */
-function headEllipsis(path: string, max: number = HEAD_ELLIPSIS_MAX): string {
-  if (path.length <= max) return path;
-  return `…${path.slice(-(max - 1))}`;
-}
 
 function kindTone(kind: DiffFile["kind"]): BadgeTone {
   switch (kind) {
@@ -212,6 +206,11 @@ function DiffFileSection({
             selectable
             style={[typeScale.bodyBold, { color: tokens.ink, fontFamily: monoFamily.regular }, styles.filePath]}
             numberOfLines={1}
+            // "head": if the row is still narrower than `headEllipsis`'s own char budget, RN's
+            // own truncation must also cut from the front, not the tail — the default "tail"
+            // mode was re-truncating the basename `headEllipsis` had just gone out of its way
+            // to keep.
+            ellipsizeMode="head"
           >
             {headEllipsis(file.path)}
           </Text>
@@ -282,7 +281,16 @@ function DiffFileSection({
       ) : null}
 
       {expanded && !file.binary ? (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={[styles.hunkScroll, styles.horizontalScroll]}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={[styles.hunkScroll, styles.horizontalScroll]}
+          // `DiffLines`' own rows are `minWidth: "100%"` so a short diff's added/removed
+          // background still spans the full card width — that percentage resolves against
+          // this content container, not the ScrollView's viewport, unless the container is
+          // told to be at least as wide as the viewport itself.
+          contentContainerStyle={styles.hunkScrollContent}
+        >
           <View>
             {file.hunks.map((hunk, hIdx) => (
               <View key={hIdx} style={styles.hunk}>
@@ -355,6 +363,7 @@ const styles = StyleSheet.create({
   selectionClose: { width: 24, height: 24, alignItems: "center", justifyContent: "center" },
   hunkScroll: { marginBottom: space.space4 },
   horizontalScroll: { flexGrow: 0, flexShrink: 0 },
+  hunkScrollContent: { minWidth: "100%" },
   hunk: { paddingBottom: space.space8 },
   hunkHeader: { paddingHorizontal: space.space12, paddingVertical: space.space4 },
   footer: { paddingHorizontal: space.space12, paddingVertical: space.space8 },

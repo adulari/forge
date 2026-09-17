@@ -156,6 +156,12 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/components/ds/IconButton.tsx",
+    "platform": "web/native",
+    "reason": "focus-visible ring is web-only; touch platforms must not keep a ring after a sheet closes",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/components/ds/Input.tsx",
     "platform": "web/native",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
@@ -258,6 +264,12 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/components/shell/TerminalDock.tsx",
+    "platform": "web/native",
+    "reason": "Android delivers the soft keyboard's Enter as a submit, not a key press, so the newline is sent there",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/lib/AnywhereProvider.tsx",
     "platform": "desktop",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
@@ -315,6 +327,12 @@
     "file": "mobile/src/lib/auth.tsx",
     "platform": "desktop",
     "reason": "runtime-gated daemon pairing seed for connected desktop performance capture; normal pairing flow remains shared",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/biometricLabel.ts",
+    "platform": "web/native",
+    "reason": "the unlock prompt is named per platform: Face ID/Touch ID on iOS, biometric unlock elsewhere",
     "category": "capability"
   },
   {

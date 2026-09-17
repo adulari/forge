@@ -12,6 +12,7 @@ import { Plus, RefreshCw, RotateCcw, Square, Terminal } from "lucide-react-nativ
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   NativeSyntheticEvent,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -39,6 +40,7 @@ import { AnsiScrollback, type AnsiColor, type AnsiLine, type AnsiSpan } from "./
 import {
   compareTerminalIds,
   nextTerminalId,
+  terminalInputDelta,
   terminalTitle,
 } from "./terminalModel";
 
@@ -217,6 +219,9 @@ export function TerminalDock({
   const scrollRef = useRef<ScrollView | null>(null);
   const stickyRef = useRef(true);
   const inputRef = useRef<TextInput | null>(null);
+  // The hidden capture input's own last known text — see terminalInputDelta for why this is
+  // tracked instead of assuming the native buffer actually clears back to "" between keystrokes.
+  const lastNativeTextRef = useRef("");
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartRef = useRef(false);
   const suppressReconnectRef = useRef(false);
@@ -444,7 +449,41 @@ export function TerminalDock({
       // double-send every keystroke.
       if (key.length === 1) return;
       const mapped = CONTROL_KEYS[key];
-      if (mapped) send(mapped);
+      if (mapped) {
+        send(mapped);
+        // A control key handled here (notably Backspace on an IME that reports it this way
+        // instead of shrinking onChangeText's text) never touched the tracked buffer above —
+        // reset it too, so the next onChangeText diffs from the buffer's real state.
+        lastNativeTextRef.current = "";
+        inputRef.current?.clear();
+      }
+    },
+    [send],
+  );
+
+  // Android delivers the soft keyboard's Enter on a single-line input as a submit, never as an
+  // onKeyPress "Enter", so without this the shell never received a newline. iOS and web do send
+  // the keypress, which already wrote "\r" above.
+  const onSubmitEditing = useCallback(() => {
+    if (Platform.OS !== "android") return;
+    send(CONTROL_KEYS.Enter);
+    lastNativeTextRef.current = "";
+    inputRef.current?.clear();
+  }, [send]);
+
+  const onChangeText = useCallback(
+    (text: string) => {
+      // See terminalInputDelta: the native buffer is not guaranteed to have actually reset to ""
+      // since the last keystroke, so `text` may be just the new character OR the whole
+      // accumulated buffer — either way, diffing against what we last saw yields the right thing
+      // to send exactly once.
+      const delta = terminalInputDelta(lastNativeTextRef.current, text);
+      lastNativeTextRef.current = text;
+      if (delta) send(delta);
+      // Best-effort: encourage the native buffer back to empty so it doesn't grow without bound
+      // over a long typing session. Correctness does not depend on this actually taking effect
+      // before the next keystroke — terminalInputDelta handles either outcome.
+      inputRef.current?.clear();
     },
     [send],
   );
@@ -529,11 +568,14 @@ export function TerminalDock({
         </ScrollView>
         <TextInput
           ref={inputRef}
-          value=""
-          onChangeText={(text) => {
-            if (text) send(text);
-          }}
+          // Deliberately uncontrolled (no `value` prop): a literal `value=""` fights Android's
+          // native EditText for ownership of its own buffer on every re-render, which is what
+          // let keystrokes accumulate into the native side instead of actually clearing —
+          // onChangeText's delta computation (terminalInputDelta) is what keeps this correct now,
+          // not a controlled value forcing a reset.
+          onChangeText={onChangeText}
           onKeyPress={onKeyPress}
+          onSubmitEditing={onSubmitEditing}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           style={styles.input}

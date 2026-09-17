@@ -157,10 +157,21 @@ export const webInputTextStyle: TextStyle = Platform.OS === "web" ? { fontSize: 
 // Format helpers (§2)
 // ---------------------------------------------------------------------------
 
-/** `$0.0421` (4dp) under $1, `$12.48` (2dp) at/above $1. */
+/** `$0.0421` (4dp) under a cent, `$12.48` (2dp) otherwise; nothing spent reads `$0.00`. */
 export function formatCost(usd: number): string {
   const magnitude = Math.abs(usd);
+  if (magnitude === 0) return "$0.00";
   return magnitude < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
+/** A rounded aggregate total (Fleet's "$X today") reads worse at 4-decimal precision than a
+ * live per-session ticker does — "$0.0000" looks broken, not "no spend yet". Two decimals for
+ * a real amount, `<$0.01` for a nonzero remainder too small to show, `$0.00` for exactly zero. */
+export function formatCostSummary(usd: number): string {
+  const magnitude = Math.abs(usd);
+  if (magnitude === 0) return "$0.00";
+  if (magnitude < 0.01) return "<$0.01";
+  return `$${usd.toFixed(2)}`;
 }
 
 function formatTokenCount(n: number): string {

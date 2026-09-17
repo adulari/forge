@@ -111,3 +111,26 @@ export async function reconcileAnywhereHosts(
   if (JSON.stringify(next) !== JSON.stringify(current)) await save(next);
   return next;
 }
+
+/** A managed Anywhere host's baseUrl is always `fany://<host id>`; every other server (paired
+ * directly by URL/QR) is "direct". Shared by every UI surface that labels a host/session by
+ * transport, so a relay-reached server is never mislabeled "direct" just because it also happens
+ * to run on a familiar-looking hostname. */
+export function transportForBaseUrl(baseUrl: string | null | undefined): "anywhere" | "direct" {
+  return baseUrl?.startsWith("fany://") ? "anywhere" : "direct";
+}
+
+/** Active-server fallback after an Anywhere host sync. A stored active id that still exists in
+ * `next` is left untouched. Otherwise a fallback is picked — this covers BOTH the id having
+ * disappeared (server removed) AND there having been no active id at all yet: a fresh device
+ * with nothing paired reconciles its first Anywhere host into `next` but `active` is still
+ * null, and without this branch nothing ever selects it — the app is stuck on the unpaired
+ * welcome screen until a restart re-derives `isPaired` some other way. Returns the same
+ * `active` value (by `===`) when nothing should change, so callers can skip the write. */
+export function selectActiveServerAfterSync(
+  active: string | null,
+  next: readonly StoredServer[],
+): string | null {
+  if (active && next.some((server) => server.id === active)) return active;
+  return next[0]?.id ?? null;
+}

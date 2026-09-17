@@ -218,6 +218,23 @@ impl Store {
         Ok((msgs, total.max(0) as usize))
     }
 
+    /// Append a harness-injected nudge: `role=user` (the model needs a legal user turn next) but
+    /// flagged `nudge=1` so a client can tell it apart from what the person typed (migration_0036,
+    /// read back on `HistoryRow::nudge` by `load_history_page_with` below).
+    pub fn add_nudge_message(&self, session_id: &str, seq: i64, content: &str) -> Result<String> {
+        self.insert_message(
+            session_id,
+            seq,
+            Role::User,
+            content,
+            None,
+            &[],
+            None,
+            Visibility::Llm,
+            true,
+        )
+    }
+
     /// One page of a session's user-facing transcript, NEWEST first — the remote-control
     /// scrollback pagination seam (docs/features/remote-control.md). Returns user + assistant
     /// turns plus `visibility='ui'` notes (they are part of the visible conversation); tool
@@ -269,10 +286,17 @@ impl Store {
         // projection unconditionally: SQLite short-circuits the CASE, so the default page runs the
         // same work it always did and pays nothing for a subquery it never needs. Same for the
         // row's OWN `tool_calls_json` (the carrier expansion below) and for the widened content
-        // filter, which collapses back to `m.content != ''` when tools aren't asked for.
+        // filter, which collapses back to `TRIM(m.content, ...) != ''` when tools aren't asked for.
+        //
+        // The content check trims tab/newline/CR/space before comparing: a completion whose real
+        // prose landed on a tool-call row (invisible with `include_tools=false`) can leave its own
+        // carrier holding only whitespace (e.g. "\n\n\n"), and SQLite's bare `!= ''` treats that as
+        // non-empty. Left in, that surfaces as a blank assistant bubble the user's actual reply
+        // never occupies (#28). `TRIM(X)` alone only strips spaces in SQLite, not newlines/tabs —
+        // hence the explicit `char(9,10,13,32)` character set.
         let mut stmt = conn.prepare(
             "SELECT m.seq, m.role, m.content, m.model, m.created_at, m.visibility,
-                    m.tool_call_id,
+                    m.tool_call_id, m.nudge,
                     CASE WHEN ?4 = 1 AND m.role = 'tool' THEN (
                         SELECT c.tool_calls_json FROM message c
                          WHERE c.session_id = m.session_id
@@ -290,7 +314,7 @@ impl Store {
                AND (?2 IS NULL OR m.seq < ?2)
                AND (((m.role IN ('user', 'assistant') AND m.visibility != 'llm_only') OR m.visibility = 'ui')
                     OR (?4 = 1 AND m.role = 'tool' AND m.visibility != 'llm_only'))
-               AND (m.content != ''
+               AND (TRIM(m.content, char(9,10,13,32)) != ''
                     OR (?4 = 1 AND m.role = 'assistant' AND m.visibility != 'llm_only'
                         AND m.tool_calls_json IS NOT NULL))
              ORDER BY m.seq DESC LIMIT ?3",
@@ -307,8 +331,9 @@ impl Store {
                 let role: String = row.get(1)?;
                 let visibility: String = row.get(5)?;
                 let tool_call_id: Option<String> = row.get(6)?;
-                let carrier_json: Option<String> = row.get(7)?;
-                let own_calls_json: Option<String> = row.get(8)?;
+                let nudge: bool = row.get(7)?;
+                let carrier_json: Option<String> = row.get(8)?;
+                let own_calls_json: Option<String> = row.get(9)?;
                 let role = parse_role_with_diagnostic(session_id, Some(seq), &role);
                 Ok((
                     HistoryRow {
@@ -322,6 +347,7 @@ impl Store {
                             tool_name_from_carrier(carrier, tool_call_id.as_deref())
                         }),
                         tool_phase: (role == Role::Tool).then_some(ToolPhase::Result),
+                        nudge,
                     },
                     own_calls_json,
                 ))
@@ -351,10 +377,17 @@ impl Store {
                         visibility: row.visibility,
                         tool_name: Some(call.name),
                         tool_phase: Some(ToolPhase::Call),
+                        // A synthesized tool-call row is machine activity, never something the
+                        // person or the harness "said" — never a nudge.
+                        nudge: false,
                     });
                 }
             }
-            if !row.content.is_empty() {
+            // Whitespace-only prose (the same "\n\n\n" shape the SQL filter above screens out of
+            // the non-tool page) still reaches here via the widened tools-included branch, which
+            // deliberately fetches a carrier with blank content so its CALLS surface — the carrier's
+            // own row must not.
+            if !row.content.trim().is_empty() {
                 out.push(row);
             }
         }
@@ -388,7 +421,7 @@ impl Store {
              WHERE session_id = ?1
                AND (((role IN ('user', 'assistant') AND visibility != 'llm_only') OR visibility = 'ui')
                     OR (?2 = 1 AND role = 'tool' AND visibility != 'llm_only'))
-               AND (content != ''
+               AND (TRIM(content, char(9,10,13,32)) != ''
                     OR (?2 = 1 AND role = 'assistant' AND visibility != 'llm_only'
                         AND tool_calls_json IS NOT NULL))",
             rusqlite::params![session_id, i64::from(include_tools)],

@@ -3303,11 +3303,33 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // read-only produced no diff BY INSTRUCTION, and re-driving it with "implement the fix
         // now" contradicts what the user asked for. #1266 fixed the contract's precedence but
         // left this gate reading the session flag directly, so the nudge kept firing.
+        // A contract sourced purely from the session-wide harness expectation (no explicit change
+        // directive in THIS prompt) and a turn that ran zero tools is a pure-answer turn — "reply
+        // with the word pong only" inside a worktree-backed daemon session has nothing to
+        // implement, so nudging it sends the model hunting for a "fix" that doesn't exist (#19).
+        // An explicit per-turn directive (`ContractSource::ExplicitChange`) still nudges with zero
+        // tools — a plan-only reply to "fix this" IS an empty implementation. And a harness-expectation
+        // turn that DID run tools still nudges: it had the opportunity to change something and didn't.
+        // `expect_code_change` short-circuits `TurnContract::derive` before it ever checks
+        // `explicitly_requests_change`, so a `HarnessExpectation` source alone can't tell "reply
+        // with the word pong only" (nothing to implement) apart from "fix the bug" (a request that
+        // DID ask for a change and got an empty diff) — check the prompt itself, same detector the
+        // contract uses for `ExplicitChange`. See `direct_mutating_turn_that_only_plans_is_nudged`.
+        // Excludes CLI bridges: a bridge's tool activity runs inside its own subprocess and is only
+        // OBSERVED via sink events, so `turn_tools_ran == 0` there can mean "ran tools but surfaced no
+        // parseable event" (refusal / prose-only / CLI output drift), not "did nothing" — the case
+        // `bridge_empty_diff_with_no_surfaced_tool_still_nudges` covers.
+        let pure_answer_turn = turn_tools_ran == 0
+            && !forge_provider::is_cli_bridge(&active_model)
+            && self.last_turn_contract.source()
+                == turn_contract::ContractSource::HarnessExpectation
+            && !turn_contract::explicitly_requests_change(prompt);
         if self.config.mesh.nudge_empty_diff
             && self.last_turn_contract.intent() != TaskIntent::ReadOnlyReview
             && (self.expect_code_change || self.last_turn_contract.requires_changed_artifact())
             && self.edits_this_turn == 0
             && !halted_by_loop_guard
+            && !pure_answer_turn
         {
             let mut continuation_count = 0usize;
             // No prior continuation yet: a sentinel that keeps the diminishing-returns stop from
@@ -3352,13 +3374,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         // near the window, so the nudge has room to actually do the work.
                         self.auto_compact_if_needed(&active_model).await;
                         let seq = self.next_seq();
-                        self.store.add_message(
-                            &self.id,
-                            seq,
-                            Role::User,
-                            EMPTY_DIFF_NUDGE,
-                            None,
-                        )?;
+                        self.store
+                            .add_nudge_message(&self.id, seq, EMPTY_DIFF_NUDGE)?;
                         self.transcript.push(Message::user(EMPTY_DIFF_NUDGE));
                         let tokens_before = context_tokens;
                         let nudge_specs = self.tool_specs();
@@ -3425,8 +3442,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     test_edits.join("\n- ")
                 );
                 let gseq = self.next_seq();
-                self.store
-                    .add_message(&self.id, gseq, Role::User, &guard, None)?;
+                self.store.add_nudge_message(&self.id, gseq, &guard)?;
                 self.transcript.push(Message::user(&guard));
                 let guard_specs = self.tool_specs();
                 let guard_outcome = self
@@ -3989,8 +4005,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             // decision: no cross-model failover for the continuation, like the autofix re-run).
             let cont = format!("[stop hook] {reason}");
             let seq = self.next_seq();
-            self.store
-                .add_message(&self.id, seq, Role::User, &cont, None)?;
+            self.store.add_nudge_message(&self.id, seq, &cont)?;
             self.transcript.push(Message::user(&cont));
             let cont_specs = self.tool_specs();
             let cont_outcome = self
@@ -4727,6 +4742,9 @@ mod tests {
 
     #[path = "stale_tasks.rs"]
     mod stale_tasks_tests;
+
+    #[path = "nudge_marker.rs"]
+    mod nudge_marker_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {
@@ -13346,6 +13364,118 @@ mod tests {
                 .iter()
                 .any(|m| m.content == EMPTY_DIFF_NUDGE),
             "the empty-diff nudge contradicts an explicitly read-only instruction"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Scripted DIRECT (non-bridge) model that answers in plain text on its first call and never
+    /// touches a tool — the "reply with the word pong only" shape from #19.
+    struct PlainAnswerProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        text: &'static str,
+    }
+    #[async_trait::async_trait]
+    impl Provider for PlainAnswerProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            on_event(StreamEvent::Text(self.text.into()));
+            Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
+                content: self.text.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn worktree_session_pure_answer_turn_is_not_nudged() {
+        // #19: `driver.rs` arms `set_expect_code_change(true)` for the whole life of a
+        // worktree-backed daemon session — exactly what the app does for every session it creates.
+        // "reply with the word pong only" ran no tools and has nothing to implement; nudging it
+        // with EMPTY_DIFF_NUDGE sent the model hunting for a "fix" that doesn't exist. Unlike
+        // `an_explicitly_read_only_turn_in_a_build_session_is_not_nudged`, THIS prompt carries no
+        // read-only directive either — it is exempted purely because the contract's only source is
+        // the session-wide harness expectation and the turn ran zero tools.
+        let dir = clean_git_repo();
+        let provider = Arc::new(PlainAnswerProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            text: "pong",
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+        // Exactly what `spawn_session_driver` does for a worktree-backed daemon session.
+        session.set_expect_code_change(true);
+        session.config.mesh.verify_completeness = false;
+
+        let answer = session
+            .run_turn("reply with the word pong only")
+            .await
+            .unwrap();
+
+        assert_eq!(answer, "pong");
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a pure-answer turn with no tool activity must not be re-driven"
+        );
+        assert!(
+            !session
+                .transcript
+                .iter()
+                .any(|m| m.content == EMPTY_DIFF_NUDGE),
+            "a plain-text answer with zero tools has nothing to implement — no nudge"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_answer_starting_with_blank_lines_is_persisted_trimmed() {
+        // #28: a bridge's wrap-up text opened with "\n\n" before "All tasks complete. ..." and the
+        // daemon's `/api/history` view rendered that leading dead space verbatim. The trim belongs
+        // in `publish_terminal_answer`, the one place every terminal answer is persisted, so this
+        // exercises it through a real turn rather than calling the helper directly.
+        let dir = clean_git_repo();
+        let provider = Arc::new(PlainAnswerProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            text: "\n\nAll tasks complete. Everything shipped.",
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+
+        let answer = session.run_turn("wrap up").await.unwrap();
+        assert_eq!(answer, "\n\nAll tasks complete. Everything shipped.");
+
+        let page = store.load_history_page(&session.id, None, 10).unwrap();
+        let note = page
+            .iter()
+            .find(|r| r.visibility == forge_types::Visibility::UiOnly)
+            .expect("the terminal answer is persisted as a ui note");
+        assert_eq!(
+            note.content, "All tasks complete. Everything shipped.",
+            "the persisted note must not start with dead blank lines"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

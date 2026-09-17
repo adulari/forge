@@ -31,7 +31,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
 import { filterSessions, isOfflineError, sessionPickerState } from "../../lib/sessionPicker";
 import { radii, space } from "../../theme/tokens";
-import { formatCost, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
+import { formatCostSummary, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
 // DESIGN_ELEVATION.md Move 3 — the one identity moment: the ⚒ mark beside the Fleet
@@ -81,7 +81,7 @@ function FleetSummary({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: 
     >
       <Text style={[typeScale.sub, { color: waitingCount > 0 ? tokens.danger : tokens.ink3 }]}>{waitingCount} needs you</Text>
       <Text style={[typeScale.sub, { color: tokens.ink3 }]}> · {busyCount} forging · </Text>
-      <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{formatCost(totalCost)}</Text>
+      <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{formatCostSummary(totalCost)}</Text>
       <Text style={[typeScale.sub, { color: tokens.ink3 }]}> today</Text>
     </Pressable>
   );
@@ -207,15 +207,20 @@ export function FleetScreen() {
   const [hostFilter, setHostFilter] = useState<string | null>(null);
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
   const [composerText, setComposerText] = useState("");
-  // The composer is `position: absolute`, so it never participates in layout resize — Android
-  // already lifts it for free via the default `adjustResize` softInputMode, but iOS does not
-  // resize the window for the keyboard at all, so the pill needs its own offset there.
-  // `keyboardWillShow`/`keyboardWillHide` fire on iOS only, so this is a no-op elsewhere.
+  // The composer is `position: absolute`, so it never participates in layout resize — neither
+  // iOS (which never resizes the window for the keyboard) nor Android (Android 15+ enforces
+  // edge-to-edge, so `adjustResize` no longer shrinks the window either) lifts it for free, so
+  // the pill needs its own offset on both. `keyboardWillShow`/`keyboardWillHide` only exist on
+  // iOS (no native equivalent on Android — RN's Keyboard.js); Android uses
+  // `keyboardDidShow`/`keyboardDidHide`, which fire with real metrics independent of the window
+  // resize (only API<30 depended on that).
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   useEffect(() => {
-    if (Platform.OS !== "ios") return;
-    const show = Keyboard.addListener("keyboardWillShow", (e) => setKeyboardOffset(e.endCoordinates.height));
-    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardOffset(0));
+    if (Platform.OS === "web") return;
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const show = Keyboard.addListener(showEvent, (e) => setKeyboardOffset(e.endCoordinates.height));
+    const hide = Keyboard.addListener(hideEvent, () => setKeyboardOffset(0));
     return () => {
       show.remove();
       hide.remove();
@@ -352,8 +357,8 @@ export function FleetScreen() {
         onSubmit={onComposerSubmit}
         // `bottom: 0` already sits flush with the safe area here — Screen's SafeAreaView
         // (`edges` includes "bottom" by default) shrinks this View by insets.bottom itself,
-        // so adding it again would double-count it. `keyboardOffset` (iOS only) lifts the
-        // pill clear of the keyboard.
+        // so adding it again would double-count it. `keyboardOffset` lifts the pill clear
+        // of the keyboard on iOS and Android alike (see the listener above).
         style={[styles.composer, { bottom: space.space16 + keyboardOffset }]}
         testID="fleet-composer"
       />

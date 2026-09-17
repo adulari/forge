@@ -3,7 +3,15 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { EncryptedAnywhereRelay, type AnywhereRelayCredentials } from "./EncryptedAnywhereRelay";
-import { bytesToHex, openEnvelope, sealEnvelope, type EnvelopeMetadata } from "./anywhereEnvelope";
+import {
+  ANYWHERE_HEADER_BYTES,
+  ANYWHERE_SIGNATURE_BYTES,
+  ANYWHERE_TAG_BYTES,
+  bytesToHex,
+  openEnvelope,
+  sealEnvelope,
+  type EnvelopeMetadata,
+} from "./anywhereEnvelope";
 
 // The threshold above which the relay offloads to a blob instead of inlining. Much smaller than
 // the 256 KiB we ACCEPT inline, because a JSON numeric array inflates a body ~3.57x and the relay
@@ -11,6 +19,12 @@ import { bytesToHex, openEnvelope, sealEnvelope, type EnvelopeMetadata } from ".
 // of the code, and rejected by the real relay every time with `relay_frame_too_large`.
 const INLINE_LIMIT = 64 * 1024;
 const RELAY_ENVELOPE_LIMIT = 300 * 1024;
+// The relay service's own minimum blob size (forge-anywhere-service/src/relay_blob.rs
+// `MIN_RELAY_BLOB_BYTES`). A ciphertext at or below this is rejected with `invalid_object_size`,
+// so `uploadBlob` pads plaintext until its sealed envelope clears it.
+const MIN_BLOB_CIPHERTEXT_BYTES = 256 * 1024;
+const ENVELOPE_OVERHEAD_BYTES = ANYWHERE_HEADER_BYTES + ANYWHERE_TAG_BYTES + ANYWHERE_SIGNATURE_BYTES;
+const PADDED_PLAINTEXT_BYTES = MIN_BLOB_CIPHERTEXT_BYTES + 1 - ENVELOPE_OVERHEAD_BYTES;
 const accountId = new Uint8Array(16).fill(0x11);
 const controllerId = new Uint8Array(16).fill(0x22);
 const hostId = new Uint8Array(16).fill(0x33);
@@ -67,7 +81,14 @@ describe("EncryptedAnywhereRelay blobs", () => {
         const opened = openEnvelope(bytes, dataKey, ed25519.getPublicKey(controllerSeed));
         expect(opened.metadata.kind).toBe(8);
         expect(opened.metadata.recipientId).toEqual(hostId);
-        expect(opened.plaintext.length).toBe(INLINE_LIMIT + 1);
+        // The body itself is only INLINE_LIMIT + 1 bytes, but that seals to well under the
+        // relay's blob minimum, so uploadBlob pads the plaintext with trailing spaces until it
+        // clears MIN_BLOB_CIPHERTEXT_BYTES.
+        expect(opened.plaintext.length).toBe(PADDED_PLAINTEXT_BYTES);
+        expect(Array.from(opened.plaintext.slice(0, INLINE_LIMIT + 1))).toEqual(
+          Array.from(new Uint8Array(INLINE_LIMIT + 1).fill(7)),
+        );
+        expect(opened.plaintext.slice(INLINE_LIMIT + 1).every((byte) => byte === 0x20)).toBe(true);
         expect(new Headers(init.headers).has("authorization")).toBe(false);
         return new Response(null, { status: 200 });
       }
@@ -86,8 +107,12 @@ describe("EncryptedAnywhereRelay blobs", () => {
     expect(sentPayloads[0]?.body).toHaveLength(INLINE_LIMIT);
     expect(sentPayloads[0]).not.toHaveProperty("body_blob");
     expect(sentPayloads[1]).not.toHaveProperty("body");
-    expect(sentPayloads[1]?.body_blob).toMatchObject({ blob_id: blobId });
+    expect(sentPayloads[1]?.body_blob).toMatchObject({
+      blob_id: blobId,
+      plaintext_bytes: INLINE_LIMIT + 1,
+    });
     expect(uploads).toHaveLength(1);
+    expect(uploads[0]!.length).toBeGreaterThan(MIN_BLOB_CIPHERTEXT_BYTES);
 
     // The invariant that actually matters, and the one nothing checked before: what goes on the
     // wire has to fit through the relay. A 256 KiB inline body sealed to ~914 KiB against a
@@ -243,6 +268,169 @@ describe("EncryptedAnywhereRelay blobs", () => {
     expect(new TextDecoder().decode(response.body)).toBe("durable response");
     expect(events).toContain("consume");
   });
+
+  // Real-world sizes: /api/models and /api/config run 70-80 KiB against a live daemon, both well
+  // past the 64 KiB outbound-inline threshold, so the host always answers them with a body_blob.
+  it("downloads and decodes a response body far larger than the outbound-inline threshold", async () => {
+    const big = { models: Array.from({ length: 1500 }, (_, index) => ({
+      id: `provider::model-${index}`,
+      name: `Model number ${index} with a realistically long descriptive name`,
+    })) };
+    const plaintext = new TextEncoder().encode(JSON.stringify(big));
+    expect(plaintext.length).toBeGreaterThan(64 * 1024);
+    const blob = inboundBlob(plaintext);
+    const relay = inboundRelay(blob, blob, []);
+    const response = await relay.request(bridgeRequest(new Uint8Array()));
+    const decoded = JSON.parse(new TextDecoder().decode(response.body)) as { models: unknown[] };
+    expect(decoded.models).toHaveLength(1500);
+  }, 30_000);
+
+  // 70 KiB sits in the dead band that used to fail outright: too big for the outbound-inline
+  // threshold, too small for the relay's own blob minimum. The sender pads it and records the
+  // true length in `plaintext_bytes`; the receiver must strip the padding back off.
+  it("decodes a padded response blob back to exactly the original body via plaintext_bytes", async () => {
+    const original = { note: "x".repeat(70_000) };
+    const plaintext = new TextEncoder().encode(JSON.stringify(original));
+    expect(plaintext.length).toBeGreaterThan(64 * 1024);
+    expect(plaintext.length).toBeLessThan(MIN_BLOB_CIPHERTEXT_BYTES);
+    const padded = new Uint8Array(PADDED_PLAINTEXT_BYTES);
+    padded.set(plaintext);
+    padded.fill(0x20, plaintext.length);
+    const blob = inboundBlob(padded);
+    const relay = inboundRelay(blob, blob, [], undefined, 204, { plaintext_bytes: plaintext.length });
+    const response = await relay.request(bridgeRequest(new Uint8Array()));
+    expect(response.body).toHaveLength(plaintext.length);
+    expect(JSON.parse(new TextDecoder().decode(response.body))).toEqual(original);
+  });
+
+  // A host that pads but predates `plaintext_bytes` (or simply omits it) must not break an
+  // up-to-date app: the padding is ASCII spaces specifically so a receiver that just uses the raw
+  // bytes still gets valid JSON, trailing whitespace and all.
+  it("still JSON-parses a padded blob when the reference omits plaintext_bytes", async () => {
+    const original = { ok: true };
+    const plaintext = new TextEncoder().encode(JSON.stringify(original));
+    const padded = new Uint8Array(plaintext.length + 4096);
+    padded.set(plaintext);
+    padded.fill(0x20, plaintext.length);
+    const blob = inboundBlob(padded);
+    const relay = inboundRelay(blob, blob, []);
+    const response = await relay.request(bridgeRequest(new Uint8Array()));
+    expect(response.body.length).toBe(padded.length);
+    expect(JSON.parse(new TextDecoder().decode(response.body))).toEqual(original);
+  });
+
+  it("pads a 100 KB request body above the relay's blob minimum and records plaintext_bytes", async () => {
+    const sentPayloads: Record<string, unknown>[] = [];
+    const uploads: Uint8Array[] = [];
+    installWebSocket((socket, value) => {
+      const request = openEnvelope(value, dataKey, ed25519.getPublicKey(controllerSeed));
+      const payload = JSON.parse(new TextDecoder().decode(request.plaintext)) as Record<string, unknown> & {
+        request_id: number[];
+      };
+      sentPayloads.push(payload);
+      socket.emit(hostEnvelope(2, { request_id: payload.request_id, status: 200, body: [] }, 70n));
+    });
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const url = input.toString();
+      if (url.endsWith("/v1/relay/tickets")) return jsonResponse({ ticket: "ticket" });
+      if (url.endsWith("/v1/relay/blobs") && init?.method === "POST") {
+        return jsonResponse({ blob_id: blobId, upload_url: "https://objects.test/upload" });
+      }
+      if (url === "https://objects.test/upload" && init?.method === "PUT") {
+        uploads.push(new Uint8Array(init.body as ArrayBuffer));
+        return new Response(null, { status: 200 });
+      }
+      if (url.endsWith(`/v1/relay/blobs/${blobId}/complete`)) return new Response(null, { status: 204 });
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch;
+
+    const relay = new EncryptedAnywhereRelay(credentials());
+    await relay.request(bridgeRequest(new Uint8Array(100_000).fill(9)));
+
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]!.length).toBeGreaterThan(MIN_BLOB_CIPHERTEXT_BYTES);
+    expect(sentPayloads[0]?.body_blob).toMatchObject({ plaintext_bytes: 100_000 });
+  }, 30_000);
+
+  it("isolates a failed response blob to its own request, leaving the connection and an unrelated concurrent request intact", async () => {
+    const goodBlobId = "cc".repeat(16);
+    const badBlobId = blobId;
+    const goodBlob = inboundBlob(new TextEncoder().encode("ok"));
+    const goodReference = {
+      blob_id: goodBlobId,
+      ciphertext_bytes: goodBlob.length,
+      ciphertext_sha256: base64Url(sha256(goodBlob)),
+    };
+    const originalBad = inboundBlob(new TextEncoder().encode("tampered"));
+    const tamperedBad = originalBad.slice();
+    tamperedBad[120] ^= 1;
+    const badReference = {
+      blob_id: badBlobId,
+      ciphertext_bytes: originalBad.length,
+      ciphertext_sha256: base64Url(sha256(originalBad)),
+    };
+
+    const closeCodes: number[] = [];
+    const requestIds = new Map<string, number[]>();
+    let sends = 0;
+    class TrackedSocket extends MockWebSocket {
+      override close(code?: number): void {
+        closeCodes.push(code ?? 0);
+        super.close();
+      }
+      override send(value: Uint8Array): void {
+        const opened = openEnvelope(value, dataKey, ed25519.getPublicKey(controllerSeed));
+        const payload = JSON.parse(new TextDecoder().decode(opened.plaintext)) as {
+          request_id: number[];
+          parameters: string[];
+        };
+        requestIds.set(payload.parameters[0], payload.request_id);
+        sends += 1;
+        // Both requests are sent before either is answered, so both are genuinely concurrent
+        // pending entries when the bad response arrives.
+        if (sends === 2) {
+          this.emit(hostEnvelope(2, {
+            request_id: requestIds.get("bad"),
+            status: 200,
+            body_blob: badReference,
+          }, 30n));
+          this.emit(hostEnvelope(2, {
+            request_id: requestIds.get("good"),
+            status: 200,
+            body_blob: goodReference,
+          }, 31n));
+        }
+      }
+    }
+    globalThis.WebSocket = TrackedSocket as unknown as typeof WebSocket;
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const url = input.toString();
+      if (url.endsWith("/v1/relay/tickets")) return jsonResponse({ ticket: "ticket" });
+      if (url.endsWith(`/v1/relay/blobs/${badBlobId}`) && init?.method === "GET") {
+        return jsonResponse({ ...badReference, download_url: "https://objects.test/bad" });
+      }
+      if (url === "https://objects.test/bad") return new Response(tamperedBad as unknown as BodyInit, { status: 200 });
+      if (url.endsWith(`/v1/relay/blobs/${goodBlobId}`) && init?.method === "GET") {
+        return jsonResponse({ ...goodReference, download_url: "https://objects.test/good" });
+      }
+      if (url === "https://objects.test/good") return new Response(goodBlob as unknown as BodyInit, { status: 200 });
+      if (url.endsWith(`/v1/relay/blobs/${goodBlobId}`) && init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch;
+
+    const relay = new EncryptedAnywhereRelay(credentials());
+    const bad = relay.request({ ...bridgeRequest(new Uint8Array()), parameters: ["bad"] });
+    const good = relay.request({ ...bridgeRequest(new Uint8Array()), parameters: ["good"] });
+
+    await expect(bad).rejects.toThrow();
+    await expect(good).resolves.toMatchObject({ status: 200 });
+    const goodResponse = await good;
+    expect(new TextDecoder().decode(goodResponse.body)).toBe("ok");
+    // The tampered blob must not have torn the connection down: nothing ever called `close()`.
+    expect(closeCodes).toEqual([]);
+  });
 });
 
 function credentials(onAccept?: (sequence: bigint) => void): AnywhereRelayCredentials {
@@ -320,11 +508,13 @@ function inboundRelay(
   events: string[],
   onAccept?: (sequence: bigint) => void,
   consumeStatus = 204,
+  referenceOverrides: { plaintext_bytes?: number } = {},
 ): EncryptedAnywhereRelay {
   const reference = {
     blob_id: blobId,
     ciphertext_bytes: referencedBlob.length,
     ciphertext_sha256: base64Url(sha256(referencedBlob)),
+    ...referenceOverrides,
   };
   installWebSocket((socket, value) => {
     const request = openEnvelope(value, dataKey, ed25519.getPublicKey(controllerSeed));

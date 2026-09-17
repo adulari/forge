@@ -5,6 +5,8 @@ import {
   mergeAnywhereHosts,
   reconcileAnywhereHosts,
   repointMovedDaemons,
+  selectActiveServerAfterSync,
+  transportForBaseUrl,
   unrepresentedAnywhereHosts,
   type StoredServer,
 } from "./serverTargets";
@@ -118,5 +120,44 @@ describe("Anywhere host target reconciliation", () => {
     const managed = mergeAnywhereHosts([], [host], 40);
     expect(unrepresentedAnywhereHosts(managed, [host])).toEqual([]);
     expect(unrepresentedAnywhereHosts([direct], [host])).toEqual([host]);
+  });
+});
+
+describe("active-server selection after an Anywhere sync", () => {
+  const managed: StoredServer = { ...direct, id: "anywhere:f".repeat(4), transport: "anywhere" };
+
+  it("selects the first reconciled host on a fresh device with no active server at all", () => {
+    // This is the bug: a device that has never paired anything has `active === null`, and the
+    // old logic only ever picked a fallback when a PREVIOUS active id had gone missing — so the
+    // newly-reconciled Anywhere host was never selected and the app stayed on the welcome screen.
+    expect(selectActiveServerAfterSync(null, [managed])).toBe(managed.id);
+  });
+
+  it("stays null when the sync produced no servers", () => {
+    expect(selectActiveServerAfterSync(null, [])).toBeNull();
+  });
+
+  it("leaves a still-valid active id untouched", () => {
+    expect(selectActiveServerAfterSync(direct.id, [direct, managed])).toBe(direct.id);
+  });
+
+  it("falls back to the first remaining server when the active id disappeared", () => {
+    expect(selectActiveServerAfterSync("gone", [direct, managed])).toBe(direct.id);
+  });
+
+  it("falls back to null when the active id disappeared and nothing is left", () => {
+    expect(selectActiveServerAfterSync("gone", [])).toBeNull();
+  });
+});
+
+describe("transport label from a baseUrl", () => {
+  it("labels a managed Anywhere host's fany:// baseUrl as anywhere", () => {
+    expect(transportForBaseUrl(`fany://${"a".repeat(32)}`)).toBe("anywhere");
+  });
+
+  it("labels every other server as direct, including null/undefined", () => {
+    expect(transportForBaseUrl("https://local.test/token")).toBe("direct");
+    expect(transportForBaseUrl(null)).toBe("direct");
+    expect(transportForBaseUrl(undefined)).toBe("direct");
   });
 });

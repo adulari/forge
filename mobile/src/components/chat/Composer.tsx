@@ -773,9 +773,12 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
             <View style={styles.metaRow}>
               {model ? (
                 <MetaChip
-                  label={model}
+                  // The daemon sends the literal sentinel "—" for an Automatic session (no
+                  // model pinned yet) — same value StatusStrip already special-cases. A raw
+                  // dash on the chip reads as broken/missing data, not as "automatic".
+                  label={model === "—" ? "auto" : model}
                   color={tokens.ink2}
-                  accessibilityLabel={`model: ${model} — change model`}
+                  accessibilityLabel={`model: ${model === "—" ? "auto" : model} — change model`}
                   testID="composer-model-chip"
                   onPress={openModelPicker}
                 />
@@ -792,6 +795,21 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
               />
             </View>
           ) : null}
+          {/* Attach buttons get their own row above the input: with image+file+mic+send all
+              competing for one row's width, the message input was squeezed to roughly a third
+              of the card's width — short replies wrapped onto 2-3 lines instead of one. */}
+          <View style={styles.attachRow}>
+            <IconButton
+              icon={<ImageIcon size={20} strokeWidth={1.75} color={tokens.ink2} />}
+              onPress={onAttachImage}
+              accessibilityLabel="attach photo"
+            />
+            <IconButton
+              icon={<FileText size={20} strokeWidth={1.75} color={tokens.ink2} />}
+              onPress={onAttachDocument}
+              accessibilityLabel="attach file"
+            />
+          </View>
           <View
             style={[
               styles.row,
@@ -808,16 +826,6 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
               },
             ]}
           >
-          <IconButton
-            icon={<ImageIcon size={20} strokeWidth={1.75} color={tokens.ink2} />}
-            onPress={onAttachImage}
-            accessibilityLabel="attach photo"
-          />
-          <IconButton
-            icon={<FileText size={20} strokeWidth={1.75} color={tokens.ink2} />}
-            onPress={onAttachDocument}
-            accessibilityLabel="attach file"
-          />
           <View
             style={[
               styles.inputWrap,
@@ -1028,6 +1036,11 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   metaChipLabel: { flexShrink: 1, minWidth: 0 },
+  attachRow: {
+    flexDirection: "row",
+    paddingLeft: space.space4,
+    paddingTop: space.space4,
+  },
   row: {
     position: "relative",
     flexDirection: "row",
