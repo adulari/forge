@@ -12,6 +12,7 @@ import { Plus, RefreshCw, RotateCcw, Square, Terminal } from "lucide-react-nativ
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   NativeSyntheticEvent,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -460,6 +461,16 @@ export function TerminalDock({
     [send],
   );
 
+  // Android delivers the soft keyboard's Enter on a single-line input as a submit, never as an
+  // onKeyPress "Enter", so without this the shell never received a newline. iOS and web do send
+  // the keypress, which already wrote "\r" above.
+  const onSubmitEditing = useCallback(() => {
+    if (Platform.OS !== "android") return;
+    send(CONTROL_KEYS.Enter);
+    lastNativeTextRef.current = "";
+    inputRef.current?.clear();
+  }, [send]);
+
   const onChangeText = useCallback(
     (text: string) => {
       // See terminalInputDelta: the native buffer is not guaranteed to have actually reset to ""
@@ -564,6 +575,7 @@ export function TerminalDock({
           // not a controlled value forcing a reset.
           onChangeText={onChangeText}
           onKeyPress={onKeyPress}
+          onSubmitEditing={onSubmitEditing}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           style={styles.input}
