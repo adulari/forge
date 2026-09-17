@@ -226,7 +226,9 @@ pub(super) async fn request_provider_response(
                 // pin refined by evidence rather than a value competing with it. The pin is the
                 // fallback for a model mesh has no ladder for, and `None` still sends nothing.
                 effort: decision.and_then(|d| d.effort).or(session.pinned_effort),
-                temperature: Some(CODING_TEMPERATURE),
+                temperature: Some(crate::repetition_temperature(session.repetition_pressure)),
+                frequency_penalty: crate::repetition_frequency_penalty(session.repetition_pressure),
+                presence_penalty: crate::repetition_presence_penalty(session.repetition_pressure),
                 checkpoint: Some(checkpoint_ctx.clone()),
                 prompt_cache_key: Some(checkpoint_ctx.session.clone()),
                 max_output_tokens: None,

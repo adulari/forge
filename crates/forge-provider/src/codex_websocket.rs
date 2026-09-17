@@ -1097,6 +1097,8 @@ mod tests {
     #[test]
     fn ws_frame_has_response_create_tag_and_codex_shaping() {
         let opts = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             temperature: Some(0.3),
             ..Default::default()
         };

@@ -16,6 +16,74 @@ pub fn temperature_for_wire(temperature: f32) -> f64 {
     (f64::from(temperature) * 100.0).round() / 100.0
 }
 
+/// Providers whose chat API accepts OpenAI's `frequency_penalty`/`presence_penalty`.
+///
+/// Sent only while a turn is under repetition pressure, so the blast radius of a wrong entry is
+/// one rescued turn rather than every request. Anthropic's Messages API has no such parameter and
+/// rejects unknown body fields, so it is deliberately absent; the CLI bridges do not expose
+/// sampling at all. Namespaces match `forge_config::provider_of`.
+const PENALTY_CAPABLE_PROVIDERS: &[&str] = &[
+    "openai",
+    "openrouter",
+    "kimi",
+    "moonshot",
+    "deepseek",
+    "groq",
+    "cerebras",
+    "nvidia",
+    "mistral",
+    "together",
+    "xai",
+    "opencode",
+    "ollama",
+    "zen",
+];
+
+/// Whether `model`'s provider takes the OpenAI repetition penalties.
+pub(crate) fn accepts_repetition_penalties(model: &str) -> bool {
+    PENALTY_CAPABLE_PROVIDERS.contains(&forge_config::provider_of(model))
+}
+
+/// The `extra_body` fragment carrying whichever penalties the caller set, or `None` when a turn is
+/// not repeating (the ordinary case) or the provider cannot take them.
+pub(crate) fn repetition_penalty_body(
+    model: &str,
+    frequency: Option<f32>,
+    presence: Option<f32>,
+) -> Option<serde_json::Value> {
+    if !accepts_repetition_penalties(model) {
+        return None;
+    }
+    let mut body = serde_json::Map::new();
+    if let Some(value) = frequency {
+        body.insert(
+            "frequency_penalty".into(),
+            serde_json::json!(temperature_for_wire(value)),
+        );
+    }
+    if let Some(value) = presence {
+        body.insert(
+            "presence_penalty".into(),
+            serde_json::json!(temperature_for_wire(value)),
+        );
+    }
+    (!body.is_empty()).then_some(serde_json::Value::Object(body))
+}
+
+/// Attach the penalties to a genai request when the caller reports repetition pressure and the
+/// provider takes them. genai has no typed field for either, so they ride in `extra_body`, which
+/// OpenAI-compatible endpoints merge into the request body.
+pub(crate) fn with_repetition_penalties(
+    options: genai::chat::ChatOptions,
+    model: &str,
+    opts: &crate::CompletionOptions,
+) -> genai::chat::ChatOptions {
+    match repetition_penalty_body(model, opts.frequency_penalty, opts.presence_penalty) {
+        Some(body) => options.with_extra_body(body),
+        None => options,
+    }
+}
+
 /// Whether a stream ended because the provider detected a repetition loop (Kimi's
 /// `finish_reason: "repeat"`).
 pub(crate) fn cut_for_repetition(reason: Option<&genai::chat::StopReason>) -> bool {
@@ -98,5 +166,39 @@ mod temperature_wire_tests {
             let decimals = wire.split_once('.').map_or(0, |(_, d)| d.len());
             assert!(decimals <= 2, "{t} serialised as {wire}");
         }
+    }
+}
+
+#[cfg(test)]
+mod repetition_penalty_tests {
+    use super::{accepts_repetition_penalties, repetition_penalty_body};
+
+    #[test]
+    fn only_providers_that_accept_the_penalties_are_sent_them() {
+        assert!(accepts_repetition_penalties("kimi::k3-256k"));
+        assert!(accepts_repetition_penalties("openrouter::some/model:free"));
+        // Anthropic's Messages API has no such parameter and rejects unknown body fields.
+        assert!(!accepts_repetition_penalties("anthropic::claude-opus-5"));
+        assert!(!accepts_repetition_penalties("claude-cli::fable"));
+    }
+
+    #[test]
+    fn nothing_is_sent_for_an_ordinary_step() {
+        assert!(repetition_penalty_body("kimi::k3-256k", None, None).is_none());
+    }
+
+    #[test]
+    fn a_repeating_turn_sends_the_penalties_it_asked_for() {
+        let body = repetition_penalty_body("kimi::k3-256k", Some(0.8), Some(0.5))
+            .expect("kimi takes the penalties");
+        assert_eq!(body["frequency_penalty"], serde_json::json!(0.8));
+        assert_eq!(body["presence_penalty"], serde_json::json!(0.5));
+    }
+
+    #[test]
+    fn a_provider_that_cannot_take_them_gets_nothing_even_under_pressure() {
+        assert!(
+            repetition_penalty_body("anthropic::claude-opus-5", Some(0.8), Some(0.5)).is_none()
+        );
     }
 }

@@ -54,6 +54,7 @@ mod model_request;
 mod model_response;
 mod model_stream;
 mod model_tools;
+mod narration_dedupe;
 mod nudge_policy;
 mod orchestration;
 pub mod permission;
@@ -159,6 +160,44 @@ const SHELL_DIAGNOSE_MAX_SECS: u64 = 12;
 /// than creatively varied. Only takes effect when reasoning/effort isn't engaged (thinking models
 /// reject a custom temperature) — see `genai_provider`.
 const CODING_TEMPERATURE: f32 = 0.1;
+
+/// Sampling for a turn that has begun repeating itself.
+///
+/// A coding turn runs at [`CODING_TEMPERATURE`] on purpose — patches should be deterministic, not
+/// creative. The cost is that a context which already contains a sentence makes re-emitting that
+/// sentence the near-certain continuation, so the harness kept asking a stuck model the same
+/// question in the same way and receiving the same answer. Raising the temperature once the model
+/// has demonstrably restated itself changes the request rather than the instruction: it is the
+/// difference between "please stop looping" and not offering the loop as the obvious next token.
+/// The rungs stay inside what a coding model can be trusted with (0.1 → 0.5 → 0.9) and drop back
+/// to the floor for the next turn.
+fn repetition_temperature(pressure: u8) -> f32 {
+    match pressure {
+        0 => CODING_TEMPERATURE,
+        1 => 0.5,
+        _ => 0.9,
+    }
+}
+
+/// Penalise tokens the model has already used this turn, once it is repeating. Sent only to
+/// providers that accept it (see the genai adapter); `None` is the ordinary case.
+fn repetition_frequency_penalty(pressure: u8) -> Option<f32> {
+    match pressure {
+        0 => None,
+        1 => Some(0.4),
+        _ => Some(0.8),
+    }
+}
+
+/// Companion to the frequency penalty: nudges the distribution off topics already covered, which
+/// is what a restated sentence is.
+fn repetition_presence_penalty(pressure: u8) -> Option<f32> {
+    match pressure {
+        0 => None,
+        1 => Some(0.2),
+        _ => Some(0.5),
+    }
+}
 
 /// The base coding-agent system prompt, prepended (fresh, never persisted) to every main-loop
 /// request so a model performs in Forge the way it does in a purpose-built harness. Kept tight: it
@@ -1196,14 +1235,17 @@ enum ContinuationDecision {
     Accept,
 }
 
-/// Continuations that must have already fired before a tiny-output turn counts as diminishing
-/// returns — the spec floor at which a "keeps saying done, emits nothing" spiral is stopped.
-const CONTINUATION_DIMINISHING_MIN: usize = 3;
-/// Transcript-growth (tokens) below which a continuation produced "almost nothing".
-const CONTINUATION_DIMINISHING_TOKEN_FLOOR: u64 = 500;
 /// Absolute continuation ceiling so the guard can NEVER loop forever, even if every re-drive keeps
 /// emitting more than [`CONTINUATION_DIMINISHING_TOKEN_FLOOR`] tokens without making real progress.
-const CONTINUATION_MAX: usize = 6;
+///
+/// ONE, not six. Each re-drive appends the same byte-identical nudge and replays the model loop,
+/// so six of them leave the request holding six copies of that instruction next to the model's own
+/// repeated narration — the harness was assembling the very pattern that makes a model repeat, and
+/// then blaming the model for repeating. Pushing back once is worth it (a model that described a
+/// fix sometimes makes it when told); pushing back again has never been observed to rescue a turn
+/// that the first push-back did not, and it is how a stuck turn became a 40-minute spiral. After
+/// one, the turn ends and says plainly what did not happen, which is a state the user can act on.
+const CONTINUATION_MAX: usize = 1;
 /// Only nudge with real budget headroom — at/above this fraction of the context window a re-drive
 /// has no room to work, so accept instead of nudging into the wall.
 const CONTINUATION_BUDGET_CEILING: f64 = 0.90;
@@ -1220,26 +1262,20 @@ const CONTINUATION_BUDGET_CEILING: f64 = 0.90;
 /// * `budget_used`        — this turn's input tokens / model context window (≈0.0..=1.0). Only
 ///   nudge below [`CONTINUATION_BUDGET_CEILING`].
 /// * `continuation_count` — continuation nudges already fired this turn (0 on the first check).
-/// * `delta_tokens_last`  — tokens the LAST continuation grew the managed transcript by; a tiny
-///   delta after several continuations is the diminishing-returns spiral. Pass a large sentinel
-///   (e.g. `u64::MAX`) before any continuation has run so the stop can't fire on the first check.
 fn continuation_decision(
     goal_verified: bool,
     made_progress: bool,
     budget_used: f64,
     continuation_count: usize,
-    delta_tokens_last: u64,
 ) -> ContinuationDecision {
     // A verified goal or a turn that actually did work needs no nudge.
     if goal_verified || made_progress {
         return ContinuationDecision::Accept;
     }
-    // Diminishing returns / absolute ceiling: stop the spiral with an honest reason instead of
-    // re-driving a model that keeps "continuing" while producing nothing.
-    if continuation_count >= CONTINUATION_MAX
-        || (continuation_count >= CONTINUATION_DIMINISHING_MIN
-            && delta_tokens_last < CONTINUATION_DIMINISHING_TOKEN_FLOOR)
-    {
+    // The push-back budget is spent: stop with an honest reason instead of re-driving a model
+    // that has already been told once. Re-driving further only adds copies of the same
+    // instruction to the context, which is what turns a stuck turn into a spiral.
+    if continuation_count >= CONTINUATION_MAX {
         return ContinuationDecision::Stop;
     }
     // No budget headroom for a productive re-drive — accept rather than nudge into the window wall.
@@ -1650,6 +1686,9 @@ pub struct Session {
     /// The next main-loop request must answer with a tool call. Armed by a stall nudge while tasks
     /// are open; consumed by that one request.
     require_tool_call: bool,
+    /// How hard the CURRENT turn is repeating itself (0-2), fed by the narration guard every step
+    /// and consumed when the next request's sampling is chosen. Reset at turn start.
+    repetition_pressure: u8,
     /// Where each spooled tool output was written, by call id, so a result cut later can point at it.
     kept_outputs: std::collections::HashMap<String, String>,
     /// Whether white-hot effort's standing orchestration guidance has been injected this session
@@ -2916,6 +2955,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Reset the per-turn edit counter so the autofix stage only fires when THIS turn wrote
         // something (not a carry-over from a prior turn).
         self.edits_this_turn = 0;
+        self.repetition_pressure = 0;
         self.mutations_this_turn = 0;
         self.turn_input_tokens = 0;
         self.turn_output_tokens = 0;
@@ -3332,9 +3372,6 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && !pure_answer_turn
         {
             let mut continuation_count = 0usize;
-            // No prior continuation yet: a sentinel that keeps the diminishing-returns stop from
-            // firing on the first check (it is only consulted once `continuation_count` is high).
-            let mut delta_tokens_last = u64::MAX;
             loop {
                 // Past the soft deadline there is no budget for a re-drive (and the re-entered loop
                 // would end immediately, clobbering the final answer with an empty one).
@@ -3348,13 +3385,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 );
                 let window = self.effective_context_window(&active_model).max(1) as f64;
                 let budget_used = context_tokens as f64 / window;
-                match continuation_decision(
-                    false,
-                    made_progress,
-                    budget_used,
-                    continuation_count,
-                    delta_tokens_last,
-                ) {
+                match continuation_decision(false, made_progress, budget_used, continuation_count) {
                     ContinuationDecision::Accept => break,
                     ContinuationDecision::Stop => {
                         self.presenter.emit(PresenterEvent::Warning(format!(
@@ -3377,7 +3408,6 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         self.store
                             .add_nudge_message(&self.id, seq, EMPTY_DIFF_NUDGE)?;
                         self.transcript.push(Message::user(EMPTY_DIFF_NUDGE));
-                        let tokens_before = context_tokens;
                         let nudge_specs = self.tool_specs();
                         let nudge_outcome = self
                             .run_model_loop(
@@ -3399,9 +3429,6 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         // too failed to start, this stays a toolless turn — carry the signal into the
                         // classification below.
                         saw_mcp_unavailable |= nudge_outcome.mcp_tools_unavailable;
-                        // How much the managed transcript grew across this continuation — the
-                        // diminishing-returns signal for the NEXT iteration.
-                        delta_tokens_last = context_tokens.saturating_sub(tokens_before);
                         continuation_count += 1;
                         if halted_by_loop_guard {
                             break;
@@ -5015,53 +5042,64 @@ mod tests {
     }
 
     // ── Token-budget continuation guard (H8) — pure decision, offline-unit-tested ──────────────
+    /// The ladder exists because a coding turn is deliberately near-deterministic: at 0.1 a
+    /// context that already contains a sentence makes that sentence the continuation. Asking the
+    /// same model the same way again cannot produce a different answer, so the request itself has
+    /// to change once repetition is observed.
+    #[test]
+    fn repetition_pressure_changes_the_request_not_just_the_instruction() {
+        assert_eq!(repetition_temperature(0), CODING_TEMPERATURE);
+        assert!(repetition_temperature(1) > repetition_temperature(0));
+        assert!(repetition_temperature(2) > repetition_temperature(1));
+        assert!(
+            repetition_temperature(2) <= 1.0,
+            "stay in coding-usable range"
+        );
+
+        // An ordinary step sends no penalties at all — this must not change the default request.
+        assert_eq!(repetition_frequency_penalty(0), None);
+        assert_eq!(repetition_presence_penalty(0), None);
+        assert!(repetition_frequency_penalty(1).unwrap() > 0.0);
+        assert!(
+            repetition_frequency_penalty(2).unwrap() > repetition_frequency_penalty(1).unwrap()
+        );
+        assert!(repetition_presence_penalty(2).unwrap() > repetition_presence_penalty(1).unwrap());
+    }
+
     #[test]
     fn continuation_nudges_when_under_budget_no_progress_unverified() {
-        // (turn under budget + no progress + goal unverified) → Nudge.
+        // (turn under budget + no progress + goal unverified) → one push-back.
         assert_eq!(
-            continuation_decision(false, false, 0.10, 0, u64::MAX),
+            continuation_decision(false, false, 0.10, 0),
             ContinuationDecision::Nudge
         );
         // Just below the budget ceiling still nudges.
         assert_eq!(
-            continuation_decision(false, false, 0.89, 1, 900),
+            continuation_decision(false, false, 0.89, 0),
             ContinuationDecision::Nudge
         );
     }
 
     #[test]
-    fn continuation_stops_on_diminishing_returns() {
-        // (continuation_count >= MIN && dtok < FLOOR) → Stop.
+    fn continuation_stops_once_the_single_push_back_is_spent() {
+        // The push-back budget is ONE. A second re-drive would only append another copy of the
+        // same instruction to the context, which is how a stuck turn became a spiral.
         assert_eq!(
-            continuation_decision(
-                false,
-                false,
-                0.10,
-                CONTINUATION_DIMINISHING_MIN,
-                CONTINUATION_DIMINISHING_TOKEN_FLOOR - 1
-            ),
+            continuation_decision(false, false, 0.10, CONTINUATION_MAX),
             ContinuationDecision::Stop
         );
-        // Under the min continuations it does NOT stop yet even with a tiny delta — it nudges.
         assert_eq!(
-            continuation_decision(false, false, 0.10, CONTINUATION_DIMINISHING_MIN - 1, 0),
-            ContinuationDecision::Nudge
-        );
-        // Above the min but still producing real output (>= floor) keeps nudging (not diminishing)…
-        assert_eq!(
-            continuation_decision(
-                false,
-                false,
-                0.10,
-                CONTINUATION_DIMINISHING_MIN,
-                CONTINUATION_DIMINISHING_TOKEN_FLOOR
-            ),
-            ContinuationDecision::Nudge
-        );
-        // …until the absolute ceiling, which stops the loop regardless of output size.
-        assert_eq!(
-            continuation_decision(false, false, 0.10, CONTINUATION_MAX, 10_000),
+            continuation_decision(false, false, 0.10, CONTINUATION_MAX + 3),
             ContinuationDecision::Stop
+        );
+        // Progress or a verified goal is accepted rather than stopped, at any count.
+        assert_eq!(
+            continuation_decision(false, true, 0.10, CONTINUATION_MAX),
+            ContinuationDecision::Accept
+        );
+        assert_eq!(
+            continuation_decision(true, false, 0.10, CONTINUATION_MAX),
+            ContinuationDecision::Accept
         );
     }
 
@@ -5069,22 +5107,22 @@ mod tests {
     fn continuation_accepts_on_progress_or_verified_or_no_budget() {
         // Real progress made this turn → never nudge, even under budget and unverified.
         assert_eq!(
-            continuation_decision(false, true, 0.10, 0, u64::MAX),
+            continuation_decision(false, true, 0.10, 0),
             ContinuationDecision::Accept
         );
         // Goal verified → never nudge.
         assert_eq!(
-            continuation_decision(true, false, 0.10, 0, u64::MAX),
+            continuation_decision(true, false, 0.10, 0),
             ContinuationDecision::Accept
         );
         // No budget headroom (>= ceiling) → accept rather than nudge into the window wall.
         assert_eq!(
-            continuation_decision(false, false, CONTINUATION_BUDGET_CEILING, 0, u64::MAX),
+            continuation_decision(false, false, CONTINUATION_BUDGET_CEILING, 0),
             ContinuationDecision::Accept
         );
         // Progress wins even when the diminishing-returns counters would otherwise stop.
         assert_eq!(
-            continuation_decision(false, true, 0.10, CONTINUATION_MAX, 0),
+            continuation_decision(false, true, 0.10, CONTINUATION_MAX),
             ContinuationDecision::Accept
         );
     }
@@ -13020,9 +13058,8 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2 + CONTINUATION_DIMINISHING_MIN,
-            "explore + describe (2 completions), then 3 continuation re-drives before the \
-             diminishing-returns stop"
+            2 + CONTINUATION_MAX,
+            "explore + describe (2 completions), then ONE push-back before the honest stop"
         );
         assert_eq!(answer, "still only describing");
         let _ = std::fs::remove_dir_all(&dir);
@@ -13050,7 +13087,7 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2 + CONTINUATION_DIMINISHING_MIN,
+            2 + CONTINUATION_MAX,
             "the explicit change contract must re-drive an empty implementation"
         );
         assert_eq!(answer, "still only describing");
@@ -13273,7 +13310,7 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            1 + CONTINUATION_DIMINISHING_MIN,
+            1 + CONTINUATION_MAX,
             "bridge yields its whole loop in ONE completion, then 3 continuation re-drives before \
              the diminishing-returns stop"
         );
@@ -13507,7 +13544,7 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            1 + CONTINUATION_DIMINISHING_MIN,
+            1 + CONTINUATION_MAX,
             "bridge empty diff with no surfaced tool must still be nudged (3× before the stop)"
         );
         assert_eq!(answer, "still only describing after the nudge");
@@ -13539,7 +13576,7 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            1 + CONTINUATION_DIMINISHING_MIN,
+            1 + CONTINUATION_MAX,
             "a direct mutating turn that only planned must be pushed to execute"
         );
         assert_eq!(answer, "still only describing after the nudge");
@@ -13908,7 +13945,7 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            3 + CONTINUATION_DIMINISHING_MIN,
+            3 + CONTINUATION_MAX,
             "explore + describe, three bounded empty-diff continuations, then exactly ONE \
              pristine-test guard re-drive"
         );
@@ -13996,7 +14033,7 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2 + CONTINUATION_DIMINISHING_MIN,
+            2 + CONTINUATION_MAX,
             "bridge completion, three bounded empty-diff continuations, then exactly ONE \
              pristine-test guard re-drive"
         );
@@ -14033,7 +14070,7 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2 + CONTINUATION_DIMINISHING_MIN,
+            2 + CONTINUATION_MAX,
             "an untracked new test file must not fire the pristine-test guard; only the bounded \
              empty-diff continuations run"
         );
@@ -14065,7 +14102,7 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2 + CONTINUATION_DIMINISHING_MIN
+            2 + CONTINUATION_MAX
         );
         assert_eq!(answer, "still only describing");
         // The rewritten test is left exactly as the model wrote it.

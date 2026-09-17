@@ -94,6 +94,7 @@ pub(crate) fn to_llm(
     // content in place so `synthetic_tool_results` — a set of INDICES into these messages — stays
     // valid; removing the messages instead would silently shift every index in it.
     dedupe_repeated_tool_results(&mut normalized.messages, keep_recent_tool_results);
+    crate::narration_dedupe::collapse_repeated_narration(&mut normalized.messages);
     let elided = elide_old_tool_results(
         &normalized.messages,
         &normalized.synthetic_tool_results,
@@ -790,6 +791,96 @@ pub(crate) fn clamp_chars(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The structural half of loop prevention. A model conditions on its context, so a request
+    /// carrying five verbatim copies of one sentence tells it that repeating that sentence is what
+    /// happens here. Observed live 2026-09-17: 40 assistant rows holding 15 distinct texts, one of
+    /// them 7 times across 12 minutes, while every tool call differed — so no identical-call guard
+    /// could see it. The request the model receives must never contain the pattern.
+    #[test]
+    fn a_repeated_sentence_reaches_the_model_exactly_once() {
+        let narration = "I'm inspecting the current diff to identify the missing fix, then I'll apply and verify it.";
+        let mut messages = vec![Message::user("fix the failing test")];
+        for index in 0..5 {
+            messages.push(Message::assistant_tool_calls(
+                narration,
+                vec![forge_types::ToolCall {
+                    id: format!("call-{index}"),
+                    name: "read_file".into(),
+                    // Every call differs, which is exactly why the doom-loop guard stays quiet.
+                    args: serde_json::json!({ "path": format!("src/file_{index}.rs") }),
+                }],
+            ));
+            messages.push(Message::tool_result(
+                format!("call-{index}"),
+                "fn main() {}",
+            ));
+        }
+
+        let sent = to_llm(&messages, 100_000, 4_096, 2);
+        let verbatim = sent
+            .iter()
+            .filter(|message| message.content == narration)
+            .count();
+        assert_eq!(verbatim, 1, "the model must see its own sentence once");
+        let marked = sent
+            .iter()
+            .filter(|message| message.content == crate::narration_dedupe::NARRATION_DEDUPE_MARKER)
+            .count();
+        assert_eq!(marked, 4, "every later copy is marked instead of repeated");
+        // The call/result round-trip a provider validates is untouched.
+        assert_eq!(sent.iter().filter(|m| !m.tool_calls.is_empty()).count(), 5);
+        assert_eq!(sent.iter().filter(|m| m.role == Role::Tool).count(), 5);
+    }
+
+    /// The FIRST copy is the one kept, not the last: rewriting an older message would change the
+    /// prefix every provider prompt-caches, turning loop prevention into a cache-miss generator.
+    #[test]
+    fn collapsing_keeps_the_earliest_copy_so_the_cached_prefix_survives() {
+        let text = "Reverting the failed live-reuse path and re-running the focused tests now.";
+        let messages = vec![
+            Message::user("carry on"),
+            Message::assistant(text),
+            Message::assistant("something genuinely different this step, with enough length"),
+            Message::assistant(text),
+        ];
+        let sent = to_llm(&messages, 100_000, 4_096, 2);
+        assert_eq!(sent[1].content, text);
+        assert_eq!(
+            sent[3].content,
+            crate::narration_dedupe::NARRATION_DEDUPE_MARKER
+        );
+    }
+
+    /// A re-driven nudge is stored as a plain user message, so six re-drives used to leave six
+    /// copies of the same instruction in the request beside the model's own repeats.
+    #[test]
+    fn a_repeated_injected_instruction_is_collapsed_too() {
+        let nudge =
+            "You have not modified any files. Implement the fix now — do not just describe it.";
+        let messages = vec![
+            Message::user("fix the bug"),
+            Message::assistant("Looking at the failing assertion first."),
+            Message::user(nudge),
+            Message::assistant("Still reading the test, one moment while I confirm the cause."),
+            Message::user(nudge),
+        ];
+        let sent = to_llm(&messages, 100_000, 4_096, 2);
+        assert_eq!(sent.iter().filter(|m| m.content == nudge).count(), 1);
+    }
+
+    /// Two short acknowledgements are not a loop, and collapsing them would read as censorship of
+    /// the model's own words for no gain.
+    #[test]
+    fn short_acknowledgements_are_left_alone() {
+        let messages = vec![
+            Message::user("and now the second half"),
+            Message::assistant("Done."),
+            Message::assistant("Done."),
+        ];
+        let sent = to_llm(&messages, 100_000, 4_096, 2);
+        assert_eq!(sent.iter().filter(|m| m.content == "Done.").count(), 2);
+    }
 
     /// A thinking model's reply carries its reasoning back to the provider on every later call in
     /// the loop, so the estimate that drives compaction and the window-fit check must include it.

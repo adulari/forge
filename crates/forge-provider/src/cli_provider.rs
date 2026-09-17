@@ -6030,6 +6030,8 @@ done
         let mut sink = |_e: StreamEvent| {};
 
         let options = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             checkpoint: Some(CheckpointContext {
                 session: "workspace-session".to_string(),
                 seq: 1,

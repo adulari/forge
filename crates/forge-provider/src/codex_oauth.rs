@@ -1246,6 +1246,8 @@ mod tests {
         let prefix = "Stable prompt-cache probe context. ".repeat(300);
         let messages = vec![Message::system(prefix), Message::user("Reply only with OK")];
         let opts = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             prompt_cache_key: Some(format!("forge-cache-probe-{}", std::process::id())),
             ..Default::default()
         };
@@ -1287,6 +1289,8 @@ mod tests {
     fn codex_request_uses_session_cache_key_and_cli_parity_fields() {
         let messages = vec![Message::user("hi")];
         let opts = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             prompt_cache_key: Some("forge-session-123".into()),
             ..Default::default()
         };
@@ -1322,6 +1326,8 @@ mod tests {
         // the backend default while Forge reported the pin.
         let messages = vec![Message::user("hi")];
         let opts = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             effort: Some(EffortLevel::Medium),
             ..Default::default()
         };
@@ -1349,6 +1355,8 @@ mod tests {
         // rung down is recoverable; a rejected turn is not.
         let messages = vec![Message::user("hi")];
         let opts = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             effort: Some(EffortLevel::WhiteHot),
             ..Default::default()
         };
@@ -2444,6 +2452,8 @@ mod tests {
             .with_max_output_tokens(4096);
         let mut sink = |_: StreamEvent| {};
         let opts = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             temperature: Some(0.2),
             ..Default::default()
         };

@@ -254,6 +254,8 @@ impl LlmRouter {
                     &messages,
                     &[],
                     &CompletionOptions {
+                        frequency_penalty: None,
+                        presence_penalty: None,
                         temperature: Some(0.0),
                         ..CompletionOptions::default()
                     },

@@ -1245,6 +1245,9 @@ impl GenAiProvider {
             }
         }
 
+        // Repetition penalties, only while the turn is repeating itself (see `wire_params`).
+        options = crate::wire_params::with_repetition_penalties(options, &model_name, opts);
+
         // Structured-output request (OpenAI `response_format`): map to the provider's JSON-mode /
         // JSON-schema knob so a caller asking for JSON actually gets JSON. Providers that don't
         // support it ignore the field (genai's documented behaviour).
@@ -1761,6 +1764,8 @@ mod tests {
 
         // Structured output must not mix with Partial Mode.
         let json = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             response_format: Some(ResponseFormat::JsonObject),
             ..CompletionOptions::default()
         };

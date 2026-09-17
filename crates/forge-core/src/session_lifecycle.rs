@@ -223,6 +223,7 @@ impl Session {
             subagent_pin_free: None,
             overflow_window_cap: None,
             require_tool_call: false,
+            repetition_pressure: 0,
             kept_outputs: std::collections::HashMap::new(),
             whitehot_guidance_injected: false,
             pinned_tier: None,

@@ -307,6 +307,8 @@ async fn chat_completions(
     };
     let effort = req.reasoning_effort.as_deref().and_then(EffortLevel::parse);
     let opts = CompletionOptions {
+        frequency_penalty: None,
+        presence_penalty: None,
         effort,
         temperature: req.temperature,
         checkpoint: None,

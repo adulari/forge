@@ -425,6 +425,8 @@ Rules:\n\
             _ => None,
         };
         CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             // A summary replaces everything it folds; the cheap rung produced 189 chars for
             // 240K tokens. Compaction runs at the model's own default.
             effort: (purpose != "compact").then_some(EffortLevel::Low),
@@ -478,6 +480,8 @@ Rules:\n\
 
         let stream_idle = std::time::Duration::from_secs(self.config.mesh.stream_idle_timeout_secs);
         let completion_opts = CompletionOptions {
+            frequency_penalty: None,
+            presence_penalty: None,
             effort: self.pinned_effort,
             temperature: Some(CODING_TEMPERATURE),
             // The planner runs with no tools (it can't edit files), so it needs no checkpoint context.
