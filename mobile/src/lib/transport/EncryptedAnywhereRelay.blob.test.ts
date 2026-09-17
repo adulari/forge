@@ -243,6 +243,102 @@ describe("EncryptedAnywhereRelay blobs", () => {
     expect(new TextDecoder().decode(response.body)).toBe("durable response");
     expect(events).toContain("consume");
   });
+
+  // Real-world sizes: /api/models and /api/config run 70-80 KiB against a live daemon, both well
+  // past the 64 KiB outbound-inline threshold, so the host always answers them with a body_blob.
+  it("downloads and decodes a response body far larger than the outbound-inline threshold", async () => {
+    const big = { models: Array.from({ length: 1500 }, (_, index) => ({
+      id: `provider::model-${index}`,
+      name: `Model number ${index} with a realistically long descriptive name`,
+    })) };
+    const plaintext = new TextEncoder().encode(JSON.stringify(big));
+    expect(plaintext.length).toBeGreaterThan(64 * 1024);
+    const blob = inboundBlob(plaintext);
+    const relay = inboundRelay(blob, blob, []);
+    const response = await relay.request(bridgeRequest(new Uint8Array()));
+    const decoded = JSON.parse(new TextDecoder().decode(response.body)) as { models: unknown[] };
+    expect(decoded.models).toHaveLength(1500);
+  }, 30_000);
+
+  it("isolates a failed response blob to its own request, leaving the connection and an unrelated concurrent request intact", async () => {
+    const goodBlobId = "cc".repeat(16);
+    const badBlobId = blobId;
+    const goodBlob = inboundBlob(new TextEncoder().encode("ok"));
+    const goodReference = {
+      blob_id: goodBlobId,
+      ciphertext_bytes: goodBlob.length,
+      ciphertext_sha256: base64Url(sha256(goodBlob)),
+    };
+    const originalBad = inboundBlob(new TextEncoder().encode("tampered"));
+    const tamperedBad = originalBad.slice();
+    tamperedBad[120] ^= 1;
+    const badReference = {
+      blob_id: badBlobId,
+      ciphertext_bytes: originalBad.length,
+      ciphertext_sha256: base64Url(sha256(originalBad)),
+    };
+
+    const closeCodes: number[] = [];
+    const requestIds = new Map<string, number[]>();
+    let sends = 0;
+    class TrackedSocket extends MockWebSocket {
+      override close(code?: number): void {
+        closeCodes.push(code ?? 0);
+        super.close();
+      }
+      override send(value: Uint8Array): void {
+        const opened = openEnvelope(value, dataKey, ed25519.getPublicKey(controllerSeed));
+        const payload = JSON.parse(new TextDecoder().decode(opened.plaintext)) as {
+          request_id: number[];
+          parameters: string[];
+        };
+        requestIds.set(payload.parameters[0], payload.request_id);
+        sends += 1;
+        // Both requests are sent before either is answered, so both are genuinely concurrent
+        // pending entries when the bad response arrives.
+        if (sends === 2) {
+          this.emit(hostEnvelope(2, {
+            request_id: requestIds.get("bad"),
+            status: 200,
+            body_blob: badReference,
+          }, 30n));
+          this.emit(hostEnvelope(2, {
+            request_id: requestIds.get("good"),
+            status: 200,
+            body_blob: goodReference,
+          }, 31n));
+        }
+      }
+    }
+    globalThis.WebSocket = TrackedSocket as unknown as typeof WebSocket;
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const url = input.toString();
+      if (url.endsWith("/v1/relay/tickets")) return jsonResponse({ ticket: "ticket" });
+      if (url.endsWith(`/v1/relay/blobs/${badBlobId}`) && init?.method === "GET") {
+        return jsonResponse({ ...badReference, download_url: "https://objects.test/bad" });
+      }
+      if (url === "https://objects.test/bad") return new Response(tamperedBad as unknown as BodyInit, { status: 200 });
+      if (url.endsWith(`/v1/relay/blobs/${goodBlobId}`) && init?.method === "GET") {
+        return jsonResponse({ ...goodReference, download_url: "https://objects.test/good" });
+      }
+      if (url === "https://objects.test/good") return new Response(goodBlob as unknown as BodyInit, { status: 200 });
+      if (url.endsWith(`/v1/relay/blobs/${goodBlobId}`) && init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch;
+
+    const relay = new EncryptedAnywhereRelay(credentials());
+    const bad = relay.request({ ...bridgeRequest(new Uint8Array()), parameters: ["bad"] });
+    const good = relay.request({ ...bridgeRequest(new Uint8Array()), parameters: ["good"] });
+
+    await expect(bad).rejects.toThrow();
+    await expect(good).resolves.toMatchObject({ status: 200 });
+    const goodResponse = await good;
+    expect(new TextDecoder().decode(goodResponse.body)).toBe("ok");
+    // The tampered blob must not have torn the connection down: nothing ever called `close()`.
+    expect(closeCodes).toEqual([]);
+  });
 });
 
 function credentials(onAccept?: (sequence: bigint) => void): AnywhereRelayCredentials {
