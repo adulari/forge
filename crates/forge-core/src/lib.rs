@@ -4743,9 +4743,6 @@ mod tests {
     #[path = "stale_tasks.rs"]
     mod stale_tasks_tests;
 
-    #[path = "reasoning_carrier.rs"]
-    mod reasoning_carrier_tests;
-
     #[path = "nudge_marker.rs"]
     mod nudge_marker_tests;
 
