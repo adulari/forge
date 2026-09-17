@@ -269,7 +269,14 @@ impl Store {
         // projection unconditionally: SQLite short-circuits the CASE, so the default page runs the
         // same work it always did and pays nothing for a subquery it never needs. Same for the
         // row's OWN `tool_calls_json` (the carrier expansion below) and for the widened content
-        // filter, which collapses back to `m.content != ''` when tools aren't asked for.
+        // filter, which collapses back to `TRIM(m.content, ...) != ''` when tools aren't asked for.
+        //
+        // The content check trims tab/newline/CR/space before comparing: a completion whose real
+        // prose landed on a tool-call row (invisible with `include_tools=false`) can leave its own
+        // carrier holding only whitespace (e.g. "\n\n\n"), and SQLite's bare `!= ''` treats that as
+        // non-empty. Left in, that surfaces as a blank assistant bubble the user's actual reply
+        // never occupies (#28). `TRIM(X)` alone only strips spaces in SQLite, not newlines/tabs —
+        // hence the explicit `char(9,10,13,32)` character set.
         let mut stmt = conn.prepare(
             "SELECT m.seq, m.role, m.content, m.model, m.created_at, m.visibility,
                     m.tool_call_id,
@@ -290,7 +297,7 @@ impl Store {
                AND (?2 IS NULL OR m.seq < ?2)
                AND (((m.role IN ('user', 'assistant') AND m.visibility != 'llm_only') OR m.visibility = 'ui')
                     OR (?4 = 1 AND m.role = 'tool' AND m.visibility != 'llm_only'))
-               AND (m.content != ''
+               AND (TRIM(m.content, char(9,10,13,32)) != ''
                     OR (?4 = 1 AND m.role = 'assistant' AND m.visibility != 'llm_only'
                         AND m.tool_calls_json IS NOT NULL))
              ORDER BY m.seq DESC LIMIT ?3",
@@ -354,7 +361,11 @@ impl Store {
                     });
                 }
             }
-            if !row.content.is_empty() {
+            // Whitespace-only prose (the same "\n\n\n" shape the SQL filter above screens out of
+            // the non-tool page) still reaches here via the widened tools-included branch, which
+            // deliberately fetches a carrier with blank content so its CALLS surface — the carrier's
+            // own row must not.
+            if !row.content.trim().is_empty() {
                 out.push(row);
             }
         }
@@ -388,7 +399,7 @@ impl Store {
              WHERE session_id = ?1
                AND (((role IN ('user', 'assistant') AND visibility != 'llm_only') OR visibility = 'ui')
                     OR (?2 = 1 AND role = 'tool' AND visibility != 'llm_only'))
-               AND (content != ''
+               AND (TRIM(content, char(9,10,13,32)) != ''
                     OR (?2 = 1 AND role = 'assistant' AND visibility != 'llm_only'
                         AND tool_calls_json IS NOT NULL))",
             rusqlite::params![session_id, i64::from(include_tools)],

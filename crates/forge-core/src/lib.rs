@@ -13449,6 +13449,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_answer_starting_with_blank_lines_is_persisted_trimmed() {
+        // #28: a bridge's wrap-up text opened with "\n\n" before "All tasks complete. ..." and the
+        // daemon's `/api/history` view rendered that leading dead space verbatim. The trim belongs
+        // in `publish_terminal_answer`, the one place every terminal answer is persisted, so this
+        // exercises it through a real turn rather than calling the helper directly.
+        let dir = clean_git_repo();
+        let provider = Arc::new(PlainAnswerProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            text: "\n\nAll tasks complete. Everything shipped.",
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+
+        let answer = session.run_turn("wrap up").await.unwrap();
+        assert_eq!(answer, "\n\nAll tasks complete. Everything shipped.");
+
+        let page = store.load_history_page(&session.id, None, 10).unwrap();
+        let note = page
+            .iter()
+            .find(|r| r.visibility == forge_types::Visibility::UiOnly)
+            .expect("the terminal answer is persisted as a ui note");
+        assert_eq!(
+            note.content, "All tasks complete. Everything shipped.",
+            "the persisted note must not start with dead blank lines"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn bridge_empty_diff_with_no_surfaced_tool_still_nudges() {
         // Wave-6 bridge-path robustness: a bridge that yields an empty diff having surfaced NO
         // parseable tool event (refusal / prose-only / CLI output drift → `tools_ran == 0`) still

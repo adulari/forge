@@ -2829,6 +2829,59 @@ mod tests {
     }
 
     #[test]
+    fn history_page_drops_whitespace_only_assistant_rows() {
+        // #28: a completion whose real prose landed on a tool-call row (visible only with
+        // `include_tools=true`) can leave its own assistant carrier holding nothing but
+        // whitespace — "\n\n\n" reported live. A bare `content != ''` check let that through as a
+        // blank bubble the user's actual reply never occupies; it must be dropped, on BOTH the
+        // default page and the tools-included one (the carrier's tool_calls_json makes it eligible
+        // there too, so the whitespace check has to hold regardless).
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        store.add_message(&sid, 0, Role::User, "q", None).unwrap();
+        store
+            .add_message_full(
+                &sid,
+                1,
+                Role::Assistant,
+                "\n\n\n",
+                Some("m1"),
+                &[ToolCall {
+                    id: "call-a".into(),
+                    name: "write_file".into(),
+                    args: serde_json::json!({"path": "android-test.txt"}),
+                }],
+                None,
+            )
+            .unwrap();
+        store
+            .add_message(&sid, 2, Role::Assistant, "Done.", None)
+            .unwrap();
+
+        let plain = store.load_history_page(&sid, None, 10).unwrap();
+        assert_eq!(
+            plain.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![2, 0],
+            "the whitespace-only carrier must not appear as a blank bubble"
+        );
+
+        let with_tools = store.load_history_page_with(&sid, None, 10, true).unwrap();
+        assert!(
+            with_tools
+                .iter()
+                .all(|r| !(r.role == Role::Assistant && r.content.trim().is_empty())),
+            "no whitespace-only assistant row in the tools-included view either: {with_tools:?}"
+        );
+        assert!(
+            with_tools
+                .iter()
+                .any(|r| r.tool_phase == Some(ToolPhase::Call)
+                    && r.tool_name.as_deref() == Some("write_file")),
+            "the carrier's real tool call still surfaces when tools are included"
+        );
+    }
+
+    #[test]
     fn tool_call_args_are_summarized_without_leaking_a_file_body() {
         // A `write_file` call is the worst case: the body is arbitrarily large and the `path` is
         // the part that says what happened. Capping values first keeps the path visible.
