@@ -93,9 +93,17 @@ fn project_row(path: &Path, last_activity: Option<i64>) -> ProjectRow {
     ProjectRow {
         path: path.display().to_string(),
         name: project_name(path),
-        is_git_repo: path.join(".git").exists(),
+        is_git_repo: looks_like_git_repo(path),
         last_activity,
     }
+}
+
+// A bare `.git` directory is not enough: a home directory can carry a stub `.git/` (hooks and
+// info only) that git itself rejects, and offering an isolated worktree there fails at start.
+// A linked worktree's `.git` is a file pointing at the real git dir.
+fn looks_like_git_repo(path: &Path) -> bool {
+    let dot_git = path.join(".git");
+    dot_git.is_file() || dot_git.join("HEAD").is_file()
 }
 
 fn path_is_browsable(path: &Path, roots: &[PathBuf]) -> bool {
@@ -322,6 +330,8 @@ mod tests {
         let git = root.path().join("zeta-git");
         std::fs::create_dir_all(&ordinary).unwrap();
         std::fs::create_dir_all(git.join(".git")).unwrap();
+        std::fs::write(git.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(ordinary.join(".git/hooks")).unwrap();
         std::fs::create_dir_all(root.path().join(".hidden")).unwrap();
         let canonical_root = root.path().canonicalize().unwrap();
         let result =
@@ -336,6 +346,10 @@ mod tests {
             ["zeta-git", "alpha"]
         );
         assert!(result.entries[0].is_git_repo);
+        assert!(
+            !result.entries[1].is_git_repo,
+            "a stub .git/ without HEAD is not a repository"
+        );
         let error = browse_project_directory(outside.path().to_path_buf(), vec![canonical_root])
             .unwrap_err();
         assert!(
