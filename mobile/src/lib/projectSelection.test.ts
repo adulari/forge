@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { isKnownGitRepo, isLoopbackServer, lastProjectStorageKey, projectChoices, projectName } from "./projectSelection";
+import {
+  DEFAULT_WORKTREE_PREFERENCE,
+  isKnownGitRepo,
+  isLoopbackServer,
+  lastProjectStorageKey,
+  projectChoices,
+  projectName,
+  recommendedWorktree,
+  withWorktreeToggled,
+} from "./projectSelection";
 
 describe("project selection", () => {
   it("uses one server-scoped remembered-project key", () => {
@@ -55,5 +64,40 @@ describe("isKnownGitRepo", () => {
     expect(isKnownGitRepo("/some/manual/path", catalog)).toBeNull();
     expect(isKnownGitRepo("/home/floris", null)).toBeNull();
     expect(isKnownGitRepo("", catalog)).toBeNull();
+  });
+});
+
+describe("recommendedWorktree / withWorktreeToggled", () => {
+  it("is on by default for a known or unknown git repo", () => {
+    expect(recommendedWorktree("/work/forge", true, DEFAULT_WORKTREE_PREFERENCE)).toBe(true);
+    expect(recommendedWorktree("/manual/path", null, DEFAULT_WORKTREE_PREFERENCE)).toBe(true);
+  });
+
+  it("is off, full stop, once the project is known not to be a git repo", () => {
+    expect(recommendedWorktree("/home/floris", false, DEFAULT_WORKTREE_PREFERENCE)).toBe(false);
+    // Even a standing "user turned it back on" preference can't override "not a git repo".
+    const pref = withWorktreeToggled(DEFAULT_WORKTREE_PREFERENCE, "/home/floris", true);
+    expect(recommendedWorktree("/home/floris", false, pref)).toBe(false);
+  });
+
+  it("re-enables to the recommended default once a git project is chosen afterward", () => {
+    // Reproduces the reported bug: /home/floris (not a git repo) auto-disables the toggle,
+    // then the user picks /work/forge (a git repo) — the toggle must come back on, since
+    // the user never touched the switch for /work/forge.
+    let pref = DEFAULT_WORKTREE_PREFERENCE;
+    expect(recommendedWorktree("/home/floris", false, pref)).toBe(false);
+    expect(recommendedWorktree("/work/forge", true, pref)).toBe(true);
+  });
+
+  it("remembers an explicit off choice only for the project it was made on", () => {
+    let pref = withWorktreeToggled(DEFAULT_WORKTREE_PREFERENCE, "/work/forge", false);
+    expect(recommendedWorktree("/work/forge", true, pref)).toBe(false);
+    // Switching to a different git project doesn't inherit the override.
+    expect(recommendedWorktree("/work/helm", true, pref)).toBe(true);
+    // Switching back to /work/forge still honors it.
+    expect(recommendedWorktree("/work/forge", true, pref)).toBe(false);
+    // Turning it back on for /work/forge clears the override.
+    pref = withWorktreeToggled(pref, "/work/forge", true);
+    expect(recommendedWorktree("/work/forge", true, pref)).toBe(true);
   });
 });

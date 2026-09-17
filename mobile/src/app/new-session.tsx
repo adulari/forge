@@ -1,8 +1,10 @@
 // "Forge a task" (mobile.dc.html:378, desktop.dc.html:252) — Hearth core rule 6: the task
-// composer replaces every "new session" affordance. CreateSessionRequest has no separate
-// initial-prompt field yet, so per HANDOFF core rule 8 ("session titles are task titles")
-// the composer's free text maps straight onto the existing `title` param — no data-layer
-// change needed, this is a reskin.
+// composer replaces every "new session" affordance. Per HANDOFF core rule 8 ("session titles
+// are task titles") the composer's free text ALSO maps onto the existing `title` param — that
+// part is unchanged. The text itself now rides `CreateSessionRequest.prompt` so the daemon runs
+// the first turn as part of session creation; a daemon that predates that field rejects the
+// whole request (`deny_unknown_fields`), detected via `isUnsupportedPromptFieldError` below, and
+// the retry falls back to the older `offlineQueue` seeding this screen used exclusively before.
 //
 // Compact (mobile): full-bleed screen, header + scrollable body + a CTA pinned near the
 // bottom. Medium/expanded (desktop/web): expo-router's `presentation: "modal"` gives no
@@ -29,7 +31,7 @@ import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
 import { ModelPicker } from "../components/session/ModelPicker";
 import { ProjectPicker } from "../components/session/ProjectPicker";
-import { ApiError } from "../lib/api";
+import { ApiError, isUnsupportedPromptFieldError, type CreateSessionResponse } from "../lib/api";
 import { hostStateText } from "../lib/anywhere/format";
 import { anywhereClient, useAnywhere, useAnywhereHosts } from "../lib/anywhere/store";
 import type { AnywhereHost } from "../lib/anywhere/types";
@@ -38,7 +40,14 @@ import { useIncomingShare } from "../lib/incomingShare";
 import { appendIncomingShareText } from "../lib/incomingShareCore";
 import { goBackOr } from "../lib/nav";
 import { buildInitialPromptQueue, offlineQueueKey } from "../lib/offlineQueue";
-import { isKnownGitRepo, lastProjectStorageKey } from "../lib/projectSelection";
+import {
+  DEFAULT_WORKTREE_PREFERENCE,
+  isKnownGitRepo,
+  lastProjectStorageKey,
+  recommendedWorktree,
+  withWorktreeToggled,
+  type WorktreePreference,
+} from "../lib/projectSelection";
 import { transportForBaseUrl } from "../lib/serverTargets";
 import { useCreateSession, useProjects } from "../lib/queries";
 import { getSecureItem, setSecureItem } from "../lib/secureStore";
@@ -183,7 +192,7 @@ export default function NewSessionScreen() {
   const [cwd, setCwd] = useState(requestedCwd ?? "");
   const [task, setTask] = useState(requestedTitle ?? "");
   const [model, setModel] = useState("");
-  const [worktree, setWorktree] = useState(true);
+  const [worktreePref, setWorktreePref] = useState<WorktreePreference>(DEFAULT_WORKTREE_PREFERENCE);
   const [temper, setTemper] = useState<Temper>("Ask");
   const create = useCreateSession();
   const toast = useToast();
@@ -192,9 +201,14 @@ export default function NewSessionScreen() {
   // a home/workspace folder, not one (see projectSelection.ts). `null` means "the catalog never
   // told us" (manual path, still loading) — only an explicit `false` turns the toggle off.
   const cwdIsGitRepo = useMemo(() => isKnownGitRepo(cwd, projects.data ?? null), [cwd, projects.data]);
-  useEffect(() => {
-    if (cwdIsGitRepo === false) setWorktree(false);
-  }, [cwdIsGitRepo]);
+  const worktree = useMemo(
+    () => recommendedWorktree(cwd, cwdIsGitRepo, worktreePref),
+    [cwd, cwdIsGitRepo, worktreePref],
+  );
+  const onWorktreeChange = useCallback(
+    (value: boolean) => setWorktreePref((pref) => withWorktreeToggled(pref, cwd, value)),
+    [cwd],
+  );
 
   useEffect(() => {
     if (
@@ -277,39 +291,52 @@ export default function NewSessionScreen() {
 
     if (create.isPending) return;
     const trimmedCwd = cwd.trim();
-    create.mutate(
-      {
-        cwd: trimmedCwd || undefined,
-        title: task.trim() || undefined,
-        model: model.trim() || undefined,
-        worktree,
-        temper,
-      },
-      {
-        onSuccess: (res) => {
-          if (incomingShareId) void consumeShare(incomingShareId);
-          if (activeServerId) void setSecureItem(lastProjectStorageKey(activeServerId), res.cwd);
-          // The daemon has no initial-prompt param (see CreateSessionRequest) — the task text
-          // rides the same durable offline-prompt queue a live chat screen already drains on
-          // its first socket-open edge, so it survives the gap between "session created" and
-          // "this new screen's WS connects" instead of being silently dropped.
-          const initialQueue = buildInitialPromptQueue(task);
-          const seedQueue = initialQueue.length > 0
-            ? AsyncStorage.setItem(offlineQueueKey(baseUrl, res.id), JSON.stringify(initialQueue)).catch(() => {
-                // best-effort — worst case the composer opens with no queued first prompt
-              })
-            : Promise.resolve();
-          void seedQueue.then(() => {
-            // This screen is a `presentation: "modal"` Stack.Screen (see app/_layout.tsx) — a
-            // plain `replace` leaves the native modal transition in place and the target route
-            // renders behind/under it as a blank screen on Android. `dismissTo` pops the modal
-            // off the stack and lands on `/session/[id]` in its place (falling back to a normal
-            // navigate when that route isn't already in history, which it never is here).
-            router.dismissTo(`/session/${res.id}`);
-          });
-        },
-      },
-    );
+    const trimmedTask = task.trim();
+    const baseBody = {
+      cwd: trimmedCwd || undefined,
+      title: trimmedTask || undefined,
+      model: model.trim() || undefined,
+      worktree,
+      temper,
+    };
+
+    void (async () => {
+      let res: CreateSessionResponse;
+      let promptDelivered = false;
+      try {
+        res = await create.mutateAsync({ ...baseBody, prompt: trimmedTask || undefined });
+        promptDelivered = trimmedTask.length > 0;
+      } catch (err) {
+        // Any other failure (bad cwd, daemon down, ...) is a real error — `create.error` is
+        // already set by the failed mutateAsync above and `serverError` below renders it.
+        if (!isUnsupportedPromptFieldError(err)) return;
+        // Pre-#1394 daemon: `deny_unknown_fields` rejected the whole body over `prompt`. Retry
+        // without it — this is the exact request this screen always sent — then fall back to
+        // the durable offline-prompt queue a live chat screen drains on its first socket-open
+        // edge, so the task text still survives the gap between "session created" and "this new
+        // screen's WS connects" instead of being silently dropped.
+        res = await create.mutateAsync(baseBody);
+      }
+      if (incomingShareId) void consumeShare(incomingShareId);
+      if (activeServerId) void setSecureItem(lastProjectStorageKey(activeServerId), res.cwd);
+      const initialQueue = promptDelivered ? [] : buildInitialPromptQueue(task);
+      const seedQueue = initialQueue.length > 0
+        ? AsyncStorage.setItem(offlineQueueKey(baseUrl, res.id), JSON.stringify(initialQueue)).catch(() => {
+            // best-effort — worst case the composer opens with no queued first prompt
+          })
+        : Promise.resolve();
+      void seedQueue.then(() => {
+        // This screen is a `presentation: "modal"` Stack.Screen (see app/_layout.tsx) — a
+        // plain `replace` leaves the native modal transition in place and the target route
+        // renders behind/under it as a blank screen on Android. `dismissTo` pops the modal
+        // off the stack and lands on `/session/[id]` in its place (falling back to a normal
+        // navigate when that route isn't already in history, which it never is here).
+        router.dismissTo(`/session/${res.id}`);
+      });
+    })().catch(() => {
+      // A failed retry (the non-prompt path) leaves `create.error` set by mutateAsync — nothing
+      // further to do here, the error text is already what `serverError` renders.
+    });
   }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktree, temper, activeServerId, baseUrl, consumeShare, incomingShareId]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
@@ -372,7 +399,7 @@ export default function NewSessionScreen() {
       <View style={styles.worktreeRow}>
         <Switch
           value={worktree}
-          onValueChange={setWorktree}
+          onValueChange={onWorktreeChange}
           disabled={cwdIsGitRepo === false}
           accessibilityLabel="Isolated git worktree"
         />

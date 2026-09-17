@@ -428,6 +428,26 @@ export interface CreateSessionRequest {
   mode?: PermissionMode;
   resume?: string;
   temper?: string;
+  /** Run the new session's first turn with this text immediately, server-side — added so the
+   * task composer's very first prompt survives even when this device's WebSocket to the new
+   * session never reaches `open` before the screen unmounts (see mobile/src/app/new-session.tsx).
+   * Ignored by the daemon on a `resume`. A pre-#1394 daemon rejects the WHOLE request with a 400
+   * (`deny_unknown_fields` on the unrecognized field) rather than silently dropping it — see
+   * `isUnsupportedPromptFieldError`, which callers use to detect that and retry without it. */
+  prompt?: string;
+}
+
+/** True when `error` is the specific 400 a daemon predating `prompt` support in
+ * `POST /api/sessions` returns for a request that includes it — `#[serde(deny_unknown_fields)]`
+ * rejects the whole body rather than ignoring the one field. Callers retry without `prompt` and
+ * fall back to queuing it client-side (`offlineQueue.ts`) instead of losing it. */
+export function isUnsupportedPromptFieldError(error: unknown): boolean {
+  return (
+    error instanceof ApiError
+    && error.status === 400
+    && error.message.includes("unknown field")
+    && error.message.includes("`prompt`")
+  );
 }
 
 export interface ForkSessionRequest { at_seq: number; }
