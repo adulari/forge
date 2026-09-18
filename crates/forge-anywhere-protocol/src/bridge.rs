@@ -55,6 +55,25 @@ pub enum RouteId {
     GitStatus,
     GitBranches,
     GitDiff,
+    /// A fork's worktree diff against its merge base (`GET /api/sessions/{id}/diff`).
+    SessionDiff,
+    // The Files tab. Reading and saving a file in the session's workspace is strictly less than
+    // what the bridged terminal already allows, so the bridge carries it rather than leaving the
+    // tab as a "connect directly" dead end on the transport phones actually use.
+    WorkspaceEntries,
+    ReadWorkspaceFile,
+    WriteWorkspaceFile,
+    WorkspaceSearch,
+    ListWorkflows,
+    // Schedules can be reviewed, paused, resumed and deleted remotely. Creating one is not
+    // bridged: it persists a prompt the host later runs unattended, the same class of durable
+    // execution that keeps MCP registration local.
+    ListSchedules,
+    PauseSchedule,
+    ResumeSchedule,
+    DeleteSchedule,
+    Changelog,
+    Identity,
     WebSocket,
     TerminalWebSocket,
 }

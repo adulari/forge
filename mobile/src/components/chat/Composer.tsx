@@ -46,7 +46,6 @@ import { isMacOS } from "../../lib/platform";
 import { recordComposerImeCommit, recordComposerInput } from "../../lib/performance";
 import { useUpload, useWorkspaceSearch } from "../../lib/queries";
 import { useSessionStable } from "../../lib/sessionContext";
-import { supportsDirectDaemonEndpoints } from "../../lib/transport";
 import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
 import { durations, easings } from "../../theme/motion";
@@ -248,10 +247,8 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
   const recognizedCommand = leadingCommand != null && isKnownCommand(leadingCommand, skillCommands.map((s) => s.name));
   const workspaceMention = workspaceMentionAtEnd(text);
   const workspaceMentionQuery = workspaceMention?.query ?? "";
-  const workspaceSearchSession =
-    !baseUrl || supportsDirectDaemonEndpoints(baseUrl) ? sessionId : null;
   const workspaceSearch = useWorkspaceSearch(
-    workspaceSearchSession,
+    sessionId,
     workspaceMentionQuery,
     "files",
     8,

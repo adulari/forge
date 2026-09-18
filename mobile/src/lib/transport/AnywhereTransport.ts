@@ -44,7 +44,19 @@ export type BridgeRoute =
   // produce a request that comes back denied.
   | "git_status"
   | "git_branches"
-  | "git_diff";
+  | "git_diff"
+  | "session_diff"
+  | "workspace_entries"
+  | "read_workspace_file"
+  | "write_workspace_file"
+  | "workspace_search"
+  | "list_workflows"
+  | "list_schedules"
+  | "pause_schedule"
+  | "resume_schedule"
+  | "delete_schedule"
+  | "changelog"
+  | "identity";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -265,6 +277,13 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/git/status": { GET: "git_status" },
     "/api/git/branches": { GET: "git_branches" },
     "/api/git/diff": { GET: "git_diff" },
+    "/api/workspace/entries": { GET: "workspace_entries" },
+    "/api/workspace/file": { GET: "read_workspace_file", PUT: "write_workspace_file" },
+    "/api/workspace/search": { GET: "workspace_search" },
+    "/api/workflows": { GET: "list_workflows" },
+    "/api/schedules": { GET: "list_schedules" },
+    "/api/changelog": { GET: "changelog" },
+    "/api/identity": { GET: "identity" },
   };
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };
@@ -282,6 +301,19 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     if (method === expectedMethod) {
       return { route: operation[session[2]], parameters: [sessionPathParameter(session[1])] };
     }
+  }
+  const sessionDiff = path.match(/^\/api\/sessions\/([^/]+)\/diff$/);
+  if (sessionDiff && method === "GET") {
+    return { route: "session_diff", parameters: [sessionPathParameter(sessionDiff[1])] };
+  }
+  const schedule = path.match(/^\/api\/schedules\/([^/]+)\/(pause|resume|delete)$/);
+  if (schedule && method === "POST") {
+    const operation: Record<string, BridgeRoute> = {
+      pause: "pause_schedule",
+      resume: "resume_schedule",
+      delete: "delete_schedule",
+    };
+    return { route: operation[schedule[2]], parameters: [sessionPathParameter(schedule[1])] };
   }
   const sessionMetadata = path.match(/^\/api\/sessions\/([^/]+)$/);
   if (sessionMetadata) {

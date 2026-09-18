@@ -25,14 +25,12 @@ import {
   type WorkspaceFileResponse,
   type WorkspaceSearchMode,
 } from "../../lib/api";
-import { useAuth } from "../../lib/auth";
 import {
   useWorkspaceEntries,
   useWorkspaceFile,
   useWorkspaceSearch,
   useWriteWorkspaceFile,
 } from "../../lib/queries";
-import { supportsDirectDaemonEndpoints } from "../../lib/transport";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, type as typeScale } from "../../theme/typography";
@@ -371,21 +369,12 @@ function WorkspaceEditor({
 }
 
 export function WorkspaceDock({ sessionId, resourceId }: WorkspaceDockProps) {
-  const { baseUrl } = useAuth();
   const { isExpanded } = useBreakpoint();
   const workbench = useWorkbench();
   const [localResource, setLocalResource] = useState<string | null>(null);
 
   if (!sessionId) {
     return <EmptyState icon={Folder} message="Open a session to browse its workspace." />;
-  }
-  if (baseUrl && !supportsDirectDaemonEndpoints(baseUrl)) {
-    return (
-      <EmptyState
-        icon={Folder}
-        message="Workspace files need a direct connection to this host. Forge Anywhere carries sessions only — connect over your network or a tunnel to browse and edit files."
-      />
-    );
   }
   const activeResource = resourceId ?? localResource;
   const openFile = (path: string) => {

@@ -188,6 +188,39 @@ describe("AnywhereTransport", () => {
     );
   });
 
+  it("maps Files, fork diffs and schedule controls, but never schedule creation", async () => {
+    const captured: AnywhereBridgeRequest[] = [];
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        captured.push(request);
+        return { status: 200, body: new TextEncoder().encode("{}") };
+      },
+      openSessionSocket: socket,
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+
+    await transport.fetch("fany://host-1/api/workspace/entries?session=s1&path=src");
+    await transport.fetch("fany://host-1/api/workspace/file?session=s1&path=a.rs");
+    await transport.fetch("fany://host-1/api/workspace/file", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "s1", path: "a.rs", content: "x" }),
+    });
+    await transport.fetch("fany://host-1/api/sessions/s1/diff");
+    await transport.fetch("fany://host-1/api/schedules/nightly-1/pause", { method: "POST" });
+
+    expect(captured.map((request) => [request.route, request.parameters[0] ?? ""])).toEqual([
+      ["workspace_entries", "?session=s1&path=src"],
+      ["read_workspace_file", "?session=s1&path=a.rs"],
+      ["write_workspace_file", ""],
+      ["session_diff", "s1"],
+      ["pause_schedule", "nightly-1"],
+    ]);
+    await expect(
+      transport.fetch("fany://host-1/api/schedules", { method: "POST", body: "{}" }),
+    ).rejects.toThrow("not allowlisted");
+  });
+
   it("refuses arbitrary URLs instead of acting as a proxy", async () => {
     const relay: AnywhereRelay = {
       request: async () => ({ status: 200, body: new Uint8Array() }),

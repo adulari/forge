@@ -18,6 +18,7 @@ use forge_anywhere_protocol::{
     EnvelopeMetadata, QueuedCommandList, QueuedCommandMetadata, RecipientKind,
     COMMAND_LIST_VERSION,
 };
+use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
 use reqwest::header::{HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
 use reqwest::{Client, Method, RequestBuilder, Response, Url};
@@ -373,6 +374,12 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
         service_url: &service_url,
         store: &store,
     };
+    // Local HTTP requests run concurrently with the relay loop. Awaiting one inline starved the
+    // heartbeat: a slow request (creating a session, scanning projects, a large history page)
+    // held the loop past RELAY_HEARTBEAT_TIMEOUT, the connector dropped the relay, and the
+    // response — plus every stream the phone had open — was lost. Responses are still sealed
+    // and sent from this loop, so outbound sequences stay in send order.
+    let mut in_flight = FuturesUnordered::new();
     loop {
         tokio::select! {
             relay_message = relay_read.next() => {
@@ -383,7 +390,7 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                     Message::Binary(bytes) => {
                         last_exchange_ms = now_ms();
                         record_link_state(true, last_exchange_ms, None);
-                        handle_relay_envelope(
+                        if let Some(pending) = handle_relay_envelope(
                             &store,
                             &identity,
                             &devices,
@@ -393,7 +400,12 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                             &local_events_tx,
                             &blobs,
                             &mut relay_write,
-                        ).await?;
+                        ).await? {
+                            in_flight.push(async move {
+                                let response = dispatch_http(local_base_url, &pending.request).await;
+                                (pending, response)
+                            });
+                        }
                     }
                     Message::Ping(bytes) => {
                         heartbeat.record_pong(Instant::now());
@@ -409,6 +421,19 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                     Message::Close(_) => bail!("relay closed the connection"),
                     Message::Text(_) | Message::Frame(_) => bail!("relay sent a non-binary data frame"),
                 }
+            }
+            Some((pending, response)) = in_flight.next(), if !in_flight.is_empty() => {
+                if let Some(blob_id) = pending.consumed_blob_id {
+                    consume_blob_after_delivery(&blobs, blob_id).await;
+                }
+                send_bridge_response(
+                    &store,
+                    &blobs,
+                    pending.sender_device_id,
+                    pending.request.request_id,
+                    response,
+                    &mut relay_write,
+                ).await?;
             }
             _ = heartbeat_interval.tick() => {
                 if heartbeat.is_timed_out(Instant::now()) {
@@ -701,7 +726,7 @@ async fn handle_relay_envelope<S>(
     local_events: &mpsc::Sender<LocalSocketEvent>,
     blobs: &RelayBlobClient<'_>,
     relay_write: &mut S,
-) -> Result<()>
+) -> Result<Option<PendingDispatch>>
 where
     S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
@@ -717,8 +742,38 @@ where
 
     match envelope.metadata.kind {
         EnvelopeKind::BridgeRequest => {
-            let mut request: BridgeRequest =
-                serde_json::from_slice(&plaintext).context("decode typed bridge request")?;
+            let mut request: BridgeRequest = match serde_json::from_slice(&plaintext) {
+                Ok(request) => request,
+                Err(error) => {
+                    // A newer app names a route this host predates. Answering that one request
+                    // keeps the relay up; failing the whole connection dropped every open stream
+                    // and the phone reopened the same request straight into it again.
+                    let Some(request_id) = unsupported_request_id(&plaintext) else {
+                        return Err(error).context("decode typed bridge request");
+                    };
+                    accept_inbound_envelopes(
+                        store,
+                        sender_device_id,
+                        envelope.metadata.key_epoch,
+                        None,
+                        envelope.metadata.sequence,
+                    )?;
+                    send_bridge_response(
+                        store,
+                        blobs,
+                        sender_device_id,
+                        request_id,
+                        bridge_error(
+                            request_id,
+                            501,
+                            "this Forge host does not support that request yet — update Forge on the host",
+                        ),
+                        relay_write,
+                    )
+                    .await?;
+                    return Ok(None);
+                }
+            };
             let verified_blob = resolve_inbound_blob(
                 blobs,
                 identity,
@@ -742,51 +797,36 @@ where
                 request.body_blob = None;
             }
 
-            let mut response = if matches!(
+            if !matches!(
                 request.route,
                 RouteId::WebSocket | RouteId::TerminalWebSocket
             ) {
-                open_stream(
-                    local_base_url,
-                    &request,
+                return Ok(Some(PendingDispatch {
+                    request,
                     sender_device_id,
-                    streams,
-                    local_events,
-                )
-                .await
-            } else {
-                dispatch_http(local_base_url, &request).await
-            };
+                    consumed_blob_id,
+                }));
+            }
+            let response = open_stream(
+                local_base_url,
+                &request,
+                sender_device_id,
+                streams,
+                local_events,
+            )
+            .await;
             if let Some(blob_id) = consumed_blob_id {
                 consume_blob_after_delivery(blobs, blob_id).await;
             }
-            if response.body.len() > MAX_OUTBOUND_INLINE_BODY {
-                match upload_blob(store, blobs, sender_device_id, &response.body).await {
-                    Ok(reference) => {
-                        response.body.clear();
-                        response.body_blob = Some(reference);
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "⚠ Forge Anywhere could not offload a {} B response as a relay blob: {error:#}",
-                            response.body.len()
-                        );
-                        response = bridge_error(
-                            request.request_id,
-                            502,
-                            "local response could not be transferred as a temporary blob",
-                        );
-                    }
-                }
-            }
-            let plaintext = serde_json::to_vec(&response).context("encode bridge response")?;
-            let encoded = seal_outbound(
+            send_bridge_response(
                 store,
-                EnvelopeKind::BridgeResponse,
+                blobs,
                 sender_device_id,
-                &plaintext,
-            )?;
-            relay_write.send(Message::Binary(encoded.into())).await?;
+                request.request_id,
+                response,
+                relay_write,
+            )
+            .await?;
         }
         EnvelopeKind::WebSocketFrame => {
             let mut frame: WebSocketFrame =
@@ -842,7 +882,7 @@ where
                 if let Some(blob_id) = consumed_blob_id {
                     consume_blob_after_delivery(blobs, blob_id).await;
                 }
-                return Ok(());
+                return Ok(None);
             };
             if handle.owner_device_id != sender_device_id {
                 bail!("WebSocket stream belongs to another controller device");
@@ -868,6 +908,64 @@ where
         }
         _ => bail!("relay envelope kind is not valid on a host connection"),
     }
+    Ok(None)
+}
+
+fn unsupported_request_id(plaintext: &[u8]) -> Option<[u8; 16]> {
+    #[derive(Deserialize)]
+    struct RequestIdOnly {
+        request_id: [u8; 16],
+    }
+    serde_json::from_slice::<RequestIdOnly>(plaintext)
+        .ok()
+        .map(|request| request.request_id)
+}
+
+/// A bridge request accepted from the relay whose local HTTP dispatch runs off the relay loop.
+struct PendingDispatch {
+    request: BridgeRequest,
+    sender_device_id: [u8; 16],
+    consumed_blob_id: Option<[u8; 16]>,
+}
+
+async fn send_bridge_response<S>(
+    store: &StateStore,
+    blobs: &RelayBlobClient<'_>,
+    sender_device_id: [u8; 16],
+    request_id: [u8; 16],
+    mut response: BridgeResponse,
+    relay_write: &mut S,
+) -> Result<()>
+where
+    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    if response.body.len() > MAX_OUTBOUND_INLINE_BODY {
+        match upload_blob(store, blobs, sender_device_id, &response.body).await {
+            Ok(reference) => {
+                response.body.clear();
+                response.body_blob = Some(reference);
+            }
+            Err(error) => {
+                eprintln!(
+                    "⚠ Forge Anywhere could not offload a {} B response as a relay blob: {error:#}",
+                    response.body.len()
+                );
+                response = bridge_error(
+                    request_id,
+                    502,
+                    "local response could not be transferred as a temporary blob",
+                );
+            }
+        }
+    }
+    let plaintext = serde_json::to_vec(&response).context("encode bridge response")?;
+    let encoded = seal_outbound(
+        store,
+        EnvelopeKind::BridgeResponse,
+        sender_device_id,
+        &plaintext,
+    )?;
+    relay_write.send(Message::Binary(encoded.into())).await?;
     Ok(())
 }
 
@@ -1391,6 +1489,25 @@ fn bridge_error(request_id: [u8; 16], status: u16, message: &str) -> BridgeRespo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_route_this_host_predates_still_yields_its_request_id() {
+        let mut value = serde_json::to_value(BridgeRequest {
+            request_id: [7; 16],
+            route: RouteId::ListSessions,
+            method: "GET".to_owned(),
+            parameters: Vec::new(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            body_blob: None,
+        })
+        .unwrap();
+        value["route"] = serde_json::json!("some_future_route");
+        let plaintext = serde_json::to_vec(&value).unwrap();
+        assert!(serde_json::from_slice::<BridgeRequest>(&plaintext).is_err());
+        assert_eq!(unsupported_request_id(&plaintext), Some([7; 16]));
+        assert_eq!(unsupported_request_id(b"not json"), None);
+    }
     use std::path::PathBuf;
     use std::time::Instant;
 
