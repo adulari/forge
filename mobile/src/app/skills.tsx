@@ -33,6 +33,7 @@ import { type ColorTokens, hexToRgba, radii, space, tapTarget } from "../theme/t
 import { monoFamily, type } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
 import { SettingsShell } from "./(tabs)/settings";
+import { usePullRefresh } from "../lib/usePullRefresh";
 
 type Scope = SkillRow["scope"];
 const SCOPE_ORDER: Scope[] = ["project", "builtin", "user"];
@@ -179,6 +180,7 @@ function SkillsScreenBody() {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
   const query = useSkills();
+  const pull = usePullRefresh(query.refetch);
   const [search, setSearch] = useState("");
   const [activeName, setActiveName] = useState<string | null>(null);
   const needle = search.trim().toLocaleLowerCase();
@@ -241,7 +243,7 @@ function SkillsScreenBody() {
     );
 
   return (
-    <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
+    <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
       <BackLink />
       <Text style={[type.title, { color: tokens.ink }]}>Skills</Text>
       <Text style={[type.sub, { color: tokens.ink3 }]}>Reusable Forge methodologies available to every session.</Text>

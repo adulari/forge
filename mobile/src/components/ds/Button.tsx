@@ -120,7 +120,12 @@ export function Button({
           style,
         ]}
       >
-        <View style={[styles.content, { opacity: loading ? 0.6 : 1 }]}>
+        {/* `collapsable={false}`: at opacity 1 this wrapper has no visual props, so Fabric
+            flattened it away and the label Text re-parented onto the Pressable; at 0.6 it came
+            back. The flip on loading → done landed in the same frame as the new-session modal
+            dismissing, Android threw "addViewAt: View already has a parent", and the whole
+            surface unmounted to a blank screen. A wrapper that always exists never moves. */}
+        <View collapsable={false} style={[styles.content, { opacity: loading ? 0.6 : 1 }]}>
           {loading ? (
             <ActivityIndicator size="small" color={ink} style={styles.spinner} />
           ) : icon ? (

@@ -16,6 +16,7 @@ import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { monoFamily, type, tabularNums } from "../theme/typography";
 import { SettingsShell } from "./(tabs)/settings";
+import { usePullRefresh } from "../lib/usePullRefresh";
 
 const compact = (value: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value).toLowerCase();
 const kindTone = (kind: string) => kind === "api" ? "neutral" : "success";
@@ -145,8 +146,9 @@ function UsageScreenBody() {
   const { data: sessions } = useSessions();
   const sessionId = sessions?.find((session) => session.busy)?.id ?? sessions?.[0]?.id;
   const query = useUsage(sessionId);
+  const pull = usePullRefresh(query.refetch);
   const selected = window === "week" ? query.data?.week : query.data?.session;
-  const { isError, isLoading, isRefetching, refetch, data, dataUpdatedAt } = query;
+  const { isError, isLoading, data, dataUpdatedAt } = query;
   // Pace projection is relative to the instant this quota snapshot was fetched, not to
   // whatever moment a render happens to run in — sidesteps calling Date.now() during
   // render (react-hooks/purity) and is arguably more correct: the fraction/resetsAt pair
@@ -214,7 +216,7 @@ function UsageScreenBody() {
 
   return (
     <Screen scroll={false} contentContainerStyle={styles.screen}>
-      <BoundedList data={providers} renderItem={renderItem} keyExtractor={keyExtractor} ListHeaderComponent={header} ListEmptyComponent={empty} refreshing={isRefetching} onRefresh={() => void refetch()} contentContainerStyle={styles.content} />
+      <BoundedList data={providers} renderItem={renderItem} keyExtractor={keyExtractor} ListHeaderComponent={header} ListEmptyComponent={empty} refreshing={pull.refreshing} onRefresh={pull.onRefresh} contentContainerStyle={styles.content} />
     </Screen>
   );
 }

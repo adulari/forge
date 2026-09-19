@@ -11,6 +11,7 @@ import { useLocalSearchParams } from "expo-router";
 import { ReplayView } from "../../../components/session/ReplayView";
 import { Screen } from "../../../components/ds/Screen";
 import { useHistory } from "../../../lib/queries";
+import { usePullRefresh } from "../../../lib/usePullRefresh";
 
 export default function SessionReplayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -18,6 +19,7 @@ export default function SessionReplayScreen() {
   // leaves out — calls and results both (ReplayView tells them apart by `tool_phase`). Its own
   // cache entry, so the chat tab's plain stream is untouched by this.
   const query = useHistory(id ?? null, { includeTools: true });
+  const pull = usePullRefresh(query.refetch);
   const rows = useMemo(() => query.data?.pages.flat().slice().reverse() ?? [], [query.data?.pages]);
 
   const onEndReached = useCallback(() => {
@@ -32,8 +34,8 @@ export default function SessionReplayScreen() {
         error={query.isError}
         errorMessage={query.error?.message}
         onRetry={() => void query.refetch()}
-        refreshing={query.isFetching && !query.isFetchingNextPage}
-        onRefresh={() => void query.refetch()}
+        refreshing={pull.refreshing}
+        onRefresh={pull.onRefresh}
         onEndReached={onEndReached}
         loadingMore={query.isFetchingNextPage}
       />

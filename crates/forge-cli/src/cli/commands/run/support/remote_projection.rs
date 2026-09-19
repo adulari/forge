@@ -173,15 +173,21 @@ pub(crate) fn map_history_row(
 ) -> remote::HistoryRow {
     let visibility = row.visibility.as_str().to_string();
     let role = row.role.as_str().to_string();
-    // `ui` rows are Forge talking to the user (notices, command feedback), not a turn of the
-    // conversation — they carry role='assistant' in the store but read as system lines. A
-    // harness-injected continuation nudge (v10 additive `nudge` column, see `migration_0036`)
-    // is checked first: it is stored `role='user'` for the model, but it's Forge talking, not
-    // the person, and a client must not render it as "You".
+    // `ui` rows are kept out of the model's context, but their role still says who is speaking:
+    // notices and warnings are written `role='system'`, while `role='assistant'` is the turn's
+    // published answer (`publish_terminal_answer`) or a workflow's result, and `role='user'` is
+    // the command the person typed. Mapping every `ui` row to "system" labelled each final
+    // answer "sys" in replay. A harness-injected continuation nudge (v10 additive `nudge`
+    // column, see `migration_0036`) is checked first: it is stored `role='user'` for the model,
+    // but it's Forge talking, not the person, and a client must not render it as "You".
     let kind = if row.nudge {
         "nudge"
     } else if visibility == "ui" {
-        "system"
+        match role.as_str() {
+            "user" => "user",
+            "assistant" => "assistant",
+            _ => "system",
+        }
     } else {
         match role.as_str() {
             "user" => "user",

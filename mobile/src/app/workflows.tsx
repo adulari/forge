@@ -30,6 +30,7 @@ import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
 import { formatCost, formatRelativeTime, monoFamily, tabularNums, type as typeScale } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
+import { usePullRefresh } from "../lib/usePullRefresh";
 
 type ArgValues = Record<string, string>;
 
@@ -217,6 +218,7 @@ function WorkflowsScreenBody() {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
   const query = useWorkflows();
+  const pull = usePullRefresh(query.refetch);
   const rows = query.data ?? [];
   const [freeTextByName, setFreeTextByName] = useState<Record<string, string>>({});
   const [valuesByName, setValuesByName] = useState<Record<string, ArgValues>>({});
@@ -243,7 +245,7 @@ function WorkflowsScreenBody() {
   return (
     <Screen
       scroll
-      refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />}
+      refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />}
       contentContainerStyle={styles.content}
     >
       <BackLink />

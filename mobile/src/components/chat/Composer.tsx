@@ -791,6 +791,9 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
                 color={tokens.ink3}
                 accessibilityLabel={`reasoning effort: ${effort ?? "auto"} — change effort`}
                 testID="composer-effort-chip"
+                // Short and informative ("effort · high"): a long model id used to squeeze it to
+                // "effort …", hiding the one value the chip exists to show.
+                fixed
                 onPress={() => setEffortVisible(true)}
               />
             </View>
@@ -959,12 +962,15 @@ function MetaChip({
   accessibilityLabel,
   testID,
   onPress,
+  fixed = false,
 }: {
   label: string;
   color: string;
   accessibilityLabel: string;
   testID: string;
   onPress: () => void;
+  /** Keep the full label; the other chip in the row gives up the width instead. */
+  fixed?: boolean;
 }) {
   const { tokens } = useTheme();
   return (
@@ -974,7 +980,7 @@ function MetaChip({
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       testID={testID}
-      style={[styles.metaChip, { borderColor: tokens.border }]}
+      style={[styles.metaChip, fixed && styles.metaChipFixed, { borderColor: tokens.border }]}
     >
       <Text style={[type.monoMeta, styles.metaChipLabel, { color }]} numberOfLines={1}>{label}</Text>
       <ChevronDown size={11} strokeWidth={1.75} color={tokens.ink4} />
@@ -1035,6 +1041,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.space8,
     paddingVertical: 3,
   },
+  metaChipFixed: { flexShrink: 0 },
   metaChipLabel: { flexShrink: 1, minWidth: 0 },
   attachRow: {
     flexDirection: "row",

@@ -17,6 +17,7 @@ import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
 import { SettingsShell } from "./(tabs)/settings";
+import { usePullRefresh } from "../lib/usePullRefresh";
 
 type Scope = "user" | "project";
 
@@ -97,6 +98,7 @@ function ConfigFieldRow({ field, scope, showSeparator }: { field: ConfigField; s
 function ConfigurationScreenBody() {
   const tokens = useTokens();
   const query = useConfig();
+  const pull = usePullRefresh(query.refetch);
   const [scope, setScope] = useState<Scope>("user");
   const [search, setSearch] = useState("");
   const fields = useMemo(() => {
@@ -105,7 +107,7 @@ function ConfigurationScreenBody() {
   }, [query.data?.fields, search]);
   const groups = useMemo(() => grouped(fields), [fields]);
 
-  return <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
+  return <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
     <BackLink />
     <Text style={[type.title, { color: tokens.ink }]}>Configuration</Text>
     <Text style={[type.sub, { color: tokens.ink3 }]}>Tune Forge’s effective settings. Choose where edits are saved.</Text>

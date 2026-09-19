@@ -26,6 +26,7 @@ import { type ColorTokens, hexToRgba, radii, space } from "../theme/tokens";
 import { monoFamily, type } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
 import { SettingsShell } from "./(tabs)/settings";
+import { usePullRefresh } from "../lib/usePullRefresh";
 
 type EventKind = "info" | "danger" | "neutral";
 
@@ -118,6 +119,7 @@ function HooksScreenBody() {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
   const query = useHooks();
+  const pull = usePullRefresh(query.refetch);
   const [search, setSearch] = useState("");
   const needle = search.trim().toLocaleLowerCase();
   const hooks = useMemo(
@@ -149,7 +151,7 @@ function HooksScreenBody() {
     );
 
   return (
-    <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
+    <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
       <BackLink />
       <Text style={[type.title, { color: tokens.ink }]}>Hooks</Text>
       <Text style={[type.sub, { color: tokens.ink3 }]}>Automations on session and tool events.</Text>

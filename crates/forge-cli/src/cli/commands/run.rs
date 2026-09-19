@@ -4883,9 +4883,9 @@ mod tests {
         assert_eq!(assistant.kind, "assistant");
         assert_eq!(assistant.elapsed_ms, Some(12_000));
 
-        // A `ui` note is Forge talking to the user, not a turn — it reads as a system line even
-        // though the store row's role says assistant.
-        let note = map_history_row(
+        // A published answer is a `ui` row with role='assistant': it is Forge's reply, so it
+        // must not read as a system line (replay labelled every final answer "sys").
+        let answer = map_history_row(
             row(
                 3,
                 forge_types::Role::Assistant,
@@ -4894,8 +4894,22 @@ mod tests {
             ),
             epoch,
         );
+        assert_eq!(answer.kind, "assistant");
+        assert_eq!(
+            answer.visibility, "ui",
+            "the raw visibility still rides the wire"
+        );
+
+        let note = map_history_row(
+            row(
+                3,
+                forge_types::Role::System,
+                forge_types::Visibility::UiOnly,
+                1_020,
+            ),
+            epoch,
+        );
         assert_eq!(note.kind, "system");
-        assert_eq!(note.role, "assistant", "the raw role still rides the wire");
 
         // A harness-injected continuation nudge is stored `role='user'` (see
         // `Store::add_nudge_message`) but must read as its own kind, not "user" — a client must

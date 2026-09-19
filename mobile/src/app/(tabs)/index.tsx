@@ -120,7 +120,10 @@ function FleetServerSwitcher() {
     >
       {servers.map((server, index) => {
         const fleet = fleets[index];
-        const reachable = fleet.isSuccess;
+        // One failed poll is a blip, not an outage: with `retry: false` a single dropped relay
+        // exchange flipped the chip red for the whole 15s backoff while the list beside it
+        // still showed live data. `failureCount` resets on the next success.
+        const reachable = fleet.isSuccess || (fleet.data !== undefined && fleet.failureCount < 2);
         const rows: SessionRow[] = fleet.data ?? [];
         const count = rows.filter((row) => row.waiting).length;
         const active = server.id === activeServerId;
