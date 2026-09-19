@@ -6,9 +6,9 @@
 //!
 //! Permission: each call runs `permission::decide` before executing; a `Deny` (e.g. the
 //! `rm -rf`/secret-read denylist) returns an MCP tool error the model sees and adapts to.
-//! An interactive `Ask` also returns an error here: there is no TTY on this path, so the honest
-//! resolution of "confirm with the user first" is a refusal, not a silent allow (see
-//! [`gate_decision`]). Forge never sees the CLI's auth.
+//! An interactive `Ask` is relayed to the parent session through its event sink and answered in
+//! the parent's own prompt (TUI or phone); with no parent to ask, it is a refusal, never a silent
+//! allow (see [`permission_relay`]). Forge never sees the CLI's auth.
 //!
 //! Subagents (RFC subagent-orchestration Phase 3): when subagents are enabled this server also
 //! exposes the `spawn_agents` virtual tool, so a subscription model can fan work out to
@@ -77,6 +77,11 @@ fn append_sink_record(path: &str, record: &serde_json::Value) -> std::io::Result
 
 mod bridge_budget;
 use bridge_budget::*;
+
+mod permission_relay;
+use permission_relay::gate;
+#[cfg(test)]
+use permission_relay::gate_decision;
 
 mod dispatch;
 mod fleet;
@@ -387,7 +392,7 @@ impl ForgeMcp {
 
         // Forge's permission gate — the unoverridable denylist always applies here.
         let decision = permission::decide(self.mode, tool.side_effect(), &name, &args, &self.rules);
-        if let Err(refusal) = gate_decision(decision, &name, self.mode) {
+        if let Err(refusal) = gate(decision, &name, tool.side_effect(), self.mode).await {
             return Ok(CallToolResult::error(vec![ContentBlock::text(refusal)]));
         }
 
@@ -453,29 +458,6 @@ impl ForgeMcp {
     }
 }
 
-/// Resolve a broker decision on the bridge path, which has no TTY and no presenter.
-///
-/// `Deny` refuses, and so does `Ask`: this process cannot prompt, and running the call anyway
-/// would make the Ask tempers (`default`, and `plan`'s residual asks) behave exactly like
-/// `bypass` — a silent privilege escalation for anyone who deliberately picked a stricter
-/// posture. The refusal text names the temper so the user can escalate on purpose.
-fn gate_decision(
-    decision: PermissionDecision,
-    tool: &str,
-    mode: PermissionMode,
-) -> Result<(), String> {
-    match decision {
-        PermissionDecision::Allow => Ok(()),
-        PermissionDecision::Deny => Err(format!("denied by Forge permission policy: {tool}")),
-        PermissionDecision::Ask => Err(format!(
-            "denied by Forge permission policy: {tool} needs confirmation in the `{}` temper and \
-             this bridged session has no way to prompt. Ask the user to switch to auto-edit or \
-             full, or add an allow rule for this tool.",
-            mode.key()
-        )),
-    }
-}
-
 impl ForgeMcp {
     /// Dispatch one external MCP meta-tool through the same hook and permission path used by the
     /// stdio bridge. Keeping this seam separate makes the bridge path testable with an in-process
@@ -515,7 +497,7 @@ impl ForgeMcp {
 
         let decision =
             permission::decide(self.mode, side_effect, name, &effective_args, &self.rules);
-        if let Err(refusal) = gate_decision(decision, name, self.mode) {
+        if let Err(refusal) = gate(decision, name, side_effect, self.mode).await {
             return Some(CallToolResult::error(vec![ContentBlock::text(refusal)]));
         }
         let out = m.call(name, &effective_args).await;
