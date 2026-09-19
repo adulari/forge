@@ -998,6 +998,7 @@ export default function SessionChat() {
           online={online}
           suggestedPrompt={snapshot?.suggested_prompt ?? null}
           model={snapshot?.model ?? null}
+          modelPinned={snapshot?.model_pinned}
           effort={snapshot?.effort ?? null}
           onSend={handleSend}
           onInterrupt={handleInterrupt}

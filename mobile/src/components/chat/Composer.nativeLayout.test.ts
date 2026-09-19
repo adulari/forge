@@ -21,9 +21,11 @@ function sourceRegion(start: string, end: string, message: string): string {
 
 describe("composer model chip", () => {
   it("labels an Automatic session's dash sentinel as \"auto\", not a raw dash", () => {
+    // The label itself (sentinel → "auto", unpinned → "auto · model") is unit-tested in
+    // modelChipLabel.test.ts; this pins that the chip still goes through it.
     expectSource(
-      /label=\{model === "—" \? "auto" : model\}/,
-      "the daemon's unset-model sentinel (\"—\") must render as \"auto\" on the chip",
+      /label=\{modelChipLabel\(model, modelPinned\)\}/,
+      "the model chip must render through modelChipLabel so the \"—\" sentinel reads as \"auto\"",
     );
   });
 });

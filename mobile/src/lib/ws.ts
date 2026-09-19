@@ -167,6 +167,9 @@ export interface Snapshot {
   effort?: string | null;
   tier: string | null;
   model: string;
+  /** Additive: whether `model` is the user's pin rather than the mesh's latest pick. Absent from
+   * older hosts — treat as unknown, not as unpinned. */
+  model_pinned?: boolean;
   cost_usd: number;
   context_tokens: number;
   context_limit: number | null;

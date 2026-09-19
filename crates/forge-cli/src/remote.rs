@@ -1044,6 +1044,10 @@ pub struct Snapshot {
     /// Mesh routing: tier + model, or "—" when unset.
     pub tier: Option<String>,
     pub model: String,
+    /// Whether `model` is a pin the user chose rather than the mesh's latest pick (additive).
+    /// Without it a phone showed an Automatic session's last routed model as if it were pinned.
+    #[serde(default)]
+    pub model_pinned: bool,
     /// Session spend in USD.
     pub cost_usd: f64,
     /// Context-window fill: tokens used + limit (if known).
@@ -1141,6 +1145,7 @@ impl Default for Snapshot {
             effort: String::new(),
             tier: None,
             model: "—".to_string(),
+            model_pinned: false,
             cost_usd: 0.0,
             context_tokens: 0,
             context_limit: None,

@@ -494,6 +494,7 @@ async fn drive_session(
 
     let mut last_snap: Option<remote::Snapshot> = None;
     let mut revision: u64 = 0;
+    let mut model_pinned = false;
     let mut dirty = true;
     // The most recent genuine turn failure (PresenterEvent::Error), latched so the busy falling
     // edge pushes "failed" instead of "done". Cleared when the next turn starts.
@@ -615,6 +616,10 @@ async fn drive_session(
                 st.app.turn_elapsed_secs = st.busy_since.elapsed().as_secs();
             }
             let project = forge_config::project_initialization(std::path::Path::new(&cwd));
+            // A running turn holds the session; keep the last known pin state until it's free.
+            if let Ok(s) = st.session.try_lock() {
+                model_pinned = s.pinned_model().is_some();
+            }
             let mut snap = build_snapshot_frame(
                 &st.app,
                 SnapshotIdentity {
@@ -625,6 +630,7 @@ async fn drive_session(
                     project_initialized: project.initialized,
                     project_init_hint: project.hint,
                     exposure: "daemon".to_string(),
+                    model_pinned,
                 },
                 st.copy_text.clone(),
                 st.prompt_seq,
