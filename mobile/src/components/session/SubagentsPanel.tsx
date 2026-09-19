@@ -19,6 +19,7 @@ import { Button } from "../ds/Button";
 import { EmptyState } from "../ds/EmptyState";
 import { StatusDot } from "../ds/StatusDot";
 import { AgentRow, rowStateOf } from "./AgentRow";
+import { displayPermissionPrompt } from "../../lib/permissionPrompt";
 
 const GRID_GAP = 20;
 const TAIL_RADIUS = 9;
@@ -154,7 +155,7 @@ function Tile({
             <View style={styles.tilePermission}>
               <Text style={[typeScale.monoMeta, { color: tokens.danger }]}>needs permission</Text>
               <Text style={[typeScale.sub, { color: tokens.ink2 }]} numberOfLines={expanded ? undefined : 2}>
-                {prompt}
+                {displayPermissionPrompt(prompt)}
               </Text>
               {answerable ? (
                 <View style={styles.tileActions}>

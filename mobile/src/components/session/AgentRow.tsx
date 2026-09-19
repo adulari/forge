@@ -26,6 +26,7 @@ import { radii, space } from "../../theme/tokens";
 import { formatCost, tabularNums, type as typeScale } from "../../theme/typography";
 import { Button } from "../ds/Button";
 import { StatusDot } from "../ds/StatusDot";
+import { displayPermissionPrompt } from "../../lib/permissionPrompt";
 
 export interface AgentRowProps {
   agent: SnapshotSubagent;
@@ -114,7 +115,7 @@ function AgentRowBase({
 
       {needsPermission ? (
         <Text style={[typeScale.sub, { color: tokens.ink2 }]} numberOfLines={expanded ? undefined : 2}>
-          {prompt}
+          {displayPermissionPrompt(prompt)}
         </Text>
       ) : (
         <>

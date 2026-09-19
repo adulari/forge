@@ -282,7 +282,9 @@ const styles = StyleSheet.create({
   name: { flex: 1, fontSize: 14, fontFamily: monoFamily.bold },
   sourceBadge: { borderRadius: radii.radiusPill, paddingHorizontal: space.space8, paddingVertical: 2 },
   sourceBadgeText: { fontSize: 10, fontWeight: "700", letterSpacing: 0.3, fontFamily: monoFamily.bold },
-  slashPill: { minHeight: 26, justifyContent: "center", borderRadius: radii.radiusPill, paddingHorizontal: 11 },
+  // The pill repeats the name as a command; it gives up width first so a long skill name
+  // is not crushed to one letter beside its own copy.
+  slashPill: { minHeight: 26, justifyContent: "center", borderRadius: radii.radiusPill, paddingHorizontal: 11, flexShrink: 1, maxWidth: "45%" },
   slashText: { fontSize: 11, fontFamily: monoFamily.regular },
   chevron: { width: tapTarget, height: tapTarget, alignItems: "center", justifyContent: "center", marginVertical: -space.space8, marginRight: -space.space8 },
   chevronOpen: { transform: [{ rotate: "180deg" }] },

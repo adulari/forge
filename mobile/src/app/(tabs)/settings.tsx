@@ -439,7 +439,9 @@ export function SettingsScreen() {
   const health = connectionHealthFromFleet(activeServerIndex >= 0 ? serverQueries[activeServerIndex] : undefined);
   const healthStatusWord = health === "ok" ? "online" : health === "testing" ? "checking…" : health === "bad-token" ? "pairing invalid" : health === "unreachable" ? "offline" : health === "server-error" ? "server error" : "not connected";
   const healthDotColor = health === "ok" ? tokens.success : health === "testing" ? tokens.warn : health === "idle" ? tokens.ink3 : tokens.danger;
-  const healthMetaText = host ? `${healthStatusWord} · protocol v${PROTOCOL_VERSION} · ${host}` : healthStatusWord;
+  // The host name is already on the footer line above; repeating it here pushed the row's own
+  // title down to "Connec…" on a phone.
+  const healthMetaText = host ? `${healthStatusWord} · protocol v${PROTOCOL_VERSION}` : healthStatusWord;
 
   const onAppLockChange = (value: boolean) => {
     const previous = appLock;
@@ -690,7 +692,9 @@ export function SettingsScreen() {
           <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 0 }]}>{versionMeta}</Text>
           <View style={styles.footerFill} />
           <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 1 }]} numberOfLines={1}>
-            {host ? `${host} · ${maskToken(activeToken)}` : "not connected"}
+            {host
+              ? `${host} · ${servers[activeServerIndex]?.transport === "anywhere" ? "anywhere" : maskToken(activeToken)}`
+              : "not connected"}
           </Text>
         </View>
 

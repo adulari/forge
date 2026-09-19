@@ -45,4 +45,13 @@ describe("fillerHistoryRows", () => {
     expect(new Set(seqs).size).toBe(seqs.length);
     expect(Math.min(...seqs)).toBeGreaterThan(0);
   });
+  it("leaves out the terminal's speaker header and reasoning placeholder", () => {
+    const chrome: TranscriptRow[] = [
+      { kind: "user", text: "reply pong", tool: null, meta: null },
+      { kind: "assistant", text: "  💭 thinking… (/thinking to expand)", tool: null, meta: null },
+      { kind: "assistant", text: "  ⚒ forge", tool: null, meta: null },
+      { kind: "assistant", text: "pong", tool: null, meta: null },
+    ];
+    expect(fillerHistoryRows(chrome, false)!.map((r) => r.content)).toEqual(["pong", "reply pong"]);
+  });
 });

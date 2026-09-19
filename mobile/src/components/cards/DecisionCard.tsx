@@ -21,6 +21,7 @@ import { Button } from "../ds/Button";
 import { Card } from "../ds/Card";
 import { RelativeTime } from "../ds/RelativeTime";
 import { StatusDot } from "../ds/StatusDot";
+import { displayPermissionPrompt } from "../../lib/permissionPrompt";
 
 export interface DecisionCardProps {
   row: SessionRow;
@@ -35,7 +36,9 @@ function DecisionCardBase({ row, index, onPeek }: DecisionCardProps) {
   const { snapshot } = useSessionSocket(baseUrl, row.id);
   const title = row.title || `session ${row.id.slice(0, 8)}`;
   const hasWorktree = !!row.worktree;
-  const preview = snapshot?.permission_prompt ?? snapshot?.question ?? null;
+  const preview = snapshot?.permission_prompt
+    ? displayPermissionPrompt(snapshot.permission_prompt)
+    : (snapshot?.question ?? null);
 
   return (
     <Animated.View style={[entrance, styles.wrap]}>
