@@ -390,7 +390,7 @@ function ReadyCenter() {
         onAction={() => void anywhere.cancelCleanReset().catch((reason) => toast.show(reason instanceof Error ? reason.message : "Reset could not be canceled.", { tone: "danger" }))}
         style={styles.flushBanner}
       /> : null}
-      {!anywhere.passkeys.length ? <Banner tone="neutral" message="Add a recovery passkey before connecting your first host for the quickest zero-knowledge recovery." actionLabel="Open Recovery Center" onAction={() => router.push("/anywhere/recovery-phrase")} style={styles.flushBanner} /> : null}
+      {!anywhere.passkeys.length ? <Banner tone="neutral" message={anywhere.hosts.length ? "Add a recovery passkey for the quickest zero-knowledge recovery." : "Add a recovery passkey before connecting your first host for the quickest zero-knowledge recovery."} actionLabel="Open Recovery Center" onAction={() => router.push("/anywhere/recovery-phrase")} style={styles.flushBanner} /> : null}
 
       <Section title="Approval inbox" meta={anywhere.pendingApprovals.length ? `${anywhere.pendingApprovals.length} pending` : "No pending requests"}>
         {anywhere.approvalError ? <Banner tone="warn" message={anywhere.approvalError} actionLabel="Retry" onAction={() => void anywhere.refreshPendingApprovals(true)} style={styles.flushBanner} /> : null}
@@ -443,7 +443,7 @@ function HubOverview({ anywhere, trialBadge, login }: { anywhere: ReturnType<typ
         <View style={[styles.hubCard, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
           <HubRow
             label="Hosts"
-            value={`${anywhere.hosts.length} of ${MAX_ACTIVE_HOSTS} · ${hostFleetSummary(anywhere.hosts)}`}
+            value={`${anywhere.hosts.filter((host) => host.online === true).length} online · ${anywhere.hosts.length} of ${MAX_ACTIVE_HOSTS} slots`}
             onPress={() => router.push("/anywhere/hosts")}
           />
           <HubRow label="Devices" value={`${anywhere.devices.length} paired`} onPress={() => router.push("/anywhere/devices")} />
