@@ -6,7 +6,6 @@
 // real device-approval inbox on the Hub (which trades in a different, safety-code
 // shape). Structured like passkey.tsx: a single status-driven card.
 import * as Clipboard from "expo-clipboard";
-import { router } from "expo-router";
 import { Check, KeyRound, ScanLine, X } from "lucide-react-native";
 import React, { useCallback, useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
@@ -22,6 +21,7 @@ import type { PairChallenge, PairChallengeState } from "../../lib/anywhere/types
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
+import { goBackOr } from "../../lib/nav";
 
 const STATE_CAPTION: Record<PairChallengeState, string | null> = {
   pending: null,
@@ -100,7 +100,7 @@ export default function AnywherePairScreen() {
   return (
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
       <View style={styles.shell}>
-        <BackLink label="Devices" onPress={() => router.replace("/anywhere/devices")} />
+        <BackLink label="Devices" onPress={() => goBackOr("/anywhere/devices")} />
         <Text accessibilityRole="header" style={[typeScale.headingBold, styles.title, { color: tokens.ink }]}>
           Approve new device
         </Text>

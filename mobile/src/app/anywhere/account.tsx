@@ -9,7 +9,7 @@
 // disable the action, this exports what the client genuinely holds — the account,
 // subscription, host, device and passkey metadata already on screen — and says exactly
 // that in the row caption. No session content and no key material leave the device.
-import { Redirect, router } from "expo-router";
+import { Redirect } from "expo-router";
 import { Trash2 } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
 import { Platform, Pressable, Share, StyleSheet, Text, View } from "react-native";
@@ -26,6 +26,7 @@ import { useAnywhere } from "../../lib/AnywhereProvider";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, space } from "../../theme/tokens";
 import { monoFamily, type as typeScale } from "../../theme/typography";
+import { goBackOr } from "../../lib/nav";
 
 export default function AnywhereAccountScreen() {
   const anywhere = useAnywhere();
@@ -105,7 +106,7 @@ export default function AnywhereAccountScreen() {
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
       <View style={styles.shell}>
         <View style={styles.header}>
-          <BackLink label="Anywhere" onPress={() => router.replace("/anywhere")} />
+          <BackLink label="Anywhere" onPress={() => goBackOr("/anywhere")} />
           <Text accessibilityRole="header" style={[typeScale.headingBold, styles.headerTitle, { color: tokens.ink }]}>
             {`Account${anywhere.credentials?.githubLogin ? ` · @${anywhere.credentials.githubLogin}` : ""}`}
           </Text>
