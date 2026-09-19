@@ -9,13 +9,14 @@ import React, { useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import type { HistoryRow } from "../../lib/api";
-import { useForkSession, useHistory, useSessions } from "../../lib/queries";
+import { useForkSession, useHistory, useRenameSession, useSessions } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { Button } from "../ds/Button";
 import { Input } from "../ds/Input";
 import { Sheet } from "../ds/Sheet";
+
 
 function preview(row: HistoryRow) {
   return row.content.replace(/\s+/g, " ").trim();
@@ -31,17 +32,26 @@ export function ForkSheet({ visible, onClose, sessionId }: { visible: boolean; o
   const history = useHistory(sessionId);
   const sessions = useSessions();
   const fork = useForkSession();
+  const rename = useRenameSession();
   const [name, setName] = useState("");
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
 
+  // Only the person's own prompts are fork points: a harness nudge is stored `role='user'` for
+  // the model but its `kind` says it was Forge talking ("Your last response was empty…").
   const prompts = useMemo(
-    () => history.data?.pages.flat().filter((row) => row.role === "user").slice().reverse() ?? [],
+    () =>
+      history.data?.pages
+        .flat()
+        .filter((row) => row.role === "user" && row.kind !== "nudge")
+        .slice()
+        .reverse() ?? [],
     [history.data?.pages],
   );
+  // Default to the latest prompt — forking "from here" is the common case — not the first one.
   const base = useMemo(() => {
     if (prompts.length === 0) return null;
-    return prompts.find((row) => row.seq === selectedSeq) ?? prompts[0];
+    return prompts.find((row) => row.seq === selectedSeq) ?? prompts[prompts.length - 1];
   }, [prompts, selectedSeq]);
   const baseSession = useMemo(() => sessions.data?.find((s) => s.id === sessionId) ?? null, [sessions.data, sessionId]);
 
@@ -55,6 +65,10 @@ export function ForkSheet({ visible, onClose, sessionId }: { visible: boolean; o
       { id: sessionId, body: { at_seq: base.seq } },
       {
         onSuccess: (session) => {
+          // The fork endpoint takes only the fork point, so the name is applied with the same
+          // rename call the session menu uses — it used to be typed in here and then dropped.
+          const title = name.trim();
+          if (title) rename.mutate({ id: session.id, title });
           setName("");
           setSelectedSeq(null);
           close();

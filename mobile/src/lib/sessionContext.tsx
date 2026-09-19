@@ -10,11 +10,15 @@
 // compatibility) pay that cost. See PR that introduced this split for the profiling that
 // motivated it: MessageRow/Composer were re-rendering per streamed frame despite React.memo
 // because the single merged context object changed identity every frame.
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Attachment } from "../components/chat/attach";
 import { useAuth } from "./auth";
+import { useSessions } from "./queries";
 import { type ConnectionState, type RemoteInput, type Snapshot, useSessionSocket } from "./ws";
+
+const REOPEN_WINDOW_MS = 60_000;
+const MAX_REOPENS_PER_WINDOW = 3;
 
 /** In-flight Composer draft (text + attachments), keyed by session id so it survives the
  * Chat/Tasks/Agents/Review segment switches that `router.replace` the route out from under
@@ -101,7 +105,23 @@ export function SessionProvider({
   children: React.ReactNode;
 }) {
   const { baseUrl } = useAuth();
-  const { snapshot, connectionState, send } = useSessionSocket(baseUrl, sessionId);
+  const { snapshot, connectionState, send, reopen } = useSessionSocket(baseUrl, sessionId);
+  // The daemon sends `closed` whenever a session's driver stops — including when the daemon
+  // itself restarts (an update, a crash), after which it resumes the session. Treating every
+  // `closed` as final left each open screen read-only ("session ended") until the user left and
+  // came back. A session the fleet still lists is alive, so reconnect to it; the cap stops a
+  // listed-but-finished session from reconnecting in a loop.
+  const { data: fleetRows } = useSessions();
+  const stillListed = fleetRows?.some((row) => row.id === sessionId) ?? false;
+  const reopenedAt = useRef<number[]>([]);
+  useEffect(() => {
+    if (connectionState !== "closed" || !stillListed) return;
+    const now = Date.now();
+    reopenedAt.current = reopenedAt.current.filter((at) => now - at < REOPEN_WINDOW_MS);
+    if (reopenedAt.current.length >= MAX_REOPENS_PER_WINDOW) return;
+    reopenedAt.current.push(now);
+    reopen();
+  }, [connectionState, stillListed, reopen]);
   const [headerHeight, setHeaderHeight] = useState(0);
   const [pendingAnswer, setPendingAnswer] = useState<PendingAnswer | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});

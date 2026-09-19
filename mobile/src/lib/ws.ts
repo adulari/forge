@@ -258,6 +258,8 @@ export interface UseSessionSocketResult {
   snapshot: Snapshot | null;
   connectionState: ConnectionState;
   send: (input: RemoteInput) => boolean;
+  /** Reconnect a socket the daemon marked `closed`, from a fresh revision. */
+  reopen: () => void;
 }
 
 /**
@@ -518,5 +520,15 @@ export function useSessionSocket(
     return false;
   }, []);
 
-  return { snapshot, connectionState, send };
+  const reopen = useCallback(() => {
+    if (!closedRef.current || !shouldRunRef.current) return;
+    closedRef.current = false;
+    // A resumed session is a new driver whose revisions start over.
+    revRef.current = 0;
+    attemptRef.current = 0;
+    setConnectionState("reconnecting");
+    connect();
+  }, [connect]);
+
+  return { snapshot, connectionState, send, reopen };
 }

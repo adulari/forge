@@ -229,7 +229,7 @@ function RootNavigator() {
         <Stack.Screen name="session-tree" />
 
         <Stack.Screen name="mcp" />
-        <Stack.Screen name="session/[id]" />
+        <Stack.Screen name="session" />
         <Stack.Screen
           name="new-session"
           // headerShown: false — new-session.tsx owns its own themed header (matches
