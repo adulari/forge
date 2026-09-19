@@ -967,6 +967,10 @@ fn parse_agy_models(out: &str) -> Vec<String> {
     slugs
 }
 
+/// How long a bridged CLI lets one Forge tool call run. Above the permission relay's own wait in
+/// `forge mcp-serve`, so a user taking their time over a prompt is answered, not timed out.
+pub const BRIDGE_TOOL_TIMEOUT_SECS: u64 = 900;
+
 /// IDLE window (seconds) for a bridged CLI: kill only after this long with NO output. Not a total
 /// cap — a turn streaming events stays alive indefinitely, so long hard tasks aren't truncated.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
@@ -980,6 +984,11 @@ const STDERR_CAP: usize = 16 * 1024;
 
 mod resume;
 use resume::ResumeState;
+
+mod sink;
+#[cfg(test)]
+use sink::parse_sink_line;
+use sink::tail_subagent_sink;
 
 /// A [`Provider`] that delegates the completion to an external agent CLI.
 pub struct CliProvider {
@@ -1339,6 +1348,10 @@ fn build_args(
             "mcp_servers.forge.args=[\"mcp-serve\"]".into(),
             "-c".into(),
             "mcp_servers.forge.default_tools_approval_mode=\"approve\"".into(),
+            // A Forge tool may wait on the user's permission answer (relayed to the parent's
+            // prompt); codex's default tool timeout would abandon it after a minute.
+            "-c".into(),
+            format!("mcp_servers.forge.tool_timeout_sec={BRIDGE_TOOL_TIMEOUT_SECS}"),
         ],
         // Phase-1 text mode: codex as its own read-only agent, no Forge tools.
         (CliKind::Codex, false) => vec![
@@ -1937,6 +1950,11 @@ impl CliProvider {
         if let Some(p) = &sink_path {
             cmd.env(SUBAGENT_SINK_ENV, p);
         }
+        // claude's MCP tool timeout (ms); see `BRIDGE_TOOL_TIMEOUT_SECS`.
+        cmd.env(
+            "MCP_TOOL_TIMEOUT",
+            (BRIDGE_TOOL_TIMEOUT_SECS * 1000).to_string(),
+        );
         apply_claude_bridge_home(self.kind, &mut cmd);
         put_in_own_process_group(&mut cmd);
 
@@ -2980,6 +2998,11 @@ impl CliProvider {
         if let Some(p) = &sink_path {
             cmd.env(SUBAGENT_SINK_ENV, p);
         }
+        // claude's MCP tool timeout (ms); see `BRIDGE_TOOL_TIMEOUT_SECS`.
+        cmd.env(
+            "MCP_TOOL_TIMEOUT",
+            (BRIDGE_TOOL_TIMEOUT_SECS * 1000).to_string(),
+        );
         apply_claude_bridge_home(self.kind, &mut cmd);
         put_in_own_process_group(&mut cmd);
 
@@ -3178,77 +3201,6 @@ impl CliProvider {
 /// events to; the bridge sets it on the spawned CLI (inherited forge → claude → mcp-serve) and
 /// tails it so bridge-spawned subagents surface in the TUI (RFC subagent-orchestration 3c).
 pub const SUBAGENT_SINK_ENV: &str = "FORGE_SUBAGENT_SINK";
-
-/// Parse one line of the subagent sink into a [`StreamEvent`]. Field-tolerant.
-fn parse_sink_line(line: &str) -> Option<StreamEvent> {
-    let v: Value = serde_json::from_str(line).ok()?;
-    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-    match v.get("k").and_then(Value::as_str)? {
-        "start" => Some(StreamEvent::SubagentStarted {
-            id: s("id"),
-            agent: s("agent"),
-            task: s("task"),
-        }),
-        "progress" => Some(StreamEvent::SubagentProgress {
-            id: s("id"),
-            snippet: s("snippet"),
-        }),
-        "done" => Some(StreamEvent::SubagentFinished {
-            id: s("id"),
-            agent: s("agent"),
-            ok: v.get("ok").and_then(Value::as_bool).unwrap_or(true),
-            summary: s("summary"),
-            cost_usd: v.get("cost").and_then(Value::as_f64).unwrap_or(0.0),
-        }),
-        "tasks" => {
-            let tasks = serde_json::from_value(v.get("tasks")?.clone()).ok()?;
-            Some(StreamEvent::Tasks(tasks))
-        }
-        "plan" => {
-            let plan = serde_json::from_value(v.get("plan")?.clone()).ok()?;
-            Some(StreamEvent::Plan(plan))
-        }
-        _ => None,
-    }
-}
-
-/// Tail the subagent sink file, forwarding each event over `tx` as it is appended. Runs until
-/// aborted by the caller (after the CLI process exits). Tolerant of the file not existing yet.
-async fn tail_subagent_sink(
-    path: std::path::PathBuf,
-    tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
-) {
-    use tokio::io::AsyncBufReadExt;
-    // Wait for the file to appear (mcp-serve creates/opens it on first write).
-    let file = loop {
-        match tokio::fs::File::open(&path).await {
-            Ok(f) => break f,
-            Err(_) => tokio::time::sleep(Duration::from_millis(40)).await,
-        }
-    };
-    let mut reader = tokio::io::BufReader::new(file);
-    let mut buf = String::new();
-    loop {
-        match reader.read_line(&mut buf).await {
-            Ok(0) => tokio::time::sleep(Duration::from_millis(40)).await, // EOF: await more
-            Ok(_) if !buf.ends_with('\n') => {
-                // Torn read: the reader caught up to the file's current EOF mid-line (no trailing
-                // newline yet). Keep the partial bytes buffered — do NOT parse or clear — so the
-                // next read_line appends the rest of this same line instead of losing/mis-parsing it.
-                continue;
-            }
-            Ok(_) => {
-                if let Some(ev) = parse_sink_line(buf.trim()) {
-                    if tx.send(ev).is_err() {
-                        break;
-                    }
-                }
-                buf.clear();
-            }
-            Err(_) => break,
-        }
-    }
-}
 
 /// Format a bridge's captured stderr as a trailing ` — stderr: …` clause for an error message
 /// (empty when there's nothing). Trimmed and tail-capped so a noisy CLI can't bloat the error.
@@ -3828,6 +3780,30 @@ mod tests {
         }
         assert!(parse_sink_line("not json").is_none());
         assert!(parse_sink_line(r#"{"k":"unknown"}"#).is_none());
+
+        // A bridged tool waiting on the user's permission → a prompt request for the parent.
+        match parse_sink_line(
+            r#"{"k":"permission","tool":"write_file","side_effect":"Write","answer":"/tmp/sink.permission-1"}"#,
+        ) {
+            Some(StreamEvent::PermissionRequest {
+                tool,
+                side_effect,
+                answer_path,
+            }) => {
+                assert_eq!(tool, "write_file");
+                assert_eq!(side_effect, forge_types::SideEffect::Write);
+                assert_eq!(
+                    answer_path,
+                    std::path::PathBuf::from("/tmp/sink.permission-1")
+                );
+            }
+            other => panic!("expected PermissionRequest, got {other:?}"),
+        }
+        assert!(
+            parse_sink_line(r#"{"k":"permission","tool":"write_file","side_effect":"Write"}"#)
+                .is_none(),
+            "a request with nowhere to answer is dropped, not prompted"
+        );
 
         // A bridged `update_tasks` reported over the sink → a live Tasks event for the TUI panel.
         match parse_sink_line(

@@ -691,6 +691,15 @@ pub enum StreamEvent {
     /// each of which then submitted an empty patch. Root cause of the ENOENT (sandbox vs load) is
     /// intermittent and unconfirmed; the respawn on retry usually clears it.
     ToolsUnavailable { reason: String },
+    /// A bridged tool call needs the user's confirmation: `forge mcp-serve` reached an `Ask`
+    /// permission decision. The parent asks through its own presenter — the same prompt a native
+    /// tool raises, in the TUI or on a phone — and writes the answer (`allow`, `always`, `deny`)
+    /// to `answer_path`, which the waiting `mcp-serve` polls (CLI bridge only).
+    PermissionRequest {
+        tool: String,
+        side_effect: forge_types::SideEffect,
+        answer_path: std::path::PathBuf,
+    },
 }
 
 /// A sink for [`StreamEvent`]s as they arrive (text, reasoning, tool activity).

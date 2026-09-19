@@ -128,5 +128,24 @@ pub(super) fn handle_stream_event(
         StreamEvent::ToolsUnavailable { reason: _ } => {
             tools_unavailable.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // A bridged tool hit an `Ask` decision in `mcp-serve`, which is waiting for an answer.
+        // Ask exactly as a native tool would — this presenter is the TUI or the daemon's remote
+        // surface — and hand the decision back through the answer file.
+        StreamEvent::PermissionRequest {
+            tool,
+            side_effect,
+            answer_path,
+        } => {
+            let answer = match presenter.confirm(&tool, side_effect) {
+                forge_types::ConfirmOutcome::AlwaysAllow => "always",
+                forge_types::ConfirmOutcome::Allow => "allow",
+                forge_types::ConfirmOutcome::Deny => "deny",
+            };
+            if let Err(error) = std::fs::write(&answer_path, answer) {
+                presenter.emit(PresenterEvent::Warning(format!(
+                    "could not hand the {tool} permission answer to the bridge: {error}"
+                )));
+            }
+        }
     }
 }
