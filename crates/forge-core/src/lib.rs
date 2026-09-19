@@ -7912,6 +7912,19 @@ mod tests {
             nudged,
             "emitted a continue-nudge warning for the unfinished task"
         );
+        // What the model said before the re-drive is kept, not replaced by the final pass: with
+        // a task left over from an earlier request, that text is the answer to the new question.
+        let shown: Vec<String> = store
+            .load_all_messages(session.session_id())
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.visibility == forge_types::Visibility::UiOnly)
+            .map(|m| m.content)
+            .collect();
+        assert!(
+            shown.iter().any(|c| c == "I'll keep going on this."),
+            "the pre-re-drive text was published: {shown:?}"
+        );
     }
 
     /// Registers a task in_progress on call 0, then narrates with NO tool call forever — the task
