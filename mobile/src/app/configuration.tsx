@@ -4,6 +4,7 @@ import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native"
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BackLink } from "../components/ds/BackLink";
 import { Button } from "../components/ds/Button";
+import { Chip } from "../components/ds/Chip";
 import { Input } from "../components/ds/Input";
 import { ListRow } from "../components/ds/ListRow";
 import { Screen } from "../components/ds/Screen";
@@ -90,9 +91,15 @@ function ConfigFieldRow({ field, scope, showSeparator }: { field: ConfigField; s
     return <View style={fieldStyle}><Input label={field.label} value={draft} onChangeText={setDraft} multiline numberOfLines={8} autoCapitalize="none" autoCorrect={false} mono error={error ?? undefined} accessibilityLabel={field.label} /><Button label="Save" variant="secondary" onPress={() => save(draft)} disabled={mutation.isPending || draft === field.value} loading={mutation.isPending} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text></View>;
   }
   if (field.field_type === "enum") {
-    return <View style={fieldStyle}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text><Segmented options={field.options.map((option) => ({ value: option, label: option }))} value={draft} onChange={(value) => { setDraft(value); save(value); }} /></View>;
+    return <View style={fieldStyle}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text>{segmentFits(field.options) ? <Segmented options={field.options.map((option) => ({ value: option, label: option }))} value={draft} onChange={(value) => { setDraft(value); save(value); }} /> : <View style={styles.optionWrap}>{field.options.map((option) => <Chip key={option} label={option} selected={option === draft} onPress={() => { setDraft(option); save(option); }} />)}</View>}</View>;
   }
   return <View style={fieldStyle}><Input label={field.label} value={draft} onChangeText={setDraft}  keyboardType={field.field_type === "int" || field.field_type === "float" ? "decimal-pad" : "default"} autoCapitalize="none" autoCorrect={false} error={error ?? undefined} accessibilityLabel={field.label} /><Button label="Save" variant="secondary" onPress={() => save(draft)} disabled={mutation.isPending || draft === field.value} loading={mutation.isPending} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text>{field.modified ? <Pressable onPress={() => save(undefined)} accessibilityRole="button" accessibilityLabel={`Reset ${field.label}`}><Text style={[styles.reset, { color: tokens.accent }]}>Reset to default ({field.default || "empty"})</Text></Pressable> : null}</View>;
+}
+
+/** Whether an enum's options fit one segmented row on a phone. Four long values ("default ·
+ * accept-edits · bypass · plan") were cut to "ACCEPT-E…"; those get wrapping chips instead. */
+function segmentFits(options: readonly string[]): boolean {
+  return options.length <= 3 && options.reduce((total, option) => total + option.length, 0) <= 24;
 }
 
 function ConfigurationScreenBody() {
@@ -126,6 +133,7 @@ export default function ConfigurationScreen() {
 }
 
 const styles = StyleSheet.create({
+  optionWrap: { flexDirection: "row", flexWrap: "wrap", gap: space.space8, marginTop: space.space8 },
   content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 },
   back: { fontSize: 15, fontWeight: "600" },
   field: { gap: space.space4, paddingHorizontal: space.space16, paddingVertical: space.space12 },
