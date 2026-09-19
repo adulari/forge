@@ -31,6 +31,7 @@ import { useForgeline, useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, space } from "../../theme/tokens";
 import { formatCost, monoFamily, tabularNums, type } from "../../theme/typography";
+import { usePullRefresh } from "../../lib/usePullRefresh";
 
 interface HistoryDisplayRow extends PastSessionRow {
   running: boolean;
@@ -212,7 +213,6 @@ export function HistoryScreen() {
     hasNextPage,
     isFetchingNextPage,
     refetch,
-    isRefetching,
   } = usePastSessions();
   const globalSearch = useSessionSearch(query, 100);
   const createSession = useCreateSession();
@@ -324,9 +324,7 @@ export function HistoryScreen() {
   const visibleError = serverSearching ? globalSearch.error : error;
   const visibleIsError = serverSearching ? globalSearch.isError : isError;
   const visibleRefetch = serverSearching ? globalSearch.refetch : refetch;
-  const visibleIsRefetching = serverSearching
-    ? globalSearch.isFetching && !globalSearch.isDebouncing
-    : isRefetching;
+  const pull = usePullRefresh(visibleRefetch);
 
   return (
     <Screen scroll={false} contentContainerStyle={styles.screenPad}>
@@ -375,8 +373,8 @@ export function HistoryScreen() {
               />
             )
           }
-          refreshing={visibleIsRefetching}
-          onRefresh={visibleRefetch}
+          refreshing={pull.refreshing}
+          onRefresh={pull.onRefresh}
           onEndReached={onEndReached}
           loadingMore={!serverSearching && isFetchingNextPage}
           contentContainerStyle={styles.listPad}

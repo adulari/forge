@@ -32,6 +32,7 @@ import { useTokens } from "../theme/ThemeProvider";
 import { radii, space, type ColorTokens } from "../theme/tokens";
 import { formatCost, formatRelativeTime, monoFamily, tabularNums, type as typeScale } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
+import { usePullRefresh } from "../lib/usePullRefresh";
 
 interface TreeRow {
   node: SessionTreeRow;
@@ -118,6 +119,7 @@ export default function SessionTreeScreen() {
   const toast = useToast();
   const { baseUrl } = useAuth();
   const query = useSessionTree();
+  const pull = usePullRefresh(query.refetch);
   const sessions = useSessions();
   const merge = useMergeSession();
   const { isCompact } = useBreakpoint();
@@ -171,7 +173,7 @@ export default function SessionTreeScreen() {
 
   return (
     <DesktopDrillDown>
-      <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
+      <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
         <BackLink />
         <View style={[styles.columns, isCompact ? styles.columnsStacked : styles.columnsRow]}>
           <View style={styles.treeCol}>

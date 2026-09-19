@@ -57,6 +57,7 @@ import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
 import { monoFamily, type, tabularNums } from "../theme/typography";
 import { SettingsShell } from "./(tabs)/settings";
+import { usePullRefresh } from "../lib/usePullRefresh";
 
 type KeyMode = "append" | "replace";
 type OAuthProviderId = OAuthAccountRequest["provider"];
@@ -545,6 +546,7 @@ function ProvidersScreenBody() {
   const direct = baseUrl != null && supportsDirectDaemonEndpoints(baseUrl);
   const query = useProviders();
   const modelsQuery = useModels();
+  const pull = usePullRefresh(() => Promise.all([query.refetch(), modelsQuery.refetch()]));
   const setEnabled = useSetProviderEnabled();
   const removeKeys = useRemoveProviderKeys();
   const switchAccount = useSwitchOAuthAccount();
@@ -668,8 +670,8 @@ function ProvidersScreenBody() {
       refreshControl={
         direct ? (
           <RefreshControl
-            refreshing={query.isFetching || modelsQuery.isFetching}
-            onRefresh={() => void Promise.all([query.refetch(), modelsQuery.refetch()])}
+            refreshing={pull.refreshing}
+            onRefresh={pull.onRefresh}
           />
         ) : undefined
       }
