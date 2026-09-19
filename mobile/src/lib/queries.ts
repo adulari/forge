@@ -282,7 +282,10 @@ export function useServerFleets(servers: { id: string; baseUrl: string }[]) {
   const isFocused = useIsFocused();
   return useQueries({
     queries: servers.map((server) => ({
-      queryKey: ["sessions", "server", server.id] as const,
+      // The same key `useSessions` uses for the active server, so the Fleet list and its host
+      // chip share one poll instead of each asking the host for `/api/sessions` every 5s — over
+      // the relay that was two encrypted round trips per tick for one answer.
+      queryKey: ["sessions", server.baseUrl] as const,
       queryFn: () => getSessions(server.baseUrl),
       refetchInterval: isFocused
         ? (query: { state: { error: unknown } }) =>

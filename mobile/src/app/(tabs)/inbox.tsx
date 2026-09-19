@@ -21,6 +21,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
+import { usePullRefresh } from "../../lib/usePullRefresh";
 
 const EVERYTHING_COPY = "That's everything — nothing else needs you.";
 
@@ -40,6 +41,7 @@ export function InboxScreen() {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
   const query = useSessions();
+  const pull = usePullRefresh(query.refetch);
   const rows = useMemo(() => (query.data ?? []).filter((s) => s.waiting), [query.data]);
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
 
@@ -104,8 +106,8 @@ export function InboxScreen() {
         // The prototype's reassurance line always sits below the decision card(s) once
         // there's at least one — `EmptyState` above already covers the zero-item case.
         ListFooterComponent={!query.isError && rows.length > 0 ? <Text style={[typeScale.sub, styles.footerCopy, { color: tokens.ink4 }]}>{EVERYTHING_COPY}</Text> : undefined}
-        refreshing={query.isRefetching}
-        onRefresh={query.refetch}
+        refreshing={pull.refreshing}
+        onRefresh={pull.onRefresh}
         contentContainerStyle={styles.listPad}
       />
       <DecisionPeek sessionId={peekSessionId} visible={peekSessionId != null} onClose={closePeek} />

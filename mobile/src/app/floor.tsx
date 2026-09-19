@@ -14,6 +14,7 @@ import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { type as typeScale } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
+import { usePullRefresh } from "../lib/usePullRefresh";
 
 const SOCKET_CAP = 8;
 
@@ -25,6 +26,7 @@ export default function FloorScreen() {
   const tokens = useTokens();
   const { width } = useBreakpoint();
   const query = useSessions();
+  const pull = usePullRefresh(query.refetch);
   const [visibleIds, setVisibleIds] = useState<Set<string>>(new Set());
   const burning = useMemo(() => (query.data ?? []).filter((row) => row.waiting || row.busy), [query.data]);
   // Hearth: Floor is a fixed 2-col grid from medium up (HANDOFF desktop Floor screen).
@@ -38,7 +40,7 @@ export default function FloorScreen() {
   return <Screen scroll={false}>
     <BackLink label="Fleet" />
     <View style={styles.header}><Text style={[typeScale.title, { color: tokens.ink }]}>Floor</Text><Text style={[typeScale.meta, styles.mark, { color: tokens.ink3 }]}>⚒</Text><Text style={[typeScale.sub, { color: tokens.ink3 }]}>{burning.length} forging · live tails</Text></View>
-    <BoundedList key={`floor-${columns}`} data={burning} renderItem={renderItem} keyExtractor={keyExtractor} numColumns={columns} onViewableItemsChanged={onViewableItemsChanged} refreshing={query.isRefetching} onRefresh={() => void query.refetch()} ListEmptyComponent={query.isError ? <EmptyState icon={Flame} message="Could not load live sessions." action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} />} /> : <EmptyState icon={Flame} message="The floor is cool — no live sessions right now." />} contentContainerStyle={styles.list} />
+    <BoundedList key={`floor-${columns}`} data={burning} renderItem={renderItem} keyExtractor={keyExtractor} numColumns={columns} onViewableItemsChanged={onViewableItemsChanged} refreshing={pull.refreshing} onRefresh={pull.onRefresh} ListEmptyComponent={query.isError ? <EmptyState icon={Flame} message="Could not load live sessions." action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} />} /> : <EmptyState icon={Flame} message="The floor is cool — no live sessions right now." />} contentContainerStyle={styles.list} />
   </Screen>;
 }
 

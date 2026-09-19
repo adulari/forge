@@ -37,6 +37,7 @@ import { Sheet } from "../ds/Sheet";
 import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
 import { SessionLifecycleSheet } from "../session/SessionLifecycleSheet";
+import { shortModelLabel } from "./shortModelLabel";
 
 // Hearth "ONE right-aligned mono metric" (HANDOFF Fleet rows): cost while forging,
 // relative time while cool, elapsed while waiting — never stacked, never with CostMetric's
@@ -313,10 +314,13 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                       },
                     ]}
                     numberOfLines={1}
-                    ellipsizeMode={row.waiting ? "tail" : "head"}
+                    // Tail, not head: the line leads with host · transport · project, and a head
+                    // ellipsis spent the whole width on a long model id ("…r::dots-studio/…"),
+                    // hiding the host and the project the row is about.
+                    ellipsizeMode="tail"
                       accessibilityLabel={row.waiting ? undefined : `path: ${row.cwd}`}
                     >
-                      {row.waiting ? "needs a decision" : `${hostLabel} · ${transportLabel} · ${cwdLabel} · ${row.model}`}
+                      {row.waiting ? "needs a decision" : `${hostLabel} · ${transportLabel} · ${cwdLabel} · ${shortModelLabel(row.model)}`}
                     </Text>
                 </Pressable>
                 <IconButton

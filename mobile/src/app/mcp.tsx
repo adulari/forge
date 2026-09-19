@@ -26,6 +26,7 @@ import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { monoFamily, type } from "../theme/typography";
 import { SettingsShell } from "./(tabs)/settings";
+import { usePullRefresh } from "../lib/usePullRefresh";
 
 /** The daemon's own refusal text. `request()` rewrites every 404's message to the pairing-invalid
  * copy (it cannot tell a bad token from a real 404), so the true reason survives only in `body`. */
@@ -56,6 +57,7 @@ function McpScreenBody() {
   const tokens = useTokens();
   const toast = useToast();
   const query = useMcp();
+  const pull = usePullRefresh(query.refetch);
   const update = useUpdateMcpServer();
   const data = query.data;
   const [adding, setAdding] = useState(false);
@@ -95,7 +97,7 @@ function McpScreenBody() {
     [toast, update],
   );
 
-  return <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
+  return <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
     <View style={styles.headerRow}><BackLink /><View style={styles.flexFill} /><Pressable onPress={() => setAdding(true)} accessibilityRole="button"><Text style={[styles.add, { color: tokens.accent }]}>+ Add</Text></Pressable></View>
     <Text style={[type.title, { color: tokens.ink }]}>MCP servers</Text>
     <Text style={[type.sub, { color: tokens.ink3 }]}>External tools available to Forge. Secrets remain on the host.</Text>

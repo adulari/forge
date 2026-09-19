@@ -93,6 +93,16 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
   const clean =
     data != null && data.staged.length === 0 && data.unstaged.length === 0 && data.untracked.length === 0;
 
+  // Outside a repository there is no branch to pick and no diff to show: rendering the picker
+  // ("detached HEAD") and an empty "select a file" pane under the notice read as a broken repo.
+  if (status.error && isNotARepo(status.error.message)) {
+    return (
+      <View style={[styles.empty, { backgroundColor: tokens.bg0 }]}>
+        <EmptyState icon={GitBranch} message={status.error.message} />
+      </View>
+    );
+  }
+
   let column: React.ReactNode;
   if (status.error) {
     const text = status.error.message;
