@@ -14,14 +14,23 @@ import { monoFamily, tabularNums, type as typeScale } from "../../theme/typograp
 import { Button } from "../ds/Button";
 import { Input } from "../ds/Input";
 import { Sheet } from "../ds/Sheet";
+import { useToast } from "../ds/ToastHost";
 
 export function CheckpointSheet({ visible, onClose, send }: { visible: boolean; onClose: () => void; send: (input: RemoteInput) => boolean }) {
   const tokens = useTokens();
+  const toast = useToast();
   const [name, setName] = useState("");
+  // The save runs on the host and its confirmation lands in the session transcript, which this
+  // sheet covers — closing silently left the user unsure anything happened, and a send that
+  // failed while reconnecting did nothing at all.
   const save = () => {
-    if (send({ kind: "prompt", text: name.trim() ? `/checkpoint ${name.trim()}` : "/checkpoint" })) {
+    const label = name.trim();
+    if (send({ kind: "prompt", text: label ? `/checkpoint ${label}` : "/checkpoint" })) {
       setName("");
       onClose();
+      toast.show(label ? `Checkpoint "${label}" saved` : "Checkpoint saved");
+    } else {
+      toast.show("Not connected — the checkpoint was not saved", { tone: "danger" });
     }
   };
   const restore = () => {
