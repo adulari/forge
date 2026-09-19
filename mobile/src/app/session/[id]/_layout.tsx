@@ -18,8 +18,6 @@ import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTimin
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { HandoffSheet } from "../../../components/anywhere/HandoffSheet";
-import { ShareSheet } from "../../../components/anywhere/ShareSheet";
 import { Banner } from "../../../components/ds/Banner";
 import { IconButton } from "../../../components/ds/IconButton";
 import { TabStrip, type TabStripOption } from "../../../components/ds/TabStrip";
@@ -143,8 +141,6 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   // to before this landed: no host prefix on the meta line, no extra kebab rows.
   const { signedIn } = useAnywhere();
   const { host: authHost } = useAuth();
-  const [handoffVisible, setHandoffVisible] = useState(false);
-  const [shareVisible, setShareVisible] = useState(false);
 
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
@@ -342,17 +338,17 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   );
   const onToggleGitReview = useCallback(() => workbench.toggleSurface({ kind: "git" }), [workbench]);
   const onToggleTerminal = useCallback(() => workbench.toggleSurface({ kind: "terminal" }), [workbench]);
-  const openHandoffSheet = useCallback(() => setHandoffVisible(true), []);
-  const openShareSheet = useCallback(() => setShareVisible(true), []);
-  const onSwitchTransportPress = useCallback(
-    () => toast.show("transport switching lands with the relay backend"),
-    [toast],
-  );
-  // `onHandoff`/`onShareReplay`/`onSwitchTransport` stay `undefined` (not a fresh no-op arrow)
-  // when signed out, so SessionHeader's memo sees a stable `undefined` across frames too.
-  const onHandoff = signedIn ? openHandoffSheet : undefined;
-  const onShareReplay = signedIn ? openShareSheet : undefined;
-  const onSwitchTransport = signedIn ? onSwitchTransportPress : undefined;
+  const openHandoff = useCallback(() => router.push("/anywhere/handoff"), []);
+  // `onHandoff` stays `undefined` (not a fresh no-op arrow) when signed out, so SessionHeader's
+  // memo sees a stable `undefined` across frames too.
+  const onHandoff = signedIn ? openHandoff : undefined;
+  // Not offered: the share sheet and the handoff sheet this menu used to open were backed by the
+  // in-memory mock client — "Create share link" produced a link to nothing, and the handoff
+  // preflight listed files (".env", "assets/demo.mov") no session has. Handoff now opens the real
+  // capsule screen; share links are created on the host (`forge anywhere share`). "Switch
+  // transport" only ever showed a "lands with the relay backend" toast.
+  const onShareReplay: (() => void) | undefined = undefined;
+  const onSwitchTransport: (() => void) | undefined = undefined;
 
   // StatusStrip's `weekly`/`transport` props are object literals — recreating them every
   // render (as the JSX used to do inline) would defeat its memo on every frame even though
@@ -504,14 +500,6 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           onClose={() => setLifecycleVisible(false)}
         />
 
-        <HandoffSheet
-          visible={handoffVisible}
-          onClose={() => setHandoffVisible(false)}
-          sessionId={sessionId}
-          sessionTitle={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
-          sourceHostName={authHost ?? "this host"}
-        />
-        <ShareSheet visible={shareVisible} onClose={() => setShareVisible(false)} sessionId={sessionId} />
 
         {protocolWarning ? (
           <Banner tone="warn" message={protocolWarning} />
