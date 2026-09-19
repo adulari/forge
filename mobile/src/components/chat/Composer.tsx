@@ -82,6 +82,7 @@ import {
 } from "../workspace/workspaceModel";
 import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
+import { modelChipLabel } from "./modelChipLabel";
 
 interface NativeComposerMirrorProps {
   color: ColorValue;
@@ -115,12 +116,15 @@ export interface ComposerProps {
    * reads the stable session context (see `useSessionStable` below) so it can be wrapped in
    * `React.memo` without re-rendering on every WS snapshot frame. */
   model?: string | null;
+  /** From the host: `false` means `model` is only the mesh's latest pick for an Automatic
+   * session; `undefined` (older host) is unknown. */
+  modelPinned?: boolean;
   effort?: string | null;
   onSend: (text: string, attachments: SentAttachment[]) => boolean;
   onInterrupt: () => void;
 }
 
-function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort, onSend, onInterrupt }: ComposerProps) {
+function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPinned, effort, onSend, onInterrupt }: ComposerProps) {
   const { scheme, tokens } = useTheme();
   const depth = scheme === "dark" ? depthDark : depthLight;
   const imeProps = { onCompositionEnd: recordComposerImeCommit } as unknown as React.ComponentProps<typeof TextInput>;
@@ -771,9 +775,9 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
                   // The daemon sends the literal sentinel "—" for an Automatic session (no
                   // model pinned yet) — same value StatusStrip already special-cases. A raw
                   // dash on the chip reads as broken/missing data, not as "automatic".
-                  label={model === "—" ? "auto" : model}
+                  label={modelChipLabel(model, modelPinned)}
                   color={tokens.ink2}
-                  accessibilityLabel={`model: ${model === "—" ? "auto" : model} — change model`}
+                  accessibilityLabel={`model: ${modelChipLabel(model, modelPinned)} — change model`}
                   testID="composer-model-chip"
                   onPress={openModelPicker}
                 />

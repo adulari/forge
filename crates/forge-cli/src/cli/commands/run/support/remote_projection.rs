@@ -16,6 +16,8 @@ pub(crate) struct SnapshotIdentity<'a> {
     pub project_init_hint: Option<String>,
     /// "loopback" | "LAN" | "public (provider)" — see [`remote::exposure_label`].
     pub exposure: String,
+    /// Whether the session's model is pinned (the Session knows; `App` does not).
+    pub model_pinned: bool,
 }
 
 /// Build one wire [`remote::Snapshot`] frame from the App's remote projection. The ONE snapshot
@@ -72,6 +74,7 @@ pub(crate) fn build_snapshot_frame(
             .to_string(),
         tier: view.tier,
         model: view.model,
+        model_pinned: ident.model_pinned,
         cost_usd: view.cost_usd,
         context_tokens: view.context_tokens,
         context_limit: view.context_limit,

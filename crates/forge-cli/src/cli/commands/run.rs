@@ -820,6 +820,7 @@ pub(crate) async fn run_chat_tui(
     // a busy turn parked in a permission/question prompt holds `session`'s lock for the ENTIRE
     // turn, and this id practically never changes mid-turn anyway, so a stale reuse costs nothing).
     let mut cached_session_id = session.lock().await.session_id().to_string();
+    let mut cached_model_pinned = session.lock().await.pinned_model().is_some();
     // The store seam behind the remote server's `GET /api/history` scrollback pagination
     // (docs/features/remote-control.md §2b): reads persisted transcript pages for whatever
     // session id the latest snapshot carries (it follows `/new`/resume automatically). A
@@ -4715,6 +4716,7 @@ pub(crate) async fn run_chat_tui(
                 // nothing.
                 if let Ok(s) = session.try_lock() {
                     cached_session_id = s.session_id().to_string();
+                    cached_model_pinned = s.pinned_model().is_some();
                 }
                 let remote_cwd = remote_workspace
                     .read()
@@ -4732,6 +4734,7 @@ pub(crate) async fn run_chat_tui(
                         project_initialized: project.initialized,
                         project_init_hint: project.hint,
                         exposure,
+                        model_pinned: cached_model_pinned,
                     },
                     remote_copy_text.clone(),
                     prompt_seq,
@@ -5031,6 +5034,7 @@ mod tests {
                 project_initialized: true,
                 project_init_hint: None,
                 exposure: "loopback".into(),
+                model_pinned: false,
             },
             None,
             0,
