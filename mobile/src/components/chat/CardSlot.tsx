@@ -8,6 +8,8 @@ import React from "react";
 
 import { PermissionCard } from "../cards/PermissionCard";
 import { QuestionCard } from "../cards/QuestionCard";
+import { PlanCard } from "../review/PlanCard";
+import { resolvePlanDecision } from "../../lib/planDecision";
 import { useSessionCtx } from "../../lib/sessionContext";
 
 export default function CardSlot() {
@@ -20,6 +22,25 @@ export default function CardSlot() {
       <PermissionCard
         prompt={snapshot.permission_prompt}
         diff={snapshot.diff}
+        promptSeq={snapshot.prompt_seq}
+        send={send}
+        onQueueAnswer={setPendingAnswer}
+      />
+    );
+  }
+
+  // A plan's approval arrives as an ordinary question ("Build this plan? — …"). Asked that in
+  // Chat with only Build it / Cancel, the user was approving steps they could not see — the plan
+  // itself was only on the Review tab. Show the plan card, steps and all, where the decision is.
+  if (
+    snapshot.plan != null &&
+    resolvePlanDecision(snapshot.plan.title, snapshot.question, snapshot.question_options, snapshot.prompt_seq)
+  ) {
+    return (
+      <PlanCard
+        plan={snapshot.plan}
+        question={snapshot.question}
+        questionOptions={snapshot.question_options}
         promptSeq={snapshot.prompt_seq}
         send={send}
         onQueueAnswer={setPendingAnswer}

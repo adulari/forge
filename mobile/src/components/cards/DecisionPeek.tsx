@@ -24,6 +24,7 @@ import { space } from "../../theme/tokens";
 import { monoFamily, type as typeScale } from "../../theme/typography";
 import { PermissionCard } from "./PermissionCard";
 import { QuestionCard } from "./QuestionCard";
+import { useSessions } from "../../lib/queries";
 
 export interface DecisionPeekProps {
   sessionId: string | null;
@@ -54,6 +55,9 @@ function DecisionPeekBody({ sessionId, onClose }: { sessionId: string; onClose: 
   // skeleton below. Only the escalated state needs to break out of the skeleton, otherwise
   // a normal transient reconnect blip would flash the error message for no reason.
   const unreachable = connectionState === "unreachable";
+  // Name the session being decided on, as the Inbox card does; the bare id told the user nothing.
+  const { data: fleetRows } = useSessions();
+  const sessionTitle = fleetRows?.find((row) => row.id === sessionId)?.title?.trim();
 
   return (
     <View style={styles.container}>
@@ -65,7 +69,7 @@ function DecisionPeekBody({ sessionId, onClose }: { sessionId: string; onClose: 
           style={[typeScale.meta, styles.sessionId, { color: tokens.ink3, fontFamily: monoFamily.regular }]}
           numberOfLines={1}
         >
-          #{sessionId.slice(0, 8)}
+          {sessionTitle || `#${sessionId.slice(0, 8)}`}
         </Text>
         <View style={styles.headerSpacer} />
         <IconButton
