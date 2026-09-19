@@ -25,6 +25,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, space } from "../../theme/tokens";
 import { formatRelativeTime, type as typeScale } from "../../theme/typography";
 import { DiffCard } from "../review/DiffCard";
+import { displayPermissionPrompt } from "../../lib/permissionPrompt";
 
 export interface PermissionCardProps {
   prompt: string;
@@ -153,7 +154,7 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
             {`permission · ${formatRelativeTime(waitingSince, now)}`}
           </Text>
 
-          <Text style={[typeScale.body, { color: tokens.ink }, styles.prompt]}>{prompt}</Text>
+          <Text style={[typeScale.body, { color: tokens.ink }, styles.prompt]}>{displayPermissionPrompt(prompt)}</Text>
 
           {diff?.pending ? (
             <View style={styles.diffSlot}>

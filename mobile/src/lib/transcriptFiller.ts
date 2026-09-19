@@ -34,9 +34,20 @@ export function fillerHistoryRows(
   const out: HistoryRow[] = [];
   for (let i = end - 1; i >= 0; i--) {
     const row = rows[i];
+    if (isTerminalChrome(row)) continue;
     out.push(toHistoryRow(row, i + 1));
   }
   return out;
+}
+
+/** Lines the TUI draws around a reply rather than the reply itself: the "⚒ forge" speaker header
+ * and the collapsed-reasoning placeholder, whose "/thinking to expand" is a terminal command. The
+ * daemon forwards them as assistant rows, so the filler painted each as its own Forge message
+ * until history arrived. */
+function isTerminalChrome(row: TranscriptRow): boolean {
+  if (row.kind !== "assistant") return false;
+  const text = row.text.trim();
+  return text === "⚒ forge" || /^💭 thinking… \(\/thinking to expand\)$/.test(text);
 }
 
 function toHistoryRow(row: TranscriptRow, seq: number): HistoryRow {

@@ -9,7 +9,7 @@
 import * as Clipboard from "expo-clipboard";
 import { Check, ChevronDown, ChevronRight, Copy, MessageSquarePlus, X } from "lucide-react-native";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { DiffLines } from "./DiffLines";
 import { headEllipsis } from "./pathTruncate";
@@ -203,7 +203,10 @@ function DiffFileSection({
             <ChevronRight size={16} strokeWidth={1.75} color={tokens.ink3} />
           )}
           <Text
-            selectable
+            // Android's TextView ignores ellipsize on selectable text and simply clips it, which
+            // cut "/tmp/forge-perm-test.txt" to "/tmp/forge-pe" — the filename, the one part a
+            // reviewer needs, was the part lost. The full path is in the copied patch.
+            selectable={Platform.OS !== "android"}
             style={[typeScale.bodyBold, { color: tokens.ink, fontFamily: monoFamily.regular }, styles.filePath]}
             numberOfLines={1}
             // "head": if the row is still narrower than `headEllipsis`'s own char budget, RN's

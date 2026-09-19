@@ -27,6 +27,8 @@ import { space } from "../theme/tokens";
 import { monoFamily, type } from "../theme/typography";
 import { SettingsShell } from "./(tabs)/settings";
 import { usePullRefresh } from "../lib/usePullRefresh";
+import { useAuth } from "../lib/auth";
+import { supportsDirectDaemonEndpoints } from "../lib/transport";
 
 /** The daemon's own refusal text. `request()` rewrites every 404's message to the pairing-invalid
  * copy (it cannot tell a bad token from a real 404), so the true reason survives only in `body`. */
@@ -61,6 +63,11 @@ function McpScreenBody() {
   const update = useUpdateMcpServer();
   const data = query.data;
   const [adding, setAdding] = useState(false);
+  // The relay refuses MCP writes by design: registering or enabling a server persists a command
+  // the host later runs. Over Anywhere the screen reviews only, instead of offering an Add sheet
+  // and toggles whose requests always come back "not allowlisted".
+  const { baseUrl } = useAuth();
+  const direct = baseUrl == null || supportsDirectDaemonEndpoints(baseUrl);
   // Desired-state overlay keyed by server name. The mutation seeds the cache with the daemon's
   // full refreshed list, so the overlay is dropped on settle — success keeps the new value,
   // failure rolls back to whatever the server still reports.
@@ -98,7 +105,7 @@ function McpScreenBody() {
   );
 
   return <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
-    <View style={styles.headerRow}><BackLink /><View style={styles.flexFill} /><Pressable onPress={() => setAdding(true)} accessibilityRole="button"><Text style={[styles.add, { color: tokens.accent }]}>+ Add</Text></Pressable></View>
+    <View style={styles.headerRow}><BackLink /><View style={styles.flexFill} />{direct ? <Pressable onPress={() => setAdding(true)} accessibilityRole="button"><Text style={[styles.add, { color: tokens.accent }]}>+ Add</Text></Pressable> : null}</View>
     <Text style={[type.title, { color: tokens.ink }]}>MCP servers</Text>
     <Text style={[type.sub, { color: tokens.ink3 }]}>External tools available to Forge. Secrets remain on the host.</Text>
     {query.isLoading ? (
@@ -122,7 +129,8 @@ function McpScreenBody() {
       // reason stays as the fallback for a pre-v9 daemon that omits the flag.
       const readOnlyReason =
         external[server.name] ??
-        (server.editable === false ? "defined outside mcp.toml — edit it where it is defined" : null);
+        (server.editable === false ? "defined outside mcp.toml — edit it where it is defined" : null) ??
+        (direct ? null : "change it on the host — Forge Anywhere does not carry MCP changes");
       return <View key={server.name} style={[styles.server, index < data.servers.length - 1 ? { borderBottomColor: tokens.hairline, borderBottomWidth: StyleSheet.hairlineWidth } : null]}>
         <View style={[styles.dot, { backgroundColor: enabled ? tokens.success : tokens.ink4 }]} />
         <View style={styles.serverBody}>
