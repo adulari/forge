@@ -3,23 +3,20 @@
 // for it), so `RETENTION_ROWS` below is a local constant built from the real `RetentionRow`
 // shape (lib/anywhere/types.ts) rather than ad hoc strings.
 import { router } from "expo-router";
-import { ChevronRight } from "lucide-react-native";
-import React, { useCallback, useEffect, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useEffect } from "react";
+import { StyleSheet, Text, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 
 import { SettingsShell } from "../(tabs)/settings";
 import { BackLink } from "../../components/ds/BackLink";
 import { Banner, type BannerTone } from "../../components/ds/Banner";
-import { Button } from "../../components/ds/Button";
 import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
-import { Sheet } from "../../components/ds/Sheet";
 import { Skeleton } from "../../components/ds/Skeleton";
-import { useToast } from "../../components/ds/ToastHost";
 import { goBackOr } from "../../lib/nav";
 import { formatBytes } from "../../lib/anywhere/format";
-import { useAnywhere, useAnywhereStorage } from "../../lib/anywhere/store";
+import { useAnywhere } from "../../lib/anywhere/store";
+import { useAnywhere as useEncryptedAnywhere } from "../../lib/AnywhereProvider";
 import type { RetentionRow, StorageState } from "../../lib/anywhere/types";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
@@ -48,6 +45,12 @@ interface StorageBannerInfo {
   actionLabel?: string;
 }
 
+function storageFigures(usedBytes: number, quotaBytes: number): { usedBytes: number; quotaBytes: number; state: StorageState } {
+  const fraction = quotaBytes > 0 ? usedBytes / quotaBytes : 0;
+  const state: StorageState = fraction >= 1 ? "full" : fraction >= 0.9 ? "nearly-full" : "ok";
+  return { usedBytes, quotaBytes, state };
+}
+
 function storageBannerInfo(state: StorageState, usedBytes: number, quotaBytes: number): StorageBannerInfo | null {
   switch (state) {
     case "ok":
@@ -73,31 +76,15 @@ function storageBannerInfo(state: StorageState, usedBytes: number, quotaBytes: n
 
 export default function AnywhereStorageScreen() {
   const tokens = useTokens();
-  const toast = useToast();
-  const { client, signedIn, loading: accountLoading } = useAnywhere();
-  const { storage, loading, refresh } = useAnywhereStorage();
-  const [previewVisible, setPreviewVisible] = useState(false);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [reclaimableBytes, setReclaimableBytes] = useState<number | null>(null);
-
-  const onCleanUp = useCallback(async () => {
-    setPreviewVisible(true);
-    setPreviewLoading(true);
-    try {
-      const preview = await client.cleanupPreview();
-      setReclaimableBytes(preview.reclaimableBytes);
-    } finally {
-      setPreviewLoading(false);
-    }
-  }, [client]);
-
-  const onConfirmCleanup = useCallback(() => {
-    // AnywhereClient has no cleanup-commit method yet (client.ts only exposes
-    // cleanupPreview) — closing here rather than pretending a delete happened.
-    setPreviewVisible(false);
-    void refresh();
-    toast.show("Preview reviewed — cleanup isn't wired up to a commit endpoint yet.", { tone: "neutral" });
-  }, [refresh, toast]);
+  const { signedIn, loading: accountLoading } = useAnywhere();
+  // The figures come from the real account the Anywhere hub shows. This screen used to read the
+  // prototype's MockAnywhereClient — a made-up usage figure and a "Clean up" preview offering to
+  // free 0.3 GB, which then admitted it was not wired to anything.
+  const real = useEncryptedAnywhere();
+  const loading = real.account == null && real.phase !== "ready";
+  const storage = real.account
+    ? storageFigures(real.account.storage_used_bytes, real.account.storage_limit_bytes)
+    : null;
 
   useEffect(() => {
     if (!accountLoading && !signedIn) router.replace("/anywhere");
@@ -147,8 +134,6 @@ export default function AnywhereStorageScreen() {
           <Banner
             tone={bannerInfo.tone}
             message={bannerInfo.message}
-            actionLabel={bannerInfo.actionLabel}
-            onAction={bannerInfo.actionLabel ? onCleanUp : undefined}
           />
         ) : null}
 
@@ -169,45 +154,8 @@ export default function AnywhereStorageScreen() {
           ))}
         </View>
 
-        <View style={styles.section}>
-          <Pressable
-            onPress={onCleanUp}
-            accessibilityRole="button"
-            accessibilityLabel="Clean up storage"
-            style={styles.cleanupRow}
-          >
-            <Text style={[typeScale.bodyBold, styles.cleanupLabel, { color: tokens.ink }]}>Clean up</Text>
-            <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]} numberOfLines={1}>
-              oldest sessions first · preview before delete
-            </Text>
-            <ChevronRight size={14} strokeWidth={1.75} color={tokens.ink4} />
-          </Pressable>
-        </View>
       </Screen>
 
-      <Sheet visible={previewVisible} onClose={() => setPreviewVisible(false)} accessibilityLabel="Clean up preview">
-        <View style={styles.sheetContent}>
-          <Text style={[typeScale.headingBold, { color: tokens.ink }]}>Clean up preview</Text>
-          {previewLoading ? (
-            <Skeleton width="60%" height={24} style={styles.previewSkeleton} />
-          ) : (
-            <Text style={[typeScale.sub, styles.previewText, { color: tokens.ink2 }]}>
-              {reclaimableBytes != null
-                ? `Removing the oldest synced sessions first would free up about ${formatBytes(reclaimableBytes)}.`
-                : "Nothing to clean up right now."}
-            </Text>
-          )}
-          <View style={styles.sheetActions}>
-            <Button label="Confirm" onPress={onConfirmCleanup} disabled={previewLoading} style={styles.sheetButton} />
-            <Button
-              label="Cancel"
-              variant="secondary"
-              onPress={() => setPreviewVisible(false)}
-              style={styles.sheetButton}
-            />
-          </View>
-        </View>
-      </Sheet>
     </SettingsShell>
   );
 }
