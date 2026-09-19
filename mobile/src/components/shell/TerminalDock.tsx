@@ -204,6 +204,8 @@ export interface TerminalDockProps {
 
 type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected";
 
+const TERMINAL_OPEN_DEADLINE_MS = 15_000;
+
 export function TerminalDock({
   sessionId,
   terminalId = "term-1",
@@ -223,6 +225,7 @@ export function TerminalDock({
   // tracked instead of assuming the native buffer actually clears back to "" between keystrokes.
   const lastNativeTextRef = useRef("");
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectedRef = useRef(false);
   const restartRef = useRef(false);
   const suppressReconnectRef = useRef(false);
   const terminalStatusRef = useRef<TerminalStatus>("running");
@@ -306,6 +309,7 @@ export function TerminalDock({
     buffer.clear();
     setLines(buffer.lines());
     setConnectionStatus("connecting");
+    connectedRef.current = false;
     let socket: TerminalSocket;
     let disposed = false;
     const restart = restartRef.current;
@@ -329,10 +333,12 @@ export function TerminalDock({
             setLines(buffer.lines());
           },
           onOpen: () => {
+            connectedRef.current = true;
             setConnectionStatus("connected");
             void refreshTerminals();
           },
           onClose: () => {
+            connectedRef.current = false;
             setConnectionStatus("disconnected");
             void refreshTerminals();
             if (
@@ -364,8 +370,23 @@ export function TerminalDock({
       return;
     }
     socketRef.current = socket;
+    // An open request lost on the way — the relay dropped between the phone and the host — never
+    // resolves: no open, no close, so the pane sat on "connecting" until the user found the
+    // restart button. Give the attach a deadline and try again.
+    const openDeadline = setTimeout(() => {
+      if (disposed || connectedRef.current) return;
+      // This timer owns the retry; keep the close handler from scheduling a second one.
+      suppressReconnectRef.current = true;
+      socket.close();
+      setConnectionStatus("disconnected");
+      reconnectTimerRef.current = setTimeout(
+        () => setConnectionGeneration((generation) => generation + 1),
+        1_500,
+      );
+    }, TERMINAL_OPEN_DEADLINE_MS);
     return () => {
       disposed = true;
+      clearTimeout(openDeadline);
       if (reconnectTimerRef.current != null) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
