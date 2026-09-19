@@ -20,10 +20,11 @@ export function monoFamilyFor(weight: 400 | 700): string {
   return weight === 700 ? monoFamily.bold : monoFamily.regular;
 }
 
-// No ligatures in mono text: Geist Mono joins "--" into one dash, so a copyable command such as
+// No ligatures or contextual alternates in mono text: Geist Mono joins "--" into one dash and
+// tightens the space before it, so a copyable command such as
 // `forge anywhere enable --name NAME` looked like it took an em-dash. tabularNums is composed after
 // the mono styles and replaces their fontVariant, so it carries the setting too.
-export const tabularNums: TextStyle = { fontVariant: ["tabular-nums", "no-common-ligatures"] };
+export const tabularNums: TextStyle = { fontVariant: ["tabular-nums", "no-common-ligatures", "no-contextual"] };
 
 // §2: sans is now a bundled custom family (Geist) on every platform — native embeds
 // it via the expo-font config plugin (same mechanism as the mono family below);
@@ -128,14 +129,14 @@ export const type = {
     lineHeight: 18,
     fontWeight: "400",
     fontFamily: monoFamily.regular,
-    fontVariant: ["no-common-ligatures"],
+    fontVariant: ["no-common-ligatures", "no-contextual"],
   } satisfies TextStyle,
   codeSmall: {
     fontSize: 11,
     lineHeight: 16,
     fontWeight: "400",
     fontFamily: monoFamily.regular,
-    fontVariant: ["no-common-ligatures"],
+    fontVariant: ["no-common-ligatures", "no-contextual"],
   } satisfies TextStyle,
   // Mono discipline: numbers/paths/branches/model ids/commands render in Geist Mono
   // at 10.5-12px with tabular-nums (never proportional sans). `codeSmall` (11px)
@@ -147,7 +148,7 @@ export const type = {
     lineHeight: 14,
     fontWeight: "400",
     fontFamily: monoFamily.regular,
-    fontVariant: ["no-common-ligatures"],
+    fontVariant: ["no-common-ligatures", "no-contextual"],
   } satisfies TextStyle,
 } as const;
 
