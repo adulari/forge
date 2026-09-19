@@ -246,6 +246,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/review/DiffCard.tsx",
+    "platform": "web/native",
+    "reason": "Android's TextView ignores ellipsize on selectable text, so the diff path is selectable everywhere except Android",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/components/session/EffortPicker.tsx",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
