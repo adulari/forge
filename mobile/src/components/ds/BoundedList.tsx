@@ -144,6 +144,9 @@ function BoundedListInner<T>(
           ) : undefined
         }
         removeClippedSubviews={Platform.OS !== "web"}
+        // The default ("never") spends the first tap after typing on dismissing the keyboard: a
+        // History search result, say, needed two taps to open. Callers can still override.
+        keyboardShouldPersistTaps="handled"
         maxToRenderPerBatch={12}
         windowSize={9}
         initialNumToRender={12}

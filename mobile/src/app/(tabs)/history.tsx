@@ -134,7 +134,9 @@ function HistoryRowBase({ row, index, onPress, onActions }: HistoryRowProps) {
                 <Text style={[type.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
                   {title}
                 </Text>
-                {row.running ? <Badge label="running" tone="success" /> : null}
+                {/* `running` means the daemon still hosts it, not that a turn is in progress —
+                    "running" on an idle session read as busy. */}
+                {row.running ? <Badge label="live" tone="success" /> : null}
                 {row.archived ? <Badge label="archived" tone="neutral" /> : null}
               </View>
               <Text
