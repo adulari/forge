@@ -24,7 +24,6 @@ import { type ColorValue, Image, Platform, Pressable, ScrollView, StyleSheet, Te
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
-import { useAuth } from "../../lib/auth";
 import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
 import { mergeCommandSources } from "../../lib/commandSources";
 import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
@@ -46,7 +45,6 @@ import { isMacOS } from "../../lib/platform";
 import { recordComposerImeCommit, recordComposerInput } from "../../lib/performance";
 import { useUpload, useWorkspaceSearch } from "../../lib/queries";
 import { useSessionStable } from "../../lib/sessionContext";
-import { supportsDirectDaemonEndpoints } from "../../lib/transport";
 import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
 import { durations, easings } from "../../theme/motion";
@@ -128,7 +126,6 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
   const imeProps = { onCompositionEnd: recordComposerImeCommit } as unknown as React.ComponentProps<typeof TextInput>;
   const usesNativeMirror = composerUsesNativeMirror(Platform.OS);
   const upload = useUpload();
-  const { baseUrl } = useAuth();
   const insets = useSafeAreaInsets();
   const [commandFocusSignal, setCommandFocusSignal] = useState(0);
 
@@ -248,10 +245,8 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
   const recognizedCommand = leadingCommand != null && isKnownCommand(leadingCommand, skillCommands.map((s) => s.name));
   const workspaceMention = workspaceMentionAtEnd(text);
   const workspaceMentionQuery = workspaceMention?.query ?? "";
-  const workspaceSearchSession =
-    !baseUrl || supportsDirectDaemonEndpoints(baseUrl) ? sessionId : null;
   const workspaceSearch = useWorkspaceSearch(
-    workspaceSearchSession,
+    sessionId,
     workspaceMentionQuery,
     "files",
     8,

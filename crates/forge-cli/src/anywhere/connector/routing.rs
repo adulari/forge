@@ -48,6 +48,35 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::GitStatus => exact(Method::GET, "/api/git/status"),
         RouteId::GitBranches => exact(Method::GET, "/api/git/branches"),
         RouteId::GitDiff => exact(Method::GET, "/api/git/diff"),
+        RouteId::WorkspaceEntries => exact(Method::GET, "/api/workspace/entries"),
+        RouteId::ReadWorkspaceFile => exact(Method::GET, "/api/workspace/file"),
+        RouteId::WriteWorkspaceFile => exact(Method::PUT, "/api/workspace/file"),
+        RouteId::WorkspaceSearch => exact(Method::GET, "/api/workspace/search"),
+        RouteId::ListWorkflows => exact(Method::GET, "/api/workflows"),
+        RouteId::ListSchedules => exact(Method::GET, "/api/schedules"),
+        RouteId::Changelog => exact(Method::GET, "/api/changelog"),
+        RouteId::Identity => exact(Method::GET, "/api/identity"),
+        RouteId::SessionDiff => {
+            let id = single_path_parameter(request)?;
+            Ok(RouteTarget {
+                method: Method::GET,
+                path: format!("/api/sessions/{id}/diff"),
+                query: query_parameter(&request.parameters, 1)?,
+            })
+        }
+        RouteId::PauseSchedule | RouteId::ResumeSchedule | RouteId::DeleteSchedule => {
+            let id = single_path_parameter(request)?;
+            let operation = match request.route {
+                RouteId::PauseSchedule => "pause",
+                RouteId::ResumeSchedule => "resume",
+                _ => "delete",
+            };
+            Ok(RouteTarget {
+                method: Method::POST,
+                path: format!("/api/schedules/{id}/{operation}"),
+                query: query_parameter(&request.parameters, 1)?,
+            })
+        }
         RouteId::ArchiveSession
         | RouteId::ForkSession
         | RouteId::MergeSession
@@ -92,6 +121,13 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         | RouteId::WebSocket
         | RouteId::TerminalWebSocket => bail!("route is not an HTTP bridge route"),
     }
+}
+
+fn single_path_parameter(request: &BridgeRequest) -> Result<&str> {
+    if request.parameters.is_empty() || request.parameters.len() > 2 {
+        bail!("route requires one path parameter and an optional query");
+    }
+    safe_path_segment(&request.parameters[0])
 }
 
 pub(super) fn query_parameter(parameters: &[String], index: usize) -> Result<Option<String>> {
@@ -198,6 +234,103 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn files_diff_and_schedule_routes_map_to_their_daemon_endpoints() {
+        let cases: [(RouteId, &str, &[&str], Method, &str); 12] = [
+            (
+                RouteId::WorkspaceEntries,
+                "GET",
+                &["?session=s1&path=src"],
+                Method::GET,
+                "/api/workspace/entries",
+            ),
+            (
+                RouteId::ReadWorkspaceFile,
+                "GET",
+                &["?session=s1&path=a.rs"],
+                Method::GET,
+                "/api/workspace/file",
+            ),
+            (
+                RouteId::WriteWorkspaceFile,
+                "PUT",
+                &[],
+                Method::PUT,
+                "/api/workspace/file",
+            ),
+            (
+                RouteId::WorkspaceSearch,
+                "GET",
+                &["?session=s1&q=main"],
+                Method::GET,
+                "/api/workspace/search",
+            ),
+            (
+                RouteId::ListWorkflows,
+                "GET",
+                &["?session=s1"],
+                Method::GET,
+                "/api/workflows",
+            ),
+            (
+                RouteId::ListSchedules,
+                "GET",
+                &[],
+                Method::GET,
+                "/api/schedules",
+            ),
+            (
+                RouteId::Changelog,
+                "GET",
+                &["?limit=5"],
+                Method::GET,
+                "/api/changelog",
+            ),
+            (RouteId::Identity, "GET", &[], Method::GET, "/api/identity"),
+            (
+                RouteId::SessionDiff,
+                "GET",
+                &["session_7"],
+                Method::GET,
+                "/api/sessions/session_7/diff",
+            ),
+            (
+                RouteId::PauseSchedule,
+                "POST",
+                &["nightly-1"],
+                Method::POST,
+                "/api/schedules/nightly-1/pause",
+            ),
+            (
+                RouteId::ResumeSchedule,
+                "POST",
+                &["nightly-1"],
+                Method::POST,
+                "/api/schedules/nightly-1/resume",
+            ),
+            (
+                RouteId::DeleteSchedule,
+                "POST",
+                &["nightly-1"],
+                Method::POST,
+                "/api/schedules/nightly-1/delete",
+            ),
+        ];
+        for (route, method, parameters, expected_method, expected_path) in cases {
+            let bridged = request(route, method, parameters);
+            let target = route_target(&bridged).unwrap();
+            assert_eq!(target.method, expected_method, "{route:?}");
+            assert_eq!(target.path, expected_path, "{route:?}");
+            assert!(validate_command_request(&bridged).is_ok(), "{route:?}");
+            assert!(
+                validate_command_request(&request(route, "DELETE", parameters)).is_err(),
+                "{route:?} must refuse a method it does not serve"
+            );
+        }
+        assert!(route_target(&request(RouteId::SessionDiff, "GET", &["../x"])).is_err());
+        assert!(route_target(&request(RouteId::PauseSchedule, "POST", &[])).is_err());
     }
 
     /// The MCP catalog reads; registering a server does not. `POST /api/mcp` writes a
