@@ -19,6 +19,7 @@ import type { SentAttachment } from "./attach";
 import { Markdown } from "./Markdown";
 import { ReasoningDisclosure } from "./ReasoningDisclosure";
 import { SystemOutput } from "./SystemOutput";
+import { uploadDisplayName } from "./uploadName";
 
 const IS_WEB = Platform.OS === "web";
 
@@ -78,7 +79,7 @@ function mentionsFromContent(content: string): {
   const images: ImageMention[] = [];
   for (const tok of m[1].trim().split(/\s+/)) {
     const path = tok.slice(1);
-    const name = (path.split("/").pop() ?? tok).replace(/^\d+-/, "");
+    const name = uploadDisplayName(path);
     if (IMAGE_MENTION_RE.test(path)) {
       images.push({ name, path });
     } else {
