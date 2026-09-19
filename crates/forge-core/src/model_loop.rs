@@ -566,6 +566,7 @@ impl Session {
                         verify_attempts = 0;
                         if made_progress && bridge_continue_nudges < MAX_BRIDGE_CONTINUE_NUDGES {
                             bridge_continue_nudges += 1;
+                            self.publish_terminal_answer(&resp.content)?;
                             self.presenter.emit(PresenterEvent::Warning(format!(
                                 "bridge yielded with {} task(s) unfinished — continuing the plan ({bridge_continue_nudges}/{MAX_BRIDGE_CONTINUE_NUDGES})",
                                 unfinished.len()
@@ -695,6 +696,7 @@ impl Session {
                         ) {
                             ContinueNudge::Send => {
                                 continue_nudges += 1;
+                                self.publish_terminal_answer(&resp.content)?;
                                 (goalless_nudges, idle_nudges) = nudge_policy::next_streaks(
                                     (goalless_nudges, idle_nudges),
                                     last_nudge_progress,
