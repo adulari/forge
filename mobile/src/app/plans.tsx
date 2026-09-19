@@ -42,6 +42,7 @@ import { space, tapTarget } from "../theme/tokens";
 import { tabularNums, type } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
 import { SettingsShell } from "./(tabs)/settings";
+import { usePullRefresh } from "../lib/usePullRefresh";
 
 type StepState = "done" | "running" | "pending";
 
@@ -249,6 +250,7 @@ function PlansScreenBody() {
   const tokens = useTokens();
   const { isCompact } = useBreakpoint();
   const query = usePlans();
+  const pull = usePullRefresh(query.refetch);
   const plans = query.data ?? [];
   const featured = plans[0] ?? null;
   const rest = plans.slice(1);
@@ -312,7 +314,7 @@ function PlansScreenBody() {
   }
 
   return (
-    <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
+    <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
       <BackLink />
       <View style={styles.titleRow}>
         <Text style={[type.title, styles.title, { color: tokens.ink }]}>Plans</Text>
