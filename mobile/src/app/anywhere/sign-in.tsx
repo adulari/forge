@@ -21,6 +21,7 @@ import { useAnywhere } from "../../lib/AnywhereProvider";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
+import { goBackOr } from "../../lib/nav";
 
 const READY_ELSEWHERE_PHASES = new Set(["ready", "awaiting_approval", "new_recovery", "existing_recovery"]);
 
@@ -70,7 +71,7 @@ export default function AnywhereSignInScreen() {
   return (
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
       <View style={styles.shell}>
-        <BackLink label="Anywhere" onPress={() => router.replace("/anywhere")} />
+        <BackLink label="Anywhere" onPress={() => goBackOr("/anywhere")} />
         <Text accessibilityRole="header" style={[typeScale.title, styles.title, { color: tokens.ink }]}>
           Sign in with GitHub
         </Text>

@@ -17,6 +17,7 @@ import { useAnywhere } from "../../lib/AnywhereProvider";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
+import { goBackOr } from "../../lib/nav";
 
 function isPhoneLike(name: string): boolean {
   return /phone|android/i.test(name);
@@ -65,7 +66,7 @@ export default function AnywhereDevicesScreen() {
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
       <View style={styles.shell}>
         <View style={styles.header}>
-          <BackLink label="Anywhere" onPress={() => router.replace("/anywhere")} />
+          <BackLink label="Anywhere" onPress={() => goBackOr("/anywhere")} />
           <View style={styles.headerRow}>
             <Text accessibilityRole="header" style={[typeScale.headingBold, styles.headerTitle, { color: tokens.ink }]}>
               Devices
