@@ -2,7 +2,6 @@
 // desktop.dc.html "D AW Settings" devices column lines 1009-1013). Real device list
 // and revoke-with-key-rotation flow — same `anywhere.revokeDevice` used by
 // recovery-phrase.tsx's Recovery Center, just given its own dedicated list here.
-import { router } from "expo-router";
 import { Laptop, Smartphone, Trash2 } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
@@ -71,7 +70,7 @@ export default function AnywhereDevicesScreen() {
             <Text accessibilityRole="header" style={[typeScale.headingBold, styles.headerTitle, { color: tokens.ink }]}>
               Devices
             </Text>
-            <Button label="Pair device" variant="secondary" onPress={() => router.push("/anywhere/pair")} />
+
           </View>
         </View>
 
