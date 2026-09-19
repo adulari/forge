@@ -65,7 +65,11 @@ export default function AnywhereHostsScreen() {
         </View>
 
         <Text style={[typeScale.monoMeta, styles.footnote, { color: tokens.ink4 }]}>
-          {`add: $ forge anywhere enable --name NAME · ${MAX_ACTIVE_HOSTS} active max — disable or revoke to free a slot`}
+          {"add: "}
+          {/* Geist Mono's hyphen fills its cell edge to edge, so " --name" drew with no visible
+              space ("enable--name"). The command is set in the system monospace face instead. */}
+          <Text style={styles.command}>$ forge anywhere enable --name NAME</Text>
+          {` · ${MAX_ACTIVE_HOSTS} active max — disable or revoke to free a slot`}
         </Text>
       </View>
     </Screen>
@@ -73,6 +77,7 @@ export default function AnywhereHostsScreen() {
 }
 
 const styles = StyleSheet.create({
+  command: { fontFamily: "monospace", fontVariant: [] },
   content: { paddingTop: space.space12, paddingBottom: space.space48 },
   shell: { width: "100%", maxWidth: 680, alignSelf: "center" },
   header: { gap: space.space8, marginBottom: space.space4 },
