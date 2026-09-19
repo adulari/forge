@@ -217,12 +217,26 @@ export function FleetScreen() {
   // iOS (no native equivalent on Android — RN's Keyboard.js); Android uses
   // `keyboardDidShow`/`keyboardDidHide`, which fire with real metrics independent of the window
   // resize (only API<30 depended on that).
+  //
+  // The offset is the keyboard's overlap with THIS screen, not its height: the keyboard also
+  // covers the tab bar and the bottom inset under the screen, so lifting by the full height left
+  // the pill floating a tab bar's height above the keys, over the session rows.
   const [keyboardOffset, setKeyboardOffset] = useState(0);
+  const keyboardAnchor = React.useRef<View>(null);
   useEffect(() => {
     if (Platform.OS === "web") return;
     const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
     const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
-    const show = Keyboard.addListener(showEvent, (e) => setKeyboardOffset(e.endCoordinates.height));
+    const show = Keyboard.addListener(showEvent, (e) => {
+      const anchor = keyboardAnchor.current;
+      if (!anchor) {
+        setKeyboardOffset(e.endCoordinates.height);
+        return;
+      }
+      anchor.measureInWindow((_x, screenBottom) =>
+        setKeyboardOffset(Math.max(0, screenBottom - e.endCoordinates.screenY)),
+      );
+    });
     const hide = Keyboard.addListener(hideEvent, () => setKeyboardOffset(0));
     return () => {
       show.remove();
@@ -352,6 +366,7 @@ export function FleetScreen() {
         />
       )}
 
+      <View ref={keyboardAnchor} pointerEvents="none" style={styles.keyboardAnchor} />
       {/* Hearth core rule 6: bottom-floating task composer replaces the FAB — the one
           "new session" affordance on mobile Fleet. */}
       <TaskComposer
@@ -403,6 +418,7 @@ const styles = StyleSheet.create({
   skeletonRow1: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   skeletonGap: { marginTop: space.space4 },
   composer: { position: "absolute", left: space.space16, right: space.space16 },
+  keyboardAnchor: { position: "absolute", left: 0, right: 0, bottom: 0, height: 0 },
   expandedEmpty: { flex: 1, alignItems: "center", justifyContent: "center", gap: space.space16, paddingHorizontal: space.space24 },
   expandedEmptyMessage: { fontSize: 14, lineHeight: 20, textAlign: "center" },
   expandedComposerWrap: { position: "relative", width: 560, maxWidth: "100%" },

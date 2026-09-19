@@ -185,6 +185,10 @@ export function TabPager({ index, children }: { index: number; children: React.R
       canCancelContentTouches
       // Keeps a vertical drag with the list inside the page rather than contesting it.
       directionalLockEnabled
+      // Every tab page lives inside this scroll view, so its default ("never") applied to all of
+      // them: while typing, the first tap anywhere — Fleet's send button, a History search result
+      // — was spent dismissing the keyboard and never reached its target.
+      keyboardShouldPersistTaps="handled"
       showsHorizontalScrollIndicator={false}
       contentOffset={{ x: homeOffset, y: 0 }}
       onLayout={onLayout}
