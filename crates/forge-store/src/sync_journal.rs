@@ -10,8 +10,24 @@ impl Store {
     /// Existing pending rows are retained when disabled so logout/service outages cannot destroy
     /// unsynchronized history. Ordinary Forge installs default to disabled and incur no duplicate
     /// payload writes.
+    ///
+    /// Every CLI and daemon store open calls this, so it only writes when the flag actually
+    /// changes. An unconditional UPDATE needed SQLite's write lock on each open: a session being
+    /// created while another session was mid-write waited out the busy timeout and failed with
+    /// "configure Anywhere sync journal" (a 500 to the phone), though nothing needed changing.
     pub fn set_sync_journal_enabled(&self, enabled: bool) -> Result<()> {
-        self.lock()?.execute(
+        let conn = self.lock()?;
+        let current: Option<bool> = conn
+            .query_row(
+                "SELECT enabled FROM anywhere_sync_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current == Some(enabled) {
+            return Ok(());
+        }
+        conn.execute(
             "UPDATE anywhere_sync_state SET enabled = ?1 WHERE singleton = 1",
             [enabled],
         )?;
