@@ -92,8 +92,8 @@
   {
     "file": "mobile/src/app/shares/[id].tsx",
     "platform": "web/native",
-    "reason": "shared surface contains platform-specific handling",
-    "category": "capability"
+    "reason": "the replay link's key lives in the URL fragment: read from window.location on web, from the opening deep link on native",
+    "category": "behavior"
   },
   {
     "file": "mobile/src/components/AppLock.tsx",
