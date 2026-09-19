@@ -1184,3 +1184,29 @@ fn sender_identity_collision_does_not_advance_the_staging_cursor() {
     assert!(store.stage_remote_sync_record(&collision).is_err());
     assert_eq!(store.sync_download_cursor().unwrap(), 1);
 }
+
+/// Opening a store re-applies the Anywhere sync flag. When the flag already matches, that must not
+/// need the write lock: a session created while another held a write transaction waited out the
+/// busy timeout here and failed with "configure Anywhere sync journal".
+#[test]
+fn reapplying_the_sync_flag_does_not_wait_for_another_writer() {
+    let dir = std::env::temp_dir().join(format!("forge-sync-flag-{}", forge_types::new_id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("forge.db");
+    let store = Store::open(&path).expect("open store");
+    store.set_sync_journal_enabled(true).unwrap();
+
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let started = std::time::Instant::now();
+    Store::open(&path)
+        .expect("second open")
+        .set_sync_journal_enabled(true)
+        .expect("an unchanged flag needs no write");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+    writer.execute_batch("ROLLBACK").unwrap();
+    drop(writer);
+    let _ = std::fs::remove_dir_all(&dir);
+}
