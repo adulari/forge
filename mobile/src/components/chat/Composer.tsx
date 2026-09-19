@@ -24,7 +24,6 @@ import { type ColorValue, Image, Platform, Pressable, ScrollView, StyleSheet, Te
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
-import { useAuth } from "../../lib/auth";
 import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
 import { mergeCommandSources } from "../../lib/commandSources";
 import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
@@ -127,7 +126,6 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, effort,
   const imeProps = { onCompositionEnd: recordComposerImeCommit } as unknown as React.ComponentProps<typeof TextInput>;
   const usesNativeMirror = composerUsesNativeMirror(Platform.OS);
   const upload = useUpload();
-  const { baseUrl } = useAuth();
   const insets = useSafeAreaInsets();
   const [commandFocusSignal, setCommandFocusSignal] = useState(0);
 
