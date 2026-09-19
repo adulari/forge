@@ -615,8 +615,12 @@ export function SettingsScreen() {
 
         <View>
           <SectionHeader>Preferences</SectionHeader>
-          <NavListRow label="Appearance" onPress={() => router.push("/appearance")} />
-          <NavListRow label="Keyboard shortcuts" onPress={() => router.push("/keybindings")} showSeparator={false} />
+          {/* Shortcut capture only exists on desktop and web (the screen says so itself); on a
+              phone the row opened a list of bindings that do nothing there. */}
+          <NavListRow label="Appearance" onPress={() => router.push("/appearance")} showSeparator={Platform.OS === "web"} />
+          {Platform.OS === "web" ? (
+            <NavListRow label="Keyboard shortcuts" onPress={() => router.push("/keybindings")} showSeparator={false} />
+          ) : null}
         </View>
 
         <View>
