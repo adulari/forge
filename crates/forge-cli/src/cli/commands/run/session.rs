@@ -449,9 +449,12 @@ pub(crate) async fn build_session_with_self_mcp(
             // inotify watches + a slow initial walk). `None` ⇒ no sensible root → skip the watcher.
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             match forge_index::resolve_watch_root(&cwd, home.as_deref()) {
-                None => session.notify_error(
-                    "watch & reindex skipped: launched in the home directory with no project root \
-                     — open a project folder (one with a .git) to enable auto-reindex",
+                // Not a warning: $HOME is the daemon's default project, so every quick session
+                // started from a phone showed "⚠ watch & reindex skipped" under its first answer.
+                // Nothing is wrong — there is no project to reindex.
+                None => tracing::info!(
+                    cwd = %cwd.display(),
+                    "lattice watch skipped: no project root above the home directory"
                 ),
                 Some(root) => {
                     // Build the watcher on a detached thread and DELIVER it to the session through a
