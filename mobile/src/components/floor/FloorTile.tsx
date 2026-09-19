@@ -70,6 +70,8 @@ function connectionLabel(state: string) {
   if (state === "unreachable") return "unreachable";
   if (state === "closed") return "closed";
   if (state === "idle") return "idle";
+  // A tile's first connection is not a reconnect; calling it one read as a failure.
+  if (state === "connecting") return "connecting";
   return "reconnecting";
 }
 
@@ -85,9 +87,10 @@ function FloorTileBase({ row, active }: FloorTileProps) {
   const { prose, tool } = splitTail(snapshot ?? null);
   // A live stream is newer than anything already committed to the transcript, so it wins the
   // prose slot — but the tool block beneath it stays, since that is what the model is streaming
-  // *about*. The "warming socket…" filler is only for a tile with nothing at all to show: a
+  // *about*. The connecting/waiting filler is only for a tile with nothing at all to show: a
   // turn that opens on tool activity has a real tail already, just not a prose one.
-  const tail = snapshot?.streaming || prose || (tool ? null : "warming socket…");
+  const tail =
+    snapshot?.streaming || prose || (tool ? null : connectionState === "open" ? "waiting for output…" : "connecting…");
   const tasksDone = snapshot?.tasks.filter((task) => task.status === "done").length ?? 0;
   const taskCount = snapshot?.tasks.length ?? 0;
   const state = waiting ? "waiting" : busy ? "busy" : "idle";

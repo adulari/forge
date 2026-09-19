@@ -31,7 +31,14 @@ export default function FloorScreen() {
   const burning = useMemo(() => (query.data ?? []).filter((row) => row.waiting || row.busy), [query.data]);
   // Hearth: Floor is a fixed 2-col grid from medium up (HANDOFF desktop Floor screen).
   const columns = width >= 768 ? 2 : 1;
-  const renderItem = useCallback(({ item }: { item: SessionRow }) => <View style={styles.tileWrap}><FloorTile row={item} active={visibleIds.has(item.id)} /></View>, [visibleIds]);
+  // Until the list reports what is on screen, open the first tiles' sockets anyway. Waiting for
+  // the first viewability callback kept every tile on "warming socket…" for the extra round trip
+  // on top of the relay's own connect.
+  const activeIds = useMemo(
+    () => (visibleIds.size > 0 ? visibleIds : new Set(burning.slice(0, SOCKET_CAP).map((row) => row.id))),
+    [visibleIds, burning],
+  );
+  const renderItem = useCallback(({ item }: { item: SessionRow }) => <View style={styles.tileWrap}><FloorTile row={item} active={activeIds.has(item.id)} /></View>, [activeIds]);
   const keyExtractor = useCallback((item: SessionRow) => item.id, []);
   const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: { item: SessionRow }[] }) => setVisibleIds(new Set(viewableItems.slice(0, SOCKET_CAP).map(({ item }) => item.id))), []);
 
