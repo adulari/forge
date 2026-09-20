@@ -9,7 +9,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
@@ -629,11 +629,21 @@ async fn enroll_existing_account(
 
     println!(
         "\nApprove this device from an enrolled Forge client within 10 minutes.\n\
-         Run on the enrolled device:\n\n  forge anywhere approve '{}'\n\n\
-         Safety code: {safety_code}\n\
-         Compare this code on both devices before approving.\n\
-         Waiting for approval… (Recovery Kit fallback: `forge anywhere setup --recovery`)",
+         Run on the enrolled device:\n\n  forge anywhere approve '{}'\n",
         created.challenge
+    );
+    // The phone cannot type a challenge this long, and the service never lists it, so the QR is
+    // the only practical way to approve from the Forge app.
+    if let Some(lines) = crate::remote::qr_lines_captioned(
+        &created.challenge,
+        "  or scan this from the Forge app (Anywhere → Approval inbox):",
+    ) {
+        println!("{}", lines.join("\n"));
+    }
+    println!(
+        "\nSafety code: {safety_code}\n\
+         Compare this code on both devices before approving.\n\
+         Waiting for approval… (Recovery Kit fallback: `forge anywhere setup --recovery`)"
     );
 
     loop {
@@ -1884,6 +1894,55 @@ async fn logout() -> Result<()> {
 }
 
 async fn ensure_access_token(store: &StateStore, state: &mut LocalState) -> Result<String> {
+    let service_url = forge_config::load()?.anywhere.service_url().to_owned();
+    ensure_access_token_at(store, state, &service_url).await
+}
+
+/// A refresh that failed, and whether the stored token can still be worth retrying. Network and
+/// service errors are transient; 401/403 means the token family is gone for good.
+struct RefreshFailure {
+    error: anyhow::Error,
+    rejected: bool,
+}
+
+async fn refresh_tokens(
+    service_url: &str,
+    refresh_token: &str,
+) -> std::result::Result<RefreshResponse, RefreshFailure> {
+    let transient = |error: anyhow::Error| RefreshFailure {
+        error: error.context("refresh Anywhere login"),
+        rejected: false,
+    };
+    let client = client().map_err(transient)?;
+    let response = client
+        .post(format!("{service_url}/v1/auth/refresh"))
+        .json(&RefreshRequest { refresh_token })
+        .send()
+        .await
+        .context("send Anywhere request")
+        .map_err(transient)?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .context("read Anywhere service response")
+        .map_err(transient)?;
+    if !status.is_success() {
+        return Err(RefreshFailure {
+            error: anyhow!(service_error(status, &body)).context("refresh Anywhere login"),
+            rejected: matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+        });
+    }
+    serde_json::from_slice(&body)
+        .context("decode Anywhere service response")
+        .map_err(transient)
+}
+
+async fn ensure_access_token_at(
+    store: &StateStore,
+    state: &mut LocalState,
+    service_url: &str,
+) -> Result<String> {
     let lease_id = hex::encode(rand::random::<[u8; 16]>());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
     loop {
@@ -1921,16 +1980,7 @@ async fn ensure_access_token(store: &StateStore, state: &mut LocalState) -> Resu
             tokio::time::sleep(Duration::from_millis(250)).await;
             continue;
         };
-        let service_url = forge_config::load()?.anywhere.service_url().to_owned();
-        let result: Result<RefreshResponse> = send_json(
-            client()?
-                .post(format!("{service_url}/v1/auth/refresh"))
-                .json(&RefreshRequest {
-                    refresh_token: &refresh_token,
-                }),
-        )
-        .await
-        .context("refresh Anywhere login");
+        let result = refresh_tokens(service_url, &refresh_token).await;
         match result {
             Ok(refreshed) => {
                 let access_token = refreshed.access_token.clone();
@@ -1946,15 +1996,32 @@ async fn ensure_access_token(store: &StateStore, state: &mut LocalState) -> Resu
                 })?;
                 return Ok(access_token);
             }
-            Err(error) => {
+            Err(failure) => {
+                // A rejected refresh token never becomes valid again, so keeping it would leave
+                // `is_logged_in` claiming an enrollment the service has already dropped: setup
+                // then skips sign-in, fails the same way, and tells you to run setup. Clearing it
+                // here is what makes that advice work.
+                let discard = failure.rejected;
                 let _ = store.update(|latest| {
                     if latest.refresh_lease_id.as_deref() == Some(lease_id.as_str()) {
                         latest.refresh_lease_id = None;
                         latest.refresh_lease_until_ms = 0;
+                        if discard {
+                            latest.clear_tokens();
+                        }
                     }
                     Ok(())
                 });
-                return Err(error);
+                *state = store.load()?;
+                if discard {
+                    bail!(
+                        "Anywhere sign-in is no longer valid — the service rejected this device's \
+                         refresh token. Run `forge anywhere setup` to sign in again (approve the \
+                         new enrollment from another signed-in device, or use \
+                         `forge anywhere setup --recovery` with your Recovery Kit)."
+                    );
+                }
+                return Err(failure.error);
             }
         }
     }
@@ -2646,6 +2713,86 @@ mod tests {
                 .expect("load state")
                 .next_sequence,
             8
+        );
+    }
+
+    async fn refresh_service(status: StatusCode) -> String {
+        let app = axum::Router::new().route(
+            "/v1/auth/refresh",
+            axum::routing::post(move || async move {
+                (
+                    status,
+                    axum::Json(serde_json::json!({
+                        "version": 1,
+                        "error": { "code": "unauthorized", "message": "a valid access token is required" }
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{address}")
+    }
+
+    fn store_with_expired_access(directory: &std::path::Path) -> StateStore {
+        let store = StateStore {
+            path: directory.join("state.json"),
+        };
+        store
+            .update(|state| {
+                state.version = STATE_VERSION;
+                state.access_token = Some("stale-access".into());
+                state.refresh_token = Some("stale-refresh".into());
+                state.access_expires_at_ms = Some(now_ms().saturating_sub(60_000));
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn a_rejected_refresh_token_is_dropped_so_setup_signs_in_again() {
+        // The lockout: `is_logged_in` only asks whether a refresh-token string exists, so a token
+        // the service had already revoked still counted as an enrollment. `setup` skipped its
+        // sign-in step, hit the same 401, and advised running `setup` — with no way out but
+        // `logout`. Once the service rejects the token, the only honest local state is signed out.
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_expired_access(directory.path());
+        let service_url = refresh_service(StatusCode::UNAUTHORIZED).await;
+        let mut state = store.load().unwrap();
+
+        let error = ensure_access_token_at(&store, &mut state, &service_url)
+            .await
+            .expect_err("a rejected refresh token must fail");
+
+        assert!(
+            format!("{error:#}").contains("forge anywhere setup"),
+            "the error must name the command that recovers: {error:#}"
+        );
+        assert!(
+            !store.load().unwrap().is_logged_in(),
+            "a rejected token must not keep claiming this device is enrolled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_service_outage_keeps_the_refresh_token() {
+        // The opposite mistake: signing the user out of a healthy enrollment because the service
+        // was briefly down would force a re-approval for nothing.
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_with_expired_access(directory.path());
+        let service_url = refresh_service(StatusCode::SERVICE_UNAVAILABLE).await;
+        let mut state = store.load().unwrap();
+
+        assert!(ensure_access_token_at(&store, &mut state, &service_url)
+            .await
+            .is_err());
+        assert!(
+            store.load().unwrap().is_logged_in(),
+            "a transient failure must leave the enrollment intact"
         );
     }
 }
