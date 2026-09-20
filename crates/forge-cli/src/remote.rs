@@ -2064,10 +2064,15 @@ pub(crate) async fn pump_ws(
 /// `None` when the encoder fails (we then just print the URL). Uses half-block glyphs so it reads
 /// at a normal terminal cell aspect ratio.
 pub fn qr_lines(url: &str) -> Option<Vec<String>> {
-    let code = qrcode::QrCode::new(url.as_bytes()).ok()?;
+    qr_lines_captioned(url, "  scan to connect:")
+}
+
+/// `qr_lines` with the caller's own caption, for codes that are not a connect URL.
+pub fn qr_lines_captioned(payload: &str, caption: &str) -> Option<Vec<String>> {
+    let code = qrcode::QrCode::new(payload.as_bytes()).ok()?;
     let width = code.width();
     let mut out: Vec<String> = Vec::with_capacity(width.div_ceil(2) + 2);
-    out.push("  scan to connect:".to_string());
+    out.push(caption.to_string());
     for y in (0..width).step_by(2) {
         let mut row = String::from("  ");
         for x in 0..width {
