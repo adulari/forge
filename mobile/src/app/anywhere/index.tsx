@@ -568,6 +568,7 @@ function ApprovalRequest({ request }: { request: AnywherePendingApproval }) {
     <View style={[styles.approval, { borderColor: tokens.borderStrong, backgroundColor: tokens.bg2 }]}>
       <View style={styles.approvalTop}><View style={[styles.pendingDot, { backgroundColor: tokens.warn }]} /><View style={styles.resourceCopy}><Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{request.deviceName}</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>New device · expires {remaining}</Text></View></View>
       <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Open or scan the challenge shown on the waiting device to review and approve it.</Text>
+      <Button label="Scan or paste the challenge" variant="secondary" onPress={() => router.push("/anywhere/pair")} fullWidth />
     </View>
   );
 }

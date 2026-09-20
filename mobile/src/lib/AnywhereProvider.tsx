@@ -161,6 +161,13 @@ export interface AnywherePendingApproval {
   expiresAtMs: number;
 }
 
+/** What an approver sees before approving: the request's own claims, plus the code to compare. */
+export interface AnywherePairingPreview {
+  deviceName: string;
+  safetyCode: string;
+  expiresAtMs: number;
+}
+
 export interface AnywhereClaimantApproval {
   expiresAtMs: number;
   safetyCode: string;
@@ -254,6 +261,8 @@ export interface AnywhereContextValue {
   setHostTransportPreference(hostId: string, preference: TransportPreference): Promise<void>;
   /** Device-local snapshot of the account metadata this client holds. No server export exists. */
   exportAccountData(): string;
+  /** Read a scanned/pasted challenge so the approver can compare the safety code first. */
+  inspectPairing(challenge: string): Promise<AnywherePairingPreview>;
   approvePairing(challenge: string): Promise<void>;
   refreshPendingApprovals(force?: boolean): Promise<void>;
   prepareLocalHost(name: string): Promise<"approval" | "activated">;
@@ -1339,6 +1348,20 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     });
   }, [account, devices, hosts, passkeys, subscription]);
 
+  const inspectPairing = useCallback(async (encodedChallenge: string): Promise<AnywherePairingPreview> => {
+    const current = credentialsRef.current;
+    if (!current) throw new Error("Forge Anywhere is not signed in");
+    const serviceUrl = current.serviceUrl ?? SERVICE_URL;
+    const challenge = parsePairingChallenge(encodedChallenge, serviceUrl);
+    const token = await accessToken();
+    const details = await pairingDetails(serviceUrl, token, challenge);
+    return {
+      deviceName: safeDeviceName(details.device_name),
+      safetyCode: pairingSafetyCode(challenge, details.signing_public_key, current.accountIdHex),
+      expiresAtMs: challenge.expires_at_ms,
+    };
+  }, [accessToken]);
+
   const approvePairing = useCallback(async (encodedChallenge: string) => {
     const current = credentialsRef.current;
     if (!current) throw new Error("Forge Anywhere is not signed in");
@@ -1615,7 +1638,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     hostTransportPreferences,
     approvalError, error, errorIsOffline, pushStatus, remoteJobs,
     accessToken, startLogin, openLoginPage, confirmNewRecovery, recoverExisting, scheduleCleanReset, cancelCleanReset, registerPasskey: registerRecoveryPasskey, recoverWithPasskey, renamePasskey: renameRecoveryPasskey, revokePasskey: revokeRecoveryPasskey, useRecoveryInstead, restartSetup, refresh, checkout, openBillingPortal,
-    revokeDevice, revokeHost, renameHost, setHostDisabled, setHostTransportPreference, exportAccountData, selectHost, approvePairing, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
+    revokeDevice, revokeHost, renameHost, setHostDisabled, setHostTransportPreference, exportAccountData, selectHost, inspectPairing, approvePairing, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
     enablePush, disablePush, logout,
   };
   const consumersReady = anywhereConsumersReady(phase, runtimeId, registeredRuntimeId);
