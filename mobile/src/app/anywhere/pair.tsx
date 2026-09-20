@@ -1,38 +1,25 @@
 // Forge Anywhere — approve a new device by code or QR (mobile.dc.html "AW Hosts
-// Detail Pair" lines 511-521). Backed by the AnywhereClient pairing surface
-// (client.startPair/approvePair/rejectPair + PairChallenge) — the real backend has
-// no public pairing-challenge-with-fingerprint-and-grants endpoint yet, so this
-// flow is intentionally scoped to the client interface rather than bolted onto the
-// real device-approval inbox on the Hub (which trades in a different, safety-code
-// shape). Structured like passkey.tsx: a single status-driven card.
+// Detail Pair" lines 511-521). Backed by the real enrollment inbox: the waiting device
+// prints its challenge, this screen reads it, shows the safety code both sides must
+// match, and signs the account-key wrap through AnywhereProvider.approvePairing.
+// The challenge is never listed by the service, so it has to arrive by scan or paste.
 import * as Clipboard from "expo-clipboard";
-import { Check, KeyRound, ScanLine, X } from "lucide-react-native";
+import { router } from "expo-router";
+import { Check, ScanLine, X } from "lucide-react-native";
 import React, { useCallback, useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { BackLink } from "../../components/ds/BackLink";
+import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
 import { Input } from "../../components/ds/Input";
 import { Screen } from "../../components/ds/Screen";
 import { useToast } from "../../components/ds/ToastHost";
 import { QRScan } from "../../components/pairing/QRScan";
-import { useAnywhere } from "../../lib/anywhere/store";
-import type { PairChallenge, PairChallengeState } from "../../lib/anywhere/types";
+import { useAnywhere, type AnywherePairingPreview } from "../../lib/AnywhereProvider";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
-import { goBackOr } from "../../lib/nav";
-
-const STATE_CAPTION: Record<PairChallengeState, string | null> = {
-  pending: null,
-  approved: "Approved — the device now has account access.",
-  rejected: "Rejected. No keys were shared.",
-  expired: "Expired — pairing codes are valid for 10 minutes. Ask the device to generate a new one.",
-  "already-used": "This code was already used for a different device.",
-  "wrong-account": "That code belongs to a different Forge account — blocked.",
-  malformed: "That code isn't a valid pairing code.",
-  "camera-denied": "Camera access was denied — paste the code instead.",
-};
 
 function useCountdown(expiresAtMs: number): string {
   const [now, setNow] = useState(() => Date.now());
@@ -44,53 +31,66 @@ function useCountdown(expiresAtMs: number): string {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s left`;
 }
 
+function failure(reason: unknown): string {
+  const text = reason instanceof Error ? reason.message : String(reason);
+  return text.trim() || "That code could not be read.";
+}
+
 export default function AnywherePairScreen() {
-  const { client } = useAnywhere();
+  const { inspectPairing, approvePairing, refreshPendingApprovals } = useAnywhere();
   const tokens = useTokens();
   const toast = useToast();
   const [code, setCode] = useState("");
   const [scanning, setScanning] = useState(false);
-  const [challenge, setChallenge] = useState<PairChallenge | null>(null);
+  const [preview, setPreview] = useState<AnywherePairingPreview | null>(null);
+  const [challenge, setChallenge] = useState("");
+  const [approved, setApproved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const submitCode = useCallback(
     async (value: string) => {
-      if (!value.trim()) return;
+      const trimmed = value.trim();
+      if (!trimmed) return;
       setBusy(true);
+      setError(null);
       try {
-        const result = await client.startPair(value.trim());
-        setChallenge(result);
+        const details = await inspectPairing(trimmed);
+        setPreview(details);
+        setChallenge(trimmed);
         setScanning(false);
+      } catch (reason) {
+        setError(failure(reason));
       } finally {
         setBusy(false);
       }
     },
-    [client],
+    [inspectPairing],
   );
 
   const approve = useCallback(async () => {
-    if (!challenge) return;
+    if (!challenge || !preview) return;
     setBusy(true);
+    setError(null);
     try {
-      await client.approvePair(challenge.id);
-      setChallenge({ ...challenge, state: "approved" });
-      toast.show(`${challenge.deviceName} approved.`, { tone: "neutral" });
+      await approvePairing(challenge);
+      setApproved(true);
+      toast.show(`${preview.deviceName} approved.`, { tone: "neutral" });
+      await refreshPendingApprovals(true);
+    } catch (reason) {
+      setError(failure(reason));
     } finally {
       setBusy(false);
     }
-  }, [challenge, client, toast]);
+  }, [approvePairing, challenge, preview, refreshPendingApprovals, toast]);
 
-  const reject = useCallback(async () => {
-    if (!challenge) return;
-    setBusy(true);
-    try {
-      await client.rejectPair(challenge.id);
-      setChallenge({ ...challenge, state: "rejected" });
-      toast.show("Device rejected.", { tone: "neutral" });
-    } finally {
-      setBusy(false);
-    }
-  }, [challenge, client, toast]);
+  const reset = useCallback(() => {
+    setPreview(null);
+    setChallenge("");
+    setApproved(false);
+    setError(null);
+    setCode("");
+  }, []);
 
   const pasteCode = useCallback(async () => {
     const text = await Clipboard.getStringAsync();
@@ -100,12 +100,14 @@ export default function AnywherePairScreen() {
   return (
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
       <View style={styles.shell}>
-        <BackLink label="Devices" onPress={() => goBackOr("/anywhere/devices")} />
+        <BackLink label="Devices" onPress={() => router.replace("/anywhere/devices")} />
         <Text accessibilityRole="header" style={[typeScale.headingBold, styles.title, { color: tokens.ink }]}>
           Approve new device
         </Text>
 
-        {!challenge ? (
+        {error ? <Banner tone="danger" message={error} style={styles.banner} /> : null}
+
+        {!preview ? (
           <View style={styles.form}>
             <Text style={[typeScale.sub, { color: tokens.ink2 }]}>
               Scan the code shown on the new device, or paste it below. Scanning alone grants nothing — review, then
@@ -128,8 +130,9 @@ export default function AnywherePairScreen() {
               label="Or paste the pairing code"
               value={code}
               onChangeText={setCode}
-              autoCapitalize="characters"
+              autoCapitalize="none"
               autoCorrect={false}
+              multiline
               trailing={
                 <Pressable onPress={() => void pasteCode()} accessibilityRole="button" accessibilityLabel="Paste">
                   <Text style={[typeScale.meta, { color: tokens.accent }]}>Paste</Text>
@@ -141,52 +144,57 @@ export default function AnywherePairScreen() {
         ) : (
           <View style={styles.form}>
             <View style={[styles.card, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
-              <DetailRow label="Device" value={`${challenge.deviceName} · ${challenge.deviceKind}`} />
-              <DetailRow label="Fingerprint" value={challenge.fingerprint} mono />
-              <DetailRow label="Grants" value={challenge.grants.join(", ")} />
-              {challenge.state === "pending" ? <ExpiryRow expiresAt={challenge.expiresAt} /> : null}
+              <DetailRow label="Device" value={preview.deviceName} />
+              <DetailRow label="Safety code" value={preview.safetyCode} mono />
+              {!approved ? <ExpiryRow expiresAtMs={preview.expiresAtMs} /> : null}
             </View>
 
-            {challenge.state === "pending" ? (
-              <View style={styles.actionRow}>
-                <Button label="Approve" variant="allow" icon={<Check size={16} color={tokens.successBg} />} loading={busy} onPress={() => void approve()} style={styles.flexAction} />
-                <Button label="Reject" variant="danger" icon={<X size={16} color={tokens.danger} />} disabled={busy} onPress={() => void reject()} style={styles.flexAction} />
-              </View>
-            ) : (
-              <View style={[styles.resultBanner, { borderColor: tokens.border }]}>
-                {challenge.state === "approved" ? (
-                  <KeyRound size={18} color={tokens.success} />
-                ) : (
-                  <X size={18} color={tokens.danger} />
-                )}
-                <Text style={[typeScale.sub, styles.resultText, { color: tokens.ink2 }]}>
-                  {STATE_CAPTION[challenge.state]}
+            {!approved ? (
+              <>
+                <Text style={[typeScale.sub, { color: tokens.ink2 }]}>
+                  The waiting device shows the same safety code. Approve only if they match — approving shares this
+                  account&apos;s encrypted history key with that device.
                 </Text>
-              </View>
+                <View style={styles.actionRow}>
+                  <Button
+                    label="Approve"
+                    variant="allow"
+                    icon={<Check size={16} color={tokens.successBg} />}
+                    loading={busy}
+                    onPress={() => void approve()}
+                    style={styles.flexAction}
+                  />
+                  <Button
+                    label="Not now"
+                    variant="danger"
+                    icon={<X size={16} color={tokens.danger} />}
+                    disabled={busy}
+                    onPress={reset}
+                    style={styles.flexAction}
+                  />
+                </View>
+              </>
+            ) : (
+              <Banner
+                tone="neutral"
+                message={`${preview.deviceName} now has account access. It finishes enrolling on its own.`}
+              />
             )}
 
-            <Button
-              label="Pair another device"
-              variant="ghost"
-              onPress={() => {
-                setChallenge(null);
-                setCode("");
-              }}
-              fullWidth
-            />
+            <Button label="Approve another device" variant="ghost" onPress={reset} fullWidth />
           </View>
         )}
 
         <Text style={[typeScale.monoMeta, styles.footnote, { color: tokens.ink4 }]}>
-          states: expired (10-min window) · already used · wrong account — blocked
+          codes expire 10 minutes after the waiting device asks · a code from another account is refused
         </Text>
       </View>
     </Screen>
   );
 }
 
-function ExpiryRow({ expiresAt }: { expiresAt: number }) {
-  const remaining = useCountdown(expiresAt);
+function ExpiryRow({ expiresAtMs }: { expiresAtMs: number }) {
+  const remaining = useCountdown(expiresAtMs);
   return <DetailRow label="Expires" value={remaining} />;
 }
 
@@ -209,6 +217,7 @@ const styles = StyleSheet.create({
   content: { paddingTop: space.space12, paddingBottom: space.space48 },
   shell: { width: "100%", maxWidth: 640, alignSelf: "center" },
   title: { marginTop: space.space12 },
+  banner: { marginTop: space.space12 },
   form: { marginTop: space.space20, gap: space.space12 },
   scanButton: {
     minHeight: 96,
@@ -224,7 +233,5 @@ const styles = StyleSheet.create({
   detailValue: { flex: 1, textAlign: "right" },
   actionRow: { flexDirection: "row", gap: space.space8 },
   flexAction: { flex: 1 },
-  resultBanner: { flexDirection: "row", alignItems: "center", gap: space.space8, borderWidth: 1, borderRadius: radii.radius12, padding: space.space16 },
-  resultText: { flex: 1, lineHeight: 18 },
   footnote: { marginTop: space.space20, lineHeight: 16 },
 });
