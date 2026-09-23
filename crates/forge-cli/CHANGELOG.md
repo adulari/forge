@@ -6,6 +6,72 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-09-23
+
+### Added
+- **Amazon Bedrock runs Kimi K3 for a whole session** (#1429–#1432). `forge auth bedrock` stores a
+  Bedrock API key; `[providers.bedrock] models = ["global.moonshotai.kimi-k3"]` puts the model in
+  every picker (Bedrock cannot be listed with an API key, so the configured ids are the catalog).
+  The first live session found nine defects, each confirmed against Bedrock itself: Converse rejects
+  a `cachePoint` for models outside its caching list, and a `temperature` or `topP` at any value for
+  Moonshot models; the stream stopped one frame before the token counts, so every Bedrock reply
+  (Claude included) recorded 0 tokens and $0; `inputTokens` excludes cached tokens, so a nearly
+  full context read as empty; parallel tool results were split across messages and an unanswered
+  call failed every later request; `Inference Profile ARN not found` is a routing blip, now retried;
+  and a Bedrock id matched no published window, so a 1M-token model was trimmed to 32k. Effort is
+  not offered there: Bedrock accepts `reasoning_effort` for Kimi and ignores it.
+  (vendor/genai-0.6.5/src/adapter/adapters/bedrock/, crates/forge-provider/src/cache_hints.rs)
+- **Kimi Code as a subscription provider** (#1374): `forge auth kimi`, K3 and Kimi for Coding over
+  Kimi's coding endpoint, with its own low/high/max effort ladder.
+- **Per-provider tuning in config** (#1376, #1377, #1380): `[system_prompt_overrides]` swaps the base
+  prompt for one provider (`@path` loads a file); `[reasoning_prefill]` seeds a provider's thinking;
+  `[model_effort]` and `/effort exact <level>` send one rung verbatim instead of treating it as a
+  ceiling; `[compact_cap]` sets an auto-compaction ceiling per model or provider (Kimi Code ships at
+  120K). `[mesh.pricing]` entries take an optional `cache_read_per_1k`.
+- **Large whole-file reads return an outline** (#1388) instead of flooding the context, and a reply the
+  provider cut for repeating itself is re-sampled instead of accepted.
+- **A bounded working set inside a turn** (#1387), and search results that show every matching file.
+- **The model is told the current time** (#1368).
+- **Bridged claude/codex turns ask before a permissioned tool** (#1407) instead of refusing it outright;
+  the question reaches the TUI and the phone.
+- **Sessions report whether their model is pinned** (#1419), and Automatic sessions are labelled auto.
+- **Full tool output viewer, and the live repo and branch in the statusbar** (#1378).
+
+### Fixed
+- **A session mid-task keeps its tools for "continue"** (#1432). A bare "continue" or "yes" classified
+  as a trivial chat reply, which advertised no tools, so every nudge re-sent a tool-less request and
+  the model could never call a tool again.
+- **Forge Anywhere lockout** (#1426). A refresh token the service had revoked still counted as signed
+  in, so `forge anywhere setup` skipped sign-in, failed, and advised running `setup`. A rejected token
+  is now cleared and the error names the recovery routes; the approval challenge prints as a QR code.
+- **The phone can approve a new device** (#1425): the approval screen ran on the mock client and never
+  called the service.
+- **Compaction and long turns** (#1379, #1381, #1382, #1385, #1386): echoed reasoning counts toward the
+  transcript estimate; an empty summary is never committed; fitting never orphans a tool result; the
+  last tool rounds stay whole when pruning mid-turn; one ceiling applies to any tool result.
+- **Stalls and loops** (#1383, #1384, #1395, #1398, #1415): a model is not written off after one idle
+  answer; the request after a stall nudge must call a tool; interleaved narration loops are caught;
+  Forge stops manufacturing repetition loops it used to nudge into; an answer given before an
+  open-task re-drive is kept.
+- **Long reasoning streams** (#1364): the 90s inner idle timeout no longer kills them.
+- **Forge Anywhere relay** (#1365, #1389, #1397, #1399): one oversized record no longer jams the sync
+  outbox; relay bodies are UTF-8 and history stays live during long turns; the blob token is resolved
+  per request; Files work over the relay, and slow requests no longer stall the connector.
+- **Store** (#1403): opening it no longer takes the write lock for the sync flag.
+- **Companion app, from a full Android retest** (#1393–#1396, #1400–#1402, #1404–#1406, #1408,
+  #1410–#1414, #1416–#1418, #1420–#1424): session creation no longer blanks the screen; lists stop
+  spinning on every poll; the first tap while typing lands; a lost terminal attach retries; sessions
+  survive daemon restarts and open from inside another session; plans are approved where they can be
+  read; replay links decrypt the real replay; Remote jobs and Encrypted storage show real data;
+  commands and code render without font ligatures.
+- **Other fixes**: the statusline follows a session into a resumed workspace (#1392); no warning for a
+  session started in the home directory (#1409); the task list is no longer deleted mid-work (#1366);
+  iOS prebuild works again with the xmldom override bounded (#1371); a tools history page is sized for
+  the relay (#1369).
+
+### Security
+- rustls 0.23.45 for RUSTSEC-2026-0285 (#1390).
+
 ### Added
 - **Plan and dispatch — split one prompt into parallel sessions from the board.**
   `forge dispatch start`, `/dispatch` in chat, or `D` on `forge board` sends a project to a
@@ -4418,7 +4484,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.15.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.16.0...HEAD
+[2.16.0]: https://github.com/Adulari/forge/compare/v2.15.0...v2.16.0
 [2.15.0]: https://github.com/Adulari/forge/compare/v2.14.1...v2.15.0
 [2.14.1]: https://github.com/Adulari/forge/compare/v2.13.9...v2.14.1
 [2.13.9]: https://github.com/Adulari/forge/compare/v2.13.8...v2.13.9
