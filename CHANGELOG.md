@@ -68,9 +68,7 @@ All notable changes to Forge are documented here. The format follows
   session started in the home directory (#1409); the task list is no longer deleted mid-work (#1366);
   iOS prebuild works again with the xmldom override bounded (#1371); a tools history page is sized for
   the relay (#1369).
-
-### Security
-- rustls 0.23.45 for RUSTSEC-2026-0285 (#1390).
+- **Security**: rustls 0.23.45 for RUSTSEC-2026-0285 (#1390).
 
 ### Added
 - **Plan and dispatch — split one prompt into parallel sessions from the board.**
