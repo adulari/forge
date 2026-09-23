@@ -333,11 +333,42 @@ fn into_converse_request_parts(chat_req: ChatRequest) -> Result<ConverseRequestP
 		.map(|tools| tools.into_iter().map(tool_to_converse_tool).collect::<Result<Vec<Value>>>())
 		.transpose()?;
 
+	// Converse accepts toolUse/toolResult blocks only beside a toolConfig ("The toolConfig field must
+	// be defined when using toolUse and toolResult content blocks"). A tool-less call — a summary,
+	// a recap, compaction — over a transcript with tool history carries the history as text.
+	let tools = tools.filter(|tools| !tools.is_empty());
+	let messages = if tools.is_some() {
+		messages
+	} else {
+		tool_blocks_as_text(messages)
+	};
+
 	Ok(ConverseRequestParts {
 		system,
 		messages: pair_tool_turns(messages),
 		tools,
 	})
+}
+
+fn tool_blocks_as_text(messages: Vec<Value>) -> Vec<Value> {
+	messages
+		.into_iter()
+		.map(|mut message| {
+			if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+				for block in blocks.iter_mut() {
+					if let Some(tool_use) = block.get("toolUse") {
+						let name = tool_use.get("name").and_then(Value::as_str).unwrap_or("tool");
+						let input = tool_use.get("input").map(Value::to_string).unwrap_or_default();
+						*block = json!({ "text": format!("[called {name} with {input}]") });
+					} else if let Some(result) = block.get("toolResult") {
+						let text = result.pointer("/content/0/text").and_then(Value::as_str).unwrap_or_default();
+						*block = json!({ "text": format!("[tool result]\n{text}") });
+					}
+				}
+			}
+			message
+		})
+		.collect()
 }
 
 /// Reshape a transcript into the strict turn grammar Converse enforces, which OpenAI-style APIs do
@@ -625,6 +656,27 @@ mod tool_pairing_tests {
 			.iter()
 			.filter_map(|b| b.pointer("/toolResult/toolUseId").and_then(Value::as_str).map(str::to_string))
 			.collect()
+	}
+
+	#[test]
+	fn a_tool_less_request_carries_tool_history_as_text() {
+		let messages = vec![
+			crate::chat::ChatMessage::user("go"),
+			crate::chat::ChatMessage::from(vec![crate::chat::ToolCall {
+				call_id: "c1".into(),
+				fn_name: "shell".into(),
+				fn_arguments: json!({ "command": "ls" }),
+				thought_signatures: None,
+			}]),
+			crate::chat::ChatMessage::from(crate::chat::ToolResponse::new("c1", "a.txt")),
+			crate::chat::ChatMessage::user("summarise"),
+		];
+		let parts = into_converse_request_parts(ChatRequest::new(messages)).unwrap();
+		assert!(parts.tools.is_none());
+		let body = serde_json::to_string(&parts.messages).unwrap();
+		assert!(!body.contains("toolUse") && !body.contains("toolResult"), "{body}");
+		assert!(body.contains("[called shell with"), "{body}");
+		assert!(body.contains("a.txt"), "{body}");
 	}
 
 	#[test]
