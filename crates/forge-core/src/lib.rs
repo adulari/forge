@@ -2401,6 +2401,22 @@ impl Session {
     /// a trivial turn only receives tools when the prompt has a clear workspace or external-action
     /// intent. This prevents small local models from interpreting a requested answer token as a
     /// function name while preserving tool access for genuine simple file/command tasks.
+    /// A session already using tools, or holding unfinished tasks, is mid-task: its next message
+    /// ("continue", "yes", "go on") reads as a trivial chat reply to the tier classifier but is an
+    /// instruction to keep working. Hiding the tools there stranded the model — every "continuing
+    /// it" nudge re-sent the same tool-less request, and on Bedrock the tool history it carried
+    /// either failed the request outright or, rendered as text, taught the model to write tool
+    /// calls as prose (live, bedrock::global.moonshotai.kimi-k3, 2026-09-23).
+    fn mid_task(&self) -> bool {
+        self.tasks
+            .iter()
+            .any(|task| task.status != forge_types::TodoStatus::Done)
+            || self
+                .transcript
+                .iter()
+                .any(|message| !message.tool_calls.is_empty() || message.role == Role::Tool)
+    }
+
     fn should_advertise_tools(tier: TaskTier, prompt: &str) -> bool {
         if tier != TaskTier::Trivial {
             return true;
@@ -3230,7 +3246,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // the hard-trim floor and lose recent context. Transparent — `compact` emits its own note.
         self.auto_compact_if_needed(&edit_model).await;
 
-        let specs = if Self::should_advertise_tools(decision.tier, prompt) {
+        let specs = if self.mid_task() || Self::should_advertise_tools(decision.tier, prompt) {
             self.tool_specs()
         } else {
             Vec::new()
@@ -18005,6 +18021,32 @@ mod tests {
             test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_session_mid_task_keeps_its_tools_for_a_bare_continue() {
+        // "continue" classifies as a trivial chat reply, which hides the tools; mid-task that
+        // stranded the model with nothing to call on every nudge.
+        let mut session = make_session(Config::default());
+        assert!(!session.mid_task(), "a fresh session is not mid-task");
+        assert!(!Session::should_advertise_tools(
+            TaskTier::Trivial,
+            "continue"
+        ));
+
+        session.tasks.push(forge_types::TodoItem {
+            title: "ship it".into(),
+            status: forge_types::TodoStatus::InProgress,
+            assignee: None,
+        });
+        assert!(session.mid_task(), "an unfinished task keeps the tools");
+
+        session.tasks[0].status = forge_types::TodoStatus::Done;
+        assert!(!session.mid_task());
+        session
+            .transcript
+            .push(Message::tool_result("call-1", "ok".to_string()));
+        assert!(session.mid_task(), "tool history keeps the tools");
     }
 
     #[test]
