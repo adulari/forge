@@ -11,9 +11,9 @@ use forge_types::{EffortLevel, Message, Role, ToolCall, Usage};
 use futures::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{
-    Binary, CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ChatRole,
-    ChatStreamEvent, ContentPart, JsonSpec, MessageContent, ReasoningEffort, Tool,
-    ToolCall as GenAiToolCall, ToolResponse,
+    Binary, ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ChatRole, ChatStreamEvent,
+    ContentPart, JsonSpec, MessageContent, ReasoningEffort, Tool, ToolCall as GenAiToolCall,
+    ToolResponse,
 };
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, Headers, ModelIden, ServiceTarget};
@@ -949,26 +949,6 @@ fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMess
 /// price — the single biggest cost lever for a long agent loop. Providers without prompt caching
 /// (and sub-threshold prefixes, e.g. Anthropic's 1024-token minimum) silently ignore the hint, so
 /// this is always safe to set.
-fn mark_cache_breakpoints(msgs: &mut [ChatMessage]) {
-    if msgs.is_empty() {
-        return;
-    }
-    // Anchor on the END of the leading system run, not just the first system message: Forge emits
-    // several stacked system messages (base prompt + env + AGENTS.md + skill guidance), and a
-    // breakpoint caches everything UP TO it — so marking the last leading system message caches the
-    // whole standing prefix instead of re-billing all but the first every turn. Plus a breakpoint on
-    // the final message so the rest of the conversation prefix is cached for the next turn's reuse.
-    let last_leading_system = msgs
-        .iter()
-        .take_while(|m| m.role == ChatRole::System)
-        .count()
-        .checked_sub(1);
-    let last = msgs.len() - 1;
-    for idx in [last_leading_system, Some(last)].into_iter().flatten() {
-        msgs[idx].options = Some(CacheControl::Ephemeral.into());
-    }
-}
-
 fn to_genai_tool(spec: &ToolSpec) -> Tool {
     Tool::new(spec.name.clone())
         .with_description(spec.description.clone())
@@ -1136,7 +1116,9 @@ impl GenAiProvider {
 
         let mut genai_messages = to_genai_messages(messages, requires_reasoning_echo(&model_name));
         // Opt-in per provider (`[reasoning_prefill]`); absent for every provider by default.
-        let prefill_seed = model_name
+        // Keyed on Forge's namespace, which is what `[reasoning_prefill]` names: genai's differs for
+        // some providers (`bedrock` is `bedrock_api` by now), and the entry silently never applied.
+        let prefill_seed = model
             .split_once("::")
             .and_then(|(provider, _)| forge_config::reasoning_prefill_for(provider));
         // The seed is written for the agent loop ("continue the current task"); a tool-less side
@@ -1145,7 +1127,7 @@ impl GenAiProvider {
         if let Some(prefill) = partial_prefill(prefill_seed.as_deref(), opts) {
             genai_messages.push(prefill);
         }
-        mark_cache_breakpoints(&mut genai_messages);
+        crate::cache_hints::mark_cache_breakpoints(model, &mut genai_messages);
         let mut req = ChatRequest::new(genai_messages);
         if !tools.is_empty() {
             req = req.with_tools(tools.iter().map(to_genai_tool).collect::<Vec<_>>());
@@ -2056,7 +2038,7 @@ mod tests {
             Message::user("fix this bug"),
         ];
         let mut genai = to_genai_messages(&msgs, false);
-        mark_cache_breakpoints(&mut genai);
+        crate::cache_hints::mark_cache_breakpoints("anthropic::claude-opus-5", &mut genai);
         // System (idx 0) and final user message (idx 3) carry a cache breakpoint; the middle
         // turns don't, so the cache reads the largest stable prefix.
         assert!(genai[0].options.is_some(), "system should be a breakpoint");
@@ -2079,7 +2061,7 @@ mod tests {
             Message::user("do it"),
         ];
         let mut genai = to_genai_messages(&msgs, false);
-        mark_cache_breakpoints(&mut genai);
+        crate::cache_hints::mark_cache_breakpoints("anthropic::claude-opus-5", &mut genai);
         assert!(genai[0].options.is_none(), "not just the first system");
         assert!(genai[1].options.is_none());
         assert!(
@@ -2092,7 +2074,7 @@ mod tests {
     #[test]
     fn cache_breakpoints_on_empty_is_noop() {
         let mut empty: Vec<ChatMessage> = Vec::new();
-        mark_cache_breakpoints(&mut empty);
+        crate::cache_hints::mark_cache_breakpoints("anthropic::claude-opus-5", &mut empty);
         assert!(empty.is_empty());
     }
 

@@ -22,6 +22,7 @@ use crate::{Error, ModelIden, Result};
 use bytes::{Buf, BytesMut};
 use futures::Stream;
 use serde_json::{Map, Value};
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use value_ext::JsonValueExt;
@@ -38,6 +39,8 @@ pub(super) struct BedrockStreamer {
 	done: bool,
 	emitted_start: bool,
 	in_progress_tool: Option<ToolCallAccumulator>,
+	/// Events decoded from a frame but not yet yielded: one frame can produce several.
+	pending: VecDeque<InterStreamEvent>,
 }
 
 struct ToolCallAccumulator {
@@ -60,6 +63,7 @@ impl BedrockStreamer {
 			done: false,
 			emitted_start: false,
 			in_progress_tool: None,
+			pending: VecDeque::new(),
 		}
 	}
 
@@ -265,35 +269,27 @@ impl Stream for BedrockStreamer {
 	type Item = Result<InterStreamEvent>;
 
 	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-		if self.done {
-			return Poll::Ready(None);
-		}
-
 		loop {
-			// Try to parse a complete frame from the buffer first.
+			if let Some(event) = self.pending.pop_front() {
+				return Poll::Ready(Some(Ok(event)));
+			}
+			if self.done {
+				return Poll::Ready(None);
+			}
+
 			match self.try_parse_frame() {
 				Ok(Some(frame)) => {
-					// Detect terminal events BEFORE handling so we can emit End after.
-					let is_message_stop = frame.headers.get(":event-type").map(|s| s.as_str()) == Some("messageStop");
+					// `metadata` (token usage) is the last event of a ConverseStream and arrives
+					// AFTER `messageStop`. Ending at `messageStop` threw it away, so every Bedrock
+					// reply reported zero tokens: no cost, and a context gauge stuck at empty.
+					let is_final = frame.headers.get(":event-type").map(|s| s.as_str()) == Some("metadata");
 					let events = self.handle_frame(frame)?;
-					if let Some(first) = events.into_iter().next() {
-						// For simplicity we emit one InterStreamEvent per poll. Since handle_frame
-						// sometimes produces 2 (Start + body), we need to surface both; the Start
-						// gets emitted first on the next poll.
-						//
-						// Implementation shortcut: emitted_start tracking ensures we only emit Start
-						// once and the caller will re-poll for subsequent events from the same frame.
-						// If we produced >1 event, we emitted Start for the first time; the second
-						// event is lost in this simplified path.
-						//
-						// TODO: proper multi-event-per-frame queueing.
-						return Poll::Ready(Some(Ok(first)));
-					}
-					if is_message_stop {
+					self.pending.extend(events);
+					if is_final {
 						self.done = true;
-						return Poll::Ready(Some(Ok(self.finalize_end())));
+						let end = self.finalize_end();
+						self.pending.push_back(end);
 					}
-					// No events produced; loop to parse more frames or pull more bytes.
 					continue;
 				}
 				Ok(None) => {
@@ -302,7 +298,6 @@ impl Stream for BedrockStreamer {
 				Err(err) => return Poll::Ready(Some(Err(err))),
 			}
 
-			// Pull more bytes.
 			match Pin::new(&mut self.inner).poll_next(cx) {
 				Poll::Ready(Some(Ok(bytes))) => {
 					self.buf.extend_from_slice(&bytes);
@@ -316,11 +311,13 @@ impl Stream for BedrockStreamer {
 					})));
 				}
 				Poll::Ready(None) => {
+					// A stream that closes without `metadata` still ends cleanly with what it had.
 					self.done = true;
 					if self.emitted_start {
-						return Poll::Ready(Some(Ok(self.finalize_end())));
+						let end = self.finalize_end();
+						self.pending.push_back(end);
 					}
-					return Poll::Ready(None);
+					continue;
 				}
 				Poll::Pending => return Poll::Pending,
 			}
@@ -402,29 +399,8 @@ fn parse_headers(mut raw: &[u8]) -> std::result::Result<std::collections::HashMa
 	Ok(out)
 }
 
-fn parse_stream_usage(mut value: Value) -> Usage {
-	let input_tokens: i32 = value.x_take("inputTokens").ok().unwrap_or(0);
-	let output_tokens: i32 = value.x_take("outputTokens").ok().unwrap_or(0);
-	let total_tokens: i32 = value.x_take("totalTokens").ok().unwrap_or(input_tokens + output_tokens);
-	let cache_read: Option<i32> = value.x_take("cacheReadInputTokens").ok();
-	let cache_write: Option<i32> = value.x_take("cacheWriteInputTokens").ok();
-	let prompt_tokens_details = if cache_read.is_some() || cache_write.is_some() {
-		Some(crate::chat::PromptTokensDetails {
-			cache_creation_tokens: cache_write,
-			cache_creation_details: None,
-			cached_tokens: cache_read,
-			audio_tokens: None,
-		})
-	} else {
-		None
-	};
-	Usage {
-		prompt_tokens: Some(input_tokens),
-		prompt_tokens_details,
-		completion_tokens: Some(output_tokens),
-		completion_tokens_details: None,
-		total_tokens: Some(total_tokens),
-	}
+fn parse_stream_usage(value: Value) -> Usage {
+	super::converse::parse_usage(value)
 }
 
 #[cfg(test)]
@@ -482,6 +458,49 @@ mod tests {
 		assert_eq!(decoded.payload, payload);
 	}
 
+	#[tokio::test]
+	async fn usage_after_message_stop_reaches_the_end_event() {
+		// Real ConverseStream order: the usage-carrying `metadata` frame comes after
+		// `messageStop`. The stream used to end at `messageStop`, so every reply reported zero.
+		use futures::StreamExt;
+		let mut bytes = Vec::new();
+		bytes.extend(build_frame("messageStart", br#"{"role":"assistant"}"#));
+		bytes.extend(build_frame(
+			"contentBlockDelta",
+			br#"{"delta":{"text":"pong"},"contentBlockIndex":0}"#,
+		));
+		bytes.extend(build_frame("contentBlockStop", br#"{"contentBlockIndex":0}"#));
+		bytes.extend(build_frame("messageStop", br#"{"stopReason":"end_turn"}"#));
+		bytes.extend(build_frame(
+			"metadata",
+			br#"{"usage":{"inputTokens":7,"cacheReadInputTokens":83,"cacheWriteInputTokens":0,"outputTokens":69,"totalTokens":159},"metrics":{"latencyMs":1858}}"#,
+		));
+		let inner: Pin<Box<dyn Stream<Item = _> + Send>> =
+			Box::pin(futures::stream::iter(vec![Ok(bytes::Bytes::from(bytes))]));
+		let options = crate::chat::ChatOptions::default().with_capture_usage(true);
+		let options_set = ChatOptionsSet::default().with_chat_options(Some(&options));
+		let events: Vec<_> = BedrockStreamer::new(inner, test_model_iden(), options_set)
+			.collect::<Vec<_>>()
+			.await
+			.into_iter()
+			.map(|event| event.expect("event"))
+			.collect();
+
+		assert!(
+			events
+				.iter()
+				.any(|event| matches!(event, InterStreamEvent::Chunk(text) if text == "pong")),
+			"the text delta is still yielded"
+		);
+		let Some(InterStreamEvent::End(end)) = events.last() else {
+			panic!("the stream ends with End");
+		};
+		let usage = end.captured_usage.as_ref().expect("usage captured");
+		assert_eq!(usage.prompt_tokens, Some(90));
+		assert_eq!(usage.completion_tokens, Some(69));
+		assert_eq!(end.captured_stop_reason, Some(StopReason::from("end_turn".to_string())));
+	}
+
 	#[test]
 	fn partial_frame_returns_none() {
 		let model_iden = test_model_iden();
@@ -501,7 +520,8 @@ mod tests {
 			"cacheWriteInputTokens": 1_024,
 		}));
 
-		assert_eq!(usage.prompt_tokens, Some(12_000));
+		// `inputTokens` excludes cached tokens; the prompt is all three together.
+		assert_eq!(usage.prompt_tokens, Some(12_000 + 10_240 + 1_024));
 		let details = usage.prompt_tokens_details.expect("Bedrock cache usage details");
 		assert_eq!(details.cached_tokens, Some(10_240));
 		assert_eq!(details.cache_creation_tokens, Some(1_024));

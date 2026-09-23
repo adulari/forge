@@ -171,14 +171,18 @@ pub(super) fn normalize_stop_reason(converse_reason: &str) -> &str {
 	converse_reason
 }
 
-fn parse_usage(mut usage_value: Value) -> Usage {
-	let input_tokens: i32 = usage_value.x_take("inputTokens").ok().unwrap_or(0);
+/// Converse usage → genai `Usage`, whose `prompt_tokens` is the WHOLE prompt. Bedrock's
+/// `inputTokens` counts only the uncached part: a 6,101-token prompt served from cache reports
+/// `inputTokens: 7` beside `cacheReadInputTokens: 6094` (its `totalTokens` is the sum of all
+/// three, measured on Kimi K3, 2026-09-23). Taken as the prompt size, that reads a nearly full
+/// context as empty, so the three are added here.
+pub(super) fn parse_usage(mut usage_value: Value) -> Usage {
+	let uncached_input: i32 = usage_value.x_take("inputTokens").ok().unwrap_or(0);
 	let output_tokens: i32 = usage_value.x_take("outputTokens").ok().unwrap_or(0);
-	let total_tokens: i32 = usage_value.x_take("totalTokens").ok().unwrap_or(input_tokens + output_tokens);
-
-	// Bedrock reports cache stats under cacheReadInputTokens / cacheWriteInputTokens when supported.
 	let cache_read: Option<i32> = usage_value.x_take("cacheReadInputTokens").ok();
 	let cache_write: Option<i32> = usage_value.x_take("cacheWriteInputTokens").ok();
+	let input_tokens = uncached_input + cache_read.unwrap_or(0) + cache_write.unwrap_or(0);
+	let total_tokens: i32 = usage_value.x_take("totalTokens").ok().unwrap_or(input_tokens + output_tokens);
 
 	let prompt_tokens_details = if cache_read.is_some() || cache_write.is_some() {
 		Some(crate::chat::PromptTokensDetails {

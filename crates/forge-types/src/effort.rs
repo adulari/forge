@@ -89,6 +89,10 @@ pub fn ladder(provider: &str, model: &str) -> &'static [EffortLevel] {
         // KIMI_LADDER). Keyed on the namespace because `k3` names no vendor family for the model
         // check below to find.
         "kimi" => KIMI_LADDER,
+        // Bedrock accepts `reasoning_effort` for its Moonshot models and ignores it: low, max and
+        // a nonsense value produced byte-identical output lengths (22,517 tokens each, measured
+        // 2026-09-23). Offering a rung there would be a control that does nothing.
+        "bedrock" if model.to_lowercase().contains("moonshot") => &[],
         // Everything else goes over the generic (genai/OpenAI-compatible) path, where an effort
         // field is only meaningful for a reasoning model.
         _ => {
@@ -194,9 +198,14 @@ pub fn bridge_args(provider: &str, level: EffortLevel) -> Vec<String> {
 /// serves — `k3`, `k3-256k`, `kimi-for-coding`, `kimi-for-coding-highspeed` — answers
 /// `invalid temperature: only 1 is allowed for this model` (live, 2026-09-14), which killed every
 /// Forge turn before a single token. Keyed on the namespace because `k3` names no vendor family.
+///
+/// Bedrock's Moonshot models refuse the field at any value, 1 included ("This model doesn't
+/// support the temperature field", live on `global.moonshotai.kimi-k3`, 2026-09-23).
 pub fn model_rejects_temperature(model: &str) -> bool {
     let m = model.to_lowercase();
-    if m.starts_with("kimi::") {
+    // The provider asks with genai's id, where Bedrock's namespace is already `bedrock_api`.
+    let bedrock = m.starts_with("bedrock::") || m.starts_with("bedrock_api::");
+    if m.starts_with("kimi::") || (bedrock && m.contains("moonshot")) {
         return true;
     }
     ["o1", "o1-", "o3", "o3-", "o4", "o4-", "gpt-5", "gpt-6"]
@@ -391,6 +400,28 @@ mod tests {
                 "{id} takes a temperature too — conflating these is what blocked its rung"
             );
         }
+    }
+
+    #[test]
+    fn bedrock_moonshot_models_offer_no_effort_rung() {
+        assert!(ladder("bedrock", "bedrock::global.moonshotai.kimi-k3").is_empty());
+        assert!(!ladder("bedrock", "bedrock::us.anthropic.claude-opus-5-v1:0").is_empty());
+    }
+
+    #[test]
+    fn bedrock_moonshot_models_refuse_any_temperature() {
+        assert!(model_rejects_temperature(
+            "bedrock::global.moonshotai.kimi-k3"
+        ));
+        assert!(model_rejects_temperature(
+            "bedrock::moonshot.kimi-k2-thinking"
+        ));
+        assert!(model_rejects_temperature(
+            "bedrock_api::global.moonshotai.kimi-k3"
+        ));
+        assert!(!model_rejects_temperature(
+            "bedrock::us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        ));
     }
 
     #[test]

@@ -10746,6 +10746,7 @@ mod tests {
             forge_config::PriceOverride {
                 input_per_1k: 1.0,
                 output_per_1k: 1.0,
+                cache_read_per_1k: None,
             },
         );
         config
@@ -11288,6 +11289,7 @@ mod tests {
                 PriceOverride {
                     input_per_1k: price,
                     output_per_1k: price,
+                    cache_read_per_1k: None,
                 },
             );
         }
