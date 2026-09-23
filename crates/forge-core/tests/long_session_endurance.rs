@@ -130,6 +130,7 @@ fn endurance_config() -> Config {
             PriceOverride {
                 input_per_1k: 0.0,
                 output_per_1k: 0.0,
+                cache_read_per_1k: None,
             },
         );
     }

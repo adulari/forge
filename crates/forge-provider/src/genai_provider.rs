@@ -949,6 +949,20 @@ fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMess
 /// price — the single biggest cost lever for a long agent loop. Providers without prompt caching
 /// (and sub-threshold prefixes, e.g. Anthropic's 1024-token minimum) silently ignore the hint, so
 /// this is always safe to set.
+/// Whether a request to `model` may carry explicit cache breakpoints. Everywhere else an
+/// unsupported hint is ignored, but Bedrock Converse rejects the whole request ("This model doesn't
+/// support the cachePoint field") for any model outside its prompt-caching list — Kimi K3 among
+/// them. There the hint is sent only to the families Bedrock caches: Claude and Nova.
+fn accepts_cache_breakpoints(model: &str) -> bool {
+    match model.split_once("::") {
+        Some(("bedrock", id)) => {
+            let id = id.to_ascii_lowercase();
+            id.contains("anthropic.") || id.contains("amazon.nova")
+        }
+        _ => true,
+    }
+}
+
 fn mark_cache_breakpoints(msgs: &mut [ChatMessage]) {
     if msgs.is_empty() {
         return;
@@ -1136,7 +1150,9 @@ impl GenAiProvider {
 
         let mut genai_messages = to_genai_messages(messages, requires_reasoning_echo(&model_name));
         // Opt-in per provider (`[reasoning_prefill]`); absent for every provider by default.
-        let prefill_seed = model_name
+        // Keyed on Forge's namespace, which is what `[reasoning_prefill]` names: genai's differs for
+        // some providers (`bedrock` is `bedrock_api` by now), and the entry silently never applied.
+        let prefill_seed = model
             .split_once("::")
             .and_then(|(provider, _)| forge_config::reasoning_prefill_for(provider));
         // The seed is written for the agent loop ("continue the current task"); a tool-less side
@@ -1145,7 +1161,9 @@ impl GenAiProvider {
         if let Some(prefill) = partial_prefill(prefill_seed.as_deref(), opts) {
             genai_messages.push(prefill);
         }
-        mark_cache_breakpoints(&mut genai_messages);
+        if accepts_cache_breakpoints(model) {
+            mark_cache_breakpoints(&mut genai_messages);
+        }
         let mut req = ChatRequest::new(genai_messages);
         if !tools.is_empty() {
             req = req.with_tools(tools.iter().map(to_genai_tool).collect::<Vec<_>>());
@@ -2747,6 +2765,21 @@ mod tests {
     }
 
     // --- Enterprise / custom-endpoint plumbing ---
+
+    #[test]
+    fn bedrock_sends_cache_breakpoints_only_to_the_families_it_caches() {
+        // Kimi K3 on Bedrock failed every request: Converse rejects a cachePoint it does not
+        // support instead of ignoring it.
+        assert!(!accepts_cache_breakpoints(
+            "bedrock::global.moonshotai.kimi-k3"
+        ));
+        assert!(accepts_cache_breakpoints(
+            "bedrock::us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        ));
+        assert!(accepts_cache_breakpoints("bedrock::amazon.nova-pro-v1:0"));
+        assert!(accepts_cache_breakpoints("kimi::k3"));
+        assert!(accepts_cache_breakpoints("anthropic::claude-opus-5"));
+    }
 
     #[test]
     fn bedrock_namespace_maps_to_genai_bedrock_api_and_vertex_passes_through() {

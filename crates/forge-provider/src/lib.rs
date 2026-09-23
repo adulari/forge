@@ -446,6 +446,8 @@ pub(crate) fn cache_control_unsupported(error: &ProviderError) -> bool {
         && [
             "unsupported",
             "not supported",
+            "doesn't support",
+            "does not support",
             "unknown",
             "unrecognized",
             "not permitted",
@@ -504,6 +506,11 @@ mod prompt_cache_compat_tests {
         )));
         assert!(cache_control_unsupported(&ProviderError::Capability(
             "extra_forbidden: messages.0.content.1.cache_control".into()
+        )));
+        // Bedrock's own wording for a model outside its prompt-caching list (Kimi K3).
+        assert!(cache_control_unsupported(&ProviderError::Request(
+            "This model doesn't support the cachePoint field. Remove cachePoint and try again."
+                .into()
         )));
         assert!(!cache_control_unsupported(&ProviderError::Request(
             "cache lookup temporarily unavailable".into()

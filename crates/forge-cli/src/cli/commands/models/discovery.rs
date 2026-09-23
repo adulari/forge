@@ -376,6 +376,11 @@ pub(crate) async fn discover_catalog_with_status(
             models.extend(az.deployments.iter().map(|d| format!("azure::{d}")));
         }
     }
+    // Bedrock: same shape — an API key cannot enumerate invokable models (most third-party models
+    // are reached through an inference profile), so the configured ids are the catalog.
+    if forge_config::has_api_key("bedrock") {
+        models.extend(forge_config::bedrock_models());
+    }
     // xAI OAuth (SuperGrok/X Premium subscription, `forge auth xai-oauth`): only worth probing if
     // a session is actually stored — skips a needless network call/timeout for the vast majority
     // of users who never signed in. `list_xai_oauth_models` itself falls back to a small seed list

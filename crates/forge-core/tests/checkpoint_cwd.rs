@@ -74,6 +74,7 @@ async fn undo_reverts_files_with_the_default_relative_checkpoint_root() {
         PriceOverride {
             input_per_1k: 0.0,
             output_per_1k: 0.0,
+            cache_read_per_1k: None,
         },
     );
 

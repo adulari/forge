@@ -18,7 +18,7 @@ impl From<forge_config::PriceOverride> for ModelRate {
         ModelRate {
             input_per_1k: o.input_per_1k,
             output_per_1k: o.output_per_1k,
-            cache_read_per_1k: None,
+            cache_read_per_1k: o.cache_read_per_1k,
         }
     }
 }
@@ -286,10 +286,23 @@ pub fn cross_namespace_window(id: &str, windows: &HashMap<String, u32>) -> Optio
 /// namespaces: the part after `provider::`, then after the last `/`, minus Forge's `-free` tier
 /// suffix, lowercased.
 fn normalized_bare_name(id: &str) -> String {
-    bare_model_name(id)
-        .strip_suffix("-free")
-        .unwrap_or(bare_model_name(id))
-        .to_lowercase()
+    let bare = bedrock_model_name(id).unwrap_or_else(|| bare_model_name(id));
+    bare.strip_suffix("-free").unwrap_or(bare).to_lowercase()
+}
+
+/// A Bedrock id names the vendor, and for an inference profile the routing geography, ahead of the
+/// model: `global.moonshotai.kimi-k3`. Without stripping both it matched nothing published
+/// elsewhere, and a million-token model was trimmed to the 32k conservative floor.
+fn bedrock_model_name(id: &str) -> Option<&str> {
+    const GEOGRAPHIES: &[&str] = &[
+        "global.", "us-gov.", "us.", "eu.", "apac.", "jp.", "au.", "ca.",
+    ];
+    let model = id.strip_prefix("bedrock::")?;
+    let model = GEOGRAPHIES
+        .iter()
+        .find_map(|geography| model.strip_prefix(geography))
+        .unwrap_or(model);
+    Some(model.split_once('.').map_or(model, |(_, name)| name))
 }
 
 fn estimate(rate: &ModelRate) -> f64 {
@@ -369,6 +382,37 @@ mod tests {
         assert_eq!(
             super::cross_namespace_window("opencode::muse-spark-1.3-contributor-free", &windows),
             Some(1_048_576)
+        );
+    }
+
+    #[test]
+    fn a_bedrock_inference_profile_borrows_the_window_of_the_same_model() {
+        // `global.moonshotai.kimi-k3` is how Bedrock invokes Kimi K3; the store holds 1,048,576
+        // for it under every other namespace, and the bare Bedrock id used to match none of them.
+        use std::collections::HashMap;
+        let mut windows = HashMap::new();
+        windows.insert("openrouter::moonshotai/kimi-k3".to_string(), 1_048_576_u32);
+        windows.insert("openrouter::moonshotai/kimi-k2.5".to_string(), 262_144_u32);
+        for id in [
+            "bedrock::global.moonshotai.kimi-k3",
+            "bedrock::us.moonshotai.kimi-k3",
+            "bedrock::moonshotai.kimi-k3",
+        ] {
+            assert_eq!(
+                super::cross_namespace_window(id, &windows),
+                Some(1_048_576),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            super::cross_namespace_window("bedrock::moonshotai.kimi-k2.5", &windows),
+            Some(262_144),
+            "a dotted version must survive the vendor strip"
+        );
+        assert_eq!(
+            super::cross_namespace_window("openai::gpt-5.6", &windows),
+            None,
+            "dots outside Bedrock ids are part of the model name"
         );
     }
 
@@ -568,6 +612,7 @@ mod tests {
             forge_config::PriceOverride {
                 input_per_1k: 9.0,
                 output_per_1k: 9.0,
+                cache_read_per_1k: None,
             },
         );
         let fetched = vec![
@@ -629,6 +674,7 @@ mod tests {
             forge_config::PriceOverride {
                 input_per_1k: 1.0,
                 output_per_1k: 2.0,
+                cache_read_per_1k: None,
             },
         );
         let pricing = Pricing::from_config(&config);

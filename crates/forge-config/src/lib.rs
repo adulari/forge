@@ -486,6 +486,24 @@ pub struct ProvidersConfig {
     /// Bearer`), so it needs its own block rather than a `[[providers.custom]]` row. Absent = inert.
     #[serde(default)]
     pub azure: Option<AzureConfig>,
+    /// `[providers.bedrock]` — which Bedrock models to offer. Bedrock has no model list Forge can
+    /// enumerate with an API key, so without this a `bedrock::` id works only when typed by hand
+    /// and never appears in a model picker. Absent = inert.
+    #[serde(default)]
+    pub bedrock: Option<BedrockConfig>,
+}
+
+/// `[providers.bedrock]`: the Bedrock model ids to seed into the catalog when a `bedrock` key is
+/// stored. Use the id Bedrock invokes, which for most third-party models is an inference profile
+/// rather than the bare model id:
+/// ```toml
+/// [providers.bedrock]
+/// models = ["global.moonshotai.kimi-k3"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BedrockConfig {
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 /// `[providers.azure]`: an Azure OpenAI resource the user configures without recompiling. Azure's
@@ -2399,6 +2417,11 @@ impl Default for BudgetBehavior {
 pub struct PriceOverride {
     pub input_per_1k: f64,
     pub output_per_1k: f64,
+    /// The rate for cached prompt tokens. Absent = cached tokens are billed at `input_per_1k`,
+    /// which overstates a long session on a provider that caches automatically (Bedrock's Kimi K3
+    /// reads cache at a tenth of its input price).
+    #[serde(default)]
+    pub cache_read_per_1k: Option<f64>,
 }
 
 /// A widget shown in the statusline.
@@ -2831,6 +2854,25 @@ fn merge_mcp_toml(config: &mut McpConfig, path: &std::path::Path) {
             Err(e) => tracing::warn!("ignoring malformed {}: {e}", path.display()),
         }
     }
+}
+
+/// The `[providers.bedrock] models` entries as routable `bedrock::<id>` ids, blanks dropped.
+pub fn bedrock_models() -> Vec<String> {
+    load()
+        .ok()
+        .and_then(|config| config.providers.bedrock)
+        .map(|bedrock| bedrock_model_ids(&bedrock))
+        .unwrap_or_default()
+}
+
+fn bedrock_model_ids(bedrock: &BedrockConfig) -> Vec<String> {
+    bedrock
+        .models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .map(|model| format!("bedrock::{}", model.trim_start_matches("bedrock::")))
+        .collect()
 }
 
 /// Per-provider reasoning-prefill seeds (`[reasoning_prefill]`), read once for the process.
@@ -4994,6 +5036,22 @@ reason = "no privilege escalation"
         }
         // These are paid gateways, not standing free tiers.
         assert!(!custom_provider("together").unwrap().free);
+    }
+
+    #[test]
+    fn bedrock_block_lists_its_models_as_routable_ids() {
+        let providers: ProvidersConfig = toml::from_str(
+            "[bedrock]\nmodels = [\"global.moonshotai.kimi-k3\", \" \", \"bedrock::us.moonshotai.kimi-k3\"]\n",
+        )
+        .unwrap();
+        let bedrock = providers.bedrock.expect("block parses");
+        assert_eq!(
+            bedrock_model_ids(&bedrock),
+            vec![
+                "bedrock::global.moonshotai.kimi-k3".to_string(),
+                "bedrock::us.moonshotai.kimi-k3".to_string(),
+            ]
+        );
     }
 
     #[test]
