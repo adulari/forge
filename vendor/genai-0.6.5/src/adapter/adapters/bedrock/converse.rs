@@ -335,9 +335,95 @@ fn into_converse_request_parts(chat_req: ChatRequest) -> Result<ConverseRequestP
 
 	Ok(ConverseRequestParts {
 		system,
-		messages,
+		messages: pair_tool_turns(messages),
 		tools,
 	})
+}
+
+/// Reshape a transcript into the strict turn grammar Converse enforces, which OpenAI-style APIs do
+/// not: roles alternate, and every `toolUse` is answered in the very next user message by a
+/// `toolResult` with its id — and nothing else claims to be a result.
+///
+/// Parallel tool calls arrived as one user message PER result, so the first message answered one
+/// id and Bedrock rejected the turn ("Expected toolResult blocks at messages.14.content for the
+/// following Ids: …"). A call left unanswered by an interrupted or failed tool killed every later
+/// request of the session the same way, even one that was fine on the model that made it.
+fn pair_tool_turns(messages: Vec<Value>) -> Vec<Value> {
+	let mut merged: Vec<(String, Vec<Value>)> = Vec::new();
+	for message in messages {
+		let role = message.get("role").and_then(Value::as_str).unwrap_or("user").to_string();
+		let blocks = message.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
+		match merged.last_mut() {
+			Some((last_role, last_blocks)) if *last_role == role => last_blocks.extend(blocks),
+			_ => merged.push((role, blocks)),
+		}
+	}
+
+	let mut out: Vec<(String, Vec<Value>)> = Vec::with_capacity(merged.len() + 1);
+	let mut open_calls: Vec<String> = Vec::new();
+	for (role, blocks) in merged {
+		if role == "assistant" {
+			if !open_calls.is_empty() {
+				out.push(("user".to_string(), answer_missing(Vec::new(), &mut open_calls)));
+			}
+			open_calls = blocks.iter().filter_map(tool_use_id).collect();
+			out.push((role, blocks));
+		} else {
+			out.push((role, answer_missing(blocks, &mut open_calls)));
+		}
+	}
+	if !open_calls.is_empty() {
+		out.push(("user".to_string(), answer_missing(Vec::new(), &mut open_calls)));
+	}
+	if out.first().is_some_and(|(role, _)| role == "assistant") {
+		out.insert(
+			0,
+			("user".to_string(), vec![json!({ "text": "(conversation continues)" })]),
+		);
+	}
+	out.into_iter()
+		.map(|(role, content)| json!({ "role": role, "content": content }))
+		.collect()
+}
+
+fn tool_use_id(block: &Value) -> Option<String> {
+	block.pointer("/toolUse/toolUseId").and_then(Value::as_str).map(str::to_string)
+}
+
+/// A user turn that answers exactly `open_calls`: results first (the order Bedrock's Anthropic
+/// models require), a stand-in error result for any call that never got one, and any result whose
+/// call is not open kept as plain text rather than as a result for nothing.
+fn answer_missing(blocks: Vec<Value>, open_calls: &mut Vec<String>) -> Vec<Value> {
+	let mut results = Vec::new();
+	let mut rest = Vec::new();
+	for block in blocks {
+		match block.pointer("/toolResult/toolUseId").and_then(Value::as_str) {
+			Some(id) if open_calls.iter().any(|open| open == id) => {
+				let id = id.to_string();
+				open_calls.retain(|open| *open != id);
+				results.push(block);
+			}
+			Some(id) => {
+				let text = block
+					.pointer("/toolResult/content/0/text")
+					.and_then(Value::as_str)
+					.unwrap_or_default();
+				rest.push(json!({ "text": format!("[result of tool call {id}]\n{text}") }));
+			}
+			None => rest.push(block),
+		}
+	}
+	for id in open_calls.drain(..) {
+		results.push(json!({
+			"toolResult": {
+				"toolUseId": id,
+				"content": [{ "text": "This tool call did not complete, so it has no result." }],
+				"status": "error",
+			}
+		}));
+	}
+	results.extend(rest);
+	results
 }
 
 /// Append an AWS Bedrock Converse cache point after a message's content. Forge marks only stable
@@ -517,6 +603,79 @@ fn tool_to_converse_tool(tool: Tool) -> Result<Value> {
 	}
 
 	Ok(json!({ "toolSpec": tool_spec }))
+}
+
+#[cfg(test)]
+mod tool_pairing_tests {
+	use super::*;
+
+	fn use_block(id: &str) -> Value {
+		json!({ "toolUse": { "toolUseId": id, "name": "shell", "input": {} } })
+	}
+	fn result_block(id: &str) -> Value {
+		json!({ "toolResult": { "toolUseId": id, "content": [{ "text": "ok" }] } })
+	}
+	fn msg(role: &str, content: Vec<Value>) -> Value {
+		json!({ "role": role, "content": content })
+	}
+	fn result_ids(message: &Value) -> Vec<String> {
+		message["content"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.filter_map(|b| b.pointer("/toolResult/toolUseId").and_then(Value::as_str).map(str::to_string))
+			.collect()
+	}
+
+	#[test]
+	fn parallel_results_share_one_user_turn() {
+		let out = pair_tool_turns(vec![
+			msg("user", vec![json!({ "text": "go" })]),
+			msg("assistant", vec![use_block("a"), use_block("b")]),
+			msg("user", vec![result_block("a")]),
+			msg("user", vec![result_block("b")]),
+		]);
+		assert_eq!(out.len(), 3);
+		assert_eq!(result_ids(&out[2]), vec!["a", "b"]);
+	}
+
+	#[test]
+	fn an_unanswered_call_gets_an_error_result_before_the_next_user_text() {
+		let out = pair_tool_turns(vec![
+			msg("user", vec![json!({ "text": "go" })]),
+			msg("assistant", vec![use_block("lost")]),
+			msg("user", vec![json!({ "text": "next request" })]),
+		]);
+		assert_eq!(out.len(), 3);
+		assert_eq!(result_ids(&out[2]), vec!["lost"]);
+		assert_eq!(out[2]["content"][0]["toolResult"]["status"], "error");
+		assert_eq!(out[2]["content"][1]["text"], "next request");
+	}
+
+	#[test]
+	fn a_call_followed_by_another_assistant_turn_is_answered_in_between() {
+		let out = pair_tool_turns(vec![
+			msg("user", vec![json!({ "text": "go" })]),
+			msg("assistant", vec![use_block("lost")]),
+			msg("assistant", vec![json!({ "text": "continuing" })]),
+		]);
+		// Same-role messages merge, so the stray text joins the call's turn; the call is then
+		// answered at the end rather than left open.
+		assert_eq!(out.last().unwrap()["role"], "user");
+		assert_eq!(result_ids(out.last().unwrap()), vec!["lost"]);
+	}
+
+	#[test]
+	fn a_result_without_its_call_becomes_text_and_roles_start_with_user() {
+		let out = pair_tool_turns(vec![
+			msg("assistant", vec![json!({ "text": "earlier summary" })]),
+			msg("user", vec![result_block("orphan")]),
+		]);
+		assert_eq!(out[0]["role"], "user");
+		assert_eq!(out[1]["role"], "assistant");
+		assert!(result_ids(&out[2]).is_empty());
+		assert!(out[2]["content"][0]["text"].as_str().unwrap().contains("orphan"));
+	}
 }
 
 #[cfg(test)]
