@@ -407,6 +407,9 @@ pub(super) fn classify_status(
                 .map(str::to_string)
         });
     let message = short(provider_message.as_deref().unwrap_or(&message));
+    if bedrock_profile_blip(body) || bedrock_profile_blip(&message) {
+        return ProviderError::Unavailable(message);
+    }
     // A permanent incapability (no tool support / unaffordable) regardless of status code: 402
     // is always "can't afford", and 400/404 bodies often carry "tool calling not supported".
     if code == 402
@@ -436,6 +439,15 @@ pub(super) fn classify_status(
     }
 }
 
+/// Bedrock answers `ResourceNotFoundException: Inference Profile ARN not found` now and then for a
+/// cross-region profile that exists and served the previous call — a routing blip, not a missing
+/// model. Read as a dead model id it failed the whole turn on `global.moonshotai.kimi-k3` after a
+/// dozen good calls in the same session (2026-09-23); others see it on about 1 call in 9.
+pub(super) fn bedrock_profile_blip(text: &str) -> bool {
+    text.to_ascii_lowercase()
+        .contains("inference profile arn not found")
+}
+
 /// NVIDIA's hosted NIM catalog maps model ids to account-scoped NVCF function ids. Catalog churn
 /// can leave a cached model pointing at a removed function; the endpoint then returns a 404 such
 /// as `Function '<uuid>': Not found for account '<id>'`. That is a model-specific incapability,
@@ -459,6 +471,9 @@ pub(super) fn classify_text(text: &str, message: String) -> ProviderError {
     // zero quota drops the (useless) tiny delay so the longer default bench applies.
     let retry_after = parse_retry_after_body(text).filter(|_| !quota_is_exhausted(text));
     let message = short(&message);
+    if bedrock_profile_blip(text) {
+        return ProviderError::Unavailable(message);
+    }
     // Permanent incapability first — a streamed "tool calling is not supported" / "402 requires
     // more credits" must NOT be mistaken for a transient dropped stream (the misclassification
     // bug that benched-and-retried dead models forever).

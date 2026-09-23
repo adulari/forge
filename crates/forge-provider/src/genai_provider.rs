@@ -2490,6 +2490,22 @@ mod tests {
     }
 
     #[test]
+    fn a_bedrock_inference_profile_blip_is_retried_not_fatal() {
+        let body = r#"{"message":"Inference Profile ARN not found"}"#;
+        let status = classify_status(404, "HTTP error".into(), body, None);
+        assert!(
+            matches!(status, ProviderError::Unavailable(_)),
+            "{status:?}"
+        );
+        assert!(status.is_retryable());
+        let streamed = classify_text(
+            "ResourceNotFoundException: Inference Profile ARN not found",
+            "Inference Profile ARN not found".into(),
+        );
+        assert!(streamed.is_retryable(), "{streamed:?}");
+    }
+
+    #[test]
     fn stall_error_is_retryable_unavailable() {
         let e = stall_error("stream stalled", std::time::Duration::from_secs(90));
         assert!(matches!(e, ProviderError::Unavailable(_)));
