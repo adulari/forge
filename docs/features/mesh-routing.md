@@ -1072,13 +1072,20 @@ binary fetches + caches them; `BenchmarkScores` is pure data + matching.
   bridge alias (`claude-cli::opus`) is unaffected and maps to the best matching family row.
 - Product-reviewed successor rules (`predecessor_canon`, `bench.rs:178`) bypass generic fuzzy
   matching for a successor the version-conflict guard above would otherwise leave unscored. Until
-  Artificial Analysis publishes their own rows, `qwen3.8-max-preview` inherits the exact Qwen3.7 Max score and `claude-opus-5`
-  (released 2026-07-24, and priced identically to its predecessor) inherits Claude Opus 4.8's; a
-  published row for the successor always wins afterward. `source_score_for` excludes inheritance,
+  Artificial Analysis publishes their own rows, `qwen3.8-max-preview` inherits the exact Qwen3.7
+  Max score and Muse Spark 1.3 inherits 1.2's; a published row for the successor always wins
+  afterward. `source_score_for` excludes inheritance,
   so cache refresh and negative-cache bookkeeping continue to distinguish measured data from the
   temporary prior. Bare bridge aliases carry no version token and so never inherit —
-  `claude-cli::opus` keeps mapping to the best-scoring Claude-Opus row, which becomes Opus 5 as
-  soon as AA measures it.
+  `claude-cli::opus` keeps mapping to the best-scoring Claude-Opus row.
+- The canonical key (`canon`) sorts and dedupes the words but keeps version numbers in order and
+  with repeats, so Opus 5.5 and Opus 5, or GPT-5.4 and GPT-4.5, never share a key or an effort
+  ladder.
+- A row with no coding index (AA leaves it blank for most of the feed, new frontier releases
+  included) gets an estimate: its intelligence times the median coding/intelligence ratio of the 15
+  rated rows closest in intelligence, capped at the best measured coding index
+  (`estimate_coding`, `crates/forge-cli/src/benchmarks.rs`). A cache holding such rows is
+  re-fetched daily.
 - `id_tokens` (`bench.rs:198`) injects a family token per bridge (`claude-cli`/`anthropic` →
   "claude", `codex-cli` → "gpt", `agy-cli` → "gemini") so bare aliases match at all.
 - `exact_score_for` (`bench.rs:82`) is the no-fuzzy variant for precisely-named local tags
