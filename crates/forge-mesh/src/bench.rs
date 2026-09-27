@@ -406,12 +406,6 @@ impl BenchmarkScores {
     fn predecessor_canon(id: &str) -> Option<String> {
         const PREDECESSORS: &[(&str, &str)] = &[
             ("qwen3.8-max-preview", "qwen3.7-max"),
-            // Claude Opus 5 shipped 2026-07-24; Artificial Analysis has no row for it yet. The
-            // version-conflict guard above (correctly) refuses to fuzzy-match it onto Opus 4.8,
-            // which would otherwise leave the fleet's newest frontier model unscored — ranked by
-            // the family heuristic alone and sorted below every benched peer at high effort.
-            // Opus 5 lists at Opus 4.8's price, so 4.8's measured score is the honest prior.
-            ("claude-opus-5", "claude-opus-4-8"),
             // Muse Spark 1.3 shipped 2026-09-02 and is free on OpenCode Zen. Artificial
             // Analysis's site publishes it (Intelligence Index 62, above 1.2's 56.8) but the
             // v2 data API feed carries no row for it yet, and the positional version guard
@@ -589,12 +583,22 @@ fn strip_parens(s: &str) -> String {
     out
 }
 
-/// A stable key for a token set (order-independent): sorted, deduped, joined.
+/// A stable key for a token list: the words sorted and deduped (so "Claude 4.8 Opus" and
+/// "claude-opus-4-8" agree, and a provider-derived family word may repeat the model's own), then
+/// the version numbers IN ORDER and with repeats. Deduping the numbers too made Opus 5.5 and
+/// Opus 5 one key — Opus 5 was scored as 5.5 and the two effort ladders merged — and sorting them
+/// made 5.4 and 4.5 one key.
 fn canon(toks: &[String]) -> String {
-    let mut v: Vec<&str> = toks.iter().map(String::as_str).collect();
-    v.sort_unstable();
-    v.dedup();
-    v.join("-")
+    let is_num = |t: &&str| t.chars().all(|c| c.is_ascii_digit());
+    let mut words: Vec<&str> = toks
+        .iter()
+        .map(String::as_str)
+        .filter(|t| !is_num(t))
+        .collect();
+    words.sort_unstable();
+    words.dedup();
+    let nums: Vec<&str> = toks.iter().map(String::as_str).filter(is_num).collect();
+    format!("{}#{}", words.join("-"), nums.join("."))
 }
 
 /// Count of distinct `want` tokens also present in `have`.
@@ -1145,62 +1149,65 @@ mod tests {
         );
     }
 
+    /// Real rows from the 2026-09-27 feed. The canonical key used to dedupe version numbers, so
+    /// "Opus 5.5" and "Opus 5" became one key: Opus 5 was scored as 5.5 and their effort ladders
+    /// merged into one.
     #[test]
-    fn claude_opus_5_inherits_opus_4_8_until_its_own_row_exists() {
+    fn a_point_release_never_shares_a_key_with_its_base_version() {
         let mut b = BenchmarkScores::new();
+        b.insert("Claude Opus 5 (Adaptive Reasoning, Max Effort)", 50.8, 78.0);
+        b.insert("Claude Opus 5 (Adaptive Reasoning, Low Effort)", 39.4, 66.9);
         b.insert(
-            "Claude Opus 4.8 (Adaptive Reasoning, Max Effort)",
-            55.7,
-            56.7,
+            "Claude Opus 5.5 (Adaptive Reasoning, Max Effort, Default Fallback)",
+            57.6,
+            81.6,
         );
         b.insert(
-            "Claude Sonnet 4.6 (Adaptive Reasoning, Max Effort)",
-            47.2,
-            63.0,
-        );
-        // Fable's row NAME carries "Opus 4.8 Fallback"; strip_parens must keep it out of the way.
-        b.insert("Claude Fable 5 (Max Effort, Opus 4.8 Fallback)", 59.9, 76.5);
-
-        assert!(
-            b.source_score_for("anthropic::claude-opus-5").is_none(),
-            "inheritance must not hide the missing source row from cache refresh logic"
+            "Claude Opus 5.5 (Adaptive Reasoning, High Effort, Default Fallback)",
+            53.6,
+            80.0,
         );
 
-        for id in [
-            "anthropic::claude-opus-5",
-            "openrouter::anthropic/claude-opus-5",
-        ] {
-            assert_eq!(
-                b.score_for(id).expect("Opus 5 should inherit a score"),
-                BenchScore {
-                    intelligence: 55.7,
-                    coding: 56.7,
-                },
-                "{id} must inherit Opus 4.8 exactly — not Fable's higher row, not Sonnet's"
-            );
-        }
-
-        // The bare bridge alias has no version token, so it never inherits; it keeps mapping to
-        // the best Claude-Opus row, which is still 4.8 while that's the only one measured.
-        assert!(b.source_score_for("claude-cli::opus").is_some());
-        assert_eq!(b.score_for("claude-cli::opus").unwrap().intelligence, 55.7);
-
-        // Once AA publishes Opus 5, the measured row wins over the inherited prior, and the bare
-        // alias follows it up — `claude-cli::opus` is the CLI's *latest* Opus, not a pinned 4.8.
-        b.insert("Claude Opus 5 (Adaptive Reasoning, Max Effort)", 61.4, 72.0);
-        assert!(b.source_score_for("anthropic::claude-opus-5").is_some());
         assert_eq!(
-            b.score_for("anthropic::claude-opus-5"),
-            Some(BenchScore {
-                intelligence: 61.4,
-                coding: 72.0,
-            })
+            b.score_for("anthropic::claude-opus-5")
+                .unwrap()
+                .intelligence,
+            50.8
+        );
+        assert_eq!(
+            b.score_for("opencode::claude-opus-5-5")
+                .unwrap()
+                .intelligence,
+            57.6
+        );
+        let ladder = |id| {
+            b.efforts_for(id)
+                .into_iter()
+                .map(|(rung, _)| rung)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ladder("anthropic::claude-opus-5"),
+            [BenchEffort::Low, BenchEffort::Max]
+        );
+        assert_eq!(
+            ladder("opencode::claude-opus-5-5"),
+            [BenchEffort::High, BenchEffort::Max]
         );
         assert_eq!(
             b.score_for("claude-cli::opus").unwrap().intelligence,
-            61.4,
-            "bare opus → best Claude-Opus row, now Opus 5"
+            57.6,
+            "the bare alias still follows the best Claude-Opus row"
         );
+    }
+
+    #[test]
+    fn swapped_version_digits_are_different_models() {
+        let mut b = BenchmarkScores::new();
+        b.insert("GPT-5.4 (xhigh)", 40.0, 70.0);
+        b.insert("GPT-4.5", 20.0, 30.0);
+        assert_eq!(b.score_for("openai::gpt-5.4").unwrap().intelligence, 40.0);
+        assert_eq!(b.score_for("openai::gpt-4.5").unwrap().intelligence, 20.0);
     }
 
     /// Verbatim Artificial Analysis rows for Opus 5, as actually returned by

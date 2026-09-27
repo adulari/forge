@@ -6,6 +6,17 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Benchmark scores for new models, and for every model without an AA coding index.** Artificial
+  Analysis publishes no coding index for 406 of its 665 rows, including Opus 5.5, GPT-6 Sol and
+  GPT-6 Luna. Forge copied the intelligence index into the gap, and the two indices sit on
+  different scales, so those models ranked about 20 points low on code-heavy work (GPT-6 Sol read
+  47.5 against GPT-5.6 Sol's 77.4). The gap is now estimated from rated models of similar
+  intelligence and capped at the best measured coding index. The estimate is 4.7 points off on
+  average; copying intelligence was 21.3 points off. A cache holding estimates is re-fetched daily,
+  so a published coding index replaces the estimate. Separately, Opus 5 and Opus 5.5 shared one
+  matching key: Opus 5 was scored as 5.5 and their per-effort ladders were merged.
+
 ## [2.16.0] - 2026-09-23
 
 ### Added
