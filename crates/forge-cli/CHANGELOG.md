@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.16.2] - 2026-09-30
+
 ### Added
 - **`[mesh] min_tier`** — the lowest tier a turn may be routed at (`"standard"` or `"complex"`). A
   turn classified below it is routed as the floor tier; an explicit tier hint, an in-session tier
