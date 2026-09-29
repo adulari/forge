@@ -6,7 +6,13 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.16.1] - 2026-09-29
+
 ### Fixed
+- **Claude models the picker names only by alias now appear by id** (#1438). Claude Code 2.1.284
+  advertises the newest Opus and Sonnet only as `opus`/`sonnet`/`default`, resolving to
+  `claude-opus-5-5` and `claude-sonnet-5-5`; discovery kept the aliases and dropped the ids, so
+  neither reached `forge models` or `GET /v1/models`. Each entry's resolved id is now advertised too.
 - **Benchmark scores for new models, and for every model without an AA coding index.** Artificial
   Analysis publishes no coding index for 406 of its 665 rows, including Opus 5.5, GPT-6 Sol and
   GPT-6 Luna. Forge copied the intelligence index into the gap, and the two indices sit on
