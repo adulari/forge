@@ -3744,11 +3744,24 @@ mod tests {
 
     #[test]
     fn mesh_min_tier_parses_and_defaults_to_no_floor() {
-        let floored: Config = toml::from_str("[mesh]\nmodels = {}\nmin_tier = \"standard\"\n")
-            .expect("min_tier parses");
+        let floored: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+min_tier = "standard"
+"#,
+        )
+        .expect("min_tier parses");
         assert_eq!(floored.mesh.min_tier, Some(forge_types::TaskTier::Standard));
-        let plain: Config =
-            toml::from_str("[mesh]\nmodels = {}\n").expect("a config without min_tier parses");
+        let plain: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+"#,
+        )
+        .expect("a config without min_tier parses");
         assert_eq!(plain.mesh.min_tier, None);
         assert_eq!(Config::default().mesh.min_tier, None);
     }
