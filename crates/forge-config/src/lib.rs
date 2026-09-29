@@ -2671,7 +2671,7 @@ impl Default for Config {
                 bridge_mode: BridgeMode::default(),
                 bridge_lean: false,
                 bridge_mcp_external: true,
-            min_tier: None,
+                min_tier: None,
                 daily_budget_usd: None,
                 monthly_cap_usd: None,
                 weekly_budget_usd: None,
