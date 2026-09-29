@@ -302,12 +302,7 @@ impl CliKind {
             if let Some(initialization) =
                 probe_claude_initialization_response(self.default_binary()).await
             {
-                let advertised = initialization
-                    .models
-                    .into_iter()
-                    .map(|model| model.value)
-                    .filter(|value| value != "default" && !value.is_empty())
-                    .collect::<Vec<_>>();
+                let advertised = claude_advertised_models(initialization.models);
                 if !advertised.is_empty() {
                     // The initialize response is the picker's list, not the CLI's full
                     // inventory: claude 2.1.257 advertises `opus[1m]`, `sonnet`, `haiku` and
@@ -692,6 +687,27 @@ fn windows_cmd_line(program: &std::path::Path, args: &[String]) -> String {
         inner.push_str(&q(a));
     }
     format!("\"{inner}\"")
+}
+
+/// The ids an initialize response makes routable: each picker entry's own value, then the full id
+/// it resolves to. The picker names the newest models only by alias — claude 2.1.284 advertises
+/// `opus` → `claude-opus-5-5` and `sonnet` → `claude-sonnet-5-5` — so without the resolved ids a
+/// model shipped to subscribers never appears in the catalog under its own name. `default` is
+/// dropped as a value but its resolved id is kept.
+fn claude_advertised_models(models: Vec<ClaudeModelCapability>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for model in &models {
+        if model.value != "default" && !model.value.is_empty() && !out.contains(&model.value) {
+            out.push(model.value.clone());
+        }
+    }
+    for model in models {
+        let resolved = model.resolved_model;
+        if !resolved.is_empty() && !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    out
 }
 
 /// Union of what the initialize protocol advertised and what `--help` documents, advertised
@@ -3655,6 +3671,38 @@ mod tests {
         assert_eq!(
             merge_claude_aliases(vec![], &documented),
             ["fable", "opus", "sonnet"]
+        );
+    }
+
+    /// claude 2.1.284's picker: the newest Opus and Sonnet exist only behind `opus`/`sonnet`
+    /// (and `default`), so their full ids must come from `resolvedModel`.
+    #[test]
+    fn resolved_ids_of_picker_aliases_are_advertised() {
+        let entry = |value: &str, resolved: &str| ClaudeModelCapability {
+            value: value.into(),
+            resolved_model: resolved.into(),
+            ..Default::default()
+        };
+        let models = vec![
+            entry("default", "claude-opus-5-5"),
+            entry("opus", "claude-opus-5-5"),
+            entry("claude-fable-5-1[1m]", "claude-fable-5-1"),
+            entry("sonnet", "claude-sonnet-5-5"),
+            entry("haiku", "claude-haiku-4-5-20251001"),
+            entry("", ""),
+        ];
+        assert_eq!(
+            claude_advertised_models(models),
+            [
+                "opus",
+                "claude-fable-5-1[1m]",
+                "sonnet",
+                "haiku",
+                "claude-opus-5-5",
+                "claude-fable-5-1",
+                "claude-sonnet-5-5",
+                "claude-haiku-4-5-20251001",
+            ]
         );
     }
 
