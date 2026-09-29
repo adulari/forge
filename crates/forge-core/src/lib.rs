@@ -1593,6 +1593,14 @@ impl RoutingInspector {
     }
 }
 
+fn tier_rank(tier: TaskTier) -> u8 {
+    match tier {
+        TaskTier::Trivial => 0,
+        TaskTier::Standard => 1,
+        TaskTier::Complex => 2,
+    }
+}
+
 /// One interactive session. Construct with [`Session::start`], then drive [`Session::run_turn`].
 pub struct Session {
     id: String,
@@ -2745,6 +2753,36 @@ impl Session {
                     )
                     .await
             }
+        };
+        // `[mesh] min_tier`: a turn classified below the floor is routed as the floor tier. An
+        // explicit tier hint or in-session tier pin is the user's own choice and is left alone; a
+        // pinned model keeps its model and only takes the floor's tier (and so its tool surface).
+        let decision = match self.config.mesh.min_tier {
+            Some(floor) if tier_rank(decision.tier) < tier_rank(floor) => {
+                if self.pinned_model.is_none() && effective_tier.is_none() {
+                    let mut floored = self
+                        .router
+                        .route_contextual(
+                            prompt,
+                            has_images,
+                            budget,
+                            &health,
+                            &quota,
+                            Some(floor),
+                            self.pinned_effort,
+                            &self.project,
+                            &routing_context,
+                        )
+                        .await;
+                    floored.tier = floor;
+                    floored
+                } else {
+                    let mut floored = decision;
+                    floored.tier = floor;
+                    floored
+                }
+            }
+            _ => decision,
         };
         // BACKSTOP: a pin is a contract, and it was being honoured per-call-site rather than in one
         // place — so any routing path that forgot it (the architect plan phase builds its failover
@@ -5967,6 +6005,12 @@ mod tests {
             names.windows(2).all(|pair| pair[0] <= pair[1]),
             "advertised tools must be deterministic for cross-process prompt caching: {names:?}"
         );
+    }
+
+    #[test]
+    fn tier_rank_orders_trivial_below_standard_below_complex() {
+        assert!(tier_rank(TaskTier::Trivial) < tier_rank(TaskTier::Standard));
+        assert!(tier_rank(TaskTier::Standard) < tier_rank(TaskTier::Complex));
     }
 
     #[test]

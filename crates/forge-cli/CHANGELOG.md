@@ -6,6 +6,14 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`[mesh] min_tier`** — the lowest tier a turn may be routed at (`"standard"` or `"complex"`). A
+  turn classified below it is routed as the floor tier; an explicit tier hint, an in-session tier
+  pin, or a pinned model keep their own choice (a pinned model still takes the floor's tier, and so
+  its tool surface). For embedders whose every question needs tools: a `trivial` turn went to the
+  cheapest models with no tools unless its prompt named a workspace action, so "how many habits do
+  I have" was answered "I'll check your habits now" with nothing to call.
+
 ## [2.16.1] - 2026-09-29
 
 ### Fixed

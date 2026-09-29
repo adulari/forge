@@ -1815,6 +1815,14 @@ pub struct MeshConfig {
     /// tools remain available either way. The environment override wins.
     #[serde(default = "default_true")]
     pub bridge_mcp_external: bool,
+    /// The lowest tier a turn may be routed at (`"standard"` or `"complex"`; unset = no floor).
+    /// A turn the classifier rates below it is routed as the floor tier instead. For embedders
+    /// whose every question needs tools and a capable model: a `trivial` turn is routed to the
+    /// cheapest models and gets no tool surface unless its prompt names a workspace action, so an
+    /// assistant asked "how many habits do I have" answered "I'll check your habits now" and
+    /// stopped, having nothing to call.
+    #[serde(default)]
+    pub min_tier: Option<forge_types::TaskTier>,
     /// Enforcement behavior once a cap is reached.
     #[serde(default)]
     pub budget: BudgetBehavior,
@@ -2663,6 +2671,7 @@ impl Default for Config {
                 bridge_mode: BridgeMode::default(),
                 bridge_lean: false,
                 bridge_mcp_external: true,
+                min_tier: None,
                 daily_budget_usd: None,
                 monthly_cap_usd: None,
                 weekly_budget_usd: None,
@@ -3731,6 +3740,30 @@ mod tests {
                 .filter(|c| *c > 0),
             None
         );
+    }
+
+    #[test]
+    fn mesh_min_tier_parses_and_defaults_to_no_floor() {
+        let floored: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+min_tier = "standard"
+"#,
+        )
+        .expect("min_tier parses");
+        assert_eq!(floored.mesh.min_tier, Some(forge_types::TaskTier::Standard));
+        let plain: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+"#,
+        )
+        .expect("a config without min_tier parses");
+        assert_eq!(plain.mesh.min_tier, None);
+        assert_eq!(Config::default().mesh.min_tier, None);
     }
 
     #[test]
