@@ -387,6 +387,8 @@ Rules:\n\
             .and_then(|set| set.first().cloned());
         if routed.pinned || session_pin.is_some() {
             let own = session_pin.unwrap_or_else(|| routed.model.clone());
+            // A side call that already failed permanently (model_not_found, auth, 402) is benched
+            // in the shared store; without this filter the same doomed call repeated every turn.
             let health = self.provider_readiness().health;
             self.config
                 .candidates_for(TaskTier::Trivial)

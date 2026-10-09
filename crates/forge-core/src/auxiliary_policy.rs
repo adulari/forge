@@ -3,6 +3,7 @@
 //! This owner keeps related session invariants together behind the Session program.
 
 use super::*;
+use crate::compaction_policy::record_model_failure_in;
 
 fn report_auxiliary_persistence_failure(
     session_id: &str,
@@ -82,6 +83,7 @@ prompt text, nothing else.";
         let router = self.router.clone();
         let id = self.id.clone();
         let config = self.config.clone();
+        let cooldown = std::time::Duration::from_secs(config.mesh.failover_cooldown_secs);
         let pinned_effort = self.pinned_effort;
         let project = self.project.clone();
         let user_snippet: String = prompt.chars().take(500).collect();
@@ -112,7 +114,7 @@ prompt text, nothing else.";
             ];
             let mut on_event = |_: StreamEvent| {};
             let completion_opts = Session::auxiliary_completion_options(&id, "memory");
-            let Ok(r) = provider
+            let r = match provider
                 .complete_with(
                     &decision.model,
                     &messages,
@@ -121,8 +123,12 @@ prompt text, nothing else.";
                     &mut on_event,
                 )
                 .await
-            else {
-                return;
+            {
+                Ok(r) => r,
+                Err(error) => {
+                    record_model_failure_in(&store, &decision.model, &error, cooldown);
+                    return;
+                }
             };
             if let Err(error) =
                 store.record_side_call_usage_for(&id, "memory", Some(&decision.model), &r.usage)
@@ -254,14 +260,22 @@ prompt text, nothing else.";
         let provider = self.provider.clone();
         let store = self.store.clone();
         let id = self.id.clone();
+        let cooldown = std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
         match self.presenter.recap_sink() {
             Some(mut sink) => {
                 tokio::spawn(async move {
                     let mut on_event = |_: StreamEvent| {};
                     let completion_opts = Session::auxiliary_completion_options(&id, "recap");
-                    if let Ok(r) = provider
+                    let r = match provider
                         .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                         .await
+                    {
+                        Ok(r) => r,
+                        Err(error) => {
+                            record_model_failure_in(&store, &model, &error, cooldown);
+                            return;
+                        }
+                    };
                     {
                         if let Err(error) =
                             store.record_side_call_usage_for(&id, "recap", Some(&model), &r.usage)
@@ -282,9 +296,16 @@ prompt text, nothing else.";
             None => {
                 let mut on_event = |_: StreamEvent| {};
                 let completion_opts = Session::auxiliary_completion_options(&id, "recap");
-                if let Ok(r) = provider
+                let r = match provider
                     .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                     .await
+                {
+                    Ok(r) => r,
+                    Err(error) => {
+                        record_model_failure_in(&store, &model, &error, cooldown);
+                        return;
+                    }
+                };
                 {
                     if let Err(error) =
                         store.record_side_call_usage_for(&id, "recap", Some(&model), &r.usage)
@@ -366,15 +387,23 @@ prompt text, nothing else.";
         let provider = self.provider.clone();
         let store = self.store.clone();
         let id = self.id.clone();
+        let cooldown = std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
         let prev_prompt = prompt.to_string();
         match self.presenter.recap_sink() {
             Some(mut sink) => {
                 tokio::spawn(async move {
                     let mut on_event = |_: StreamEvent| {};
                     let completion_opts = Session::auxiliary_completion_options(&id, "suggest");
-                    if let Ok(r) = provider
+                    let r = match provider
                         .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                         .await
+                    {
+                        Ok(r) => r,
+                        Err(error) => {
+                            record_model_failure_in(&store, &model, &error, cooldown);
+                            return;
+                        }
+                    };
                     {
                         if let Err(error) =
                             store.record_side_call_usage_for(&id, "suggest", Some(&model), &r.usage)
@@ -395,9 +424,16 @@ prompt text, nothing else.";
             None => {
                 let mut on_event = |_: StreamEvent| {};
                 let completion_opts = Session::auxiliary_completion_options(&id, "suggest");
-                if let Ok(r) = provider
+                let r = match provider
                     .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                     .await
+                {
+                    Ok(r) => r,
+                    Err(error) => {
+                        record_model_failure_in(&store, &model, &error, cooldown);
+                        return;
+                    }
+                };
                 {
                     if let Err(error) =
                         store.record_side_call_usage_for(&id, "suggest", Some(&model), &r.usage)
@@ -501,6 +537,14 @@ prompt text, nothing else.";
             stream_with_idle_timeout(completion, &activity, None, idle),
         )
         .await;
+        if let Ok(Err(error)) = &response {
+            record_model_failure_in(
+                &self.store,
+                &model,
+                error,
+                std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs),
+            );
+        }
         if let Ok(Ok(r)) = response {
             if let Err(error) = self.store.record_side_call_usage_for(
                 &self.id,

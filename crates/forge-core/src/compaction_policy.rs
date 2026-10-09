@@ -3,6 +3,7 @@
 //! This owner keeps related session invariants together behind the Session program.
 
 use super::*;
+pub(crate) use crate::model_failure_record::record_model_failure_in;
 
 /// Minimum age of a prior auth failure before it corroborates a new one into a provider-wide
 /// exclusion. Sized to separate a repeat from a burst of concurrent turns, not to be a cooldown.
@@ -53,7 +54,22 @@ pub(crate) fn auth_failure_scope(
     }
 }
 
-/// Persist one auth failure against `store` at the narrowest scope its evidence supports.
+/// Persist an authentication failure at the narrowest scope the evidence supports.
+///
+/// One failed turn is not proof that a subscription's credential is dead. A CLI bridge that
+/// exits abnormally for an unrelated reason still prints something auth-shaped on stderr, and
+/// that is enough to reach here — which is how a healthy claude-cli subscription was benched
+/// provider-wide for 24 hours while `forge run --model claude-cli::sonnet` answered in four
+/// seconds. So the first failure benches only the MODEL, and provider scope waits for a repeat
+/// that is separated in time from the first by at least [`AUTH_ESCALATION_MIN_GAP`].
+///
+/// The gap matters as much as the repeat. Concurrent turns against one provider fail together
+/// within the same second, so a bare "has it failed before?" would let a single burst of
+/// parallel sessions escalate exactly as before — which is what normal parallel use of Forge
+/// looks like.
+///
+/// A first failure is narrowed further still when the provider COMPLETED a turn within
+/// [`AUTH_RECENT_SUCCESS_WINDOW`].
 ///
 /// A free function over the store rather than a `Session` method so the observed sequence
 /// (success → one "not logged in" → success) is testable without a live session.
@@ -376,39 +392,7 @@ impl Session {
         err: &forge_provider::ProviderError,
         default_cooldown: std::time::Duration,
     ) {
-        // An over-window request is a statement about the payload, not about the model: the same
-        // model answers fine the moment we send less. Benching for it sidelines a healthy model for
-        // a full cooldown and, because the auxiliary chains are trivial-tier, walks the identical
-        // oversized payload into the next cheap model and benches that one too — so the damage
-        // outlives the request that caused it and degrades routing for ordinary turns afterwards.
-        if err.is_context_overflow() {
-            return;
-        }
-        let detail = err.to_string();
-        let reason = model_health_reason(err, &detail);
-        if err.is_auth() {
-            // The store prefixes the class itself ("excluded: auth failed: …"), so what goes in
-            // here must be the EVIDENCE — the provider's / CLI's own text — not the class label
-            // again. A row reading "auth failed: auth failed" told the mobile app that Opus was
-            // benched for auth while `claude --model opus -p` answered fine on the same login,
-            // and left nothing to diagnose it with (2026-09-02).
-            let detail = detail.trim();
-            let detail: String = detail.chars().take(240).collect();
-            self.record_auth_failure(
-                model,
-                if detail.is_empty() {
-                    err.reason()
-                } else {
-                    &detail
-                },
-            );
-        } else if err.is_permanent() {
-            let _ = self.store.exclude_model(model, reason);
-        } else {
-            let _ = self
-                .store
-                .bench_for(model, err.cooldown(default_cooldown), reason);
-        }
+        record_model_failure_in(&self.store, model, err, default_cooldown);
     }
 }
 
@@ -428,29 +412,6 @@ pub(crate) fn model_health_reason<'a>(
 }
 
 impl Session {
-    /// Persist an authentication failure at the narrowest scope the evidence supports.
-    ///
-    /// One failed turn is not proof that a subscription's credential is dead. A CLI bridge that
-    /// exits abnormally for an unrelated reason still prints something auth-shaped on stderr, and
-    /// that is enough to reach here — which is how a healthy claude-cli subscription was benched
-    /// provider-wide for 24 hours while `forge run --model claude-cli::sonnet` answered in four
-    /// seconds. So the first failure benches only the MODEL, and provider scope waits for a repeat
-    /// that is separated in time from the first by at least [`AUTH_ESCALATION_MIN_GAP`].
-    ///
-    /// The gap matters as much as the repeat. Concurrent turns against one provider fail together
-    /// within the same second, so a bare "has it failed before?" would let a single burst of
-    /// parallel sessions escalate exactly as before — which is what normal parallel use of Forge
-    /// looks like.
-    ///
-    /// A first failure is narrowed further still when the provider COMPLETED a turn within
-    /// [`AUTH_RECENT_SUCCESS_WINDOW`]: see [`record_auth_failure_in`].
-    fn record_auth_failure(&self, model: &str, reason: &str) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs() as i64);
-        record_auth_failure_in(&self.store, model, reason, now);
-    }
-
     /// Token budget for ONE compaction request against `model`: its window, minus the standing
     /// [`COMPACT_SYSTEM`] prompt, minus room for the summary it has to write back, with the same 5%
     /// headroom [`Self::transcript_for`] keeps for the divergence between our o200k count and the
