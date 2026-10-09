@@ -5,7 +5,7 @@ use forge_browser::attach::{
     attach_launch_args, default_attach_profile, discover, find_browsers, normalize_endpoint,
 };
 
-use crate::cli::args::BrowserOp;
+use crate::browser_args::BrowserOp;
 
 fn data_home() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")

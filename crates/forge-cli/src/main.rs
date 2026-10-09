@@ -61,6 +61,8 @@ mod benchmarks;
 mod blame;
 mod board;
 mod bridge_stats;
+#[path = "cli/browser_args.rs"]
+mod browser_args;
 mod cli;
 mod context_windows;
 mod daemon_cwd;

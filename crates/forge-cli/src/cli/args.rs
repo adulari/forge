@@ -744,12 +744,8 @@ pub(crate) enum Command {
         #[arg(long, global = true)]
         global: bool,
     },
-    /// Drive a browser you are already logged into: `forge browser attach` starts one Forge can
-    /// attach to (docs/features/browser-attach.md).
-    Browser {
-        #[command(subcommand)]
-        op: BrowserOp,
-    },
+    #[command(subcommand, about = "Attach Forge to a logged-in browser")]
+    Browser(crate::browser_args::BrowserOp),
     /// Git worktrees — what they cost on disk, and reclaiming the ones that are safe to remove.
     Worktree {
         #[command(subcommand)]
@@ -1185,27 +1181,6 @@ pub(crate) enum ImportSource {
         /// Legacy alias for `--scope project` (hidden; kept for back-compat).
         #[arg(long, hide = true, conflicts_with = "scope")]
         project: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub(crate) enum BrowserOp {
-    /// Launch a Chromium-family browser with remote debugging on a dedicated, persistent Forge
-    /// profile (log in once), then print the URL to put in `[browser] attach`.
-    Attach {
-        /// Remote-debugging port.
-        #[arg(long, default_value_t = forge_browser::attach::DEFAULT_ATTACH_PORT)]
-        port: u16,
-        /// Profile directory (default: `<data dir>/forge/browser-attach-profile`). Never the
-        /// browser's default profile — Chrome 136+ refuses debugging there.
-        #[arg(long)]
-        profile: Option<std::path::PathBuf>,
-        /// Browser executable (default: first of Chrome, Chromium, Brave, Edge found).
-        #[arg(long)]
-        browser: Option<std::path::PathBuf>,
-        /// Print the command instead of launching it.
-        #[arg(long)]
-        print: bool,
     },
 }
 
