@@ -54,6 +54,10 @@ impl HeadlessPresenter {
 }
 
 impl Presenter for HeadlessPresenter {
+    fn consumes_suggestions(&self) -> bool {
+        false
+    }
+
     fn emit(&mut self, event: PresenterEvent) {
         match event {
             PresenterEvent::SessionStarted { id } => {

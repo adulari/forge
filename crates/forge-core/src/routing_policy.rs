@@ -387,10 +387,18 @@ Rules:\n\
             .and_then(|set| set.first().cloned());
         if routed.pinned || session_pin.is_some() {
             let own = session_pin.unwrap_or_else(|| routed.model.clone());
+            let health = self.provider_readiness().health;
             self.config
                 .candidates_for(TaskTier::Trivial)
                 .into_iter()
                 .filter(|m| !forge_mesh::catalog::is_subscription(m) || *m == own)
+                .filter(|m| {
+                    crate::auxiliary_candidates::usable_for_side_call(
+                        m,
+                        &health,
+                        self.catalog.as_ref(),
+                    )
+                })
                 .find(|m| forge_config::has_api_key(forge_config::provider_of(m)))
                 .unwrap_or(own)
         } else {
