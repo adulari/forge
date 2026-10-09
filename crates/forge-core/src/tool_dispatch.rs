@@ -356,7 +356,7 @@ impl Session {
         // on stdout rewrites the args before the tool runs. Inert when no hooks configured.
         if !self.config.hooks.is_empty() {
             let payload = serde_json::json!({
-                "tool": call.name, "args": effective_args, "cwd": self.workspace.display()
+                "tool": call.name, "args": effective_args, "cwd": self.workspace.display(), "session_id": self.id
             })
             .to_string();
             let outcome = hooks::run_hooks(
@@ -533,7 +533,24 @@ impl Session {
         }
 
         let (result, full, ok) = if allowed {
-            match tool.run_full(&effective_args).await {
+            let run = tool.run_full(&effective_args);
+            let outcome = if call.name == "shell"
+                && effective_args
+                    .get("background")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            {
+                // Only a job THIS call starts reports its exit to this session (see job_wake.rs).
+                let wake = self.job_wake.clone();
+                forge_tools::scope_job_exit_sink(
+                    std::sync::Arc::new(move |exit| wake.push(&exit)),
+                    run,
+                )
+                .await
+            } else {
+                run.await
+            };
+            match outcome {
                 Ok(out) => {
                     // Record what we wrote, so a later restore can warn on a manual edit.
                     if let Some(path) = &write_path {
@@ -631,7 +648,7 @@ impl Session {
         // tool result is already final; post hooks only surface notes, they don't change it.
         if !self.config.hooks.is_empty() {
             let payload =
-                serde_json::json!({ "tool": call.name, "args": call.args, "result": result, "ok": ok, "cwd": self.workspace.display() })
+                serde_json::json!({ "tool": call.name, "args": call.args, "result": result, "ok": ok, "cwd": self.workspace.display(), "session_id": self.id })
                     .to_string();
             let outcome = hooks::run_hooks(
                 &self.config.hooks,

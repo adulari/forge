@@ -85,6 +85,10 @@ pub struct Config {
     /// matching tool call.
     #[serde(default)]
     pub hooks: Vec<HookConfig>,
+    /// Max consecutive times `Stop` hooks may block a turn from ending before Forge forces it to
+    /// end (Claude Code caps this at 8). The count resets whenever a continuation runs a tool.
+    #[serde(default = "default_stop_hook_max_blocks")]
+    pub stop_hook_max_blocks: u32,
     /// Git integration settings (co-authoring, hook installation).
     #[serde(default)]
     pub git: GitConfig,
@@ -604,9 +608,12 @@ pub enum HookEvent {
     /// Just after context compaction completes. Observe-only. (Forge extension beyond CC, which
     /// only fires `PreCompact`.)
     PostCompact,
-    /// A turn finished — the agent stopped (Claude-Code `Stop`). Observe-only.
+    /// A turn is about to end (Claude-Code `Stop`). A hook that exits 2 or prints
+    /// `{"decision":"block","reason":…}` keeps the agent going with `reason` as its next
+    /// instruction, bounded by `stop_hook_max_blocks`.
     Stop,
-    /// A subagent finished (Claude-Code `SubagentStop`). Observe-only.
+    /// A subagent finished (Claude-Code `SubagentStop`). A block appends its reason to the
+    /// `spawn_agents` result the parent model reads.
     SubagentStop,
 }
 
@@ -672,6 +679,10 @@ pub struct HookConfig {
 
 fn default_hook_timeout() -> u64 {
     30
+}
+
+fn default_stop_hook_max_blocks() -> u32 {
+    8
 }
 
 /// Map a Forge tool name to its Claude-Code equivalent, so a CC hook matcher written against CC
@@ -2726,6 +2737,7 @@ impl Default for Config {
             lattice: LatticeConfig::default(),
             shell: ShellConfig::default(),
             hooks: Vec::new(),
+            stop_hook_max_blocks: default_stop_hook_max_blocks(),
             git: GitConfig::default(),
             lsp: LspConfig::default(),
             autofix: AutofixConfig::default(),

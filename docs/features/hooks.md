@@ -60,9 +60,57 @@ load-bearing events.
   MCP tool names use the `server__tool` namespace; the existing `matcher` comma-list
   already handles them (e.g. `matcher = "helm__create_task"`).
 
+**Shipped (Claude Code parity: blocking Stop, injected context, updatedInput, job wake-ups)**
+
+See "Claude Code compatibility" below. In short: `Stop` hooks can keep the agent going,
+`SessionStart` output is injected into the model's context, a CC `PreToolUse` hook's
+`updatedInput` rewrites the tool call, and a finished background job wakes the model.
+
 **Deferred**
 - Per-hook environment templating beyond the stdin JSON.
 - Other events: `notification`, `PostSessionCompact`.
+
+## Claude Code compatibility
+
+Hooks loaded from a Claude-Code-shaped `settings.json` (Forge's own `<config dir>/settings.json` and
+`./.forge/settings.json`) run in `cc_compat` mode: they get the CC stdin payload (`session_id`,
+`cwd`, `hook_event_name`, `tool_name`, `tool_input`, ...), start in the project directory with
+`CLAUDE_PROJECT_DIR` set, and their output is read with CC rules (exit 2 blocks, stderr is the
+reason). Bring your existing hooks over with `forge import claude --hooks` (opt-in; replaces only
+the `hooks` key of the destination file, so it is safe to re-run). Matchers use CC tool names:
+`Bash` matches `shell`, `Edit` matches `edit_file`, and so on.
+
+| Event | CC behaviour implemented |
+|---|---|
+| `Stop` | Exit 2, or `{"decision":"block","reason":"..."}`, or `hookSpecificOutput.additionalContext` keeps the agent going: the text is sent back as the next instruction (`[stop hook] ...`). Input has `stop_hook_active` (true once the turn is already a continuation) and `last_assistant_message`. `{"continue":false}` ends the turn and wins over another hook's block. Consecutive blocks are capped by `stop_hook_max_blocks` (config, default 8, as in CC); the count resets when a continuation runs a tool. A loop-guard halt, hard guard, or turn deadline is never overridden. Fires after Forge's own completion gates (auto-review, autofix, plan approval). |
+| `SubagentStop` | A block appends its reason to the `spawn_agents` result the parent model reads (CC re-drives the subagent itself; Forge has no subagent re-run, so the parent decides). |
+| `SessionStart` | Plain stdout and `hookSpecificOutput.additionalContext` are added to the model's context as a system message. Native (non-CC) hooks still just print. `source` is always `startup` (no resume/clear/compact distinction yet). |
+| `UserPromptSubmit` | `additionalContext` and plain stdout are appended to the prompt; `decision:"block"` / exit 2 blocks the turn. Forge appends to the prompt text (so it is visible in the transcript); CC keeps it out of sight. `sessionTitle` and `suppressOriginalPrompt` are ignored. |
+| `PreToolUse` | `permissionDecision:"deny"` or exit 2 blocks. `updatedInput` replaces the tool arguments (CC argument names are translated: `Bash` `command`/`timeout` ms/`run_in_background`, `Edit`/`Write`/`Read` `file_path`, `old_string`, `new_string`), before Forge's permission check, workspace-path validation and schema validation. `permissionDecision:"allow"` does NOT skip Forge's permission gate; `ask`/`defer` are ignored. `additionalContext` becomes a model hint. This is what `rtk hook claude` emits. |
+| `PostToolUse` | `additionalContext` becomes a model hint. A block degrades to a note. |
+
+Not implemented: `type: "prompt" | "agent" | "http"` hooks (skipped at load), `async`, `if`,
+`transcript_path` (always empty: Forge keeps its transcript in its store), `PostToolBatch`,
+`TaskCompleted` and the other newer CC events. `forge run "<prompt>"` (one-shot) does not fire
+`SessionStart` or `UserPromptSubmit`; the TUI, plain chat and daemon-hosted sessions do.
+
+### Background job wake-ups
+
+`shell` with `background:true` starts a job that outlives the call (see `shell_job`). When such a job
+exits on its own, the session that started it is told, so the model does not have to poll:
+
+- **Turn running:** a one-line notice (`[background job 4242 `npm run dev` exited 1]` plus the last
+  lines of its log, capped) joins the conversation at the next model step, through the same inbox
+  as a queued steer prompt (`inject_steers`).
+- **Session idle:** the surface starts a turn with the notice(s), checked every ~5 s and right after
+  each turn (TUI and daemon-hosted sessions, via the heartbeat check). Bursts within 1.5 s coalesce
+  into one turn, and at most 6 automatic turns run per 10 minutes; further notices wait for the
+  next user turn instead of being lost. At most 20 notices are queued (older ones are dropped and
+  counted).
+- Only jobs this session's model started are reported, and stopping a job yourself (`shell_job`
+  `stop`) is not news. Jobs started before a restart, or by another session, are not reported.
+- `forge mcp-serve` / bridged sessions and one-shot `forge run` do not auto-start turns (the process
+  has no idle loop); the notice is still delivered if a turn is running.
 
 ## Non-goals
 - Changing the agent loop, permission model, or tool contract. Hooks wrap `invoke_tool`; a

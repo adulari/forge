@@ -398,7 +398,7 @@ pub(crate) fn goal_stop_reason(
     }
 }
 
-/// Check for due session heartbeats and, if the session is idle with no turn already running,
+/// Check for due session heartbeats (and finished background-job notices) and, if the session is idle with no turn already running,
 /// deliver the claimed tick(s) as ordinary queued turns — the same FIFO a typed-while-busy prompt
 /// goes through, never injected mid-turn (docs/features/session-heartbeats.md). Shared by the
 /// interactive TUI loop and the daemon-hosted driver loop (`DriverState`), called both right after
@@ -427,7 +427,11 @@ pub(crate) fn try_deliver_due_heartbeats(
         let Ok(s) = session.try_lock() else {
             return Ok(false);
         };
-        forge_core::heartbeat::claim_due_heartbeat_prompts(&s.store, s.id())?
+        let mut due = forge_core::heartbeat::claim_due_heartbeat_prompts(&s.store, s.id())?;
+        // A background job the model started has exited while the session sat idle: wake the
+        // model with a coalesced, rate-limited notice (forge_core::job_wake).
+        due.extend(s.job_wake().claim_idle_prompt());
+        due
     };
     if due.is_empty() {
         return Ok(false);

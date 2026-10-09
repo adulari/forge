@@ -1,14 +1,16 @@
 //! Shell hooks (docs/features/hooks.md). Each `[[hooks]]` entry runs via the OS shell around
 //! tool calls and session lifecycle events. A `PreToolUse` hook that exits non-zero **blocks**
 //! the tool; a `UserPromptSubmit` hook can rewrite the user's prompt (stdout replaces it on
-//! exit 0) or block the turn (non-zero). Session hooks (`SessionStart`/`SessionEnd`) observe
-//! only. Hooks are time-bounded so a wedged hook can't hang the agent.
+//! exit 0) or block the turn (non-zero). `SessionStart` output can be injected as model context
+//! (CC-compat hooks); `SessionEnd` observes only. Hooks are time-bounded so a wedged hook can't hang the agent.
 
 use std::process::Stdio;
 use std::time::Duration;
 
 use forge_config::{HookConfig, HookEvent};
 use forge_types::truncate_ellipsis as truncate;
+
+use crate::hooks_cc::{cc_input_to_forge, parse_cc_output, to_cc_payload};
 use tokio::io::AsyncWriteExt;
 
 /// The combined effect of running the hooks that matched one tool call + event.
@@ -85,144 +87,37 @@ fn parse_hook_directive(stdout: &str, event: HookEvent) -> HookDirective {
     }
 }
 
-/// Translate Forge's native hook payload (`{tool, args, result?, ok?}` / `{prompt}`) into the
-/// Claude-Code stdin shape so a CC hook script reads the fields it expects (`tool_name`,
-/// `tool_input`, `tool_response`, `prompt`, `hook_event_name`, `cwd`, `session_id`,
-/// `transcript_path`). Best-effort: `session_id`/`transcript_path` are empty unless the caller
-/// supplied them — most CC hooks only read `tool_name`/`tool_input`, which always round-trip.
-fn to_cc_payload(forge_payload: &str, event: HookEvent, session_id: &str) -> String {
-    let v: serde_json::Value =
-        serde_json::from_str(forge_payload).unwrap_or(serde_json::Value::Null);
-    let cwd = v
-        .get("cwd")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.display().to_string())
-        })
-        .unwrap_or_default();
-    let mut obj = serde_json::Map::new();
-    obj.insert("session_id".into(), session_id.into());
-    obj.insert("transcript_path".into(), "".into());
-    obj.insert("cwd".into(), cwd.into());
-    obj.insert("hook_event_name".into(), event.cc_name().into());
-    if let Some(tool) = v.get("tool").and_then(|t| t.as_str()) {
-        obj.insert("tool_name".into(), tool.into());
-    }
-    if let Some(args) = v.get("args") {
-        obj.insert("tool_input".into(), args.clone());
-    }
-    if let Some(result) = v.get("result") {
-        obj.insert("tool_response".into(), result.clone());
-    }
-    if let Some(prompt) = v.get("prompt") {
-        obj.insert("prompt".into(), prompt.clone());
-    }
-    // Carry through any extra lifecycle fields (message, trigger, …) the caller already put in.
-    if let Some(map) = v.as_object() {
-        for (k, val) in map {
-            if !["tool", "args", "result", "ok", "prompt", "event", "cwd"].contains(&k.as_str()) {
-                obj.entry(k.clone()).or_insert_with(|| val.clone());
-            }
-        }
-    }
-    serde_json::Value::Object(obj).to_string()
-}
-
-/// What a Claude-Code hook's output asked for, after interpreting exit code + stdout/stderr.
-enum CcDecision {
-    /// Block the call/turn (exit 2, `decision:block`, or `permissionDecision:deny`).
-    Block(String),
-    /// Approve/allow with no change (`decision:approve`, `permissionDecision:allow`).
-    Noop,
-    /// Inject this string as model-visible context (`additionalContext` / `hookSpecificOutput`).
-    Context(String),
-    /// Surface this text as a user note (plain stdout, or an unrecognised JSON shape).
-    Note(String),
-}
-
-/// Interpret a Claude-Code hook's result (CC protocol): exit-code 2 blocks (stderr = reason);
-/// otherwise parse stdout for `{"decision":"block|approve","reason":…}`, a `hookSpecificOutput`
-/// object (`permissionDecision` / `additionalContext`), or a top-level `additionalContext`. Plain
-/// non-JSON stdout becomes a note. Empty stdout + exit 0 is a clean no-op.
-fn parse_cc_output(code: i32, stdout: &str, stderr: &str) -> CcDecision {
-    if code == 2 {
-        let err = stderr.trim();
-        let reason = if !err.is_empty() {
-            err
-        } else if !stdout.trim().is_empty() {
-            stdout.trim()
-        } else {
-            "blocked by hook (exit 2)"
-        };
-        return CcDecision::Block(truncate(reason, 800));
-    }
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        return CcDecision::Noop;
-    }
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-        return CcDecision::Note(truncate(trimmed, 800));
-    };
-    if let Some(decision) = v.get("decision").and_then(|d| d.as_str()) {
-        match decision {
-            "block" => {
-                let reason = v
-                    .get("reason")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("blocked by hook");
-                return CcDecision::Block(truncate(reason, 800));
-            }
-            "approve" | "allow" => return CcDecision::Noop,
-            _ => {}
-        }
-    }
-    if let Some(hso) = v.get("hookSpecificOutput") {
-        if hso.get("permissionDecision").and_then(|d| d.as_str()) == Some("deny") {
-            let reason = hso
-                .get("permissionDecisionReason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("denied by hook");
-            return CcDecision::Block(truncate(reason, 800));
-        }
-        if let Some(ctx) = hso.get("additionalContext").and_then(|c| c.as_str()) {
-            if !ctx.trim().is_empty() {
-                return CcDecision::Context(truncate(ctx, 2000));
-            }
-        }
-    }
-    if let Some(ctx) = v.get("additionalContext").and_then(|c| c.as_str()) {
-        if !ctx.trim().is_empty() {
-            return CcDecision::Context(truncate(ctx, 2000));
-        }
-    }
-    CcDecision::Note(truncate(trimmed, 800))
-}
-
 /// Run one CC-compat hook and fold its decision into `outcome`. Returns `true` if the call should
 /// be blocked + short-circuited (PreToolUse only; PostToolUse downgrades a block to a note).
+/// `updatedInput` replaces the tool's args (PreToolUse), translated from Claude-Code names.
 async fn run_cc_hook(
     h: &HookConfig,
     event: HookEvent,
+    tool: &str,
     payload: &str,
     outcome: &mut HookOutcome,
 ) -> bool {
     let cc_payload = to_cc_payload(payload, event, "");
     match run_one(h, &cc_payload).await {
-        Ok((code, stdout, stderr)) => match parse_cc_output(code, &stdout, &stderr) {
-            CcDecision::Block(reason) => {
+        Ok((code, stdout, stderr)) => {
+            let out = parse_cc_output(code, &stdout, &stderr);
+            if let Some(reason) = out.block {
                 if event == HookEvent::PreToolUse {
                     outcome.blocked = Some(reason);
                     return true;
                 }
                 outcome.notes.push(format!("⎇ hook: {reason}"));
             }
-            CcDecision::Context(ctx) => outcome.injected_context.push(ctx),
-            CcDecision::Note(text) => outcome.notes.push(format!("⎇ hook: {text}")),
-            CcDecision::Noop => {}
-        },
+            if event == HookEvent::PreToolUse {
+                if let Some(input) = out.updated_input {
+                    outcome.rewritten_args = Some(cc_input_to_forge(tool, &input));
+                }
+            }
+            outcome.injected_context.extend(out.context);
+            if let Some(text) = out.note {
+                outcome.notes.push(format!("⎇ hook: {text}"));
+            }
+        }
         Err(e) => outcome.notes.push(format!("⎇ hook error: {e}")),
     }
     false
@@ -242,7 +137,7 @@ pub async fn run_hooks(
     let payload = payload.to_string();
     for h in hooks.iter().filter(|h| h.event == event && h.matches(tool)) {
         if h.cc_compat {
-            if run_cc_hook(h, event, &payload, &mut outcome).await {
+            if run_cc_hook(h, event, tool, &payload, &mut outcome).await {
                 break;
             }
             continue;
@@ -317,13 +212,15 @@ pub async fn run_prompt_hooks_in(
             // the prompt the way a native prompt hook does).
             let cc_payload = to_cc_payload(&payload, HookEvent::UserPromptSubmit, "");
             match run_one(h, &cc_payload).await {
-                Ok((code, stdout, stderr)) => match parse_cc_output(code, &stdout, &stderr) {
-                    CcDecision::Block(reason) => return Err(reason),
-                    CcDecision::Context(ctx) | CcDecision::Note(ctx) => {
+                Ok((code, stdout, stderr)) => {
+                    let out = parse_cc_output(code, &stdout, &stderr);
+                    if let Some(reason) = out.block {
+                        return Err(reason);
+                    }
+                    for ctx in out.context.into_iter().chain(out.note) {
                         current = format!("{current}\n\n{ctx}");
                     }
-                    CcDecision::Noop => {}
-                },
+                }
                 Err(e) => eprintln!("⎇ hook error: {e}"),
             }
             continue;
@@ -358,14 +255,18 @@ pub async fn run_prompt_hooks(hooks: &[HookConfig], prompt: &str) -> Result<Stri
     run_prompt_hooks_in(hooks, prompt, None).await
 }
 
-/// Run session lifecycle hooks (`session_start` / `session_end`). Observe-only — exit code
-/// is advisory, output is printed to stderr as a note.
+/// Run session lifecycle hooks (`session_start` / `session_end`). Exit code is advisory.
+///
+/// Returns the context a `SessionStart` hook asked to put in front of the model, for the caller to
+/// inject (`Session::inject_hook_context`). Claude-Code semantics apply to `cc_compat` hooks: plain
+/// stdout and `hookSpecificOutput.additionalContext` are context, not a visible note, and the hook
+/// gets the CC payload (`hook_event_name`, `source`). Native hooks keep printing stdout to stderr.
 pub async fn run_session_hooks_in(
     hooks: &[HookConfig],
     event: HookEvent,
     session_id: &str,
     cwd: Option<&std::path::Path>,
-) {
+) -> Vec<String> {
     debug_assert!(
         matches!(event, HookEvent::SessionStart | HookEvent::SessionEnd),
         "run_session_hooks called with non-session event"
@@ -373,16 +274,29 @@ pub async fn run_session_hooks_in(
     let event_str = match event {
         HookEvent::SessionStart => "session_start",
         HookEvent::SessionEnd => "session_end",
-        _ => return,
+        _ => return Vec::new(),
     };
     let payload = serde_json::json!({
         "session_id": session_id,
         "event": event_str,
         "cwd": cwd.map(|cwd| cwd.display().to_string()),
+        "source": "startup",
     })
     .to_string();
+    let mut context = Vec::new();
     for h in hooks.iter().filter(|h| h.event == event) {
-        match run_one(h, &payload).await {
+        let sent = if h.cc_compat {
+            to_cc_payload(&payload, event, session_id)
+        } else {
+            payload.clone()
+        };
+        match run_one(h, &sent).await {
+            Ok((code, stdout, stderr)) if h.cc_compat => {
+                let out = parse_cc_output(code, &stdout, &stderr);
+                if event == HookEvent::SessionStart {
+                    context.extend(out.context.into_iter().chain(out.note));
+                }
+            }
             Ok((_, stdout, _)) => {
                 let out = stdout.trim();
                 if !out.is_empty() {
@@ -392,6 +306,7 @@ pub async fn run_session_hooks_in(
             Err(e) => eprintln!("⎇ hook error: {e}"),
         }
     }
+    context
 }
 
 /// The combined effect of running lifecycle hooks (`notification`, `pre_compact`, `post_compact`,
@@ -399,8 +314,11 @@ pub async fn run_session_hooks_in(
 #[derive(Debug, Default)]
 pub struct LifecycleOutcome {
     /// `Some(reason)` if a hook asked to block (exit 2 / `decision:block`). For `stop`/`subagent_stop`
-    /// this is the "keep going, don't stop yet" signal; the caller decides whether to honor it.
+    /// this is the "keep going, don't stop yet" signal, and a bare `additionalContext` counts too
+    /// (Claude Code continues the conversation with it); the caller decides whether to honor it.
     pub blocked: Option<String>,
+    /// A hook printed `{"continue":false}`: end now, overriding any other hook's block.
+    pub halt: bool,
     /// Lines to surface to the user (hook stdout / decision reasons).
     pub notes: Vec<String>,
 }
@@ -409,8 +327,8 @@ pub struct LifecycleOutcome {
 /// `PostCompact`, `Stop`, `SubagentStop`. `fields` are merged into the stdin payload (e.g.
 /// `{"message":…}` for a notification, `{"trigger":…}` for compaction). Native hooks receive
 /// `{session_id, event, …fields}`; CC-compat hooks receive the CC shape with `hook_event_name`.
-/// Observe-by-default: output is collected as notes; a block decision is reported but acting on it
-/// is left to the caller (compaction/turn-stop continue regardless in this MVP).
+/// Output is collected as notes; acting on `blocked` is the caller's job (only `Stop` and
+/// `SubagentStop` do, see `stop_hook.rs`).
 pub async fn run_lifecycle_hooks(
     hooks: &[HookConfig],
     event: HookEvent,
@@ -428,6 +346,7 @@ pub async fn run_lifecycle_hooks(
         }
     }
     let native_payload = serde_json::Value::Object(base).to_string();
+    let continues = matches!(event, HookEvent::Stop | HookEvent::SubagentStop);
 
     for h in hooks.iter().filter(|h| h.event == event) {
         let payload = if h.cc_compat {
@@ -436,18 +355,21 @@ pub async fn run_lifecycle_hooks(
             native_payload.clone()
         };
         match run_one(h, &payload).await {
-            Ok((code, stdout, stderr)) => match parse_cc_output(code, &stdout, &stderr) {
-                CcDecision::Block(reason) => {
+            Ok((code, stdout, stderr)) => {
+                let out = parse_cc_output(code, &stdout, &stderr);
+                outcome.halt |= out.halt;
+                if let Some(reason) = out.block {
                     outcome.notes.push(format!("⎇ hook: {reason}"));
-                    if outcome.blocked.is_none() {
-                        outcome.blocked = Some(reason);
-                    }
-                }
-                CcDecision::Context(ctx) | CcDecision::Note(ctx) => {
+                    outcome.blocked.get_or_insert(reason);
+                } else if let (true, Some(ctx)) = (continues, &out.context) {
+                    outcome.blocked.get_or_insert_with(|| ctx.clone());
+                } else if let Some(ctx) = out.context {
                     outcome.notes.push(format!("⎇ hook: {ctx}"));
                 }
-                CcDecision::Noop => {}
-            },
+                if let Some(text) = out.note {
+                    outcome.notes.push(format!("⎇ hook: {text}"));
+                }
+            }
             Err(e) => outcome.notes.push(format!("⎇ hook error: {e}")),
         }
     }
@@ -461,15 +383,29 @@ fn hook_shell() -> (&'static str, &'static str) {
     ("sh", "-c")
 }
 
-pub async fn run_session_hooks(hooks: &[HookConfig], event: HookEvent, session_id: &str) {
-    run_session_hooks_in(hooks, event, session_id, None).await;
+pub async fn run_session_hooks(
+    hooks: &[HookConfig],
+    event: HookEvent,
+    session_id: &str,
+) -> Vec<String> {
+    run_session_hooks_in(hooks, event, session_id, None).await
 }
 
 async fn run_one(h: &HookConfig, payload: &str) -> Result<(i32, String, String), String> {
     let (sh, sh_flag) = hook_shell();
-    let mut child = tokio::process::Command::new(sh)
-        .arg(sh_flag)
-        .arg(&h.command)
+    let mut cmd = tokio::process::Command::new(sh);
+    cmd.arg(sh_flag).arg(&h.command);
+    if h.cc_compat {
+        // Claude-Code scripts expect to start in the project and find it in CLAUDE_PROJECT_DIR.
+        let project = serde_json::from_str::<serde_json::Value>(payload)
+            .ok()
+            .and_then(|v| v.get("cwd").and_then(|c| c.as_str()).map(String::from))
+            .filter(|dir| std::path::Path::new(dir).is_dir());
+        if let Some(dir) = project {
+            cmd.env("CLAUDE_PROJECT_DIR", &dir).current_dir(dir);
+        }
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -860,7 +796,7 @@ mod tests {
             joined.contains("\"hook_event_name\":\"PreToolUse\""),
             "{joined}"
         );
-        assert!(joined.contains("\"tool_name\":\"shell\""), "{joined}");
+        assert!(joined.contains("\"tool_name\":\"Bash\""), "{joined}");
         assert!(joined.contains("\"tool_input\""), "{joined}");
     }
 
@@ -924,5 +860,105 @@ mod tests {
         let hooks = vec![cc_hook(HookEvent::Stop, cmd)];
         let o = run_lifecycle_hooks(&hooks, HookEvent::Stop, "sess-1", serde_json::json!({})).await;
         assert_eq!(o.blocked.as_deref(), Some("stay"));
+    }
+
+    // --- Claude-Code parity: updatedInput, SessionStart / UserPromptSubmit context ---
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn cc_updated_input_becomes_rewritten_args_in_forge_names() {
+        let hooks = vec![cc_hook(
+            HookEvent::PreToolUse,
+            "echo '{\"hookSpecificOutput\":{\"updatedInput\":{\"file_path\":\"b.rs\",\"old_string\":\"x\",\"new_string\":\"y\"}}}'",
+        )];
+        let o = run_hooks(&hooks, HookEvent::PreToolUse, "edit_file", "{}").await;
+        assert_eq!(
+            o.rewritten_args.unwrap(),
+            serde_json::json!({"path":"b.rs","old":"x","new":"y"})
+        );
+        assert!(o.notes.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn cc_updated_input_is_ignored_outside_pretooluse() {
+        let hooks = vec![cc_hook(
+            HookEvent::PostToolUse,
+            "echo '{\"hookSpecificOutput\":{\"updatedInput\":{\"command\":\"x\"}}}'",
+        )];
+        let o = run_hooks(&hooks, HookEvent::PostToolUse, "shell", "{}").await;
+        assert!(o.rewritten_args.is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn cc_session_start_stdout_and_additional_context_are_returned_as_context() {
+        let plain = cc_hook(HookEvent::SessionStart, "echo 'be terse'");
+        let json = cc_hook(
+            HookEvent::SessionStart,
+            "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"branch: main\"}}'",
+        );
+        let native = hook(HookEvent::SessionStart, "echo 'native stays a note'");
+        let got =
+            run_session_hooks_in(&[plain, json, native], HookEvent::SessionStart, "sid", None)
+                .await;
+        assert_eq!(got, vec!["be terse", "branch: main"]);
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn cc_session_hook_gets_the_cc_payload_and_project_dir() {
+        let dir = std::env::temp_dir().join(format!("forge-sess-cc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = cc_hook(
+            HookEvent::SessionStart,
+            "printf '%s|%s' \"$CLAUDE_PROJECT_DIR\" \"$(cat)\"",
+        );
+        let got = run_session_hooks_in(&[h], HookEvent::SessionStart, "sid-9", Some(&dir)).await;
+        let text = &got[0];
+        assert!(text.starts_with(&dir.display().to_string()), "{text}");
+        assert!(
+            text.contains("\"hook_event_name\":\"SessionStart\""),
+            "{text}"
+        );
+        assert!(text.contains("\"session_id\":\"sid-9\""), "{text}");
+        assert!(text.contains("\"source\":\"startup\""), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn cc_user_prompt_additional_context_is_appended_not_replacing() {
+        let hooks = vec![cc_hook(
+            HookEvent::UserPromptSubmit,
+            "echo '{\"hookSpecificOutput\":{\"additionalContext\":\"extra\"}}'",
+        )];
+        let got = run_prompt_hooks(&hooks, "hello").await.unwrap();
+        assert_eq!(got, "hello\n\nextra");
+    }
+
+    #[tokio::test]
+    async fn stop_additional_context_counts_as_a_continuation_and_continue_false_halts() {
+        #[cfg(not(windows))]
+        {
+            let hooks = vec![cc_hook(
+                HookEvent::Stop,
+                "echo '{\"hookSpecificOutput\":{\"additionalContext\":\"keep going\"}}'",
+            )];
+            let o = run_lifecycle_hooks(&hooks, HookEvent::Stop, "s", serde_json::json!({})).await;
+            assert_eq!(o.blocked.as_deref(), Some("keep going"));
+            let hooks = vec![cc_hook(HookEvent::Stop, "echo '{\"continue\":false}'")];
+            let o = run_lifecycle_hooks(&hooks, HookEvent::Stop, "s", serde_json::json!({})).await;
+            assert!(o.halt && o.blocked.is_none());
+            // Non-stop events never turn context into a block.
+            let hooks = vec![cc_hook(
+                HookEvent::Notification,
+                "echo '{\"additionalContext\":\"fyi\"}'",
+            )];
+            let o =
+                run_lifecycle_hooks(&hooks, HookEvent::Notification, "s", serde_json::json!({}))
+                    .await;
+            assert!(o.blocked.is_none());
+        }
     }
 }
