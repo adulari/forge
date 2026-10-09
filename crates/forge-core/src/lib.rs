@@ -45,6 +45,7 @@ pub mod dispatch;
 pub mod duel;
 mod exact_effort;
 mod failure_verdict;
+mod final_answer;
 pub mod fleet;
 pub(crate) mod git_hygiene;
 pub mod heartbeat;
@@ -1117,6 +1118,12 @@ impl TaskScope {
 
     fn permits_tool(&self, tool: &str) -> bool {
         if !self.contract.intent().is_observational() {
+            return true;
+        }
+        // Plan mode keeps `shell`: the permission broker admits only provably read-only command
+        // lines there, so `ls`/`wc`/`git log` work. Other observational turns (an explicit
+        // read-only prompt in a writable mode) cannot make that guarantee, so shell stays hidden.
+        if tool == "shell" && self.contract.intent() == TaskIntent::PlanOnly {
             return true;
         }
         !matches!(
@@ -2333,6 +2340,9 @@ impl Session {
         // the approve→Auto-edit→build flow non-recursive (the build turn can't re-propose a plan).
         if self.mode == PermissionMode::Plan {
             specs.push(present_plan_spec());
+            for spec in specs.iter_mut().filter(|s| s.name == "shell") {
+                spec.description.push_str(permission::PLAN_SHELL_NOTE);
+            }
         }
         // The skill-loading tool — advertised (with the available-skills list) only when a
         // non-empty catalog is attached, so the model can find + apply Forge's own skills.
@@ -4098,7 +4108,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Checked BEFORE the step cap: a step-capped turn already warned about the cap and told
         // the user to send `continue`, so the fact worth reporting here is the rarer one — that
         // the whole turn produced nothing.
-        let produced_nothing = final_text.trim().is_empty()
+        let produced_nothing = (final_text.trim().is_empty()
+            || final_answer::is_no_answer_notice(&final_text))
             && self.mutations_this_turn == 0
             && !presented_plan
             && !hard_guard_abort;
@@ -4853,6 +4864,9 @@ mod tests {
 
     #[path = "stall_guard.rs"]
     mod stall_guard_tests;
+
+    #[path = "plan_shell.rs"]
+    mod plan_shell_tests;
 
     #[path = "stale_tasks.rs"]
     mod stale_tasks_tests;
