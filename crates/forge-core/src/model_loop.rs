@@ -125,9 +125,7 @@ impl Session {
         // (tools executed, tasks resolved) captured when the last continue-nudge was sent — see
         // `nudge_policy::decide`.
         let mut last_nudge_progress: Option<nudge_policy::Progress> = None;
-        // A model can mark every task done, pass the verification gate, then yield a sentence such
-        // as "Let me verify runtime issues:" with no tool call. That is explicit unfinished intent,
-        // not a final answer. Give it one bounded chance to perform the promised action.
+        // Mid-intent nudges sent in the current stretch of idleness; see `followup_intent_nudge`.
         let mut followup_intent_nudges = 0usize;
         let mut doom_nudged = false;
         let mut narration = crate::stall_guard::NarrationTracker::default();
@@ -312,6 +310,10 @@ impl Session {
                 &mut empty_nudges,
             )?;
 
+            if resp.wants_tools() || bridge_tool_progress {
+                followup_intent_nudges = 0;
+            }
+
             if self.turn_input_ceiling_hit() {
                 final_text = self.abort_for_token_ceiling();
                 hit_step_cap = false;
@@ -426,27 +428,11 @@ impl Session {
                     // keeps its working context and the queued instruction lands as soon as it
                     // legally can (Claude Code / Codex semantics).
                     continue;
-                } else if completion_promises_followup(&resp.content) && followup_intent_nudges == 0
-                {
-                    followup_intent_nudges += 1;
-                    self.presenter.emit(PresenterEvent::Warning(
-                        "model promised another action but stopped before doing it — continuing once"
-                            .to_string(),
-                    ));
-                    const FOLLOWUP_INTENT_NUDGE: &str = "Your last response explicitly promised a \
-                        next action but ended before doing it. Do not narrate future work and stop. \
-                        Call the required tool now and complete/check the action, or, if nothing \
-                        remains, give a self-contained final answer stating exactly what already \
-                        passed.";
-                    let nseq = self.next_seq();
-                    let _ = self.store.add_message(
-                        &self.id,
-                        nseq,
-                        Role::System,
-                        FOLLOWUP_INTENT_NUDGE,
-                        None,
-                    );
-                    self.transcript.push(Message::system(FOLLOWUP_INTENT_NUDGE));
+                } else if self.followup_intent_nudge(
+                    &resp.content,
+                    bridge_tool_progress,
+                    &mut followup_intent_nudges,
+                ) {
                     continue;
                 } else if forge_provider::is_cli_bridge(&active_model) {
                     // Bridge cost ceiling (wave 5, fixes 1 + 2). This is the observation boundary a

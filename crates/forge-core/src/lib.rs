@@ -48,6 +48,7 @@ pub mod heartbeat;
 pub mod hooks;
 pub mod llm_router;
 mod lsp_hints;
+mod mid_intent;
 pub(crate) mod model_health_notice;
 mod model_loop;
 mod model_request;
@@ -995,54 +996,6 @@ fn completion_claims_file_change(text: &str) -> bool {
     ]
     .iter()
     .any(|claim| lower.contains(claim))
-}
-
-/// A response that explicitly promises another agent action and then stops at an open-ended marker
-/// is not a final answer. Keep this deliberately narrow: headings such as `What changed:` are valid
-/// prose, while `Let me verify ...:` means the model yielded before doing what it just promised.
-fn completion_promises_followup(text: &str) -> bool {
-    let trimmed = text.trim();
-    if !(trimmed.ends_with(':') || trimmed.ends_with("...") || trimmed.ends_with('…')) {
-        return false;
-    }
-
-    let lower = trimmed.to_ascii_lowercase();
-    let tail_reversed: String = lower.chars().rev().take(320).collect();
-    let tail: String = tail_reversed.chars().rev().collect();
-    let intent_at = [
-        "let me ",
-        "i'll ",
-        "i will ",
-        "i'm going to ",
-        "i’m going to ",
-        "i need to ",
-        "now i ",
-        "next i ",
-    ]
-    .iter()
-    .filter_map(|marker| tail.rfind(marker))
-    .max();
-    let Some(intent) = intent_at.map(|at| &tail[at..]) else {
-        return false;
-    };
-    [
-        "check",
-        "verify",
-        "test",
-        "run",
-        "inspect",
-        "review",
-        "investigate",
-        "fix",
-        "edit",
-        "write",
-        "create",
-        "update",
-        "continue",
-        "try",
-    ]
-    .iter()
-    .any(|action| intent.contains(action))
 }
 
 #[cfg(test)]
@@ -4803,6 +4756,9 @@ mod tests {
     use forge_types::SideEffect;
     use std::sync::{Arc, Mutex};
 
+    #[path = "mid_intent.rs"]
+    mod mid_intent_tests;
+
     #[path = "phantom_edit.rs"]
     mod phantom_edit_tests;
 
@@ -7293,23 +7249,6 @@ mod tests {
         ));
         assert!(!completion_claims_no_change(
             "Goal complete: implemented the requested change."
-        ));
-    }
-
-    #[test]
-    fn completion_followup_intent_catches_open_ended_agent_promises_only() {
-        assert!(completion_promises_followup(
-            "Syntax passes. Let me verify a few runtime issues that syntax would not catch:"
-        ));
-        assert!(completion_promises_followup(
-            "The file is written. I'll now run the browser checks..."
-        ));
-        assert!(!completion_promises_followup(
-            "Implemented and verified the fix: all targeted tests pass."
-        ));
-        assert!(!completion_promises_followup("What changed:"));
-        assert!(!completion_promises_followup(
-            "I will keep this constraint in mind."
         ));
     }
 
