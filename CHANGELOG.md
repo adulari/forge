@@ -73,7 +73,7 @@ All notable changes to Forge are documented here. The format follows
 - **Bridge** (#1446): one long-lived `claude` process per conversation with `--resume` on respawn,
   instead of a cold respawn and full-transcript flatten every turn.
 
-### Performance
+### Changed
 - **Faster session open and startup** (#1450, #1458). Migration 37 indexes the cascade-delete
   children, so the first run on a 2.7 GB store dropped from 4m32s to about 6s; `mesh`, `models`,
   `benchmarks` and `doctor` no longer repeat discovery; startup catalog refresh is skipped when the
