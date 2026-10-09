@@ -161,7 +161,9 @@ impl Session {
         // most once per turn so it can't loop. See the bridge-yield branch below.
         let mut completeness_checked = false;
         // The answer the model gave before the completeness review, and the mutation count then.
-        let mut pre_review: Option<(String, u64)> = None;
+        let mut pre_review: Option<(String, Option<u64>)> = None;
+        // Gates the review on a real change: shell commands like `./build.sh` count as mutations.
+        let turn_start_tree = crate::completeness::worktree_fingerprint(self.workspace_root());
         // Direct path only: the `inspect_ran` count at the moment the verify nudge was last issued.
         // An inspection that runs AFTER this point is the model responding to the request to verify
         // (on the direct path, tools run in separate steps from the text claim, so a step-local
@@ -486,11 +488,14 @@ impl Session {
                     if self.config.mesh.verify_completeness
                         && !completeness_checked
                         && mutations_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
+                        && (turn_start_tree.is_none()
+                            || crate::completeness::worktree_fingerprint(self.workspace_root())
+                                != turn_start_tree)
                     {
                         completeness_checked = true;
                         pre_review = Some((
                             resp.content.clone(),
-                            mutations_ran.load(std::sync::atomic::Ordering::Relaxed),
+                            crate::completeness::worktree_fingerprint(self.workspace_root()),
                         ));
                         self.start_completeness_review();
                         continue;
@@ -772,7 +777,11 @@ impl Session {
                 final_text = crate::completeness::answer_after_review(
                     resp.content,
                     pre_review.take(),
-                    mutations_ran.load(std::sync::atomic::Ordering::Relaxed),
+                    if completeness_checked {
+                        crate::completeness::worktree_fingerprint(self.workspace_root())
+                    } else {
+                        None
+                    },
                 );
                 let accepted = final_text.clone();
                 self.publish_terminal_answer(&accepted)?;
