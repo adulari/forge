@@ -234,17 +234,13 @@ impl Tool for ReadFileTool {
         {
             return Ok(read_many(paths).await);
         }
-        let path = str_arg(args, "path")?;
+        let path = match args.get("file_path").and_then(Value::as_str) {
+            Some(p) if args.get("path").is_none() => p,
+            _ => str_arg(args, "path")?,
+        };
         confine(path)?;
         check_readable_size(path).await?;
-        let start_line = args
-            .get("start_line")
-            .and_then(Value::as_u64)
-            .map(|n| n as usize);
-        let end_line = args
-            .get("end_line")
-            .and_then(Value::as_u64)
-            .map(|n| n as usize);
+        let (start_line, end_line) = read_range(args);
 
         let content = tokio::fs::read_to_string(path).await?;
         let out = if start_line.is_none() && end_line.is_none() {
@@ -267,6 +263,20 @@ impl Tool for ReadFileTool {
         };
         Ok(cap_read(out))
     }
+}
+
+/// The requested line range. Models trained on Claude Code's Read tool send `offset`/`limit`
+/// (start line, line count) instead of `start_line`/`end_line`; ignoring them returned the whole
+/// file for every "page", which a live loop re-read a dozen times at 50K characters each.
+fn read_range(args: &Value) -> (Option<usize>, Option<usize>) {
+    let num = |key: &str| args.get(key).and_then(Value::as_u64).map(|n| n as usize);
+    let start = num("start_line").or_else(|| num("offset").map(|n| n.max(1)));
+    let end = num("end_line").or_else(|| {
+        num("limit")
+            .filter(|n| *n > 0)
+            .map(|n| start.unwrap_or(1) + n - 1)
+    });
+    (start, end)
 }
 
 /// Largest file `read_file` returns whole when no line range is given.
@@ -1351,6 +1361,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(out, "line2\nline3\nline4");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_file_accepts_claude_code_offset_and_limit() {
+        let dir = temp_dir("read-offset-limit");
+        let path = dir.join("f.txt");
+        std::fs::write(&path, "line1\nline2\nline3\nline4\nline5").unwrap();
+        let p = path.to_str().unwrap();
+
+        let out = ReadFileTool
+            .run(&json!({ "file_path": p, "offset": 2, "limit": 2 }))
+            .await
+            .unwrap();
+        assert_eq!(out, "line2\nline3");
+        let out = ReadFileTool
+            .run(&json!({ "path": p, "offset": 4 }))
+            .await
+            .unwrap();
+        assert_eq!(out, "line4\nline5");
+        let out = ReadFileTool
+            .run(&json!({ "path": p, "limit": 1 }))
+            .await
+            .unwrap();
+        assert_eq!(out, "line1");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
