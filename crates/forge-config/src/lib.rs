@@ -1529,10 +1529,23 @@ fn default_max_palette() -> usize {
 
 /// Fine-grained permission rules (FR-10). Resolution is by specificity/precedence, not file
 /// order; see `forge_core::permission`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionsConfig {
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
+    /// `auto` temper: ask one cheap side-call model about a shell command the heuristics do not
+    /// recognise. Off means such a command always asks.
+    #[serde(default = "default_true")]
+    pub auto_classifier: bool,
+}
+
+impl Default for PermissionsConfig {
+    fn default() -> Self {
+        Self {
+            rules: Vec::new(),
+            auto_classifier: true,
+        }
+    }
 }
 
 /// One TOML rule block: a tool plus exactly one of `allow`/`ask`/`deny` (string or list).

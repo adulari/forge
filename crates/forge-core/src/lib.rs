@@ -27,6 +27,7 @@ use forge_types::{
 use forge_types::{Presenter, PresenterEvent};
 
 pub mod assay;
+mod auto_classifier;
 mod auxiliary_candidates;
 mod auxiliary_policy;
 mod btw_policy;
@@ -1712,6 +1713,8 @@ pub struct Session {
     history_epoch: u64,
     /// One-shot latch for the "invalid tool arguments while routed through Headroom" warning.
     headroom_args_warned: bool,
+    /// `auto` temper: per-session verdicts of the unknown-command classifier.
+    auto_classifier_cache: auto_classifier::ClassifierCache,
     /// Session-scoped "always" answer to the auto-compact-on-switch consent prompt: once the user
     /// picks "always", a mesh failover to a model that needs compaction proceeds silently for the
     /// rest of this session (reset next launch). `false` = ask each time.
@@ -4868,6 +4871,9 @@ mod tests {
     #[path = "plan_shell.rs"]
     mod plan_shell_tests;
 
+    #[path = "auto_classifier.rs"]
+    mod auto_classifier_tests;
+
     #[path = "stale_tasks.rs"]
     mod stale_tasks_tests;
 
@@ -6156,6 +6162,7 @@ mod tests {
             mcp: mcp_cfg.clone(),
             permissions: forge_config::PermissionsConfig {
                 rules: vec![deny_rule],
+                ..Default::default()
             },
             ..Config::default()
         };

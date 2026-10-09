@@ -470,7 +470,7 @@ impl Session {
         }
 
         let workspace = self.workspace_binding.read().ok().map(|g| g.clone());
-        let decision = permission::decide_in(
+        let (decision, auto_verdict) = permission::decide_in_auto(
             self.mode,
             side_effect,
             &call.name,
@@ -478,21 +478,12 @@ impl Session {
             &self.rules,
             workspace.as_deref(),
         );
-        if self.mode == forge_types::PermissionMode::Auto && decision == PermissionDecision::Ask {
-            if let Some(why) = permission::auto_risk(
-                side_effect,
-                &call.name,
-                &effective_args,
-                workspace.as_deref(),
-            ) {
-                self.presenter
-                    .emit(PresenterEvent::Warning(format!("auto mode asks: {why}")));
-            }
-        }
+        let decision = self
+            .settle_auto(decision, auto_verdict, &effective_args)
+            .await;
         // Notification lifecycle hook (Claude-Code parity): the agent needs the user's attention to
         // approve this tool. Fired just before the prompt is shown (inert when no hooks configured).
-        // Inlined with field-level borrows because `tool` holds an immutable borrow of `self.tools`
-        // here, so a whole-`self` method call wouldn't borrow-check.
+        // Inlined with field-level borrows (the hooks call needs only `config`, `id`, `presenter`).
         if matches!(decision, PermissionDecision::Ask) && !self.config.hooks.is_empty() {
             let outcome = hooks::run_lifecycle_hooks(
                 &self.config.hooks,
@@ -567,6 +558,11 @@ impl Session {
         }
 
         let (result, full, ok) = if allowed {
+            // Re-borrowed here: the permission gate above needs `&mut self` (classifier side
+            // call), which cannot overlap a registry borrow held since the top of the call.
+            let Some(tool) = self.tools.get(&call.name) else {
+                unreachable!("tool `{}` resolved above", call.name)
+            };
             let run = tool.run_full(&effective_args);
             let outcome = if call.name == "shell"
                 && effective_args
