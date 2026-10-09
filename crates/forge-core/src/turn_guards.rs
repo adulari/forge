@@ -61,7 +61,7 @@ impl Session {
     /// error said "work is uncommitted: … and 56 more" and then the run ended, leaving a human to
     /// work out what a 400-step turn had been in the middle of. The files are left in place; the
     /// snapshot is an extra copy, not a move.
-    fn preserve_uncommitted_work(&self) -> String {
+    pub(crate) fn preserve_uncommitted_work(&self) -> String {
         let root = self.workspace.root();
         let work = uncommitted_work_message(root);
         match snapshot_uncommitted_work(root) {

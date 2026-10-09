@@ -317,8 +317,8 @@ impl Session {
                 followup_intent_nudges = 0;
             }
 
-            if self.turn_input_ceiling_hit() {
-                final_text = self.abort_for_token_ceiling();
+            if let Some(text) = self.hard_guard_after_call(resp.usage.cost_usd) {
+                final_text = text;
                 hit_step_cap = false;
                 halted_by_loop_guard = true;
                 hard_guard_abort = true;

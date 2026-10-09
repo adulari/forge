@@ -4,6 +4,7 @@
 
 use super::*;
 pub(crate) use crate::model_failure_record::record_model_failure_in;
+use crate::spend_guard::priced;
 
 /// Minimum age of a prior auth failure before it corroborates a new one into a provider-wide
 /// exclusion. Sized to separate a repeat from a burst of concurrent turns, not to be a cooldown.
@@ -567,7 +568,7 @@ impl Session {
                         &self.id,
                         "compact/summarize",
                         Some(&model),
-                        &r.usage,
+                        &priced(&self.pricing, &model, &r.usage),
                     );
                     self.presenter.emit(PresenterEvent::Warning(format!(
                         "compaction: {model} returned an empty or too-short summary — trying the \
@@ -623,7 +624,7 @@ impl Session {
                 &self.id,
                 "compact/summarize",
                 Some(&model),
-                &resp.usage,
+                &priced(&self.pricing, &model, &resp.usage),
             );
         }
         let summary = resp.content;

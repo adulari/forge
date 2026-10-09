@@ -9,6 +9,7 @@
 use forge_store::{HarnessEdit, HarnessEntry, HarnessRefinement};
 
 use super::*;
+use crate::spend_guard::priced;
 
 /// Harness entries with no explicit scope live here — shared across every project/session.
 const GLOBAL_SCOPE: &str = "global";
@@ -190,9 +191,12 @@ impl Session {
                 Err(e) => return Err(CoreError::Provider(e)),
             }
         };
-        let _ =
-            self.store
-                .record_side_call_usage_for(&self.id, "refine", Some(&model), &resp.usage);
+        let _ = self.store.record_side_call_usage_for(
+            &self.id,
+            "refine",
+            Some(&model),
+            &priced(&self.pricing, &model, &resp.usage),
+        );
 
         let parsed = parse_refine_response(&resp.content).ok_or_else(|| {
             CoreError::Internal(format!(

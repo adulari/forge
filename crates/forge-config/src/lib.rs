@@ -2460,6 +2460,40 @@ pub struct BudgetBehavior {
     /// A cap downshifts/stops even an explicitly pinned model. Default true. (Model pinning
     /// is not yet a feature; this is forward-compatible config.)
     pub cap_overrides_pin: bool,
+    /// One user turn's spend (USD, every model call in it) at which a warning is shown, once.
+    /// `0` disables. The day/week/month caps never see a single runaway turn coming: the measured
+    /// outliers were 19 turns over $5 that made up 68% of all recorded spend.
+    #[serde(default = "default_turn_warn_usd")]
+    pub turn_warn_usd: f64,
+    /// One user turn's spend (USD) at which the turn is ended. The next prompt (or `continue`) gets
+    /// a fresh allowance, which is the confirmation. `0` disables; `hard_stop = false` downgrades
+    /// it to a warning; `FORGE_BUDGET_OVERRIDE=1` bypasses it.
+    #[serde(default = "default_turn_cap_usd")]
+    pub turn_cap_usd: f64,
+    /// A session's lifetime spend (USD, including side calls) at which a warning is shown, once per
+    /// process. `0` disables.
+    #[serde(default = "default_session_warn_usd")]
+    pub session_warn_usd: f64,
+    /// A session's lifetime spend (USD) at which further turns are refused until the cap is raised
+    /// or `FORGE_BUDGET_OVERRIDE=1` is set. Resuming the session does not reset it. `0` disables.
+    #[serde(default = "default_session_cap_usd")]
+    pub session_cap_usd: f64,
+}
+
+fn default_turn_warn_usd() -> f64 {
+    5.0
+}
+
+fn default_turn_cap_usd() -> f64 {
+    25.0
+}
+
+fn default_session_warn_usd() -> f64 {
+    25.0
+}
+
+fn default_session_cap_usd() -> f64 {
+    100.0
 }
 
 impl Default for BudgetBehavior {
@@ -2467,6 +2501,10 @@ impl Default for BudgetBehavior {
         Self {
             hard_stop: true,
             cap_overrides_pin: true,
+            turn_warn_usd: default_turn_warn_usd(),
+            turn_cap_usd: default_turn_cap_usd(),
+            session_warn_usd: default_session_warn_usd(),
+            session_cap_usd: default_session_cap_usd(),
         }
     }
 }

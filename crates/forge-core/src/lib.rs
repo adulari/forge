@@ -90,6 +90,7 @@ mod tool_dispatch;
 mod tool_output;
 pub mod wakeup;
 pub(crate) use tool_output::tool_detail;
+mod spend_guard;
 pub mod turn_contract;
 mod turn_guards;
 pub mod workflow;
@@ -1750,6 +1751,8 @@ pub struct Session {
     /// spending, and a nudge/verification re-drive would restart the model loop with fresh
     /// counters and defeat them.
     turn_hard_guard_abort: bool,
+    /// USD spend guards for the active turn and the session (`spend_guard.rs`).
+    spend: spend_guard::SpendState,
     /// Tracked tasks still open when this turn ended, if any. Latched by the halt paths so the
     /// turn is recorded as `TasksUnfinished` instead of a clean final answer.
     turn_unfinished_tasks: Vec<String>,
@@ -2671,6 +2674,22 @@ impl Session {
             return Ok(LoopOutcome::budget_exhausted(msg));
         }
 
+        if let Some(msg) = self.session_spend_refusal() {
+            self.presenter.emit(PresenterEvent::Warning(msg.clone()));
+            let seq = self.next_seq();
+            self.store
+                .add_message(&self.id, seq, Role::User, prompt, None)?;
+            self.transcript.push(Message::user(prompt));
+            let seq = self.next_seq();
+            self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
+            self.transcript.push(Message::system(&msg).ui_only());
+            self.presenter.emit(PresenterEvent::Done {
+                final_text: msg.clone(),
+                stop_reason: StopReason::BudgetExhausted,
+            });
+            return Ok(LoopOutcome::budget_exhausted(msg));
+        }
+
         // Surface budget pressure before routing (FR-5).
         match status {
             BudgetStatus::Warning => self.presenter.emit(PresenterEvent::Warning(format!(
@@ -3002,6 +3021,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.turn_output_tokens = 0;
         self.turn_billable_input_tokens = 0;
         self.turn_hard_guard_abort = false;
+        self.spend.begin_turn();
         self.turn_unfinished_tasks.clear();
         self.failure_tracker.reset_turn();
         self.env_fight = EnvFightTracker::default();
@@ -4888,6 +4908,9 @@ mod tests {
 
     #[path = "hooks_parity.rs"]
     mod hooks_parity_tests;
+
+    #[path = "spend_guard.rs"]
+    mod spend_guard_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {
