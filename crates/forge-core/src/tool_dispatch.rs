@@ -636,6 +636,10 @@ impl Session {
                 }
                 Err(e) => (format!("error: {e}"), None, false),
             }
+        } else if self.mode == forge_types::PermissionMode::Plan
+            && permission::is_shell_tool(&call.name)
+        {
+            (permission::plan_shell_denial(), None, false)
         } else {
             ("permission denied by policy".to_string(), None, false)
         };

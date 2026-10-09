@@ -9,7 +9,8 @@
 //! Precedence (single source of truth):
 //! 1. a `Builtin` deny match → Deny (safety floor — beats every mode incl. `bypass`)
 //! 2. any deny match → Deny
-//! 3. `plan` mode + a side effect → Deny (read-only contract; an allow rule cannot escape it)
+//! 3. `plan` mode + a side effect → Deny (read-only contract; an allow rule cannot escape it),
+//!    except a shell line the strict allowlist proves read-only ([`readonly_shell`])
 //! 4. shell commands: per-segment allow/ask — ask if any segment matches an ask rule, allow
 //!    only when *every* effective segment matches an allow rule ([`decide_shell_segments`])
 //! 5. other tools: the most-specific allow/ask match → that decision
@@ -117,7 +118,15 @@ pub fn decide_in(
     }
     // 3. `plan` is a hard read-only contract: a side effect is denied and no allow escapes it.
     if mode == PermissionMode::Plan && side_effect != SideEffect::ReadOnly {
-        return Deny;
+        // The one exception: a shell line that is provably read-only (`ls`, `wc -l`, `git log`).
+        // Explicit deny rules were already honoured above.
+        let read_only_shell = side_effect == SideEffect::Shell
+            && is_shell_tool(tool_name)
+            && args
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(readonly_shell::is_read_only_shell);
+        return if read_only_shell { Allow } else { Deny };
     }
     // 4. Shell commands resolve allow/ask per segment: an `allow = "git *"` matching the first
     //    segment must not smuggle `git status && <anything>` past the prompt — every effective
@@ -247,7 +256,7 @@ fn rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value) -> bool {
     false
 }
 
-fn is_shell_tool(tool_name: &str) -> bool {
+pub(crate) fn is_shell_tool(tool_name: &str) -> bool {
     matches!(tool_name, "shell" | "bash" | "run")
 }
 
@@ -265,8 +274,10 @@ fn specificity(rule: &PermissionRule) -> usize {
 }
 
 mod auto;
+mod readonly_shell;
 mod shell_commands;
 pub use auto::auto_risk;
+pub(crate) use readonly_shell::{plan_shell_denial, PLAN_SHELL_NOTE};
 use shell_commands::effective_commands;
 
 /// Lexically normalized candidate forms of a path for matching secret-deny globs against:
@@ -929,7 +940,7 @@ mod tests {
                 PermissionMode::Plan,
                 SideEffect::Shell,
                 "shell",
-                &shell("git status"),
+                &shell("git commit -m x"),
                 &rules
             ),
             Deny
@@ -1407,7 +1418,11 @@ mod tests {
                 );
             }
             // Invariant 3: no matching deny + Plan + side effect ⟹ Deny.
-            if !any_matching_deny && mode == Plan && eff != SideEffect::ReadOnly {
+            let read_only_shell = eff == SideEffect::Shell
+                && tool == "shell"
+                && readonly_shell::is_read_only_shell(arg["command"].as_str().unwrap_or(""));
+            if !any_matching_deny && mode == Plan && eff != SideEffect::ReadOnly && !read_only_shell
+            {
                 assert_eq!(
                     got, Deny,
                     "plan must deny side effects: eff={eff:?} tool={tool} \
@@ -1542,6 +1557,42 @@ mod tests {
         assert_eq!(
             decide_mode(PermissionMode::Auto, SideEffect::ReadOnly),
             Allow
+        );
+    }
+
+    #[test]
+    fn plan_mode_runs_read_only_shell_but_nothing_else() {
+        let plan = |cmd: &str, rules: &[PermissionRule]| {
+            decide(
+                PermissionMode::Plan,
+                SideEffect::Shell,
+                "shell",
+                &shell(cmd),
+                rules,
+            )
+        };
+        assert_eq!(plan("wc -l crates/*/src/lib.rs | tail -1", &[]), Allow);
+        assert_eq!(plan("git log --oneline -3", &[]), Allow);
+        assert_eq!(plan("rm -rf target", &[]), Deny);
+        assert_eq!(plan("ls > listing.txt", &[]), Deny);
+        assert_eq!(
+            plan("cargo build", &[cfg("shell", Allow, &["cargo *"])]),
+            Deny
+        );
+        // A deny rule still beats the read-only exemption.
+        assert_eq!(
+            plan("cat .env", &[builtin_deny("shell", &["cat *.env"])]),
+            Deny
+        );
+        assert_eq!(
+            decide(
+                PermissionMode::Plan,
+                SideEffect::Write,
+                "write_file",
+                &path("a"),
+                &[]
+            ),
+            Deny
         );
     }
 }

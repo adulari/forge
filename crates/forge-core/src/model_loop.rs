@@ -828,6 +828,20 @@ impl Session {
             hard_guard_abort = true;
         }
 
+        // A loop guard (or an unrecoverable empty reply) can end a turn that did real work with
+        // nothing to say; never hand that back as the result.
+        if final_text.trim().is_empty()
+            && !hard_guard_abort
+            && !hit_step_cap
+            && !self.past_turn_deadline()
+            && tools_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
+        {
+            final_text = self
+                .answer_for_halted_turn(&active_model, halted_by_loop_guard)
+                .await;
+            self.publish_terminal_answer(&final_text.clone())?;
+        }
+
         Ok(ModelLoopOutcome {
             final_text,
             context_tokens,
