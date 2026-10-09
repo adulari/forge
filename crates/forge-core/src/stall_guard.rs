@@ -19,23 +19,15 @@
 //! handful of phrasings coming back again and again — interleaved with other text — is caught even
 //! though no run of consecutive steps repeats.
 
-/// What the guard wants the loop to do after seeing this step's narration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stall {
-    /// Nothing to do.
-    Fine,
-    /// The same statement `NUDGE_AFTER` times running: tell the model once to answer instead.
-    Nudge,
-    /// Still repeating after the nudge: end the turn.
-    Halt,
-}
-
-/// Consecutive near-identical openings before the nudge (the fifth statement trips it). One
-/// more than the identical-call doom-loop guard needs, so a model that repeats BOTH its sentence
-/// and its call gets that guard's more specific diagnosis first.
-const NUDGE_AFTER: usize = 4;
-/// Further repeats tolerated after the nudge before halting.
-const HALT_AFTER_NUDGE: usize = 2;
+//!
+//! Narration alone is a poor judge of a loop, in both directions. Observed live (2026-09-08/09,
+//! sessions 07ca114e and 432f9364): ~30 steps of `You're right — I looped. ...` slipped past the
+//! consecutive check because the fifth word kept changing, and the user had to type "you are
+//! getting stuck in a loop" three times before the guard halted it; conversely a model opening
+//! seven successful edit/test steps with `Now let me update the ...` is exactly as repetitive in
+//! text and exactly as healthy in practice. This tracker therefore only reports which steps
+//! REPEAT an earlier opening; whether that repetition matters is decided by
+//! [`crate::loop_progress`], which knows whether the step produced anything new.
 
 /// Openings remembered for the comparison. Live, the model alternated between two phrasings
 /// ("Reverting the failed live-reuse path …" / "Cutting the failed live-reuse path …"), so
@@ -43,151 +35,73 @@ const HALT_AFTER_NUDGE: usize = 2;
 const WINDOW: usize = 3;
 
 /// Bounded history of recent narration fingerprints used for the frequency check, independent of
-/// the consecutive-only `recent`/`repeats` state above. 20 steps comfortably spans the live
-/// evidence (the worst phrasing recurred roughly every 5-6 steps over 40) while aging out narration
-/// from far earlier in a long, healthy turn, so an incidental echo late in a productive session
-/// doesn't outlive its relevance.
+/// the consecutive-only `recent` window above. 20 steps comfortably spans the live evidence (the
+/// worst phrasing recurred roughly every 5-6 steps over 40) while aging out narration from far
+/// earlier in a long, healthy turn.
 const FREQ_WINDOW: usize = 20;
-/// Below this many observed steps the frequency check is disabled entirely. Short bursts of
-/// mutually-similar text (an exact repeat plus a couple of fuzzy variants) are exactly what the
-/// consecutive check above already handles at its own pace; without this floor the frequency check
-/// — which scans the *whole* window, not just the last few steps — fires earlier than the
-/// consecutive check on those same short bursts and changes when the first `Nudge` is reported.
-/// Ten steps is the smallest sample the live evidence's "distinct-fingerprint collapse" signal
-/// needs to mean anything, and it's comfortably above every existing consecutive-repeat scenario
-/// (which resolves within 5-9 steps).
-const FREQ_MIN_HISTORY: usize = 10;
-/// A fingerprint (by `similar`) recurring this many times inside the trailing `FREQ_WINDOW` steps
-/// is structural repetition rather than progress. Matches `NUDGE_AFTER` so both paths apply the
-/// same "four is a pattern" bar — this one just doesn't require the four to be back-to-back. In the
-/// live 40-step evidence the worst phrasing reached 4 recurrences by step 15 and the halt-worthy
-/// 5th by step 17, both comfortably inside the 20-step window.
-const FREQ_NUDGE_AFTER: usize = 4;
-/// Further recurrences of the fingerprint that triggered the frequency nudge, tolerated before
-/// halting. Matches `HALT_AFTER_NUDGE`.
-const FREQ_HALT_AFTER_NUDGE: usize = 2;
+/// Below this many stagnant steps the frequency check is disabled: short bursts of
+/// mutually-similar text are what the consecutive check already handles.
+const FREQ_MIN_HISTORY: usize = 6;
+/// A fingerprint (by `similar`) recurring this many times inside the trailing `FREQ_WINDOW`
+/// stagnant steps is structural repetition even when no two adjacent steps match.
+const FREQ_REPEAT_AT: usize = 4;
 
 #[derive(Debug, Default)]
 pub(crate) struct NarrationTracker {
     recent: std::collections::VecDeque<Vec<String>>,
-    repeats: usize,
-    nudged: bool,
-    repeats_since_nudge: usize,
+    /// Openings of steps that produced nothing new. Steps that made progress never enter, so a
+    /// productive run of `Now let me update …` cannot accumulate into a frequency hit.
     freq_history: std::collections::VecDeque<Vec<String>>,
-    freq_trigger: Option<Vec<String>>,
-    freq_repeats_since_nudge: usize,
-    /// How many times each EXACT statement has been made this turn. The detectors above are
-    /// deliberately fuzzy so they can catch a model that rephrases its way around them; that same
-    /// fuzziness makes them the wrong input for the sampling ladder, where a false positive would
-    /// quietly run a healthy turn hotter. Verbatim repetition is unambiguous, so pressure is
-    /// driven by this instead.
+    /// How many times each EXACT statement has been made on a stagnant step this turn. Verbatim
+    /// repetition is unambiguous, so the sampling ladder (see [`Self::max_verbatim`]) is driven by
+    /// this rather than by the deliberately fuzzy detectors.
     exact_counts: std::collections::HashMap<String, usize>,
 }
 
 impl NarrationTracker {
-    /// Feed the text the model emitted alongside this step's tool calls.
-    pub(crate) fn observe(&mut self, text: &str) -> Stall {
+    /// Feed the text the model emitted alongside this step's tool calls. `novel` is whether the
+    /// step produced anything new (see [`crate::loop_progress`]). Returns whether this step is a
+    /// stale repeat: it restates an earlier opening AND got nothing new out of its tool calls.
+    pub(crate) fn observe(&mut self, text: &str, novel: bool) -> bool {
         let words = opening_words(text);
         if words.is_empty() {
-            return Stall::Fine;
+            return false;
         }
-
-        *self.exact_counts.entry(words.join(" ")).or_insert(0) += 1;
-
-        let freq_stall = self.observe_frequency(&words);
-        let consecutive_stall = self.observe_consecutive(&words);
-
-        match (consecutive_stall, freq_stall) {
-            (Stall::Halt, _) | (_, Stall::Halt) => Stall::Halt,
-            (Stall::Nudge, _) | (_, Stall::Nudge) => Stall::Nudge,
-            _ => Stall::Fine,
-        }
-    }
-
-    fn observe_consecutive(&mut self, words: &[String]) -> Stall {
-        let same = self.recent.iter().any(|prev| similar(prev, words));
-        self.recent.push_back(words.to_vec());
+        let like_recent = self.recent.iter().any(|prev| similar(prev, &words));
+        self.recent.push_back(words.clone());
         if self.recent.len() > WINDOW {
             self.recent.pop_front();
         }
-        if !same {
-            self.repeats = 0;
-            self.nudged = false;
-            self.repeats_since_nudge = 0;
-            return Stall::Fine;
+        if novel {
+            return false;
         }
-        self.repeats += 1;
-        if self.nudged {
-            self.repeats_since_nudge += 1;
-            if self.repeats_since_nudge >= HALT_AFTER_NUDGE {
-                return Stall::Halt;
-            }
-            return Stall::Fine;
-        }
-        if self.repeats >= NUDGE_AFTER {
-            self.nudged = true;
-            return Stall::Nudge;
-        }
-        Stall::Fine
-    }
 
-    /// Frequency-over-a-window check: unlike `observe_consecutive`, a non-matching step in between
-    /// does not reset anything here — that's the whole point (see the module doc's second live
-    /// shape). Once a fingerprint has tripped the nudge, only further recurrences of that *same*
-    /// fingerprint count toward the halt, so an unrelated later repeat doesn't cash in on someone
-    /// else's nudge.
-    fn observe_frequency(&mut self, words: &[String]) -> Stall {
-        self.freq_history.push_back(words.to_vec());
+        *self.exact_counts.entry(words.join(" ")).or_insert(0) += 1;
+        self.freq_history.push_back(words.clone());
         if self.freq_history.len() > FREQ_WINDOW {
             self.freq_history.pop_front();
         }
-        if self.freq_history.len() < FREQ_MIN_HISTORY {
-            return Stall::Fine;
-        }
-
-        if let Some(trigger) = &self.freq_trigger {
-            if similar(trigger, words) {
-                self.freq_repeats_since_nudge += 1;
-                if self.freq_repeats_since_nudge >= FREQ_HALT_AFTER_NUDGE {
-                    return Stall::Halt;
-                }
-            }
-            return Stall::Fine;
-        }
-
-        let count = self
-            .freq_history
-            .iter()
-            .filter(|prev| similar(prev, words))
-            .count();
-        if count >= FREQ_NUDGE_AFTER {
-            self.freq_trigger = Some(words.to_vec());
-            self.freq_repeats_since_nudge = 0;
-            return Stall::Nudge;
-        }
-        Stall::Fine
+        let like_often = self.freq_history.len() >= FREQ_MIN_HISTORY
+            && self
+                .freq_history
+                .iter()
+                .filter(|prev| similar(prev, &words))
+                .count()
+                >= FREQ_REPEAT_AT;
+        like_recent || like_often
     }
 
-    pub(crate) fn repeats(&self) -> usize {
-        self.repeats
+    /// The most times any one verbatim statement has been made on a stagnant step.
+    pub(crate) fn max_verbatim(&self) -> usize {
+        self.exact_counts.values().copied().max().unwrap_or(0)
     }
 
-    /// How hard this turn is currently repeating itself, as a rung on the sampling ladder.
-    ///
-    /// The detectors above exist to END a turn that is already stuck. This reports the same
-    /// evidence EARLY, while the turn is still salvageable, so the next request can be given a
-    /// different shape (a higher temperature, a repetition penalty) instead of being sent again
-    /// identically. 0 = nothing seen, 1 = it has restated itself at least once, 2 = it is doing
-    /// so persistently.
-    pub(crate) fn pressure(&self) -> u8 {
-        let verbatim = self.exact_counts.values().copied().max().unwrap_or(0);
-        if verbatim >= 3 || self.nudged || self.freq_repeats_since_nudge > 0 {
-            return 2;
-        }
-        if verbatim >= 2 {
-            return 1;
-        }
-        0
+    /// A new user turn: what was said before is no longer evidence of anything stagnant, but the
+    /// last few openings stay so a model that opens the next turn with the same sentence is still
+    /// compared against it.
+    pub(crate) fn begin_turn(&mut self) {
+        self.freq_history.clear();
+        self.exact_counts.clear();
     }
 }
 
@@ -208,15 +122,18 @@ fn opening_words(text: &str) -> Vec<String> {
 }
 
 /// Near-identical openings. A one-liner like "Reading." never counts (too short to be a
-/// preamble). Otherwise: the same first five words, or a word-set overlap of at least 60% — the
+/// preamble). Otherwise: the same first four words, or a word-set overlap of at least 60% — the
 /// live loop rephrased its second half every step ("finishing the revert I left half-done",
-/// "fixing the broken revert", "pinning the 429 source") around a fixed opening.
+/// "fixing the broken revert", "pinning the 429 source") around a fixed opening, and its
+/// fifth word changed every time ("You're right — I looped. Answering / Recovering / I'll …"), so
+/// a five-word prefix let thirty near-identical apologies through.
 fn similar(a: &[String], b: &[String]) -> bool {
     const MIN_WORDS: usize = 5;
+    const PREFIX_WORDS: usize = 4;
     if a.len() < MIN_WORDS || b.len() < MIN_WORDS {
         return false;
     }
-    if a[..MIN_WORDS] == b[..MIN_WORDS] {
+    if a[..PREFIX_WORDS] == b[..PREFIX_WORDS] {
         return true;
     }
     let sa: std::collections::HashSet<&String> = a.iter().collect();
@@ -226,47 +143,22 @@ fn similar(a: &[String], b: &[String]) -> bool {
     union > 0 && inter * 5 >= union * 3
 }
 
-impl crate::Session {
-    /// Feed this step's narration to the guard; queue the nudge or report that the turn must
-    /// halt. Lives here so the model loop stays a dispatcher.
-    pub(crate) fn narration_stalled(&mut self, tracker: &mut NarrationTracker, text: &str) -> bool {
-        let stall = tracker.observe(text);
-        // Carried into the NEXT request's sampling (see `model_request`): a turn that has started
-        // restating itself must not be asked again at the same near-deterministic temperature.
-        self.repetition_pressure = tracker.pressure();
-        match stall {
-            Stall::Fine => false,
-            Stall::Nudge => {
-                self.presenter
-                    .emit(forge_types::PresenterEvent::Warning(format!(
-                        "model has opened {} replies in a row with the same sentence without \
-                         answering — nudging it to answer before stopping",
-                        tracker.repeats() + 1
-                    )));
-                self.pending_hints.push(STALL_NUDGE.to_string());
-                false
-            }
-            Stall::Halt => {
-                self.presenter.emit(forge_types::PresenterEvent::Error(
-                    "the model kept repeating the same statement without answering after a \
-                     nudge — stopping to avoid a loop"
-                        .to_string(),
-                ));
-                true
-            }
-        }
-    }
-}
-
 pub(crate) const STALL_NUDGE: &str = "You have opened your last several replies with the same \
-sentence while issuing yet another read, and you have not answered. Stop investigating. Reply \
-NOW, in text, with the answer you can give from what you have already read (say what is \
-uncertain), then carry on with the remaining work with a concrete next edit or command. Do not \
-repeat that opening sentence again.";
+sentence while your tool calls kept returning nothing you had not already seen, and you have not \
+answered. Stop investigating. Reply NOW, in text, with the answer you can give from what you \
+have already read (say what is uncertain), then carry on with the remaining work with a concrete \
+next edit or command. Do not repeat that opening sentence again, and do not apologise for \
+looping — act.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Feed every text as a stagnant (nothing-new) step and return the stale-repeat flags.
+    fn stale_flags(texts: &[&str]) -> Vec<bool> {
+        let mut t = NarrationTracker::default();
+        texts.iter().map(|s| t.observe(s, false)).collect()
+    }
 
     const LIVE: [&str; 7] = [
         "You're right — I looped. Answering the 429 question from evidence, then finishing the revert I left half-done.",
@@ -279,21 +171,10 @@ mod tests {
     ];
 
     #[test]
-    fn the_live_loop_is_nudged_on_the_fifth_statement_and_halted_two_later() {
-        let mut t = NarrationTracker::default();
-        let verdicts: Vec<Stall> = LIVE.iter().map(|s| t.observe(s)).collect();
+    fn the_live_loop_restates_from_the_second_statement_on() {
         assert_eq!(
-            verdicts,
-            [
-                Stall::Fine,
-                Stall::Fine,
-                Stall::Fine,
-                Stall::Fine,
-                Stall::Nudge,
-                Stall::Fine,
-                Stall::Halt
-            ],
-            "{verdicts:?}"
+            stale_flags(&LIVE),
+            [false, true, true, true, true, true, true]
         );
     }
 
@@ -301,32 +182,23 @@ mod tests {
     fn two_alternating_phrasings_still_count_as_the_same_stall() {
         let a = "Reverting the failed live-reuse path — keeping the proven wins, restoring fresh-connection + finish PUT.";
         let b = "Cutting the failed live-reuse path and keeping the proven perf wins.";
-        let mut t = NarrationTracker::default();
-        let verdicts: Vec<Stall> = [a, b, a, b, a, b, a, b]
-            .iter()
-            .map(|s| t.observe(s))
-            .collect();
-        assert!(
-            verdicts.contains(&Stall::Nudge) && verdicts.last() == Some(&Stall::Halt),
-            "{verdicts:?}"
-        );
+        let flags = stale_flags(&[a, b, a, b, a, b]);
+        assert!(flags[2..].iter().all(|f| *f), "{flags:?}");
     }
 
     #[test]
-    fn a_changing_opening_resets_everything() {
+    fn a_step_that_found_something_new_is_never_a_stale_repeat() {
         let mut t = NarrationTracker::default();
-        for s in &LIVE[..5] {
-            t.observe(s);
+        for _ in 0..8 {
+            assert!(
+                !t.observe(LIVE[0], true),
+                "progress makes repetition harmless"
+            );
         }
-        assert_eq!(
-            t.observe("The 429 comes from herodotus: the worker retries without backoff."),
-            Stall::Fine
-        );
-        assert_eq!(t.repeats(), 0);
-        assert_eq!(
-            t.observe(LIVE[0]),
-            Stall::Fine,
-            "a fresh streak starts over"
+        assert_eq!(t.max_verbatim(), 0, "productive steps don't build pressure");
+        assert!(
+            t.observe(LIVE[0], false),
+            "the first stagnant restatement counts"
         );
     }
 
@@ -398,93 +270,50 @@ mod tests {
     }
 
     #[test]
-    fn the_interleaved_live_pattern_eventually_nudges_then_halts() {
-        // Ordered oldest -> newest, exactly the live distinct-text pattern (metadata evidence,
-        // 2026-09-17): 'A' recurs 7 times, 'C' 5 times, cycling among ~5 phrasings overall, with
-        // only 5 of the 39 adjacent pairs identical. The consecutive check alone never fires on
-        // this; the frequency check must.
+    fn the_interleaved_live_pattern_is_flagged_repeatedly() {
+        // The live distinct-text pattern (2026-09-17): 'A' recurs 7 times and 'C' 5 times with only
+        // 5 of 39 adjacent pairs identical. The consecutive window misses most of it; the
+        // frequency window must flag a steady stream.
         const PATTERN: &str = "ABACADEFFEDGCHAIACCBADIIGJDCAKBGBBLMMNEO";
-        assert_eq!(PATTERN.len(), 40);
-        let mut t = NarrationTracker::default();
-        let verdicts: Vec<Stall> = PATTERN.chars().map(|c| t.observe(text_for(c))).collect();
-        let nudge_at = verdicts.iter().position(|s| *s == Stall::Nudge);
-        let halt_at = verdicts.iter().position(|s| *s == Stall::Halt);
-        assert!(nudge_at.is_some(), "never nudged: {verdicts:?}");
-        assert!(
-            halt_at.is_some(),
-            "never halted, would run forever: {verdicts:?}"
-        );
-        assert!(
-            halt_at.unwrap() > nudge_at.unwrap(),
-            "halt must come after nudge: {verdicts:?}"
-        );
+        let texts: Vec<&str> = PATTERN.chars().map(text_for).collect();
+        let flags = stale_flags(&texts);
+        let hits = flags.iter().filter(|f| **f).count();
+        assert!(hits >= 12, "only {hits} stale repeats flagged: {flags:?}");
     }
 
     #[test]
-    fn a_strictly_consecutive_repeat_still_nudges_on_the_fourth() {
-        let text = text_for('A');
+    fn verbatim_counts_ignore_productive_steps() {
         let mut t = NarrationTracker::default();
-        let verdicts: Vec<Stall> = std::iter::repeat_n(text, 5).map(|s| t.observe(s)).collect();
-        assert_eq!(
-            verdicts,
-            [
-                Stall::Fine,
-                Stall::Fine,
-                Stall::Fine,
-                Stall::Fine,
-                Stall::Nudge
-            ],
-            "{verdicts:?}"
-        );
-    }
-
-    /// Pressure is the EARLY signal: it must rise on the first restatement, long before the
-    /// nudge/halt bar, because it is what changes the next request's sampling while the turn can
-    /// still be saved. A turn that narrates something new each step must stay at zero, or every
-    /// healthy turn would silently run hotter.
-    #[test]
-    fn pressure_rises_on_the_first_restatement_and_stays_flat_for_healthy_work() {
-        let mut healthy = NarrationTracker::default();
-        for narration in [
-            "The failing assertion compares the trimmed path, so I will look at the helper next",
-            "That helper never saw a Windows separator; checking who calls it",
-            "Only the importer calls it, and it passes a raw string",
-            "Adding the normalisation at the boundary instead of inside the helper",
-            "Running the focused test for the importer now",
-            "Green. Extending the case list to cover a trailing separator",
-            "Also worth a note in the module docs about the boundary",
-            "Full suite passes, so this is done",
-        ] {
-            healthy.observe(narration);
+        for _ in 0..5 {
+            t.observe(
+                "Now let me update the parser to handle the new header",
+                true,
+            );
         }
-        assert_eq!(healthy.pressure(), 0);
-
-        let mut repeating = NarrationTracker::default();
-        repeating.observe("Inspecting the diff to identify the missing fix, then applying it");
-        assert_eq!(repeating.pressure(), 0, "one statement is not a repeat");
-        repeating.observe("Inspecting the diff to identify the missing fix, then applying it");
-        assert_eq!(
-            repeating.pressure(),
-            1,
-            "restating once already changes sampling"
+        assert_eq!(t.max_verbatim(), 0);
+        t.observe(
+            "Inspecting the diff to identify the missing fix, then applying it",
+            false,
         );
-        repeating.observe("Inspecting the diff to identify the missing fix, then applying it");
-        assert_eq!(repeating.pressure(), 2, "persistent repetition escalates");
+        t.observe(
+            "Inspecting the diff to identify the missing fix, then applying it",
+            false,
+        );
+        assert_eq!(t.max_verbatim(), 2);
     }
 
     #[test]
     fn a_genuine_multi_step_turn_with_different_narration_each_step_never_trips() {
         let mut t = NarrationTracker::default();
         for (_, text) in TEXTS.iter() {
-            assert_eq!(t.observe(text), Stall::Fine, "false positive on {text:?}");
+            assert!(!t.observe(text, false), "false positive on {text:?}");
         }
         // Run through the set a second time with a rewording each pass, still never repeating a
         // fingerprint, well past FREQ_MIN_HISTORY.
         for (_, text) in TEXTS.iter() {
             let reworded = format!("Also: {text} Nothing further to add on that one right now.");
-            assert_eq!(
-                t.observe(&reworded),
-                Stall::Fine,
+            assert!(
+                !t.observe(&reworded, false),
                 "false positive on {reworded:?}"
             );
         }
@@ -494,10 +323,10 @@ mod tests {
     fn a_repeated_two_word_acknowledgement_never_trips() {
         let mut t = NarrationTracker::default();
         for _ in 0..2 {
-            assert_eq!(t.observe("Got it."), Stall::Fine);
+            assert!(!t.observe("Got it.", false));
         }
         for (_, text) in TEXTS.iter() {
-            assert_eq!(t.observe(text), Stall::Fine, "false positive on {text:?}");
+            assert!(!t.observe(text, false), "false positive on {text:?}");
         }
     }
 
@@ -505,8 +334,8 @@ mod tests {
     fn short_or_empty_narration_never_trips() {
         let mut t = NarrationTracker::default();
         for _ in 0..10 {
-            assert_eq!(t.observe(""), Stall::Fine);
-            assert_eq!(t.observe("Reading."), Stall::Fine);
+            assert!(!t.observe("", false));
+            assert!(!t.observe("Reading.", false));
         }
     }
 

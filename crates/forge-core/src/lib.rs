@@ -47,6 +47,7 @@ pub(crate) mod git_hygiene;
 pub mod heartbeat;
 pub mod hooks;
 pub mod llm_router;
+pub(crate) mod loop_progress;
 mod lsp_hints;
 mod mid_intent;
 pub(crate) mod model_health_notice;
@@ -132,8 +133,10 @@ of it, so a detail you leave out is lost for good. Do not continue the task, do 
 and do not address the user — only write the summary.\n\n\
 Use these sections, in this order, as markdown headings:\n\
 1. Goal — what the user asked for, in their own words where it matters, including constraints \
-and preferences they stated.\n\
-2. Current state — what is done, what is in progress, and exactly where the work stopped.\n\
+and preferences they stated, and any correction or complaint they made about how you were working \
+(for example being told you were looping or repeating yourself).\n\
+2. Current state — what is done, what is in progress, and exactly where the work stopped, \
+including what you have already answered or tried so it is not answered or tried again.\n\
 3. Files and code — every file path, function, type, command, and config key that was read, \
 changed, or found relevant, each with one line on why.\n\
 4. Findings and decisions — facts established, causes found, approaches chosen and rejected, and \
@@ -1650,6 +1653,10 @@ pub struct Session {
     /// How hard the CURRENT turn is repeating itself (0-2), fed by the narration guard every step
     /// and consumed when the next request's sampling is chosen. Reset at turn start.
     repetition_pressure: u8,
+    /// Structural progress judgement for the direct tool loop; spans every `run_model_loop`
+    /// re-entry of one user turn (nudges, self-review, autofix) so a loop cannot reset its own
+    /// evidence by being re-driven.
+    progress: loop_progress::ProgressTracker,
     /// Where each spooled tool output was written, by call id, so a result cut later can point at it.
     kept_outputs: std::collections::HashMap<String, String>,
     /// Whether white-hot effort's standing orchestration guidance has been injected this session
@@ -2963,6 +2970,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // something (not a carry-over from a prior turn).
         self.edits_this_turn = 0;
         self.repetition_pressure = 0;
+        self.progress.begin_turn();
         self.mutations_this_turn = 0;
         self.turn_input_tokens = 0;
         self.turn_output_tokens = 0;
@@ -4084,11 +4092,16 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && !presented_plan
             && !hard_guard_abort;
         let stop_reason = if produced_nothing {
-            self.presenter.emit(PresenterEvent::Error(
-                "the turn produced NO answer and made no successful change — reporting it as a \
-                 failed turn, not a completed one"
-                    .to_string(),
-            ));
+            // A loop-guard halt has already told the user what happened and that nothing is lost;
+            // a second, crash-sounding Error on top of it would bury that. The recorded outcome
+            // stays `NoOutput` either way, so `forge status` still does not call it a success.
+            if !halted_by_loop_guard {
+                self.presenter.emit(PresenterEvent::Error(
+                    "the turn produced NO answer and made no successful change — reporting it as \
+                     a failed turn, not a completed one"
+                        .to_string(),
+                ));
+            }
             StopReason::NoOutput
         } else if !self.turn_unfinished_tasks.is_empty() {
             // Tracked work is still open: the turn is incomplete, whatever text it ended with.
