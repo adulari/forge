@@ -744,6 +744,8 @@ pub(crate) enum Command {
         #[arg(long, global = true)]
         global: bool,
     },
+    #[command(subcommand, about = "Attach Forge to a logged-in browser")]
+    Browser(crate::browser_args::BrowserOp),
     /// Git worktrees — what they cost on disk, and reclaiming the ones that are safe to remove.
     Worktree {
         #[command(subcommand)]

@@ -36,6 +36,7 @@ forge-mcp.workspace = true
 forge-mesh.workspace = true
 forge-provider.workspace = true
 forge-skills.workspace = true
+forge-browser.workspace = true
 forge-tools.workspace = true
 forge-store.workspace = true
 forge-voice.workspace = true

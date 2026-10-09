@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+use crate::attach;
 use crate::intercept::{self, InterceptionRules};
 use crate::launch::LaunchConfig;
 use crate::launch::{self, BrowserProcess};
@@ -22,6 +23,8 @@ pub struct BrowserSession {
     rules: Arc<Mutex<intercept::InterceptionRules>>,
     pump: tokio::task::JoinHandle<()>,
     loaded: Arc<Mutex<bool>>,
+    /// Set when Forge attached to a browser it does not own: the one tab Forge opened there.
+    own_tab: Option<attach::OwnTab>,
 }
 
 impl std::fmt::Debug for BrowserSession {
@@ -36,6 +39,11 @@ impl std::fmt::Debug for BrowserSession {
 impl Drop for BrowserSession {
     fn drop(&mut self) {
         self.pump.abort();
+        if let (Some(tab), Ok(runtime)) =
+            (self.own_tab.take(), tokio::runtime::Handle::try_current())
+        {
+            runtime.spawn(async move { tab.close().await });
+        }
     }
 }
 
@@ -43,7 +51,24 @@ impl BrowserSession {
     /// Launch a browser and attach to its first page.
     pub async fn open(config: &LaunchConfig) -> Result<Self> {
         let process = BrowserProcess::launch(config).await?;
-        Self::attach_to(process, &config.fingerprint).await
+        let ws_url = first_page_target(&process.http_base).await?;
+        Self::attach_to(process, &ws_url, None, &config.fingerprint).await
+    }
+
+    /// Attach to a browser the user already runs (see [`attach`]), in a tab of Forge's own. The
+    /// user's tabs and windows are never adopted, navigated, or closed; on drop only Forge's tab
+    /// is closed.
+    pub async fn connect(endpoint: &str, fingerprint: &launch::Fingerprint) -> Result<Self> {
+        let found = attach::discover(endpoint).await?;
+        let tab = attach::open_own_tab(&found.http_base).await?;
+        let process = BrowserProcess::external(&found);
+        let ws_url = tab.ws_url.clone();
+        Self::attach_to(process, &ws_url, Some(tab), fingerprint).await
+    }
+
+    /// Whether this session is attached to a browser Forge does not own.
+    pub fn is_attached(&self) -> bool {
+        self.own_tab.is_some()
     }
 
     /// Re-attach to a browser Forge already launched on this profile — the path that lets a user
@@ -51,13 +76,18 @@ impl BrowserSession {
     /// applies no fingerprint: the browser is already the identity it was launched as.
     pub async fn reattach(profile_dir: impl Into<PathBuf>) -> Result<Self> {
         let process = BrowserProcess::attach(&profile_dir.into()).await?;
-        Self::attach_to(process, &launch::Fingerprint::default()).await
+        let ws_url = first_page_target(&process.http_base).await?;
+        Self::attach_to(process, &ws_url, None, &launch::Fingerprint::default()).await
     }
 
-    async fn attach_to(process: BrowserProcess, fingerprint: &launch::Fingerprint) -> Result<Self> {
-        let ws_url = first_page_target(&process.active.http_base()).await?;
+    async fn attach_to(
+        process: BrowserProcess,
+        ws_url: &str,
+        own_tab: Option<attach::OwnTab>,
+        fingerprint: &launch::Fingerprint,
+    ) -> Result<Self> {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let client = Arc::new(cdp::CdpClient::connect(&ws_url, events_tx).await?);
+        let client = Arc::new(cdp::CdpClient::connect(ws_url, events_tx).await?);
 
         let log = Arc::new(Mutex::new(NetworkLog::default()));
         let loaded = Arc::new(Mutex::new(false));
@@ -97,6 +127,7 @@ impl BrowserSession {
             rules,
             pump,
             loaded,
+            own_tab,
         };
         // Capture must be armed BEFORE the first navigation, or the very requests the caller
         // opened the browser to see have already happened.

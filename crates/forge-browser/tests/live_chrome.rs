@@ -318,3 +318,51 @@ async fn interception_blocks_a_request_and_the_page_still_loads() {
     let _ = stop.send(());
     let _ = server.join();
 }
+
+#[tokio::test]
+#[ignore = "needs a real Chrome installed"]
+async fn attach_drives_its_own_tab_and_leaves_the_existing_one_open() {
+    // A stand-in for "the user's logged-in browser": a Forge-launched headless Chrome whose
+    // pre-existing about:blank tab plays the user's tab.
+    let profile = tempfile::tempdir().expect("temp profile");
+    let host =
+        forge_browser::BrowserProcess::launch(&LaunchConfig::new(profile.path()).headless(true))
+            .await
+            .expect("launch the host browser");
+    let base = host.http_base.clone();
+    let count_pages = || async {
+        let list: serde_json::Value = reqwest::get(format!("{base}/json/list"))
+            .await
+            .expect("list")
+            .json()
+            .await
+            .expect("json");
+        list.as_array()
+            .map(|a| a.iter().filter(|t| t["type"] == "page").count())
+            .unwrap_or(0)
+    };
+    let before = count_pages().await;
+
+    let session = BrowserSession::connect(&base, &forge_browser::Fingerprint::default())
+        .await
+        .expect("attach");
+    assert_eq!(
+        count_pages().await,
+        before + 1,
+        "attach opens exactly one tab of its own"
+    );
+    session
+        .navigate("data:text/html,<title>attached-ok</title><h1>hi</h1>")
+        .await
+        .expect("navigate");
+    let title = session.eval("document.title").await.expect("title");
+    assert_eq!(title, "attached-ok");
+
+    drop(session);
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    assert_eq!(
+        count_pages().await,
+        before,
+        "only Forge's own tab was closed"
+    );
+}

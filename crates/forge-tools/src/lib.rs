@@ -29,7 +29,7 @@ mod sandbox;
 mod shell;
 mod web;
 mod workspace;
-pub use browser::{BrowserNetworkTool, BrowserTool};
+pub use browser::{set_attach_endpoint, BrowserNetworkTool, BrowserTool};
 pub use core_tools::{
     AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, MultiEditTool, NotebookEditTool,
     ReadFileTool, WriteFileTool,

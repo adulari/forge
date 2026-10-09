@@ -61,6 +61,8 @@ mod benchmarks;
 mod blame;
 mod board;
 mod bridge_stats;
+#[path = "cli/browser_args.rs"]
+mod browser_args;
 mod cli;
 mod context_windows;
 mod daemon_cwd;
@@ -162,6 +164,9 @@ async fn main() {
         );
         return;
     };
+    if let Ok(config) = forge_config::load() {
+        forge_tools::set_attach_endpoint(config.browser.endpoint());
+    }
     let telemetry_run = telemetry::start(&command);
     if telemetry_run.show_notice() && std::io::stdout().is_terminal() {
         println!(

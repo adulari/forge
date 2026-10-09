@@ -100,14 +100,12 @@ changes in the tree). It swaps the system prompt's version-control paragraph
 (`commit_policy.rs`) and silences the git-hygiene reminders for anything but `unit`. The
 never-push rule is kept by every policy.
 
-## Logged-in browser attach (investigation, not built)
+## Logged-in browser attach
 
-`forge-browser` drives a real Chrome over CDP but only a Forge-owned persistent profile under
-`$XDG_DATA_HOME/forge/browser/<profile>`: you log in once by hand, later turns re-attach through the
-profile's `DevToolsActivePort`. It cannot attach to the Chrome you already use because (1) Chrome
-refuses remote debugging on the default profile directory and (2) there is no "attach to this
-endpoint" entry point (`BrowserConfig`/`launch` only start or re-attach to its own instance). What
-would close the gap, cheapest first: an `attach` action taking a `ws://`/`http://host:port` the user
-started with `--remote-debugging-port` plus a non-default `--user-data-dir`; importing cookies from
-a profile (OS-keyring encrypted, needs per-platform decryption); or bridging Claude's Chrome
-extension over native messaging. None is built here.
+Built: `[browser] attach = "http://127.0.0.1:9222"` (alias `cdp_url`, env `FORGE_BROWSER_CDP`) makes
+the `browser` tool's `open` attach to an already-running Chromium-family browser instead of
+launching one. It opens its own tab, never adopts or closes yours (only `/json/close/<its tab>`; no
+`Browser.close`/`Target.closeTarget`), and `forge browser attach` starts a browser on a dedicated
+persistent profile for you to log into once. Details, safety model and the Chrome 136 default-profile
+restriction: [browser.md](browser.md#attach-to-your-logged-in-browser). Still not built: reading
+cookies out of your everyday profile, or bridging Claude's Chrome extension over native messaging.

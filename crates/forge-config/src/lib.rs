@@ -13,6 +13,7 @@ use forge_types::{
 use serde::{Deserialize, Serialize};
 
 pub mod agents;
+pub mod browser;
 mod commit_policy;
 pub mod mcp;
 pub mod notifications;
@@ -140,6 +141,9 @@ pub struct Config {
     /// Desktop notification + terminal bell when a turn finishes or Forge waits on the user.
     #[serde(default)]
     pub notifications: notifications::NotificationsConfig,
+    /// Attach the browser tool to an existing logged-in browser (`[browser] attach`).
+    #[serde(default)]
+    pub browser: browser::BrowserConfig,
     /// User-configurable keybind map (action → key combo). Defaults to the built-in map.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -2783,6 +2787,7 @@ impl Default for Config {
             self_mcp: false,
             statusline: StatuslineConfig::default(),
             notifications: notifications::NotificationsConfig::default(),
+            browser: browser::BrowserConfig::default(),
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
             system_prompt_overrides: HashMap::new(),
