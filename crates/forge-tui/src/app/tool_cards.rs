@@ -95,7 +95,7 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
         let indent = 7 + label_w + 2;
         let mut first = true;
         for chunk in wrap_plain(value, width.saturating_sub(indent + 1)) {
-            let mut spans = vec![Span::styled("     ┆ ", Style::default().fg(VERY_DIM))];
+            let mut spans = vec![Span::styled("     ┆ ", gutter_style())];
             if first {
                 spans.push(Span::styled(
                     format!("{key:<label_w$}  "),
@@ -124,7 +124,7 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
         for line in detail.lines() {
             for chunk in wrap_plain(line, width.saturating_sub(8)) {
                 out.push(TextLine::from(vec![
-                    Span::styled("     ┆ ", Style::default().fg(VERY_DIM)),
+                    Span::styled("     ┆ ", gutter_style()),
                     Span::styled(chunk, style),
                 ]));
             }
@@ -134,7 +134,7 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
     // collapse hint so `full_output_row` can find it without re-rendering the card.
     if let Some(full) = &card.full {
         out.push(TextLine::from(vec![
-            Span::styled("     ┆ ", Style::default().fg(VERY_DIM)),
+            Span::styled("     ┆ ", gutter_style()),
             Span::styled("⤢ view full output", Style::default().fg(TOOLCYAN).bold()),
             Span::styled(
                 format!(
@@ -150,6 +150,12 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
         Style::default().fg(VERY_DIM),
     )));
     out
+}
+
+/// The `┆` rail down the left of an expanded card: decoration, so a selection copies the
+/// arguments and output without it.
+fn gutter_style() -> Style {
+    crate::copy_mark::decor(Style::default().fg(VERY_DIM))
 }
 
 /// Which of a card's rendered lines is its "view full output" row, when it shows one.

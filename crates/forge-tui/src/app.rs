@@ -3037,26 +3037,9 @@ impl App {
         }
     }
 
-    /// The currently selected text (joined across wrapped rows), or `None` if nothing/empty is
-    /// selected. The shell copies this to the clipboard on button release.
-    /// Map a CELL column (a screen-x offset, what `pointer_to_text` records) to a CHAR index in
-    /// `chars`, accounting for wide glyphs. A mouse column is in terminal CELLS, but a selection
-    /// slices a `[char]` — and a CJK ideograph / emoji occupies 2 cells but 1 char, so using the cell
-    /// offset as a char index drifts the boundary right by one per wide glyph before it. Walk the
-    /// chars summing their display width until the target cell is reached. A `cell` past the end
-    /// (e.g. `usize::MAX` for "to end of row") clamps to `chars.len()`.
-    fn cell_to_char_index(chars: &[char], cell: usize) -> usize {
-        use unicode_width::UnicodeWidthChar;
-        let mut cells = 0usize;
-        for (i, &c) in chars.iter().enumerate() {
-            if cells >= cell {
-                return i;
-            }
-            cells += UnicodeWidthChar::width(c).unwrap_or(1);
-        }
-        chars.len()
-    }
-
+    /// The currently selected text, or `None` if nothing/empty is selected. The shell copies this
+    /// to the clipboard on button release. Decoration (frames, gutters) is left out; see
+    /// [`crate::copy_mark`].
     pub fn selection_text(&self) -> Option<String> {
         let (a, b) = self.selection?;
         let ((r0, c0), (r1, c1)) = if a <= b { (a, b) } else { (b, a) };
@@ -3066,30 +3049,22 @@ impl App {
         let cache = self.wrap_cache.borrow();
         let stream = self.stream_cache.borrow();
         let committed = cache.rows.len();
-        let mut out = String::new();
-        for r in r0..=r1 {
-            // The rendered transcript is the committed wrap-cache followed by the live streaming
-            // edge; a selection can span that boundary, so pull each row from whichever side it
-            // falls in. Without the streaming side, a copy ending in the in-flight reply was cut off.
+        // The rendered transcript is the committed wrap-cache followed by the live streaming
+        // edge; a selection can span that boundary, so pull each row from whichever side it
+        // falls in. Without the streaming side, a copy ending in the in-flight reply was cut off.
+        let rows = (r0..=r1).map_while(|r| {
             let line = if r < committed {
                 cache.rows.get(r)
             } else if self.streaming_active {
                 stream.rows.get(r - committed)
             } else {
                 None
-            };
-            let Some(line) = line else { break };
-            let chars: Vec<char> = line.spans.iter().flat_map(|s| s.content.chars()).collect();
-            // c0/c1 are CELL columns; convert to char indices so wide glyphs don't drift the bounds.
-            let start_cell = if r == r0 { c0 as usize } else { 0 };
-            let end_cell = if r == r1 { c1 as usize } else { usize::MAX };
-            let start = Self::cell_to_char_index(&chars, start_cell);
-            let end = Self::cell_to_char_index(&chars, end_cell).max(start);
-            if r > r0 {
-                out.push('\n');
-            }
-            out.extend(&chars[start..end]);
-        }
+            }?;
+            let from = if r == r0 { c0 as usize } else { 0 };
+            let to = if r == r1 { c1 as usize } else { usize::MAX };
+            Some((line, from, to))
+        });
+        let out = crate::copy_mark::selection_text(rows);
         let trimmed = out.trim_end_matches('\n').to_string();
         (!trimmed.trim().is_empty()).then_some(trimmed)
     }
@@ -3407,7 +3382,7 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 /// an optional yellow notes line, and a dim footer hinting the interactive approve prompt that
 /// follows. The frame is sized to the widest row (clamped) so it stays tidy at any plan length.
 fn plan_card_lines(plan: &forge_types::PlanProposal) -> Vec<TextLine<'static>> {
-    let frame = Style::default().fg(ORANGE);
+    let frame = crate::copy_mark::decor(Style::default().fg(ORANGE));
     let title = plan.title.trim().to_string();
 
     // Each logical row is a fixed prefix (number/marker/indent) plus a wrappable text payload.
@@ -3473,7 +3448,7 @@ fn plan_card_lines(plan: &forge_types::PlanProposal) -> Vec<TextLine<'static>> {
     let rule = |l: &str, r: &str| {
         TextLine::from(Span::styled(
             format!("  {l}{}{r}", "─".repeat(inner + 2)),
-            frame,
+            crate::copy_mark::frame_row(frame),
         ))
     };
 
@@ -7707,44 +7682,43 @@ mod tests {
     }
 
     #[test]
-    fn cell_to_char_index_accounts_for_wide_glyphs() {
-        // ASCII: cell offset == char index.
-        let ascii: Vec<char> = "hello".chars().collect();
-        assert_eq!(App::cell_to_char_index(&ascii, 0), 0);
-        assert_eq!(App::cell_to_char_index(&ascii, 3), 3);
-        assert_eq!(
-            App::cell_to_char_index(&ascii, 99),
-            5,
-            "past end clamps to len"
-        );
+    fn mouse_selection_over_a_code_block_copies_no_frame() {
+        let mut app = App {
+            fullscreen: true,
+            ..Default::default()
+        };
+        let code = "fn f() {\n    let v = \"a │ b\";\n}";
+        app.push_scrollback(crate::render::markdown_to_lines(&format!(
+            "```rust\n{code}\n```"
+        )));
+        app.ensure_wrapped_main(80);
+        app.transcript_geom.set(Some(TranscriptGeom {
+            col0: 0,
+            row0: 0,
+            width: 80,
+            height: 10,
+            scroll: 0,
+        }));
+        assert!(app.selection_begin(0, 0));
+        app.selection_extend(79, 4);
+        assert_eq!(app.selection_text().as_deref(), Some(code));
+    }
 
-        // "日本語x" — each ideograph is 2 cells, so cells run 0,2,4 then 'x' at cell 6.
-        let wide: Vec<char> = "日本語x".chars().collect();
-        assert_eq!(App::cell_to_char_index(&wide, 0), 0, "日 at cell 0");
-        assert_eq!(
-            App::cell_to_char_index(&wide, 2),
-            1,
-            "本 starts at cell 2 → char 1"
-        );
-        assert_eq!(
-            App::cell_to_char_index(&wide, 4),
-            2,
-            "語 starts at cell 4 → char 2"
-        );
-        assert_eq!(
-            App::cell_to_char_index(&wide, 6),
-            3,
-            "x at cell 6 → char 3 (the bug: was 6)"
-        );
-        assert_eq!(
-            App::cell_to_char_index(&wide, usize::MAX),
-            4,
-            "to end → len"
-        );
-
-        // The actual selection bug: selecting the trailing 'x' by its on-screen column. Cell 6 must
-        // map to char 3, not 6 (which would be out of bounds / drift past the string).
-        assert_eq!(&wide[App::cell_to_char_index(&wide, 6)..], &['x']);
+    #[test]
+    fn plan_card_selection_drops_frame_and_padding() {
+        let plan = forge_types::PlanProposal {
+            title: "Ship it".into(),
+            steps: vec![forge_types::PlanStep {
+                title: "do the thing".into(),
+                detail: String::new(),
+            }],
+            notes: None,
+        };
+        let rows = crate::transcript::wrap_lines(&plan_card_lines(&plan), 100);
+        let text = crate::copy_mark::selection_text(rows.iter().map(|r| (r, 0, usize::MAX)));
+        assert!(text.contains("do the thing"), "{text:?}");
+        assert!(!text.contains(['╭', '╮', '╰', '╯', '│', '─']), "{text:?}");
+        assert!(text.lines().all(|l| l == l.trim_end()), "{text:?}");
     }
 
     #[test]
