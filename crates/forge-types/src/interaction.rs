@@ -354,6 +354,15 @@ pub trait Presenter: Send {
     fn recap_sink(&self) -> Option<Box<dyn Presenter>> {
         None
     }
+    /// Whether this surface renders [`PresenterEvent::Recap`]. When `false` the session skips the
+    /// recap side call instead of paying its latency and tokens for an event nobody shows.
+    fn consumes_recap(&self) -> bool {
+        true
+    }
+    /// Whether this surface renders [`PresenterEvent::SuggestionReady`] (ghost-text next prompt).
+    fn consumes_suggestions(&self) -> bool {
+        true
+    }
 }
 
 /// One surface-independent item in a resumed session transcript.

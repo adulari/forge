@@ -34,6 +34,7 @@ mod headless;
 mod heartbeat_args;
 mod help;
 pub mod init_wizard;
+mod json_result;
 mod keybind_configurator;
 pub mod keybinds;
 mod overlays;
@@ -42,6 +43,7 @@ mod render;
 pub mod select;
 mod stream_json;
 pub mod throughput;
+pub use json_result::JsonResultPresenter;
 pub use stream_json::StreamJsonPresenter;
 mod surface;
 mod transcript;
@@ -158,6 +160,15 @@ mod stream_json_tests {
         // terminal result event.
         assert_eq!(parsed[5]["type"], "result");
         assert_eq!(parsed[5]["result"], "done");
+    }
+
+    #[test]
+    fn machine_surfaces_decline_side_calls_they_never_render() {
+        let stream = StreamJsonPresenter::with_writer(Box::new(SharedBuf(Default::default())));
+        assert!(!stream.consumes_recap() && !stream.consumes_suggestions());
+        let headless = HeadlessPresenter::new(false);
+        assert!(headless.consumes_recap(), "headless prints the recap line");
+        assert!(!headless.consumes_suggestions());
     }
 
     #[test]

@@ -331,7 +331,8 @@ pub(crate) enum Command {
             value_name = "TEXT"
         )]
         system: Vec<String>,
-        /// Output format: `text` (default, human line output) or `stream-json` (NDJSON — one JSON
+        /// Output format: `text` (default, human line output), `json` (one final Claude-Code-shaped
+        /// result object) or `stream-json` (NDJSON — one JSON
         /// event per line on stdout, mirroring Claude Code's stream-json so editors/tools can embed
         /// Forge). Pair with `--mode bypass`/`--mode accept-edits` for autonomous tool use.
         #[arg(long, value_enum, default_value = "text")]
@@ -1447,6 +1448,15 @@ pub(crate) enum OutputFormat {
     Text,
     #[value(name = "stream-json")]
     StreamJson,
+    /// One final Claude-Code-shaped `result` object (`claude -p --output-format json`).
+    Json,
+}
+
+impl OutputFormat {
+    /// Machine-readable formats own stdout: no TUI, no heartbeat, no fleet hand-off.
+    pub(crate) fn is_machine(self) -> bool {
+        !matches!(self, OutputFormat::Text)
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]

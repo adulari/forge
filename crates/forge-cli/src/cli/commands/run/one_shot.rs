@@ -51,8 +51,12 @@ pub(crate) async fn run(
 
     // stream-json: emit NDJSON events on stdout via the StreamJsonPresenter (no TUI, no heartbeat —
     // stdout stays a clean machine-readable event stream). Ctrl-C still returns partial output.
-    if output_format == OutputFormat::StreamJson {
-        let presenter: Box<dyn Presenter> = Box::new(forge_tui::StreamJsonPresenter::new());
+    if output_format.is_machine() {
+        let presenter: Box<dyn Presenter> = if output_format == OutputFormat::Json {
+            Box::new(forge_tui::JsonResultPresenter::new())
+        } else {
+            Box::new(forge_tui::StreamJsonPresenter::new())
+        };
         let mut session = build_session_with(presenter, mock, mode, resume, pin, true).await?;
         let turn = session.run_turn_with(&prompt, &guidance, tier);
         tokio::pin!(turn);
@@ -135,7 +139,7 @@ async fn maybe_publish_run_to_fleet(
     no_publish_to_fleet: bool,
     output_format: OutputFormat,
 ) -> Option<String> {
-    if matches!(output_format, OutputFormat::StreamJson) {
+    if output_format.is_machine() {
         return None;
     }
     let configured = forge_config::load()

@@ -192,7 +192,7 @@ prompt text, nothing else.";
         final_text: &str,
         tasks_before: &[forge_types::TodoItem],
     ) {
-        if !self.config.recap.enabled {
+        if !self.config.recap.enabled || !self.presenter.consumes_recap() {
             return;
         }
         // A stalled turn (empty-response give-up, hard failover exhaustion) leaves `final_text`
@@ -310,7 +310,7 @@ prompt text, nothing else.";
     /// silently skipped on budget exhaustion or any model error, exactly like `generate_recap`,
     /// whose detachment pattern (and reasoning) this mirrors.
     pub(crate) async fn generate_suggestion(&mut self, prompt: &str, final_text: &str) {
-        if !self.config.suggest.enabled {
+        if !self.config.suggest.enabled || !self.presenter.consumes_suggestions() {
             return;
         }
         if final_text.trim().is_empty() {

@@ -27,6 +27,7 @@ use forge_types::{
 use forge_types::{Presenter, PresenterEvent};
 
 pub mod assay;
+mod auxiliary_candidates;
 mod auxiliary_policy;
 mod btw_policy;
 pub mod capsule;
@@ -7236,7 +7237,7 @@ mod tests {
             forge_config::OneOrMany::Many(vec!["ollama::qwen3:4b".into()]),
         );
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let session = Session::start(
+        let mut session = Session::start(
             store,
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
@@ -7246,6 +7247,8 @@ mod tests {
             test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
+        let mut live_catalog = ModelCatalog::new(vec!["ollama::qwen3:4b".into()]);
+        session.set_catalog(Some(live_catalog.clone()));
         let pinned = forge_mesh::RoutingDecision {
             effort: None,
             tier: TaskTier::Trivial,
@@ -7268,6 +7271,7 @@ mod tests {
             "a lightweight configured model remains suitable for optional side calls"
         );
 
+        let pinned_again = pinned.clone();
         let claude_bridge = forge_mesh::RoutingDecision {
             effort: None,
             model: "claude-cli::sonnet".into(),
@@ -7278,6 +7282,14 @@ mod tests {
             session.post_turn_auxiliary_model(&claude_bridge),
             None,
             "a completed turn must not launch another full CLI agent for optional side work"
+        );
+
+        live_catalog = ModelCatalog::new(vec!["groq::llama-3.1-8b-instant".into()]);
+        session.set_catalog(Some(live_catalog));
+        assert_eq!(
+            session.auxiliary_model(&pinned_again),
+            "codex-oauth::gpt-5.6-sol",
+            "a local server absent from the discovered catalog is not used; fall back to the pin"
         );
     }
 

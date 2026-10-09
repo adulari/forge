@@ -148,4 +148,12 @@ impl Presenter for StreamJsonPresenter {
     fn is_attended(&self) -> bool {
         false
     }
+
+    fn consumes_recap(&self) -> bool {
+        false
+    }
+
+    fn consumes_suggestions(&self) -> bool {
+        false
+    }
 }
