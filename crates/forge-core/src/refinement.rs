@@ -190,9 +190,9 @@ impl Session {
                 Err(e) => return Err(CoreError::Provider(e)),
             }
         };
-        let _ = self
-            .store
-            .record_side_call_usage(&self.id, "refine", &resp.usage);
+        let _ =
+            self.store
+                .record_side_call_usage_for(&self.id, "refine", Some(&model), &resp.usage);
 
         let parsed = parse_refine_response(&resp.content).ok_or_else(|| {
             CoreError::Internal(format!(

@@ -519,7 +519,12 @@ pub(crate) async fn skill_from_session(
         .map_err(|e| anyhow::anyhow!("model call failed: {e}"))?;
 
     // Record cost against the store (best-effort, like compact / diagnose)
-    let _ = store.record_side_call_usage(&session_id, "skill/from-session", &response.usage);
+    let _ = store.record_side_call_usage_for(
+        &session_id,
+        "skill/from-session",
+        Some(&model),
+        &response.usage,
+    );
 
     // --- Parse model output and assemble SKILL.md ---
     let (body, description) = forge_skills::parse_model_output(&response.content);

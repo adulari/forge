@@ -213,6 +213,7 @@ impl Session {
                 self.transcript_fits(model),
             ) {
                 let (before, after) = self.compact(true).await.unwrap_or_default();
+                self.enforce_post_compact_headroom(trigger);
                 // Continual Harness auto-refine gate (`harness.auto_refine = "compact"`,
                 // refinement.rs): only when this call actually folded something — `compact`
                 // no-ops (before == after) when there isn't enough older history yet, and firing
@@ -571,6 +572,7 @@ impl Session {
         let mut model = chain.next().expect("compact_candidate_chain is non-empty");
         let completion_opts = Self::auxiliary_completion_options(&self.id, "compact");
         let mut best: Option<(String, forge_provider::ModelResponse)> = None;
+        let mut usage_recorded = false;
         let resp = loop {
             let mut sink = |_: StreamEvent| {};
             // Fit the payload to THIS candidate's own window. Built inside the loop because the
@@ -617,22 +619,25 @@ impl Session {
                     )));
                     match chain.next() {
                         Some(next) => model = next,
-                        // Every candidate was thin. The fullest thin summary beats none: it still
-                        // replaces a transcript that has outgrown its ceiling.
-                        None if best.is_some() => {
-                            let (m, r) = best.take().expect("checked above");
+                        // Every candidate was thin. Never fold in less than the user's own words:
+                        // the fullest thin summary (if any) gets the deterministic digest appended,
+                        // and with none at all the digest stands alone. Either way the older
+                        // stretch is dropped from context, so the ceiling is still enforced.
+                        None => {
+                            let digest = deterministic_digest(&self.transcript[..split]);
+                            let (m, mut r) = best.take().unwrap_or_else(|| {
+                                (model.clone(), forge_provider::ModelResponse::default())
+                            });
+                            r.content = if r.content.trim().is_empty() {
+                                digest
+                            } else {
+                                format!("{}\n\n{digest}", r.content.trim())
+                            };
+                            // Its usage was recorded when it came back thin.
+                            r.usage = Default::default();
+                            usage_recorded = true;
                             model = m;
                             break r;
-                        }
-                        None => {
-                            self.abandon_compaction(before);
-                            return Err(CoreError::Provider(
-                                forge_provider::ProviderError::Unavailable(
-                                    "every summarizer returned an empty summary; the conversation \
-                                     was kept as it is"
-                                        .into(),
-                                ),
-                            ));
                         }
                     }
                 }
@@ -657,12 +662,14 @@ impl Session {
                 }
             }
         };
-        let _ = self.store.record_side_call_usage_for(
-            &self.id,
-            "compact/summarize",
-            Some(&model),
-            &resp.usage,
-        );
+        if !usage_recorded {
+            let _ = self.store.record_side_call_usage_for(
+                &self.id,
+                "compact/summarize",
+                Some(&model),
+                &resp.usage,
+            );
+        }
         let summary = resp.content;
 
         let mut compacted = Vec::with_capacity(COMPACT_KEEP_RECENT + 1);
@@ -861,7 +868,7 @@ pub(crate) fn needs_compaction(transcript_tokens: u64, trigger: u64, fits_window
 /// outright, and everyone else loses those results to the pairing repair. Walking back to the
 /// call keeps a few more messages than `COMPACT_KEEP_RECENT`, which is the cheaper mistake.
 pub(crate) use crate::compaction_shape::{
-    kept_tail_start, summary_too_thin, COMPACT_KEEP_ROUNDS_TOKENS,
+    deterministic_digest, kept_tail_start, summary_too_thin, COMPACT_KEEP_ROUNDS_TOKENS,
 };
 
 pub(crate) fn round_aligned_split(messages: &[Message], mut split: usize) -> usize {

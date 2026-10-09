@@ -405,7 +405,7 @@ fn elide_old_tool_results(
         .collect()
 }
 
-fn elide_tool_result(message: &Message, token_budget: usize) -> Message {
+pub(crate) fn elide_tool_result(message: &Message, token_budget: usize) -> Message {
     // A tokenizer cannot emit more tokens than the UTF-8 byte length it consumes. This cheap
     // bound avoids BPE-tokenizing thousands of small persisted tool results just to prove that
     // each one is already below a much larger per-result budget.
