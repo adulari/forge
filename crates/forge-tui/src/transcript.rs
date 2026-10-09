@@ -191,6 +191,9 @@ pub(crate) fn wrap_lines_indexed(
     for (src, line) in lines.iter().enumerate() {
         let mut cur: Vec<Span<'static>> = Vec::new();
         let mut cur_w = 0usize;
+        // A framed line's continuation rows carry no gutter of their own, so tag them for the copy
+        // path to rejoin rather than treat them as separate source lines.
+        let framed = crate::copy_mark::has_decor(line);
         for span in &line.spans {
             let style = span.style;
             let mut buf = String::new();
@@ -206,6 +209,9 @@ pub(crate) fn wrap_lines_indexed(
                     out.push(TextLine::from(std::mem::take(&mut cur)));
                     origins.push(src);
                     cur_w = 0;
+                    if framed {
+                        cur.push(crate::copy_mark::soft_wrap_marker());
+                    }
                 }
                 buf.push(ch);
                 cur_w += cw;
@@ -214,6 +220,9 @@ pub(crate) fn wrap_lines_indexed(
                     out.push(TextLine::from(std::mem::take(&mut cur)));
                     origins.push(src);
                     cur_w = 0;
+                    if framed {
+                        cur.push(crate::copy_mark::soft_wrap_marker());
+                    }
                 }
             }
             if !buf.is_empty() {

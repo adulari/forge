@@ -29,6 +29,7 @@ mod arg_parse;
 pub mod board;
 mod commands;
 pub mod config_editor;
+mod copy_mark;
 mod driver;
 mod git_location;
 mod headless;

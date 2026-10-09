@@ -19,6 +19,7 @@ use syntect::parsing::SyntaxSet;
 mod table;
 use table::{clip_spans, TableBuild, TABLE_CELL_MAX};
 
+use crate::copy_mark;
 use crate::surface::{ACCENT, DIM, ERRRED, OKGREEN, ORANGE, TEXT, TOOLCYAN, WARNYEL};
 
 const CODEFG: Color = TEXT; // code body text = primary body text
@@ -123,8 +124,14 @@ pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
         .unwrap_or_else(|| ss.find_syntax_plain_text());
     let mut highlighter = HighlightLines::new(syntax, theme);
     let td = TextDiff::from_lines(old, new);
-    let gutter =
-        |sym: &str, c: Color| Span::styled(format!("{INDENT}{sym} "), Style::default().fg(c));
+    // The +/-/space marker is content of a diff; only the indent and the gap after it are decoration.
+    let gutter = |sym: &str, c: Color| {
+        [
+            Span::styled(INDENT, copy_mark::decor(Style::default())),
+            Span::styled(sym.to_string(), Style::default().fg(c)),
+            Span::styled(" ", copy_mark::decor(Style::default())),
+        ]
+    };
     let mut emitted = 0usize;
 
     for group in td.grouped_ops(3) {
@@ -161,7 +168,7 @@ pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
                     ChangeTag::Insert => ("+", OKGREEN),
                     ChangeTag::Equal => (" ", DIM),
                 };
-                let mut line = vec![gutter(sym, color)];
+                let mut line = gutter(sym, color).to_vec();
                 // highlight the body; context/added stay readable, deletions tinted red.
                 let body = highlighted_spans(&mut highlighter, ss, &text);
                 if change.tag() == ChangeTag::Delete {
@@ -546,7 +553,10 @@ impl Renderer {
             // start the line with its indent (+ quote bar if quoted).
             self.cur.push(Span::raw(self.indent_prefix()));
             if self.quote > 0 {
-                self.cur.push(Span::styled("▏ ", Style::default().fg(DIM)));
+                self.cur.push(Span::styled(
+                    "▏ ",
+                    copy_mark::decor(Style::default().fg(DIM)),
+                ));
             }
         }
         self.cur.push(Span::styled(text.to_string(), self.style()));
@@ -743,7 +753,8 @@ impl Renderer {
         while matches!(lines.last(), Some(l) if l.is_empty()) {
             lines = &lines[..lines.len() - 1];
         }
-        let frame = Style::default().fg(DIM);
+        let frame = copy_mark::frame_row(Style::default().fg(DIM));
+        let gutter = copy_mark::decor(Style::default().fg(DIM));
         let label = if lang.is_empty() { "text" } else { lang };
         let bar = "─".repeat(48usize.saturating_sub(label.len() + 2));
         self.lines.push(Line::from(Span::styled(
@@ -751,7 +762,7 @@ impl Renderer {
             frame,
         )));
         for spans in highlight_code(lang, lines) {
-            let mut line = vec![Span::styled(format!("{INDENT}│ "), frame)];
+            let mut line = vec![Span::styled(format!("{INDENT}│ "), gutter)];
             line.extend(spans);
             self.lines.push(Line::from(line));
         }
