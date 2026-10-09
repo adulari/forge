@@ -41,6 +41,7 @@ mod provenance_store;
 mod quota_store;
 mod schema;
 mod session_catalog_store;
+mod session_route_store;
 mod session_usage_store;
 mod spending_store;
 mod sync_files_store;
@@ -7111,6 +7112,63 @@ mod tests {
             "old failures decay out of the calibration"
         );
         assert!(row.mean_latency_ms > 100.0);
+    }
+
+    #[test]
+    fn session_last_model_is_the_newest_routed_model() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "ask").unwrap();
+        assert_eq!(store.session_last_model(&sid).unwrap(), None);
+        for (seq, model) in [(0, "a::one"), (1, "b::two"), (2, "a::one")] {
+            let id = store
+                .add_message(&sid, seq, Role::Assistant, "x", None)
+                .unwrap();
+            store
+                .record_routing(&id, TaskTier::Standard, model, "r")
+                .unwrap();
+        }
+        store
+            .add_message(&sid, 3, Role::User, "unrouted", None)
+            .unwrap();
+        assert_eq!(
+            store.session_last_model(&sid).unwrap().as_deref(),
+            store
+                .session_models(&sid)
+                .unwrap()
+                .last()
+                .map(String::as_str)
+        );
+        assert_eq!(
+            store.session_last_model(&sid).unwrap().as_deref(),
+            Some("a::one")
+        );
+    }
+
+    #[test]
+    fn calibration_breaks_completed_at_ties_by_newest_id() {
+        let store = Store::open_in_memory().unwrap();
+        for n in 0..130_i64 {
+            store
+                .record_mesh_outcome(&MeshOutcome {
+                    session_id: "session".into(),
+                    model: "tie::model".into(),
+                    tier: TaskTier::Standard,
+                    started_at: 5,
+                    completed_at: 5,
+                    latency_ms: 10,
+                    outcome: if n < 10 { "failure" } else { "success" }.into(),
+                    error_kind: None,
+                    failover_hop: 0,
+                    tool_calls: 0,
+                    verified_completion: true,
+                })
+                .unwrap();
+        }
+        let rows = store.model_outcome_calibration().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].samples, 120);
+        assert_eq!(rows[0].success_rate, 1.0, "the ten oldest ids are dropped");
+        assert_eq!(rows[0].mean_latency_ms, 10.0);
     }
 
     #[test]
