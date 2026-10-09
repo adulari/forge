@@ -4847,6 +4847,9 @@ mod tests {
     #[path = "failure_streak_reset.rs"]
     mod failure_streak_reset_tests;
 
+    #[path = "completeness_gate.rs"]
+    mod completeness_gate_tests;
+
     #[path = "phantom_edit.rs"]
     mod phantom_edit_tests;
 

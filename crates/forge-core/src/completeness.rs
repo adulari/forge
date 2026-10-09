@@ -388,20 +388,38 @@ pub(crate) fn shell_command_failed(result: &str) -> bool {
     }
 }
 
-/// The turn's answer after a completeness review. A review that changed nothing only confirms
-/// the work, so the user keeps the real answer instead of the review's self-assessment; a review
-/// that made further edits reports them, so its reply stands.
+/// A cheap fingerprint of the working tree (HEAD, status and diff), or `None` outside a git
+/// repository. Tool counters can't tell a review that only ran `git diff` from one that edited:
+/// every successful shell command counts as a mutation.
+pub(crate) fn worktree_fingerprint(root: &std::path::Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| o.stdout)
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    git(&["rev-parse", "HEAD"])?.hash(&mut hasher);
+    git(&["status", "--porcelain=v1", "-uall"])?.hash(&mut hasher);
+    git(&["diff", "HEAD"])?.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// The turn's answer after a completeness review. A review that left the working tree as it
+/// found it only confirms the work, so the user keeps the real answer instead of the review's
+/// self-assessment; a review that changed the tree reports that change, so its reply stands.
 pub(crate) fn answer_after_review(
     reply: String,
-    pre_review: Option<(String, u64)>,
-    mutations_now: u64,
+    pre_review: Option<(String, Option<u64>)>,
+    tree_now: Option<u64>,
 ) -> String {
     match pre_review {
-        Some((answer, mutations_then))
-            if mutations_now == mutations_then && !answer.trim().is_empty() =>
-        {
-            answer
-        }
+        Some((answer, tree_then)) if tree_now == tree_then && !answer.trim().is_empty() => answer,
         _ => reply,
     }
 }
@@ -615,20 +633,24 @@ mod review_answer_tests {
 
     #[test]
     fn review_without_new_edits_keeps_the_real_answer() {
-        let pre = Some(("Added the test; it passes.".to_string(), 2));
+        let pre = Some(("Added the test; it passes.".to_string(), Some(7)));
         assert_eq!(
-            answer_after_review("Final review: all requirements handled.".into(), pre, 2),
+            answer_after_review(
+                "Final review: all requirements handled.".into(),
+                pre,
+                Some(7)
+            ),
             "Added the test; it passes."
         );
     }
 
     #[test]
     fn review_that_edited_reports_its_own_change() {
-        let pre = Some(("Done.".to_string(), 2));
+        let pre = Some(("Done.".to_string(), Some(7)));
         assert_eq!(
-            answer_after_review("Fixed the missing case too.".into(), pre, 3),
+            answer_after_review("Fixed the missing case too.".into(), pre, Some(8)),
             "Fixed the missing case too."
         );
-        assert_eq!(answer_after_review("Plain.".into(), None, 0), "Plain.");
+        assert_eq!(answer_after_review("Plain.".into(), None, None), "Plain.");
     }
 }
