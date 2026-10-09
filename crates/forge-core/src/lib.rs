@@ -4579,6 +4579,20 @@ fn inject_budget(base: usize, status: BudgetStatus) -> usize {
     }
 }
 
+/// The outer stream-idle budget for `model` on `provider`: the configured value, raised to the
+/// provider's own hint (CLI bridges run an inner watchdog that is larger than the default outer
+/// one). A zero configured value keeps the watchdog disabled.
+pub(crate) fn effective_stream_idle(
+    provider: &dyn forge_provider::Provider,
+    model: &str,
+    configured: std::time::Duration,
+) -> std::time::Duration {
+    if configured.is_zero() {
+        return configured;
+    }
+    configured.max(provider.stream_idle_hint(model).unwrap_or_default())
+}
+
 /// Await a streaming completion, but abort it if the stream goes silent for `idle` (a half-open /
 /// stalled connection) so a turn never hangs forever — the caller treats the synthesized
 /// `Unavailable` as retryable and fails over. `activity` is bumped by the completion's event sink;
@@ -4811,6 +4825,9 @@ mod tests {
 
     #[path = "bridge_stall.rs"]
     mod bridge_stall_tests;
+
+    #[path = "stream_idle_hint.rs"]
+    mod stream_idle_hint_tests;
 
     #[path = "steer_rewind.rs"]
     mod steer_rewind_tests;

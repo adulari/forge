@@ -842,6 +842,15 @@ pub trait Provider: Send + Sync {
         let _ = opts;
         self.complete(model, messages, tools, on_event).await
     }
+
+    /// Minimum silence budget the caller's OUTER stream watchdog should allow for `model`. A CLI
+    /// bridge owns its own (larger) inner idle window and classifies stalls itself; an outer
+    /// watchdog tighter than that kills a legitimately quiet turn (long thinking, auto-compaction)
+    /// and, via the bridge's process-group guard, any tool running under it. `None` = no opinion.
+    fn stream_idle_hint(&self, model: &str) -> Option<std::time::Duration> {
+        let _ = model;
+        None
+    }
 }
 
 /// Routes each turn to a backend by the model id's `provider::` prefix: `claude-cli::…` /
@@ -906,6 +915,22 @@ impl DispatchProvider {
     }
 }
 
+impl DispatchProvider {
+    fn cli_for(&self, model: &str) -> Option<&CliProvider> {
+        let model = normalize_model_id(model);
+        let model = model.as_ref();
+        if model.starts_with("claude-cli::") {
+            Some(&self.claude_cli)
+        } else if model.starts_with("codex-cli::") {
+            Some(&self.codex_cli)
+        } else if model.starts_with("agy-cli::") {
+            Some(&self.agy_cli)
+        } else {
+            None
+        }
+    }
+}
+
 impl Default for DispatchProvider {
     fn default() -> Self {
         Self::new(true)
@@ -914,6 +939,10 @@ impl Default for DispatchProvider {
 
 #[async_trait]
 impl Provider for DispatchProvider {
+    fn stream_idle_hint(&self, model: &str) -> Option<std::time::Duration> {
+        self.cli_for(model)?.stream_idle_hint(model)
+    }
+
     async fn complete(
         &self,
         model: &str,

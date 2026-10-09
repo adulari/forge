@@ -40,9 +40,43 @@ pub fn record_from_env_after_write(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Path of the per-turn "bridge turn file" a LONG-LIVED bridge parent rewrites before every user
+/// turn. A persistent `claude` process (and the `forge mcp-serve` it spawned) outlives many user
+/// turns, so values baked into its spawn-time env (`ENV_SEQ`, `ENV_MODE`) go stale; the file
+/// carries the current ones as JSON `{"seq": <i64>, "mode": "<permission key>"}`.
+pub const ENV_TURN_FILE: &str = "FORGE_BRIDGE_TURN_FILE";
+
+/// The live per-turn values from the bridge turn file; `None` when the env var is unset or the
+/// file is missing/unparsable (callers then keep their spawn-time values).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BridgeTurn {
+    pub seq: Option<i64>,
+    pub mode: Option<String>,
+}
+
+pub fn read_bridge_turn() -> Option<BridgeTurn> {
+    let path = std::env::var(ENV_TURN_FILE).ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some(BridgeTurn {
+        seq: v.get("seq").and_then(serde_json::Value::as_i64),
+        mode: v
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// Current turn seq: the turn file when `ENV_TURN_FILE` is set and readable, else `ENV_SEQ`.
+pub fn current_seq() -> Option<i64> {
+    read_bridge_turn()
+        .and_then(|t| t.seq)
+        .or_else(|| std::env::var(ENV_SEQ).ok()?.parse::<i64>().ok())
+}
+
 fn env_context() -> Option<(PathBuf, String, i64)> {
     let session = std::env::var(ENV_SESSION).ok()?;
-    let seq = std::env::var(ENV_SEQ).ok()?.parse::<i64>().ok()?;
+    let seq = current_seq()?;
     let root = std::env::var(ENV_ROOT).ok()?;
     Some((PathBuf::from(root), session, seq))
 }

@@ -67,9 +67,43 @@ control request rather than scraping `claude --help`. The sanitized record inclu
 resolved model and effort/adaptive/auto/fast-mode capabilities; account, email, PID and local
 configuration are discarded. `--help` parsing remains a fallback for older Claude versions.
 
-**Respawn triggers.** Model change, transcript shrink (compaction), and a `FORGE_CHECKPOINT_SEQ`
-change (a new user turn). Re-drives *within* a turn keep the same checkpoint seq and reuse the
-process; a new user turn respawns so bridge-edit `/undo` snapshots stay turn-accurate.
+**One process per conversation.** The provider keeps a small map of live sessions keyed by the
+conversation owner (`CheckpointContext::session`; at most 4, least-recently-used idle one evicted).
+A subagent or a second hosted session therefore never shares, or evicts, the main session's warm
+process. Each slot has its own lock; a call that finds its owner's slot mid-turn does **not** queue
+(queueing emits no events and would trip the caller's stall watchdog) but runs on the one-shot
+path, without touching the shared resume state.
+
+**Per-turn context travels in a turn file, not the process env.** The `forge mcp-serve` child is
+spawned once, so its env goes stale. The parent sets `FORGE_BRIDGE_TURN_FILE=<tmp path>` at spawn
+and, before every turn it writes to the process, atomically (tmp + rename) rewrites it with
+`{"seq": <i64>, "mode": "<permission key>"}`. The child reads it per call: snapshot seq
+(`forge_core::snapshot::current_seq`, falling back to `FORGE_CHECKPOINT_SEQ`) and the permission
+mode used at each gate (`ForgeMcp::effective_mode`, falling back to the spawn-time mode; an
+unparsable mode fails closed to `default`). A failed turn-file write refuses reuse and falls back
+to one-shot. Consequently a new user turn, a new checkpoint seq or a temper switch no longer
+respawns anything: the same claude process, prompt cache and structured history serve every turn.
+
+**Respawn triggers.** Model change, effort change, history epoch change (`/rewind`, `/uncompact`),
+transcript shrink (compaction), a dead process, or the idle reaper. The reaper tears a parked
+process down after 20 minutes idle (`FORGE_BRIDGE_IDLE_TTL_SECS` overrides).
+
+**Respawn restores claude's own history.** claude's `session_id` is captured from the stream
+(`system/init`, `result`) into the live session and the shared resume state. A respawn for the
+same owner/model/epoch passes `--resume <id>` and sends only `render_resume_delta` of the messages
+claude has not seen, instead of the flattened transcript (which on big sessions was a 1M+ token
+text blob with a cold cache). If the resumed process dies or stalls before any output and before
+any tool ran, the resume state is cleared and Forge respawns fresh with the full transcript.
+
+**Watchdogs.** The outer stream-idle guard (default 180s) used to undercut the bridge's own 300s
+window, so a silent claude (long thinking, auto-compaction) was killed and, with it, the process
+group of any running tool. `Provider::stream_idle_hint` lets a CLI bridge raise the outer budget to
+its inner window plus a minute; every well-formed typed claude stream line (`system`, pings,
+`input_json_delta`, ...) now counts as activity. The stderr drain keeps reading past its 16 KiB
+capture cap (discarding the excess) so a long-lived child never sees EPIPE.
+
+**Cost.** `result.total_cost_usd` is deliberately ignored: the bridge is subscription-billed, so
+turns are $0 against Forge's USD budget (FR-5); token counts are still recorded.
 
 **Proven.** Protocol fixtures cover initialization sanitization, the exact bounded alias map,
 partial-message assembly/deduplication and system-prompt argv. Deterministic fake-CLI tests cover

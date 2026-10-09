@@ -3,7 +3,24 @@
 use super::*;
 
 impl ClaudeStreamState {
+    /// Decode one stream-json line. Any well-formed typed line that yields nothing else (claude's
+    /// `system` init/status/compact_boundary/hook lines, `ping`, `input_json_delta`,
+    /// `signature_delta`, `content_block_start`, ...) still proves the CLI is alive, so it becomes
+    /// [`Parsed::Activity`]. Without that, Forge's outer stream watchdog (which only sees events
+    /// forwarded to the sink) declared a claude that was busy but not emitting text "stalled".
     pub(super) fn parse_line(&mut self, line: &str) -> Vec<Parsed> {
+        let out = self.parse_line_inner(line);
+        if out.is_empty()
+            && serde_json::from_str::<Value>(line)
+                .ok()
+                .is_some_and(|v| v.get("type").is_some())
+        {
+            return vec![Parsed::Activity];
+        }
+        out
+    }
+
+    fn parse_line_inner(&mut self, line: &str) -> Vec<Parsed> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
