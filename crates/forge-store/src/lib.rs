@@ -5753,6 +5753,22 @@ mod tests {
             .unwrap();
         assert_eq!(provider.as_deref(), Some("kimi"));
         assert_eq!(model.as_deref(), Some("kimi::k3-256k"));
+        let anchor_model: Option<String> = conn
+            .query_row(
+                "SELECT model FROM message WHERE content = 'compact/summarize'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            anchor_model.as_deref(),
+            Some("kimi::k3-256k"),
+            "per-provider and per-model spend group on message.model"
+        );
+        drop(conn);
+        let by_provider = store.usage_by_provider_for_session(&sid).unwrap();
+        assert_eq!(by_provider.len(), 1);
+        assert_eq!(by_provider[0].provider, "kimi");
     }
 
     #[test]

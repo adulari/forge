@@ -124,7 +124,9 @@ prompt text, nothing else.";
             else {
                 return;
             };
-            if let Err(error) = store.record_side_call_usage(&id, "memory", &r.usage) {
+            if let Err(error) =
+                store.record_side_call_usage_for(&id, "memory", Some(&decision.model), &r.usage)
+            {
                 report_auxiliary_persistence_failure(&id, "memory usage", &error, |warning| {
                     if let Some(sink) = warning_sink.as_mut() {
                         sink.emit(PresenterEvent::Warning(warning));
@@ -261,7 +263,9 @@ prompt text, nothing else.";
                         .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                         .await
                     {
-                        if let Err(error) = store.record_side_call_usage(&id, "recap", &r.usage) {
+                        if let Err(error) =
+                            store.record_side_call_usage_for(&id, "recap", Some(&model), &r.usage)
+                        {
                             report_auxiliary_persistence_failure(
                                 &id,
                                 "recap usage",
@@ -282,7 +286,9 @@ prompt text, nothing else.";
                     .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                     .await
                 {
-                    if let Err(error) = store.record_side_call_usage(&id, "recap", &r.usage) {
+                    if let Err(error) =
+                        store.record_side_call_usage_for(&id, "recap", Some(&model), &r.usage)
+                    {
                         report_auxiliary_persistence_failure(
                             &id,
                             "recap usage",
@@ -370,7 +376,9 @@ prompt text, nothing else.";
                         .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                         .await
                     {
-                        if let Err(error) = store.record_side_call_usage(&id, "suggest", &r.usage) {
+                        if let Err(error) =
+                            store.record_side_call_usage_for(&id, "suggest", Some(&model), &r.usage)
+                        {
                             report_auxiliary_persistence_failure(
                                 &id,
                                 "suggestion usage",
@@ -391,7 +399,9 @@ prompt text, nothing else.";
                     .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                     .await
                 {
-                    if let Err(error) = store.record_side_call_usage(&id, "suggest", &r.usage) {
+                    if let Err(error) =
+                        store.record_side_call_usage_for(&id, "suggest", Some(&model), &r.usage)
+                    {
                         report_auxiliary_persistence_failure(
                             &id,
                             "suggestion usage",
@@ -492,10 +502,12 @@ prompt text, nothing else.";
         )
         .await;
         if let Ok(Ok(r)) = response {
-            if let Err(error) =
-                self.store
-                    .record_side_call_usage(&self.id, "shell/diagnose", &r.usage)
-            {
+            if let Err(error) = self.store.record_side_call_usage_for(
+                &self.id,
+                "shell/diagnose",
+                Some(&model),
+                &r.usage,
+            ) {
                 report_auxiliary_persistence_failure(
                     &self.id,
                     "shell diagnosis usage",

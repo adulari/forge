@@ -16,7 +16,9 @@ impl Store {
     }
 
     /// [`Store::record_side_call_usage`], naming the model that answered. Without it a side call's
-    /// row cannot say which summarizer returned nothing.
+    /// row cannot say which summarizer returned nothing. The anchor message carries the model too:
+    /// per-provider usage is grouped on `message.model`, and a NULL there made a side call count
+    /// against whichever provider happened to own the neighbouring turn.
     pub fn record_side_call_usage_for(
         &self,
         session_id: &str,
@@ -43,9 +45,9 @@ impl Store {
                 .unwrap_or(0);
             loop {
                 let r = tx.execute(
-                    "INSERT INTO message (id, session_id, seq, role, content, active) \
-                     VALUES (?1, ?2, ?3, 'system', ?4, 0)",
-                    (msg_id.as_str(), session_id, s, label),
+                    "INSERT INTO message (id, session_id, seq, role, content, model, active) \
+                     VALUES (?1, ?2, ?3, 'system', ?4, ?5, 0)",
+                    (msg_id.as_str(), session_id, s, label, model),
                 );
                 match r {
                     Ok(_) => break,
@@ -80,7 +82,7 @@ impl Store {
                 "seq": s,
                 "role": "system",
                 "content": label,
-                "model": null,
+                "model": model,
                 "tool_calls": [],
                 "tool_call_id": null,
                 "visibility": "llm",

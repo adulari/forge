@@ -31,6 +31,7 @@ mod auxiliary_policy;
 mod btw_policy;
 pub mod capsule;
 pub(crate) mod clock;
+mod compaction_headroom;
 mod compaction_policy;
 mod compaction_shape;
 mod completeness;
@@ -9909,7 +9910,10 @@ mod tests {
         assert!(compaction_policy::summary_too_thin("", &small));
         assert!(compaction_policy::summary_too_thin("done.", &big));
         assert!(!compaction_policy::summary_too_thin("done.", &small));
-        assert!(!compaction_policy::summary_too_thin(&"s".repeat(800), &big));
+        assert!(!compaction_policy::summary_too_thin(
+            &format!("Goal: {}", "s".repeat(800)),
+            &big
+        ));
     }
 
     #[test]
@@ -10151,7 +10155,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_keeps_the_conversation_when_no_summarizer_says_anything() {
+    async fn compact_trims_deterministically_when_no_summarizer_says_anything() {
         let provider = Arc::new(BlankProvider {
             blank: ["blank::model".to_string(), "also::blank".to_string()]
                 .into_iter()
@@ -10167,16 +10171,53 @@ mod tests {
                 .transcript
                 .push(Message::user(format!("message {i}")));
         }
-        let err = session
+        let (before, after) = session
             .compact(false)
             .await
-            .expect_err("an all-empty chain is a failure, not a fold");
-        assert!(err.to_string().contains("empty summary"), "{err}");
-        assert_eq!(session.transcript.len(), 12, "nothing was folded away");
+            .expect("an all-empty chain falls back to a digest, not to failure");
+        assert_eq!((before, after), (12, COMPACT_KEEP_RECENT + 1));
+        let summary = &session.transcript[0].content;
         assert!(
-            !session.was_compacted(),
-            "no summary row: a resume must rehydrate the full transcript"
+            summary.contains("message 0") && summary.contains("trimmed"),
+            "never an empty summary: {summary}"
         );
+        assert!(session.was_compacted());
+    }
+
+    #[tokio::test]
+    async fn auto_compact_leaves_headroom_when_the_kept_tail_alone_exceeds_the_ceiling() {
+        // The recurring-compaction defect: the verbatim tail (a few whole-file reads) was itself
+        // over the ceiling, so each compaction freed nothing and the next turn compacted again.
+        let provider = Arc::new(SummarizingProvider);
+        let router = Arc::new(FixedRouter {
+            model: "m::a".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        let trigger = 20_000u64;
+        let body = "alpha bravo charlie delta echo foxtrot golf hotel\n".repeat(900);
+        for i in 0..6 {
+            let id = format!("c{i}");
+            session.transcript.push(Message::assistant_tool_calls(
+                "",
+                vec![forge_types::ToolCall {
+                    id: id.clone(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": "f"}),
+                }],
+            ));
+            session
+                .transcript
+                .push(Message::tool_result(id, body.clone()));
+        }
+        assert!(session.estimated_transcript_tokens() > trigger);
+        session.enforce_post_compact_headroom(trigger);
+        let after = session.estimated_transcript_tokens();
+        assert!(
+            after <= compaction_shape::compact_target_tokens(trigger),
+            "{after} tokens left; the next tool result must not re-trigger compaction"
+        );
+        assert!(!compaction_policy::needs_compaction(after, trigger, true));
     }
 
     /// Records the payload the summarizer was actually handed, so a test can assert the request was
