@@ -293,6 +293,53 @@ fn looks_bracket_truncated(before: &str, after: &str) -> bool {
     ap > bp || ab > bb || asq > bs
 }
 
+/// Locate the line in `content` that best matches `old`'s first non-empty line, so a "not found"
+/// error can point at *where the model probably meant* instead of just saying no. Tries an exact
+/// trimmed-line match first, then a substring probe on a short prefix of that line. Returns
+/// `line_number, surrounding snippet` (1-indexed, one line of context on each side).
+fn closest_candidate(content: &str, old: &str) -> Option<String> {
+    let anchor = old.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let lines: Vec<&str> = content.lines().collect();
+    let hit = lines.iter().position(|l| l.trim() == anchor).or_else(|| {
+        let probe: String = anchor.chars().take(24).collect();
+        (probe.trim().len() >= 6)
+            .then(|| lines.iter().position(|l| l.contains(probe.trim())))
+            .flatten()
+    })?;
+    let start = hit.saturating_sub(1);
+    let end = (hit + 2).min(lines.len());
+    let snippet: String = lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("{}: {l}", start + i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "closest candidate near line {}:\n{snippet}",
+        hit + 1
+    ))
+}
+
+fn not_found_message(content: &str, old: &str) -> String {
+    let n_lines = old.lines().count();
+    let mut msg = format!(
+        "`old` ({n_lines} lines) not found (also tried whitespace-insensitive and \
+         block-anchor matches). The file may have changed — re-read the exact lines \
+         with read_file and copy them verbatim into `old` before editing"
+    );
+    if n_lines > 40 {
+        msg.push_str(
+            "; `old` is large, so split it into several smaller edits, or use \
+             write_file if you are creating a brand-new file",
+        );
+    }
+    if let Some(candidate) = closest_candidate(content, old) {
+        msg.push_str("; ");
+        msg.push_str(&candidate);
+    }
+    msg
+}
+
 /// Apply one `old → new` replacement to `content`: an exact single match, else a UNIQUE
 /// whitespace-insensitive fallback ([`flexible_replace`]). Returns `(updated, note)` or a
 /// human-readable error. Shared by [`EditFileTool`] and [`MultiEditTool`].
@@ -325,22 +372,11 @@ pub(super) fn apply_edit(
                          add surrounding context so it matches exactly once"
                     );
                 }
-                let n_lines = old.lines().count();
-                let mut msg = format!(
-                    "`old` ({n_lines} lines) not found (also tried whitespace-insensitive and \
-                     block-anchor matches). The file may have changed — re-read the exact lines \
-                     with read_file and copy them verbatim into `old` before editing"
-                );
-                if n_lines > 40 {
-                    msg.push_str(
-                        "; `old` is large, so split it into several smaller edits, or use \
-                         write_file if you are creating a brand-new file",
-                    );
-                }
-                msg
+                not_found_message(content, old)
             }),
         n => Err(format!(
-            "`old` is ambiguous: {n} occurrences — add surrounding context"
+            "`old` is ambiguous: {n} occurrences — add surrounding context, or pass \
+             `replace_all: true` if every occurrence should change"
         )),
     }?;
 
@@ -356,8 +392,61 @@ pub(super) fn apply_edit(
     Ok((updated, note))
 }
 
-/// Extract the `(old, new)` pairs from a `multi_edit` call's `edits` array.
-pub(super) fn multi_edit_pairs(args: &Value) -> Result<Vec<(String, String)>, ToolError> {
+/// Replace EVERY occurrence of `old` with `new` — the explicit, opt-in counterpart to
+/// [`apply_edit`]'s uniqueness requirement, for edits the model intends to apply everywhere
+/// (a rename, a repeated literal). Exact matches only: a replace-all that also had to guess at
+/// whitespace drift could silently rewrite the wrong span, so this doesn't fall through to the
+/// fuzzy tiers — it either finds `old` byte-for-byte or reports the same actionable error.
+pub(super) fn apply_edit_all(
+    content: &str,
+    old: &str,
+    new: &str,
+) -> Result<(String, &'static str), String> {
+    if looks_truncated(new) {
+        return Err("the replacement text looks truncated (unbalanced quotes — it was probably cut off). Make a smaller, targeted edit, or use write_file for a brand-new file."
+            .to_string()
+        );
+    }
+    let count = content.matches(old).count();
+    if count == 0 {
+        return Err(not_found_message(content, old));
+    }
+    let updated = content.replace(old, new);
+    if looks_bracket_truncated(content, &updated) {
+        return Err(
+            "the edit looks truncated (unbalanced brackets — it leaves a `{`, `(`, or `[` \
+             unclosed that wasn't unclosed before, as if it was cut off mid-block). Make a \
+             smaller, targeted edit, or use write_file for a brand-new file."
+                .to_string(),
+        );
+    }
+    Ok((updated, " (replaced all)"))
+}
+
+/// Dispatch to [`apply_edit`] or, when `replace_all`, [`apply_edit_all`].
+pub(super) fn apply_edit_mode(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Result<(String, &'static str), String> {
+    if replace_all {
+        apply_edit_all(content, old, new)
+    } else {
+        apply_edit(content, old, new)
+    }
+}
+
+/// One `multi_edit` step: `old` → `new`, plus whether every occurrence should change
+/// (`replace_all`) rather than requiring a unique match.
+pub(super) struct EditStep {
+    pub old: String,
+    pub new: String,
+    pub replace_all: bool,
+}
+
+/// Extract the edit steps from a `multi_edit` call's `edits` array.
+pub(super) fn multi_edit_pairs(args: &Value) -> Result<Vec<EditStep>, ToolError> {
     let arr = args
         .get("edits")
         .and_then(Value::as_array)
@@ -369,8 +458,16 @@ pub(super) fn multi_edit_pairs(args: &Value) -> Result<Vec<(String, String)>, To
         .map(|e| {
             let old = e.get("old").and_then(Value::as_str);
             let new = e.get("new").and_then(Value::as_str);
+            let replace_all = e
+                .get("replace_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             match (old, new) {
-                (Some(o), Some(n)) => Ok((o.to_string(), n.to_string())),
+                (Some(o), Some(n)) => Ok(EditStep {
+                    old: o.to_string(),
+                    new: n.to_string(),
+                    replace_all,
+                }),
                 _ => Err(ToolError::Failed(
                     "each edit needs string `old` and `new`".to_string(),
                 )),
@@ -381,10 +478,11 @@ pub(super) fn multi_edit_pairs(args: &Value) -> Result<Vec<(String, String)>, To
 
 /// Fold the edits over `content` in order (each on the running result), all-or-nothing: the first
 /// edit that can't apply aborts with `edit #k: <reason>` and the caller writes nothing.
-pub(super) fn apply_edits(content: &str, edits: &[(String, String)]) -> Result<String, String> {
+pub(super) fn apply_edits(content: &str, edits: &[EditStep]) -> Result<String, String> {
     let mut cur = content.to_string();
-    for (k, (old, new)) in edits.iter().enumerate() {
-        let (next, _) = apply_edit(&cur, old, new).map_err(|e| format!("edit #{}: {e}", k + 1))?;
+    for (k, step) in edits.iter().enumerate() {
+        let (next, _) = apply_edit_mode(&cur, &step.old, &step.new, step.replace_all)
+            .map_err(|e| format!("edit #{}: {e}", k + 1))?;
         cur = next;
     }
     Ok(cur)
@@ -394,29 +492,46 @@ pub(super) fn apply_edits(content: &str, edits: &[(String, String)]) -> Result<S
 mod tests {
     use super::*;
 
+    fn step(old: &str, new: &str) -> EditStep {
+        EditStep {
+            old: old.to_string(),
+            new: new.to_string(),
+            replace_all: false,
+        }
+    }
+
     #[test]
     fn apply_edits_is_atomic_and_ordered() {
         let content = "a = 1\nb = 2\nc = 3\n";
         // Both edits apply, in order.
-        let out = apply_edits(
-            content,
-            &[
-                ("a = 1".into(), "a = 10".into()),
-                ("c = 3".into(), "c = 30".into()),
-            ],
-        )
-        .unwrap();
+        let out =
+            apply_edits(content, &[step("a = 1", "a = 10"), step("c = 3", "c = 30")]).unwrap();
         assert_eq!(out, "a = 10\nb = 2\nc = 30\n");
         // A failing edit aborts the whole batch (atomic) and names which one.
-        let err = apply_edits(
-            content,
-            &[
-                ("a = 1".into(), "a = 10".into()),
-                ("nope".into(), "x".into()),
-            ],
-        )
-        .unwrap_err();
+        let err = apply_edits(content, &[step("a = 1", "a = 10"), step("nope", "x")]).unwrap_err();
         assert!(err.starts_with("edit #2:"), "names the failing edit: {err}");
+    }
+
+    #[test]
+    fn apply_edit_all_replaces_every_occurrence() {
+        let content = "x = 1;\nx = 1;\nx = 1;\n";
+        let (out, note) = apply_edit_all(content, "x = 1;", "x = 2;").unwrap();
+        assert_eq!(out, "x = 2;\nx = 2;\nx = 2;\n");
+        assert_eq!(note, " (replaced all)");
+        // Absent `old` is still reported, not silently a no-op.
+        assert!(apply_edit_all(content, "nope", "x").is_err());
+    }
+
+    #[test]
+    fn not_found_error_includes_closest_candidate_with_line_number() {
+        let content = "fn a() {}\nfn target_fn() {\n    old_body();\n}\nfn z() {}\n";
+        // The anchor line (`old`'s first line) matches content line 2 exactly, but the second
+        // line doesn't — too short for the block-anchor tier, so this falls all the way through
+        // to "not found", which should still point at where the model probably meant.
+        let err =
+            apply_edit(content, "fn target_fn() {\n    totally_different();", "x").unwrap_err();
+        assert!(err.contains("closest candidate near line 2"), "{err}");
+        assert!(err.contains("old_body();"), "{err}");
     }
 
     #[test]

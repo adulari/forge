@@ -622,10 +622,10 @@ impl Tool for EditFileTool {
         "Replace text in a file: swaps the single, EXACT occurrence of `old` with `new`. `old` must \
          match the file byte-for-byte including indentation and whitespace, and must be UNIQUE — \
          include enough surrounding lines of context that it matches exactly once. It is an error \
-         if `old` is absent or appears more than once (then add more context and retry). Read the \
-         file first so your `old` matches. To insert, set `old` to a unique nearby anchor and put \
-         that anchor plus the new lines in `new`. For new files or whole-file rewrites use \
-         write_file instead."
+         if `old` is absent or appears more than once (then add more context and retry, or pass \
+         `replace_all: true` if every occurrence should change). Read the file first so your `old` \
+         matches. To insert, set `old` to a unique nearby anchor and put that anchor plus the new \
+         lines in `new`. For new files or whole-file rewrites use write_file instead."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Write
@@ -640,7 +640,12 @@ impl Tool for EditFileTool {
                     "description": "Exact text to replace — must occur exactly once; include \
                      surrounding context to disambiguate."
                 },
-                "new": { "type": "string", "description": "Replacement text." }
+                "new": { "type": "string", "description": "Replacement text." },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence of `old` instead of requiring a \
+                     unique match (e.g. a rename). Defaults to false."
+                }
             },
             "required": ["path", "old", "new"]
         })
@@ -649,11 +654,15 @@ impl Tool for EditFileTool {
         let path = str_arg(args, "path")?;
         let old = str_arg(args, "old")?;
         let new = str_arg(args, "new")?;
+        let replace_all = args
+            .get("replace_all")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         confine(path)?;
         check_readable_size(path).await?;
         let content = tokio::fs::read_to_string(path).await?;
-        let (updated, note) = apply_edit(&content, old, new)
+        let (updated, note) = apply_edit_mode(&content, old, new, replace_all)
             .map_err(|e| ToolError::Failed(format!("{e} (in {path})")))?;
         tokio::fs::write(path, &updated).await?;
         Ok(format!("edited {path} (1 replacement){note}"))
@@ -663,11 +672,15 @@ impl Tool for EditFileTool {
         let path = str_arg(args, "path").ok()?;
         let old = str_arg(args, "old").ok()?;
         let new = str_arg(args, "new").ok()?;
+        let replace_all = args
+            .get("replace_all")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         confine(path).ok()?;
         check_readable_size(path).await.ok()?;
         let content = tokio::fs::read_to_string(path).await.ok()?;
         // Mirror run() (skip the diff and let run() surface the error when it can't apply).
-        let (updated, _) = apply_edit(&content, old, new).ok()?;
+        let (updated, _) = apply_edit_mode(&content, old, new, replace_all).ok()?;
         Some(FileDiff {
             path: path.to_string(),
             kind: DiffKind::Modified,
@@ -690,9 +703,10 @@ impl Tool for MultiEditTool {
     fn description(&self) -> &str {
         "Apply several edits to ONE file in a single call, in order. Each edit is {old, new} with \
          exactly edit_file's rules (each `old` exact + unique, with a whitespace-insensitive \
-         fallback). ATOMIC: applied in sequence to the in-memory file, and if ANY edit can't be \
-         applied the file is left untouched and the failing edit is reported — so partial edits \
-         never land. Prefer this over many edit_file calls when changing one file in several places."
+         fallback, or set that edit's `replace_all: true` to change every occurrence). ATOMIC: \
+         applied in sequence to the in-memory file, and if ANY edit can't be applied the file is \
+         left untouched and the failing edit is reported by index — so partial edits never land. \
+         Prefer this over many edit_file calls when changing one file in several places."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Write
@@ -709,7 +723,12 @@ impl Tool for MultiEditTool {
                         "type": "object",
                         "properties": {
                             "old": { "type": "string" },
-                            "new": { "type": "string" }
+                            "new": { "type": "string" },
+                            "replace_all": {
+                                "type": "boolean",
+                                "description": "Replace every occurrence of this edit's `old` \
+                                 instead of requiring a unique match. Defaults to false."
+                            }
                         },
                         "required": ["old", "new"]
                     }
@@ -749,12 +768,15 @@ impl Tool for MultiEditTool {
 }
 
 mod edits;
-use edits::{apply_edit, apply_edits, multi_edit_pairs};
+use edits::{apply_edit_mode, apply_edits, multi_edit_pairs};
+
+mod codex_patch;
 
 mod notebook;
 pub use notebook::NotebookEditTool;
 
-/// Apply a unified diff to the workspace via `git apply`. Mutates the workspace.
+/// Apply a unified diff, or a Codex-style `*** Begin Patch` envelope, to the workspace. Mutates
+/// the workspace.
 pub struct ApplyPatchTool;
 
 #[async_trait]
@@ -763,11 +785,14 @@ impl Tool for ApplyPatchTool {
         "apply_patch"
     }
     fn description(&self) -> &str {
-        "Apply a unified diff (git / `diff -u` format) to the workspace — best for multi-file or \
-         large changes where a patch is cleaner than edit_file. The `--- a/path` / `+++ b/path` \
-         headers name the files (a patch can also create or delete files). Applied with `git apply` \
-         (line-number drift tolerated); if it doesn't apply cleanly the error is returned verbatim \
-         so you can regenerate the patch. For small single-file edits prefer edit_file / multi_edit."
+        "Apply a patch to the workspace — best for multi-file or large changes where a patch is \
+         cleaner than edit_file. Accepts either a unified diff (git / `diff -u`: `--- a/path` / \
+         `+++ b/path` headers, `@@` hunks; applied with `git apply`, line-number drift tolerated) \
+         or a Codex-style envelope (`*** Begin Patch` / `*** Update File:` / `*** Add File:` / \
+         `*** Delete File:` / `@@` hunks; applied natively with the same whitespace-insensitive \
+         fallback edit_file uses). Either format can create or delete files. If it doesn't apply \
+         cleanly the error is returned verbatim, naming the failing file/hunk, so you can \
+         regenerate the patch. For small single-file edits prefer edit_file / multi_edit."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Write
@@ -776,7 +801,10 @@ impl Tool for ApplyPatchTool {
         json!({
             "type": "object",
             "properties": {
-                "patch": { "type": "string", "description": "A unified diff to apply." },
+                "patch": {
+                    "type": "string",
+                    "description": "A unified diff, or a Codex `*** Begin Patch` envelope, to apply."
+                },
                 "cwd": { "type": "string", "description": "Directory to apply in (default: current)." }
             },
             "required": ["patch"]
@@ -789,46 +817,74 @@ impl Tool for ApplyPatchTool {
         // Confine the application directory to the workspace. `git apply` (without `--unsafe-paths`)
         // already rejects patches whose `a/`/`b/` headers escape the tree, so this gates the one
         // model-supplied path on this tool — the dir the patch is applied in.
-        confine(cwd)?;
-        let mut child = tokio::process::Command::new("git")
-            // Apply byte-faithfully: a global core.autocrlf=true (the default on GitHub's
-            // Windows runners) would otherwise rewrite the patched file's line endings.
-            .args([
-                "-c",
-                "core.autocrlf=false",
-                "-c",
-                "core.eol=lf",
-                "apply",
-                "--recount",
-                "--whitespace=nowarn",
-                "-",
-            ])
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| ToolError::Failed(format!("spawning git apply: {e}")))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(patch.as_bytes())
-                .await
-                .map_err(|e| ToolError::Failed(format!("writing patch to git apply: {e}")))?;
-            if !patch.ends_with('\n') {
-                stdin.write_all(b"\n").await.map_err(|e| {
-                    ToolError::Failed(format!("writing patch terminator to git apply: {e}"))
-                })?; // git apply wants a trailing newline
-            }
-            stdin
-                .shutdown()
-                .await
-                .map_err(|e| ToolError::Failed(format!("closing patch input: {e}")))?;
+        let cwd_abs = confine(cwd)?;
+
+        if codex_patch::is_codex_patch(patch) {
+            return codex_patch::apply(patch, &cwd_abs).await;
         }
-        let out = child
-            .wait_with_output()
-            .await
-            .map_err(|e| ToolError::Failed(format!("running git apply: {e}")))?;
+
+        let run_git_apply = |extra: &'static [&'static str]| {
+            let patch = patch.to_string();
+            let cwd_abs = cwd_abs.clone();
+            async move {
+                let mut cmd = tokio::process::Command::new("git");
+                cmd
+                    // Apply byte-faithfully: a global core.autocrlf=true (the default on GitHub's
+                    // Windows runners) would otherwise rewrite the patched file's line endings.
+                    .args([
+                        "-c",
+                        "core.autocrlf=false",
+                        "-c",
+                        "core.eol=lf",
+                        "apply",
+                        "--recount",
+                        "--whitespace=nowarn",
+                    ])
+                    .args(extra)
+                    .arg("-")
+                    .current_dir(&cwd_abs)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
+                let mut child = cmd
+                    .spawn()
+                    .map_err(|e| ToolError::Failed(format!("spawning git apply: {e}")))?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(patch.as_bytes()).await.map_err(|e| {
+                        ToolError::Failed(format!("writing patch to git apply: {e}"))
+                    })?;
+                    if !patch.ends_with('\n') {
+                        stdin.write_all(b"\n").await.map_err(|e| {
+                            ToolError::Failed(format!("writing patch terminator to git apply: {e}"))
+                        })?; // git apply wants a trailing newline
+                    }
+                    stdin
+                        .shutdown()
+                        .await
+                        .map_err(|e| ToolError::Failed(format!("closing patch input: {e}")))?;
+                }
+                child
+                    .wait_with_output()
+                    .await
+                    .map_err(|e| ToolError::Failed(format!("running git apply: {e}")))
+            }
+        };
+
+        let out = run_git_apply(&[]).await?;
+        let out = if out.status.success() {
+            out
+        } else {
+            // Context-line drift (trailing/leading whitespace) is the one class of "doesn't
+            // apply" that's safe to paper over automatically — unlike content drift, it can't
+            // land the hunk in the wrong place. Retry once with it tolerated before giving up.
+            let retry = run_git_apply(&["--ignore-whitespace", "--ignore-space-change"]).await?;
+            if retry.status.success() {
+                retry
+            } else {
+                out
+            }
+        };
         if out.status.success() {
             let files = patch
                 .lines()
