@@ -27,7 +27,7 @@ use forge_types::{
 use forge_types::{Presenter, PresenterEvent};
 
 pub mod assay;
-mod auto_classifier;
+pub mod auto_classifier;
 mod auxiliary_candidates;
 mod auxiliary_policy;
 mod btw_policy;

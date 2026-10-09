@@ -1276,6 +1276,20 @@ fn bridge_mcp_env(
     env
 }
 
+/// Env var naming the model a bridge's `forge mcp-serve` may use for `auto` mode's command
+/// classifier when no keyed side-call model is usable: the cheap model of the plan the user is
+/// already running this session on. Absent for bridges with no known cheap sibling.
+pub const BRIDGE_CLASSIFIER_MODEL_ENV: &str = "FORGE_BRIDGE_CLASSIFIER_MODEL";
+
+fn push_bridge_classifier_model(env: &mut Vec<(String, String)>, kind: CliKind) {
+    if kind == CliKind::ClaudeCode {
+        env.push((
+            BRIDGE_CLASSIFIER_MODEL_ENV.to_string(),
+            "claude-cli::haiku".to_string(),
+        ));
+    }
+}
+
 /// The `FORGE_PERMISSION_MODE` a bridge child is (or would be) spawned with, read back from the
 /// env [`bridge_mcp_env`] built for that turn so there is one source of truth for the value.
 fn live_permission_mode(mcp_env: &[(String, String)]) -> Option<String> {
@@ -1956,7 +1970,8 @@ impl CliProvider {
         // passed EXPLICITLY by the parent (no process-global `set_var`) and applied to the child's
         // own `Command` env here; a host that curates its MCP servers' env (codex) strips inherited
         // vars, so they're forwarded explicitly into the MCP config (see `build_args`).
-        let mcp_env = bridge_mcp_env(sink_path.as_deref(), checkpoint);
+        let mut mcp_env = bridge_mcp_env(sink_path.as_deref(), checkpoint);
+        push_bridge_classifier_model(&mut mcp_env, self.kind);
 
         let args = build_oneshot_args(
             self.kind,
@@ -2666,6 +2681,7 @@ impl CliProvider {
             std::process::id()
         ));
         let mut mcp_env = bridge_mcp_env(sink_path.as_deref(), checkpoint);
+        push_bridge_classifier_model(&mut mcp_env, self.kind);
         if let Some(t) = turn_file.to_str() {
             mcp_env.push((TURN_FILE_ENV.to_string(), t.to_string()));
         }

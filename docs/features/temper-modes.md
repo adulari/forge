@@ -71,8 +71,12 @@ An allow is logged at debug level as `auto: allowed by classifier`.
 auto_classifier = true   # default; false makes every Unknown command ask, with no model call
 ```
 
-Subagents and the MCP bridge have no classifier surface, so an Unknown command there asks (and a
-subagent, which cannot be asked, denies it).
+The CLI-bridge `mcp-serve` runs the same classifier before relaying an Unknown command to the
+user's prompt (`mcp_serve/auto_classify.rs`), with its own per-process cache. It tries up to two
+keyed, non-subscription trivial-tier models, then, on a claude-cli session, `claude-cli::haiku`
+on the user's own plan (the parent passes `FORGE_BRIDGE_CLASSIFIER_MODEL`; 25s limit, since it
+starts a process). If none answers, the existing permission relay prompts as before. Unattended
+subagents have no classifier surface: an Unknown command there is denied.
 
 **Reserved:** `Assay` (read-only analysis crew) is the next feature and will slot in beside
 Read-only as a read-only sibling. Not wired into the cycle this turn.
