@@ -15,6 +15,7 @@
 //! `Session::start`-based tests in `lib.rs`'s `mod tests` (same convention as `compact`).
 
 use super::*;
+use crate::compaction_policy::record_model_failure_in;
 
 impl Session {
     const BTW_SYSTEM: &'static str = "You are answering a quick side question asked out-of-band \
@@ -91,6 +92,12 @@ the entire context you have.";
                 });
             }
             Err(e) => {
+                record_model_failure_in(
+                    &self.store,
+                    &model,
+                    &e,
+                    std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs),
+                );
                 self.presenter
                     .emit(PresenterEvent::Warning(format!("/btw failed: {e}")));
             }

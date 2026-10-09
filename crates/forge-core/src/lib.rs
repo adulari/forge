@@ -54,7 +54,8 @@ pub mod llm_router;
 pub(crate) mod loop_progress;
 mod lsp_hints;
 mod mid_intent;
-pub(crate) mod model_health_notice;
+pub(crate) mod model_failure_record;
+mod model_health_notice;
 mod model_loop;
 mod model_request;
 mod model_response;
@@ -7290,6 +7291,74 @@ mod tests {
             session.auxiliary_model(&pinned_again),
             "codex-oauth::gpt-5.6-sol",
             "a local server absent from the discovered catalog is not used; fall back to the pin"
+        );
+    }
+
+    /// Dead for this account: answers `model_not_found` for `dead`, a normal reply otherwise, and
+    /// records every model it was asked to call.
+    struct DeadModelProvider {
+        dead: &'static str,
+        called: std::sync::Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for DeadModelProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            self.called.lock().unwrap().push(model.to_string());
+            if model == self.dead {
+                return Err(forge_provider::ProviderError::NoModelAccess(
+                    "model_not_found".into(),
+                ));
+            }
+            Ok(forge_provider::ModelResponse {
+                content: "ok".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// A side call that fails with `model_not_found` must bench the model in the shared health
+    /// store, so the next side call picks a different one instead of repeating the doomed call.
+    #[tokio::test]
+    async fn failed_side_call_benches_model_and_next_pick_differs() {
+        let mut config = Config::default();
+        config.mesh.models.insert(
+            TaskTier::Trivial.as_str().to_string(),
+            forge_config::OneOrMany::Many(vec!["ollama::dead".into(), "ollama::alive".into()]),
+        );
+        let provider = Arc::new(DeadModelProvider {
+            dead: "ollama::dead",
+            called: Default::default(),
+        });
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = Session::start(
+            store,
+            provider.clone(),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+        session.pin_model(Some("ollama::main".into()));
+        session.set_catalog(Some(ModelCatalog::new(vec![
+            "ollama::dead".into(),
+            "ollama::alive".into(),
+        ])));
+
+        session.ask_btw("first").await;
+        session.ask_btw("second").await;
+
+        assert_eq!(
+            *provider.called.lock().unwrap(),
+            vec!["ollama::dead".to_string(), "ollama::alive".to_string()],
+            "the second side call must skip the model the first one proved dead"
         );
     }
 
