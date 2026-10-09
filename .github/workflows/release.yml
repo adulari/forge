@@ -607,5 +607,7 @@ jobs:
       - name: Dispatch baseline-guarded eas-update
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No checkout on this hosted job, so gh has no repository context of its own.
+          GH_REPO: ${{ github.repository }}
         run: |
           gh workflow run eas-update.yml --ref main
