@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod provider_items;
+pub use provider_items::ProviderItems;
 pub mod effort;
 pub mod interaction;
 mod subscription_pacing;
@@ -124,19 +126,9 @@ pub struct Message {
     /// Never rendered as the answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
-    /// Provider-native output items that must be replayed verbatim ahead of this assistant
-    /// message's own items (the Responses API's encrypted `reasoning` items). Tied to the model
-    /// that produced them; any other model ignores them. Optional so stored rows stay valid.
+    /// Encrypted provider items replayed ahead of this message, for the model that made them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_items: Option<ProviderItems>,
-}
-
-/// Opaque items a provider returned alongside an assistant reply, plus the exact model id
-/// (`namespace::name`) that produced them. See [`Message::provider_items`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProviderItems {
-    pub source: String,
-    pub items: Vec<serde_json::Value>,
+    pub provider_items: Option<provider_items::ProviderItems>,
 }
 
 impl Message {
@@ -187,30 +179,6 @@ impl Message {
             provider_items: None,
         }
     }
-    /// Attach the reply's own private thinking (see [`Message::reasoning`]). Empty means the
-    /// provider returned none, which is stored as `None` rather than an empty string so the
-    /// replayed message carries no reasoning part at all.
-    #[must_use]
-    pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
-        let reasoning = reasoning.into();
-        self.reasoning = (!reasoning.is_empty()).then_some(reasoning);
-        self
-    }
-
-    /// Attach provider-native items (see [`Message::provider_items`]). Empty means none.
-    #[must_use]
-    pub fn with_provider_items(
-        mut self,
-        source: impl Into<String>,
-        items: Vec<serde_json::Value>,
-    ) -> Self {
-        self.provider_items = (!items.is_empty()).then(|| ProviderItems {
-            source: source.into(),
-            items,
-        });
-        self
-    }
-
     /// A tool result answering a specific call.
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {

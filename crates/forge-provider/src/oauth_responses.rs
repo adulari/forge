@@ -166,6 +166,10 @@ pub fn build_responses_request(
                 // item follows: a reasoning item with nothing after it is rejected.
                 if let Some(items) = m.provider_items.as_ref().filter(|p| p.source == model) {
                     if !m.content.is_empty() || !m.tool_calls.is_empty() {
+                        tracing::debug!(
+                            count = items.items.len(),
+                            "replaying encrypted reasoning items"
+                        );
                         input.extend(items.items.iter().cloned());
                     }
                 }
@@ -333,6 +337,10 @@ pub fn apply_sse_event(
                         "summary": item.get("summary").cloned().unwrap_or_else(|| serde_json::json!([])),
                         "encrypted_content": encrypted,
                     });
+                    tracing::debug!(
+                        encrypted_len = encrypted.len(),
+                        "captured encrypted reasoning item"
+                    );
                     acc.reasoning_items.push(normalized.clone());
                     acc.output_items.push(normalized);
                 }
