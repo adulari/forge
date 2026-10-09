@@ -58,21 +58,27 @@ pub fn decide_mode(mode: PermissionMode, side_effect: SideEffect) -> PermissionD
 }
 
 /// The mode decision once no rule applied. Identical to [`decide_mode`] except for `auto`, which
-/// inspects the call: safe edits/shell/network proceed, risky ones ask (see [`auto::auto_risk`]).
+/// inspects the call: safe edits/shell/network proceed, risky and unrecognised ones ask (see
+/// [`auto::auto_risk`]). The verdict is reported through `auto_out` so the caller can hand an
+/// `Unknown` to the classifier; it stays `None` whenever a rule or another mode decided.
 fn mode_fallback(
     mode: PermissionMode,
     side_effect: SideEffect,
     tool_name: &str,
     args: &Value,
     workspace: Option<&Path>,
+    auto_out: &mut Option<AutoVerdict>,
 ) -> PermissionDecision {
     if mode != PermissionMode::Auto || side_effect == SideEffect::ReadOnly {
         return decide_mode(mode, side_effect);
     }
-    match auto::auto_risk(side_effect, tool_name, args, workspace) {
-        Some(_) => PermissionDecision::Ask,
-        None => PermissionDecision::Allow,
-    }
+    let verdict = auto::auto_risk(side_effect, tool_name, args, workspace);
+    let decision = match verdict {
+        AutoVerdict::Safe => PermissionDecision::Allow,
+        AutoVerdict::Risky(_) | AutoVerdict::Unknown => PermissionDecision::Ask,
+    };
+    *auto_out = Some(verdict);
+    decision
 }
 
 /// Decide the outcome for a tool call, composing fine-grained `rules` with the global `mode`.
@@ -97,6 +103,42 @@ pub fn decide_in(
     args: &Value,
     rules: &[PermissionRule],
     workspace: Option<&Path>,
+) -> PermissionDecision {
+    decide_in_auto(mode, side_effect, tool_name, args, rules, workspace).0
+}
+
+/// [`decide_in`] plus the `auto` verdict, present only when the decision came from `auto`'s own
+/// inspection (no rule matched). A caller may upgrade `(Ask, Some(Unknown))` to Allow; every other
+/// outcome, including any deny and any rule-driven ask, is final.
+pub fn decide_in_auto(
+    mode: PermissionMode,
+    side_effect: SideEffect,
+    tool_name: &str,
+    args: &Value,
+    rules: &[PermissionRule],
+    workspace: Option<&Path>,
+) -> (PermissionDecision, Option<AutoVerdict>) {
+    let mut auto = None;
+    let decision = decide_in_with(
+        mode,
+        side_effect,
+        tool_name,
+        args,
+        rules,
+        workspace,
+        &mut auto,
+    );
+    (decision, auto)
+}
+
+fn decide_in_with(
+    mode: PermissionMode,
+    side_effect: SideEffect,
+    tool_name: &str,
+    args: &Value,
+    rules: &[PermissionRule],
+    workspace: Option<&Path>,
+    auto_out: &mut Option<AutoVerdict>,
 ) -> PermissionDecision {
     use PermissionDecision::*;
 
@@ -136,7 +178,7 @@ pub fn decide_in(
         if let Some(decision) = decide_shell_segments(tool_name, args, rules) {
             return decision;
         }
-        return mode_fallback(mode, side_effect, tool_name, args, workspace);
+        return mode_fallback(mode, side_effect, tool_name, args, workspace, auto_out);
     }
     // 5. Most-specific allow/ask wins.
     if let Some(rule) = matched
@@ -147,7 +189,7 @@ pub fn decide_in(
         return rule.decision;
     }
     // 6. No rule applies: fall back to the global mode.
-    mode_fallback(mode, side_effect, tool_name, args, workspace)
+    mode_fallback(mode, side_effect, tool_name, args, workspace, auto_out)
 }
 
 /// Allow/ask resolution for a shell command line (denies were already handled in `decide`).
@@ -274,9 +316,10 @@ fn specificity(rule: &PermissionRule) -> usize {
 }
 
 mod auto;
+mod auto_safe;
 mod readonly_shell;
 mod shell_commands;
-pub use auto::auto_risk;
+pub use auto::{auto_risk, AutoVerdict};
 pub(crate) use readonly_shell::{plan_shell_denial, PLAN_SHELL_NOTE};
 use shell_commands::effective_commands;
 

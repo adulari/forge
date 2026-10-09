@@ -1,46 +1,82 @@
 //! Risk classifier behind the `auto` temper (Claude Code's "auto" permission mode).
 //!
 //! `auto` proceeds without prompting on safe, reversible actions and asks only for risky ones.
-//! This module answers the single question "is this call risky?" — [`auto_risk`] returns the
-//! human-readable reason, or `None` when the call may proceed. It is advisory heuristics layered
-//! under the unoverridable builtin deny rules (which still hard-deny catastrophic shell and secret
-//! paths in every mode): a risky call here becomes an *Ask*, never an Allow, and explicit user
-//! allow/ask/deny rules are resolved before this runs. Like the denylist it is a floor against
-//! accidents, not a sandbox — `shell.sandbox` is the containment story.
+//! [`auto_risk`] sorts a call three ways: [`AutoVerdict::Safe`] (known-safe, proceeds),
+//! [`AutoVerdict::Risky`] (a heuristic rule fired; carries the reason) and
+//! [`AutoVerdict::Unknown`] (nothing recognised it — an unfamiliar binary, a script, an
+//! interpreter running a file). `Unknown` asks unless the session's side-call classifier
+//! (`auto_classifier.rs`) vouches for it; it can turn `Unknown` into Allow, never `Risky`. This is
+//! advisory heuristics layered under the unoverridable builtin deny rules (which still hard-deny
+//! catastrophic shell and secret paths in every mode), and explicit user allow/ask/deny rules are
+//! resolved before this runs. Like the denylist it is a floor against accidents, not a sandbox —
+//! `shell.sandbox` is the containment story.
 
 use std::path::{Component, Path, PathBuf};
 
 use forge_types::SideEffect;
 use serde_json::Value;
 
+use super::auto_safe::segment_is_known_safe;
 use super::{effective_commands, is_shell_tool};
 
-/// Why `auto` wants to ask about this call, or `None` if it may proceed unprompted.
+/// What `auto` makes of one tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoVerdict {
+    /// Known-safe and reversible: proceed without asking.
+    Safe,
+    /// A heuristic rule fired: ask, and say why. No classifier may override this.
+    Risky(String),
+    /// Nothing recognised the call. Asks unless the side-call classifier allows it.
+    Unknown,
+}
+
+/// How `auto` sorts this call: proceed, ask (with the reason), or hand to the classifier.
 pub fn auto_risk(
     side_effect: SideEffect,
     tool_name: &str,
     args: &Value,
     workspace: Option<&Path>,
-) -> Option<String> {
+) -> AutoVerdict {
     let ws = workspace
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
+    let risky = |reason: Option<String>| reason.map_or(AutoVerdict::Safe, AutoVerdict::Risky);
     match side_effect {
-        SideEffect::ReadOnly => None,
-        SideEffect::External => Some("calls an external (MCP) tool".into()),
-        SideEffect::Network => network_risk(args),
+        SideEffect::ReadOnly => AutoVerdict::Safe,
+        SideEffect::External => AutoVerdict::Risky("calls an external (MCP) tool".into()),
+        SideEffect::Network => risky(network_risk(args)),
         SideEffect::Write => {
-            let path = forge_types::extract_path_arg(args)?;
-            outside_workspace(path, ws.as_deref())
-                .then(|| format!("writes outside the workspace: {path}"))
+            let Some(path) = forge_types::extract_path_arg(args) else {
+                return AutoVerdict::Safe;
+            };
+            risky(
+                outside_workspace(path, ws.as_deref())
+                    .then(|| format!("writes outside the workspace: {path}")),
+            )
         }
         SideEffect::Shell => {
             if !is_shell_tool(tool_name) {
-                return Some("runs an unrecognised command tool".into());
+                return AutoVerdict::Risky("runs an unrecognised command tool".into());
             }
-            let cmd = args.get("command").and_then(Value::as_str)?;
-            shell_risk(cmd, ws.as_deref())
+            match args.get("command").and_then(Value::as_str) {
+                Some(cmd) => shell_verdict(cmd, ws.as_deref()),
+                None => AutoVerdict::Risky("shell call without a command".into()),
+            }
         }
+    }
+}
+
+/// [`shell_risk`] plus the safe/unknown split: a line no rule flags is `Safe` only when every
+/// effective segment is a known-safe command, and `Unknown` otherwise.
+pub fn shell_verdict(cmd: &str, ws: Option<&Path>) -> AutoVerdict {
+    if let Some(reason) = shell_risk(cmd, ws) {
+        return AutoVerdict::Risky(reason);
+    }
+    let (segments, _) = effective_commands(cmd);
+    if segments.iter().all(|seg| segment_is_known_safe(seg)) {
+        AutoVerdict::Safe
+    } else {
+        AutoVerdict::Unknown
     }
 }
 
@@ -520,7 +556,7 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 
 /// Drop leading `VAR=value` assignments and transparent wrappers (`env`, `nohup`, `time`, …) so
 /// the real command is classified. `None` when nothing is left.
-fn strip_wrappers(words: &[String]) -> Option<&[String]> {
+pub(super) fn strip_wrappers(words: &[String]) -> Option<&[String]> {
     let mut i = 0;
     while i < words.len() {
         let w = words[i].as_str();
@@ -551,7 +587,7 @@ fn strip_wrappers(words: &[String]) -> Option<&[String]> {
 }
 
 /// Whitespace split that honours single/double quotes and strips them.
-fn split_words(s: &str) -> Vec<String> {
+pub(super) fn split_words(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;
@@ -586,7 +622,7 @@ mod tests {
 
     const WS: &str = "/home/u/proj";
 
-    fn sh(cmd: &str) -> Option<String> {
+    fn sh(cmd: &str) -> AutoVerdict {
         auto_risk(
             SideEffect::Shell,
             "shell",
@@ -596,11 +632,19 @@ mod tests {
     }
 
     fn risky(cmd: &str) {
-        assert!(sh(cmd).is_some(), "expected `{cmd}` to be risky");
+        assert!(
+            matches!(sh(cmd), AutoVerdict::Risky(_)),
+            "expected `{cmd}` to be risky, got {:?}",
+            sh(cmd)
+        );
     }
 
     fn safe(cmd: &str) {
-        assert_eq!(sh(cmd), None, "expected `{cmd}` to proceed");
+        assert_eq!(sh(cmd), AutoVerdict::Safe, "expected `{cmd}` to proceed");
+    }
+
+    fn unknown(cmd: &str) {
+        assert_eq!(sh(cmd), AutoVerdict::Unknown, "expected `{cmd}` unknown");
     }
 
     #[test]
@@ -632,6 +676,35 @@ mod tests {
         ] {
             safe(c);
         }
+    }
+
+    #[test]
+    fn unrecognised_commands_are_unknown_not_allowed() {
+        for c in [
+            "./deploy.sh",
+            "./build.sh --release",
+            "make release",
+            "npm run deploy",
+            "python3 build.py",
+            "node server.js",
+            "echo aGk= | base64 -d",
+            "base64 -d payload | head -c 10",
+            "$CMD --flag",
+            "cargo xtask ship",
+            "mystery-tool --go",
+            "cargo test && ./post.sh",
+            "/tmp/x/git status",
+        ] {
+            unknown(c);
+        }
+    }
+
+    #[test]
+    fn a_risky_segment_beats_unknown_ones() {
+        risky("./build.sh && rm -rf target");
+        risky("echo aGk= | base64 -d | sh");
+        risky("./deploy.sh > ~/out.log");
+        risky("make release; git push --force");
     }
 
     #[test]
@@ -686,12 +759,17 @@ mod tests {
         }
         for c in [
             "find . -name '*.rs'",
-            "python3 -c 'print(1+1)'",
-            "node -e 'console.log(process.version)'",
             "xargs -n1 echo",
             "timeout 60 cargo test",
         ] {
             safe(c);
+        }
+        for c in [
+            "python3 -c 'print(1+1)'",
+            "node -e 'console.log(process.version)'",
+            "find . -exec ./audit.sh {} +",
+        ] {
+            unknown(c);
         }
     }
 
@@ -765,32 +843,46 @@ mod tests {
                 ws,
             )
         };
-        assert_eq!(w("src/lib.rs"), None);
-        assert_eq!(w("/home/u/proj/src/lib.rs"), None);
-        assert_eq!(w("/tmp/scratch.txt"), None);
-        assert!(w("/etc/passwd").is_some());
-        assert!(w("../other/file").is_some());
-        assert!(w("src/../../escape").is_some());
-        assert_eq!(w("src/../src/ok.rs"), None);
-        assert!(w("~/x").is_some());
+        let is_risky = |p: &str| matches!(w(p), AutoVerdict::Risky(_));
+        assert_eq!(w("src/lib.rs"), AutoVerdict::Safe);
+        assert_eq!(w("/home/u/proj/src/lib.rs"), AutoVerdict::Safe);
+        assert_eq!(w("/tmp/scratch.txt"), AutoVerdict::Safe);
+        assert!(is_risky("/etc/passwd"));
+        assert!(is_risky("../other/file"));
+        assert!(is_risky("src/../../escape"));
+        assert_eq!(w("src/../src/ok.rs"), AutoVerdict::Safe);
+        assert!(is_risky("~/x"));
     }
 
     #[test]
     fn network_and_external_tools() {
         let ws = Some(Path::new(WS));
         let net = |a: Value| auto_risk(SideEffect::Network, "web_fetch", &a, ws);
-        assert_eq!(net(json!({ "url": "https://example.com" })), None);
-        assert!(net(json!({ "url": "https://x", "method": "POST" })).is_some());
-        assert!(net(json!({ "url": "https://x", "body": "secret" })).is_some());
-        assert!(auto_risk(SideEffect::External, "mcp__x__y", &json!({}), ws).is_some());
+        let is_risky = |v: AutoVerdict| matches!(v, AutoVerdict::Risky(_));
+        assert_eq!(
+            net(json!({ "url": "https://example.com" })),
+            AutoVerdict::Safe
+        );
+        assert!(is_risky(net(
+            json!({ "url": "https://x", "method": "POST" })
+        )));
+        assert!(is_risky(net(
+            json!({ "url": "https://x", "body": "secret" })
+        )));
+        assert!(is_risky(auto_risk(
+            SideEffect::External,
+            "mcp__x__y",
+            &json!({}),
+            ws
+        )));
         assert_eq!(
             auto_risk(SideEffect::ReadOnly, "read_file", &json!({}), ws),
-            None
+            AutoVerdict::Safe
         );
     }
 
     #[test]
     fn unparseable_command_asks() {
-        assert!(sh("echo $(echo $(echo $(echo $(echo $(echo $(echo x))))))").is_some());
+        risky("echo $(echo $(echo $(echo $(echo $(echo $(echo x))))))");
     }
 }

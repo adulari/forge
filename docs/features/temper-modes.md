@@ -33,6 +33,7 @@ names stay stable). Temper is a **display + UX layer** plus runtime switching. C
 | `plan` | **Read-only** | Investigate & propose, **no** side effects (hard contract). | yes |
 | `default` | **Ask** | Ask before each side effect. | yes |
 | `accept-edits` | **Auto-edit** | Auto-apply file edits; still ask for shell. | yes |
+| `auto` | **Auto** | Proceed on safe calls, ask on risky or unrecognised ones (see "Auto mode classification"). | yes |
 | `bypass` | **Full** | All permission guards off (the unoverridable safety denylist still applies). | **no — explicit opt-in only** |
 
 The dimension is themed **temper**; the values are **descriptive** so the active permission is
@@ -43,6 +44,35 @@ obvious at a glance (the prior themed value-names hid which mode was which). `--
 **Cycle order** (SHIFT+TAB): `Ask → Auto-edit → Auto → Read-only → Ask …` (Auto added later, see claude-code-parity.md). **Full** is deliberately
 **excluded** from the cycle: landing on "all guards off" by tapping a key is a footgun, so it is
 reachable only via `--mode full` / config. (Claude Code likewise never cycles into bypass.)
+
+### Auto mode classification
+
+`auto` sorts every shell command three ways (`permission/auto.rs`, `permission/auto_safe.rs`):
+
+- **Safe**: known build/test/lint/format tools, read-only utilities, local git, edits inside the
+  workspace. Runs without asking.
+- **Risky**: recursive or forced deletes, force-push, writes outside the workspace, credential
+  paths, pipe-to-shell, uploads, `sudo`, and similar. Always asks, with the reason in the
+  `auto mode asks: ...` warning. Nothing downstream can override this.
+- **Unknown**: everything else: unfamiliar binaries, `./deploy.sh`, `make release`,
+  `npm run <x>`, `python x.py`, `base64 -d` payloads, any command named by a non-system path.
+
+An Unknown command is judged by one bounded side call (`auto_classifier.rs`): a cheap model, low
+effort, 64 output tokens, 4s timeout, given the command, working directory, workspace root, a
+snippet of the user's request and the first 2000 characters of up to two workspace files the
+command names (a script is judged by what it does, not what it is called), replying `{"verdict":"allow"|"ask","reason":"..."}`. The verdict is
+cached per session by whitespace-normalised command. The classifier can turn Unknown into Allow or
+Ask and nothing else: deny rules, ask rules and Risky verdicts are decided before it runs. Every
+failure (no usable model, timeout, provider error, an answer that is not that JSON) asks.
+An allow is logged at debug level as `auto: allowed by classifier`.
+
+```toml
+[permissions]
+auto_classifier = true   # default; false makes every Unknown command ask, with no model call
+```
+
+Subagents and the MCP bridge have no classifier surface, so an Unknown command there asks (and a
+subagent, which cannot be asked, denies it).
 
 **Reserved:** `Assay` (read-only analysis crew) is the next feature and will slot in beside
 Read-only as a read-only sibling. Not wired into the cycle this turn.

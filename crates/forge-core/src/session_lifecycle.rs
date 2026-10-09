@@ -241,6 +241,7 @@ impl Session {
             stale_tasks: crate::task_staleness::Tracker::default(),
             history_epoch: 0,
             headroom_args_warned: false,
+            auto_classifier_cache: Default::default(),
             always_compact_on_switch: false,
             project_prompt_injected,
             agents_md_fingerprint: None,

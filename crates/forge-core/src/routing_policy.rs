@@ -431,6 +431,7 @@ Rules:\n\
     ) -> CompletionOptions {
         let max_output_tokens = match purpose {
             "recap" | "suggest" => Some(128),
+            "auto-classify" => Some(64),
             "memory" | "shell-diagnose" => Some(256),
             "btw" => Some(512),
             _ => None,
