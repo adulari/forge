@@ -8279,8 +8279,11 @@ mod tests {
             let tool_calls = if n == 0 {
                 vec![forge_types::ToolCall {
                     id: "1".into(),
-                    name: "read_file".into(),
-                    args: serde_json::json!({ "path": "Cargo.toml" }),
+                    name: "write_file".into(),
+                    args: serde_json::json!({
+                        "path": "completeness-redrive-probe.txt",
+                        "content": "x"
+                    }),
                 }]
             } else {
                 vec![]
@@ -8305,11 +8308,13 @@ mod tests {
         // Opt-in `mesh.verify_completeness`: when a CLI-bridge turn that did real work yields, the
         // harness injects ONE completeness re-drive (a final diff-review nudge) before accepting done,
         // and only ONCE — the `completeness_checked` one-shot guard prevents a loop.
+        let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
         let mut config = Config::default();
         config.mesh.verify_completeness = true;
+        config.permission_mode = forge_types::PermissionMode::Bypass;
         let mut session = Session::start(
             Arc::clone(&store),
             Arc::new(CompletenessYieldProvider {
@@ -8319,10 +8324,10 @@ mod tests {
                 model: "claude-cli::opus".into(),
                 fallbacks: vec![],
             }),
-            ToolRegistry::with_core_tools_in(test_workspace()),
+            ToolRegistry::with_core_tools_in(dir.path()),
             Box::new(capture),
             config,
-            test_workspace().to_str().expect("workspace path is UTF-8"),
+            dir.path().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -8343,6 +8348,7 @@ mod tests {
     #[tokio::test]
     async fn completeness_redrive_silent_when_verify_completeness_off() {
         // Explicit opt-out: no completeness re-drive when the quality policy is disabled.
+        let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
@@ -8363,10 +8369,10 @@ mod tests {
                 model: "claude-cli::opus".into(),
                 fallbacks: vec![],
             }),
-            ToolRegistry::with_core_tools_in(test_workspace()),
+            ToolRegistry::with_core_tools_in(dir.path()),
             Box::new(capture),
             config,
-            test_workspace().to_str().expect("workspace path is UTF-8"),
+            dir.path().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
