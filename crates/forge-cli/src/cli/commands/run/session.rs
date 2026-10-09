@@ -503,7 +503,19 @@ pub(crate) async fn build_session_with_self_mcp(
         // gate the UI (cf. the 9p watcher hang).
         let manager = std::sync::Arc::new(forge_mcp::McpManager::connecting(&mcp_config));
         let bg = std::sync::Arc::clone(&manager);
-        tokio::spawn(async move { bg.connect_active().await });
+        tokio::spawn(async move {
+            bg.connect_active().await;
+            bg.retry_failed_connects(
+                &[
+                    std::time::Duration::from_secs(5),
+                    std::time::Duration::from_secs(15),
+                    std::time::Duration::from_secs(60),
+                ],
+                std::time::Duration::from_secs(600),
+                6,
+            )
+            .await;
+        });
         session.set_mcp(Some(manager));
         if resume.is_none() && !suppress_mcp_announce {
             session.announce_mcp();

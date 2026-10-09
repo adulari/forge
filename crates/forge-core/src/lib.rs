@@ -4577,13 +4577,39 @@ where
         Output = Result<forge_provider::ModelResponse, forge_provider::ProviderError>,
     >,
 {
+    stream_with_first_event_timeout(fut, activity, active_tools, idle, idle).await
+}
+
+/// [`stream_with_idle_timeout`] with a separate, tighter deadline for the *first* event. A model
+/// that never starts (dead gateway, queued request) otherwise burns the whole idle window — 180s
+/// by default — before failover; an established stream keeps the longer `idle` tolerance. Any
+/// sink event counts as the first event (text, reasoning delta, keepalive heartbeat), so a slow
+/// reasoning model that streams reasoning is never cut off here. `first_event == 0` or
+/// `>= idle` leaves the single idle deadline in force.
+async fn stream_with_first_event_timeout<F>(
+    fut: F,
+    activity: &std::sync::atomic::AtomicU64,
+    active_tools: Option<&std::sync::atomic::AtomicU64>,
+    idle: std::time::Duration,
+    first_event: std::time::Duration,
+) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError>
+where
+    F: std::future::Future<
+        Output = Result<forge_provider::ModelResponse, forge_provider::ProviderError>,
+    >,
+{
     tokio::pin!(fut);
     if idle.is_zero() {
         return fut.await;
     }
+    let first_event = if first_event.is_zero() || first_event >= idle {
+        idle
+    } else {
+        first_event
+    };
     let mut last_seen = 0u64;
     let mut last_change = std::time::Instant::now();
-    let poll = std::time::Duration::from_secs(3).min(idle);
+    let poll = std::time::Duration::from_secs(3).min(first_event);
     loop {
         tokio::select! {
             r = &mut fut => return r,
@@ -4597,7 +4623,9 @@ where
                     // tool has its own bounded timeout near the base stream-idle boundary, so give
                     // a positively identified in-flight tool one extra window to report its
                     // ToolFinished event. Ordinary half-open streams keep the original cutoff.
-                    let effective_idle = if active_tools.is_some_and(|tools| {
+                    let effective_idle = if last_seen == 0 {
+                        first_event
+                    } else if active_tools.is_some_and(|tools| {
                         tools.load(std::sync::atomic::Ordering::Relaxed) > 0
                     }) {
                         idle.saturating_mul(2)
@@ -4607,8 +4635,13 @@ where
                     if last_change.elapsed() < effective_idle {
                         continue;
                     }
+                    let what = if last_seen == 0 {
+                        "no response from the model"
+                    } else {
+                        "stream stalled"
+                    };
                     return Err(forge_provider::ProviderError::Unavailable(format!(
-                        "stream stalled — no data for {}s",
+                        "{what} — no data for {}s",
                         effective_idle.as_secs()
                     )));
                 }
@@ -9588,6 +9621,48 @@ mod tests {
         .expect("heartbeat stream should finish within the test bound")
         .expect("provider heartbeats must prevent a false idle timeout");
         assert_eq!(result, "buffered stream completed");
+    }
+
+    #[tokio::test]
+    async fn first_event_deadline_fires_on_a_stream_that_never_yields() {
+        let activity = std::sync::atomic::AtomicU64::new(0);
+        let started = std::time::Instant::now();
+        let err = stream_with_first_event_timeout(
+            std::future::pending(),
+            &activity,
+            None,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(err.is_retryable(), "a first-event timeout must fail over");
+        assert!(err.to_string().contains("no response"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn first_event_deadline_ignores_a_stream_that_keeps_emitting() {
+        let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let bump = std::sync::Arc::clone(&activity);
+        // Reasoning deltas / keepalives only: no text, but the clock keeps resetting, so the
+        // 1s first-event deadline must not fire even though the call outlives it.
+        let fut = async move {
+            for _ in 0..8 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                bump.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(forge_provider::ModelResponse::default())
+        };
+        stream_with_first_event_timeout(
+            fut,
+            &activity,
+            None,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect("events arriving must satisfy the first-event deadline");
     }
 
     #[tokio::test]

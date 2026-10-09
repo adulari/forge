@@ -101,16 +101,99 @@ fn end_catalog_refresh() {
     CATALOG_REFRESH_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Process-wide slot that late (retried) discovery publishes into; every router built by
+/// [`build_provider_and_router`] follows it.
+pub(crate) fn live_catalog() -> forge_mesh::LiveCatalog {
+    static LIVE: std::sync::OnceLock<forge_mesh::LiveCatalog> = std::sync::OnceLock::new();
+    LIVE.get_or_init(forge_mesh::LiveCatalog::default).clone()
+}
+
+/// Delays before retrying a discovery that left a keyed provider unreachable (the daemon starts
+/// at login before the network is up); after these, [`DISCOVERY_RETRY_STEADY`] repeats.
+const DISCOVERY_RETRY_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(60),
+];
+const DISCOVERY_RETRY_STEADY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Keyed providers whose listing failed or timed out. Keyless `ollama` is excluded (not running is
+/// normal), as are bridges/OAuth sessions, which have no API key to be "keyed" on.
+fn keyed_discovery_failures(
+    statuses: &[ProviderDiscoveryStatus],
+    has_key: impl Fn(&str) -> bool,
+) -> Vec<&str> {
+    statuses
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.kind,
+                DiscoveryStatusKind::Failed | DiscoveryStatusKind::TimedOut
+            )
+        })
+        .map(|s| s.provider.as_str())
+        .filter(|p| *p != "ollama" && has_key(p))
+        .collect()
+}
+
+/// Run `discover` until no keyed provider is left failing, sleeping `backoff` then `steady`
+/// between attempts. `publish(catalog, late)` receives every result; `late` is true for retries.
+async fn discover_until_keyed_providers_answer<D, Fut, P>(
+    backoff: &[std::time::Duration],
+    steady: std::time::Duration,
+    has_key: impl Fn(&str) -> bool,
+    mut discover: D,
+    mut publish: P,
+) where
+    D: FnMut() -> Fut,
+    Fut: std::future::Future<Output = (ModelCatalog, Vec<ProviderDiscoveryStatus>)>,
+    P: FnMut(ModelCatalog, bool),
+{
+    let mut attempt = 0usize;
+    loop {
+        let (catalog, statuses) = discover().await;
+        let failing = keyed_discovery_failures(&statuses, &has_key).len();
+        publish(catalog, attempt > 0);
+        if failing == 0 {
+            return;
+        }
+        let delay = backoff.get(attempt).copied().unwrap_or(steady);
+        tracing::info!(
+            "{failing} keyed provider(s) unreachable — retrying model discovery in {}s",
+            delay.as_secs()
+        );
+        attempt += 1;
+        tokio::time::sleep(delay).await;
+    }
+}
+
 /// Rediscover the catalog off the turn's critical path and persist it. A refresh that lands
-/// mid-session takes effect on the NEXT startup; nothing waits on it.
+/// mid-session takes effect on the NEXT startup, except after a failed keyed provider: those are
+/// retried with backoff and a late success is published to every running router, so a daemon that
+/// started before the network was up gains the missing providers instead of lacking them for days.
 pub(crate) fn spawn_catalog_refresh(config: &forge_config::Config) {
     if !try_begin_catalog_refresh() {
         return;
     }
     let config = config.clone();
     tokio::spawn(async move {
-        let fresh = discover_catalog(&config).await;
-        save_catalog(&fresh);
+        discover_until_keyed_providers_answer(
+            &DISCOVERY_RETRY_BACKOFF,
+            DISCOVERY_RETRY_STEADY,
+            forge_config::has_api_key,
+            || discover_catalog_with_status(&config),
+            |catalog, late| {
+                save_catalog(&catalog);
+                if late {
+                    let catalog = match crate::open_store() {
+                        Ok(store) => super::apply_outcome_calibration(catalog, &store),
+                        Err(_) => catalog,
+                    };
+                    live_catalog().publish(catalog);
+                }
+            },
+        )
+        .await;
         end_catalog_refresh();
     });
 }
@@ -618,6 +701,98 @@ pub(crate) async fn drop_unaffordable_models(
 #[cfg(test)]
 mod refresh_tests {
     use super::*;
+
+    fn status(provider: &str, kind: DiscoveryStatusKind) -> ProviderDiscoveryStatus {
+        ProviderDiscoveryStatus {
+            provider: provider.into(),
+            kind,
+            models: 0,
+            detail: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_is_retried_until_a_failed_provider_becomes_routable() {
+        let live = forge_mesh::LiveCatalog::default();
+        let mut calls = 0;
+        let mut published = Vec::new();
+        discover_until_keyed_providers_answer(
+            &[std::time::Duration::from_millis(1)],
+            std::time::Duration::from_millis(1),
+            |p| p == "groq",
+            || {
+                calls += 1;
+                let up = calls >= 3;
+                async move {
+                    if up {
+                        (
+                            ModelCatalog::new(vec!["groq::a".to_string()]),
+                            vec![status("groq", DiscoveryStatusKind::Discovered)],
+                        )
+                    } else {
+                        (
+                            ModelCatalog::new(Vec::new()),
+                            vec![
+                                status("groq", DiscoveryStatusKind::Failed),
+                                status("ollama", DiscoveryStatusKind::Failed),
+                            ],
+                        )
+                    }
+                }
+            },
+            |catalog, late| {
+                published.push(late);
+                if late {
+                    live.publish(catalog);
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            calls, 3,
+            "two failures, then the successful retry stops the loop"
+        );
+        assert_eq!(published, [false, true, true]);
+        let routable = live.current().expect("late discovery must be published");
+        assert_eq!(routable.models(), ["groq::a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_clean_first_discovery_never_retries() {
+        let mut calls = 0;
+        discover_until_keyed_providers_answer(
+            &[],
+            std::time::Duration::from_millis(1),
+            |p| p != "claude-cli",
+            || {
+                calls += 1;
+                async {
+                    (
+                        ModelCatalog::new(vec!["groq::a".to_string()]),
+                        vec![
+                            status("groq", DiscoveryStatusKind::Discovered),
+                            status("claude-cli", DiscoveryStatusKind::Failed),
+                        ],
+                    )
+                }
+            },
+            |_, _| {},
+        )
+        .await;
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn only_keyed_network_failures_trigger_a_retry() {
+        let statuses = [
+            status("groq", DiscoveryStatusKind::TimedOut),
+            status("ollama", DiscoveryStatusKind::Failed),
+            status("claude-cli", DiscoveryStatusKind::Failed),
+            status("gemini", DiscoveryStatusKind::Unsupported),
+        ];
+        let keyed = |p: &str| p != "claude-cli";
+        assert_eq!(keyed_discovery_failures(&statuses, keyed), ["groq"]);
+    }
 
     #[test]
     fn a_stale_cache_is_still_returned_for_routing() {

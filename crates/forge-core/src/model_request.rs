@@ -239,8 +239,23 @@ pub(super) async fn request_provider_response(
             };
             let fut =
                 provider.complete_with(active_model, &sent, specs, &completion_opts, &mut sink);
+            let base_idle = stream_idle;
             let stream_idle = crate::effective_stream_idle(&**provider, active_model, stream_idle);
-            stream_with_idle_timeout(fut, &activity, Some(&active_tools), stream_idle).await
+            // CLI bridges own a longer idle budget (process spawn, MCP boot, `--resume` load), so
+            // the first-event deadline must not undercut it.
+            let first_event = if stream_idle > base_idle {
+                stream_idle
+            } else {
+                std::time::Duration::from_secs(session.config.mesh.first_event_timeout_secs)
+            };
+            crate::stream_with_first_event_timeout(
+                fut,
+                &activity,
+                Some(&active_tools),
+                stream_idle,
+                first_event,
+            )
+            .await
         };
         if let Err(error) = &result {
             let error_kind = if error.is_auth() {

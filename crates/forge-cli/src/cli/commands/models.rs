@@ -104,9 +104,9 @@ pub(crate) async fn refresh_polled_quotas(store: &forge_store::Store) {
 
 mod discovery;
 pub(crate) use discovery::{
-    discover_catalog, discover_catalog_with_status, invalidate_catalog_cache, load_cached_catalog,
-    load_cached_catalog_aged, read_cached_catalog, save_catalog, spawn_catalog_refresh,
-    DiscoveryStatusKind, ProviderDiscoveryStatus,
+    discover_catalog, discover_catalog_with_status, invalidate_catalog_cache, live_catalog,
+    load_cached_catalog, load_cached_catalog_aged, read_cached_catalog, save_catalog,
+    spawn_catalog_refresh, DiscoveryStatusKind, ProviderDiscoveryStatus,
 };
 
 fn print_discovery_statuses(statuses: &[ProviderDiscoveryStatus]) {
@@ -163,6 +163,7 @@ pub(crate) fn build_provider_and_router(
         )
     };
     let mut heuristic = HeuristicRouter::new(config.clone())
+        .with_live_catalog(live_catalog())
         .with_pin(pin)
         .with_context_windows(context_windows)
         .with_repo_boosts(repo_boosts);

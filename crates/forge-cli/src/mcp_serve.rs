@@ -896,7 +896,19 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         if bridge_external_mcp_enabled(&config) && config.mcp.active_servers().next().is_some() {
             let mgr = Arc::new(forge_mcp::McpManager::connecting(&config.mcp));
             let bg = Arc::clone(&mgr);
-            tokio::spawn(async move { bg.connect_active().await });
+            tokio::spawn(async move {
+                bg.connect_active().await;
+                bg.retry_failed_connects(
+                    &[
+                        std::time::Duration::from_secs(5),
+                        std::time::Duration::from_secs(15),
+                        std::time::Duration::from_secs(60),
+                    ],
+                    std::time::Duration::from_secs(600),
+                    6,
+                )
+                .await;
+            });
             Some(mgr)
         } else {
             None

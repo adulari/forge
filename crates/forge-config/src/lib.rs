@@ -1893,6 +1893,12 @@ pub struct MeshConfig {
     /// connection) and fail over, instead of hanging the turn forever. `0` disables the watchdog.
     #[serde(default = "default_stream_idle_timeout_secs")]
     pub stream_idle_timeout_secs: u64,
+    /// Abort a model call that yields no stream event at all (text, reasoning delta or keepalive)
+    /// for this many seconds and fail over, instead of waiting the full `stream_idle_timeout_secs`.
+    /// Only governs the wait for the *first* event; an established stream keeps the idle window.
+    /// `0` (or a value at or above the idle window) disables the separate deadline.
+    #[serde(default = "default_first_event_timeout_secs")]
+    pub first_event_timeout_secs: u64,
     /// Absolute token ceiling at which a session auto-compacts, regardless of the model's real
     /// context window. Fires at `min(compact_cap_tokens, 0.80 * window)`, so large-window models
     /// (gpt-5.6 ~1.05M) compact early to cut subscription usage — later compaction burns more.
@@ -2243,6 +2249,12 @@ fn default_pin_outage_wait_secs() -> u64 {
     // switching a pinned model, short enough that a genuinely dead provider still fails the turn
     // rather than blocking indefinitely.
     600
+}
+
+fn default_first_event_timeout_secs() -> u64 {
+    // Above the ~90s a reasoning model on a large-context session can stay silent before its
+    // first token (see `default_stream_idle_timeout_secs`), well below the 180s idle window.
+    120
 }
 
 fn default_stream_idle_timeout_secs() -> u64 {
@@ -2699,6 +2711,7 @@ impl Default for Config {
                 failover_cooldown_secs: default_failover_cooldown_secs(),
                 rate_limit_wait_secs: default_rate_limit_wait_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
+                first_event_timeout_secs: default_first_event_timeout_secs(),
                 compact_cap_tokens: default_compact_cap_tokens(),
                 free_model_cap_tokens: default_free_model_cap_tokens(),
                 max_steps: default_max_steps(),
