@@ -215,6 +215,14 @@ impl Session {
                     // A success on this tool means progress — clear its failure streaks so an
                     // earlier rough patch doesn't later trip the guard after the model recovered.
                     None => {
+                        // A successful write IS the change of approach the nudge asks for: an
+                        // edit → compile-error → edit cycle must not read as "failing the same
+                        // way" just because the failing `cargo test` text matched one category.
+                        if self.tools.get(&call.name).is_some_and(|tool| {
+                            tool.side_effect() == forge_types::SideEffect::Write
+                        }) {
+                            failure_counts.clear();
+                        }
                         failure_counts.retain(|(nm, _), _| nm != &call.name);
                         // Also clear the one-shot failure-loop latch: a genuine success means
                         // the model recovered, so a *later* distinct failure loop in the same
