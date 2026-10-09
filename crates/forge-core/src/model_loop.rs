@@ -160,6 +160,8 @@ impl Session {
         // One-shot guard for the opt-in completeness re-drive (`mesh.verify_completeness`): fired at
         // most once per turn so it can't loop. See the bridge-yield branch below.
         let mut completeness_checked = false;
+        // The answer the model gave before the completeness review, and the mutation count then.
+        let mut pre_review: Option<(String, u64)> = None;
         // Direct path only: the `inspect_ran` count at the moment the verify nudge was last issued.
         // An inspection that runs AFTER this point is the model responding to the request to verify
         // (on the direct path, tools run in separate steps from the text claim, so a step-local
@@ -479,32 +481,18 @@ impl Session {
                     // tokens in the always-on preamble form), and now does a single targeted re-check
                     // against every requirement. One-shot (`completeness_checked`) so it can't loop;
                     // gated on a turn that ran real tools (so there's an actual change to review).
+                    // Gated on a change actually made: a question or read-only turn has nothing
+                    // to review, and the review's own wording replaced the real answer there.
                     if self.config.mesh.verify_completeness
                         && !completeness_checked
-                        && inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
+                        && mutations_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
                     {
                         completeness_checked = true;
-                        self.presenter.emit(PresenterEvent::Warning(
-                            "completeness check — reviewing the change against every requirement before finishing"
-                                .to_string(),
+                        pre_review = Some((
+                            resp.content.clone(),
+                            mutations_ran.load(std::sync::atomic::Ordering::Relaxed),
                         ));
-                        const COMPLETENESS_NUDGE: &str = "Before finishing, do ONE final review (a \
-                            single bounded pass — do NOT re-explore the codebase): run `git diff` once \
-                            to see your COMPLETE change, re-read the original request and write the \
-                            distinct requirements/cases it lists (issues routinely specify several, \
-                            e.g. \"reject a dotted blueprint name AND a dotted endpoint\"), and for \
-                            each confirm your diff already handles it. Only if the diff is MISSING a \
-                            requirement, add that specific fix — otherwise finish. A change that \
-                            handles only the first of several cases is INCOMPLETE.";
-                        let nseq = self.next_seq();
-                        let _ = self.store.add_message(
-                            &self.id,
-                            nseq,
-                            Role::System,
-                            COMPLETENESS_NUDGE,
-                            None,
-                        );
-                        self.transcript.push(Message::system(COMPLETENESS_NUDGE));
+                        self.start_completeness_review();
                         continue;
                     }
                     // A CLI bridge is a ONE-SHOT subprocess: claude-cli/codex runs its own internal
@@ -781,7 +769,11 @@ impl Session {
                         ));
                     }
                 }
-                final_text = resp.content;
+                final_text = crate::completeness::answer_after_review(
+                    resp.content,
+                    pre_review.take(),
+                    mutations_ran.load(std::sync::atomic::Ordering::Relaxed),
+                );
                 let accepted = final_text.clone();
                 self.publish_terminal_answer(&accepted)?;
                 hit_step_cap = false;

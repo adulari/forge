@@ -388,6 +388,24 @@ pub(crate) fn shell_command_failed(result: &str) -> bool {
     }
 }
 
+/// The turn's answer after a completeness review. A review that changed nothing only confirms
+/// the work, so the user keeps the real answer instead of the review's self-assessment; a review
+/// that made further edits reports them, so its reply stands.
+pub(crate) fn answer_after_review(
+    reply: String,
+    pre_review: Option<(String, u64)>,
+    mutations_now: u64,
+) -> String {
+    match pre_review {
+        Some((answer, mutations_then))
+            if mutations_now == mutations_then && !answer.trim().is_empty() =>
+        {
+            answer
+        }
+        _ => reply,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ErrorCategory {
     Permission,
@@ -565,5 +583,52 @@ pub(crate) fn severity_meets(finding_sev: forge_types::Severity, threshold: &str
 pub(crate) fn adopt_redrive_text(final_text: &mut String, redrive_text: String) {
     if !redrive_text.trim().is_empty() {
         *final_text = redrive_text;
+    }
+}
+
+impl crate::Session {
+    /// Inject the one-shot completeness-review nudge (see `mesh.verify_completeness`).
+    pub(crate) fn start_completeness_review(&mut self) {
+        self.presenter.emit(forge_types::PresenterEvent::Warning(
+            "completeness check — reviewing the change against every requirement before finishing"
+                .to_string(),
+        ));
+        const COMPLETENESS_NUDGE: &str = "Before finishing, do ONE final review (a \
+                single bounded pass — do NOT re-explore the codebase): run `git diff` once \
+                to see your COMPLETE change, re-read the original request and write the \
+                distinct requirements/cases it lists (issues routinely specify several, \
+                e.g. \"reject a dotted blueprint name AND a dotted endpoint\"), and for \
+                each confirm your diff already handles it. Only if the diff is MISSING a \
+                requirement, add that specific fix — otherwise finish. A change that \
+                handles only the first of several cases is INCOMPLETE.";
+        let nseq = self.next_seq();
+        let _ = self
+            .store
+            .add_message(&self.id, nseq, Role::System, COMPLETENESS_NUDGE, None);
+        self.transcript.push(Message::system(COMPLETENESS_NUDGE));
+    }
+}
+
+#[cfg(test)]
+mod review_answer_tests {
+    use super::answer_after_review;
+
+    #[test]
+    fn review_without_new_edits_keeps_the_real_answer() {
+        let pre = Some(("Added the test; it passes.".to_string(), 2));
+        assert_eq!(
+            answer_after_review("Final review: all requirements handled.".into(), pre, 2),
+            "Added the test; it passes."
+        );
+    }
+
+    #[test]
+    fn review_that_edited_reports_its_own_change() {
+        let pre = Some(("Done.".to_string(), 2));
+        assert_eq!(
+            answer_after_review("Fixed the missing case too.".into(), pre, 3),
+            "Fixed the missing case too."
+        );
+        assert_eq!(answer_after_review("Plain.".into(), None, 0), "Plain.");
     }
 }
