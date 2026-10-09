@@ -106,7 +106,7 @@ mod discovery;
 pub(crate) use discovery::{
     discover_catalog, discover_catalog_with_status, invalidate_catalog_cache, live_catalog,
     load_cached_catalog, load_cached_catalog_aged, read_cached_catalog, save_catalog,
-    spawn_catalog_refresh, DiscoveryStatusKind, ProviderDiscoveryStatus,
+    spawn_catalog_refresh, startup_refresh_due, DiscoveryStatusKind, ProviderDiscoveryStatus,
 };
 
 fn print_discovery_statuses(statuses: &[ProviderDiscoveryStatus]) {

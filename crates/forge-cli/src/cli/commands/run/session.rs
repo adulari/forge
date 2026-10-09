@@ -251,7 +251,9 @@ pub(crate) async fn build_session_with_self_mcp(
         } else {
             "no catalog: built-in seed"
         });
-        spawn_catalog_refresh(&config);
+        if crate::cli::commands::models::startup_refresh_due(cached.as_ref().map(|c| c.age_secs)) {
+            spawn_catalog_refresh(&config);
+        }
         cached.map(|cached| cached.catalog)
     } else {
         None

@@ -36,6 +36,20 @@ fn catalog_cache_path() -> Option<std::path::PathBuf> {
 pub(crate) struct CachedCatalog {
     pub catalog: ModelCatalog,
     pub stale: bool,
+    /// Seconds since the cache file was written.
+    pub age_secs: u64,
+}
+
+/// A cache written this recently needs no foreground-startup rediscovery. Matches the one-hour
+/// window of the context-window/price sweep (`context_windows::SWEEP_FRESH_SECS`): every
+/// `forge run` otherwise re-listed every provider's models seconds after the last run did.
+const CATALOG_STARTUP_REFRESH_AFTER_SECS: u64 = 60 * 60;
+
+/// Whether a session startup should kick off a background rediscovery, given the age of the
+/// on-disk catalog (`None` = no catalog). The daemon and explicit `forge models` paths refresh
+/// unconditionally and do not consult this.
+pub(crate) fn startup_refresh_due(cache_age_secs: Option<u64>) -> bool {
+    cache_age_secs.is_none_or(|age| age >= CATALOG_STARTUP_REFRESH_AFTER_SECS)
 }
 
 /// Read the on-disk catalog whatever its age, with the epoch second it was written and how many
@@ -67,6 +81,7 @@ pub(crate) fn read_cached_catalog() -> Option<CachedCatalog> {
     load_cached_catalog_aged().map(|(catalog, _, age)| CachedCatalog {
         catalog,
         stale: age > CATALOG_CACHE_MAX_AGE_SECS,
+        age_secs: age,
     })
 }
 
@@ -851,5 +866,23 @@ mod bridge_status_tests {
         assert!(detail.contains("built-in fallback"), "{detail}");
         assert!(detail.contains("may be out of date"), "{detail}");
         assert!(detail.contains("please sign in"), "{detail}");
+    }
+}
+
+#[cfg(test)]
+mod startup_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn startup_refresh_is_skipped_only_for_a_fresh_cache() {
+        assert!(startup_refresh_due(None), "no catalog yet: discover");
+        assert!(!startup_refresh_due(Some(0)));
+        assert!(!startup_refresh_due(Some(
+            CATALOG_STARTUP_REFRESH_AFTER_SECS - 1
+        )));
+        assert!(startup_refresh_due(Some(
+            CATALOG_STARTUP_REFRESH_AFTER_SECS
+        )));
+        assert!(startup_refresh_due(Some(CATALOG_CACHE_MAX_AGE_SECS + 1)));
     }
 }
