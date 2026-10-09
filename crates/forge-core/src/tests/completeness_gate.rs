@@ -102,3 +102,94 @@ async fn shell_only_turn_in_a_clean_repo_skips_the_review() {
     );
     assert_eq!(outcome.text, "It printed: built");
 }
+
+/// Edits a file and marks the plan done, writes the real summary, then answers the completion
+/// gate's verification request with a one-line "verified".
+struct EditSummaryThenVerified {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Provider for EditSummaryThenVerified {
+    async fn complete(
+        &self,
+        _model: &str,
+        _messages: &[Message],
+        _tools: &[ToolSpec],
+        _on_event: &mut forge_provider::EventSink<'_>,
+    ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let call = |name: &str, args: serde_json::Value| forge_types::ToolCall {
+            id: forge_types::new_id(),
+            name: name.into(),
+            args,
+        };
+        let (content, tool_calls) = match n {
+            0 => (
+                String::new(),
+                vec![
+                    call(
+                        "write_file",
+                        serde_json::json!({ "path": "a.txt", "content": "fixed" }),
+                    ),
+                    call(
+                        "update_tasks",
+                        serde_json::json!({ "tasks": [{ "title": "fix a.txt", "status": "done" }] }),
+                    ),
+                ],
+            ),
+            1 => (
+                "Fixed a.txt: the typo is gone and the file now reads `fixed`.".into(),
+                vec![],
+            ),
+            _ => ("Verification completed.".into(), vec![]),
+        };
+        Ok(forge_provider::ModelResponse {
+            reasoning: String::new(),
+            reasoning_items: Vec::new(),
+            content,
+            tool_calls,
+            usage: forge_types::Usage::default(),
+            quotas: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn verification_redrive_does_not_replace_the_real_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "typo").unwrap();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let capture = CapturePresenter::default();
+    let events = capture.events.clone();
+    let config = Config {
+        permission_mode: forge_types::PermissionMode::Bypass,
+        ..Config::default()
+    };
+    let mut session = Session::start(
+        Arc::clone(&store),
+        Arc::new(EditSummaryThenVerified {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }),
+        Arc::new(FixedRouter {
+            model: "direct::edit-summary".into(),
+            fallbacks: vec![],
+        }),
+        ToolRegistry::with_core_tools_in(dir.path()),
+        Box::new(capture),
+        config,
+        dir.path().to_str().unwrap(),
+    )
+    .unwrap();
+
+    let outcome = session.run_turn("fix the typo in a.txt").await.unwrap();
+
+    let verified = events.lock().unwrap().iter().any(
+        |e| matches!(e, PresenterEvent::Warning(w) if w.contains("verifying with a real state check")),
+    );
+    assert!(verified, "the gate must have asked for verification");
+    assert_eq!(
+        outcome.text,
+        "Fixed a.txt: the typo is gone and the file now reads `fixed`."
+    );
+}

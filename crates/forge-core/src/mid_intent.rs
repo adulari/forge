@@ -211,6 +211,24 @@ const NOW_STATIVE: &[&str] = &[
     "now the build passes",
 ];
 
+/// A sentence that states nothing is left to do ("Nothing is missing, so I'm finishing with no
+/// further changes") ends the turn even though it contains an action verb in the first person.
+const NOTHING_LEFT: &[&str] = &[
+    "no further ",
+    "nothing further",
+    "nothing more",
+    "nothing else",
+    "nothing left",
+    "nothing is missing",
+    "nothing's missing",
+    "nothing missing",
+    "no more changes",
+    "no changes are needed",
+    "no changes needed",
+    "no additional changes",
+    "no other changes",
+];
+
 /// Whether the reply's last sentence announces work the model has not done.
 pub(crate) fn ends_mid_intent(text: &str) -> bool {
     let Some((sentence, paragraph)) = last_sentence(text) else {
@@ -223,7 +241,7 @@ pub(crate) fn ends_mid_intent(text: &str) -> bool {
     if s.contains('?') || USER_DIRECTED.iter().any(|m| paragraph.contains(m)) {
         return false;
     }
-    if NOW_STATIVE.iter().any(|m| s.starts_with(m)) {
+    if NOW_STATIVE.iter().any(|m| s.starts_with(m)) || NOTHING_LEFT.iter().any(|m| s.contains(m)) {
         return false;
     }
     let s = s.trim_start_matches(|c: char| !c.is_alphanumeric());

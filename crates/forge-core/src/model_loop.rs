@@ -615,6 +615,7 @@ impl Session {
                         {
                             verification_at_last_verify =
                                 verification_ledger.lock().unwrap().checkpoint();
+                            self.keep_answer_across_verification(&mut pre_review, &resp.content);
                             continue;
                         }
                         // else: accepted (clean / no-artifacts / unverified) — fall through to terminal.
@@ -744,6 +745,7 @@ impl Session {
                         {
                             verification_at_last_verify =
                                 verification_ledger.lock().unwrap().checkpoint();
+                            self.keep_answer_across_verification(&mut pre_review, &resp.content);
                             continue;
                         }
                     } else if mutations_ran.load(std::sync::atomic::Ordering::Relaxed) == 0
@@ -774,15 +776,18 @@ impl Session {
                         ));
                     }
                 }
-                final_text = crate::completeness::answer_after_review(
-                    resp.content,
-                    pre_review.take(),
-                    if completeness_checked {
-                        crate::completeness::worktree_fingerprint(self.workspace_root())
-                    } else {
-                        None
-                    },
-                );
+                let pre_answer = pre_review.take().filter(|_| {
+                    verification_ledger
+                        .lock()
+                        .unwrap()
+                        .unresolved_summary()
+                        .is_none()
+                });
+                let tree_now = pre_answer
+                    .as_ref()
+                    .and_then(|_| crate::completeness::worktree_fingerprint(self.workspace_root()));
+                final_text =
+                    crate::completeness::answer_after_review(resp.content, pre_answer, tree_now);
                 let accepted = final_text.clone();
                 self.publish_terminal_answer(&accepted)?;
                 hit_step_cap = false;
