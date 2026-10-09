@@ -7874,4 +7874,30 @@ mod tests {
             Some("hi")
         );
     }
+
+    #[test]
+    fn statusline_command_output_is_an_extra_row_with_colours_stripped() {
+        let mut app = App::default();
+        app.statusline_config.command = Some("~/.claude/statusline.sh".to_string());
+        let base_h = crate::app::render::statusline_height(&app);
+        app.custom_widget_cache.insert(
+            "~/.claude/statusline.sh".to_string(),
+            "\u{1b}[32mMY-STATUS\u{1b}[0m ok".to_string(),
+        );
+        assert_eq!(crate::app::render::statusline_height(&app), base_h + 1);
+        let out = screen_wh(&app, 80, LIVE_H);
+        assert!(out.contains("MY-STATUS ok"), "command row missing: {out:?}");
+        assert!(!out.contains('\u{1b}'), "escape leaked into the buffer");
+    }
+
+    #[test]
+    fn statusline_command_without_output_reserves_no_row() {
+        let mut app = App::default();
+        let h = crate::app::render::statusline_height(&app);
+        app.statusline_config.command = Some("x".to_string());
+        assert_eq!(crate::app::render::statusline_height(&app), h);
+        app.custom_widget_cache
+            .insert("x".to_string(), String::new());
+        assert_eq!(crate::app::render::statusline_height(&app), h);
+    }
 }

@@ -256,6 +256,8 @@ retry differently rather than repeating the same call.
 Communication:
 - Be concise and direct. No filler, no flattery, no restating the question. Reference code as \
 `path:line`.
+- Reply in the language of the user's latest message, and stay in it unless they switch; never \
+drift into another language because of earlier context, tool output, or code comments.
 - Report outcomes truthfully: if a test failed, verification was skipped, or something is \
 uncertain, say so plainly instead of reporting success.
 - When the task is done, stop and give a short summary of what changed. Don't ask whether to \
@@ -14581,6 +14583,7 @@ mod tests {
         assert!(FORGE_SYSTEM.contains("Fix failures before"));
         assert!(FORGE_SYSTEM.contains("Plan bookkeeping is non-blocking"));
         assert!(FORGE_SYSTEM.contains("NEVER call update_tasks by itself"));
+        assert!(FORGE_SYSTEM.contains("Reply in the language of the user's latest message"));
         assert!(update_tasks_spec()
             .description
             .contains("NEVER call this tool by itself"));

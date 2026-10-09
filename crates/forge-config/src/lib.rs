@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod agents;
 pub mod mcp;
+pub mod notifications;
 pub mod oauth;
 mod paths;
 pub mod provider_oauth;
@@ -134,6 +135,9 @@ pub struct Config {
     /// Customizable statusline layout (left / center / right widget segments).
     #[serde(default)]
     pub statusline: StatuslineConfig,
+    /// Desktop notification + terminal bell when a turn finishes or Forge waits on the user.
+    #[serde(default)]
+    pub notifications: notifications::NotificationsConfig,
     /// User-configurable keybind map (action → key combo). Defaults to the built-in map.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -2536,6 +2540,12 @@ pub struct StatuslineConfig {
     /// the statusline's reserved height grows with it (see `statusline_height`).
     #[serde(default)]
     pub extra_rows: Vec<Vec<StatuslineWidget>>,
+    /// A Claude-Code-style statusline command. It gets session JSON on stdin (the same shape CC
+    /// sends: `session_id`, `model`, `workspace`, `cost`, `context_window`, ...) and its first
+    /// stdout line is shown as one extra row, so an existing `~/.claude/statusline.sh` works
+    /// unchanged. `forge import claude` fills this from CC's `statusLine.command`.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 fn default_sl_left() -> Vec<StatuslineWidget> {
@@ -2559,6 +2569,7 @@ impl Default for StatuslineConfig {
             right: Vec::new(),
             separator: default_sl_separator(),
             extra_rows: Vec::new(),
+            command: None,
         }
     }
 }
@@ -2764,6 +2775,7 @@ impl Default for Config {
             telemetry: TelemetryConfig::default(),
             self_mcp: false,
             statusline: StatuslineConfig::default(),
+            notifications: notifications::NotificationsConfig::default(),
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
             system_prompt_overrides: HashMap::new(),
@@ -4926,6 +4938,7 @@ reason = "no privilege escalation"
             right: vec![StatuslineWidget::McpStatus],
             separator: " | ".to_string(),
             extra_rows: vec![vec![StatuslineWidget::RepoName]],
+            command: Some("~/.claude/statusline.sh".to_string()),
         };
         let serialized = toml::to_string(&cfg).unwrap();
         let parsed: StatuslineConfig = toml::from_str(&serialized).unwrap();
@@ -4933,6 +4946,7 @@ reason = "no privilege escalation"
         assert_eq!(parsed.right, cfg.right);
         assert_eq!(parsed.separator, cfg.separator);
         assert_eq!(parsed.extra_rows, cfg.extra_rows);
+        assert_eq!(parsed.command, cfg.command);
     }
 
     #[test]
@@ -4947,6 +4961,7 @@ reason = "no privilege escalation"
             right: vec![],
             separator: default_sl_separator(),
             extra_rows: vec![],
+            command: None,
         };
         let serialized = toml::to_string(&cfg).unwrap();
         let parsed: StatuslineConfig = toml::from_str(&serialized).unwrap();

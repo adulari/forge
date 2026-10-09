@@ -1093,7 +1093,10 @@ and keep going."
                     }
                 }
                 StatuslineAction::Reset => {
-                    app.statusline_config = forge_config::StatuslineConfig::default();
+                    app.statusline_config = forge_config::StatuslineConfig {
+                        command: app.statusline_config.command.take(),
+                        ..Default::default()
+                    };
                     match forge_config::write_statusline_config(&app.statusline_config.clone()) {
                         Ok(path) => app.note(&format!(
                             "statusline: reset to default (saved → {})",

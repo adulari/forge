@@ -64,8 +64,21 @@ pub(super) fn import_claude_settings(
             config_dst.display()
         );
     }
-    if hooks_n == 0 && perms_n == 0 {
-        println!("• no hooks or permission rules found in settings.json to import");
+    let statusline = super::claude_statusline::cc_statusline_command(&values);
+    if let Some(command) = &statusline {
+        match super::claude_statusline::write_statusline_command(command, &config_dst)? {
+            super::claude_statusline::Outcome::Written => println!(
+                "✓ imported statusLine command → [statusline] command in {}",
+                config_dst.display()
+            ),
+            super::claude_statusline::Outcome::KeptExisting => println!(
+                "• found a statusLine command — {} already has [statusline]; set `command = ...` there to use it",
+                config_dst.display()
+            ),
+        }
+    }
+    if hooks_n == 0 && perms_n == 0 && statusline.is_none() {
+        println!("• no hooks, permission rules or statusLine found in settings.json to import");
     }
     Ok(())
 }
