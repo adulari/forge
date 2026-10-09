@@ -16,8 +16,11 @@ use crate::permission::AutoVerdict;
 use crate::{
     BudgetStatus, Message, PermissionDecision, PresenterEvent, Role, Session, StreamEvent, TaskTier,
 };
+use forge_provider::Provider;
+use forge_store::Store;
 
-const CLASSIFIER_MAX_SECS: u64 = 4;
+/// Time limit for a classifier call on an API model.
+pub const CLASSIFIER_MAX_SECS: u64 = 4;
 const CACHE_CAP: usize = 256;
 const COMMAND_CHARS: usize = 2000;
 const REQUEST_CHARS: usize = 400;
@@ -41,7 +44,7 @@ Reply with ONLY one JSON object: {\"verdict\":\"allow\"|\"ask\",\"reason\":\"<=1
 
 /// The classifier's decision on one command, with the reason shown to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Classified {
+pub enum Classified {
     Allow(String),
     Ask(String),
 }
@@ -49,14 +52,14 @@ pub(crate) enum Classified {
 /// Session-scoped verdicts by normalized command, so a command the model already judged is not
 /// judged again. Only answered verdicts are kept; a failure is retried on the next attempt.
 #[derive(Debug, Default)]
-pub(crate) struct ClassifierCache(HashMap<String, Classified>);
+pub struct ClassifierCache(HashMap<String, Classified>);
 
 impl ClassifierCache {
-    fn get(&self, command: &str) -> Option<&Classified> {
+    pub fn get(&self, command: &str) -> Option<&Classified> {
         self.0.get(&normalize(command))
     }
 
-    fn insert(&mut self, command: &str, verdict: Classified) {
+    pub fn insert(&mut self, command: &str, verdict: Classified) {
         if self.0.len() >= CACHE_CAP {
             self.0.clear();
         }
@@ -70,7 +73,7 @@ fn normalize(command: &str) -> String {
 
 /// Parse the model's reply. Tolerates prose or a code fence around the object; anything that is
 /// not a JSON object with a recognised `verdict` is `None`.
-pub(crate) fn parse_verdict(reply: &str) -> Option<Classified> {
+pub fn parse_verdict(reply: &str) -> Option<Classified> {
     let start = reply.find('{')?;
     let end = reply.rfind('}')?;
     let object: Value = serde_json::from_str(reply.get(start..=end)?).ok()?;
@@ -142,7 +145,10 @@ fn classifier_prompt(command: &str, cwd: &Path, workspace: Option<&Path>, reques
         "Workspace root: {}\nWorking directory: {}\nUser request: {}\nCommand:\n{}",
         workspace.unwrap_or(cwd).display(),
         cwd.display(),
-        truncate(request.trim(), REQUEST_CHARS),
+        match request.trim() {
+            "" => "(not available)".to_string(),
+            text => truncate(text, REQUEST_CHARS),
+        },
         truncate(command, COMMAND_CHARS),
     );
     for (path, head) in script_heads(command, cwd, workspace) {
@@ -239,52 +245,96 @@ impl Session {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
-        let messages = [
-            Message::system(CLASSIFIER_SYSTEM),
-            Message::user(classifier_prompt(
-                command,
-                &cwd,
-                workspace.as_deref(),
-                request,
-            )),
-        ];
         self.presenter.emit(PresenterEvent::AuxiliaryRequest {
             model: model.clone(),
             purpose: "classifying a command for auto mode".to_string(),
         });
-        let opts = Self::auxiliary_completion_options(&self.id, "auto-classify");
-        let mut sink = |_: StreamEvent| {};
-        let completion = self
-            .provider
-            .complete_with(&model, &messages, &[], &opts, &mut sink);
-        let response = tokio::time::timeout(
+        run_classifier(
+            &*self.provider,
+            &self.store,
+            &self.id,
+            &model,
+            std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs),
             std::time::Duration::from_secs(CLASSIFIER_MAX_SECS),
-            completion,
+            ClassifierInput {
+                command,
+                cwd: &cwd,
+                workspace: workspace.as_deref(),
+                request,
+            },
         )
         .await
-        .map_err(|_| format!("classifier timed out after {CLASSIFIER_MAX_SECS}s"))?;
-        let reply = match response {
-            Ok(reply) => reply,
-            Err(error) => {
-                crate::model_failure_record::record_model_failure_in(
-                    &self.store,
-                    &model,
-                    &error,
-                    std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs),
-                );
-                return Err("classifier unavailable".into());
-            }
-        };
-        if let Err(error) = self.store.record_side_call_usage_for(
-            &self.id,
-            "auto-classify",
-            Some(&model),
-            &reply.usage,
-        ) {
-            tracing::warn!(session_id = %self.id, %error, "failed to persist classifier usage");
-        }
-        parse_verdict(&reply.content).ok_or_else(|| "classifier gave an unusable answer".into())
     }
+}
+
+/// What the classifier is shown about one command.
+pub struct ClassifierInput<'a> {
+    pub command: &'a str,
+    pub cwd: &'a Path,
+    pub workspace: Option<&'a Path>,
+    pub request: &'a str,
+}
+
+/// One bounded classifier call on `model`. Shared by the in-process session and the CLI bridge's
+/// `mcp-serve`, which has no `Session`. Any failure is an `Err` reason, which callers treat as Ask.
+pub async fn run_classifier(
+    provider: &dyn Provider,
+    store: &Store,
+    session_id: &str,
+    model: &str,
+    failure_cooldown: std::time::Duration,
+    max_wait: std::time::Duration,
+    input: ClassifierInput<'_>,
+) -> Result<Classified, String> {
+    let messages = [
+        Message::system(CLASSIFIER_SYSTEM),
+        Message::user(classifier_prompt(
+            input.command,
+            input.cwd,
+            input.workspace,
+            input.request,
+        )),
+    ];
+    let opts = Session::auxiliary_completion_options(session_id, "auto-classify");
+    let mut sink = |_: StreamEvent| {};
+    let completion = provider.complete_with(model, &messages, &[], &opts, &mut sink);
+    let response = tokio::time::timeout(max_wait, completion)
+        .await
+        .map_err(|_| format!("classifier timed out after {}s", max_wait.as_secs()))?;
+    let reply = match response {
+        Ok(reply) => reply,
+        Err(error) => {
+            crate::model_failure_record::record_model_failure_in(
+                store,
+                model,
+                &error,
+                failure_cooldown,
+            );
+            return Err("classifier unavailable".into());
+        }
+    };
+    if let Err(error) =
+        store.record_side_call_usage_for(session_id, "auto-classify", Some(model), &reply.usage)
+    {
+        tracing::warn!(session_id, %error, "failed to persist classifier usage");
+    }
+    parse_verdict(&reply.content).ok_or_else(|| "classifier gave an unusable answer".into())
+}
+
+/// Models the CLI bridge's `mcp-serve` may use for the classifier, best first (at most two, so one
+/// dead model costs a retry, not a prompt). Like [`Session::auxiliary_model`] it skips benched
+/// models and never spends a subscription plan, and it also skips CLI bridges, whose process
+/// start-up alone exceeds the classifier's time limit.
+pub fn bridge_classifier_models(config: &forge_config::Config, store: &Store) -> Vec<String> {
+    let health = crate::readiness::ProviderReadiness::snapshot(config, store).health;
+    config
+        .candidates_for(TaskTier::Trivial)
+        .into_iter()
+        .filter(|m| !forge_mesh::catalog::is_subscription(m) && !forge_provider::is_cli_bridge(m))
+        .filter(|m| crate::auxiliary_candidates::usable_for_side_call(m, &health, None))
+        .filter(|m| forge_config::has_api_key(forge_config::provider_of(m)))
+        .take(2)
+        .collect()
 }
 
 #[cfg(test)]

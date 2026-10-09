@@ -79,6 +79,7 @@ mod bridge_budget;
 mod heartbeats;
 use bridge_budget::*;
 
+mod auto_classify;
 mod permission_relay;
 use permission_relay::gate;
 #[cfg(test)]
@@ -116,6 +117,8 @@ struct ForgeMcp {
     /// Lean tool surface (`FORGE_BRIDGE_LEAN=1` / `mesh.bridge_lean`): drop the tools in
     /// [`LEAN_DROPPED_TOOLS`] from the advertised list.
     lean: bool,
+    /// `auto` temper: the classifier for Unknown shell commands (see `auto_classify.rs`).
+    auto_classify: auto_classify::AutoClassify,
 }
 
 fn parse_bridge_tasks(args: &Value) -> Result<Vec<forge_types::TodoItem>, &'static str> {
@@ -424,7 +427,18 @@ impl ForgeMcp {
 
         // Forge's permission gate — the unoverridable denylist always applies here.
         let mode = self.effective_mode();
-        let decision = permission::decide(mode, tool.side_effect(), &name, &args, &self.rules);
+        let (decision, auto_verdict) =
+            permission::decide_in_auto(mode, tool.side_effect(), &name, &args, &self.rules, None);
+        let decision = self
+            .auto_classify
+            .settle(
+                decision,
+                auto_verdict,
+                &args,
+                &self.config,
+                &self.tasks_store,
+            )
+            .await;
         if let Err(refusal) = gate(decision, &name, tool.side_effect(), mode).await {
             return Ok(CallToolResult::error(vec![ContentBlock::text(refusal)]));
         }
@@ -820,6 +834,7 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         mcp,
         skills,
         lean,
+        auto_classify: Default::default(),
     };
     if http {
         return serve_http(server, &bind).await;
@@ -935,6 +950,7 @@ mod tests {
                 &forge_skills::Sources::default(),
             )),
             lean: false,
+            auto_classify: Default::default(),
         }
     }
 
@@ -1084,6 +1100,7 @@ mod tests {
                 &forge_skills::Sources::default(),
             )),
             lean,
+            auto_classify: Default::default(),
         }
     }
 

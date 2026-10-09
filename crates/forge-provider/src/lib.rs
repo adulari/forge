@@ -29,7 +29,8 @@ mod xai_oauth;
 
 pub use cli_provider::{
     codex_cli_detected_plan, codex_rollout_is_account_wide, BridgeModelSource, BridgeModels,
-    ClaudeInitialization, ClaudeModelCapability, CliKind, CliProvider, SUBAGENT_SINK_ENV,
+    ClaudeInitialization, ClaudeModelCapability, CliKind, CliProvider, BRIDGE_CLASSIFIER_MODEL_ENV,
+    SUBAGENT_SINK_ENV,
 };
 
 /// Whether `provider` is a CLI bridge that is known to have no credentials right now, so routing
