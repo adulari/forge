@@ -74,6 +74,7 @@ mod first_run;
 mod image_input;
 pub(crate) mod live_observer;
 mod local;
+mod log_filter;
 mod mcp_agent;
 mod mcp_serve;
 mod push;
@@ -118,11 +119,8 @@ fn log_target(interactive: bool) -> LogTarget {
 /// unless `RUST_LOG` overrides.
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    // genai's adapters log full raw HTTP failure bodies at ERROR on every retried request (e.g. a
-    // multi-line 413/429 dump); forge's own error classifier already prints a clean one-liner for
-    // these, so the raw dump is pure noise. Silence genai by default; RUST_LOG opts back in.
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,genai=off"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(log_filter::DEFAULT_LOG_FILTER));
     match log_target(std::io::stdout().is_terminal()) {
         LogTarget::Stderr => {
             tracing_subscriber::fmt()

@@ -36,6 +36,7 @@ use content::{
 };
 use serde_json::Value;
 
+mod connect_log;
 mod content;
 mod handler;
 pub mod oauth;
@@ -440,7 +441,10 @@ impl McpManager {
 
         for (name, label, res) in results {
             if let Err(reason) = res {
-                tracing::warn!("mcp: server '{name}' failed to connect: {reason}");
+                tracing::warn!(
+                    "mcp: server '{name}' failed to connect: {}",
+                    connect_log::concise_reason(&reason)
+                );
                 self.set_failed(name, label, reason);
             }
         }
@@ -619,7 +623,7 @@ impl McpManager {
                 }
             }
         }
-        self.failed_servers().len()
+        connect_log::report_still_failed(&self.failed_servers(), rounds)
     }
 
     /// Remove a server from the live connection map by name. The child process (if any) will be
