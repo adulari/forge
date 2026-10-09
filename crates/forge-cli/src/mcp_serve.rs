@@ -31,7 +31,7 @@ use forge_store::Store;
 use forge_tools::ToolRegistry;
 use forge_types::{PermissionDecision, PermissionMode, PermissionRule};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
     ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
@@ -153,6 +153,17 @@ fn persist_bridge_tasks(
     Ok(tasks)
 }
 
+/// rmcp 3's `with_all_items` leaves `ttlMs`/`cacheScope` unset, so they are omitted from the wire.
+/// Claude Code >= 2.1.29x negotiates protocol 2026-07-28 and rejects a `tools/list` result without
+/// them (`Invalid result for tools/list ... ttlMs`), silently dropping EVERY Forge tool: the model
+/// then writes `<invoke>` as plain text and Forge's text-recovery loop re-sends the whole
+/// transcript per call. `ttlMs: 0` + private scope = "never cache", the safe default.
+fn tools_list_result(tools: Vec<Tool>) -> ListToolsResult {
+    ListToolsResult::with_all_items(tools)
+        .with_ttl_ms(0)
+        .with_cache_scope(CacheScope::Private)
+}
+
 impl ServerHandler for ForgeMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
@@ -170,13 +181,11 @@ impl ServerHandler for ForgeMcp {
         _request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        // rmcp 3 added spec-2026-07-28 fields (result_type, ttl_ms, cache_scope) to every
-        // paginated result; `with_all_items` fills them with the spec defaults.
         let mut tools = self.tool_list();
         if let Some(tool) = self.dispatch_sessions_tool().await {
             tools.push(tool);
         }
-        Ok(ListToolsResult::with_all_items(tools))
+        Ok(tools_list_result(tools))
     }
 
     async fn call_tool(
@@ -1027,6 +1036,13 @@ fn bearer_ok(header: Option<&str>, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tools_list_result_carries_ttl_and_cache_scope() {
+        let wire = serde_json::to_value(tools_list_result(Vec::new())).unwrap();
+        assert_eq!(wire["ttlMs"], 0, "{wire}");
+        assert_eq!(wire["cacheScope"], "private", "{wire}");
+    }
 
     fn test_server(lean: bool) -> ForgeMcp {
         test_server_with_mcp(lean, None)
