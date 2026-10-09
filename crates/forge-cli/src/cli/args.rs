@@ -1469,6 +1469,9 @@ pub(crate) enum Mode {
     Bypass,
     #[value(alias = "read-only", alias = "readonly")]
     Plan,
+    /// Proceed on safe actions, ask only for risky ones (destructive shell, writes outside the
+    /// workspace, network uploads, credential access).
+    Auto,
 }
 
 impl From<Mode> for forge_types::PermissionMode {
@@ -1478,6 +1481,7 @@ impl From<Mode> for forge_types::PermissionMode {
             Mode::AcceptEdits => forge_types::PermissionMode::AcceptEdits,
             Mode::Bypass => forge_types::PermissionMode::Bypass,
             Mode::Plan => forge_types::PermissionMode::Plan,
+            Mode::Auto => forge_types::PermissionMode::Auto,
         }
     }
 }

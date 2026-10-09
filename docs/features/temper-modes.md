@@ -40,7 +40,7 @@ obvious at a glance (the prior themed value-names hid which mode was which). `--
 `[permission] mode = …` accept **either** the canonical key **or** the label
 (e.g. `--mode read-only` == `--mode plan`, `--mode auto-edit` == `--mode accept-edits`).
 
-**Cycle order** (SHIFT+TAB): `Ask → Auto-edit → Read-only → Ask …`. **Full** is deliberately
+**Cycle order** (SHIFT+TAB): `Ask → Auto-edit → Auto → Read-only → Ask …` (Auto added later, see claude-code-parity.md). **Full** is deliberately
 **excluded** from the cycle: landing on "all guards off" by tapping a key is a footgun, so it is
 reachable only via `--mode full` / config. (Claude Code likewise never cycles into bypass.)
 

@@ -13,6 +13,7 @@ use forge_types::{
 use serde::{Deserialize, Serialize};
 
 pub mod agents;
+mod commit_policy;
 pub mod mcp;
 pub mod notifications;
 pub mod oauth;
@@ -20,7 +21,8 @@ mod paths;
 pub mod provider_oauth;
 pub mod quota_status;
 pub mod secret_store;
-pub use agents::{load_agents, AgentDef};
+pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
+pub use commit_policy::CommitPolicy;
 pub use mcp::{
     discover_import_sources, import_mcp_json, load_mcp_toml, load_mcp_toml_with_diagnostic,
     write_mcp_toml, ImportSource, McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport,
@@ -1255,6 +1257,10 @@ pub struct GitConfig {
     /// asks the model to offer the user a push (Forge never pushes on its own). `0` disables it.
     #[serde(default = "default_push_nudge_ahead")]
     pub push_nudge_ahead: u32,
+    /// `unit` (default), `end`, or `never`: swaps the system prompt's version-control paragraph
+    /// and, for anything but `unit`, silences the commit/push reminders above.
+    #[serde(default)]
+    pub commit_policy: CommitPolicy,
 }
 
 impl Default for GitConfig {
@@ -1264,6 +1270,7 @@ impl Default for GitConfig {
             commit_nudge: default_commit_nudge(),
             commit_nudge_edits: default_commit_nudge_edits(),
             push_nudge_ahead: default_push_nudge_ahead(),
+            commit_policy: CommitPolicy::default(),
         }
     }
 }
@@ -3176,12 +3183,7 @@ fn write_settings_at(
         .unwrap_or_default();
 
     // permission_mode uses kebab-case serde names
-    let perm_str = match permission {
-        PermissionMode::Default => "default",
-        PermissionMode::AcceptEdits => "accept-edits",
-        PermissionMode::Bypass => "bypass",
-        PermissionMode::Plan => "plan",
-    };
+    let perm_str = permission.key();
     root.insert(
         "permission_mode".to_string(),
         toml::Value::String(perm_str.to_string()),
@@ -3250,12 +3252,7 @@ pub fn write_permission_mode(permission: PermissionMode) -> Result<PathBuf, Conf
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_default();
-    let perm_str = match permission {
-        PermissionMode::Default => "default",
-        PermissionMode::AcceptEdits => "accept-edits",
-        PermissionMode::Bypass => "bypass",
-        PermissionMode::Plan => "plan",
-    };
+    let perm_str = permission.key();
     root.insert(
         "permission_mode".to_string(),
         toml::Value::String(perm_str.to_string()),

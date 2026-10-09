@@ -76,6 +76,7 @@ fn append_sink_record(path: &str, record: &serde_json::Value) -> std::io::Result
 }
 
 mod bridge_budget;
+mod heartbeats;
 use bridge_budget::*;
 
 mod permission_relay;
@@ -342,6 +343,9 @@ impl ForgeMcp {
         if name == forge_core::heartbeat::MANAGE_HEARTBEATS_TOOL {
             return Ok(self.handle_manage_heartbeats(&args));
         }
+        if name == forge_core::wakeup::SCHEDULE_WAKEUP_TOOL {
+            return Ok(bridge_budget::wakeup_result(&self.tasks_store, &args));
+        }
 
         // Plan presentation — report the plan to the out-of-band sink so the parent renders the
         // card and runs the approval flow (which persists + seeds tasks). The parent ignores it
@@ -564,140 +568,6 @@ impl ForgeMcp {
 }
 
 impl ForgeMcp {
-    /// Handle `manage_heartbeats` — create/list/pause/resume/delete an agent-created heartbeat on
-    /// the parent session (parity with the direct path's `Session::manage_heartbeats`, which this
-    /// mirrors action-for-action). No parent session id (bridge run standalone) → a clear error
-    /// instead of silently no-oping.
-    fn handle_manage_heartbeats(&self, args: &Value) -> CallToolResult {
-        let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) else {
-            return CallToolResult::error(vec![ContentBlock::text(
-                "manage_heartbeats unavailable: no parent session",
-            )]);
-        };
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        let label = args.get("label").and_then(|v| v.as_str());
-        let now = chrono::Utc::now().timestamp();
-
-        let (text, ok) = match action {
-            "create" => {
-                let label = label.unwrap_or("");
-                let prompt = args
-                    .get("prompt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .trim();
-                let interval = args.get("interval").and_then(|v| v.as_str()).unwrap_or("");
-                if label.trim().is_empty() {
-                    ("error: `label` is required".to_string(), false)
-                } else if prompt.is_empty() {
-                    ("error: `prompt` is required".to_string(), false)
-                } else {
-                    match forge_core::heartbeat::parse_heartbeat_interval(interval) {
-                        Err(e) => (format!("error: {e}"), false),
-                        Ok(secs) => {
-                            let existing =
-                                self.tasks_store.list_heartbeats(&session_id).unwrap_or_default();
-                            let agent_count =
-                                existing.iter().filter(|h| h.owner == "agent").count();
-                            if agent_count >= forge_core::heartbeat::MAX_AGENT_HEARTBEATS_PER_SESSION
-                            {
-                                (
-                                    format!(
-                                        "error: at most {} agent heartbeats per session — \
-                                         delete one first",
-                                        forge_core::heartbeat::MAX_AGENT_HEARTBEATS_PER_SESSION
-                                    ),
-                                    false,
-                                )
-                            } else if existing
-                                .iter()
-                                .any(|h| h.owner == "agent" && h.label.as_deref() == Some(label))
-                            {
-                                (
-                                    format!("error: an agent heartbeat named '{label}' already exists"),
-                                    false,
-                                )
-                            } else {
-                                match self.tasks_store.add_agent_heartbeat(
-                                    &forge_types::new_id(),
-                                    &session_id,
-                                    label,
-                                    prompt,
-                                    secs,
-                                    now,
-                                ) {
-                                    Ok(()) => (
-                                        format!(
-                                            "heartbeat '{label}' created — every {}",
-                                            forge_core::heartbeat::format_heartbeat_interval(secs)
-                                        ),
-                                        true,
-                                    ),
-                                    Err(e) => (format!("error: {e}"), false),
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "list" => {
-                let all = self
-                    .tasks_store
-                    .list_heartbeats(&session_id)
-                    .unwrap_or_default();
-                let agent_only: Vec<_> = all.into_iter().filter(|h| h.owner == "agent").collect();
-                (forge_core::heartbeat::format_heartbeat_list(&agent_only), true)
-            }
-            "pause" | "resume" => match label {
-                None => ("error: `label` is required".to_string(), false),
-                Some(label) => {
-                    let existing =
-                        self.tasks_store.list_heartbeats(&session_id).unwrap_or_default();
-                    match existing
-                        .iter()
-                        .find(|h| h.owner == "agent" && h.label.as_deref() == Some(label))
-                    {
-                        None => (format!("no agent heartbeat named '{label}'"), false),
-                        Some(hb) => {
-                            let status = if action == "resume" { "active" } else { "paused" };
-                            match self.tasks_store.set_heartbeat_status(&hb.id, status, now) {
-                                Ok(true) => (format!("heartbeat '{label}' {status}"), true),
-                                Ok(false) => (format!("no agent heartbeat named '{label}'"), false),
-                                Err(e) => (format!("error: {e}"), false),
-                            }
-                        }
-                    }
-                }
-            },
-            "delete" => match label {
-                None => ("error: `label` is required".to_string(), false),
-                Some(label) => {
-                    match self
-                        .tasks_store
-                        .delete_agent_heartbeat_by_label(&session_id, label)
-                    {
-                        Ok(true) => (format!("heartbeat '{label}' deleted"), true),
-                        Ok(false) => (format!("no agent heartbeat named '{label}'"), false),
-                        Err(e) => (format!("error: {e}"), false),
-                    }
-                }
-            },
-            other => (
-                format!(
-                    "error: unknown action '{other}' — expected create, list, pause, resume, or delete"
-                ),
-                false,
-            ),
-        };
-        report_to_sink(serde_json::json!({ "k": "heartbeat", "action": action, "text": text }));
-        let content = vec![ContentBlock::text(text)];
-        if ok {
-            CallToolResult::success(content)
-        } else {
-            CallToolResult::error(content)
-        }
-    }
-
     /// The advertised tool list. Factored out of `list_tools` (which needs an rmcp
     /// `RequestContext`) so the lean-surface behavior is unit-testable.
     fn tool_list(&self) -> Vec<Tool> {
@@ -717,7 +587,7 @@ impl ForgeMcp {
         // Advertise the subagent virtual tools only when enabled here — spawn_agents for fresh
         // fan-out, send_to_agent for follow-ups to persisted children (persistent subagents).
         if let Some(s) = &self.subagents {
-            let spec = subagent::spawn_agents_spec(s.max_agents);
+            let spec = subagent::spawn_agents_spec_with(s.max_agents, &s.ctx.agents);
             let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
             tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
             let follow = subagent::send_to_agent_spec();
@@ -765,9 +635,7 @@ impl ForgeMcp {
         tools.push(self.message_session_tool());
         // Advertise agent-created heartbeats — bridge parity with the direct path. Always on
         // (like update_tasks/remember): the parent session id is resolved lazily at call time.
-        let hs = forge_core::heartbeat::manage_heartbeats_spec();
-        let hs_schema: JsonObject = hs.schema.as_object().cloned().unwrap_or_default();
-        tools.push(Tool::new(hs.name, hs.description, Arc::new(hs_schema)));
+        tools.extend(bridge_budget::heartbeat_tools());
         // Advertise plan presentation so a bridge model can propose a plan in planning mode. The
         // bridge can't see the parent's runtime temper, so it's advertised unconditionally; the
         // parent honors the plan only when it is actually in Plan mode (gated in run_model_loop).
@@ -855,9 +723,10 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
             repo_boosts,
         );
         let parent_id = store.create_session(".", &format!("{:?}", config.permission_mode))?;
-        let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
+        let agents = Arc::new(forge_config::load_agents_layered(
+            &std::env::current_dir().unwrap_or_default(),
             &config.mesh.subagents.agents_dir,
-        )));
+        ));
         let ctx = AgentCtx {
             provider,
             router,

@@ -234,7 +234,8 @@ impl Session {
             env.push_str(&format!("git_branch: {b}\n"));
         }
         env.push_str("</env>");
-        let mut msgs = vec![Message::system(FORGE_SYSTEM), Message::system(env)];
+        let base = crate::commit_policy::apply(FORGE_SYSTEM, self.config.git.commit_policy);
+        let mut msgs = vec![Message::system(base.as_ref()), Message::system(env)];
         // Headless code-change turns (bench swe) get the minimal-diff bias — per-request system
         // context, so it reaches direct AND bridge providers without touching the bridge preamble.
         if self.expect_code_change {

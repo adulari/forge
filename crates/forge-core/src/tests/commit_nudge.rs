@@ -62,6 +62,14 @@ fn git(root: &std::path::Path, args: &[&str]) {
 }
 
 fn repo_session(final_on: usize, every: u32) -> (tempfile::TempDir, Session) {
+    repo_session_with(final_on, every, forge_config::CommitPolicy::Unit)
+}
+
+fn repo_session_with(
+    final_on: usize,
+    every: u32,
+    policy: forge_config::CommitPolicy,
+) -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
     std::fs::write(dir.path().join("README.md"), "hi\n").unwrap();
@@ -76,6 +84,7 @@ fn repo_session(final_on: usize, every: u32) -> (tempfile::TempDir, Session) {
     config.mesh.auto_memory = false;
     config.mesh.verify_completeness = false;
     config.git.commit_nudge_edits = every;
+    config.git.commit_policy = policy;
     let session = Session::start(
         Arc::new(Store::open_in_memory().unwrap()),
         Arc::new(Editor {
@@ -177,4 +186,32 @@ async fn disabling_commit_nudge_silences_both_reminders() {
     session.run_turn("take notes").await.unwrap();
     session.run_turn("more").await.unwrap();
     assert!(git_notes(&session).is_empty());
+}
+
+#[tokio::test]
+async fn end_and_never_policies_silence_every_reminder_across_turns() {
+    for policy in [
+        forge_config::CommitPolicy::End,
+        forge_config::CommitPolicy::Never,
+    ] {
+        let (_dir, mut session) = repo_session_with(3, 1, policy);
+        session.run_turn("take notes").await.unwrap();
+        session.run_turn("keep going").await.unwrap();
+        assert!(
+            git_notes(&session).is_empty(),
+            "{policy:?} must not nag: {:?}",
+            git_notes(&session)
+        );
+    }
+}
+
+#[test]
+fn the_system_preamble_follows_the_commit_policy() {
+    let wording = |policy| {
+        let (_dir, session) = repo_session_with(0, 10, policy);
+        session.system_preamble()[0].content.clone()
+    };
+    assert!(wording(forge_config::CommitPolicy::Unit).contains("commit each verified unit"));
+    assert!(wording(forge_config::CommitPolicy::End).contains("commit once"));
+    assert!(wording(forge_config::CommitPolicy::Never).contains("Never run `git commit`"));
 }

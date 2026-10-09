@@ -8,6 +8,33 @@
 //! MCP servers. All of it is bridge-only; the direct path is untouched.
 
 use forge_config::Config;
+use rmcp::model::{CallToolResult, ContentBlock, JsonObject, Tool};
+use std::sync::Arc;
+
+/// Session re-entry tools (`manage_heartbeats`, `schedule_wakeup`) advertised to the bridged model.
+pub(super) fn heartbeat_tools() -> Vec<Tool> {
+    forge_core::heartbeat::tool_specs()
+        .into_iter()
+        .map(|spec| {
+            let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
+            Tool::new(spec.name, spec.description, Arc::new(schema))
+        })
+        .collect()
+}
+
+/// Run `schedule_wakeup` against the parent session and shape the MCP result.
+pub(super) fn wakeup_result(
+    store: &forge_store::Store,
+    args: &serde_json::Value,
+) -> CallToolResult {
+    let (text, ok) = forge_core::wakeup::schedule_for_bridge(store, args);
+    let content = vec![ContentBlock::text(text)];
+    if ok {
+        CallToolResult::success(content)
+    } else {
+        CallToolResult::error(content)
+    }
+}
 
 /// Bridge-side byte cap on a `read_file` result. Mirrors the native caps claude/codex apply to
 /// their own read tools (they page files in ~small chunks); forge-tools' direct-path cap is
@@ -120,6 +147,7 @@ pub(super) const LEAN_DROPPED_TOOLS: &[&str] = &[
     "remember",
     "present_plan",
     "manage_heartbeats",
+    "schedule_wakeup",
 ];
 
 /// Hard cap (bytes) on the `use_skill` description advertised to a bridged CLI. The full skill

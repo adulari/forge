@@ -96,7 +96,10 @@ impl forge_tui::Presenter for AgentPresenter {
             // making `default` strictly MORE permissive than `accept_edits` — an inverted
             // safety ordering. The denial surfaces to the orchestrating agent, which can
             // escalate deliberately via forge_set_mode("accept_edits"/"bypass").
-            PermissionMode::Default | PermissionMode::Plan => forge_tui::ConfirmOutcome::Deny,
+            // Auto only reaches `confirm` for a call it judged risky — with no TTY, deny.
+            PermissionMode::Default | PermissionMode::Plan | PermissionMode::Auto => {
+                forge_tui::ConfirmOutcome::Deny
+            }
         }
     }
 
@@ -418,6 +421,7 @@ impl ForgeAgentServer {
                     PermissionMode::AcceptEdits => "accept_edits",
                     PermissionMode::Default => "default",
                     PermissionMode::Plan => "plan",
+                    PermissionMode::Auto => "auto",
                 };
                 let status = serde_json::json!({
                     "session_id": session.id(),
@@ -438,6 +442,7 @@ impl ForgeAgentServer {
                 let mode = match mode_str {
                     "bypass" => PermissionMode::Bypass,
                     "accept_edits" => PermissionMode::AcceptEdits,
+                    "auto" => PermissionMode::Auto,
                     _ => PermissionMode::Default,
                 };
                 // Update both the session's internal mode and the presenter's mode so

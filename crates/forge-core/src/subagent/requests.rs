@@ -19,6 +19,25 @@ use serde_json::Value;
 
 use super::{SPAWN_AGENTS_TOOL, SUBAGENT_SYSTEM, SUBAGENT_TOOLS};
 
+/// [`spawn_agents_spec`] plus the named agent types loaded for this workspace, so the model sees
+/// each type's description and tool set and can pick one with `agent` (Claude Code's
+/// `subagent_type`).
+pub fn spawn_agents_spec_for(max_agents: usize, project_root: &Path, agents_dir: &str) -> ToolSpec {
+    let agents = forge_config::load_agents_layered(project_root, agents_dir);
+    spawn_agents_spec_with(max_agents, &agents)
+}
+
+/// [`spawn_agents_spec_for`] over an already-loaded agent map.
+pub fn spawn_agents_spec_with(max_agents: usize, agents: &HashMap<String, AgentDef>) -> ToolSpec {
+    let mut spec = spawn_agents_spec(max_agents);
+    let catalog = forge_config::agent_catalog(agents);
+    if !catalog.is_empty() {
+        spec.description
+            .push_str(&format!("\nAvailable `agent` types:{catalog}"));
+    }
+    spec
+}
+
 /// The `ToolSpec` advertised to the parent so the model can call `spawn_agents`.
 pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
     ToolSpec {
@@ -48,7 +67,7 @@ pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
                         "properties": {
                             "agent": {
                                 "type": "string",
-                                "description": "optional named agent type; omit for a general read-only agent"
+                                "description": "optional named agent type (also accepted as `subagent_type`); omit for a general read-only agent"
                             },
                             "task": {
                                 "type": "string",
@@ -207,6 +226,7 @@ pub fn parse_requests(
             .ok_or("each agent needs a non-empty `task`")?;
         let agent = entry
             .get("agent")
+            .or_else(|| entry.get("subagent_type"))
             .and_then(|a| a.as_str())
             .filter(|a| !a.trim().is_empty())
             .unwrap_or("general")
@@ -248,7 +268,7 @@ pub fn resolve(req: &AgentRequest, agents: &HashMap<String, AgentDef>) -> Resolv
             },
             tools: def.tools.clone(),
             tier: def.tier,
-            pinned_model: None,
+            pinned_model: def.pinned_model.clone(),
         },
         None => ResolvedAgent {
             name: req.agent.clone(),

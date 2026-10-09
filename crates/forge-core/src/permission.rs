@@ -13,7 +13,10 @@
 //! 4. shell commands: per-segment allow/ask — ask if any segment matches an ask rule, allow
 //!    only when *every* effective segment matches an allow rule ([`decide_shell_segments`])
 //! 5. other tools: the most-specific allow/ask match → that decision
-//! 6. otherwise fall back to the mode ([`decide_mode`]).
+//! 6. otherwise fall back to the mode ([`decide_mode`]; `auto` inspects the call instead, see
+//!    [`auto_risk`]).
+
+use std::path::Path;
 
 use forge_types::{PermissionDecision, PermissionMode, PermissionRule, RuleSource, SideEffect};
 use serde_json::Value;
@@ -42,18 +45,57 @@ pub fn decide_mode(mode: PermissionMode, side_effect: SideEffect) -> PermissionD
             SideEffect::Network => Allow,
             SideEffect::External => Ask,
         },
+        // Content-blind fallback for `auto`: edits/shell need the call's arguments to judge, so
+        // without them stay conservative. The real decision is `mode_fallback`.
+        PermissionMode::Auto => match side_effect {
+            SideEffect::Network => Allow,
+            _ => Ask,
+        },
         // Safe default: confirm any side effect.
         PermissionMode::Default => Ask,
     }
 }
 
+/// The mode decision once no rule applied. Identical to [`decide_mode`] except for `auto`, which
+/// inspects the call: safe edits/shell/network proceed, risky ones ask (see [`auto::auto_risk`]).
+fn mode_fallback(
+    mode: PermissionMode,
+    side_effect: SideEffect,
+    tool_name: &str,
+    args: &Value,
+    workspace: Option<&Path>,
+) -> PermissionDecision {
+    if mode != PermissionMode::Auto || side_effect == SideEffect::ReadOnly {
+        return decide_mode(mode, side_effect);
+    }
+    match auto::auto_risk(side_effect, tool_name, args, workspace) {
+        Some(_) => PermissionDecision::Ask,
+        None => PermissionDecision::Allow,
+    }
+}
+
 /// Decide the outcome for a tool call, composing fine-grained `rules` with the global `mode`.
+/// Callers with a session workspace should prefer [`decide_in`]; this variant judges `auto`-mode
+/// path escapes against the process cwd.
 pub fn decide(
     mode: PermissionMode,
     side_effect: SideEffect,
     tool_name: &str,
     args: &Value,
     rules: &[PermissionRule],
+) -> PermissionDecision {
+    decide_in(mode, side_effect, tool_name, args, rules, None)
+}
+
+/// [`decide`] with the session's workspace root, which `auto` mode needs to tell an in-workspace
+/// edit from one that escapes it.
+pub fn decide_in(
+    mode: PermissionMode,
+    side_effect: SideEffect,
+    tool_name: &str,
+    args: &Value,
+    rules: &[PermissionRule],
+    workspace: Option<&Path>,
 ) -> PermissionDecision {
     use PermissionDecision::*;
 
@@ -85,7 +127,7 @@ pub fn decide(
         if let Some(decision) = decide_shell_segments(tool_name, args, rules) {
             return decision;
         }
-        return decide_mode(mode, side_effect);
+        return mode_fallback(mode, side_effect, tool_name, args, workspace);
     }
     // 5. Most-specific allow/ask wins.
     if let Some(rule) = matched
@@ -96,7 +138,7 @@ pub fn decide(
         return rule.decision;
     }
     // 6. No rule applies: fall back to the global mode.
-    decide_mode(mode, side_effect)
+    mode_fallback(mode, side_effect, tool_name, args, workspace)
 }
 
 /// Allow/ask resolution for a shell command line (denies were already handled in `decide`).
@@ -222,7 +264,9 @@ fn specificity(rule: &PermissionRule) -> usize {
     tool_score + arg_score
 }
 
+mod auto;
 mod shell_commands;
+pub use auto::auto_risk;
 use shell_commands::effective_commands;
 
 /// Lexically normalized candidate forms of a path for matching secret-deny globs against:
@@ -1298,7 +1342,7 @@ mod tests {
     #[test]
     fn broker_security_invariants_hold_under_fuzz() {
         use PermissionMode::*;
-        let modes = [Plan, Default, AcceptEdits, Bypass];
+        let modes = [Plan, Default, AcceptEdits, Auto, Bypass];
         let effects = [
             SideEffect::ReadOnly,
             SideEffect::Write,
@@ -1375,5 +1419,129 @@ mod tests {
                 assert_ne!(got, Allow, "builtin deny floor was overridden to Allow");
             }
         }
+    }
+    #[test]
+    fn auto_mode_proceeds_on_safe_and_asks_on_risky() {
+        let ws = Some(Path::new("/w/proj"));
+        let d = |eff, tool: &str, args: Value, rules: &[PermissionRule]| {
+            decide_in(PermissionMode::Auto, eff, tool, &args, rules, ws)
+        };
+        let sh = |c: &str| serde_json::json!({ "command": c });
+        assert_eq!(d(SideEffect::Shell, "shell", sh("cargo test"), &[]), Allow);
+        assert_eq!(d(SideEffect::Shell, "shell", sh("rm -rf target"), &[]), Ask);
+        assert_eq!(
+            d(
+                SideEffect::Write,
+                "write_file",
+                serde_json::json!({ "path": "src/a.rs", "content": "" }),
+                &[]
+            ),
+            Allow
+        );
+        assert_eq!(
+            d(
+                SideEffect::Write,
+                "write_file",
+                serde_json::json!({ "path": "/etc/hosts", "content": "" }),
+                &[]
+            ),
+            Ask
+        );
+        assert_eq!(
+            d(
+                SideEffect::Network,
+                "web_fetch",
+                serde_json::json!({ "url": "https://x" }),
+                &[]
+            ),
+            Allow
+        );
+        assert_eq!(
+            d(
+                SideEffect::External,
+                "mcp__a__b",
+                serde_json::json!({}),
+                &[]
+            ),
+            Ask
+        );
+        assert_eq!(
+            d(
+                SideEffect::ReadOnly,
+                "read_file",
+                serde_json::json!({}),
+                &[]
+            ),
+            Allow
+        );
+    }
+
+    #[test]
+    fn auto_mode_keeps_builtin_floor_and_honours_user_rules() {
+        let ws = Some(Path::new("/w/proj"));
+        let mut rules = forge_config::builtin_deny_rules();
+        let sh = |c: &str| serde_json::json!({ "command": c });
+        // The unoverridable floor still hard-denies (not merely asks).
+        assert_eq!(
+            decide_in(
+                PermissionMode::Auto,
+                SideEffect::Shell,
+                "shell",
+                &sh("rm -rf /"),
+                &rules,
+                ws
+            ),
+            Deny
+        );
+        assert_eq!(
+            decide_in(
+                PermissionMode::Auto,
+                SideEffect::Write,
+                "write_file",
+                &serde_json::json!({ "path": ".env", "content": "" }),
+                &rules,
+                ws
+            ),
+            Deny
+        );
+        // An explicit allow rule lifts a risky-by-heuristic command; an explicit ask still asks.
+        rules.push(cfg("shell", Allow, &["git push *"]));
+        assert_eq!(
+            decide_in(
+                PermissionMode::Auto,
+                SideEffect::Shell,
+                "shell",
+                &sh("git push --force origin x"),
+                &rules,
+                ws
+            ),
+            Allow
+        );
+        rules.push(cfg("shell", Ask, &["cargo *"]));
+        assert_eq!(
+            decide_in(
+                PermissionMode::Auto,
+                SideEffect::Shell,
+                "shell",
+                &sh("cargo test"),
+                &rules,
+                ws
+            ),
+            Ask
+        );
+    }
+
+    #[test]
+    fn auto_mode_without_arguments_is_conservative() {
+        assert_eq!(decide_mode(PermissionMode::Auto, SideEffect::Shell), Ask);
+        assert_eq!(decide_mode(PermissionMode::Auto, SideEffect::Write), Ask);
+        assert_eq!(
+            decide_mode(PermissionMode::Auto, SideEffect::Network),
+            Allow
+        );
+        assert_eq!(
+            decide_mode(PermissionMode::Auto, SideEffect::ReadOnly),
+            Allow
+        );
     }
 }
