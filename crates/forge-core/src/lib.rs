@@ -4830,6 +4830,9 @@ mod tests {
     #[path = "mid_intent.rs"]
     mod mid_intent_tests;
 
+    #[path = "failure_streak_reset.rs"]
+    mod failure_streak_reset_tests;
+
     #[path = "phantom_edit.rs"]
     mod phantom_edit_tests;
 
