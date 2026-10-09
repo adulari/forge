@@ -202,6 +202,8 @@ trim_release_docker_volumes() {
   local release_volumes=(
     "forge-release-bullseye-target-aarch64-unknown-linux-gnu"
     "forge-release-bullseye-target-x86-64-unknown-linux-gnu"
+    "forge-release-rustup-aarch64-unknown-linux-gnu"
+    "forge-release-rustup-x86-64-unknown-linux-gnu"
     "forge-release-cargo-git"
     "forge-release-cargo-registry"
   )
