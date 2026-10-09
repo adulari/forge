@@ -148,6 +148,7 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
 }
 
 mod claude;
+mod claude_statusline;
 use claude::{import_claude_settings, import_tool_mcp_servers};
 
 /// Copy `*.md` files from `src` into `dst`, skipping any that already exist. Updates `counts`.

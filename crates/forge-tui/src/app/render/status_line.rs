@@ -641,6 +641,23 @@ pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         };
         frame.render_widget(Paragraph::new(TextLine::from(spans)).style(bg), row);
     }
+
+    // The user's `[statusline] command` output, last so the built-in rows keep their positions.
+    if let Some(out) = super::status_widgets::command_line(app) {
+        if next_y < area.y + area.height {
+            let mut spans = vec![Span::styled(" ", bg)];
+            spans.extend(crate::ansi_line::spans(
+                out,
+                Style::default().fg(TEXT).bg(STATUSBG),
+            ));
+            let row = Rect {
+                y: next_y,
+                height: 1,
+                ..area
+            };
+            frame.render_widget(Paragraph::new(TextLine::from(spans)).style(bg), row);
+        }
+    }
 }
 
 /// Where the chat is working, right-aligned beside the version: `forge ⎇ feat/x  │  `.

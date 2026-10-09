@@ -22,6 +22,7 @@ pub fn display_model(id: &str) -> String {
 pub mod answer;
 pub mod question_form;
 pub use answer::resolve_answer;
+mod ansi_line;
 pub mod app;
 mod app_remote;
 mod arg_parse;

@@ -36,6 +36,8 @@ pub(crate) use one_shot::*;
 mod plain_chat;
 pub(crate) use plain_chat::*;
 mod natural_language;
+mod notify;
+mod statusline_command;
 pub(crate) use natural_language::*;
 
 /// A finished `/duel` result: the comparable report plus the still-alive worktree guards for
@@ -866,6 +868,9 @@ pub(crate) async fn run_chat_tui(
     // instead of every frame.
     let mut custom_widget_last_run: std::collections::HashMap<String, Instant> =
         std::collections::HashMap::new();
+    let session_started = Instant::now();
+    let mut notifier = notify::Tracker::new(tui_config.notifications.clone());
+    let mut statusline_sched = statusline_command::Scheduler::default();
     // Only redraw when state actually changed: idle frames cost nothing and the whole
     // conversation isn't rebuilt 16×/sec for no reason.
     let mut dirty = true;
@@ -4403,6 +4408,45 @@ pub(crate) async fn run_chat_tui(
                             ));
                         }
                     }
+                });
+            }
+        }
+        if notifier.enabled() {
+            let awaiting = app
+                .prompt
+                .as_deref()
+                .or(app.question_prompt.as_deref())
+                .or(app.form.as_ref().map(|_| "A question needs your answer"));
+            if let Some(alert) = notifier.observe(busy, awaiting, app.unfocused, Instant::now()) {
+                notifier.deliver(&alert);
+            }
+        }
+        // Claude-Code-style `[statusline] command`: debounced, detached, result delivered through
+        // the same cache the custom widgets use (keyed by the command string).
+        if let Some(cmd) = app.statusline_config.command.clone() {
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let body = statusline_command::payload(&statusline_command::StatuslineInput {
+                session_id: &app.session_id,
+                model: app.routing.as_ref().map_or("forge", |r| r.model.as_str()),
+                cwd: &cwd,
+                cost_usd: app.cost_usd,
+                duration_ms: session_started.elapsed().as_millis() as u64,
+                session_in: app.session_in,
+                session_out: app.session_out,
+                context_tokens: app.context_tokens,
+                context_limit: app.context_limit,
+            });
+            if let Some(in_flight) = statusline_sched.due(&body, Instant::now()) {
+                let tx = tx_custom.clone();
+                tokio::spawn(async move {
+                    if let Some(text) = statusline_command::run_command(&cmd, &body).await {
+                        let _ = tx.send(UiMsg::Event(
+                            forge_tui::PresenterEvent::CustomWidgetOutput { id: cmd, text },
+                        ));
+                    }
+                    in_flight.store(false, std::sync::atomic::Ordering::Relaxed);
                 });
             }
         }

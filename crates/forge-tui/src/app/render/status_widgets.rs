@@ -186,7 +186,16 @@ pub(crate) fn statusline_wants_row2(app: &App) -> bool {
 /// doc comment). Used by [`render_live`] to allocate the right number of rows for the status area.
 pub fn statusline_height(app: &App) -> u16 {
     let base = if statusline_wants_row2(app) { 2 } else { 1 };
-    base + app.statusline_config.extra_rows.len() as u16
+    base + app.statusline_config.extra_rows.len() as u16 + u16::from(command_line(app).is_some())
+}
+
+/// The first line a `[statusline] command` produced, once it has produced one.
+pub(crate) fn command_line(app: &App) -> Option<&str> {
+    let cmd = app.statusline_config.command.as_ref()?;
+    app.custom_widget_cache
+        .get(cmd)
+        .map(String::as_str)
+        .filter(|out| !out.is_empty())
 }
 
 /// Compact wall-clock duration for the turn timer: `Ns` under a minute, `MmSSs` under an hour,
