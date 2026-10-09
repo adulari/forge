@@ -21,9 +21,12 @@ env:
   CARGO_BUILD_JOBS: "4"
 
 jobs:
+  # Hosted on purpose: every build leg waits on this job, and on the single heavy runner it queued
+  # behind whatever CI job happened to hold it. It only runs git and python3, needs no secrets, and
+  # costs seconds.
   preflight:
     name: verify release provenance
-    runs-on: [release, linux, x64, heavy]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -77,6 +80,17 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.release_tag }}
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      # checkout's `git clean -ffdx` wipes ./target, so this compile (548 crates, ~6.5 min) was cold
+      # on every release. The `release` slot beside the checkout survives the clean and is shared
+      # with ci.yml's release-build job. It also stops this job from fighting the x86_64 Linux leg
+      # for CPU on the same machine.
+      - name: Use persistent Cargo target dir
+        run: |
+          if [[ -f scripts/ci/cargo-cache-env.sh ]]; then
+            bash scripts/ci/cargo-cache-env.sh release
+          else
+            echo "::notice::persistent target dir unavailable on this older release tag"
+          fi
       - name: Generate completions + man page
         run: cargo run --release --locked -p xtasks -- gen-dist dist-assets
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -163,10 +177,19 @@ jobs:
 
       # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.
       # The portable Linux legs instead use dedicated Docker volumes on the release runner.
+      #
+      # The key is deliberately just target + pinned channel. The default also hashes every rustc
+      # on the image (the preinstalled one rotates with each runner-image release) and the job id,
+      # so a runner-image bump orphaned the cache, and release-cache-keepalive.yml could not have
+      # refreshed it. GitHub evicts a cache nobody restored for 7 days, and releases are often
+      # further apart than that: v2.16.1 (6 days after the previous one) built Windows in 12m43s,
+      # v2.17.0 (10 days after) in 20m11s with "No cache found".
       - if: ${{ !matrix.self_hosted }}
         uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}-${{ steps.toolchain.outputs.channel }}
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
 
       - name: Build
         if: ${{ !matrix.portable_linux }}
@@ -193,6 +216,10 @@ jobs:
           container_name="forge-release-${TARGET//_/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$artifact_dir"
 
+          # rust-toolchain.toml pins a channel the pinned image does not ship, so every fresh
+          # container downloaded and installed rustc/cargo/clippy/rustfmt (~20s) plus the
+          # cross-target std. A per-target volume keeps them; it is per target because the two
+          # Linux legs may one day run side by side and must not race one rustup install.
           docker pull "$image"
           # The release runner itself is containerized. Bind-mounting its
           # `$GITHUB_WORKSPACE` into a sibling Docker container resolves that path on the
@@ -213,6 +240,7 @@ jobs:
             --env TARGET \
             --volume forge-release-cargo-git:/usr/local/cargo/git \
             --volume forge-release-cargo-registry:/usr/local/cargo/registry \
+            --volume "forge-release-rustup-${TARGET//_/-}:/usr/local/rustup" \
             --volume "$cache_target:/out" \
             --workdir /workspace \
             "$image" \
@@ -365,8 +393,9 @@ jobs:
             [x86_64-pc-windows-msvc]=forge.exe
           )
           mkdir -p dist
-          for target in "${!ARCHIVE[@]}"; do
-            dir="forge-${target}"
+          pack() {
+            local target="$1"
+            local dir="forge-${target}"
             mkdir "$dir"
             cp "raw/forge-raw-${target}/${BIN[$target]}" "$dir/"
             # upload/download-artifact does not preserve Unix mode bits. Without this, users who
@@ -377,10 +406,20 @@ jobs:
             cp -r dist-assets/completions "$dir/" 2>/dev/null || true
             cp dist-assets/forge.1 "$dir/" 2>/dev/null || true
             if [ "${ARCHIVE[$target]}" = "zip" ]; then
-              zip -r -y "dist/$dir.zip" "$dir"
+              zip -r -y -q "dist/$dir.zip" "$dir"
             else
               tar czf "dist/$dir.tar.gz" "$dir"
             fi
+          }
+          # Compression is single-threaded and ~100 MB per binary; the five archives are
+          # independent, so build them side by side and fail if any one fails.
+          pids=()
+          for target in "${!ARCHIVE[@]}"; do
+            pack "$target" &
+            pids+=("$!")
+          done
+          for pid in "${pids[@]}"; do
+            wait "$pid"
           done
           ls -la dist
 
@@ -557,7 +596,9 @@ jobs:
   ota:
     name: publish the matching iOS OTA
     needs: release
-    runs-on: [release, linux, x64]
+    # Hosted: it is one `gh workflow run`. On the single release runner it queued 13 minutes behind
+    # the CI runs that every release-triggered push starts (published 18:39, started 18:53 on v2.17.0).
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read

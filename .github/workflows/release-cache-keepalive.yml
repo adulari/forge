@@ -1,0 +1,50 @@
+name: release-cache-keepalive
+
+# GitHub evicts an Actions cache that has not been restored for 7 days. Releases are frequently
+# further apart than that, so the hosted release legs (the critical path of release.yml) kept
+# starting from nothing: with a warm cache Windows builds in ~13 min and x86_64 macOS in ~6, cold
+# they take ~20 and ~15. This restores the three caches every few days, restore-only, so release.yml
+# always finds them. It uses the exact rust-cache inputs release.yml uses; keep the two in step.
+on:
+  schedule:
+    - cron: "23 5 */3 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keepalive:
+    name: keep ${{ matrix.target }} cache warm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Resolve the pinned toolchain
+        id: toolchain
+        shell: bash
+        run: sed -n 's/^ *channel *= *"\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+        with:
+          key: ${{ matrix.target }}-${{ steps.toolchain.outputs.channel }}
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          save-if: false

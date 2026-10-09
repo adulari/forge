@@ -119,7 +119,7 @@ cat >"$fake_bin/docker" <<'SH'
 set -euo pipefail
 if [[ "$1 $2" == "system df" ]]; then
   cat <<'JSON'
-{"Volumes":[{"Name":"forge-release-bullseye-target-aarch64-unknown-linux-gnu","Size":"2kB"},{"Name":"forge-release-cargo-registry","Size":"2kB"},{"Name":"unrelated-database","Size":"900GB"}]}
+{"Volumes":[{"Name":"forge-release-bullseye-target-aarch64-unknown-linux-gnu","Size":"2kB"},{"Name":"forge-release-cargo-registry","Size":"2kB"},{"Name":"forge-release-rustup-x86-64-unknown-linux-gnu","Size":"2kB"},{"Name":"unrelated-database","Size":"900GB"}]}
 JSON
 elif [[ "$1 $2" == "volume rm" ]]; then
   printf '%s\n' "$3" >>"$FORGE_TEST_DOCKER_LOG"
@@ -136,9 +136,10 @@ FORGE_NPM_CACHE_ROOT="$scratch/npm" \
 FORGE_TRIM_RELEASE_DOCKER_VOLUMES=1 \
 FORGE_MAX_RELEASE_DOCKER_CACHE_KIB=1 \
   bash scripts/ci/trim-runner-cache.sh "$scratch"
-test "$(wc -l <"$docker_log")" -eq 2
+test "$(wc -l <"$docker_log")" -eq 3
 grep -Fxq "forge-release-bullseye-target-aarch64-unknown-linux-gnu" "$docker_log"
 grep -Fxq "forge-release-cargo-registry" "$docker_log"
+grep -Fxq "forge-release-rustup-x86-64-unknown-linux-gnu" "$docker_log"
 ! grep -Fq "unrelated-database" "$docker_log"
 
 : >"$docker_log"
