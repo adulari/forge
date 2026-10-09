@@ -2869,11 +2869,10 @@ pub(crate) async fn run_chat_tui(
                 let _ = reply.send(outcome);
                 app.prompt = None;
                 if outcome == ConfirmOutcome::AlwaysAllow {
-                    if let Err(e) = forge_config::append_allow_rule(&tool) {
-                        app.note(&format!("⚠ could not save allow rule: {e}"));
-                    } else {
-                        app.note(&format!("✓ {tool} added to .forge/config.toml allow rules"));
-                    }
+                    // The session core persists the rule, scoped to the command it approved.
+                    app.note(&format!(
+                        "✓ {tool} always allowed — saved to .forge/config.toml"
+                    ));
                 }
             } else if app.awaiting_question() {
                 // Answering an `ask_user` form (the turn task is blocked in `ask_form()`): the

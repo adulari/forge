@@ -2990,18 +2990,51 @@ pub fn compact_cap_for(model: &str) -> Option<u64> {
         .filter(|cap| *cap > 0)
 }
 
+/// Permission rules accumulate across scopes (Claude Code semantics): a figment merge replaces
+/// arrays, so a project defining any `[[permissions.rules]]` used to erase every user-level rule,
+/// user denies included. Re-add the user's rules ahead of the project's when both define some.
+fn accumulate_permission_rules(
+    config: &mut Config,
+    user_config: Option<&std::path::Path>,
+    project_config: &std::path::Path,
+) {
+    let rules_in = |path: &std::path::Path| {
+        if !path.is_file() {
+            return None;
+        }
+        Figment::from(Toml::file_exact(path))
+            .extract_inner::<Vec<RuleConfig>>("permissions.rules")
+            .ok()
+    };
+    if rules_in(project_config).is_none() {
+        return;
+    }
+    if let Some(mut user_rules) = user_config.and_then(rules_in) {
+        user_rules.append(&mut config.permissions.rules);
+        config.permissions.rules = user_rules;
+    }
+}
+
 /// Load configuration with full layered precedence (lowest -> highest):
 /// built-in defaults -> user config -> project `./.forge/config.toml` -> `FORGE_*` env.
 pub fn load() -> Result<Config, ConfigError> {
     let mut fig = Figment::from(Serialized::defaults(Config::default()));
 
-    if let Some(dir) = config_dir() {
-        fig = fig.merge(Toml::file(dir.join("config.toml")));
+    // `file_exact`, not `file`: figment's `file` searches every parent directory, so a stray
+    // `~/.forge/config.toml` silently became the project config of every directory under `$HOME`.
+    let user_config = config_dir().map(|dir| dir.join("config.toml"));
+    // `file_exact` errors on a missing file where `file` skipped it, so guard on existence.
+    if let Some(path) = user_config.as_ref().filter(|p| p.is_file()) {
+        fig = fig.merge(Toml::file_exact(path));
     }
-    fig = fig.merge(Toml::file("./.forge/config.toml"));
+    let project_config = std::path::Path::new("./.forge/config.toml");
+    if project_config.is_file() {
+        fig = fig.merge(Toml::file_exact(project_config));
+    }
     fig = fig.merge(Env::prefixed("FORGE_").split("__"));
 
     let mut config: Config = fig.extract()?;
+    accumulate_permission_rules(&mut config, user_config.as_deref(), project_config);
     migrate_legacy_keybinds(&mut config.keybinds);
     resolve_system_prompt_overrides(&mut config)?;
     // Project-local `.forge/mcp.toml` is the dedicated home for MCP server declarations; when
@@ -3302,14 +3335,38 @@ pub fn write_keybind(action: &str, combo: &KeyCombo) -> Result<PathBuf, ConfigEr
 /// Creates the file (and `.forge/` dir) if absent. Idempotent at the file level — duplicate
 /// entries are harmless (first match wins in the permission broker).
 pub fn append_allow_rule(tool: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(".forge")?;
-    let entry = format!("\n[[permissions.rules]]\ntool = \"{tool}\"\nallow = \"*\"\n");
+    append_allow_rule_in(std::path::Path::new("."), tool, &[])
+}
+
+/// Persist an "always allow" answer into `<root>/.forge/config.toml`, scoped to `patterns` (empty =
+/// every call of `tool`). Shell must always be scoped: a bare `allow = "*"` for shell approves
+/// every later command in that project, which is how 40 such rules once ended up auto-approving
+/// everything under `$HOME`.
+pub fn append_allow_rule_in(
+    root: &std::path::Path,
+    tool: &str,
+    patterns: &[String],
+) -> std::io::Result<()> {
+    if tool == "shell" && patterns.is_empty() {
+        return Err(std::io::Error::other(
+            "refusing to persist an unscoped shell allow rule",
+        ));
+    }
+    let dir = root.join(".forge");
+    std::fs::create_dir_all(&dir)?;
+    let allow = if patterns.is_empty() {
+        "\"*\"".to_string()
+    } else {
+        let quoted: Vec<String> = patterns.iter().map(|p| format!("{p:?}")).collect();
+        format!("[{}]", quoted.join(", "))
+    };
+    let entry = format!("\n[[permissions.rules]]\ntool = {tool:?}\nallow = {allow}\n");
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(".forge/config.toml")?;
-    f.write_all(entry.as_bytes())
+        .open(dir.join("config.toml"))?
+        .write_all(entry.as_bytes())
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -4886,7 +4943,11 @@ reason = "no privilege escalation"
         let _cwd_guard = test_cwd_guard(dir.path());
         std::fs::create_dir_all(".forge").unwrap();
 
-        append_allow_rule("shell").unwrap();
+        assert!(
+            append_allow_rule("shell").is_err(),
+            "unscoped shell allow must not persist"
+        );
+        append_allow_rule_in(Path::new("."), "shell", &["git *".into(), "git".into()]).unwrap();
         append_allow_rule("write_file").unwrap();
 
         let text = std::fs::read_to_string(".forge/config.toml").unwrap();
@@ -4908,6 +4969,59 @@ reason = "no privilege escalation"
         assert!(rules
             .iter()
             .any(|r| r.tool == "write_file" && r.decision == PermissionDecision::Allow));
+        assert!(
+            rules
+                .iter()
+                .all(|r| r.tool != "shell" || r.patterns != ["*"]),
+            "a persisted shell allow is always scoped: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn parent_project_config_is_not_inherited_and_rules_accumulate() {
+        let dir = tempfile::tempdir().unwrap();
+        // A stray ancestor `.forge/config.toml` must not apply to a nested directory.
+        std::fs::create_dir_all(dir.path().join(".forge")).unwrap();
+        std::fs::write(
+            dir.path().join(".forge/config.toml"),
+            "[[permissions.rules]]\ntool = \"shell\"\nallow = \"*\"\n",
+        )
+        .unwrap();
+        let nested = dir.path().join("work");
+        std::fs::create_dir_all(nested.join(".forge")).unwrap();
+        let _cwd_guard = test_cwd_guard(&nested);
+        let loaded = load().expect("a directory without its own config still loads");
+        assert!(
+            !loaded
+                .permissions
+                .rules
+                .iter()
+                .any(|r| matches!(&r.allow, Some(OneOrMany::One(p)) if p == "*")),
+            "ancestor allow rules leaked in: {:?}",
+            loaded.permissions.rules
+        );
+
+        // A project's rules add to the user's instead of replacing them.
+        let user = dir.path().join("user.toml");
+        std::fs::write(
+            &user,
+            "[[permissions.rules]]\ntool = \"shell\"\ndeny = \"rm -rf ~\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ".forge/config.toml",
+            "[[permissions.rules]]\ntool = \"shell\"\nallow = \"cargo *\"\n",
+        )
+        .unwrap();
+        let mut config: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::file_exact(&user))
+            .merge(Toml::file_exact("./.forge/config.toml"))
+            .extract()
+            .unwrap();
+        assert_eq!(config.permissions.rules.len(), 1, "figment replaces arrays");
+        accumulate_permission_rules(&mut config, Some(&user), Path::new("./.forge/config.toml"));
+        assert_eq!(config.permissions.rules.len(), 2);
+        assert!(config.permissions.rules[0].deny.is_some());
     }
 
     #[test]
