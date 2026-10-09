@@ -66,7 +66,7 @@ impl Session {
         &mut self,
         msg_id: &str,
         calls: &[forge_types::ToolCall],
-    ) -> Result<Vec<(String, Option<ErrorCategory>)>, CoreError> {
+    ) -> Result<Vec<(String, Option<ErrorCategory>, String)>, CoreError> {
         struct Pending {
             id: String,
             name: String,
@@ -138,7 +138,11 @@ impl Session {
                 if p.allowed { "allowed" } else { "denied" },
                 if ok { "ok" } else { "error" },
             )?;
-            classified.push((p.name.clone(), classify_tool_failure(&result)));
+            classified.push((
+                p.name.clone(),
+                classify_tool_failure(&result),
+                result.clone(),
+            ));
             let seq = self.next_seq();
             self.store.add_message_full(
                 &self.id,

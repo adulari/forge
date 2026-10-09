@@ -678,6 +678,7 @@ impl Session {
         let _ = self
             .store
             .compact_session_store(&self.id, summary.trim(), COMPACT_KEEP_RECENT);
+        self.progress.note_compaction();
 
         let after = self.transcript.len();
         self.presenter

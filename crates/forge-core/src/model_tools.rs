@@ -18,6 +18,7 @@ impl Session {
         doom_nudged: &mut bool,
         failure_counts: &mut std::collections::HashMap<(String, ErrorCategory), usize>,
         failure_nudged: &mut bool,
+        observations: &mut Vec<crate::loop_progress::CallObservation>,
     ) -> Result<bool, CoreError> {
         // Doom-loop guard: if the model emits the exact same tool call(s) several steps running,
         // it's stuck (re-reading the same file, retrying an identical failing edit). Identical
@@ -143,7 +144,13 @@ impl Session {
             // batch that keeps failing the same way (different args each step) is caught instead
             // of burning the budget to the step cap.
             let classified = self.run_readonly_batch(msg_id, calls).await?;
-            for (call, (name, kind)) in calls.iter().zip(classified) {
+            for (call, (name, kind, result)) in calls.iter().zip(classified) {
+                observations.push(crate::loop_progress::CallObservation::new(
+                    crate::loop_progress::call_signature(call),
+                    kind.is_none(),
+                    false,
+                    &result,
+                ));
                 verification_ledger.lock().unwrap().observe(
                     completion::classify_tool(&call.name, &call.args.to_string()),
                     kind.is_none(),
@@ -179,6 +186,15 @@ impl Session {
                     completion::classify_tool(&call.name, &call.args.to_string()),
                     failure.is_none(),
                 );
+                let mutating = self.tools.get(&call.name).is_some_and(|tool| {
+                    matches!(tool.side_effect(), forge_types::SideEffect::Write)
+                });
+                observations.push(crate::loop_progress::CallObservation::new(
+                    crate::loop_progress::call_signature(call),
+                    failure.is_none(),
+                    mutating,
+                    &result,
+                ));
                 // Count the mutation only once it SUCCEEDED. A denied or failing write changed
                 // nothing, so treating the attempt as evidence would let both the phantom-edit
                 // gate and the no-output turn classification accept a turn that mutated nothing.

@@ -224,6 +224,7 @@ impl Session {
             overflow_window_cap: None,
             require_tool_call: false,
             repetition_pressure: 0,
+            progress: Default::default(),
             kept_outputs: std::collections::HashMap::new(),
             whitehot_guidance_injected: false,
             pinned_tier: None,
