@@ -52,7 +52,9 @@ pub(super) fn allowed(
         && st.session_id.is_some()
         && st.sent <= messages_len
         && st.model == bare_model(model)
-        && st.owner.as_deref() == checkpoint.map(|c| c.session.as_str())
+        // A call with no checkpoint context has no conversation identity (subagents, legacy
+        // callers): two of them would match each other's `None` owner and cross-wire transcripts.
+        && checkpoint.is_some_and(|c| st.owner.as_deref() == Some(c.session.as_str()))
         && st.epoch == checkpoint.map_or(0, |c| c.epoch)
 }
 

@@ -1844,8 +1844,10 @@ impl CliProvider {
         // `--input-format stream-json` process. `Fallback` means the live session couldn't be
         // established BEFORE any turn output ran, so retrying as one-shot can't double-execute a
         // tool; `Failed` means the turn started (tools may have run) — propagate, don't re-run.
-        let mut isolated = false;
-        if self.persistent && self.kind == CliKind::ClaudeCode {
+        // Persistent reuse is keyed by conversation owner. A call without a checkpoint context
+        // (a subagent) has no identity, so it must never share a live process: it runs one-shot.
+        let mut isolated = checkpoint.is_none();
+        if self.persistent && self.kind == CliKind::ClaudeCode && checkpoint.is_some() {
             match self
                 .complete_persistent(model, messages, checkpoint, effort, on_event)
                 .await
@@ -6206,7 +6208,7 @@ done
 
         let started = std::time::Instant::now();
         let response = provider
-            .complete(
+            .complete_owned(
                 "claude-cli::sonnet",
                 &[Message::user("run the build")],
                 &[],
@@ -6396,7 +6398,7 @@ esac
         let mut sink = |_e: StreamEvent| {};
 
         let r1 = provider
-            .complete(model, &[Message::user("one")], &[], &mut sink)
+            .complete_owned(model, &[Message::user("one")], &[], &mut sink)
             .await
             .unwrap();
         assert_eq!(r1.content.trim(), "reply 1");
@@ -6405,7 +6407,7 @@ esac
         // the stall window), not hang, and the error must be retryable so failover kicks in.
         let started = std::time::Instant::now();
         let r2 = provider
-            .complete(
+            .complete_owned(
                 model,
                 &[
                     Message::user("one"),
@@ -6442,7 +6444,7 @@ esac
         let mut sink = |_event: StreamEvent| {};
 
         let result = provider
-            .complete(
+            .complete_owned(
                 "claude-cli::sonnet",
                 &[Message::user("run one side effect")],
                 &[],
@@ -6481,7 +6483,7 @@ esac
         let mut sink = |_e: StreamEvent| {};
 
         let r1 = provider
-            .complete(model, &[Message::user("one")], &[], &mut sink)
+            .complete_owned(model, &[Message::user("one")], &[], &mut sink)
             .await
             .expect("persistent turn 1");
         assert_eq!(r1.content, "reply 1");
@@ -6494,7 +6496,7 @@ esac
             Message::user("two"),
         ];
         let r2 = provider
-            .complete(model, &msgs2, &[], &mut sink)
+            .complete_owned(model, &msgs2, &[], &mut sink)
             .await
             .expect("persistent turn 2");
         assert_eq!(
@@ -6819,6 +6821,65 @@ done
             quick_took < Duration::from_millis(1500),
             "the waiter must not sit behind the 2s turn (took {quick_took:?})"
         );
+    }
+
+    #[cfg(unix)]
+    impl CliProvider {
+        /// `complete` under a fixed conversation owner: persistent reuse is keyed by owner, and a
+        /// bare `complete` carries none.
+        async fn complete_owned(
+            &self,
+            model: &str,
+            messages: &[Message],
+            tools: &[ToolSpec],
+            on_event: &mut EventSink<'_>,
+        ) -> Result<ModelResponse, ProviderError> {
+            let opts = CompletionOptions {
+                checkpoint: Some(test_ctx("test-owner", 1, "default", &std::env::temp_dir())),
+                ..Default::default()
+            };
+            self.complete_with(model, messages, tools, &opts, on_event)
+                .await
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ownerless_calls_never_share_a_live_process() {
+        // Two sequential subagents (no checkpoint context) must not see each other's claude
+        // conversation: each call gets its own fresh process and the full transcript.
+        let dir = tempfile::tempdir().unwrap();
+        let provider = resumable_provider(dir.path()).with_harness(false);
+        let mut sink = |_e: StreamEvent| {};
+        let a = provider
+            .complete(
+                "claude-cli::sonnet",
+                &[Message::user("agent-a-task")],
+                &[],
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let b = provider
+            .complete(
+                "claude-cli::sonnet",
+                &[
+                    Message::user("agent-a-task"),
+                    Message::assistant(&a.content),
+                    Message::user("agent-b-task"),
+                ],
+                &[],
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        assert!(a.content.starts_with("reply 1 from "));
+        assert!(b.content.starts_with("reply 1 from "), "{}", b.content);
+        let spawns = read_log(dir.path(), "spawns.log");
+        assert_eq!(spawns.len(), 2, "one process per ownerless call");
+        assert!(spawns
+            .iter()
+            .all(|a| !a.contains("--resume") && !a.contains("--input-format")));
     }
 
     #[cfg(unix)]
