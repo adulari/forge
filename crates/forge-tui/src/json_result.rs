@@ -19,6 +19,8 @@ pub struct JsonResultPresenter {
     input: u64,
     cached: Option<u64>,
     output: u64,
+    /// Session totals restored before this invocation's first model call (`--continue`/`--resume`).
+    baseline: Option<(f64, u64, u64, u64)>,
     last_error: Option<String>,
 }
 
@@ -43,6 +45,7 @@ impl JsonResultPresenter {
             input: 0,
             cached: None,
             output: 0,
+            baseline: None,
             last_error: None,
         }
     }
@@ -59,6 +62,7 @@ impl JsonResultPresenter {
         } else {
             final_text.to_string()
         };
+        let (base_usd, base_in, base_cached, base_out) = self.baseline.unwrap_or_default();
         let value = serde_json::json!({
             "type": "result",
             "subtype": subtype,
@@ -68,11 +72,11 @@ impl JsonResultPresenter {
             "result": result,
             "stop_reason": stop_reason.as_str(),
             "session_id": self.session_id,
-            "total_cost_usd": self.cost_usd,
+            "total_cost_usd": (self.cost_usd - base_usd).max(0.0),
             "usage": {
-                "input_tokens": self.input,
-                "cache_read_input_tokens": self.cached.unwrap_or(0),
-                "output_tokens": self.output
+                "input_tokens": self.input.saturating_sub(base_in),
+                "cache_read_input_tokens": self.cached.unwrap_or(0).saturating_sub(base_cached),
+                "output_tokens": self.output.saturating_sub(base_out)
             }
         });
         if serde_json::to_writer(&mut self.out, &value).is_ok() {
@@ -87,6 +91,20 @@ impl Presenter for JsonResultPresenter {
         match event {
             PresenterEvent::SessionStarted { id } => self.session_id = id,
             PresenterEvent::Routing { .. } => self.turns += 1,
+            PresenterEvent::Cost {
+                session_total_usd,
+                session_in,
+                session_cached_in,
+                session_out,
+                ..
+            } if self.turns == 0 && self.baseline.is_none() => {
+                self.baseline = Some((
+                    session_total_usd,
+                    session_in,
+                    session_cached_in.unwrap_or(0),
+                    session_out,
+                ));
+            }
             PresenterEvent::Cost {
                 session_total_usd,
                 session_in,
@@ -207,6 +225,38 @@ mod tests {
         assert_eq!(r["usage"]["cache_read_input_tokens"], 40);
         assert_eq!(r["usage"]["output_tokens"], 7);
         assert!(r["duration_ms"].is_u64());
+    }
+
+    #[test]
+    fn resumed_session_reports_this_invocation_not_session_totals() {
+        let restored = PresenterEvent::Cost {
+            session_total_usd: 0.10,
+            session_in: 60,
+            session_cached_in: Some(30),
+            session_out: 5,
+            context_tokens: 60,
+            context_limit: None,
+        };
+        let out = run(vec![
+            PresenterEvent::SessionStarted { id: "s-1".into() },
+            restored,
+            PresenterEvent::Routing {
+                effort: None,
+                tier: "trivial".into(),
+                model: "m".into(),
+                rationale: "r".into(),
+            },
+            cost(),
+            PresenterEvent::Done {
+                final_text: "OK".into(),
+                stop_reason: StopReason::FinalAnswer,
+            },
+        ]);
+        let r = &out[0];
+        assert_eq!(r["usage"]["input_tokens"], 40);
+        assert_eq!(r["usage"]["cache_read_input_tokens"], 10);
+        assert_eq!(r["usage"]["output_tokens"], 2);
+        assert!((r["total_cost_usd"].as_f64().unwrap() - 0.15).abs() < 1e-9);
     }
 
     #[test]
