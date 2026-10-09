@@ -6,6 +6,83 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.17.0] - 2026-10-09
+
+### Added
+- **Auto permission mode** (#1463). `--mode auto`, `permission_mode = "auto"`, the `/mode` picker and
+  the SHIFT+TAB cycle now include a mode that proceeds unless a command looks risky and asks
+  otherwise. `permission/auto.rs` classifies each shell segment (recursive/forced deletes, hard
+  resets and force-pushes, destructive SQL, `dd`/`mkfs`, `sudo`, publishing, uploads, pipe-to-shell,
+  writes outside the workspace, credential paths). The built-in deny rules remain the floor.
+- **`schedule_wakeup`, agent types and a commit policy** (#1463), matching Claude Code.
+- **Statusline command, notifications and reply language** (#1460). `[statusline] command` runs a
+  Claude Code style script (session JSON on stdin, first stdout line shown as an extra row);
+  `forge import claude` copies `statusLine.command`. `[notifications]` (off by default) fires
+  `notify-send`/`osascript` and a bell when a turn ends after `min_turn_secs` or a permission or
+  `ask_user` prompt appears while the terminal is unfocused. The system prompt now asks the model to
+  answer in the language of the user's latest message.
+- **Attach the browser tool to your own logged-in browser** (#1466). `[browser] attach` / `cdp_url` /
+  `FORGE_BROWSER_CDP` connect over CDP, open Forge's own tab and never list, adopt or close yours.
+  `forge browser attach` launches Chrome, Chromium, Brave or Edge on a dedicated persistent profile.
+- **Claude Code hook parity** (#1452). Stop and SubagentStop hooks get `last_assistant_message` and
+  honour `continue:false` and `additionalContext`; SessionStart output reaches the model;
+  PreToolUse `updatedInput` is applied; tool payloads carry `session_id` and Claude Code tool names
+  (so `rtk hook claude` matches); finished background jobs wake the session.
+- **`forge run --output-format json`** (#1456). Usage and cost in the result are per invocation, also
+  with `--continue` (#1462).
+- **Plan mode can run provably read-only shell commands** (#1468) from a strict allowlist (every
+  segment known, no write flags, no redirects other than `/dev/null`, no assignments or command
+  substitution writers), so it can list and measure files instead of looping.
+- **Persistent Codex reasoning** (#1447, #1459). The Codex (ChatGPT OAuth) provider requests and
+  replays encrypted reasoning items, and they are now stored (migration 38) so resume and daemon
+  restarts keep the reasoning chain and prompt-cache prefix.
+
+### Fixed
+- **Security: permissions no longer leak in from an ancestor config** (#1464). The project config was
+  loaded with a search through every parent directory, so a stray `~/.forge/config.toml` full of old
+  `allow = "*"` rules applied to every directory under `$HOME`, auto-approving shell commands in
+  Ask, Auto and Auto-edit modes. The project file is now read from the exact path only. A project's
+  `[[permissions.rules]]` no longer replace the user's rules (including denies imported from Claude
+  Code), and the TUI's "always allow" now persists a rule scoped to the command instead of the
+  whole tool.
+- **claude-cli bridge tools were invisible to Claude Code 2.1.29x** (#1461). `tools/list` omitted
+  `ttlMs` and `cacheScope`, which claude 2.1.295 rejects, so the model saw no Forge tools. Both are
+  now set; edit-and-test and refactor tasks ran about twice as fast in A/B runs.
+- **Codex OAuth** (#1447): reasoning items round-trip, a rejected WebSocket token refreshes and
+  retries, refresh is serialised across processes with a file lock, and `response.incomplete` is
+  handled.
+- **Loop guards** (#1445, #1448, #1465, #1457). Turns that end on an announced but undone action are
+  nudged (up to twice per idle stretch); repeated-opening detection counts only steps that made no
+  progress, so productive edit runs are no longer halted and real loops are caught sooner; a
+  successful edit clears failure-loop streaks, ending false "failed the same way" nudges; side calls
+  that fail are benched so the same doomed call is not repeated.
+- **`read_file` honours Claude Code's `offset`, `limit` and `file_path`** (#1449); paging no longer
+  returns the whole file.
+- **Provider requests** (#1454): continuation nudges stay in place instead of being hoisted to the
+  front, which had dropped prompt-cache reads (Bedrock Kimi 98% to 9%); blank replies are retried;
+  DeepSeek DSML tool calls are recovered and their markup hidden from the live stream (#1459).
+- **Compaction** (#1453): large tool results are clipped when the tail alone fills the budget, a
+  deterministic digest is used when every summariser fails, double-counted usage is fixed, and side
+  calls record their model.
+- **Daemon startup** (#1451): model discovery retries when DNS is not ready, dead sessions with a
+  deleted workspace stop being restored on every start, and a dead model no longer holds a first
+  event for the full idle window.
+- **Final answers** (#1468, #1473): a turn halted by a loop guard ends with a real answer instead of
+  an empty result, and the completeness review runs only after edits and never replaces the answer
+  to a question.
+- **Bridge** (#1446): one long-lived `claude` process per conversation with `--resume` on respawn,
+  instead of a cold respawn and full-transcript flatten every turn.
+
+### Changed
+- **Faster session open and startup** (#1450, #1458). Migration 37 indexes the cascade-delete
+  children, so the first run on a 2.7 GB store dropped from 4m32s to about 6s; `mesh`, `models`,
+  `benchmarks` and `doctor` no longer repeat discovery; startup catalog refresh is skipped when the
+  cache is under an hour old.
+- **Large-session resume** (#1467): the daemon replays only the transcript tail, the last model is
+  one indexed lookup, and outcome calibration is a per-model probe.
+- **Fewer wasted side calls** (#1456): unrendered suggestions and probes of dead local servers are
+  skipped.
+
 ## [2.16.2] - 2026-09-30
 
 ### Added
@@ -4509,7 +4586,10 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.16.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.17.0...HEAD
+[2.17.0]: https://github.com/Adulari/forge/compare/v2.16.2...v2.17.0
+[2.16.2]: https://github.com/Adulari/forge/compare/v2.16.1...v2.16.2
+[2.16.1]: https://github.com/Adulari/forge/compare/v2.16.0...v2.16.1
 [2.16.0]: https://github.com/Adulari/forge/compare/v2.15.0...v2.16.0
 [2.15.0]: https://github.com/Adulari/forge/compare/v2.14.1...v2.15.0
 [2.14.1]: https://github.com/Adulari/forge/compare/v2.13.9...v2.14.1
