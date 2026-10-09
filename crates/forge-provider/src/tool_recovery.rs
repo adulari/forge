@@ -122,7 +122,7 @@ const DSML_MARKER: &str = "DSML";
 
 /// Whether `c` is one of the vertical bars DeepSeek's template puts around `DSML`: the fullwidth
 /// `｜` (U+FF5C) in the observed output, and ASCII `|` when a gateway normalizes it.
-fn is_dsml_bar(c: char) -> bool {
+pub(crate) fn is_dsml_bar(c: char) -> bool {
     c == '\u{ff5c}' || c == '|'
 }
 

@@ -14,6 +14,7 @@ mod claude_bridge_home;
 mod cli_provider;
 mod codex_oauth;
 mod codex_websocket;
+mod dsml_stream_guard;
 mod embedder;
 mod error;
 mod genai_provider;

@@ -19,7 +19,9 @@ impl Session {
         // Carry the reply's own thinking on the in-memory transcript. Thinking-mode APIs want it
         // back on the NEXT request of this turn — DeepSeek rejects the request outright without it
         // — so it has to survive from here to the tool-result round trip. It is deliberately not
-        // persisted: only the live turn needs it, and it is not part of the answer.
+        // persisted: only the live turn needs it, and it is not part of the answer. The encrypted
+        // provider items are the exception — they are stored below so a resumed session keeps
+        // its reasoning chain and prompt-cache prefix.
         let mut assistant_message =
             Message::assistant_tool_calls(&resp.content, resp.tool_calls.clone())
                 .with_reasoning(resp.reasoning.clone())
@@ -27,6 +29,7 @@ impl Session {
         if provisional_completion {
             assistant_message = assistant_message.llm_only();
         }
+        let assistant_message_items = assistant_message.provider_items.clone();
         self.transcript.push(assistant_message);
 
         let seq = self.next_seq();
@@ -51,6 +54,9 @@ impl Session {
                 None,
             )?
         };
+        if let Some(items) = &assistant_message_items {
+            self.store.set_message_provider_items(&msg_id, items)?;
+        }
         let live_codex_plan = active_model
             .starts_with("codex-oauth::")
             .then(forge_provider::fresh_live_codex_plan)

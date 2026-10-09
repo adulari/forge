@@ -1401,6 +1401,7 @@ impl GenAiProvider {
 
         let mut stream = res.stream;
         let mut content = String::new();
+        let mut dsml_guard = crate::dsml_stream_guard::DsmlStreamGuard::default();
         let mut reasoning = String::new();
         let mut usage = Usage::default();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -1523,7 +1524,12 @@ impl GenAiProvider {
                         on_event(StreamEvent::ProviderActivity);
                     } else {
                         content.push_str(&chunk.content);
-                        on_event(StreamEvent::Text(chunk.content.clone()));
+                        let shown = dsml_guard.push(&chunk.content);
+                        if shown.is_empty() {
+                            on_event(StreamEvent::ProviderActivity);
+                        } else {
+                            on_event(StreamEvent::Text(shown));
+                        }
                     }
                 }
                 ChatStreamEvent::ReasoningChunk(chunk) => {
@@ -1557,7 +1563,10 @@ impl GenAiProvider {
                     if content.is_empty() {
                         if let Some(text) = end.captured_first_text() {
                             content.push_str(text);
-                            on_event(StreamEvent::Text(text.to_string()));
+                            let shown = dsml_guard.push(text);
+                            if !shown.is_empty() {
+                                on_event(StreamEvent::Text(shown));
+                            }
                         }
                     }
                     if let Some(tcs) = end.captured_into_tool_calls() {
@@ -1584,6 +1593,11 @@ impl GenAiProvider {
                 // watchdog does not mistake a long, healthy tool argument for a dead stream.
                 _ => on_event(StreamEvent::ProviderActivity),
             }
+        }
+
+        let held = dsml_guard.finish();
+        if !held.is_empty() {
+            on_event(StreamEvent::Text(held));
         }
 
         // Recovery pass: some native adapters (e.g. genai's Gemini adapter on newer models) don't

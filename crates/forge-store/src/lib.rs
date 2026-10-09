@@ -28,6 +28,7 @@ mod memory;
 mod migrations;
 mod model_health_store;
 mod notification_store;
+mod provider_items_store;
 use migrations::{
     add_column_if_missing, migrate_subscription_usage, run_migrations, seed_singleton_rows,
 };
@@ -65,7 +66,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 37;
+const SCHEMA_VERSION: i64 = 38;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1438,6 +1439,9 @@ pub struct StoredMessage {
     pub tool_call_id: Option<String>,
     /// `UiOnly` rows are user-facing notes; the context pipeline strips them from provider calls.
     pub visibility: Visibility,
+    /// Encrypted provider items stored with an assistant reply (see `Message::provider_items`).
+    /// Only the model-facing loads populate it; scrollback reads leave it `None`.
+    pub provider_items: Option<forge_types::ProviderItems>,
 }
 
 /// One row of a user-facing transcript page (see [`Store::load_history_page`]) — the
