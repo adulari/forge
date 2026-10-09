@@ -58,6 +58,11 @@ pub(crate) async fn run(
             Box::new(forge_tui::StreamJsonPresenter::new())
         };
         let mut session = build_session_with(presenter, mock, mode, resume, pin, true).await?;
+        if output_format == OutputFormat::Json {
+            // A resumed session's restored totals arrive before routing; the presenter keeps
+            // them as a baseline so `usage` reports this invocation, as `claude -p` does.
+            session.emit_restored_totals();
+        }
         let turn = session.run_turn_with(&prompt, &guidance, tier);
         tokio::pin!(turn);
         let result = tokio::select! {
