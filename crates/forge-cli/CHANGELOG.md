@@ -6,6 +6,27 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.17.1] - 2026-10-10
+
+### Added
+- **Model-assisted auto mode** (#1478, #1480). Auto mode now sorts each shell command into safe,
+  risky or unknown. Unknown commands (project scripts, `make` targets, unfamiliar binaries) get one
+  cheap model check that fails closed: a timeout, error or unusable reply asks you instead. The
+  model can never override a risky verdict or a deny rule. Verdicts are cached per session, and the
+  check also runs on the Claude CLI bridge. Turn it off with `[permissions] auto_classifier = false`
+  (unknown commands then always ask).
+
+### Changed
+- **Faster releases** (#1477). Stable cache keys for the hosted Windows/macOS builds plus a
+  keepalive workflow so caches stop expiring between releases, a persistent build slot for the
+  assets job, no per-run toolchain reinstall in the Linux containers, preflight and OTA moved to
+  hosted runners, and parallel packaging.
+
+### Fixed
+- **Completeness review replaced the answer after shell-only turns** (#1481). The review now runs
+  only when the git working tree changed during the turn, and the original answer is kept unless
+  the review itself changed the tree.
+
 ## [2.17.0] - 2026-10-09
 
 ### Added
@@ -4586,7 +4607,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.17.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.17.1...HEAD
+[2.17.1]: https://github.com/Adulari/forge/compare/v2.17.0...v2.17.1
 [2.17.0]: https://github.com/Adulari/forge/compare/v2.16.2...v2.17.0
 [2.16.2]: https://github.com/Adulari/forge/compare/v2.16.1...v2.16.2
 [2.16.1]: https://github.com/Adulari/forge/compare/v2.16.0...v2.16.1
