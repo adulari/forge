@@ -430,13 +430,19 @@ async fn drive_session(
             let s = session.lock().await;
             (s.hooks().to_vec(), s.workspace_root().to_path_buf())
         };
-        forge_core::hooks::run_session_hooks_in(
+        let context = forge_core::hooks::run_session_hooks_in(
             &hooks,
             forge_config::HookEvent::SessionStart,
             &session_id,
             Some(&workspace),
         )
         .await;
+        if !context.is_empty() {
+            let mut s = session.lock().await;
+            for c in &context {
+                s.inject_hook_context(c);
+            }
+        }
     }
     // Resumed session: rebuild the transcript ring so the first snapshot isn't empty.
     {

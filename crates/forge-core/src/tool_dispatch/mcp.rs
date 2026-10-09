@@ -31,7 +31,7 @@ impl Session {
         // PreToolUse hooks: same semantics as native tools — block, observe, or rewrite args.
         if !self.config.hooks.is_empty() {
             let payload = serde_json::json!({
-                "tool": call.name, "args": effective_args, "cwd": self.workspace.display()
+                "tool": call.name, "args": effective_args, "cwd": self.workspace.display(), "session_id": self.id
             })
             .to_string();
             let outcome = hooks::run_hooks(
@@ -176,7 +176,7 @@ impl Session {
         // PostToolUse hooks: observe only — notes surfaced, result unchanged.
         if !self.config.hooks.is_empty() {
             let payload = serde_json::json!({
-                "tool": call.name, "args": effective_args, "result": result, "ok": ok, "cwd": self.workspace.display()
+                "tool": call.name, "args": effective_args, "result": result, "ok": ok, "cwd": self.workspace.display(), "session_id": self.id
             })
             .to_string();
             let outcome = hooks::run_hooks(

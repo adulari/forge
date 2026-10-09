@@ -776,7 +776,8 @@ impl Session {
     /// surface. Returns whether anything was injected — the loop then continues instead of
     /// treating the last response as the end of the turn.
     pub(crate) fn inject_steers(&mut self) -> bool {
-        let texts = self.steer.drain();
+        let mut texts = self.steer.drain();
+        texts.extend(self.job_wake.drain());
         if texts.is_empty() {
             return false;
         }

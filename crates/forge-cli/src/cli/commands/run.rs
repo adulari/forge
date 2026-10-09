@@ -652,13 +652,19 @@ pub(crate) async fn run_chat_tui(
                 s.workspace_root().to_path_buf(),
             )
         };
-        forge_core::hooks::run_session_hooks_in(
+        let context = forge_core::hooks::run_session_hooks_in(
             &hooks,
             forge_config::HookEvent::SessionStart,
             &sid,
             Some(&workspace),
         )
         .await;
+        if !context.is_empty() {
+            let mut s = session.lock().await;
+            for c in &context {
+                s.inject_hook_context(c);
+            }
+        }
         sid
     };
 

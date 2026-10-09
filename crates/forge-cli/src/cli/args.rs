@@ -1141,6 +1141,11 @@ pub(crate) enum ImportSource {
         /// Legacy alias for `--scope project` (hidden; kept for back-compat).
         #[arg(long, hide = true, conflicts_with = "scope")]
         project: bool,
+        /// Also import `settings.json` hooks (written to Forge's CC-compatible `settings.json`,
+        /// replacing any `hooks` already there). Off by default: hook scripts are executable code
+        /// written against Claude Code's behaviour, so they are opt-in.
+        #[arg(long)]
+        hooks: bool,
     },
     /// Copy Codex CLI custom prompts (`~/.codex/prompts/*.md`) into Forge as commands (user
     /// scope by default). Existing definitions are kept; malformed files are skipped.

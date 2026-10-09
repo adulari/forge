@@ -39,6 +39,7 @@ use tokio::process::{Child, Command};
 use crate::sandbox::{self, SandboxPolicy};
 use crate::{str_arg, Tool, ToolError};
 mod background;
+pub use background::{scope_job_exit_sink, JobExit, JobExitSink};
 mod pty;
 mod rtk;
 pub use background::ShellJobTool;

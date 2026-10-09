@@ -63,13 +63,16 @@ instructions.\n\
     let sid = session.session_id().to_string();
     let hooks = session.hooks().to_vec();
     let workspace = session.workspace_root().to_path_buf();
-    forge_core::hooks::run_session_hooks_in(
+    let context = forge_core::hooks::run_session_hooks_in(
         &hooks,
         forge_config::HookEvent::SessionStart,
         &sid,
         Some(&workspace),
     )
     .await;
+    for c in &context {
+        session.inject_hook_context(c);
+    }
     let query = match forge_core::hooks::run_prompt_hooks_in(&hooks, &query, Some(&workspace)).await
     {
         Ok(query) => query,

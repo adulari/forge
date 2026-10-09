@@ -36,6 +36,34 @@ pub const DEFAULT_TAIL_LINES: usize = 40;
 /// Grace period between SIGTERM and SIGKILL when stopping a job.
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// How a background job ended, handed to the sink installed by [`scope_job_exit_sink`].
+#[derive(Debug, Clone)]
+pub struct JobExit {
+    pub pid: u32,
+    pub command: String,
+    /// Exit code, or -1 when a signal killed it.
+    pub code: i64,
+    /// The last lines of the job's log, for a one-glance summary.
+    pub tail: String,
+}
+
+/// Called once when a job started under [`scope_job_exit_sink`] exits on its own.
+pub type JobExitSink = std::sync::Arc<dyn Fn(JobExit) + Send + Sync>;
+
+tokio::task_local! {
+    static JOB_EXIT_SINK: JobExitSink;
+}
+
+/// Pids `stop` is killing on purpose: their exit is the caller's own doing, not news.
+static STOPPING: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+/// Run `fut` so any background job it starts reports its natural exit to `sink`. This is how a
+/// session learns that a job IT started finished, without every other session in the process (or
+/// jobs it did not start) being told.
+pub async fn scope_job_exit_sink<F: std::future::Future>(sink: JobExitSink, fut: F) -> F::Output {
+    JOB_EXIT_SINK.scope(sink, fut).await
+}
+
 /// Where job records and logs live for a workspace.
 ///
 /// Project-local rather than a global state dir: the log of a dev server belongs next to the
@@ -176,12 +204,24 @@ pub async fn start(
     // reading as still-running. If Forge exits first the job is simply reparented to init and the
     // pid-liveness check takes over.
     let dir_for_task = dir.clone();
+    let sink = JOB_EXIT_SINK.try_with(Clone::clone).ok();
+    let (command_for_task, log_for_task) = (command.to_string(), job.log.clone());
     tokio::spawn(async move {
         let code = match child.wait().await {
             Ok(status) => status.code().map(i64::from).unwrap_or(-1),
             Err(_) => return,
         };
-        record_exit(&dir_for_task, pid, code);
+        let first = record_exit(&dir_for_task, pid, code);
+        let stopped = take_stopping(pid);
+        if let (Some(sink), true, false) = (sink, first, stopped) {
+            let tail = tail(&log_for_task, 8).unwrap_or_default();
+            sink(JobExit {
+                pid,
+                command: command_for_task,
+                code,
+                tail,
+            });
+        }
     });
 
     Ok(job)
@@ -248,6 +288,9 @@ pub async fn stop(workspace: Option<&Path>, cwd: &str, id: u32) -> Result<String
     };
     if !job.is_running() {
         return Ok(format!("job {id} was already {}", job.status()));
+    }
+    if let Ok(mut stopping) = STOPPING.lock() {
+        stopping.push(id);
     }
     signal_group(id, libc_sigterm());
     let deadline = std::time::Instant::now() + STOP_GRACE;
@@ -369,16 +412,26 @@ fn read_record(path: &Path) -> Option<Job> {
     })
 }
 
-fn record_exit(dir: &Path, pid: u32, code: i64) {
+/// Record a job's exit code. `true` when this call was the first to record one.
+fn record_exit(dir: &Path, pid: u32, code: i64) -> bool {
     let path = dir.join(format!("{pid}.json"));
     let Some(mut job) = read_record(&path) else {
-        return;
+        return false;
     };
     if job.exit.is_some() {
-        return;
+        return false;
     }
     job.exit = Some(code);
     let _ = write_record(dir, &job);
+    true
+}
+
+fn take_stopping(pid: u32) -> bool {
+    STOPPING.lock().is_ok_and(|mut stopping| {
+        let before = stopping.len();
+        stopping.retain(|p| *p != pid);
+        stopping.len() != before
+    })
 }
 
 fn now_secs() -> u64 {

@@ -26,15 +26,24 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
         _ => {}
     }
 
+    let mut import_hooks = false;
     let (label, project, home, commands_sub, skills_sub, agents_sub) = match source {
-        ImportSource::Claude { scope, project } => (
-            "claude",
-            Scope::to_project(scope, project),
-            forge_config::claude_dir().context("no home directory — cannot locate ~/.claude")?,
-            "commands",
-            Some("skills"),
-            Some("agents"),
-        ),
+        ImportSource::Claude {
+            scope,
+            project,
+            hooks,
+        } => {
+            import_hooks = hooks;
+            (
+                "claude",
+                Scope::to_project(scope, project),
+                forge_config::claude_dir()
+                    .context("no home directory — cannot locate ~/.claude")?,
+                "commands",
+                Some("skills"),
+                Some("agents"),
+            )
+        }
         ImportSource::Codex { scope, project } => (
             "codex",
             Scope::to_project(scope, project),
@@ -132,7 +141,7 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
     // fold in the MCP servers, instead of silently dropping them. Best-effort; each piece reports
     // what transferred vs. what was skipped.
     if label == "claude" {
-        import_claude_settings(&home, project)?;
+        import_claude_settings(&home, project, import_hooks)?;
     }
     import_tool_mcp_servers(label, project)?;
     Ok(())

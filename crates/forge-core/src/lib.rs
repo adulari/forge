@@ -46,6 +46,8 @@ pub mod fleet;
 pub(crate) mod git_hygiene;
 pub mod heartbeat;
 pub mod hooks;
+mod hooks_cc;
+pub mod job_wake;
 pub mod llm_router;
 pub(crate) mod loop_progress;
 mod lsp_hints;
@@ -73,6 +75,7 @@ mod session_virtual_tools;
 pub mod snapshot;
 pub(crate) mod stall_guard;
 pub mod steer;
+mod stop_hook;
 pub mod subagent;
 pub(crate) mod task_staleness;
 mod text_policy;
@@ -1684,6 +1687,7 @@ pub struct Session {
     pending_hints: Vec<String>,
     /// Prompts queued by the surface while a turn runs; drained by the model loop (`steer.rs`).
     steer: steer::SteerInbox,
+    job_wake: job_wake::JobWake,
     /// Commit discipline: which files this session wrote and whether they are still uncommitted.
     git_hygiene: git_hygiene::Tracker,
     /// Counts how long each unfinished task has stood still (task_staleness.rs), so a task the
@@ -4007,41 +4011,38 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
         }
 
-        // ── Stop lifecycle hook (Claude-Code parity: "Stop hook can block stopping") ──────────
-        // Fire the Stop hook BEFORE finalizing. A hook that returns block ({"decision":"block"} /
-        // exit 2) means "don't stop yet": its reason is fed back as a synthetic user message and the
-        // model loop re-runs, so the agent keeps working instead of ending the turn. Bounded by
-        // MAX_STOP_BLOCKS consecutive blocks (mirroring the codebase's other loop guards) so a hook
-        // that always blocks can't wedge the turn — after the cap we force-stop with a warning. The
-        // `stop_hook_active` flag (true once we're already in a continuation) lets a well-behaved
-        // hook break its own loop by approving when set, exactly like Claude Code.
-        const MAX_STOP_BLOCKS: u32 = 3;
-        let mut stop_blocks: u32 = 0;
+        // ── Stop lifecycle hook (Claude-Code parity: a Stop hook can block stopping) ──────────
+        // A hook that blocks ({"decision":"block"} / exit 2 / bare additionalContext) means "don't
+        // stop yet": its reason is fed back as a synthetic user message and the model loop re-runs.
+        // Policy (cap = `stop_hook_max_blocks`, reset on tool progress, `continue:false` and the
+        // loop-guard/deadline stops win over a block) lives in `stop_hook::StopHookGate`. `stop_hook_active`
+        // is true once we are in a continuation so a well-behaved hook can approve and break its own loop.
+        let mut stop_gate = stop_hook::StopHookGate::new(self.config.stop_hook_max_blocks);
         loop {
             let stop_outcome = self
                 .fire_lifecycle(
                     forge_config::HookEvent::Stop,
                     serde_json::json!({
-                        "stop_hook_active": stop_blocks > 0,
+                        "stop_hook_active": stop_gate.active(),
                         "hit_step_cap": hit_step_cap,
+                        "last_assistant_message": final_text,
                     }),
                 )
                 .await;
-            let Some(reason) = stop_outcome.blocked else {
-                break;
+            let can_continue =
+                !halted_by_loop_guard && !hard_guard_abort && !self.past_turn_deadline();
+            let (reason, n, max) = match stop_gate.judge(&stop_outcome, can_continue) {
+                stop_hook::StopVerdict::Stop => break,
+                stop_hook::StopVerdict::Capped { reason, max } => {
+                    self.presenter.emit(PresenterEvent::Warning(format!(
+                        "stop hook blocked {max}× in a row — forcing the turn to end ({reason})"
+                    )));
+                    break;
+                }
+                stop_hook::StopVerdict::Continue { reason, n, max } => (reason, n, max),
             };
-            if halted_by_loop_guard {
-                break;
-            }
-            if stop_blocks >= MAX_STOP_BLOCKS {
-                self.presenter.emit(PresenterEvent::Warning(format!(
-                    "stop hook blocked {MAX_STOP_BLOCKS}× in a row — forcing the turn to end ({reason})"
-                )));
-                break;
-            }
-            stop_blocks += 1;
             self.presenter.emit(PresenterEvent::Warning(format!(
-                "stop hook requested continuation ({stop_blocks}/{MAX_STOP_BLOCKS}): {reason}"
+                "stop hook requested continuation ({n}/{max}): {reason}"
             )));
             // Feed the reason back as a synthetic user message and re-drive the model loop (None
             // decision: no cross-model failover for the continuation, like the autofix re-run).
@@ -4060,6 +4061,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     stream_idle,
                 )
                 .await?;
+            stop_gate.note_progress(cont_outcome.tools_ran);
             adopt_redrive_text(&mut final_text, cont_outcome.final_text);
             context_tokens = cont_outcome.context_tokens;
             active_model = cont_outcome.active_model;
@@ -4812,6 +4814,9 @@ mod tests {
 
     #[path = "nudge_marker.rs"]
     mod nudge_marker_tests;
+
+    #[path = "hooks_parity.rs"]
+    mod hooks_parity_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {
@@ -6741,10 +6746,10 @@ mod tests {
         let events = capture.events.clone();
         let mut session = counting_session(provider.clone(), config, capture);
         session.run_turn("do the task").await.unwrap();
-        // primary + MAX_STOP_BLOCKS (3) continuations = 4 model-loop runs, then a forced stop.
+        // primary + `stop_hook_max_blocks` (8) continuations = 9 model-loop runs, then a forced stop.
         assert_eq!(
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
-            4,
+            9,
             "the safety cap bounds continuations so an always-blocking hook can't wedge the turn"
         );
         let warnings: Vec<String> = events

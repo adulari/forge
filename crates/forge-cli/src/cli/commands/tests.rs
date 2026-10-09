@@ -796,7 +796,16 @@ fn import_claude_scope_and_legacy_project_alias() {
             source: ImportSource::Claude {
                 project: true,
                 scope: None,
+                ..
             }
+        }
+    ));
+    // Hooks are opt-in.
+    let cli = Cli::try_parse_from(["forge", "import", "claude", "--hooks"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Import {
+            source: ImportSource::Claude { hooks: true, .. }
         }
     ));
     // Default (neither flag) → user scope: scope None + project false.
