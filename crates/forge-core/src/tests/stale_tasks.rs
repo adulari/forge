@@ -23,6 +23,7 @@ impl Provider for Talker {
         if n == 0 {
             return Ok(forge_provider::ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: String::new(),
                 tool_calls: vec![forge_types::ToolCall {
                     id: forge_types::new_id(),
@@ -38,6 +39,7 @@ impl Provider for Talker {
         }
         Ok(forge_provider::ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: "Still working out what that task means.".into(),
             tool_calls: vec![],
             usage: forge_types::Usage::default(),

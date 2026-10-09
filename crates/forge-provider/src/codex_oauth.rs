@@ -161,6 +161,10 @@ pub struct CodexOauthProvider {
     /// `invalid_grant`).
     refresh_locks:
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    /// Cross-process counterpart of `refresh_locks`: the daemon, CLI runs and `mcp-serve` children
+    /// all share one keyring entry whose refresh token rotates. `None` skips the file lock.
+    refresh_lock_path: Option<std::path::PathBuf>,
+    token_endpoint: String,
     /// Incremental Responses WebSocket state keyed by Forge session. A dependent continuation may
     /// retain the connection-local chain on the same model/account; an independent turn, model
     /// switch, OAuth-account switch, or new Forge session replaces it.
@@ -184,6 +188,8 @@ impl CodexOauthProvider {
             accounts: AccountSource::Keyring,
             test_account_header: None,
             refresh_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            refresh_lock_path: forge_config::data_dir().map(|d| d.join("codex-oauth-refresh.lock")),
+            token_endpoint: CODEX_OAUTH_TOKEN_ENDPOINT.to_string(),
             turn_websockets: std::sync::Mutex::new(std::collections::HashMap::new()),
             turn_websocket_use_seq: std::sync::atomic::AtomicU64::new(0),
         }
@@ -202,6 +208,22 @@ impl CodexOauthProvider {
 
     pub fn with_accounts(mut self, store: forge_config::oauth::OAuthAccountStore) -> Self {
         self.accounts = AccountSource::Memory(std::sync::Mutex::new(store));
+        // An in-memory store is private to this provider; there is no peer process to exclude.
+        self.refresh_lock_path = None;
+        self
+    }
+
+    /// Tests: refresh against a mock token endpoint instead of the real IdP.
+    #[cfg(test)]
+    fn with_token_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.token_endpoint = endpoint.into();
+        self
+    }
+
+    /// Tests: use (or disable) the cross-process refresh lock at an explicit path.
+    #[cfg(test)]
+    fn with_refresh_lock_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.refresh_lock_path = path;
         self
     }
 
@@ -356,26 +378,85 @@ impl CodexOauthProvider {
         // the rest await here, then re-load below and reuse the token the winner just stored.
         let lock = self.refresh_lock(account_id);
         let _guard = lock.lock().await;
-        // Re-check under the latch — a peer may have refreshed while we waited.
+        let _file_lock = self.cross_process_refresh_lock().await;
+        // Re-check under the latches — a peer (this process or another) may have refreshed while we
+        // waited.
         let current = self.load_tokens(account_id)?;
         if !current.is_expired(now_unix(), REFRESH_SKEW_SECS) {
             return Ok(current.access_token);
         }
-        let Some(refresh_token) = current.refresh_token.clone() else {
+        if current.refresh_token.is_none() {
             return Err(ProviderError::Auth(
                 "Codex OAuth session expired and has no refresh token — run `forge auth codex-oauth` \
                  to sign in again"
                     .to_string(),
             ));
-        };
-        let refreshed = carry_refresh_token(
-            refresh_tokens(&self.http, &refresh_token)
-                .await
-                .map_err(refresh_failure_to_provider_error)?,
-            &current,
-        );
-        self.store_refreshed(account_id, &refreshed);
-        Ok(refreshed.access_token)
+        }
+        Ok(self
+            .refresh_or_adopt(account_id, current)
+            .await?
+            .access_token)
+    }
+
+    /// Wait for the cross-process refresh lock. Proceeding without it (timeout, unsupported
+    /// platform) is safe: [`Self::refresh_or_adopt`] recovers from a lost rotation race.
+    async fn cross_process_refresh_lock(&self) -> Option<crate::refresh_lock::RefreshFileLock> {
+        let path = self.refresh_lock_path.as_deref()?;
+        let lock = crate::refresh_lock::acquire(path, std::time::Duration::from_secs(30)).await;
+        if lock.is_none() {
+            tracing::warn!(
+                path = %path.display(),
+                "could not take the Codex OAuth refresh file lock; refreshing without it"
+            );
+        }
+        lock
+    }
+
+    /// Spend `current`'s refresh token and store the result. The refresh token rotates, so when the
+    /// server rejects it a peer process may simply have spent it first: reload the stored tokens
+    /// and, if they differ from the ones we used, take them instead of declaring the credential
+    /// dead (which would exclude a healthy provider although the keyring is already fresh).
+    async fn refresh_or_adopt(
+        &self,
+        account_id: Option<&str>,
+        current: forge_config::oauth::OAuthTokens,
+    ) -> Result<forge_config::oauth::OAuthTokens, ProviderError> {
+        let mut used = current;
+        let mut adopted_once = false;
+        loop {
+            let Some(refresh_token) = used.refresh_token.clone() else {
+                return Err(ProviderError::Auth(
+                    "Codex OAuth session has no refresh token — run `forge auth codex-oauth`"
+                        .to_string(),
+                ));
+            };
+            match refresh_tokens(&self.http, &self.token_endpoint, &refresh_token).await {
+                Ok(refreshed) => {
+                    let refreshed = carry_refresh_token(refreshed, &used);
+                    self.store_refreshed(account_id, &refreshed);
+                    return Ok(refreshed);
+                }
+                Err(rejected @ provider_oauth::TokenRefreshFailure::Rejected { .. })
+                    if !adopted_once =>
+                {
+                    adopted_once = true;
+                    let reloaded = self.load_tokens(account_id)?;
+                    if reloaded.refresh_token == used.refresh_token
+                        && reloaded.access_token == used.access_token
+                    {
+                        return Err(refresh_failure_to_provider_error(rejected));
+                    }
+                    tracing::info!(
+                        "Codex OAuth refresh token was rotated by a peer process; using stored tokens"
+                    );
+                    if !reloaded.is_expired(now_unix(), REFRESH_SKEW_SECS) {
+                        return Ok(reloaded);
+                    }
+                    used = reloaded;
+                }
+                Err(failure) => return Err(refresh_failure_to_provider_error(failure)),
+            }
+        }
     }
 
     /// Pick the next account from the pool and resolve its token. Returns the store account id
@@ -458,7 +539,38 @@ impl CodexOauthProvider {
             .clone()
     }
 
+    /// Incremental-WebSocket counterpart of [`Self::execute`]: a 401 force-refreshes THIS account's
+    /// token and retries once. Without it a rejected upgrade surfaced `Auth` directly, which for
+    /// WebSocket-only models (Luna) excluded a healthy provider whose refresh token still worked.
     async fn execute_turn_websocket(
+        &self,
+        call: TurnWebsocketCall<'_>,
+        on_event: &mut EventSink<'_>,
+    ) -> Result<ModelResponse, ProviderError> {
+        let result = self.execute_turn_websocket_once(call, on_event).await;
+        if let Err(ProviderError::Auth(ref msg)) = result {
+            if msg.contains("(401)") {
+                if let Ok((token2, id2)) = self
+                    .force_refresh_account(call.account_id, call.token)
+                    .await
+                {
+                    return self
+                        .execute_turn_websocket_once(
+                            TurnWebsocketCall {
+                                token: &token2,
+                                chatgpt_account_id: &id2,
+                                ..call
+                            },
+                            on_event,
+                        )
+                        .await;
+                }
+            }
+        }
+        result
+    }
+
+    async fn execute_turn_websocket_once(
         &self,
         call: TurnWebsocketCall<'_>,
         on_event: &mut EventSink<'_>,
@@ -662,24 +774,19 @@ impl CodexOauthProvider {
     ) -> Result<(String, String), ProviderError> {
         let lock = self.refresh_lock(account_id);
         let _guard = lock.lock().await;
+        let _file_lock = self.cross_process_refresh_lock().await;
         let current = self.load_tokens(account_id)?;
         if current.access_token != stale_token && !current.is_expired(now_unix(), REFRESH_SKEW_SECS)
         {
             let chatgpt_id = self.chatgpt_id_for(&current.access_token, account_id);
             return Ok((current.access_token, chatgpt_id));
         }
-        let Some(rt) = current.refresh_token.clone() else {
+        if current.refresh_token.is_none() {
             return Err(ProviderError::Auth(
                 "Codex OAuth 401 and no refresh token — run `forge auth codex-oauth`".to_string(),
             ));
-        };
-        let refreshed = carry_refresh_token(
-            refresh_tokens(&self.http, &rt)
-                .await
-                .map_err(refresh_failure_to_provider_error)?,
-            &current,
-        );
-        self.store_refreshed(account_id, &refreshed);
+        }
+        let refreshed = self.refresh_or_adopt(account_id, current).await?;
         let chatgpt_id = self.chatgpt_id_for(&refreshed.access_token, account_id);
         Ok((refreshed.access_token, chatgpt_id))
     }
@@ -720,6 +827,7 @@ fn carry_refresh_token(
 
 async fn refresh_tokens(
     http: &reqwest::Client,
+    token_endpoint: &str,
     refresh_token: &str,
 ) -> Result<forge_config::oauth::OAuthTokens, provider_oauth::TokenRefreshFailure> {
     let transient = |message: String| provider_oauth::TokenRefreshFailure::Transient {
@@ -727,7 +835,7 @@ async fn refresh_tokens(
         message,
     };
     let resp = http
-        .post(CODEX_OAUTH_TOKEN_ENDPOINT)
+        .post(token_endpoint)
         .form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
@@ -1014,6 +1122,10 @@ pub async fn probe_quota() -> Result<Vec<QuotaHint>, ProviderError> {
 /// surface accepts it — do not add it back.
 fn apply_codex_body_overrides(body: &mut serde_json::Value, opts: &CompletionOptions) {
     body["store"] = serde_json::json!(false);
+    // With `store:false` the backend keeps no reasoning between requests. Asking for the encrypted
+    // reasoning items lets Forge replay them (as the Codex CLI does) so chain-of-thought survives
+    // transports without a `previous_response_id` chain: HTTPS, WS reconnects, stale-id resends.
+    body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
     if let Some(key) = opts.prompt_cache_key.as_deref() {
         body["prompt_cache_key"] = serde_json::json!(key);
     }
@@ -2619,5 +2731,399 @@ mod tests {
             .iter()
             .any(|h| h.window == "weekly" && h.fraction_used == Some(0.0)));
         hit.assert();
+    }
+
+    fn reasoning_sse() -> String {
+        let reasoning = serde_json::json!({"item": {
+            "type": "reasoning", "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "plan"}],
+            "encrypted_content": "ENC",
+        }});
+        let call = serde_json::json!({"item": {
+            "type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{}",
+        }});
+        format!(
+            "event: response.output_item.done\ndata: {reasoning}\n\n\
+             event: response.output_item.done\ndata: {call}\n\n\
+             event: response.completed\ndata: {{\"response\":{{\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}}}\n\n"
+        )
+    }
+
+    #[test]
+    fn codex_request_asks_for_encrypted_reasoning() {
+        let mut body = serde_json::json!({"model": "gpt-5.6-sol", "input": []});
+        apply_codex_body_overrides(&mut body, &CompletionOptions::default());
+        assert_eq!(
+            body["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_items_round_trip_over_the_https_path() {
+        let model = "codex-oauth::gpt-5.6-sol";
+        let server = httpmock::MockServer::start();
+        let first = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/responses")
+                .body_includes("reasoning.encrypted_content")
+                .body_excludes("\"type\":\"reasoning\"");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(reasoning_sse());
+        });
+        let second = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/responses")
+                .body_includes("\"type\":\"reasoning\"")
+                .body_includes("\"encrypted_content\":\"ENC\"");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(ok_sse());
+        });
+        let provider = CodexOauthProvider::new()
+            .with_api_base(server.base_url())
+            .with_accounts(memory_store(&[("only", "only")], "only"));
+        let mut sink = |_: StreamEvent| {};
+        let mut transcript = vec![Message::user("task")];
+        let reply = provider
+            .complete(model, &transcript, &[], &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(reply.tool_calls.len(), 1);
+        assert_eq!(
+            reply.reasoning_items.len(),
+            1,
+            "the reply must hand its reasoning back"
+        );
+        assert!(reply.reasoning_items[0].get("id").is_none());
+
+        transcript.push(
+            Message::assistant_tool_calls(&reply.content, reply.tool_calls.clone())
+                .with_provider_items(model, reply.reasoning_items.clone()),
+        );
+        transcript.push(Message::tool_result("c1", "done"));
+        provider
+            .complete(model, &transcript, &[], &mut sink)
+            .await
+            .unwrap();
+        first.assert();
+        second.assert();
+    }
+
+    #[tokio::test]
+    async fn https_incomplete_terminal_returns_the_partial_reply() {
+        let server = httpmock::MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/responses");
+            then.status(200).header("content-type", "text/event-stream").body(
+                "event: response.output_text.delta\ndata: {\"delta\":\"cut\"}\n\n\
+                 event: response.incomplete\ndata: {\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+            );
+        });
+        let provider = CodexOauthProvider::new()
+            .with_api_base(server.base_url())
+            .with_accounts(memory_store(&[("only", "only")], "only"));
+        let mut sink = |_: StreamEvent| {};
+        let reply = provider
+            .complete(
+                "codex-oauth::gpt-5.5",
+                &[Message::user("hi")],
+                &[],
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.content, "cut");
+    }
+
+    #[test]
+    fn consecutive_requests_share_a_byte_stable_prefix() {
+        let model = "codex-oauth::gpt-5.6-sol";
+        let tools: Vec<ToolSpec> = ["shell", "read_file", "write_file"]
+            .iter()
+            .map(|name| ToolSpec {
+                name: (*name).into(),
+                description: format!("{name} tool"),
+                schema: serde_json::json!({"type": "object", "properties": {"a": {"type": "string"}}}),
+            })
+            .collect();
+        let opts = CompletionOptions {
+            prompt_cache_key: Some("session-1".into()),
+            ..CompletionOptions::default()
+        };
+        let build = |messages: &[Message]| {
+            let mut body = build_responses_request(model, messages, &tools, &opts, 0);
+            apply_codex_body_overrides(&mut body, &opts);
+            body
+        };
+        let mut messages = vec![
+            Message::system("stable system"),
+            Message::system("<env>\nworking_directory: /w\n</env>"),
+            Message::user("task"),
+        ];
+        let first = build(&messages);
+        messages.push(
+            Message::assistant_tool_calls(
+                "",
+                vec![forge_types::ToolCall {
+                    id: "c1".into(),
+                    name: "shell".into(),
+                    args: serde_json::json!({"command": "ls"}),
+                }],
+            )
+            .with_provider_items(
+                model,
+                vec![serde_json::json!({"type": "reasoning", "summary": [], "encrypted_content": "ENC"})],
+            ),
+        );
+        messages.push(Message::tool_result("c1", "ok"));
+        let second = build(&messages);
+
+        for key in [
+            "instructions",
+            "tools",
+            "prompt_cache_key",
+            "include",
+            "store",
+            "model",
+        ] {
+            assert_eq!(
+                serde_json::to_string(&first[key]).unwrap(),
+                serde_json::to_string(&second[key]).unwrap(),
+                "`{key}` must be byte-identical turn over turn or the prompt cache misses"
+            );
+        }
+        let (a, b) = (
+            first["input"].as_array().unwrap(),
+            second["input"].as_array().unwrap(),
+        );
+        assert_eq!(
+            a[..],
+            b[..a.len()],
+            "earlier input must be an untouched prefix"
+        );
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        reason = "tungstenite's required handshake callback owns its large HTTP error response"
+    )]
+    async fn reject_then_accept_ws(
+        accepted_token: &'static str,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut bearer = String::new();
+                let result = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                     response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        bearer = req
+                            .headers()
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        if bearer == format!("Bearer {accepted_token}") {
+                            Ok(response)
+                        } else {
+                            let mut reject = tokio_tungstenite::tungstenite::http::Response::new(
+                                Some("{\"error\":{\"message\":\"expired\"}}".to_string()),
+                            );
+                            *reject.status_mut() =
+                                tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
+                            Err(reject)
+                        }
+                    },
+                )
+                .await;
+                seen.push(bearer);
+                if let Ok(mut socket) = result {
+                    let _ = socket.next().await;
+                    socket
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            serde_json::json!({
+                                "type": "response.completed",
+                                "response": {"id": "r1", "usage": {"input_tokens": 5, "output_tokens": 1}}
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+            seen
+        });
+        (format!("ws://{address}/responses"), handle)
+    }
+
+    #[tokio::test]
+    async fn incremental_websocket_401_force_refreshes_and_retries_once() {
+        let idp = httpmock::MockServer::start();
+        let refresh = idp.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/token")
+                .body_includes("rt-only");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"access_token":"at-new","refresh_token":"rt-new","expires_in":3600}"#);
+        });
+        let provider = CodexOauthProvider::new()
+            .with_accounts(memory_store(&[("only", "only")], "only"))
+            .with_token_endpoint(format!("{}/token", idp.base_url()))
+            .with_test_account_header("acct");
+        let (ws_url, server) = reject_then_accept_ws("at-new").await;
+        let checkpoint = crate::CheckpointContext {
+            session: "s401".into(),
+            seq: 1,
+            root: "/tmp/checkpoints".into(),
+            workspace: "/tmp/workspace".into(),
+            mode: "ask".into(),
+            epoch: 0,
+        };
+        let body = serde_json::json!({"model": "gpt-5.6-luna", "input": [], "store": false});
+        let mut sink = |_: StreamEvent| {};
+        provider
+            .execute_turn_websocket(
+                TurnWebsocketCall {
+                    ws_url: &ws_url,
+                    account_id: Some("only"),
+                    token: "at-only",
+                    chatgpt_account_id: "acct",
+                    model: "codex-oauth::gpt-5.6-luna",
+                    checkpoint: &checkpoint,
+                    reuse_across_turns: false,
+                    response_chain_prefix_tokens: 0,
+                    body: &body,
+                },
+                &mut sink,
+            )
+            .await
+            .expect("a 401 on the websocket upgrade must be recovered by one forced refresh");
+        assert_eq!(server.await.unwrap(), ["Bearer at-only", "Bearer at-new"]);
+        refresh.assert();
+        assert_eq!(
+            provider.load_tokens(Some("only")).unwrap().access_token,
+            "at-new"
+        );
+    }
+
+    fn expired_tokens(label: &str) -> forge_config::oauth::OAuthTokens {
+        forge_config::oauth::OAuthTokens {
+            expires_at: 1,
+            ..sample_oauth_tokens(label)
+        }
+    }
+
+    /// Bind a token endpoint now and answer it later, so the provider under test can be built
+    /// against its URL before the handler (which needs the provider) exists.
+    async fn bind_token_endpoint() -> (tokio::net::TcpListener, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        (listener, url)
+    }
+
+    /// Answer one refresh with `400 invalid_grant` after running `on_request`, standing in for the
+    /// IdP refusing a refresh token a peer process already spent.
+    fn serve_invalid_grant(
+        listener: tokio::net::TcpListener,
+        on_request: impl FnOnce() + Send + 'static,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            while let Ok(Ok(n)) =
+                tokio::time::timeout(std::time::Duration::from_millis(150), stream.read(&mut buf))
+                    .await
+            {
+                if n == 0 {
+                    break;
+                }
+            }
+            on_request();
+            let body = r#"{"error":"invalid_grant","error_description":"refresh token reused"}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+    }
+
+    fn expired_provider(endpoint: String) -> CodexOauthProvider {
+        let mut store = memory_store(&[("only", "only")], "only");
+        store.set_tokens("only", expired_tokens("old")).unwrap();
+        CodexOauthProvider::new()
+            .with_accounts(store)
+            .with_token_endpoint(endpoint)
+            .with_test_account_header("acct")
+    }
+
+    #[tokio::test]
+    async fn rejected_refresh_adopts_tokens_a_peer_process_already_stored() {
+        let (listener, endpoint) = bind_token_endpoint().await;
+        let provider = std::sync::Arc::new(expired_provider(endpoint));
+        let peer = provider.clone();
+        serve_invalid_grant(listener, move || {
+            let mut fresh = sample_oauth_tokens("peer");
+            fresh.expires_at = now_unix() + 3600;
+            peer.store_refreshed(Some("only"), &fresh);
+        });
+        let (token, _) = provider.access_token_for(Some("only")).await.expect(
+            "the keyring already holds fresh tokens; invalid_grant must not exclude the provider",
+        );
+        assert_eq!(token, "at-peer");
+    }
+
+    #[tokio::test]
+    async fn rejected_refresh_with_unchanged_tokens_is_still_an_auth_failure() {
+        let (listener, endpoint) = bind_token_endpoint().await;
+        serve_invalid_grant(listener, || {});
+        let error = expired_provider(endpoint)
+            .access_token_for(Some("only"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProviderError::Auth(_)), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_waits_for_the_cross_process_lock_then_reuses_the_winners_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("refresh.lock");
+        // Nothing listens here: a refresh that skipped the lock would fail with Unavailable.
+        let provider = std::sync::Arc::new(
+            expired_provider("http://127.0.0.1:9/token".into())
+                .with_refresh_lock_path(Some(lock_path.clone())),
+        );
+        let peer_lock = crate::refresh_lock::acquire(&lock_path, std::time::Duration::from_secs(1))
+            .await
+            .expect("peer takes the lock");
+        let waiter = tokio::spawn({
+            let provider = provider.clone();
+            async move { provider.access_token_for(Some("only")).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !waiter.is_finished(),
+            "must block while a peer holds the refresh lock"
+        );
+
+        let mut fresh = sample_oauth_tokens("peer");
+        fresh.expires_at = now_unix() + 3600;
+        provider.store_refreshed(Some("only"), &fresh);
+        drop(peer_lock);
+        let (token, _) = waiter
+            .await
+            .unwrap()
+            .expect("reuses the peer's refreshed tokens");
+        assert_eq!(token, "at-peer");
     }
 }

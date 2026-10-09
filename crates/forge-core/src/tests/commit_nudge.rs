@@ -22,6 +22,7 @@ impl Provider for Editor {
         if n >= self.final_on {
             return Ok(forge_provider::ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: "done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -30,6 +31,7 @@ impl Provider for Editor {
         }
         Ok(forge_provider::ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: String::new(),
             tool_calls: vec![forge_types::ToolCall {
                 id: forge_types::new_id(),

@@ -44,6 +44,7 @@ impl Provider for InterruptibleProvider {
         }
         Ok(ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: "recovered after repeated interruption".to_string(),
             tool_calls: Vec::new(),
             usage: Usage::default(),
@@ -102,6 +103,7 @@ impl Provider for EnduranceProvider {
         };
         Ok(ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content,
             tool_calls: Vec::new(),
             usage: Usage::default(),

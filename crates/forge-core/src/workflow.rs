@@ -839,6 +839,7 @@ mod tests {
         ) -> Result<ModelResponse, ProviderError> {
             Ok(ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -869,6 +870,7 @@ mod tests {
             self.active.fetch_sub(1, SeqCst);
             Ok(ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),

@@ -26,6 +26,7 @@ impl Provider for EmptyOnceProvider {
         let content = if n == 0 { "" } else { "Done." };
         Ok(forge_provider::ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: content.to_string(),
             tool_calls: Vec::new(),
             usage: forge_types::Usage::default(),

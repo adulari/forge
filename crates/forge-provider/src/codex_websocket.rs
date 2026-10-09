@@ -269,7 +269,7 @@ impl CodexTurnWebsocket {
                     match event_type {
                         "codex.rate_limits" => quotas = parse_rate_limits_frame(&value),
                         "error" => return Err(classify_error_frame(&value, &classify)),
-                        "response.completed" => {
+                        "response.completed" | "response.incomplete" => {
                             apply_sse_event(&mut acc, event_type, &value, on_event)?;
                             break;
                         }
@@ -302,9 +302,12 @@ impl CodexTurnWebsocket {
             ));
         }
 
+        crate::oauth_responses::check_incomplete(&acc)?;
+
         let last_response_items = std::mem::take(&mut acc.output_items);
         let response = ModelResponse {
             reasoning: String::new(),
+            reasoning_items: std::mem::take(&mut acc.reasoning_items),
             content: acc.content,
             tool_calls: acc.tool_calls,
             usage: acc.usage,
@@ -503,7 +506,7 @@ pub async fn run(
                 match event_type {
                     "codex.rate_limits" => quotas = parse_rate_limits_frame(&value),
                     "error" => return Err(classify_error_frame(&value, &classify)),
-                    "response.completed" => {
+                    "response.completed" | "response.incomplete" => {
                         apply_sse_event(&mut acc, event_type, &value, on_event)?;
                         break;
                     }
@@ -529,9 +532,11 @@ pub async fn run(
                 .to_string(),
         ));
     }
+    crate::oauth_responses::check_incomplete(&acc)?;
 
     Ok(ModelResponse {
         reasoning: String::new(),
+        reasoning_items: acc.reasoning_items,
         content: acc.content,
         tool_calls: acc.tool_calls,
         usage: acc.usage,
@@ -1289,5 +1294,97 @@ mod tests {
             classify_error_frame(&schema, &classify),
             ProviderError::Request(_)
         ));
+    }
+
+    /// Serve one connection: read the request frame, then send `frames`, then hold the socket open
+    /// (a server that stays silent after its terminal event, like the real backend).
+    async fn serve_frames(frames: Vec<serde_json::Value>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = socket.next().await;
+            for frame in frames {
+                socket
+                    .send(Message::Text(frame.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        format!("ws://{address}/responses")
+    }
+
+    fn incomplete_frames(reason: &str) -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+            serde_json::json!({"type": "response.incomplete", "response": {
+                "id": "resp-1",
+                "incomplete_details": {"reason": reason},
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }}),
+        ]
+    }
+
+    #[tokio::test]
+    async fn incomplete_terminal_ends_the_turn_instead_of_waiting_for_the_watchdog() {
+        let url = serve_frames(incomplete_frames("max_output_tokens")).await;
+        let body = serde_json::json!({"model": "gpt-5.6-luna", "input": [], "store": false});
+        let mut sink = |_: crate::StreamEvent| {};
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(&url, "t", "a", &body, &mut sink, |_, _, _| {
+                ProviderError::Request("x".into())
+            }),
+        )
+        .await
+        .expect("must not wait out the idle watchdog")
+        .expect("a token-limit stop returns the partial output");
+        assert_eq!(response.content, "partial");
+        assert_eq!(response.usage.output_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn incomplete_content_filter_is_a_non_benching_error_on_the_persistent_socket() {
+        let url = serve_frames(incomplete_frames("content_filter")).await;
+        let classify =
+            |_: u16, _: &str, _: Option<std::time::Duration>| ProviderError::Request("x".into());
+        let mut socket = CodexTurnWebsocket::connect(&url, "t", "a", None, &classify)
+            .await
+            .unwrap();
+        let body = serde_json::json!({"model": "gpt-5.6-sol", "input": [], "store": false});
+        let mut sink = |_: crate::StreamEvent| {};
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            socket.complete(&body, &mut sink, classify),
+        )
+        .await
+        .expect("must not wait out the idle watchdog")
+        .unwrap_err();
+        assert!(matches!(error, ProviderError::Request(_)) && !error.is_retryable());
+        assert!(
+            socket.incremental_history().is_none(),
+            "a filtered response must not become the chain to continue from"
+        );
+    }
+
+    #[test]
+    fn replayed_reasoning_keeps_the_response_chain_incremental() {
+        let reasoning =
+            serde_json::json!({"type": "reasoning", "summary": [], "encrypted_content": "ENC"});
+        let call = serde_json::json!({"type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{}"});
+        let user = serde_json::json!({"role": "user", "content": "task"});
+        let output =
+            serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "ok"});
+        let request =
+            |input: Vec<serde_json::Value>| serde_json::json!({"model": "m", "input": input});
+        let previous = request(vec![user.clone()]);
+        let current = request(vec![user, reasoning.clone(), call.clone(), output.clone()]);
+        assert_eq!(
+            incremental_input(&previous, &[reasoning, call], &current),
+            Some(vec![output]),
+            "only the tool result may be sent when the reasoning item is replayed in emission order"
+        );
     }
 }

@@ -1616,6 +1616,7 @@ impl GenAiProvider {
             tool_calls,
             usage,
             reasoning,
+            reasoning_items: Vec::new(),
             quotas: Vec::new(),
         })
     }

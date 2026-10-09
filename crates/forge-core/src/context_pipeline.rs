@@ -472,6 +472,17 @@ pub(crate) fn message_tokens(m: &Message) -> usize {
     if let Some(reasoning) = &m.reasoning {
         n += tokens::count_text(reasoning);
     }
+    // Encrypted reasoning items are replayed to the provider too. The payload is base64 of the
+    // original reasoning plus a fixed envelope; this is the estimate the Codex CLI itself uses.
+    if let Some(provider) = &m.provider_items {
+        for item in &provider.items {
+            let encoded = item
+                .get("encrypted_content")
+                .and_then(|v| v.as_str())
+                .map_or(0, str::len);
+            n += (encoded * 3 / 4).saturating_sub(650) / 4;
+        }
+    }
     n
 }
 
@@ -480,6 +491,7 @@ fn truncate_message_to_budget(mut message: Message, budget_tokens: usize) -> Opt
     // A message clipped to fit does not keep its thinking: the reasoning is counted as prompt
     // now, and on a thinking model it can outweigh the text it explains.
     message.reasoning = None;
+    message.provider_items = None;
     message.content = MESSAGE_TRUNCATION_MARKER.to_string();
     if message_tokens(&message) > budget_tokens {
         return None;

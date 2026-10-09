@@ -25,6 +25,7 @@ impl Provider for WorkspaceOpsProvider {
         if messages.iter().any(|message| message.role == Role::Tool) {
             return Ok(ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: "done".into(),
                 tool_calls: vec![],
                 usage,
@@ -33,6 +34,7 @@ impl Provider for WorkspaceOpsProvider {
         }
         Ok(ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: String::new(),
             tool_calls: vec![
                 ToolCall {

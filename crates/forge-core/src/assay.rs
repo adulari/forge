@@ -606,6 +606,7 @@ mod tests {
                 };
                 return Ok(ModelResponse {
                     reasoning: String::new(),
+                    reasoning_items: Vec::new(),
                     content: content.into(),
                     tool_calls: vec![],
                     usage,
@@ -622,6 +623,7 @@ mod tests {
                 };
                 return Ok(ModelResponse {
                     reasoning: String::new(),
+                    reasoning_items: Vec::new(),
                     content: v.into(),
                     tool_calls: vec![],
                     usage,
@@ -630,6 +632,7 @@ mod tests {
             }
             Ok(ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: "[]".into(),
                 tool_calls: vec![],
                 usage,
@@ -687,6 +690,7 @@ mod tests {
             };
             Ok(ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: content.into(),
                 tool_calls: vec![],
                 usage: Usage::default(),

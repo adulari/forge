@@ -161,6 +161,14 @@ pub fn build_responses_request(
             }
             Role::Assistant => {
                 leading_system_prefix = false;
+                // Encrypted reasoning items precede the reply's own items, exactly where the
+                // backend emitted them. Only for the model that produced them, and only when an
+                // item follows: a reasoning item with nothing after it is rejected.
+                if let Some(items) = m.provider_items.as_ref().filter(|p| p.source == model) {
+                    if !m.content.is_empty() || !m.tool_calls.is_empty() {
+                        input.extend(items.items.iter().cloned());
+                    }
+                }
                 if !m.content.is_empty() {
                     input.push(serde_json::json!({"role": "assistant", "content": m.content}));
                 }
@@ -231,8 +239,34 @@ pub struct ResponseAccumulator {
     /// Provider output items normalized to the representation used by the next full request.
     /// Incremental reuse is allowed only when these items exactly bridge two request transcripts.
     pub output_items: Vec<serde_json::Value>,
-    /// Whether a `response.completed` (or `.failed`) event arrived.
+    /// Whether a `response.completed` (or `.incomplete`) event arrived.
     pub saw_terminal: bool,
+    /// Normalized encrypted `reasoning` items of this response, in emission order (also present in
+    /// `output_items`). Replayed on the next request so hidden chain-of-thought survives transports
+    /// that do not carry a `previous_response_id` chain.
+    pub reasoning_items: Vec<serde_json::Value>,
+    /// `incomplete_details.reason` of a `response.incomplete` terminal event.
+    pub incomplete_reason: Option<String>,
+}
+
+/// Decide what a `response.incomplete` terminal means. A token-limit stop returns the partial
+/// output like any finished turn; a content-filter stop is a hard, non-benching `Request` error —
+/// the model and account are healthy, so a stall/`Unavailable` would bench them for nothing.
+pub fn check_incomplete(acc: &ResponseAccumulator) -> Result<(), ProviderError> {
+    match acc.incomplete_reason.as_deref() {
+        Some("content_filter") => Err(ProviderError::Request(
+            "response blocked by the provider's content filter (incomplete: content_filter)"
+                .to_string(),
+        )),
+        Some(reason) => {
+            tracing::warn!(
+                reason,
+                "Responses stream ended incomplete; returning partial output"
+            );
+            Ok(())
+        }
+        None => Ok(()),
+    }
 }
 
 /// Fold one decoded SSE event into `acc`. Event-name matching is intentionally loose.
@@ -286,6 +320,22 @@ pub fn apply_sse_event(
                     "arguments": args.to_string(),
                 }));
                 acc.tool_calls.push(ToolCall { id, name, args });
+            } else if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
+                let encrypted = item
+                    .get("encrypted_content")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty());
+                if let Some(encrypted) = encrypted {
+                    // `id` is deliberately dropped: with `store:false` the backend cannot resolve
+                    // a stored item and rejects a replayed reasoning item that names one.
+                    let normalized = serde_json::json!({
+                        "type": "reasoning",
+                        "summary": item.get("summary").cloned().unwrap_or_else(|| serde_json::json!([])),
+                        "encrypted_content": encrypted,
+                    });
+                    acc.reasoning_items.push(normalized.clone());
+                    acc.output_items.push(normalized);
+                }
             } else if item.get("type").and_then(|t| t.as_str()) == Some("message") {
                 let text = item
                     .get("content")
@@ -308,8 +358,18 @@ pub fn apply_sse_event(
             .and_then(|response| response.get("id"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
-    } else if event == "response.completed" {
+    } else if event == "response.completed" || event == "response.incomplete" {
         acc.saw_terminal = true;
+        if event == "response.incomplete" {
+            acc.incomplete_reason = Some(
+                data.get("response")
+                    .and_then(|r| r.get("incomplete_details"))
+                    .and_then(|d| d.get("reason"))
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+            );
+        }
         if let Some(resp) = data.get("response") {
             if let Some(response_id) = resp.get("id").and_then(serde_json::Value::as_str) {
                 acc.response_id = Some(response_id.to_owned());
@@ -532,9 +592,11 @@ pub async fn execute_responses_request(
             "stream closed without a completion signal (truncated mid-generation)".to_string(),
         ));
     }
+    check_incomplete(&acc)?;
 
     Ok(ModelResponse {
         reasoning: String::new(),
+        reasoning_items: acc.reasoning_items,
         content: acc.content,
         tool_calls: acc.tool_calls,
         usage: acc.usage,
@@ -702,5 +764,159 @@ mod tests {
         assert_eq!(acc.content, "hi");
         assert!(acc.saw_terminal);
         assert_eq!(acc.usage.cost_usd, 0.0);
+    }
+
+    fn reasoning_done(id: &str, encrypted: &str) -> serde_json::Value {
+        serde_json::json!({"item": {
+            "type": "reasoning",
+            "id": id,
+            "summary": [{"type": "summary_text", "text": "thought"}],
+            "encrypted_content": encrypted,
+        }})
+    }
+
+    #[test]
+    fn encrypted_reasoning_items_are_captured_without_their_store_bound_id() {
+        let mut acc = ResponseAccumulator::default();
+        let sink: &mut EventSink<'_> = &mut |_| {};
+        apply_sse_event(
+            &mut acc,
+            "response.output_item.done",
+            &reasoning_done("rs_1", "ENC"),
+            sink,
+        )
+        .unwrap();
+        apply_sse_event(
+            &mut acc,
+            "response.output_item.done",
+            &serde_json::json!({"item": {"type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{}"}}),
+            sink,
+        )
+        .unwrap();
+        let expected = serde_json::json!({
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "thought"}],
+            "encrypted_content": "ENC",
+        });
+        assert_eq!(acc.reasoning_items, vec![expected.clone()]);
+        assert_eq!(
+            acc.output_items[0], expected,
+            "the chain bridge must see the reasoning item exactly as the next request replays it"
+        );
+
+        let mut bare = ResponseAccumulator::default();
+        let no_content =
+            serde_json::json!({"item": {"type": "reasoning", "id": "rs_2", "summary": []}});
+        apply_sse_event(&mut bare, "response.output_item.done", &no_content, sink).unwrap();
+        assert!(
+            bare.reasoning_items.is_empty() && bare.output_items.is_empty(),
+            "a reasoning item without encrypted content cannot be replayed under store:false"
+        );
+    }
+
+    fn reasoning_turn(model: &str) -> Vec<Message> {
+        vec![
+            Message::user("task"),
+            Message::assistant_tool_calls(
+                "",
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "shell".into(),
+                    args: serde_json::json!({}),
+                }],
+            )
+            .with_provider_items(
+                model,
+                vec![serde_json::json!({"type": "reasoning", "summary": [], "encrypted_content": "ENC"})],
+            ),
+            Message::tool_result("c1", "ok"),
+        ]
+    }
+
+    #[test]
+    fn reasoning_items_replay_before_the_function_calls_of_their_own_turn() {
+        let model = "codex-oauth::gpt-5.6-sol";
+        let body = build_responses_request(
+            model,
+            &reasoning_turn(model),
+            &[],
+            &CompletionOptions::default(),
+            0,
+        );
+        let types: Vec<_> = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.get("type").and_then(|t| t.as_str()).unwrap_or("message"))
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "message",
+                "reasoning",
+                "function_call",
+                "function_call_output"
+            ]
+        );
+        assert_eq!(body["input"][1]["encrypted_content"], "ENC");
+    }
+
+    #[test]
+    fn reasoning_items_never_replay_to_another_model_or_without_a_following_item() {
+        let produced_by = "codex-oauth::gpt-5.6-sol";
+        let other = build_responses_request(
+            "codex-oauth::gpt-5.6-terra",
+            &reasoning_turn(produced_by),
+            &[],
+            &CompletionOptions::default(),
+            0,
+        );
+        assert!(!other.to_string().contains("encrypted_content"));
+
+        let mut orphan = reasoning_turn(produced_by);
+        orphan[1].tool_calls.clear();
+        let body =
+            build_responses_request(produced_by, &orphan, &[], &CompletionOptions::default(), 0);
+        assert!(
+            !body.to_string().contains("encrypted_content"),
+            "a reasoning item with nothing after it is rejected by the backend"
+        );
+    }
+
+    #[test]
+    fn incomplete_terminal_carries_partial_output_and_its_reason() {
+        let mut acc = ResponseAccumulator::default();
+        let sink: &mut EventSink<'_> = &mut |_| {};
+        apply_sse_event(
+            &mut acc,
+            "response.output_text.delta",
+            &serde_json::json!({"delta": "part"}),
+            sink,
+        )
+        .unwrap();
+        apply_sse_event(
+            &mut acc,
+            "response.incomplete",
+            &serde_json::json!({"response": {
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 9, "output_tokens": 4}
+            }}),
+            sink,
+        )
+        .unwrap();
+        assert!(acc.saw_terminal);
+        assert_eq!(acc.content, "part");
+        assert_eq!(acc.usage.output_tokens, 4);
+        assert!(
+            check_incomplete(&acc).is_ok(),
+            "a token-limit stop returns the partial output"
+        );
+
+        acc.incomplete_reason = Some("content_filter".into());
+        let err = check_incomplete(&acc).unwrap_err();
+        assert!(
+            matches!(err, ProviderError::Request(_)) && !err.is_retryable(),
+            "a content-filter stop must not bench a healthy model: {err}"
+        );
     }
 }
