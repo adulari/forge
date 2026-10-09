@@ -178,3 +178,35 @@ This is device *emulation* via the same CDP overrides DevTools' device toolbar u
 present a chosen, consistent device. It is not a binary-patched anti-detect build (gologin and
 similar patch Chrome itself); a site that fingerprints at that depth can still tell. The browser is
 a real profile, which is most of what matters, but that limit is real.
+
+## Attach to your logged-in browser
+
+By default `browser` drives a Forge-owned profile you log into once. To use a browser you already
+run instead, point Forge at its DevTools endpoint:
+
+```toml
+[browser]
+attach = "http://127.0.0.1:9222"   # or cdp_url; FORGE_BROWSER_CDP overrides
+```
+
+`forge browser attach [--port 9222] [--profile DIR] [--browser PATH] [--print]` launches the first
+of Chrome, Chromium, Brave or Edge it finds with `--remote-debugging-port` (bound to 127.0.0.1) on
+a dedicated persistent profile (`<data dir>/forge/browser-attach-profile`), then prints the config
+line. Log into your sites in that window once; the logins persist.
+
+**Why a dedicated profile.** Since Chrome 136, `--remote-debugging-port` is ignored on the default
+user-data-dir ("requires a non-default data directory"), so your everyday profile cannot be
+attached. Importing cookies from it is a different, OS-keyring-bound problem and is not done.
+
+**What attach mode does.** Discovery is `GET /json/version`. `open` then creates a fresh tab
+(`PUT /json/new`) and drives only that. Your existing tabs and windows are never listed, adopted,
+navigated or closed; on `close`/exit only Forge's own tab is closed. Proxy, fingerprint and
+headless arguments are ignored (the browser is already running as itself). The endpoint comes
+from config or env only, never from a tool argument, so the model cannot redirect it.
+
+**Safety.** The tool is still `SideEffect::Network`, so every call goes through the permission
+broker exactly as before. The attached profile holds real sessions: `eval`, `cookies` and
+`browser_network` can read or act as you on any site you are logged into, and anything that can
+reach the debugging port can do the same. Keep the port on loopback, use the dedicated profile only
+for accounts you are willing to let an agent use, and prefer plan/ask permission modes while
+attached.

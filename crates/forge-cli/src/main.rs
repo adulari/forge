@@ -162,6 +162,9 @@ async fn main() {
         );
         return;
     };
+    if let Ok(config) = forge_config::load() {
+        forge_tools::set_attach_endpoint(config.browser.endpoint());
+    }
     let telemetry_run = telemetry::start(&command);
     if telemetry_run.show_notice() && std::io::stdout().is_terminal() {
         println!(

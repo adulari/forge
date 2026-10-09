@@ -40,6 +40,30 @@ fn dirs_data() -> Option<std::path::PathBuf> {
 /// The browser has to outlive a single tool call: opening a page, clicking through a login, and
 /// then asking what the page fetched are three separate calls against one browser. A tool object
 /// is stateless and re-used, so the state lives here.
+/// Endpoint from `[browser] attach`, installed once at startup by the CLI. `FORGE_BROWSER_CDP`
+/// overrides it. Deliberately not a tool argument: which browser holds the user's real logins is
+/// the user's decision, not the model's.
+static ATTACH_ENDPOINT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_attach_endpoint(endpoint: Option<&str>) {
+    *ATTACH_ENDPOINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = endpoint.map(str::to_string);
+}
+
+fn attach_endpoint() -> Option<String> {
+    std::env::var("FORGE_BROWSER_CDP")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            ATTACH_ENDPOINT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+}
+
 static SESSIONS: std::sync::OnceLock<Mutex<HashMap<String, Arc<BrowserSession>>>> =
     std::sync::OnceLock::new();
 
@@ -84,7 +108,11 @@ impl Tool for BrowserTool {
          (user_agent, platform, timezone, viewport). \"replay\" re-issues a request from inside \
          the page with your changes, reusing its login — the core loop for reverse-engineering an \
          API. \"intercept\" blocks or rewrites requests. Actions: open, navigate, click, type, \
-         eval, html, screenshot, cookies, replay, intercept, intercept_clear, close."
+         eval, html, screenshot, cookies, replay, intercept, intercept_clear, close. When the user \
+         configured `[browser] attach` (or FORGE_BROWSER_CDP), \"open\" instead attaches to their \
+         already-running, LOGGED-IN browser in a new tab of Forge's own: it never touches their \
+         other tabs, and proxy/fingerprint/headless are ignored. Treat that browser's sessions as \
+         the user's real accounts."
     }
 
     fn side_effect(&self) -> SideEffect {
@@ -291,6 +319,9 @@ async fn open(args: &Value, profile: &str) -> Result<String, ToolError> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let dir = profile_root().join(profile);
+    if let Some(endpoint) = attach_endpoint() {
+        return open_attached(args, profile, &endpoint).await;
+    }
 
     let mut map = sessions().lock().await;
     if !map.contains_key(profile) {
@@ -325,6 +356,29 @@ async fn open(args: &Value, profile: &str) -> Result<String, ToolError> {
         "browser ready (profile '{profile}', {}, {})",
         if headless { "headless" } else { "windowed" },
         dir.display()
+    );
+    if let Some(url) = args.get("url").and_then(Value::as_str) {
+        let landed = session.navigate(url).await.map_err(message)?;
+        report.push_str(&format!("\nnavigated to {landed}"));
+    }
+    Ok(report)
+}
+
+/// `open` against the user's own browser: a new tab of ours, nothing else touched.
+async fn open_attached(args: &Value, profile: &str, endpoint: &str) -> Result<String, ToolError> {
+    let mut map = sessions().lock().await;
+    if !map.contains_key(profile) {
+        let session = BrowserSession::connect(endpoint, &fingerprint_from(args))
+            .await
+            .map_err(message)?;
+        map.insert(profile.to_string(), Arc::new(session));
+    }
+    let session = map.get(profile).cloned().expect("just inserted");
+    drop(map);
+
+    let mut report = format!(
+        "browser ready (attached to the browser at {endpoint}, in a new tab of Forge's own; the \
+         user's existing tabs are untouched and their logged-in sessions are live)"
     );
     if let Some(url) = args.get("url").and_then(Value::as_str) {
         let landed = session.navigate(url).await.map_err(message)?;

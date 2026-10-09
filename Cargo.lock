@@ -2025,6 +2025,7 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "flate2",
  "forge-agent-anywhere-protocol",
+ "forge-agent-browser",
  "forge-agent-config",
  "forge-agent-core",
  "forge-agent-index",

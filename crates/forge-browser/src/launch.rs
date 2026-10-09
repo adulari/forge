@@ -307,6 +307,9 @@ pub struct BrowserProcess {
     child: Option<tokio::process::Child>,
     pub active: ActivePort,
     pub profile_dir: PathBuf,
+    /// `http://host:port` of the DevTools endpoint. Differs from `active.http_base()` only for an
+    /// externally owned browser, which need not be on loopback or on a port we read from disk.
+    pub http_base: String,
 }
 
 impl BrowserProcess {
@@ -339,6 +342,7 @@ impl BrowserProcess {
         let active = wait_for_active_port(&config.profile_dir).await?;
         Ok(Self {
             child: Some(child),
+            http_base: active.http_base(),
             active,
             profile_dir: config.profile_dir.clone(),
         })
@@ -357,9 +361,35 @@ impl BrowserProcess {
             parse_active_port(&contents).context("DevToolsActivePort is present but unreadable")?;
         Ok(Self {
             child: None,
+            http_base: active.http_base(),
             active,
             profile_dir: profile_dir.to_path_buf(),
         })
+    }
+
+    /// A handle on a browser someone else started (see [`crate::attach`]). It owns no child
+    /// process, so dropping it never stops that browser.
+    pub fn external(endpoint: &crate::attach::CdpEndpoint) -> Self {
+        let port = endpoint
+            .http_base
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0);
+        let browser_ws_path = endpoint
+            .browser_ws_url
+            .split_once("://")
+            .and_then(|(_, rest)| rest.find('/').map(|i| rest[i..].to_string()))
+            .unwrap_or_default();
+        Self {
+            child: None,
+            active: ActivePort {
+                port,
+                browser_ws_path,
+            },
+            profile_dir: PathBuf::new(),
+            http_base: endpoint.http_base.clone(),
+        }
     }
 
     /// Leave the browser running after this handle drops, so the window the user is looking at

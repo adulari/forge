@@ -7,6 +7,7 @@
 //!
 //! - [`launch`] — finding, starting, and re-attaching to Chrome, and why the profile and port are
 //!   handled the way they are.
+//! - [`attach`] — attaching to a browser that is already running and logged in.
 //! - [`cdp`] — the DevTools Protocol client.
 //! - [`network`] — the capture that makes this worth more than page automation.
 //! - [`intercept`] — request blocking and header rewriting.
@@ -19,6 +20,7 @@ use std::time::Duration;
 /// of their own.
 pub use anyhow::Error;
 
+pub mod attach;
 pub mod cdp;
 pub mod har;
 pub mod intercept;
