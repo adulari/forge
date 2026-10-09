@@ -6,6 +6,21 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.17.2] - 2026-10-10
+
+### Fixed
+- **`apply_patch` rejected Codex-format patches** (#1486). 59% of historical `apply_patch` failures
+  were `*** Begin Patch` envelopes that `git apply` refused outright. They are now applied natively,
+  each hunk through the same tolerant matcher `edit_file` uses; failing unified diffs get one
+  whitespace-insensitive retry. Not-found edit errors now name the closest matching line, and
+  `edit_file`/`multi_edit` accept `replace_all`.
+- **Startup discovery noise and rediscovery loop** (#1485). Bridge providers no longer count as keyed
+  providers in the discovery retry loop (one slow `agy models` re-ran the whole sweep every 10
+  minutes for the daemon's lifetime); retries stop after three rounds. A provider that fails a round
+  keeps its last-known model list for up to 7 days instead of leaving the cache stale. `agy models`
+  gets a 30s budget and an hour-long cache. Transient MCP connect failures log one concise line.
+- **iOS OTA dispatch in the release workflow** (#1484): the hosted job now has its repository context.
+
 ## [2.17.1] - 2026-10-10
 
 ### Added
@@ -4607,7 +4622,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.17.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.17.2...HEAD
+[2.17.2]: https://github.com/Adulari/forge/compare/v2.17.1...v2.17.2
 [2.17.1]: https://github.com/Adulari/forge/compare/v2.17.0...v2.17.1
 [2.17.0]: https://github.com/Adulari/forge/compare/v2.16.2...v2.17.0
 [2.16.2]: https://github.com/Adulari/forge/compare/v2.16.1...v2.16.2
