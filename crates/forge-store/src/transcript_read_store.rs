@@ -28,6 +28,22 @@ fn parse_tool_calls_with_diagnostic(
     }
 }
 
+/// Decode a stored `provider_items_json`. A malformed blob drops the items (the reply still
+/// replays, just without its reasoning chain) instead of failing the whole session load.
+fn parse_provider_items(
+    session_id: &str,
+    raw: Option<String>,
+) -> Option<forge_types::ProviderItems> {
+    let raw = raw?;
+    match serde_json::from_str(&raw) {
+        Ok(items) => Some(items),
+        Err(error) => {
+            tracing::warn!(session_id, %error, "store: malformed persisted provider_items_json; replaying without it");
+            None
+        }
+    }
+}
+
 fn parse_role_with_diagnostic(session_id: &str, seq: Option<i64>, raw: &str) -> Role {
     match Role::parse(raw) {
         Some(role) => role,
@@ -108,7 +124,7 @@ impl Store {
             )
             .optional()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility
+            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility, provider_items_json
              FROM message WHERE session_id = ?1 AND active = 1 ORDER BY seq",
         )?;
         let rows = stmt.query_map([session_id], |row| {
@@ -124,6 +140,7 @@ impl Store {
                 tool_calls,
                 tool_call_id: row.get(4)?,
                 visibility: Visibility::parse(&visibility),
+                provider_items: parse_provider_items(session_id, row.get(6)?),
             })
         })?;
         let mut msgs = rows
@@ -142,6 +159,7 @@ impl Store {
                     tool_calls: vec![],
                     tool_call_id: None,
                     visibility: Visibility::Llm,
+                    provider_items: None,
                 },
             );
         }
@@ -155,7 +173,7 @@ impl Store {
     pub fn load_all_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility
+            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility, provider_items_json
              FROM message WHERE session_id = ?1 ORDER BY seq",
         )?;
         let rows = stmt.query_map([session_id], |row| {
@@ -171,6 +189,7 @@ impl Store {
                 tool_calls,
                 tool_call_id: row.get(4)?,
                 visibility: Visibility::parse(&visibility),
+                provider_items: parse_provider_items(session_id, row.get(6)?),
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -209,6 +228,7 @@ impl Store {
                 tool_calls,
                 tool_call_id: row.get(4)?,
                 visibility: Visibility::parse(&visibility),
+                provider_items: None,
             })
         })?;
         let mut msgs = rows

@@ -80,7 +80,7 @@ impl Session {
             .into_iter()
             .map(|m| Message {
                 reasoning: None,
-                provider_items: None,
+                provider_items: m.provider_items,
                 role: m.role,
                 content: m.content,
                 tool_calls: m.tool_calls,

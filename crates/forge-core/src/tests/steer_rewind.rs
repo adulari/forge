@@ -332,3 +332,88 @@ fn inject_steers_persists_and_echoes_each_prompt() {
     assert!(persisted.iter().all(|m| m.role == Role::User));
     assert!(session.steer.is_empty());
 }
+
+struct ReasoningRecorder {
+    requests: Arc<Mutex<Vec<Vec<Message>>>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for ReasoningRecorder {
+    async fn complete(
+        &self,
+        _model: &str,
+        messages: &[Message],
+        _tools: &[ToolSpec],
+        _on_event: &mut forge_provider::EventSink<'_>,
+    ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+        self.requests.lock().unwrap().push(messages.to_vec());
+        Ok(forge_provider::ModelResponse {
+            reasoning: String::new(),
+            reasoning_items: vec![
+                serde_json::json!({"type": "reasoning", "encrypted_content": "abc"}),
+            ],
+            content: "done".into(),
+            tool_calls: vec![],
+            usage: forge_types::Usage::default(),
+            quotas: Vec::new(),
+        })
+    }
+}
+
+/// Encrypted reasoning items used to live only in the in-memory transcript, so a resumed session
+/// lost the reasoning chain and the prompt-cache prefix. They must survive the store.
+#[tokio::test]
+async fn resumed_session_replays_persisted_reasoning_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let router = || {
+        Arc::new(FixedRouter {
+            model: "codex-oauth::gpt-5.6-sol".into(),
+            fallbacks: vec![],
+        })
+    };
+    let provider = || {
+        Arc::new(ReasoningRecorder {
+            requests: requests.clone(),
+        })
+    };
+    let mut first = Session::start(
+        Arc::clone(&store),
+        provider(),
+        router(),
+        ToolRegistry::with_core_tools_in(dir.path()),
+        Box::new(HeadlessPresenter::new(false)),
+        Config::default(),
+        dir.path().to_str().unwrap(),
+    )
+    .unwrap();
+    first.run_turn("hello").await.unwrap();
+    let sid = first.id.clone();
+    drop(first);
+
+    let mut resumed = Session::resume(
+        Arc::clone(&store),
+        provider(),
+        router(),
+        ToolRegistry::with_core_tools_in(dir.path()),
+        Box::new(HeadlessPresenter::new(false)),
+        Config::default(),
+        &sid,
+    )
+    .unwrap();
+    resumed.run_turn("again").await.unwrap();
+
+    let requests = requests.lock().unwrap();
+    let first_after_resume = requests
+        .iter()
+        .find(|r| r.iter().any(|m| m.content == "again"))
+        .expect("the resumed turn made a request");
+    let carried = first_after_resume
+        .iter()
+        .find(|m| m.role == Role::Assistant && m.content == "done")
+        .and_then(|m| m.provider_items.as_ref())
+        .expect("the resumed request carries the earlier reply's reasoning items");
+    assert_eq!(carried.source, "codex-oauth::gpt-5.6-sol");
+    assert_eq!(carried.items.len(), 1);
+}
