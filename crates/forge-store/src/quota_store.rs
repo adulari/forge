@@ -78,28 +78,37 @@ impl Store {
     /// behaviour.  The router itself ignores groups below its minimum-sample gate.
     pub fn model_outcome_calibration(&self) -> Result<Vec<ModelOutcomeCalibration>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "WITH recent AS (
-                 SELECT model, outcome, latency_ms,
-                        ROW_NUMBER() OVER (PARTITION BY model ORDER BY completed_at DESC, id DESC) AS n
-                 FROM mesh_outcome
-             )
-             SELECT model,
-                    COUNT(*) AS samples,
-                    AVG(CASE WHEN outcome = 'success' THEN 1.0 ELSE 0.0 END) AS success_rate,
-                    AVG(latency_ms) AS mean_latency_ms
-             FROM recent WHERE n <= 120 GROUP BY model",
-        )?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(ModelOutcomeCalibration {
-                    model: row.get(0)?,
-                    samples: row.get::<_, i64>(1)? as u32,
-                    success_rate: row.get(2)?,
-                    mean_latency_ms: row.get(3)?,
-                })
-            })?
+        // One bounded index probe per model (`idx_mesh_outcome_model_completed`) instead of a
+        // ROW_NUMBER() window over the whole table: the window read and sorted every outcome row
+        // (~60 ms at 35k rows) and ran once per session start.
+        let models = conn
+            .prepare_cached("SELECT DISTINCT model FROM mesh_outcome ORDER BY model")?
+            .query_map([], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut recent = conn.prepare_cached(
+            "SELECT outcome, latency_ms FROM mesh_outcome WHERE model = ?1
+             ORDER BY completed_at DESC, id DESC LIMIT 120",
+        )?;
+        let mut rows = Vec::with_capacity(models.len());
+        for model in models {
+            let sample = recent
+                .query_map([&model], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if sample.is_empty() {
+                continue;
+            }
+            let n = sample.len() as f64;
+            let successes = sample.iter().filter(|(o, _)| o == "success").count() as f64;
+            let latency: f64 = sample.iter().map(|(_, l)| *l as f64).sum();
+            rows.push(ModelOutcomeCalibration {
+                model,
+                samples: sample.len() as u32,
+                success_rate: successes / n,
+                mean_latency_ms: latency / n,
+            });
+        }
         Ok(rows)
     }
 

@@ -295,12 +295,7 @@ impl Session {
             .as_ref()
             .and_then(|set| set.first())
             .cloned();
-        let model = pinned.or_else(|| {
-            self.store
-                .session_models(&self.id)
-                .ok()
-                .and_then(|models| models.last().cloned())
-        })?;
+        let model = pinned.or_else(|| self.store.session_last_model(&self.id).ok().flatten())?;
         Some(self.base_context_window(&model))
     }
 

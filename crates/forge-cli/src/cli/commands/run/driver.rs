@@ -447,7 +447,7 @@ async fn drive_session(
     // Resumed session: rebuild the transcript ring so the first snapshot isn't empty.
     {
         let s = session.lock().await;
-        let items = s.replay_items_full();
+        let (items, _) = s.replay_items_tail(super::REPLAY_TAIL_MESSAGES);
         if !items.is_empty() {
             app.replay_history(&items);
         }

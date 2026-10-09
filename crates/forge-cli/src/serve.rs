@@ -1745,10 +1745,7 @@ async fn fork_session(
         worktree: None,
         title: format!("Fork of {}", &id[..id.len().min(8)]),
         mock: state.mock,
-        model: store
-            .session_models(&id)
-            .ok()
-            .and_then(|models| models.last().cloned()),
+        model: store.session_last_model(&id).ok().flatten(),
         resume: Some(fork_id.clone()),
         temper: None,
         push: state.push.clone(),
@@ -2523,11 +2520,7 @@ pub(crate) async fn merge_session_core(
         worktree: handle.worktree.clone(),
         title: handle.title(),
         mock: state.mock,
-        model: state
-            .store
-            .session_models(id)
-            .ok()
-            .and_then(|models| models.last().cloned()),
+        model: state.store.session_last_model(id).ok().flatten(),
         resume: Some(id.to_string()),
         temper: None,
         push: state.push.clone(),
