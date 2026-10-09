@@ -494,6 +494,7 @@ mod tests {
             match &self.0 {
                 Ok(text) => Ok(ModelResponse {
                     reasoning: String::new(),
+                    reasoning_items: Vec::new(),
                     content: text.clone(),
                     tool_calls: Vec::new(),
                     usage: Default::default(),
@@ -522,6 +523,7 @@ mod tests {
             match self.responses.lock().unwrap().remove(0) {
                 Ok(content) => Ok(ModelResponse {
                     reasoning: String::new(),
+                    reasoning_items: Vec::new(),
                     content,
                     tool_calls: Vec::new(),
                     usage: Default::default(),
@@ -553,6 +555,7 @@ mod tests {
                 .push(messages[1].content.clone());
             Ok(ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: self.responses.lock().unwrap().remove(0),
                 tool_calls: Vec::new(),
                 usage: Default::default(),

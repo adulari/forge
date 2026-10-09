@@ -35,6 +35,7 @@ impl Provider for ToolThenFinal {
         };
         Ok(forge_provider::ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: if n == 0 && self.tool_on_first {
                 String::new()
             } else {

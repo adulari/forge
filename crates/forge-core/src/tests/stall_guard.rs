@@ -35,6 +35,7 @@ impl Provider for SameSentenceReader {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(forge_provider::ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: "You're right — I looped. Answering the question from evidence, then \
                       finishing the revert I left half-done."
                 .into(),
@@ -67,6 +68,7 @@ impl Provider for CyclingReader {
         let text = self.pattern[n % self.pattern.len()].clone();
         Ok(forge_provider::ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: text,
             tool_calls: vec![forge_types::ToolCall {
                 id: forge_types::new_id(),

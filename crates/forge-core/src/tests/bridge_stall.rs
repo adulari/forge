@@ -37,6 +37,7 @@ impl Provider for ProseOnlyBridge {
         };
         Ok(forge_provider::ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: "Claim: the earlier change is correct. Verification summary: reviewed."
                 .to_string(),
             tool_calls,

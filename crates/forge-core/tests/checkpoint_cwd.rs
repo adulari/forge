@@ -30,6 +30,7 @@ impl Provider for WriteOnceProvider {
         if messages.iter().any(|m| m.role == Role::Tool) {
             return Ok(ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: "done".into(),
                 tool_calls: vec![],
                 usage,
@@ -38,6 +39,7 @@ impl Provider for WriteOnceProvider {
         }
         Ok(ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: "writing".into(),
             tool_calls: vec![ToolCall {
                 id: new_id(),

@@ -48,6 +48,7 @@ impl Provider for PhantomEditProvider {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(forge_provider::ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content: "I've created the file and updated the workflow.".into(),
             tool_calls: vec![],
             usage: forge_types::Usage::default(),

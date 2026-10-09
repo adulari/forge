@@ -2398,6 +2398,7 @@ impl CliProvider {
 
         Ok(ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content,
             tool_calls,
             usage,
@@ -2604,6 +2605,7 @@ fn finish_persistent_turn(binary: &str, turn: TurnData) -> Result<ModelResponse,
     }
     Ok(ModelResponse {
         reasoning: String::new(),
+        reasoning_items: Vec::new(),
         content,
         tool_calls,
         usage: turn.usage,

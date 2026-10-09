@@ -22,7 +22,8 @@ impl Session {
         // persisted: only the live turn needs it, and it is not part of the answer.
         let mut assistant_message =
             Message::assistant_tool_calls(&resp.content, resp.tool_calls.clone())
-                .with_reasoning(resp.reasoning.clone());
+                .with_reasoning(resp.reasoning.clone())
+                .with_provider_items(active_model, resp.reasoning_items.clone());
         if provisional_completion {
             assistant_message = assistant_message.llm_only();
         }

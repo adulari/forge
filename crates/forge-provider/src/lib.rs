@@ -20,6 +20,7 @@ mod genai_provider;
 pub mod headroom;
 mod mock;
 mod oauth_responses;
+mod refresh_lock;
 mod tool_recovery;
 pub mod wire_params;
 mod xai_oauth;
@@ -628,6 +629,9 @@ pub struct ModelResponse {
     /// to the API` and rejects the turn, which made every tool-using turn die right after the
     /// first tool result. Never shown as the answer and never part of `content`.
     pub reasoning: String,
+    /// Provider-native output items (Responses API encrypted `reasoning` items) the next request
+    /// must replay ahead of this reply's own items. Empty for providers that return none.
+    pub reasoning_items: Vec<serde_json::Value>,
     /// Subscription quota observations surfaced by a CLI bridge this turn (Claude's
     /// `rate_limit_event` / Codex rollout). Empty for API providers / when the bridge
     /// reported nothing. Multiple entries when both the 5h and weekly windows were observed.

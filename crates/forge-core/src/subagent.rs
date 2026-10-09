@@ -1322,6 +1322,7 @@ mod tests {
             }
             Ok(forge_provider::ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -1567,6 +1568,7 @@ mod tests {
             } else {
                 Ok(forge_provider::ModelResponse {
                     reasoning: String::new(),
+                    reasoning_items: Vec::new(),
                     content: "child recovered after stall".into(),
                     tool_calls: vec![],
                     usage: forge_types::Usage::default(),
@@ -1684,6 +1686,7 @@ mod tests {
             };
             Ok(forge_provider::ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content,
                 tool_calls,
                 usage: forge_types::Usage::default(),
@@ -1912,6 +1915,7 @@ mod tests {
             self.active.fetch_sub(1, SeqCst);
             Ok(forge_provider::ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -1977,6 +1981,7 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             Ok(forge_provider::ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: "\n  \n".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
@@ -2089,6 +2094,7 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(forge_provider::ModelResponse {
                 reasoning: String::new(),
+                reasoning_items: Vec::new(),
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),

@@ -199,6 +199,7 @@ impl Session {
                     .into_iter()
                     .map(|m| Message {
                         reasoning: None,
+                        provider_items: None,
                         role: m.role,
                         content: m.content,
                         tool_calls: m.tool_calls,
@@ -223,6 +224,7 @@ impl Session {
                     .into_iter()
                     .map(|m| Message {
                         reasoning: None,
+                        provider_items: None,
                         role: m.role,
                         content: m.content,
                         tool_calls: m.tool_calls,
@@ -261,6 +263,7 @@ impl Session {
             .into_iter()
             .map(|m| Message {
                 reasoning: None,
+                provider_items: None,
                 role: m.role,
                 content: m.content,
                 tool_calls: m.tool_calls,
@@ -356,6 +359,7 @@ impl Session {
             .into_iter()
             .map(|m| Message {
                 reasoning: None,
+                provider_items: None,
                 role: m.role,
                 content: m.content,
                 tool_calls: m.tool_calls,
