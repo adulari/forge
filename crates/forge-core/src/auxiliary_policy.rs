@@ -40,7 +40,7 @@ prompt text, nothing else.";
     /// After a turn completes, make one cheap trivial-tier call to generate a one-line recap,
     /// emitted via [`PresenterEvent::Recap`]. Best-effort: silently skipped on budget exhaustion
     /// or any model error so it can never derail the session.
-    const MEMORY_CAPTURE_SYSTEM: &'static str =
+    pub(crate) const MEMORY_CAPTURE_SYSTEM: &'static str =
         "You extract DURABLE facts worth remembering across FUTURE sessions in this project: user \
          preferences, project decisions/conventions, key architecture or config, and stable \
          constraints. Output 0 to 3 lines, each exactly `kind: fact`, where kind is one of \
@@ -54,8 +54,8 @@ prompt text, nothing else.";
     // Spawns memory capture so it doesn't block turn completion — the spinner clears when the AI
     // response finishes. Returns a JoinHandle so the caller can await it in one-shot mode (forge
     // run) before the process exits; interactive turns drop the handle and it runs in background.
-    pub(crate) fn capture_memories(
-        &self,
+    pub(crate) async fn capture_memories(
+        &mut self,
         prompt: &str,
         final_text: &str,
     ) -> Option<tokio::task::JoinHandle<()>> {
@@ -90,22 +90,23 @@ prompt text, nothing else.";
         let assistant_snippet: String = final_text.chars().take(1200).collect();
         let workspace = self.workspace.clone();
         let mut warning_sink = self.presenter.recap_sink();
+        // Routed here, not inside the spawned task, so a session pin goes through the same
+        // side-call filter as recap/suggestion: a benched or unreachable model is never used, and
+        // a subscription bridge the user did not point the session at is skipped.
+        let decision = router
+            .route_hinted(
+                "extract durable facts",
+                false,
+                budget,
+                &health,
+                &quota,
+                Some(TaskTier::Trivial),
+                pinned_effort,
+                &project,
+            )
+            .await;
+        let model = self.post_turn_auxiliary_model(&decision)?;
         Some(tokio::spawn(async move {
-            let decision = router
-                .route_hinted(
-                    "extract durable facts",
-                    false,
-                    budget,
-                    &health,
-                    &quota,
-                    Some(TaskTier::Trivial),
-                    pinned_effort,
-                    &project,
-                )
-                .await;
-            if forge_provider::is_cli_bridge(&decision.model) {
-                return;
-            }
             let messages = vec![
                 Message::system(Session::MEMORY_CAPTURE_SYSTEM),
                 Message::user(format!(
@@ -115,23 +116,17 @@ prompt text, nothing else.";
             let mut on_event = |_: StreamEvent| {};
             let completion_opts = Session::auxiliary_completion_options(&id, "memory");
             let r = match provider
-                .complete_with(
-                    &decision.model,
-                    &messages,
-                    &[],
-                    &completion_opts,
-                    &mut on_event,
-                )
+                .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                 .await
             {
                 Ok(r) => r,
                 Err(error) => {
-                    record_model_failure_in(&store, &decision.model, &error, cooldown);
+                    record_model_failure_in(&store, &model, &error, cooldown);
                     return;
                 }
             };
             if let Err(error) =
-                store.record_side_call_usage_for(&id, "memory", Some(&decision.model), &r.usage)
+                store.record_side_call_usage_for(&id, "memory", Some(&model), &r.usage)
             {
                 report_auxiliary_persistence_failure(&id, "memory usage", &error, |warning| {
                     if let Some(sink) = warning_sink.as_mut() {

@@ -4143,7 +4143,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // One-shot/headless mode must await memory persistence before the process exits. In the
         // interactive TUI, dropping a Tokio JoinHandle detaches (does not cancel) the capture, so
         // the completed answer and input become usable immediately while persistence finishes.
-        if let Some(handle) = self.capture_memories(prompt, &final_text) {
+        if let Some(handle) = self.capture_memories(prompt, &final_text).await {
             if detach_post_turn_work {
                 drop(handle);
             } else {
@@ -4847,6 +4847,9 @@ mod tests {
 
     #[path = "stale_tasks.rs"]
     mod stale_tasks_tests;
+
+    #[path = "memory_capture_model.rs"]
+    mod memory_capture_model_tests;
 
     #[path = "nudge_marker.rs"]
     mod nudge_marker_tests;
