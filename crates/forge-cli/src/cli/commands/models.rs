@@ -415,7 +415,11 @@ pub(crate) async fn benchmarks_cmd(refresh: bool) -> Result<()> {
         println!("benchmark ranking is disabled (`mesh.benchmark_ranking = false`).");
         return Ok(());
     }
-    let cat = discover_catalog(&config).await;
+    let cat = if refresh {
+        discover_catalog(&config).await
+    } else {
+        cached_or_discovered_catalog(&config).await
+    };
     let models = cat.models().to_vec();
     let scores = benchmarks::ensure(&config, &models, refresh).await;
     let Some(scores) = scores.filter(|s| !s.is_empty()) else {
@@ -608,11 +612,21 @@ pub(crate) fn report_secret_backend() {
     eprintln!("{prefix}reading keys from: {}", backend.describe());
 }
 
+/// The on-disk catalog when it is still fresh, otherwise a full discovery sweep. Read-only commands
+/// that only explain the catalog (`forge mesh`, `forge benchmarks`) have no reason to re-ask ~35
+/// providers on every invocation; `forge models` is the command that refreshes it.
+async fn cached_or_discovered_catalog(config: &forge_config::Config) -> forge_mesh::ModelCatalog {
+    match load_cached_catalog() {
+        Some(cat) if !cat.is_empty() => cat,
+        _ => discover_catalog(config).await,
+    }
+}
+
 pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Result<()> {
     forge_config::inject_provider_keys();
     report_secret_backend();
     let config = super::load_config()?;
-    let cat = discover_catalog(&config).await;
+    let cat = cached_or_discovered_catalog(&config).await;
     if cat.is_empty() {
         println!(
             "no models discovered — set a provider key (`forge auth <provider>`) or run ollama"

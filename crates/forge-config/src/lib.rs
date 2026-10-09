@@ -3708,7 +3708,30 @@ pub fn inject_provider_keys() {
     let azure = azure_registry()
         .into_iter()
         .map(|a| (AZURE_NS, a.env_var.as_str()));
-    for (provider, var) in native.chain(custom).chain(azure) {
+    let all: Vec<(&str, &str)> = native.chain(custom).chain(azure).collect();
+    // ~144 serial secret-store lookups (a D-Bus round trip each) cost 218 ms before the first
+    // frame. Ask for them in parallel; `secret_store::get` memoizes, so the loop below then only
+    // reads the cache.
+    let to_lookup: Vec<&str> = all
+        .iter()
+        .filter(|(p, var)| {
+            !var.is_empty()
+                && !env_set(var)
+                && !env_aliases_for(p).any(|a| std::env::var(a).is_ok_and(|v| !v.is_empty()))
+        })
+        .map(|(p, _)| *p)
+        .collect();
+    std::thread::scope(|scope| {
+        let per_thread = to_lookup.len().div_ceil(8).max(1);
+        for chunk in to_lookup.chunks(per_thread) {
+            scope.spawn(move || {
+                for provider in chunk {
+                    let _ = secret_store::get(provider);
+                }
+            });
+        }
+    });
+    for (provider, var) in all {
         // Keyless custom providers (local servers) carry an empty env_var — nothing to inject.
         if var.is_empty() || env_set(var) {
             continue;

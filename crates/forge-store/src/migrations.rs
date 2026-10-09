@@ -4,10 +4,12 @@ use super::*;
 
 mod apply;
 mod m0035_dispatch;
+mod m0037_fk_indexes;
 pub(super) use apply::run_migrations;
 #[cfg(test)]
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
 use m0035_dispatch::migration_0035;
+use m0037_fk_indexes::migration_0037;
 mod usage;
 use usage::migration_0030;
 
@@ -692,6 +694,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0034,
     migration_0035,
     migration_0036,
+    migration_0037,
 ];
 
 /// Migration #33: whether a session has released its subagents from the active model pin.

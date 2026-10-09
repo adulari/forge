@@ -79,14 +79,28 @@ pub async fn run() -> anyhow::Result<usize> {
     let mut sections: Vec<(&str, Vec<Check>)> = Vec::new();
     sections.push(("Config", config_checks()));
     let (mut provider_v, mut has_usable_provider) = provider_checks();
+    // Every live probe below is independent of the others (provider listings, quota polls, bridge
+    // launches, the daemon check), so they run together and the report costs the slowest, not the
+    // sum — run back to back they took 8-55 s.
+    //
     // Reachability is evidence for the routing verdict, not the verdict itself. A provider can
-    // answer discovery while the mesh has excluded it or exhausted its subscription.
-    let reachability = provider_reachability_checks().await;
-    // OpenCode Go's and Kimi Code's windows are poll-only, so without this the routing verdict below
-    // would report whatever a previous command happened to leave behind (or nothing at all).
-    if let Ok(store) = crate::open_store() {
-        crate::cli::commands::models::refresh_polled_quotas(&store).await;
-    }
+    // answer discovery while the mesh has excluded it or exhausted its subscription. OpenCode Go's
+    // and Kimi Code's windows are poll-only, so the quota refresh must land before the routing
+    // verdict below, or it would report whatever a previous command left behind.
+    let (reachability, bridge_live, bridge_models, daemon) = tokio::join!(
+        async {
+            let reachability = provider_reachability_checks().await;
+            if let Ok(store) = crate::open_store() {
+                crate::cli::commands::models::refresh_polled_quotas(&store).await;
+            }
+            reachability
+        },
+        // Live, timeout-bounded: prove a detected bridge can actually launch + answer (not just on
+        // PATH).
+        bridge_roundtrip_checks(),
+        bridge_models::checks(),
+        daemon_checks(),
+    );
     mark_rejected_keys(&mut provider_v, &reachability);
     if provider_v.iter().any(|c| c.status == Status::Fail) {
         has_usable_provider = provider_v.iter().any(|c| {
@@ -103,17 +117,14 @@ pub async fn run() -> anyhow::Result<usize> {
     provider_v.extend(routing);
     provider_v.extend(reachability);
     sections.push(("Providers", provider_v));
-    // Live, timeout-bounded: prove a detected bridge can actually launch + answer (not just on PATH).
-    let bridge_live = bridge_roundtrip_checks().await;
     if !bridge_live.is_empty() {
         sections.push(("Bridge liveness", bridge_live));
     }
-    let bridge_models = bridge_models::checks().await;
     if !bridge_models.is_empty() {
         sections.push(("Bridge model discovery", bridge_models));
     }
     sections.push(("Model health", crate::doctor_health::model_health_checks()));
-    sections.push(("Background daemon", daemon_checks().await));
+    sections.push(("Background daemon", daemon));
     sections.push(("Forge Anywhere", crate::doctor_health::anywhere_checks()));
     sections.push(("Local LLM (Ollama)", ollama_checks()));
     sections.push(("Session store", store_checks()));

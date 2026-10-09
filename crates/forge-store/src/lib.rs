@@ -23,6 +23,7 @@ mod harness_store;
 mod heartbeat_store;
 mod lattice_store;
 mod live_session_store;
+mod maintenance;
 mod memory;
 mod migrations;
 mod model_health_store;
@@ -58,12 +59,13 @@ pub use handoff_types::{
     HandoffSessionImport, ImportedSessionMetadata,
 };
 pub use harness_store::{AppliedHarnessEdit, HarnessEdit, HarnessEntry, HarnessRefinement};
+pub use maintenance::MaintenanceReport;
 pub use memory::Memory;
 
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 36;
+const SCHEMA_VERSION: i64 = 37;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -117,18 +119,11 @@ const MAX_CALL_ARG_VALUE_CHARS: usize = 80;
 /// pruning (cascading to their messages/usage/routing/tool_calls/live_events). ~90 days.
 pub const RETENTION_HORIZON_SECS: i64 = 90 * 24 * 60 * 60;
 
-/// How many old sessions a single opportunistic [`Store::prune`] pass removes — bounded so the prune
-/// piggy-backed on session open stays cheap.
-const PRUNE_BATCH: usize = 50;
-
 /// How long a session with zero real (user) messages is kept before being eligible for
 /// [`Store::prune_empty`] — much shorter than [`RETENTION_HORIZON_SECS`] since an empty session
 /// carries nothing worth retaining. Long enough that the session currently being opened (which
 /// hasn't sent its first message yet) is never swept out from under itself.
 const EMPTY_SESSION_HORIZON_SECS: i64 = 10 * 60;
-
-/// Same cap rationale as [`PRUNE_BATCH`], applied to the empty-session sweep.
-const EMPTY_PRUNE_BATCH: usize = 200;
 
 /// Run live-event ring-buffer pruning only once every this many appends, instead of on every insert
 /// (the old per-insert correlated-subquery DELETE was O(n) on a hot path).

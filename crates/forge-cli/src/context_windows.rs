@@ -27,7 +27,14 @@ use forge_mesh::pricing;
 use std::collections::HashMap;
 use std::time::Duration;
 
-const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-request cap. Every probe in [`fetch_and_persist`] runs concurrently, so the whole sweep
+/// costs one of these, not their sum.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// A sweep for the same model set is skipped while the last one is this fresh: prices and windows
+/// move on a scale of days, and `forge models` / `forge mesh` / `forge doctor` each ran a full
+/// network sweep on every invocation.
+const SWEEP_FRESH_SECS: u64 = 3600;
 
 const OPENROUTER_VENDOR_MAP: &[(&str, &str, bool)] = &[
     ("anthropic/", "anthropic", true),
@@ -88,6 +95,11 @@ pub async fn fetch_and_persist(models: &[String]) {
     let Ok(store) = crate::open_store() else {
         return;
     };
+    let stamp = SweepStamp::for_store(&store, models);
+    if stamp.as_ref().is_some_and(SweepStamp::is_fresh) {
+        tracing::debug!("context-window/price sweep is fresh — skipping the network round");
+        return;
+    }
     let wanted: std::collections::HashSet<&str> = models.iter().map(String::as_str).collect();
 
     // Running in-memory registry of every context window we persist this run.
@@ -99,52 +111,117 @@ pub async fn fetch_and_persist(models: &[String]) {
     // rows, zero burn penalty, a $12 pool gone in minutes. One warning per run, with the cause.
     let mut price_write_failed = false;
 
+    // Every network read below is independent of the others, so they all go out at once and the
+    // sweep costs the slowest host instead of the sum of ~35. Only the NETWORK is concurrent: the
+    // results are applied afterwards in the original order, because precedence between sources
+    // (native providers overwrite OpenRouter-derived values) is defined by write order.
+    let custom: Vec<_> = forge_config::custom_providers()
+        .filter(|cp| {
+            models
+                .iter()
+                .any(|m| forge_config::provider_of(m) == cp.namespace)
+        })
+        .filter_map(|cp| {
+            forge_config::api_key(cp.namespace)
+                .ok()
+                .map(|key| (cp, key))
+        })
+        .collect();
+    let wants = |provider: &str| {
+        models
+            .iter()
+            .any(|m| forge_config::provider_of(m) == provider)
+    };
+    let anthropic_key = wants("anthropic")
+        .then(|| forge_config::api_key("anthropic").ok())
+        .flatten();
+    let gemini_key = (wants("gemini") || models.iter().any(|m| m.starts_with("agy-cli::")))
+        .then(|| forge_config::api_key("gemini").ok())
+        .flatten();
+    let groq_key = wants("groq")
+        .then(|| forge_config::api_key("groq").ok())
+        .flatten();
+
+    let (or_body, models_dev_body, custom_bodies, anthropic_body, gemini_body, groq_body) = tokio::join!(
+        get_json("https://openrouter.ai/api/v1/models", None),
+        get_json("https://models.dev/api.json", None),
+        futures::future::join_all(custom.iter().map(|(cp, key)| async move {
+            let body = get_json(&format!("{}models", cp.endpoint), Some(key)).await;
+            let served = match body {
+                Some(_) => llama_cpp_served_window(cp.endpoint).await,
+                None => None,
+            };
+            (body, served)
+        })),
+        async {
+            let key = anthropic_key.as_deref()?;
+            get_json_with_headers(
+                "https://api.anthropic.com/v1/models",
+                &[("x-api-key", key), ("anthropic-version", "2023-06-01")],
+            )
+            .await
+        },
+        async {
+            let key = gemini_key.as_deref()?;
+            get_json(
+                &format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models?key={key}&pageSize=100"
+                ),
+                None,
+            )
+            .await
+        },
+        async {
+            let key = groq_key.as_deref()?;
+            get_json("https://api.groq.com/openai/v1/models", Some(key)).await
+        },
+    );
+
     // ── OpenRouter first (keyless, always) ───────────────────────────────────────────────────────
-    // Fetched before native providers so we can build the basename fallback index used by custom
-    // provider fetches below. Native fetches (Anthropic, Gemini, Groq) run afterward and overwrite
-    // OR-derived values with authoritative data where available.
-    let or_basename_index =
-        if let Some(body) = get_json("https://openrouter.ai/api/v1/models", None).await {
-            // openrouter:: windows
-            for (id, w) in openrouter_windows(&body) {
-                if wanted.contains(id.as_str()) {
-                    let _ = store.set_model_context(&id, w);
-                    ctx_registry.insert(id, w);
-                }
-            }
-            // cross-map to native namespaces (openai::, xai::, deepseek::, mistral::, nvidia::, …)
-            for (id, w) in openrouter_native_cross_map(&body) {
+    // Applied before native providers so we can build the basename fallback index used by custom
+    // provider results below. Native results (Anthropic, Gemini, Groq) are applied afterward and
+    // overwrite OR-derived values with authoritative data where available.
+    let or_basename_index = if let Some(body) = or_body {
+        // openrouter:: windows
+        for (id, w) in openrouter_windows(&body) {
+            if wanted.contains(id.as_str()) {
                 let _ = store.set_model_context(&id, w);
                 ctx_registry.insert(id, w);
             }
-            // Pricing applies to the exact billed provider/model ID. Subscription and free
-            // providers intentionally retain a zero recorded cost rather than inheriting an
-            // unrelated OpenRouter list price.
-            for (id, in_1k, out_1k, cache_1k) in openrouter_pricing(&body) {
-                record_price(
-                    &store,
-                    &id,
-                    in_1k,
-                    out_1k,
-                    cache_1k,
-                    &mut price_write_failed,
-                );
-            }
-            // basename index: "llama-3.1-405b-instruct" → 131072
-            // Used below as fallback for custom providers that don't include context info in /v1/models
-            // but whose models appear on OR under a different vendor prefix (e.g. NVIDIA NIM hosts
-            // `meta/llama-3.1-405b-instruct`; OR lists it as `meta-llama/llama-3.1-405b-instruct`).
-            build_basename_index(&body)
-        } else {
-            HashMap::new()
-        };
+        }
+        // cross-map to native namespaces (openai::, xai::, deepseek::, mistral::, nvidia::, …)
+        for (id, w) in openrouter_native_cross_map(&body) {
+            let _ = store.set_model_context(&id, w);
+            ctx_registry.insert(id, w);
+        }
+        // Pricing applies to the exact billed provider/model ID. Subscription and free
+        // providers intentionally retain a zero recorded cost rather than inheriting an
+        // unrelated OpenRouter list price.
+        for (id, in_1k, out_1k, cache_1k) in openrouter_pricing(&body) {
+            record_price(
+                &store,
+                &id,
+                in_1k,
+                out_1k,
+                cache_1k,
+                &mut price_write_failed,
+            );
+        }
+        // basename index: "llama-3.1-405b-instruct" → 131072
+        // Used below as fallback for custom providers that don't include context info in /v1/models
+        // but whose models appear on OR under a different vendor prefix (e.g. NVIDIA NIM hosts
+        // `meta/llama-3.1-405b-instruct`; OR lists it as `meta-llama/llama-3.1-405b-instruct`).
+        build_basename_index(&body)
+    } else {
+        HashMap::new()
+    };
 
     // ── models.dev second (keyless) ─────────────────────────────────────────────────────────────
     // The price source for the native OpenAI / Anthropic / Google / xAI ids OpenRouter does not
     // list (no `openai/gpt-5.6*` on OpenRouter at all). Written AFTER OpenRouter so a native id
     // present in both takes models.dev's number, and only ever additive: a failed fetch leaves
     // the bundled `DEFAULT_RATES` fallback in force rather than writing $0.
-    if let Some(body) = get_json("https://models.dev/api.json", None).await {
+    if let Some(body) = models_dev_body {
         for (id, in_1k, out_1k, cache_1k) in models_dev_pricing(&body) {
             record_price(
                 &store,
@@ -160,16 +237,9 @@ pub async fn fetch_and_persist(models: &[String]) {
     // ── Custom OpenAI-compatible providers (NVIDIA NIM, Cerebras, SambaNova, …) ─────────────────
     // Fetched before the other native providers so the Anthropic/Gemini/Groq authoritative writes
     // happen last and win over any cross-provider basename matches.
-    for cp in forge_config::custom_providers() {
+    for ((cp, _), (body, served_window)) in custom.iter().zip(custom_bodies) {
         let ns = cp.namespace;
-        if !models.iter().any(|m| forge_config::provider_of(m) == ns) {
-            continue;
-        }
-        let Ok(key) = forge_config::api_key(ns) else {
-            continue;
-        };
-        let url = format!("{}models", cp.endpoint);
-        if let Some(body) = get_json(&url, Some(&key)).await {
+        if let Some(body) = body {
             let native = openai_compatible_windows(&body, ns);
             let native_ids: std::collections::HashSet<&str> =
                 native.iter().map(|(id, _)| id.as_str()).collect();
@@ -185,7 +255,6 @@ pub async fn fetch_and_persist(models: &[String]) {
             // fell through to the basename index below and inherited OpenRouter's cloud
             // `qwen/qwen3.8-27b` window of 1,000,000 — while the server was actually started with
             // `-c 16384`. Forge then believed it had 61x the context it really had. Ask the server.
-            let served_window = llama_cpp_served_window(cp.endpoint).await;
             if let Some(w) = served_window {
                 if let Some(data) = body["data"].as_array() {
                     for m in data {
@@ -224,59 +293,26 @@ pub async fn fetch_and_persist(models: &[String]) {
     }
 
     // ── Anthropic native (authoritative) ─────────────────────────────────────────────────────────
-    if models
-        .iter()
-        .any(|m| forge_config::provider_of(m) == "anthropic")
-    {
-        if let Ok(key) = forge_config::api_key("anthropic") {
-            if let Some(body) = get_json_with_headers(
-                "https://api.anthropic.com/v1/models",
-                &[
-                    ("x-api-key", key.as_str()),
-                    ("anthropic-version", "2023-06-01"),
-                ],
-            )
-            .await
-            {
-                for (id, w) in anthropic_windows(&body) {
-                    let _ = store.set_model_context(&id, w);
-                    ctx_registry.insert(id, w);
-                }
-            }
+    if let Some(body) = anthropic_body {
+        for (id, w) in anthropic_windows(&body) {
+            let _ = store.set_model_context(&id, w);
+            ctx_registry.insert(id, w);
         }
     }
 
     // ── Gemini native (authoritative) ─────────────────────────────────────────────────────────────
-    if models
-        .iter()
-        .any(|m| forge_config::provider_of(m) == "gemini" || m.starts_with("agy-cli::"))
-    {
-        if let Ok(key) = forge_config::api_key("gemini") {
-            let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models?key={key}&pageSize=100"
-            );
-            if let Some(body) = get_json(&url, None).await {
-                for (id, w) in gemini_windows(&body) {
-                    let _ = store.set_model_context(&id, w);
-                    ctx_registry.insert(id, w);
-                }
-            }
+    if let Some(body) = gemini_body {
+        for (id, w) in gemini_windows(&body) {
+            let _ = store.set_model_context(&id, w);
+            ctx_registry.insert(id, w);
         }
     }
 
     // ── Groq (authoritative) ─────────────────────────────────────────────────────────────────────
-    if models
-        .iter()
-        .any(|m| forge_config::provider_of(m) == "groq")
-    {
-        if let Ok(key) = forge_config::api_key("groq") {
-            if let Some(body) = get_json("https://api.groq.com/openai/v1/models", Some(&key)).await
-            {
-                for (id, w) in openai_compatible_windows(&body, "groq") {
-                    let _ = store.set_model_context(&id, w);
-                    ctx_registry.insert(id, w);
-                }
-            }
+    if let Some(body) = groq_body {
+        for (id, w) in openai_compatible_windows(&body, "groq") {
+            let _ = store.set_model_context(&id, w);
+            ctx_registry.insert(id, w);
         }
     }
 
@@ -289,6 +325,46 @@ pub async fn fetch_and_persist(models: &[String]) {
     // Product-verified values win last over absent native fields and provisional cross-catalog
     // matches. This also repairs stale rows written by an earlier discovery run.
     persist_authoritative_contexts(models, &store);
+    if let Some(stamp) = stamp {
+        stamp.touch();
+    }
+}
+
+/// Remembers that a sweep for exactly this model set finished recently. Lives beside the store
+/// file, so a scratch `FORGE_DB` never inherits the real store's "already swept" verdict.
+struct SweepStamp {
+    path: std::path::PathBuf,
+    key: String,
+}
+
+impl SweepStamp {
+    fn for_store(store: &forge_store::Store, models: &[String]) -> Option<Self> {
+        use std::hash::{Hash, Hasher};
+        let mut sorted: Vec<&String> = models.iter().collect();
+        sorted.sort();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        sorted.hash(&mut hasher);
+        let path = store.db_path()?.with_extension("sweep-stamp");
+        Some(Self {
+            path,
+            key: format!("{:016x}", hasher.finish()),
+        })
+    }
+
+    fn is_fresh(&self) -> bool {
+        let Ok(body) = std::fs::read_to_string(&self.path) else {
+            return false;
+        };
+        let age = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok());
+        body.trim() == self.key && age.is_some_and(|a| a.as_secs() < SWEEP_FRESH_SECS)
+    }
+
+    fn touch(&self) {
+        let _ = std::fs::write(&self.path, &self.key);
+    }
 }
 
 mod bridges;
@@ -366,6 +442,35 @@ async fn get_json_with_headers(url: &str, headers: &[(&str, &str)]) -> Option<se
 
 #[cfg(test)]
 mod tests {
+    /// A finished sweep suppresses the next one only for the SAME model set, only while fresh, and
+    /// never across stores (the stamp sits beside the db file).
+    #[test]
+    fn sweep_stamp_is_fresh_only_for_the_same_models_and_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = forge_store::Store::open(dir.path().join("a.db")).unwrap();
+        let models = vec!["groq::a".to_string(), "groq::b".to_string()];
+        let stamp = SweepStamp::for_store(&store, &models).unwrap();
+        assert!(!stamp.is_fresh(), "no stamp yet");
+        stamp.touch();
+        assert!(stamp.is_fresh());
+
+        let reordered = vec!["groq::b".to_string(), "groq::a".to_string()];
+        assert!(SweepStamp::for_store(&store, &reordered)
+            .unwrap()
+            .is_fresh());
+        let other = vec!["groq::a".to_string()];
+        assert!(!SweepStamp::for_store(&store, &other).unwrap().is_fresh());
+
+        let elsewhere = forge_store::Store::open(dir.path().join("b.db")).unwrap();
+        assert!(!SweepStamp::for_store(&elsewhere, &models)
+            .unwrap()
+            .is_fresh());
+        assert!(
+            SweepStamp::for_store(&forge_store::Store::open_in_memory().unwrap(), &models)
+                .is_none()
+        );
+    }
+
     /// A locally hosted server knows its own window; a name match cannot. `llamacpp::qwen3.8-27b`
     /// inherited OpenRouter's cloud `qwen/qwen3.8-27b` window of 1,000,000 while the server was
     /// running with `-c 16384` — so Forge packed contexts 61x larger than the server could hold.
