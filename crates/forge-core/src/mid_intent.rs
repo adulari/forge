@@ -378,3 +378,62 @@ fn last_sentence(text: &str) -> Option<(String, String)> {
     }
     Some((sentence.to_string(), whole))
 }
+
+/// Nudges allowed per stretch of idleness. The caller re-arms the counter whenever the model runs a
+/// tool, so a model that progresses and later stalls again is nudged again, while one that answers
+/// consecutive nudges with nothing stops the turn.
+const MAX_FOLLOWUP_INTENT_NUDGES: usize = 2;
+
+/// Re-sent at full context cost on every request, so keep it terse.
+const FOLLOWUP_INTENT_NUDGE: &str =
+    "You stopped after announcing your next step. Do it now with a \
+    tool call, or give a self-contained final answer.";
+
+impl crate::Session {
+    /// Whether tracked tasks remain unfinished. The task-list gate owns that case with a stronger,
+    /// task-naming nudge, so the generic mid-intent nudge stands aside. A bridge's `update_tasks`
+    /// runs in a separate process, so the store is the source of truth there.
+    fn has_open_tasks(&self) -> bool {
+        let stored = self.store.tasks(&self.id).unwrap_or_default();
+        let tasks = if stored.is_empty() {
+            &self.tasks
+        } else {
+            &stored
+        };
+        tasks
+            .iter()
+            .any(|t| !matches!(t.status, forge_types::TodoStatus::Done))
+    }
+
+    /// A reply ending on "Now the worker side..." or "Let me verify runtime issues:" with no tool
+    /// call is unfinished intent, not a final answer. Pushes the nudge and returns `true` when the
+    /// turn should continue.
+    pub(crate) fn followup_intent_nudge(
+        &mut self,
+        content: &str,
+        bridge_tool_progress: bool,
+        sent: &mut usize,
+    ) -> bool {
+        if *sent >= MAX_FOLLOWUP_INTENT_NUDGES
+            || !(ends_mid_intent(content) || (content.trim().is_empty() && bridge_tool_progress))
+            || self.has_open_tasks()
+        {
+            return false;
+        }
+        *sent += 1;
+        self.presenter.emit(crate::PresenterEvent::Warning(format!(
+            "model announced another action but stopped before doing it — continuing ({sent}/{MAX_FOLLOWUP_INTENT_NUDGES})"
+        )));
+        let nseq = self.next_seq();
+        let _ = self.store.add_message(
+            &self.id,
+            nseq,
+            forge_types::Role::System,
+            FOLLOWUP_INTENT_NUDGE,
+            None,
+        );
+        self.transcript
+            .push(forge_types::Message::system(FOLLOWUP_INTENT_NUDGE));
+        true
+    }
+}

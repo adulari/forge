@@ -4,21 +4,6 @@ use super::*;
 use crate::nudge_policy::{self, ContinueNudge};
 
 impl Session {
-    /// Whether tracked tasks remain unfinished. The task-list gate owns that case with a stronger,
-    /// task-naming nudge, so the generic mid-intent nudge stands aside. A bridge's `update_tasks`
-    /// runs in a separate process, so the store is the source of truth there.
-    fn has_open_tasks(&self) -> bool {
-        let stored = self.store.tasks(&self.id).unwrap_or_default();
-        let tasks = if stored.is_empty() {
-            &self.tasks
-        } else {
-            &stored
-        };
-        tasks
-            .iter()
-            .any(|t| !matches!(t.status, forge_types::TodoStatus::Done))
-    }
-
     /// Shared model↔tool inner loop used by both the primary turn and the autofix re-run.
     ///
     /// * `active_model` – the model to start with; updated by failover.
@@ -140,12 +125,7 @@ impl Session {
         // (tools executed, tasks resolved) captured when the last continue-nudge was sent — see
         // `nudge_policy::decide`.
         let mut last_nudge_progress: Option<nudge_policy::Progress> = None;
-        // A model can end its reply on "Now the worker side..." or "Let me verify runtime issues:"
-        // with no tool call. That is unfinished intent, not a final answer. Nudges are bounded per
-        // stretch of idleness: the counter re-arms whenever the model runs a tool, so a model that
-        // progresses and later stalls again is nudged again, while one that answers consecutive
-        // nudges with nothing stops the turn.
-        const MAX_FOLLOWUP_INTENT_NUDGES: usize = 2;
+        // Mid-intent nudges sent in the current stretch of idleness; see `followup_intent_nudge`.
         let mut followup_intent_nudges = 0usize;
         let mut doom_nudged = false;
         let mut narration = crate::stall_guard::NarrationTracker::default();
@@ -448,27 +428,11 @@ impl Session {
                     // keeps its working context and the queued instruction lands as soon as it
                     // legally can (Claude Code / Codex semantics).
                     continue;
-                } else if followup_intent_nudges < MAX_FOLLOWUP_INTENT_NUDGES
-                    && (crate::mid_intent::ends_mid_intent(&resp.content)
-                        || (resp.content.trim().is_empty() && bridge_tool_progress))
-                    && !self.has_open_tasks()
-                {
-                    followup_intent_nudges += 1;
-                    self.presenter.emit(PresenterEvent::Warning(format!(
-                        "model announced another action but stopped before doing it — continuing ({followup_intent_nudges}/{MAX_FOLLOWUP_INTENT_NUDGES})"
-                    )));
-                    // Re-sent at full context cost on every request, so keep it terse.
-                    const FOLLOWUP_INTENT_NUDGE: &str = "You stopped after announcing your next \
-                        step. Do it now with a tool call, or give a self-contained final answer.";
-                    let nseq = self.next_seq();
-                    let _ = self.store.add_message(
-                        &self.id,
-                        nseq,
-                        Role::System,
-                        FOLLOWUP_INTENT_NUDGE,
-                        None,
-                    );
-                    self.transcript.push(Message::system(FOLLOWUP_INTENT_NUDGE));
+                } else if self.followup_intent_nudge(
+                    &resp.content,
+                    bridge_tool_progress,
+                    &mut followup_intent_nudges,
+                ) {
                     continue;
                 } else if forge_provider::is_cli_bridge(&active_model) {
                     // Bridge cost ceiling (wave 5, fixes 1 + 2). This is the observation boundary a
