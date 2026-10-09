@@ -791,26 +791,6 @@ fn normalize_namespace(prefix: &str) -> &str {
     }
 }
 
-/// Move every system message to the front, preserving their relative order.
-///
-/// Forge injects system content mid-transcript — lattice symbols, command guidance, standing
-/// instructions — and hosted APIs accept that. A strict chat template does not: Qwen3.8's raises
-///
-///   Jinja Exception: System message must be at the beginning.
-///
-/// which llama.cpp surfaces as `Unable to generate parser for this template`, failing EVERY
-/// tool-bearing turn on an otherwise healthy local model. The content is identical either way —
-/// system guidance is not positional — so hoisting costs nothing and makes Forge's transcript
-/// legal for templates that enforce the rule.
-fn hoist_system_messages(messages: &[Message]) -> Vec<&Message> {
-    let mut ordered: Vec<&Message> = messages
-        .iter()
-        .filter(|m| matches!(m.role, Role::System))
-        .collect();
-    ordered.extend(messages.iter().filter(|m| !matches!(m.role, Role::System)));
-    ordered
-}
-
 /// Whether this model's API rejects a follow-up request that omits the assistant's
 /// `reasoning_content`.
 ///
@@ -863,12 +843,12 @@ fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMess
     // (e.g. "At most 1 image(s) may be provided in one prompt") on the total images in a
     // request. Images are only useful on the turn that introduced them, so only the most
     // recent image-bearing user turn keeps its images; earlier ones fall back to text-only.
-    let messages = hoist_system_messages(messages);
+    let messages = crate::system_placement::place_system_messages(messages);
     let last_image_turn = messages
         .iter()
         .rposition(|m| matches!(m.role, Role::User) && !m.images.is_empty());
     let mut out = Vec::with_capacity(messages.len());
-    for (i, m) in messages.iter().copied().enumerate() {
+    for (i, m) in messages.iter().enumerate() {
         match m.role {
             Role::System => out.push(ChatMessage::system(m.content.clone())),
             Role::User if m.images.is_empty() || Some(i) != last_image_turn => {
@@ -1072,7 +1052,8 @@ impl Provider for GenAiProvider {
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
         let mut output_spent = 0u64;
-        let mut attempt = 0usize;
+        let mut repeat_attempts = 0usize;
+        let mut empty_attempts = 0usize;
         loop {
             let mut repeated = false;
             let mut resp = self
@@ -1080,16 +1061,28 @@ impl Provider for GenAiProvider {
                 .await?;
             // Input stays the last attempt's: it is the live context size the gauge shows.
             resp.usage.output_tokens += output_spent;
-            if !repeated || !resp.tool_calls.is_empty() || attempt == MAX_REPEAT_RESAMPLES {
-                return Ok(resp);
-            }
-            attempt += 1;
-            output_spent = resp.usage.output_tokens;
-            tracing::warn!(model, attempt, "reply cut for repetition; resampling");
-            on_event(StreamEvent::Reasoning(
+            let note = if repeated
+                && resp.tool_calls.is_empty()
+                && repeat_attempts < MAX_REPEAT_RESAMPLES
+            {
+                repeat_attempts += 1;
+                tracing::warn!(
+                    model,
+                    attempt = repeat_attempts,
+                    "reply cut for repetition; resampling"
+                );
                 "\n[the provider cut this reply because it was repeating itself — asking again]\n"
-                    .to_string(),
-            ));
+            } else if crate::wire_params::is_empty_agent_reply(&resp, !tools.is_empty())
+                && empty_attempts < MAX_EMPTY_RESAMPLES
+            {
+                empty_attempts += 1;
+                tracing::warn!(model, "empty reply with tools on offer; resampling");
+                "\n[the provider returned an empty reply — asking again]\n"
+            } else {
+                return Ok(resp);
+            };
+            output_spent = resp.usage.output_tokens;
+            on_event(StreamEvent::Reasoning(note.to_string()));
         }
     }
 }
@@ -1101,6 +1094,14 @@ impl Provider for GenAiProvider {
 /// empty answer and nudge, with the looping reply now part of the prompt. Replaying the same
 /// request instead gives a fresh sample (seen 2026-09-16: 1 of 6 identical requests hit it).
 const MAX_REPEAT_RESAMPLES: usize = 2;
+
+/// Fresh samples asked for when a reply to a tool-offering request carries neither text nor a tool
+/// call. The agent loop answers that with a visible "your last response was empty" nudge, a stored
+/// empty message and, after two, a benched model — all for what is usually a one-off blank
+/// completion (75 in 60 days of live use, mostly Kimi). One silent retry of the identical request
+/// costs a call and keeps the transcript clean; a model that is blank twice still reaches the
+/// nudge path, which is the right place to judge it.
+const MAX_EMPTY_RESAMPLES: usize = 1;
 
 impl GenAiProvider {
     async fn complete_attempt(
@@ -1819,50 +1820,6 @@ mod tests {
                 "{id} takes a temperature"
             );
         }
-    }
-
-    /// Qwen3.8's chat template raises "System message must be at the beginning", which llama.cpp
-    /// reports as `Unable to generate parser for this template` — failing EVERY tool-bearing turn.
-    /// Forge injects system content mid-transcript (lattice symbols, command guidance), so the
-    /// conversion must hoist it rather than rely on providers being lenient.
-    #[test]
-    fn system_messages_are_hoisted_to_the_front_in_order() {
-        let msgs = vec![
-            Message::system("first system"),
-            Message::user("hello"),
-            Message::system("injected later"),
-            Message::user("second turn"),
-        ];
-        let hoisted = hoist_system_messages(&msgs);
-        let roles: Vec<_> = hoisted.iter().map(|m| format!("{:?}", m.role)).collect();
-        assert_eq!(
-            roles,
-            vec!["System", "System", "User", "User"],
-            "got {roles:?}"
-        );
-        assert_eq!(hoisted[0].content, "first system");
-        assert_eq!(
-            hoisted[1].content, "injected later",
-            "system order must be preserved"
-        );
-        assert_eq!(
-            hoisted[2].content, "hello",
-            "non-system order must be preserved"
-        );
-        assert_eq!(hoisted[3].content, "second turn");
-    }
-
-    /// A transcript that is already legal must come through untouched.
-    #[test]
-    fn a_transcript_without_stray_system_messages_is_unchanged() {
-        let msgs = vec![
-            Message::system("only system"),
-            Message::user("a"),
-            Message::user("b"),
-        ];
-        let hoisted = hoist_system_messages(&msgs);
-        let got: Vec<&str> = hoisted.iter().map(|m| m.content.as_str()).collect();
-        assert_eq!(got, vec!["only system", "a", "b"]);
     }
 
     use super::*;

@@ -14,6 +14,10 @@
 //!   - Qwen / ollama-style:       `<tool_call>{"name":"T","arguments":{…}}</tool_call>`.
 //!   - Llama / Groq-style:        `<function=T>{"p":"v"}</function>`, optionally wrapped in
 //!     `<tool_call>…</tool_call>` (observed leaking from groq llama-3.x via the mesh).
+//!   - DeepSeek DSML:             `<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="T"><｜｜DSML｜｜parameter
+//!     name="p" string="true">v</｜｜DSML｜｜parameter>…` — the Anthropic shape with a `｜DSML｜`
+//!     namespace in every tag, which DeepSeek's chat template emits as plain text when its
+//!     server-side tool parser does not claim the reply. Rewritten to the `<invoke>` form first.
 //!
 //! Wrapper namespaces some SDKs prepend (`default_api:`, `default_api.`, `functions.`,
 //! `mcp__forge__`) are normalized back to the bare Forge tool name so the recovered call dispatches.
@@ -26,6 +30,13 @@ use serde_json::{Map, Value};
 /// unchanged when nothing tool-call-shaped is present — the overwhelmingly common case, so this is
 /// cheap (a couple of substring checks) on normal prose.
 pub fn recover_text_tool_calls(content: &str) -> (Vec<ToolCall>, String) {
+    if content.contains(DSML_MARKER) {
+        return recover_dsml(content);
+    }
+    recover_plain(content)
+}
+
+fn recover_plain(content: &str) -> (Vec<ToolCall>, String) {
     // Fast bail: none of the recoverable markers are present.
     if !content.contains("<invoke")
         && !content.contains("<tool_call")
@@ -107,6 +118,62 @@ pub fn recover_text_tool_calls(content: &str) -> (Vec<ToolCall>, String) {
     (calls, cleaned)
 }
 
+const DSML_MARKER: &str = "DSML";
+
+/// Whether `c` is one of the vertical bars DeepSeek's template puts around `DSML`: the fullwidth
+/// `｜` (U+FF5C) in the observed output, and ASCII `|` when a gateway normalizes it.
+fn is_dsml_bar(c: char) -> bool {
+    c == '\u{ff5c}' || c == '|'
+}
+
+/// Rewrite DeepSeek DSML tags (`<｜｜DSML｜｜invoke …>`, `</｜｜DSML｜｜parameter>`) into the plain
+/// tag spelling by dropping the `｜…DSML…｜` namespace. Observed in the wild with two bars on each
+/// side; any run of one or more is accepted so a template revision does not reopen the leak.
+fn strip_dsml_namespace(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let after_lt = &rest[lt + 1..];
+        let (slash, body) = match after_lt.strip_prefix('/') {
+            Some(b) => ("/", b),
+            None => ("", after_lt),
+        };
+        let bars = body.trim_start_matches(is_dsml_bar);
+        let namespaced = bars.len() < body.len()
+            && bars
+                .strip_prefix(DSML_MARKER)
+                .is_some_and(|r| r.starts_with(is_dsml_bar));
+        if namespaced {
+            let tag = bars[DSML_MARKER.len()..].trim_start_matches(is_dsml_bar);
+            out.push('<');
+            out.push_str(slash);
+            rest = tag;
+        } else {
+            out.push('<');
+            rest = after_lt;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Recover DSML tool calls from `content`. The calls come from the standard `<invoke>` parser run
+/// over the de-namespaced text; whatever DSML is left afterwards (a reply cut off mid-block, so the
+/// block never closes) is cut from the visible text, because raw template markup is never an
+/// answer the user wants to read.
+fn recover_dsml(content: &str) -> (Vec<ToolCall>, String) {
+    let normalized = strip_dsml_namespace(content);
+    let (calls, mut cleaned) = recover_plain(&normalized);
+    for tag in ["<tool_calls>", "</tool_calls>"] {
+        cleaned = cleaned.replace(tag, "");
+    }
+    if let Some(at) = cleaned.find("<invoke") {
+        cleaned.truncate(at);
+    }
+    (calls, cleaned.trim().to_string())
+}
+
 fn parse_json_tool_call(v: &Value, idx: usize) -> Option<ToolCall> {
     let name = v.get("name")?.as_str()?.to_string();
     let args = v
@@ -179,13 +246,25 @@ fn parse_span(span: &str, idx: usize) -> Option<ToolCall> {
         };
         let gt = after.find('>')? + 1;
         let val_end = after.find("</parameter>")?;
+        // DSML marks each parameter `string="true"` (literal text, keep as a string even when it
+        // reads like a number) or `string="false"` (JSON).
+        let literal_string = after
+            .get(..gt)
+            .is_some_and(|head| head.contains("string=\"true\""));
         // A malformed open tag (no closing `>`) makes the first `>` land INSIDE `</parameter>`, so
         // `gt > val_end` and a raw `after[gt..val_end]` slice would panic on untrusted model output.
         // `.get` returns None for an inverted/out-of-bounds range; stop parsing params on a bad one.
         let Some(raw) = after.get(gt..val_end).map(str::trim) else {
             break;
         };
-        args.insert(pname, coerce(raw));
+        args.insert(
+            pname,
+            if literal_string {
+                Value::String(raw.to_string())
+            } else {
+                coerce(raw)
+            },
+        );
         rest = &after[val_end + "</parameter>".len()..];
     }
     // No <parameter> tags but a JSON body inside the invoke is a valid single-object arg form.
@@ -404,6 +483,7 @@ pub fn looks_like_unexecuted_tool_call(content: &str) -> bool {
     if content.contains("<invoke")
         || content.contains("<tool_call")
         || content.contains("<function=")
+        || (content.contains(DSML_MARKER) && strip_dsml_namespace(content).contains("<invoke"))
         || content.contains("default_api:")
         || content.contains("default_api.")
     {
@@ -850,5 +930,68 @@ mod tests {
             let repaired = repair_malformed_args(Value::String(s.clone()));
             assert!(repaired.is_object(), "non-object result for input: {s:?}");
         }
+    }
+
+    /// The exact leak persisted in session 4888aca1 (deepseek-v4-pro): three calls in one
+    /// `tool_calls` block, delivered as the reply text with no structured calls.
+    const DSML_REPLY: &str = "<｜｜DSML｜｜tool_calls>\n\
+<｜｜DSML｜｜invoke name=\"read_file\">\n\
+<｜｜DSML｜｜parameter name=\"path\" string=\"true\">crates/forge-core/src/routing_policy.rs</｜｜DSML｜｜parameter>\n\
+<｜｜DSML｜｜parameter name=\"start_line\" string=\"false\">223</｜｜DSML｜｜parameter>\n\
+</｜｜DSML｜｜invoke>\n\
+<｜｜DSML｜｜invoke name=\"search\">\n\
+<｜｜DSML｜｜parameter name=\"pattern\" string=\"true\">42</｜｜DSML｜｜parameter>\n\
+</｜｜DSML｜｜invoke>\n\
+</｜｜DSML｜｜tool_calls>";
+
+    #[test]
+    fn recovers_deepseek_dsml_tool_calls_and_clears_the_text() {
+        let (calls, cleaned) = recover_text_tool_calls(DSML_REPLY);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(
+            calls[0].args["path"],
+            "crates/forge-core/src/routing_policy.rs"
+        );
+        assert_eq!(
+            calls[0].args["start_line"], 223,
+            "string=false is typed JSON"
+        );
+        assert_eq!(calls[1].name, "search");
+        assert_eq!(calls[1].args["pattern"], "42", "string=true stays a string");
+        assert_eq!(calls[0].id, "recovered_0");
+        assert_eq!(calls[1].id, "recovered_1");
+        assert_eq!(
+            cleaned, "",
+            "no template markup left for the user: {cleaned:?}"
+        );
+    }
+
+    #[test]
+    fn dsml_keeps_surrounding_prose_and_accepts_single_or_ascii_bars() {
+        let text = "Reading it.\n<|DSML|tool_calls><|DSML|invoke name=\"shell\">\
+            <|DSML|parameter name=\"command\" string=\"true\">ls</|DSML|parameter>\
+            </|DSML|invoke></|DSML|tool_calls>";
+        let (calls, cleaned) = recover_text_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].args["command"], "ls");
+        assert_eq!(cleaned, "Reading it.");
+    }
+
+    #[test]
+    fn a_dsml_block_cut_off_mid_call_is_hidden_not_shown() {
+        let text = "Checking.\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"read_file\">\n\
+            <｜｜DSML｜｜parameter name=\"path\" string=\"true\">src/li";
+        let (calls, cleaned) = recover_text_tool_calls(text);
+        assert!(calls.is_empty(), "an unterminated call is not guessed at");
+        assert_eq!(cleaned, "Checking.");
+    }
+
+    #[test]
+    fn dsml_is_flagged_as_an_unexecuted_tool_call() {
+        assert!(looks_like_unexecuted_tool_call(DSML_REPLY));
+        assert!(!looks_like_unexecuted_tool_call(
+            "DSML is a template format."
+        ));
     }
 }

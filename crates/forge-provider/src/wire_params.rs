@@ -2,7 +2,7 @@
 //! -vs-model distinction the failover policy keys on. Split out of `lib.rs` to keep the crate
 //! root under the architecture size guard.
 
-use crate::ProviderError;
+use crate::{ModelResponse, ProviderError};
 
 /// Widen an `f32` temperature to the `f64` a JSON body carries, WITHOUT dragging the binary
 /// representation's noise along.
@@ -201,4 +201,10 @@ mod repetition_penalty_tests {
             repetition_penalty_body("anthropic::claude-opus-5", Some(0.8), Some(0.5)).is_none()
         );
     }
+}
+
+/// A reply with no text and no tool call to a request that offered tools: the agent loop cannot
+/// act on it and would nudge. Whitespace-only text counts as empty.
+pub(crate) fn is_empty_agent_reply(resp: &ModelResponse, tools_offered: bool) -> bool {
+    tools_offered && resp.tool_calls.is_empty() && resp.content.trim().is_empty()
 }

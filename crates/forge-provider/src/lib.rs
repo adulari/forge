@@ -21,6 +21,7 @@ pub mod headroom;
 mod mock;
 mod oauth_responses;
 mod refresh_lock;
+mod system_placement;
 mod tool_recovery;
 pub mod wire_params;
 mod xai_oauth;
