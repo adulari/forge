@@ -41,9 +41,10 @@ impl Session {
             min_context_tokens: None,
         };
 
-        let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
+        let agents = Arc::new(forge_config::load_agents_layered(
+            self.workspace.root(),
             &self.config.mesh.subagents.agents_dir,
-        )));
+        ));
         let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
             provider: Arc::clone(&self.provider),
@@ -226,9 +227,10 @@ impl Session {
 
         // Re-resolve the agent definition by its recorded name so a named type keeps its
         // persona + toolset; the follow-up message becomes the routed "task".
-        let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
+        let agents = Arc::new(forge_config::load_agents_layered(
+            self.workspace.root(),
             &self.config.mesh.subagents.agents_dir,
-        )));
+        ));
         let request = subagent::AgentRequest {
             agent: agent_name.clone(),
             task: message.clone(),
@@ -336,9 +338,10 @@ impl Session {
         };
 
         let budget = self.budget_snapshot();
-        let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
+        let agents = Arc::new(forge_config::load_agents_layered(
+            self.workspace.root(),
             &self.config.mesh.subagents.agents_dir,
-        )));
+        ));
         let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
             provider: Arc::clone(&self.provider),
@@ -454,9 +457,10 @@ impl Session {
             .add_ui_note(&self.id, command_seq, Role::User, &command)?;
 
         let budget = self.budget_snapshot();
-        let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
+        let agents = Arc::new(forge_config::load_agents_layered(
+            self.workspace.root(),
             &self.config.mesh.subagents.agents_dir,
-        )));
+        ));
         let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
             provider: Arc::clone(&self.provider),
@@ -635,9 +639,10 @@ impl Session {
         task: &str,
     ) -> Result<(duel::DuelReport, Vec<worktree::WorktreeGuard>), CoreError> {
         let budget = self.budget_snapshot();
-        let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
+        let agents = Arc::new(forge_config::load_agents_layered(
+            self.workspace.root(),
             &self.config.mesh.subagents.agents_dir,
-        )));
+        ));
         let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
             provider: Arc::clone(&self.provider),

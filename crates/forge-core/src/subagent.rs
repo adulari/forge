@@ -49,8 +49,8 @@ mod requests;
 pub use requests::{
     cancel_subagent_spec, is_write_capable, list_subagents_spec, parse_detached_flag,
     parse_requests, resolve, resolve_child_address, rewrite_args_for_root, send_to_agent_spec,
-    spawn_agents_spec, AdmissionHandle, AgentRequest, ResolvedAgent, CANCEL_SUBAGENT_TOOL,
-    LIST_SUBAGENTS_TOOL, SEND_TO_AGENT_TOOL,
+    spawn_agents_spec, spawn_agents_spec_for, spawn_agents_spec_with, AdmissionHandle,
+    AgentRequest, ResolvedAgent, CANCEL_SUBAGENT_TOOL, LIST_SUBAGENTS_TOOL, SEND_TO_AGENT_TOOL,
 };
 
 /// Shared, cheaply-cloneable machinery a subagent needs — the same backends the parent uses.
@@ -114,7 +114,7 @@ pub async fn route_child(
             effort: None,
             tier: agent.tier.unwrap_or(TaskTier::Standard),
             model: model.to_string(),
-            rationale: "duel: pinned".to_string(),
+            rationale: "pinned by the agent type or /duel".to_string(),
             fallbacks: Vec::new(),
             // A duel candidate is a hard, explicit pin: switching models mid-duel would
             // invalidate the comparison, so the pinned rate-limit backoff applies here too.
@@ -1062,6 +1062,7 @@ mod tests {
                 description: "d".into(),
                 tools: vec!["read_file".into()],
                 tier: Some(TaskTier::Complex),
+                pinned_model: Some("p::m".into()),
                 system_prompt: "You review.".into(),
             },
         );
@@ -1075,6 +1076,7 @@ mod tests {
         assert_eq!(named.system_prompt, "You review.");
         assert_eq!(named.tools, vec!["read_file"]);
         assert_eq!(named.tier, Some(TaskTier::Complex));
+        assert_eq!(named.pinned_model.as_deref(), Some("p::m"));
 
         let unknown = resolve(
             &AgentRequest {
@@ -1086,6 +1088,35 @@ mod tests {
         assert!(unknown.tools.is_empty()); // → default read-only set
         assert_eq!(unknown.tier, None); // → mesh-routed
         assert_eq!(unknown.system_prompt, SUBAGENT_SYSTEM);
+    }
+
+    #[test]
+    fn spawn_spec_lists_agent_types_and_accepts_subagent_type() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "reviewer".to_string(),
+            AgentDef {
+                name: "reviewer".into(),
+                description: "Reviews diffs".into(),
+                tools: vec!["read_file".into()],
+                tier: None,
+                pinned_model: None,
+                system_prompt: String::new(),
+            },
+        );
+        let with = spawn_agents_spec_with(4, &agents);
+        assert!(with
+            .description
+            .contains("- reviewer: Reviews diffs [read_file]"));
+        assert!(!spawn_agents_spec_with(4, &HashMap::new())
+            .description
+            .contains("Available `agent` types"));
+        let reqs = parse_requests(
+            &serde_json::json!({ "agents": [{ "subagent_type": "reviewer", "task": "t" }] }),
+            4,
+        )
+        .unwrap();
+        assert_eq!(reqs[0].agent, "reviewer");
     }
 
     #[tokio::test]

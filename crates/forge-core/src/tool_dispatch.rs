@@ -40,6 +40,7 @@ impl Session {
             || name == fleet::MESSAGE_SESSION_TOOL
             || name == crate::dispatch::DISPATCH_SESSIONS_TOOL
             || name == heartbeat::MANAGE_HEARTBEATS_TOOL
+            || name == wakeup::SCHEDULE_WAKEUP_TOOL
         {
             return false;
         }
@@ -257,6 +258,9 @@ impl Session {
         if call.name == heartbeat::MANAGE_HEARTBEATS_TOOL {
             return self.manage_heartbeats(msg_id, call);
         }
+        if call.name == wakeup::SCHEDULE_WAKEUP_TOOL {
+            return self.schedule_wakeup(msg_id, call);
+        }
         // External MCP tools (meta-tools + exposed server tools) are owned by the manager, not the
         // built-in registry. Route them here, still through the permission broker (mcp-client.md).
         if self.mcp.as_ref().is_some_and(|m| m.knows_tool(&call.name)) {
@@ -465,13 +469,26 @@ impl Session {
             }
         }
 
-        let decision = permission::decide(
+        let workspace = self.workspace_binding.read().ok().map(|g| g.clone());
+        let decision = permission::decide_in(
             self.mode,
             side_effect,
             &call.name,
             &effective_args,
             &self.rules,
+            workspace.as_deref(),
         );
+        if self.mode == forge_types::PermissionMode::Auto && decision == PermissionDecision::Ask {
+            if let Some(why) = permission::auto_risk(
+                side_effect,
+                &call.name,
+                &effective_args,
+                workspace.as_deref(),
+            ) {
+                self.presenter
+                    .emit(PresenterEvent::Warning(format!("auto mode asks: {why}")));
+            }
+        }
         // Notification lifecycle hook (Claude-Code parity): the agent needs the user's attention to
         // approve this tool. Fired just before the prompt is shown (inert when no hooks configured).
         // Inlined with field-level borrows because `tool` holds an immutable borrow of `self.tools`
@@ -570,6 +587,7 @@ impl Session {
                         // reminder, remind the model (right after this result) that its work is
                         // uncommitted. `git status` runs only when the reminder is due.
                         if self.config.git.commit_nudge
+                            && self.config.git.commit_policy.nudges()
                             && self.git_hygiene.record_edit(
                                 self.workspace.root(),
                                 path,

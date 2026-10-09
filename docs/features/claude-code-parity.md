@@ -1,4 +1,4 @@
-# Feature: Claude Code parity (statusline command, notifications, reply language)
+# Feature: Claude Code parity (statusline, notifications, language, auto mode, wakeups, agent types, commit policy)
 
 Small gaps people hit when moving from Claude Code to Forge.
 
@@ -42,3 +42,72 @@ terminals/tmux setups that do not report focus events.
 The base system prompt tells the model to answer in the language of the user's latest message.
 This stops models such as Kimi from drifting into another language mid-session. Bridged Claude and
 Codex turns receive the same prompt, since system messages are flattened into the bridge transcript.
+
+## Auto permission mode (`--mode auto`)
+
+Forge already had Tempers (Read-only / Ask / Auto-edit / Full). **Auto-edit** auto-approves edits
+*and* shell, relying on the builtin deny rules alone, so there was no "proceed unless risky"
+posture. The new **Auto** temper (`PermissionMode::Auto`, key `auto`) fills it:
+
+| call | outcome |
+| --- | --- |
+| read-only tools | allow |
+| edits inside the workspace (or `/tmp`) | allow |
+| shell that is not risky | allow |
+| network GET / HEAD | allow |
+| builtin-deny match (`rm -rf /`, `.env`, `~/.ssh`, ...) | **deny** (the floor still beats every mode) |
+| risky shell or write | **ask** |
+| external MCP tool | ask |
+
+Risky means: `rm -r/-f`, `git reset --hard`, force-push or remote branch delete, `git clean`,
+`git checkout -- .`, `git branch -D`, `DROP`/`TRUNCATE` SQL, `dd of=`, `mkfs`, recursive
+`chmod`/`chown`, `sudo`, `kill`, container/cluster/terraform deletes, package `publish`, uploads
+(`curl -d/-F/-T/-X POST`, `scp`, `ssh`, `nc`, `rsync` to a remote), pipe-to-shell, writes (redirects,
+`cp`/`mv`/`tee`/`sed -i`, write tools) outside the workspace or via `~`/`..`, and reads of credential
+paths or secret environment variables. The classifier is `permission/auto.rs` (`auto_risk`); it is a
+heuristic floor like the denylist, not a sandbox. Explicit `allow`/`ask`/`deny` rules are resolved
+before it, so a user rule can lift or tighten any single command. When auto asks, a warning line
+names the reason.
+
+Selectable with `forge run --mode auto`, `permission_mode = "auto"` in config, `/mode`, and the
+SHIFT+TAB cycle (Ask, Auto-edit, Auto, Read-only). Subagents and the bridge treat an ask as a
+deny (no interactive surface), as for every mode.
+
+## `schedule_wakeup`
+
+Survey: `forge schedule` (OS timers, fresh process), `/heartbeat` and `manage_heartbeats`
+(recurring prompts into the live session) and background-job exit wakes already existed. Missing
+was Claude Code's one-shot "resume me in N seconds". `schedule_wakeup(delay_seconds, prompt,
+reason?)` clamps the delay to 60-3600 s and re-enters the same session with the prompt once it is
+idle. It is stored as a one-shot agent heartbeat under the reserved label `wakeup` (no
+migration), deleted when delivered; calling it again replaces the pending one. Advertised on the
+direct path and through the CLI bridge (`mcp_serve`, via the shared store). Like heartbeats it
+fires only while the session is open (TUI or daemon), not in a one-shot `forge run` that exits.
+
+## Subagent types
+
+`.forge/agents/*.md` (name, description, tools, tier) already loaded. Added: `.claude/agents/`
+(project and `~/.claude/agents`) and `~/.forge/agents` are merged in, later layers winning
+(`~/.claude`, `~/.forge`, project `.claude`, project `agents_dir`). Claude `tools: Read, Grep, Bash`
+lists translate to Forge tool names (unknown Claude tools are dropped), `model:` maps `haiku` /
+`sonnet` / `opus` to a tier and `provider::model` to a hard pin, and `spawn_agents` now lists
+each type with its description and tools and accepts `subagent_type` as an alias of `agent`.
+
+## `[git] commit_policy`
+
+`unit` (default, unchanged), `end` (one commit when the task is complete) or `never` (leave
+changes in the tree). It swaps the system prompt's version-control paragraph
+(`commit_policy.rs`) and silences the git-hygiene reminders for anything but `unit`. The
+never-push rule is kept by every policy.
+
+## Logged-in browser attach (investigation, not built)
+
+`forge-browser` drives a real Chrome over CDP but only a Forge-owned persistent profile under
+`$XDG_DATA_HOME/forge/browser/<profile>`: you log in once by hand, later turns re-attach through the
+profile's `DevToolsActivePort`. It cannot attach to the Chrome you already use because (1) Chrome
+refuses remote debugging on the default profile directory and (2) there is no "attach to this
+endpoint" entry point (`BrowserConfig`/`launch` only start or re-attach to its own instance). What
+would close the gap, cheapest first: an `attach` action taking a `ws://`/`http://host:port` the user
+started with `--remote-debugging-port` plus a non-default `--user-data-dir`; importing cookies from
+a profile (OS-keyring encrypted, needs per-platform decryption); or bridging Claude's Chrome
+extension over native messaging. None is built here.

@@ -32,6 +32,7 @@ mod auxiliary_policy;
 mod btw_policy;
 pub mod capsule;
 pub(crate) mod clock;
+mod commit_policy;
 mod compaction_headroom;
 mod compaction_policy;
 mod compaction_shape;
@@ -85,6 +86,7 @@ mod text_policy;
 pub mod tokens;
 mod tool_dispatch;
 mod tool_output;
+pub mod wakeup;
 pub(crate) use tool_output::tool_detail;
 pub mod turn_contract;
 mod turn_guards;
@@ -2279,8 +2281,10 @@ impl Session {
                 .as_ref()
                 .is_none_or(|scope| scope.permits_tool(subagent::SPAWN_AGENTS_TOOL))
         {
-            specs.push(subagent::spawn_agents_spec(
+            specs.push(subagent::spawn_agents_spec_for(
                 self.config.mesh.subagents.max_agents,
+                self.workspace.root(),
+                &self.config.mesh.subagents.agents_dir,
             ));
             // Follow-ups to already-spawned children (persistent subagents). Advertised beside
             // spawn_agents — a fresh session simply has no children yet and the tool says so.
@@ -2322,7 +2326,7 @@ impl Session {
             .as_ref()
             .is_none_or(|scope| scope.permits_tool(heartbeat::MANAGE_HEARTBEATS_TOOL))
         {
-            specs.push(heartbeat::manage_heartbeats_spec());
+            specs.extend(heartbeat::tool_specs());
         }
         // The plan-presentation tool — offered ONLY in planning mode, so the model proposes a plan
         // (rendered as an interactive card) instead of editing. Gating it to Plan mode also makes
@@ -3129,7 +3133,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Commit discipline (git_hygiene.rs): while files this session edited are still
         // uncommitted, say so once per turn; when the branch is well ahead of its upstream, ask
         // the model to offer a push. `git status` is a process spawn, so it runs off the executor.
-        if self.config.git.commit_nudge {
+        if self.config.git.commit_nudge && self.config.git.commit_policy.nudges() {
             let root = self.workspace.root().to_path_buf();
             let push_ahead = self.config.git.push_nudge_ahead;
             let mut tracker = std::mem::take(&mut self.git_hygiene);
@@ -11894,8 +11898,9 @@ mod tests {
 
         // Default config now starts at AcceptEdits (Smith).
         assert_eq!(session.temper(), PermissionMode::AcceptEdits); // Smith
+        assert_eq!(session.cycle_temper(), PermissionMode::Auto);
+        assert_eq!(store.session_mode(&id).unwrap(), "Auto", "switch persisted");
         assert_eq!(session.cycle_temper(), PermissionMode::Plan); // → Survey
-        assert_eq!(store.session_mode(&id).unwrap(), "Plan", "switch persisted");
         assert_eq!(session.cycle_temper(), PermissionMode::Default); // → Guarded
         assert_eq!(session.cycle_temper(), PermissionMode::AcceptEdits); // wraps → Smith
                                                                          // Cycling never lands on the dangerous Unfettered temper.

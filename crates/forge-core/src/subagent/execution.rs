@@ -30,12 +30,18 @@ pub(super) async fn execute_tool(
         return Ok(result);
     };
     let side_effect = tool.side_effect();
-    let allowed =
-        match permission::decide(ctx.mode, side_effect, &call.name, &call.args, &ctx.rules) {
-            PermissionDecision::Allow => true,
-            // No interactive surface in a subagent → Ask becomes Deny (safe default).
-            PermissionDecision::Deny | PermissionDecision::Ask => false,
-        };
+    let allowed = match permission::decide_in(
+        ctx.mode,
+        side_effect,
+        &call.name,
+        &call.args,
+        &ctx.rules,
+        Some(ctx.worktree_root.as_deref().unwrap_or(&ctx.repo_root)),
+    ) {
+        PermissionDecision::Allow => true,
+        // No interactive surface in a subagent → Ask becomes Deny (safe default).
+        PermissionDecision::Deny | PermissionDecision::Ask => false,
+    };
     let (result, status) = if allowed {
         // A daemon may host sessions rooted anywhere. Never let a child's relative path fall back
         // to the daemon process cwd: read-only children use the session repo, isolated writers use

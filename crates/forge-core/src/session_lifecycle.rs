@@ -97,6 +97,7 @@ impl Session {
                 "AcceptEdits" => Some(PermissionMode::AcceptEdits),
                 "Bypass" => Some(PermissionMode::Bypass),
                 "Plan" => Some(PermissionMode::Plan),
+                "Auto" => Some(PermissionMode::Auto),
                 _ => PermissionMode::from_label(&stored_mode),
             };
             if let Some(m) = parsed {

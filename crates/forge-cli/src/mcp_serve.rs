@@ -342,6 +342,9 @@ impl ForgeMcp {
         if name == forge_core::heartbeat::MANAGE_HEARTBEATS_TOOL {
             return Ok(self.handle_manage_heartbeats(&args));
         }
+        if name == forge_core::wakeup::SCHEDULE_WAKEUP_TOOL {
+            return Ok(bridge_budget::wakeup_result(&self.tasks_store, &args));
+        }
 
         // Plan presentation — report the plan to the out-of-band sink so the parent renders the
         // card and runs the approval flow (which persists + seeds tasks). The parent ignores it
@@ -717,7 +720,7 @@ impl ForgeMcp {
         // Advertise the subagent virtual tools only when enabled here — spawn_agents for fresh
         // fan-out, send_to_agent for follow-ups to persisted children (persistent subagents).
         if let Some(s) = &self.subagents {
-            let spec = subagent::spawn_agents_spec(s.max_agents);
+            let spec = subagent::spawn_agents_spec_with(s.max_agents, &s.ctx.agents);
             let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
             tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
             let follow = subagent::send_to_agent_spec();
@@ -765,9 +768,7 @@ impl ForgeMcp {
         tools.push(self.message_session_tool());
         // Advertise agent-created heartbeats — bridge parity with the direct path. Always on
         // (like update_tasks/remember): the parent session id is resolved lazily at call time.
-        let hs = forge_core::heartbeat::manage_heartbeats_spec();
-        let hs_schema: JsonObject = hs.schema.as_object().cloned().unwrap_or_default();
-        tools.push(Tool::new(hs.name, hs.description, Arc::new(hs_schema)));
+        tools.extend(bridge_budget::heartbeat_tools());
         // Advertise plan presentation so a bridge model can propose a plan in planning mode. The
         // bridge can't see the parent's runtime temper, so it's advertised unconditionally; the
         // parent honors the plan only when it is actually in Plan mode (gated in run_model_loop).
@@ -855,9 +856,10 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
             repo_boosts,
         );
         let parent_id = store.create_session(".", &format!("{:?}", config.permission_mode))?;
-        let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
+        let agents = Arc::new(forge_config::load_agents_layered(
+            &std::env::current_dir().unwrap_or_default(),
             &config.mesh.subagents.agents_dir,
-        )));
+        ));
         let ctx = AgentCtx {
             provider,
             router,

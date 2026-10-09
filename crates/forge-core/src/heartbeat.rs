@@ -17,7 +17,7 @@ pub const MIN_HEARTBEAT_INTERVAL_SECS: i64 = 30;
 /// (enforced by the store's partial unique index) and never counts against this.
 pub const MAX_AGENT_HEARTBEATS_PER_SESSION: usize = 8;
 
-fn now_secs() -> i64 {
+pub(crate) fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -77,6 +77,9 @@ pub fn format_heartbeat_interval(secs: i64) -> String {
 /// of looking like an unexplained user message.
 fn format_delivery(hb: &forge_store::SessionHeartbeat) -> String {
     match &hb.label {
+        Some(label) if label == crate::wakeup::WAKEUP_LABEL => {
+            format!("[scheduled wakeup] {}", hb.prompt)
+        }
         Some(label) => format!("[heartbeat: {label}] {}", hb.prompt),
         None => format!("[heartbeat] {}", hb.prompt),
     }
@@ -94,9 +97,23 @@ pub fn claim_due_heartbeat_prompts(
     store: &Store,
     session_id: &str,
 ) -> std::result::Result<Vec<String>, forge_store::StoreError> {
-    store
-        .claim_due_heartbeats(session_id, now_secs())
-        .map(|heartbeats| heartbeats.iter().map(format_delivery).collect())
+    let claimed = store.claim_due_heartbeats(session_id, now_secs())?;
+    // A wakeup is one-shot: once claimed for delivery it is spent.
+    if claimed
+        .iter()
+        .any(|hb| hb.owner == "agent" && hb.label.as_deref() == Some(crate::wakeup::WAKEUP_LABEL))
+    {
+        store.delete_agent_heartbeat_by_label(session_id, crate::wakeup::WAKEUP_LABEL)?;
+    }
+    Ok(claimed.iter().map(format_delivery).collect())
+}
+
+/// Tool specs the model sees for session re-entry: recurring heartbeats and one-shot wakeups.
+pub fn tool_specs() -> Vec<ToolSpec> {
+    vec![
+        manage_heartbeats_spec(),
+        crate::wakeup::schedule_wakeup_spec(),
+    ]
 }
 
 /// The `manage_heartbeats` virtual tool name (agent-created heartbeats).
