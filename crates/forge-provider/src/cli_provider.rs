@@ -309,10 +309,11 @@ impl CliKind {
                     // NOTHING for Fable, while `claude --model fable` answers on the same
                     // install. `--help` is the CLI's own documentation of `--model` and does
                     // name it, so the two are unioned; both are non-billing.
-                    let documented = run_model_probe(self.default_binary(), &["--help"])
-                        .await
-                        .map(|out| parse_claude_model_aliases(&out))
-                        .unwrap_or_default();
+                    let documented =
+                        run_model_probe(self.default_binary(), &["--help"], self.probe_timeout())
+                            .await
+                            .map(|out| parse_claude_model_aliases(&out))
+                            .unwrap_or_default();
                     return Ok(merge_claude_aliases(advertised, &documented));
                 }
             }
@@ -322,7 +323,7 @@ impl CliKind {
             CliKind::Antigravity => &["models"],
             CliKind::Codex => &["debug", "models"],
         };
-        let out = run_model_probe(self.default_binary(), args).await?;
+        let out = run_model_probe(self.default_binary(), args, self.probe_timeout()).await?;
         let models = match self {
             CliKind::ClaudeCode => parse_claude_model_aliases(&out),
             CliKind::Antigravity => parse_agy_models(&out),
@@ -399,10 +400,12 @@ impl CliKind {
                     );
                 } else {
                     tracing::warn!(
-                        "{} model discovery failed: {} — the mesh will use an unverified model \
-                         list for this bridge",
-                        self.prefix(),
-                        collapse_oauth_urls(self.default_binary(), &error)
+                        "{}",
+                        model_probe::failure_warning(
+                            self.prefix(),
+                            &collapse_oauth_urls(self.default_binary(), &error),
+                            recall_bridge_models(self).map(|(_, age)| age),
+                        )
                     );
                 }
                 match recall_bridge_models(self) {
@@ -763,13 +766,11 @@ fn parse_claude_model_aliases(help: &str) -> Vec<String> {
     out
 }
 
-const MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Run a model-enumeration command and return its stdout, or a one-line explanation of why it
 /// produced nothing. The explanation quotes the CLI's own message (`agy models` says "Please sign
 /// in to view available models") because that, not a generic "discovery failed", is what tells a
 /// user what to do about it.
-async fn run_model_probe(binary: &str, args: &[&str]) -> Result<String, String> {
+async fn run_model_probe(binary: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
     let owned: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
     let label = format!("`{binary} {}`", args.join(" "));
     let mut cmd = bridge_command(binary, &owned);
@@ -777,7 +778,7 @@ async fn run_model_probe(binary: &str, args: &[&str]) -> Result<String, String> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    match tokio::time::timeout(MODEL_PROBE_TIMEOUT, cmd.output()).await {
+    match tokio::time::timeout(timeout, cmd.output()).await {
         Ok(Ok(out)) if out.status.success() => {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         }
@@ -790,10 +791,7 @@ async fn run_model_probe(binary: &str, args: &[&str]) -> Result<String, String> 
             probe_failure_message(&out.stderr, &out.stdout)
         )),
         Ok(Err(e)) => Err(format!("{label} could not be launched: {e}")),
-        Err(_) => Err(format!(
-            "{label} timed out after {}s",
-            MODEL_PROBE_TIMEOUT.as_secs()
-        )),
+        Err(_) => Err(format!("{label} timed out after {}s", timeout.as_secs())),
     }
 }
 
@@ -1793,6 +1791,7 @@ mod cli_stream;
 pub mod credentials;
 mod empty_turn;
 mod error_policy;
+mod model_probe;
 mod sign_in;
 use cli_stream::*;
 use sign_in::{collapse_oauth_urls, not_logged_in_message, read_to_cap_watching};
