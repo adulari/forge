@@ -11,7 +11,7 @@ pub(super) use apply::run_migrations;
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
 use m0035_dispatch::migration_0035;
 use m0037_fk_indexes::migration_0037;
-use m0038_provider_items::migration_0038;
+use m0038_provider_items::{migration_0036, migration_0038};
 mod usage;
 use usage::migration_0030;
 
@@ -783,22 +783,5 @@ pub(super) fn seed_singleton_rows(conn: &Connection) -> rusqlite::Result<()> {
 fn migration_0034(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_routing_decision_message ON routing_decision(message_id)",
-    )
-}
-
-/// Migration #36: a real marker for a harness-injected continuation/empty-response nudge.
-///
-/// These are synthesized by forge-core (e.g. `EMPTY_DIFF_NUDGE`, the empty-response and
-/// followup-intent nudges) and persisted with `role='user'` so a thinking-mode/tool-calling
-/// provider's next request still ends on a legal user turn — but that means the ONLY signal any
-/// client had for telling a nudge apart from a real, person-typed message was matching the exact,
-/// well-known nudge text (see mobile's `lib/harnessNudge.ts`), which breaks the moment a nudge is
-/// reworded or a new one is added. `nudge=1` marks the row at the point it's created, independent
-/// of its wording, while the message itself is still stored/replayed as an ordinary `Role::User`
-/// turn for the model.
-fn migration_0036(conn: &Connection) -> rusqlite::Result<()> {
-    add_column_if_missing(
-        conn,
-        "ALTER TABLE message ADD COLUMN nudge INTEGER NOT NULL DEFAULT 0",
     )
 }
