@@ -17,8 +17,6 @@ permissions:
 
 env:
   CARGO_BUILD_JOBS: "4"
-  # Shared with ci.yml: the trim step bounds every persistent Cargo slot together.
-  FORGE_MAX_TARGET_CACHE_KIB: "33554432" # 32 GiB
 
 jobs:
   changes:
@@ -137,9 +135,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: clippy
-      # checkout's `git clean -ffdx` would otherwise delete mobile/src-tauri/target every job.
-      - name: Use persistent Cargo target dir
-        run: bash scripts/ci/cargo-cache-env.sh tauri
       - name: Ensure cargo-audit is installed
         run: |
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
