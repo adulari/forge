@@ -114,13 +114,12 @@ fn segment_risk(segment: &str, ws: Option<&Path>) -> Option<String> {
     let reason: Option<&str> = match cmd {
         "sudo" | "su" | "doas" | "pkexec" => Some("privilege escalation"),
         "rm" | "rmdir" | "unlink" | "shred" => {
-            if cmd == "shred" || has_short('r') || has_short('R') || has_short('f') {
-                Some("recursive or forced delete")
-            } else if has_long(&["--recursive", "--force", "--no-preserve-root"]) {
-                Some("recursive or forced delete")
-            } else {
-                None
-            }
+            let forced = cmd == "shred"
+                || has_short('r')
+                || has_short('R')
+                || has_short('f')
+                || has_long(&["--recursive", "--force", "--no-preserve-root"]);
+            forced.then_some("recursive or forced delete")
         }
         "dd" if rest.iter().any(|w| w.starts_with("of=")) => Some("raw disk write (dd of=)"),
         "mkfs" | "wipefs" | "fdisk" | "parted" | "sfdisk" | "gdisk" => Some("disk-level operation"),
@@ -129,6 +128,21 @@ fn segment_risk(segment: &str, ws: Option<&Path>) -> Option<String> {
             Some("recursive permission/ownership change")
         }
         "kill" | "killall" | "pkill" => Some("terminates processes"),
+        "find"
+            if rest.iter().any(|w| w == "-delete")
+                || rest.windows(2).any(|w| {
+                    matches!(w[0].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir")
+                        && matches!(
+                            w[1].rsplit('/').next().unwrap_or(&w[1]),
+                            "rm" | "shred" | "unlink" | "mv"
+                        )
+                }) =>
+        {
+            Some("find deletes or moves matched files")
+        }
+        c if inline_code_risk(c, rest) => Some(
+            "runs inline interpreter code that deletes files, spawns processes or uses the network",
+        ),
         "git" => return git_risk(rest),
         "docker" | "podman" => container_risk(rest),
         "kubectl" | "helm" if args.iter().any(|a| matches!(*a, "delete" | "uninstall")) => {
@@ -151,6 +165,60 @@ fn segment_risk(segment: &str, ws: Option<&Path>) -> Option<String> {
         return Some(r.to_string());
     }
     outside_write_risk(cmd, rest, &flags, ws)
+}
+
+/// `python -c`, `node -e`, `perl -e` … run arbitrary code the word-level rules above never see.
+/// Ask when that code reaches for deletion, process spawning or the network.
+fn inline_code_risk(cmd: &str, rest: &[String]) -> bool {
+    let interpreter = cmd.starts_with("python")
+        || matches!(
+            cmd,
+            "node" | "nodejs" | "deno" | "bun" | "perl" | "ruby" | "php" | "osascript"
+        );
+    if !interpreter {
+        return false;
+    }
+    let Some(pos) = rest.iter().position(|w| {
+        matches!(
+            w.as_str(),
+            "-c" | "-e" | "-r" | "-E" | "--eval" | "-p" | "--print"
+        )
+    }) else {
+        return false;
+    };
+    let code = rest[pos + 1..].join(" ").to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "rmtree",
+        "remove(",
+        "unlink",
+        "rmdir",
+        "rm -",
+        "rm(",
+        "truncate",
+        "os.system",
+        "subprocess",
+        "popen",
+        "child_process",
+        "exec(",
+        "execsync",
+        "spawn",
+        "system(",
+        "`",
+        "requests.",
+        "urllib",
+        "http.client",
+        "socket",
+        "fetch(",
+        "net::http",
+        "lwp::",
+        "curl",
+        "writefile",
+        "open(",
+        "deno.remove",
+        "deno.run",
+        "fs.rm",
+    ];
+    MARKERS.iter().any(|m| code.contains(m))
 }
 
 fn git_risk(rest: &[String]) -> Option<String> {
@@ -459,6 +527,17 @@ fn strip_wrappers(words: &[String]) -> Option<&[String]> {
         let is_assign = w.split_once('=').is_some_and(|(k, _)| {
             !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_')
         });
+        if matches!(w, "xargs" | "timeout") {
+            // `xargs -0 rm -rf`, `timeout 30s rm -rf x`: classify the command they run.
+            i += 1;
+            while i < words.len()
+                && (words[i].starts_with('-')
+                    || (w == "timeout" && words[i].starts_with(|c: char| c.is_ascii_digit())))
+            {
+                i += 1;
+            }
+            continue;
+        }
         if is_assign || matches!(w, "env" | "nohup" | "time" | "nice" | "command" | "exec") {
             if w == "env" && i + 1 >= words.len() {
                 break;
@@ -587,6 +666,32 @@ mod tests {
             "bash -c 'rm -rf x'",
         ] {
             risky(c);
+        }
+    }
+
+    #[test]
+    fn indirect_deletes_and_inline_code_ask() {
+        for c in [
+            "find . -name '*.rs' -delete",
+            "find /tmp -exec rm -rf {} +",
+            "ls | xargs rm -rf",
+            "xargs -0 rm -f < files",
+            "timeout 30s rm -rf build",
+            "python3 -c \"import shutil; shutil.rmtree('/home/u')\"",
+            "python -c 'import os; os.system(\"curl x\")'",
+            "node -e \"require('child_process').execSync('rm -rf ~')\"",
+            "perl -e 'unlink glob q(*)'",
+        ] {
+            risky(c);
+        }
+        for c in [
+            "find . -name '*.rs'",
+            "python3 -c 'print(1+1)'",
+            "node -e 'console.log(process.version)'",
+            "xargs -n1 echo",
+            "timeout 60 cargo test",
+        ] {
+            safe(c);
         }
     }
 
