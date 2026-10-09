@@ -643,13 +643,14 @@ pub(crate) async fn run_chat_tui(
     if git_coauthor {
         maybe_install_git_hook(&tui_config);
     }
-    let sid = {
-        let (hooks, sid, workspace) = {
+    let (sid, session_store) = {
+        let (hooks, sid, workspace, store) = {
             let s = session.lock().await;
             (
                 s.hooks().to_vec(),
                 s.session_id().to_string(),
                 s.workspace_root().to_path_buf(),
+                s.store.clone(),
             )
         };
         let context = forge_core::hooks::run_session_hooks_in(
@@ -665,7 +666,7 @@ pub(crate) async fn run_chat_tui(
                 s.inject_hook_context(c);
             }
         }
-        sid
+        (sid, store)
     };
 
     // Publish this terminal-local session into the shared store's presence table so a
@@ -680,11 +681,7 @@ pub(crate) async fn run_chat_tui(
     let publish_local_sessions = forge_config::load()
         .map(|c| c.remote.publish_local_sessions)
         .unwrap_or(true);
-    let local_presence = LocalPresenceGuard::new(
-        publish_local_sessions
-            .then(|| crate::open_store().ok().map(Arc::new))
-            .flatten(),
-    );
+    let local_presence = LocalPresenceGuard::new(publish_local_sessions.then_some(session_store));
     local_presence.retarget(&sid);
 
     // On a resumed session (`--continue` / `--resume <id>`): render the FULL prior transcript into

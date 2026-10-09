@@ -17,10 +17,9 @@ impl Store {
             tx.commit()?;
             Ok(())
         })?;
-        // Opportunistic, bounded retention sweep so the global append-only DB doesn't grow forever.
-        // Best-effort: a prune failure must never block opening a session.
-        let _ = self.prune(RETENTION_HORIZON_SECS, PRUNE_BATCH);
-        let _ = self.prune_empty(EMPTY_SESSION_HORIZON_SECS, EMPTY_PRUNE_BATCH);
+        // Retention runs off this path (see `maintenance.rs`): a cascading delete here once held
+        // the write lock for over a minute while a session was being opened.
+        self.spawn_maintenance_once();
         Ok(id)
     }
 

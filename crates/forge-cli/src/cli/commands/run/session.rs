@@ -102,8 +102,9 @@ pub(crate) async fn build_session_with_self_mcp(
     session_cwd: Option<&str>,
 ) -> Result<Session> {
     let mut clock = StartupClock::start();
+    let store = Arc::new(open_store()?);
     if let Some(session_id) = resume.as_deref() {
-        if crate::open_store()?
+        if store
             .session_handoff_blocked(session_id)
             .context("checking Anywhere handoff state")?
         {
@@ -183,7 +184,6 @@ pub(crate) async fn build_session_with_self_mcp(
     // the provider it can actually use.
     let pin = pin.map(|p| pin_members(&p).join(","));
 
-    let store = Arc::new(open_store()?);
     clock.mark("store open + migrations");
     // Never construct a session router from an expired Codex pressure reading. The helper uses a
     // fresh CLI rollout when available, otherwise performs one bounded minimal OAuth probe; it
@@ -296,10 +296,7 @@ pub(crate) async fn build_session_with_self_mcp(
 
     let catalog = catalog
         .map(|catalog| crate::cli::commands::models::apply_outcome_calibration(catalog, &store));
-    let ctx_windows = crate::open_store()
-        .ok()
-        .and_then(|s| s.all_model_contexts().ok())
-        .unwrap_or_default();
+    let ctx_windows = store.all_model_contexts().unwrap_or_default();
     clock.mark("calibration + context windows");
     let workspace_root = match session_cwd {
         Some(cwd) => std::path::PathBuf::from(cwd)
@@ -319,10 +316,7 @@ pub(crate) async fn build_session_with_self_mcp(
     };
     let workspace_cwd = workspace_root.display().to_string();
     let repo_key = workspace_cwd.clone();
-    let repo_boosts = crate::open_store()
-        .ok()
-        .and_then(|s| s.duel_boosts(&repo_key).ok())
-        .unwrap_or_default();
+    let repo_boosts = store.duel_boosts(&repo_key).unwrap_or_default();
     // OpenCode Go requires `x-opencode-session`: one STABLE id per conversation (enforced from
     // 2026-09-06). Seed it from the session id before the provider makes its first request, so a
     // resumed conversation keeps the same id across restarts instead of looking like a new one.

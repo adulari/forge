@@ -359,6 +359,124 @@ fn fetch_claude_rate_limits(stats: &mut BridgeStats, home: &Path) {
     }
 }
 
+/// Token totals for one minute of a Claude transcript. Bucketing keeps the per-file aggregate small
+/// while leaving the 5h and 7d cutoffs accurate to the minute.
+type MinuteBucket = (u64, u64);
+
+/// What the incremental scan remembers about one transcript.
+///
+/// `~/.claude/projects` holds gigabytes of append-only JSONL touched within the week. Re-reading all
+/// of it on every start burned ~47% of a core for 10–20 s; with this index an unchanged file costs
+/// one `stat` and a grown one costs only the bytes appended since `offset`.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct FileScan {
+    /// Bytes already folded into `buckets`: always the end of a complete line.
+    offset: u64,
+    /// Modification time (secs) when `offset` was recorded; lets a same-size rewrite be noticed.
+    mtime: i64,
+    /// Minute (epoch secs / 60) → (input, output) tokens.
+    buckets: std::collections::BTreeMap<i64, MinuteBucket>,
+}
+
+type ScanIndex = std::collections::HashMap<String, FileScan>;
+
+fn scan_index_path(home: &Path) -> PathBuf {
+    home.join(".cache/forge/claude-usage-index.json")
+}
+
+fn load_scan_index(home: &Path) -> ScanIndex {
+    std::fs::read(scan_index_path(home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_scan_index(home: &Path, index: &ScanIndex) {
+    let path = scan_index_path(home);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(bytes) = serde_json::to_vec(index) else {
+        return;
+    };
+    // Write-then-rename so a concurrent Forge never reads a half-written index.
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    if std::fs::write(&tmp, bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+fn bytes_contain(hay: &[u8], needle: &[u8]) -> bool {
+    let Some((&first, rest)) = needle.split_first() else {
+        return true;
+    };
+    let mut i = 0;
+    while let Some(pos) = hay[i..].iter().position(|&b| b == first) {
+        let start = i + pos;
+        if hay[start + 1..].starts_with(rest) {
+            return true;
+        }
+        i = start + 1;
+    }
+    false
+}
+
+/// Fold the lines appended to `path` since `scan.offset` into `scan.buckets`.
+fn scan_claude_file(path: &Path, len: u64, mtime: i64, scan: &mut FileScan) {
+    use std::io::{BufRead, Seek, SeekFrom};
+    // Shrunk or rewritten in place: the old aggregate no longer describes this file.
+    if len < scan.offset || (len == scan.offset && mtime != scan.mtime && scan.offset != 0) {
+        *scan = FileScan::default();
+    }
+    scan.mtime = mtime;
+    if len == scan.offset {
+        return;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return;
+    };
+    if file.seek(SeekFrom::Start(scan.offset)).is_err() {
+        return;
+    }
+    let mut reader = std::io::BufReader::with_capacity(256 * 1024, file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                // A partial trailing line is still being written; pick it up next time.
+                if line.last() != Some(&b'\n') {
+                    break;
+                }
+                scan.offset += n as u64;
+            }
+        }
+        // User/tool-result lines carry the large payloads and no usage: skip them unparsed.
+        if !bytes_contain(&line, b"\"type\":\"assistant\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        if v["type"] != "assistant" {
+            continue;
+        }
+        let ts = v["timestamp"].as_str().map(parse_ts).unwrap_or(0);
+        if ts <= 0 {
+            continue;
+        }
+        let u = &v["message"]["usage"];
+        let inp = u["input_tokens"].as_u64().unwrap_or(0)
+            + u["cache_read_input_tokens"].as_u64().unwrap_or(0)
+            + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+        let out = u["output_tokens"].as_u64().unwrap_or(0);
+        let bucket = scan.buckets.entry(ts.div_euclid(60)).or_default();
+        bucket.0 += inp;
+        bucket.1 += out;
+    }
+}
+
 fn fetch_claude(stats: &mut BridgeStats, home: &Path) {
     fetch_claude_rate_limits(stats, home);
     let root = home.join(".claude/projects");
@@ -369,33 +487,48 @@ fn fetch_claude(stats: &mut BridgeStats, home: &Path) {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_recent_jsonl(&root, cutoff_week, &mut files);
 
+    let mut old_index = load_scan_index(home);
+    let mut index = ScanIndex::new();
+    let mut changed = false;
     for path in files {
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let key = path.to_string_lossy().into_owned();
+        let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
-        for line in content.lines() {
-            let Ok(v) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if v["type"] != "assistant" {
-                continue;
-            }
-            let ts = v["timestamp"].as_str().map(parse_ts).unwrap_or(0);
-            if ts < cutoff_week {
-                continue;
-            }
-            let u = &v["message"]["usage"];
-            let inp = u["input_tokens"].as_u64().unwrap_or(0)
-                + u["cache_read_input_tokens"].as_u64().unwrap_or(0)
-                + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-            let out = u["output_tokens"].as_u64().unwrap_or(0);
-            stats.claude_weekly_in += inp;
-            stats.claude_weekly_out += out;
-            if ts >= cutoff_5h {
-                stats.claude_5h_in += inp;
-                stats.claude_5h_out += out;
-            }
-        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64);
+        let mut scan = old_index.remove(&key).unwrap_or_default();
+        let before = scan.offset;
+        scan_claude_file(&path, meta.len(), mtime, &mut scan);
+        changed |= scan.offset != before;
+        let weekly_floor = cutoff_week.div_euclid(60);
+        let (week_in, week_out, h5_in, h5_out) = scan.buckets.range(weekly_floor..).fold(
+            (0, 0, 0, 0),
+            |(wi, wo, hi, ho), (&minute, &(i, o))| {
+                let recent = minute * 60 >= cutoff_5h;
+                (
+                    wi + i,
+                    wo + o,
+                    hi + if recent { i } else { 0 },
+                    ho + if recent { o } else { 0 },
+                )
+            },
+        );
+        stats.claude_weekly_in += week_in;
+        stats.claude_weekly_out += week_out;
+        stats.claude_5h_in += h5_in;
+        stats.claude_5h_out += h5_out;
+        // Buckets older than the window can never count again.
+        scan.buckets = scan.buckets.split_off(&weekly_floor);
+        index.insert(key, scan);
+    }
+    // Files that fell out of the window were dropped from `index`; persist that too.
+    changed |= !old_index.is_empty();
+    if changed {
+        save_scan_index(home, &index);
     }
 }
 
@@ -681,5 +814,80 @@ mod tests {
             std::env::current_dir().unwrap().as_path(),
             "probe must not inherit the project cwd"
         );
+    }
+
+    fn claude_line(secs_ago: i64, inp: u64, out: u64) -> String {
+        let ts = chrono::DateTime::from_timestamp(now_epoch() - secs_ago, 0)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","message":{{"usage":{{"input_tokens":{inp},"output_tokens":{out}}}}}}}"#
+        ) + "\n"
+    }
+
+    fn claude_project(home: &Path) -> PathBuf {
+        let dir = home.join(".claude/projects/p");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("s.jsonl")
+    }
+
+    #[test]
+    fn claude_totals_are_incremental_and_survive_a_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let file = claude_project(home.path());
+        let user_line = "{\"type\":\"user\",\"message\":\"hello\"}\n";
+        std::fs::write(
+            &file,
+            format!(
+                "{user_line}{}{}",
+                claude_line(60, 10, 1),
+                claude_line(6 * 3600, 100, 5)
+            ),
+        )
+        .unwrap();
+
+        let mut stats = BridgeStats::default();
+        fetch_claude(&mut stats, home.path());
+        assert_eq!((stats.claude_5h_in, stats.claude_5h_out), (10, 1));
+        assert_eq!((stats.claude_weekly_in, stats.claude_weekly_out), (110, 6));
+
+        let index = load_scan_index(home.path());
+        let len = std::fs::metadata(&file).unwrap().len();
+        assert_eq!(
+            index.values().next().unwrap().offset,
+            len,
+            "index covers the file"
+        );
+
+        // Append one complete line and one still being written: only the complete one counts,
+        // and the old lines are not re-added.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap();
+        write!(f, "{}{{\"type\":\"assist", claude_line(30, 1, 2)).unwrap();
+        drop(f);
+        let mut stats = BridgeStats::default();
+        fetch_claude(&mut stats, home.path());
+        assert_eq!((stats.claude_5h_in, stats.claude_5h_out), (11, 3));
+        assert_eq!((stats.claude_weekly_in, stats.claude_weekly_out), (111, 8));
+    }
+
+    #[test]
+    fn claude_totals_rescan_a_truncated_transcript() {
+        let home = tempfile::tempdir().unwrap();
+        let file = claude_project(home.path());
+        std::fs::write(
+            &file,
+            format!("{}{}", claude_line(60, 10, 1), claude_line(120, 20, 2)),
+        )
+        .unwrap();
+        fetch_claude(&mut BridgeStats::default(), home.path());
+
+        std::fs::write(&file, claude_line(60, 7, 3)).unwrap();
+        let mut stats = BridgeStats::default();
+        fetch_claude(&mut stats, home.path());
+        assert_eq!((stats.claude_weekly_in, stats.claude_weekly_out), (7, 3));
     }
 }
