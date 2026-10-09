@@ -169,4 +169,25 @@ for workflow in \
 done
 grep -Fq "FORGE_TRIM_RELEASE_DOCKER_VOLUMES: \"1\"" .github/workflows/release.yml
 
+# Out-of-tree slots from cargo-cache-env.sh count toward the same budget, and nothing but
+# `<root>/<slot>/target` is removed.
+slots="$scratch/slots"
+mkdir -p "$slots/ci/target" "$slots/ci/keep" "$slots/release/target"
+dd if=/dev/zero of="$slots/ci/target/blob" bs=1024 count=8 status=none
+dd if=/dev/zero of="$slots/release/target/blob" bs=1024 count=8 status=none
+FORGE_CARGO_CACHE_ROOT="$slots" FORGE_CACHE_TRIM_DRY_RUN=1 FORGE_MAX_TARGET_CACHE_KIB=1 \
+  bash scripts/ci/trim-runner-cache.sh "$scratch" >/dev/null
+test -e "$slots/ci/target/blob"
+FORGE_CARGO_CACHE_ROOT="$slots" FORGE_MAX_TARGET_CACHE_KIB=1 \
+  bash scripts/ci/trim-runner-cache.sh "$scratch" >/dev/null
+test ! -e "$slots/ci/target"
+test ! -e "$slots/release/target"
+test -d "$slots/ci/keep"
+
+RUNNER_WORKSPACE="$scratch/work" GITHUB_ENV="$scratch/env" \
+  bash scripts/ci/cargo-cache-env.sh ci vendor
+grep -Fxq "CARGO_TARGET_DIR=$scratch/work/.cargo-ci/ci/target" "$scratch/env"
+grep -Fxq "FORGE_VENDOR_TARGET_DIR=$scratch/work/.cargo-ci/vendor/target" "$scratch/env"
+grep -Fxq "FORGE_CARGO_CACHE_ROOT=$scratch/work/.cargo-ci" "$scratch/env"
+
 echo "runner cache trim tests passed"

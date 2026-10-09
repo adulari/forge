@@ -38,6 +38,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: "4"
   RUSTFLAGS: "-D warnings"
+  # CI never reads a debugger-grade backtrace: panic locations come from the panic itself, not
+  # from debuginfo. Dropping line tables shrinks every test binary link and the persistent target.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  FORGE_MAX_TARGET_CACHE_KIB: "33554432" # 32 GiB across all slots
 
 jobs:
   changes:
@@ -173,9 +177,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: clippy
-      # No Swatinem/rust-cache here: this is a persistent self-hosted runner whose `target/`
-      # already survives on local disk between jobs — restoring/saving a cache over the network
-      # would be pure overhead on top of an already-warm build dir.
+      # No Swatinem/rust-cache here: this is a persistent self-hosted runner, so a cache restored
+      # over the network would be pure overhead. But the workspace `target/` is NOT the persistent
+      # dir: checkout's `git clean -ffdx` deletes it before every job (measured: ~770 crates
+      # recompiled cold per job). cargo-cache-env.sh moves it beside the checkout, where it lives.
+      - name: Use persistent Cargo target dir
+        run: bash scripts/ci/cargo-cache-env.sh ci vendor
       # `--locked` fails if Cargo.lock is out of sync with Cargo.toml. Without it, a version bump
       # that forgets to refresh the lock (e.g. `cargo update -p forge` — a no-op, the root crate is
       # forge-cli) otherwise blows up only at release time, where the build DOES use `--locked`
@@ -197,6 +204,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      # Same slots as clippy: dependency build scripts and proc-macros compiled by one are reused
+      # by the other, and both run on the serialized heavy runner so they never contend for it.
+      - name: Use persistent Cargo target dir
+        run: bash scripts/ci/cargo-cache-env.sh ci vendor
       # FORGE_DB is not optional here, for the same reason AGENTS.md makes it mandatory locally: a
       # handful of tests open the DEFAULT store when it is unset, and this is a PERSISTENT
       # self-hosted runner, so that store survives between jobs and is shared by every branch. A
@@ -209,7 +220,9 @@ jobs:
       - run: cargo test --locked --all --all-features
         env:
           FORGE_DB: ${{ runner.temp }}/forge-ci-test.db
-      - run: cargo test --locked --manifest-path vendor/genai-0.6.5/Cargo.toml
+      - run: |
+          CARGO_TARGET_DIR="${FORGE_VENDOR_TARGET_DIR:-${CARGO_TARGET_DIR:-$PWD/vendor/genai-0.6.5/target}}" \
+            cargo test --locked --manifest-path vendor/genai-0.6.5/Cargo.toml
         env:
           FORGE_DB: ${{ runner.temp }}/forge-ci-vendor.db
       - name: Bound persistent build cache
@@ -236,11 +249,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      # Own slot: a release-profile tree is large and would otherwise push the dev tree over the
+      # trim budget, throwing away the warm clippy/test cache it shares a disk with.
+      - name: Use persistent Cargo target dir
+        run: bash scripts/ci/cargo-cache-env.sh release
       - run: cargo build --release --locked --bin forge
       - name: Verify upgrade, reconnect, and rollback from latest release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/release-upgrade-e2e.sh "" target/release/forge
+        run: scripts/release-upgrade-e2e.sh "" "$CARGO_TARGET_DIR/release/forge"
       - name: Bound persistent build cache
         if: always()
         run: bash scripts/ci/trim-runner-cache.sh

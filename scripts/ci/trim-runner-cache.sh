@@ -60,6 +60,15 @@ cargo_roots=(
   "$workspace/vendor/genai-0.6.5/target"
   "$workspace/mobile/src-tauri/target"
 )
+# Slots created by cargo-cache-env.sh live beside the checkout, so `git clean` never removes them
+# and this bound is the only thing that does. Only `<root>/<slot>/target` is in scope.
+if [[ -n "${FORGE_CARGO_CACHE_ROOT:-}" && -d "$FORGE_CARGO_CACHE_ROOT" && ! -L "$FORGE_CARGO_CACHE_ROOT" ]]; then
+  for slot_target in "$FORGE_CARGO_CACHE_ROOT"/*/target; do
+    if [[ -d "$slot_target" && ! -L "$slot_target" ]]; then
+      cargo_roots+=("$slot_target")
+    fi
+  done
+fi
 cargo_total_kib=0
 for cargo_root in "${cargo_roots[@]}"; do
   if [[ -d "$cargo_root" && ! -L "$cargo_root" ]]; then
