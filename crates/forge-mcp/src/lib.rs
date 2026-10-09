@@ -578,6 +578,50 @@ impl McpManager {
         }
     }
 
+    /// Servers whose connect attempt failed outright. `Unauthorized` is left out: a token problem
+    /// is not cured by waiting, so retrying it only spams the remote.
+    fn failed_servers(&self) -> Vec<forge_config::McpServerConfig> {
+        let failed: Vec<String> = self
+            .conns
+            .lock()
+            .values()
+            .filter(|c| matches!(c.status, ServerStatus::Failed(_)))
+            .map(|c| c.name.clone())
+            .collect();
+        self.config
+            .active_servers()
+            .filter(|s| failed.contains(&s.name))
+            .cloned()
+            .collect()
+    }
+
+    /// Re-attempt servers that failed their initial connect, for a daemon that started before the
+    /// network was up. Waits `backoff[i]` before round `i` (then `steady`), for at most `rounds`
+    /// rounds, and returns how many servers are still failed. A server that connects becomes
+    /// callable through the meta-tools immediately.
+    pub async fn retry_failed_connects(
+        &self,
+        backoff: &[Duration],
+        steady: Duration,
+        rounds: usize,
+    ) -> usize {
+        for round in 0..rounds {
+            if self.failed_servers().is_empty() {
+                break;
+            }
+            tokio::time::sleep(backoff.get(round).copied().unwrap_or(steady)).await;
+            for server in self.failed_servers() {
+                match self.connect_one(&server).await {
+                    Ok(()) => tracing::info!("mcp: server '{}' connected on retry", server.name),
+                    Err(reason) => {
+                        tracing::debug!("mcp: retry of '{}' failed: {reason}", server.name)
+                    }
+                }
+            }
+        }
+        self.failed_servers().len()
+    }
+
     /// Remove a server from the live connection map by name. The child process (if any) will be
     /// dropped, which closes the stdio pipe and causes it to exit.
     pub fn disconnect(&self, name: &str) {
@@ -1493,6 +1537,41 @@ mod tests {
         assert!(
             conn.service.is_none(),
             "dead RunningService dropped immediately (child reaped, no session-long orphan)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_initial_connect_is_retried_a_bounded_number_of_times() {
+        let config = McpConfig {
+            connect_timeout_secs: 1,
+            servers: vec![forge_config::McpServerConfig {
+                name: "down".into(),
+                transport: forge_config::McpTransport::Stdio {
+                    command: "sh".into(),
+                    args: vec!["-c".into(), "exit 1".into()],
+                    env: Default::default(),
+                },
+                auth: None,
+                secret_env: vec![],
+                enabled: true,
+            }],
+            ..Default::default()
+        };
+        let mgr = McpManager::connecting(&config);
+        mgr.connect_active().await;
+        assert_eq!(mgr.failed_servers().len(), 1);
+        let started = std::time::Instant::now();
+        let still_failed = mgr
+            .retry_failed_connects(&[Duration::from_millis(1)], Duration::from_millis(1), 3)
+            .await;
+        assert_eq!(still_failed, 1, "a dead server stays failed, no hang");
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert_eq!(
+            mgr.retry_failed_connects(&[], Duration::from_millis(1), 0)
+                .await,
+            1,
+            "zero rounds attempts nothing"
         );
     }
 

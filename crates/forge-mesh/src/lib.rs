@@ -21,6 +21,8 @@ mod context;
 #[cfg(test)]
 mod doc_sync;
 pub mod explain;
+mod live_catalog;
+pub use live_catalog::LiveCatalog;
 pub mod pacing_view;
 pub mod pricing;
 pub mod rung_cost;
@@ -1143,7 +1145,9 @@ pub struct HeuristicRouter {
     pricing: pricing::Pricing,
     /// Live catalog of usable models (auto-discovery). When present and `mesh.auto_discover` is
     /// on, the router ranks the best discovered model per tier instead of the configured lists.
-    catalog: Option<ModelCatalog>,
+    catalog: Option<std::sync::Arc<ModelCatalog>>,
+    /// Late-discovery slot; supersedes `catalog` once published (see `live_catalog.rs`).
+    live_catalog: Option<LiveCatalog>,
     /// Known context-window sizes (model id → token count). Used to filter out models that
     /// cannot fit the current transcript during routing.
     context_windows: std::collections::HashMap<String, u32>,
@@ -1237,7 +1241,7 @@ impl HeuristicRouter {
         ceiling: Option<EffortLevel>,
         code_heavy: bool,
     ) -> Option<EffortLevel> {
-        rung_cost::best_value_rung(self.catalog.as_ref()?, model, ceiling, code_heavy)
+        rung_cost::best_value_rung(&*self.catalog()?, model, ceiling, code_heavy)
     }
 
     /// Documented in docs/features/mesh-routing.md.
@@ -1249,6 +1253,7 @@ impl HeuristicRouter {
             model_available: default_model_available,
             pricing,
             catalog: None,
+            live_catalog: None,
             context_windows: std::collections::HashMap::new(),
             repo_boosts: std::collections::HashMap::new(),
             seed_only: false,
@@ -1267,7 +1272,7 @@ impl HeuristicRouter {
     /// Attach a discovered model catalog for auto-discovery routing (no-op when empty).
     /// Documented in docs/features/mesh-routing.md.
     pub fn with_catalog(mut self, catalog: ModelCatalog) -> Self {
-        self.catalog = Some(catalog);
+        self.catalog = Some(std::sync::Arc::new(catalog));
         self
     }
 
@@ -1330,7 +1335,7 @@ impl HeuristicRouter {
     }
 
     fn auto_active(&self) -> bool {
-        self.config.mesh.auto_discover && self.catalog.as_ref().is_some_and(|c| !c.is_empty())
+        self.config.mesh.auto_discover && self.catalog().is_some_and(|c| !c.is_empty())
     }
 
     /// Ordered shortlist used for COMPACTION — capable free models, best FIRST.
@@ -1351,8 +1356,8 @@ impl HeuristicRouter {
         }
         capable.sort_by(|a, b| {
             let score = |m: &str| {
-                self.catalog
-                    .as_ref()
+                self.catalog()
+                    .as_deref()
                     .and_then(|catalog| catalog.benchmark_for(m))
                     .map(|(intelligence, _)| intelligence)
             };
@@ -1392,8 +1397,8 @@ impl HeuristicRouter {
         let mut capable_free: Vec<String> = free
             .iter()
             .filter(|model| {
-                self.catalog
-                    .as_ref()
+                self.catalog()
+                    .as_deref()
                     .and_then(|catalog| catalog.benchmark_for(model))
                     .map_or_else(
                         || capability::quality_class(model) >= 2,
@@ -1479,7 +1484,7 @@ impl HeuristicRouter {
             // first usable entry, so a longer tail never changes selection — it only deepens
             // failover. (The bug: a top-5 cap meant ~6 unique models across tiers, so a few dead
             // providers exhausted the chain while most of the catalog went untried.)
-            let Some(catalog) = self.catalog.as_ref() else {
+            let Some(catalog) = self.catalog() else {
                 return self.apply_repo_boosts(self.widened_seed_candidates(tier));
             };
             let ranked = catalog.ranked_seeded(
@@ -1949,7 +1954,7 @@ impl HeuristicRouter {
             && !hints.continuation
             && effort != Some(EffortLevel::Low)
         {
-            if let Some(catalog) = self.catalog.as_ref() {
+            if let Some(catalog) = self.catalog() {
                 let metric = |model: &str| catalog.benchmark_for(model).map(|(_, coding)| coding);
                 if let Some(max_quality) = usable
                     .iter()
@@ -1966,8 +1971,8 @@ impl HeuristicRouter {
                                 let b_in_band = max_quality - b_score <= AFFINITY_QUALITY_BAND;
                                 if a_in_band && b_in_band {
                                     if let (Some(a_latency), Some(b_latency)) = (
-                                        dependable_calibrated_latency(catalog, a),
-                                        dependable_calibrated_latency(catalog, b),
+                                        dependable_calibrated_latency(&catalog, a),
+                                        dependable_calibrated_latency(&catalog, b),
                                     ) {
                                         if (a_latency - b_latency).abs()
                                             >= INITIAL_ANCHOR_LATENCY_MARGIN_MS
@@ -2094,8 +2099,8 @@ impl HeuristicRouter {
     }
 
     fn affinity_quality(&self, model: &str, code_heavy: bool) -> Option<f64> {
-        self.catalog
-            .as_ref()
+        self.catalog()
+            .as_deref()
             .and_then(|catalog| catalog.benchmark_for(model))
             .map(|(intelligence, coding)| if code_heavy { coding } else { intelligence })
     }
@@ -2325,7 +2330,7 @@ impl HeuristicRouter {
             }
         }
 
-        if let Some(catalog) = self.catalog.as_ref() {
+        if let Some(catalog) = self.catalog() {
             let warm_calibration = catalog.runtime_calibration_for(warm);
             let best_calibration = catalog.runtime_calibration_for(&best);
             if let (Some(warm_latency), Some(best_latency)) = (warm_calibration, best_calibration) {
@@ -2529,7 +2534,7 @@ impl HeuristicRouter {
             effort,
             has_images,
         );
-        if self.seed_only {
+        if self.seed_only && self.catalog().is_none() {
             decision
                 .rationale
                 .push_str(" — no catalog yet: built-in seed");
@@ -2703,8 +2708,8 @@ impl HeuristicRouter {
                             && !hints.continuation
                             && effort != Some(EffortLevel::Low)
                         {
-                            if let Some(note) = self.catalog.as_ref().and_then(|catalog| {
-                                initial_anchor_speed_note(catalog, &routed_usable, &model)
+                            if let Some(note) = self.catalog().and_then(|catalog| {
+                                initial_anchor_speed_note(&catalog, &routed_usable, &model)
                             }) {
                                 why.push_str(&format!(" — {note}"));
                             }
@@ -5324,6 +5329,35 @@ mod tests {
             "{}",
             d.rationale
         );
+    }
+
+    #[tokio::test]
+    async fn a_late_discovery_makes_a_running_router_route_to_the_new_provider() {
+        // A router built while every keyed provider was unreachable (no catalog) must pick up
+        // the complete catalog once a retried discovery publishes it — without being rebuilt.
+        let live = LiveCatalog::default();
+        let r = HeuristicRouter::new(list_config("standard", &["openai::gpt-4o-mini"]))
+            .with_availability(|_| true)
+            .with_seed_only_catalog()
+            .with_live_catalog(live.clone());
+        assert!(!r.auto_active(), "nothing published yet");
+        live.publish(ModelCatalog::new(vec![
+            "groq::llama-3.3-70b-versatile".into()
+        ]));
+        assert!(r.auto_active(), "the published catalog must be picked up");
+        let d = r
+            .route(
+                &"add a new endpoint that returns the list of users as json".repeat(2),
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(d.model, "groq::llama-3.3-70b-versatile", "{}", d.rationale);
+        assert!(!d.rationale.contains("no catalog yet"), "{}", d.rationale);
     }
 
     #[tokio::test]

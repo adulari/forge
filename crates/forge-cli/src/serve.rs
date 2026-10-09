@@ -1810,7 +1810,11 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
     } else {
         println!("  restoring {restoring} session(s) from the previous run");
     }
-    for id in live.into_iter().take(RESURRECT_LIMIT) {
+    let mut attempted = 0;
+    for id in live {
+        if attempted >= RESURRECT_LIMIT {
+            break;
+        }
         let request = CreateSessionReq {
             resume: Some(id.clone()),
             ..Default::default()
@@ -1818,15 +1822,30 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
         let response = create_session(State(state.clone()), Ok(axum::Json(request))).await;
         let status = response.status();
         if status.is_success() {
+            attempted += 1;
             continue;
         }
         // Stop retrying a session the daemon can no longer open — otherwise every restart repeats
         // the same failure forever. A transient error keeps its flag and is tried again next time.
-        if status == axum::http::StatusCode::NOT_FOUND {
+        // Only the fleet flag is cleared: the session record stays, and an explicit resume after
+        // the user restores the directory re-enrols it. A tombstoned session does not spend the
+        // restore budget, so live sessions behind it are still reached.
+        if is_permanent_restore_failure(status) {
             let _ = state.store.set_session_daemon_live(&id, false);
+        } else {
+            attempted += 1;
         }
         eprintln!("⚠ could not restore session {id}: {status}");
     }
+}
+
+/// 404 (no such session) and 410 (recorded workspace/worktree deleted) cannot succeed on the next
+/// restart either, unlike a transient start failure.
+fn is_permanent_restore_failure(status: axum::http::StatusCode) -> bool {
+    matches!(
+        status,
+        axum::http::StatusCode::NOT_FOUND | axum::http::StatusCode::GONE
+    )
 }
 
 async fn archive_session(
@@ -7386,6 +7405,74 @@ pub(crate) mod tests {
 
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session whose recorded workspace is gone fails every restore with 410. It must be
+    /// dropped from the restored fleet (record kept) so later restarts skip it, and it must not
+    /// spend the restore budget that live sessions behind it need.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restore_tombstones_gone_sessions_and_still_reaches_live_ones() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FORGE_DB", dir.path().join("restore-tomb.db"));
+        let store = Arc::new(crate::open_store().unwrap());
+
+        let live_ws = dir.path().join("live-workspace");
+        std::fs::create_dir_all(&live_ws).unwrap();
+        let live_id = store
+            .create_session(live_ws.to_str().unwrap(), "default")
+            .unwrap();
+        store
+            .add_message(&live_id, 0, forge_types::Role::User, "hi", None)
+            .unwrap();
+        store.set_session_daemon_live(&live_id, true).unwrap();
+        let mut dead = Vec::new();
+        for n in 0..RESURRECT_LIMIT + 1 {
+            let ws = dir.path().join(format!("dead-{n}"));
+            std::fs::create_dir_all(&ws).unwrap();
+            let id = store
+                .create_session(ws.to_str().unwrap(), "default")
+                .unwrap();
+            std::fs::remove_dir_all(&ws).unwrap();
+            store
+                .add_message(&id, 0, forge_types::Role::User, "hi", None)
+                .unwrap();
+            store.set_session_daemon_live(&id, true).unwrap();
+            dead.push(id);
+        }
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.path().display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+
+        resurrect_fleet(state.clone()).await;
+
+        assert!(
+            state.registry.get(&live_id).await.is_some(),
+            "dead sessions ahead of it must not exhaust the restore budget"
+        );
+        let still_live = store.daemon_live_sessions().unwrap();
+        assert!(
+            dead.iter().all(|id| !still_live.contains(id)),
+            "410 sessions must be tombstoned: {still_live:?}"
+        );
+        assert!(still_live.contains(&live_id));
+        assert!(
+            dead.iter().all(|id| store.session_exists(id).unwrap()),
+            "the session records themselves are kept"
+        );
+
+        std::env::remove_var("FORGE_DB");
     }
 
     /// `POST /api/sessions` with a `prompt` runs the session's first turn immediately — the
