@@ -4,6 +4,21 @@ use super::*;
 use crate::nudge_policy::{self, ContinueNudge};
 
 impl Session {
+    /// Whether tracked tasks remain unfinished. The task-list gate owns that case with a stronger,
+    /// task-naming nudge, so the generic mid-intent nudge stands aside. A bridge's `update_tasks`
+    /// runs in a separate process, so the store is the source of truth there.
+    fn has_open_tasks(&self) -> bool {
+        let stored = self.store.tasks(&self.id).unwrap_or_default();
+        let tasks = if stored.is_empty() {
+            &self.tasks
+        } else {
+            &stored
+        };
+        tasks
+            .iter()
+            .any(|t| !matches!(t.status, forge_types::TodoStatus::Done))
+    }
+
     /// Shared model↔tool inner loop used by both the primary turn and the autofix re-run.
     ///
     /// * `active_model` – the model to start with; updated by failover.
@@ -125,9 +140,12 @@ impl Session {
         // (tools executed, tasks resolved) captured when the last continue-nudge was sent — see
         // `nudge_policy::decide`.
         let mut last_nudge_progress: Option<nudge_policy::Progress> = None;
-        // A model can mark every task done, pass the verification gate, then yield a sentence such
-        // as "Let me verify runtime issues:" with no tool call. That is explicit unfinished intent,
-        // not a final answer. Give it one bounded chance to perform the promised action.
+        // A model can end its reply on "Now the worker side..." or "Let me verify runtime issues:"
+        // with no tool call. That is unfinished intent, not a final answer. Nudges are bounded per
+        // stretch of idleness: the counter re-arms whenever the model runs a tool, so a model that
+        // progresses and later stalls again is nudged again, while one that answers consecutive
+        // nudges with nothing stops the turn.
+        const MAX_FOLLOWUP_INTENT_NUDGES: usize = 2;
         let mut followup_intent_nudges = 0usize;
         let mut doom_nudged = false;
         let mut narration = crate::stall_guard::NarrationTracker::default();
@@ -312,6 +330,10 @@ impl Session {
                 &mut empty_nudges,
             )?;
 
+            if resp.wants_tools() || bridge_tool_progress {
+                followup_intent_nudges = 0;
+            }
+
             if self.turn_input_ceiling_hit() {
                 final_text = self.abort_for_token_ceiling();
                 hit_step_cap = false;
@@ -426,18 +448,18 @@ impl Session {
                     // keeps its working context and the queued instruction lands as soon as it
                     // legally can (Claude Code / Codex semantics).
                     continue;
-                } else if completion_promises_followup(&resp.content) && followup_intent_nudges == 0
+                } else if followup_intent_nudges < MAX_FOLLOWUP_INTENT_NUDGES
+                    && (crate::mid_intent::ends_mid_intent(&resp.content)
+                        || (resp.content.trim().is_empty() && bridge_tool_progress))
+                    && !self.has_open_tasks()
                 {
                     followup_intent_nudges += 1;
-                    self.presenter.emit(PresenterEvent::Warning(
-                        "model promised another action but stopped before doing it — continuing once"
-                            .to_string(),
-                    ));
-                    const FOLLOWUP_INTENT_NUDGE: &str = "Your last response explicitly promised a \
-                        next action but ended before doing it. Do not narrate future work and stop. \
-                        Call the required tool now and complete/check the action, or, if nothing \
-                        remains, give a self-contained final answer stating exactly what already \
-                        passed.";
+                    self.presenter.emit(PresenterEvent::Warning(format!(
+                        "model announced another action but stopped before doing it — continuing ({followup_intent_nudges}/{MAX_FOLLOWUP_INTENT_NUDGES})"
+                    )));
+                    // Re-sent at full context cost on every request, so keep it terse.
+                    const FOLLOWUP_INTENT_NUDGE: &str = "You stopped after announcing your next \
+                        step. Do it now with a tool call, or give a self-contained final answer.";
                     let nseq = self.next_seq();
                     let _ = self.store.add_message(
                         &self.id,
