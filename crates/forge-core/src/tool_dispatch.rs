@@ -510,16 +510,29 @@ impl Session {
             PermissionDecision::Deny => false,
             PermissionDecision::Ask => match self.presenter.confirm(&call.name, side_effect) {
                 forge_types::ConfirmOutcome::AlwaysAllow => {
-                    self.rules.push(forge_types::PermissionRule {
-                        tool: call.name.clone(),
-                        // Scope to what the user SAW: an empty list matches every segment (see
-                        // decide_shell_segments), so approving `git status` used to auto-approve
-                        // every later shell command in the session.
-                        patterns: always_allow_patterns(&call.name, &call.args),
-                        decision: forge_types::PermissionDecision::Allow,
-                        source: forge_types::RuleSource::Configured,
-                        reason: Some("user answered 'always' at runtime prompt".into()),
-                    });
+                    // Scope to what the user SAW: an empty list matches every segment (see
+                    // decide_shell_segments), so approving `git status` used to auto-approve
+                    // every later shell command in the session.
+                    let patterns = always_allow_patterns(&call.name, &call.args);
+                    // Persisted with the same scope; an unscopable shell call is allowed once.
+                    if let Err(e) = forge_config::append_allow_rule_in(
+                        self.workspace_root(),
+                        &call.name,
+                        &patterns,
+                    ) {
+                        self.presenter.emit(PresenterEvent::Warning(format!(
+                            "allow rule not saved: {e}"
+                        )));
+                    }
+                    if call.name != "shell" || !patterns.is_empty() {
+                        self.rules.push(forge_types::PermissionRule {
+                            tool: call.name.clone(),
+                            patterns,
+                            decision: forge_types::PermissionDecision::Allow,
+                            source: forge_types::RuleSource::Configured,
+                            reason: Some("user answered 'always' at runtime prompt".into()),
+                        });
+                    }
                     true
                 }
                 forge_types::ConfirmOutcome::Allow => true,
