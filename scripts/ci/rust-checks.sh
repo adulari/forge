@@ -10,4 +10,7 @@ set -euo pipefail
 export RUSTFLAGS="${RUSTFLAGS:--D warnings}"
 
 cargo clippy --locked --all-targets --all-features
-cargo clippy --locked --manifest-path vendor/genai-0.6.5/Cargo.toml --all-targets -- -D warnings
+# The vendored genai workspace has its own lockfile, so it gets its own target tree in CI rather
+# than fighting the main one over the same fingerprints.
+CARGO_TARGET_DIR="${FORGE_VENDOR_TARGET_DIR:-${CARGO_TARGET_DIR:-$PWD/vendor/genai-0.6.5/target}}" \
+  cargo clippy --locked --manifest-path vendor/genai-0.6.5/Cargo.toml --all-targets -- -D warnings

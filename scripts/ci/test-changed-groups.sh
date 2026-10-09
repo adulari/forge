@@ -33,6 +33,11 @@ expect rust release_build true
 expect rust mobile_app false
 expect rust cargo_audit false
 
+classify cibuild scripts/ci/cargo-cache-env.sh
+expect cibuild rust true
+expect cibuild release_build true
+expect cibuild mobile_app false
+
 classify lock Cargo.lock
 expect lock rust true
 expect lock release_build true

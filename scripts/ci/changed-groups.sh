@@ -59,6 +59,10 @@ classify() {
     .github/workflows/security.yml)
       enable cargo_audit cargo_deny
       ;;
+    scripts/ci/rust-checks.sh|scripts/ci/cargo-cache-env.sh|scripts/ci/trim-runner-cache.sh)
+      # These decide where and how every Rust job builds; a change must be proven by running them.
+      enable rust release_build
+      ;;
     scripts/ci/check-anywhere-plaintext-canary.sh|scripts/ci/test-anywhere-plaintext-canary.sh)
       enable anywhere_policy
       ;;
