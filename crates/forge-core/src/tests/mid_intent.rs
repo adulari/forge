@@ -114,6 +114,7 @@ impl Provider for ScriptedProvider {
             .unwrap_or_default();
         Ok(forge_provider::ModelResponse {
             reasoning: String::new(),
+            reasoning_items: Vec::new(),
             content,
             tool_calls,
             usage: forge_types::Usage::default(),
