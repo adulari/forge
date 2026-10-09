@@ -91,6 +91,8 @@ use subagents::SubagentSupport;
 
 struct ForgeMcp {
     registry: ToolRegistry,
+    /// Spawn-time mode. A long-lived bridge process serves many user turns, so the mode actually
+    /// enforced per tool call comes from [`ForgeMcp::effective_mode`].
     mode: PermissionMode,
     rules: Vec<PermissionRule>,
     config: Config,
@@ -190,6 +192,23 @@ impl ServerHandler for ForgeMcp {
 }
 
 impl ForgeMcp {
+    /// The permission mode for THIS tool call: the bridge turn file's `mode` when the parent keeps
+    /// one (`FORGE_BRIDGE_TURN_FILE`), else the spawn-time mode. An unreadable file keeps the
+    /// spawn-time mode; an unparsable mode string falls to the stricter `Default`, matching the
+    /// parent's `bridge_permission_mode`.
+    fn effective_mode(&self) -> PermissionMode {
+        self.mode_from_turn(forge_core::snapshot::read_bridge_turn())
+    }
+
+    fn mode_from_turn(&self, turn: Option<forge_core::snapshot::BridgeTurn>) -> PermissionMode {
+        match turn.and_then(|t| t.mode) {
+            Some(raw) => PermissionMode::from_key(&raw)
+                .or_else(|| PermissionMode::from_label(&raw))
+                .unwrap_or(PermissionMode::Default),
+            None => self.mode,
+        }
+    }
+
     /// The real tool dispatch. Split out from the `ServerHandler::call_tool` above so the
     /// rmcp 3 response wrapping happens in exactly one place rather than at every return.
     async fn call_tool_complete(
@@ -391,8 +410,9 @@ impl ForgeMcp {
         }
 
         // Forge's permission gate — the unoverridable denylist always applies here.
-        let decision = permission::decide(self.mode, tool.side_effect(), &name, &args, &self.rules);
-        if let Err(refusal) = gate(decision, &name, tool.side_effect(), self.mode).await {
+        let mode = self.effective_mode();
+        let decision = permission::decide(mode, tool.side_effect(), &name, &args, &self.rules);
+        if let Err(refusal) = gate(decision, &name, tool.side_effect(), mode).await {
             return Ok(CallToolResult::error(vec![ContentBlock::text(refusal)]));
         }
 
@@ -495,9 +515,9 @@ impl ForgeMcp {
             }
         }
 
-        let decision =
-            permission::decide(self.mode, side_effect, name, &effective_args, &self.rules);
-        if let Err(refusal) = gate(decision, name, side_effect, self.mode).await {
+        let mode = self.effective_mode();
+        let decision = permission::decide(mode, side_effect, name, &effective_args, &self.rules);
+        if let Err(refusal) = gate(decision, name, side_effect, mode).await {
             return Some(CallToolResult::error(vec![ContentBlock::text(refusal)]));
         }
         let out = m.call(name, &effective_args).await;
@@ -1019,6 +1039,28 @@ mod tests {
             )),
             lean: false,
         }
+    }
+
+    #[test]
+    fn per_call_mode_follows_the_bridge_turn_file() {
+        use forge_core::snapshot::BridgeTurn;
+        let server = test_server_with_mode(PermissionMode::Plan);
+        let turn = |mode: Option<&str>| {
+            Some(BridgeTurn {
+                seq: Some(3),
+                mode: mode.map(str::to_string),
+            })
+        };
+        assert_eq!(server.mode_from_turn(None), PermissionMode::Plan);
+        assert_eq!(server.mode_from_turn(turn(None)), PermissionMode::Plan);
+        assert_eq!(
+            server.mode_from_turn(turn(Some(PermissionMode::Bypass.key()))),
+            PermissionMode::Bypass
+        );
+        assert_eq!(
+            server.mode_from_turn(turn(Some("not-a-mode"))),
+            PermissionMode::Default
+        );
     }
 
     #[test]

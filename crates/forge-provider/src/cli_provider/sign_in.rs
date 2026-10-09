@@ -54,8 +54,13 @@ pub(super) async fn read_to_cap_watching<R: tokio::io::AsyncRead + Unpin>(
     let mut chunk = [0u8; 4096];
     let mut notified = false;
     while let Ok(n) = r.read(&mut chunk).await {
-        if n == 0 || buf.len() >= super::STDERR_CAP {
+        if n == 0 {
             break;
+        }
+        // Keep reading (and discarding) past the cap: returning here would close our end of the
+        // pipe and give a long-lived child (the persistent bridge) EPIPE on its next stderr write.
+        if buf.len() >= super::STDERR_CAP {
+            continue;
         }
         let take = n.min(super::STDERR_CAP - buf.len());
         buf.extend_from_slice(&chunk[..take]);
@@ -112,5 +117,21 @@ Or, paste the authorization code here and press Enter:\nError: authentication ti
             assert!(!is_interactive_auth_prompt(ordinary));
         }
         assert!(is_interactive_auth_prompt(AGY_SIGN_IN_STDERR));
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_keeps_draining_past_the_cap_so_the_child_never_gets_epipe() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut tx, rx) = tokio::io::duplex(1024);
+        let reader = tokio::spawn(read_to_cap_watching(rx, None));
+        let total = crate::cli_provider::STDERR_CAP * 3;
+        // Before the fix the reader returned at the cap and dropped its end, so this write failed
+        // with BrokenPipe — exactly what a long-lived child sees on its next stderr write.
+        tx.write_all(&vec![b'x'; total])
+            .await
+            .expect("writer must not hit EPIPE after the cap");
+        drop(tx);
+        let got = reader.await.unwrap();
+        assert_eq!(got.len(), crate::cli_provider::STDERR_CAP);
     }
 }

@@ -331,7 +331,8 @@ async fn run_agent_loop(
             let completion = ctx
                 .provider
                 .complete(&active_model, &transcript, &specs, &mut sink);
-            match crate::stream_with_idle_timeout(completion, &activity, None, stream_idle).await {
+            let idle = crate::effective_stream_idle(&*ctx.provider, &active_model, stream_idle);
+            match crate::stream_with_idle_timeout(completion, &activity, None, idle).await {
                 Ok(r) => break r,
                 Err(e) if failover_enabled && e.is_retryable() => {
                     let _ = ctx.store.bench_for(

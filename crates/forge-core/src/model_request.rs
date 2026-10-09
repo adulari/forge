@@ -239,6 +239,7 @@ pub(super) async fn request_provider_response(
             };
             let fut =
                 provider.complete_with(active_model, &sent, specs, &completion_opts, &mut sink);
+            let stream_idle = crate::effective_stream_idle(&**provider, active_model, stream_idle);
             stream_with_idle_timeout(fut, &activity, Some(&active_tools), stream_idle).await
         };
         if let Err(error) = &result {
