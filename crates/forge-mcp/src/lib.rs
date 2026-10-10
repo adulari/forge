@@ -40,10 +40,12 @@ mod connect_log;
 mod content;
 mod handler;
 pub mod oauth;
+mod pool;
 mod sse;
 mod transport;
 
 pub use handler::{ForgeClientHandler, SamplingFuture, SamplingHandler};
+pub use pool::McpPool;
 
 /// The connection map type, shared (via [`Arc`]/[`std::sync::Weak`]) between the manager and each
 /// server's [`ForgeClientHandler`] so a `tools/list_changed` notification can refresh the live
@@ -260,6 +262,13 @@ pub(crate) struct Connection {
     resources: Vec<DiscoveredResource>,
     prompts: Vec<DiscoveredPrompt>,
     reconnect_attempts: usize,
+    /// The pooled connection this entry mirrors, when the server is shared between managers. The
+    /// pool entry owns the service and child; `peer`/`tools`/… here are kept in step with it, and
+    /// dropping this entry releases one lease.
+    shared: Option<Arc<pool::SharedServer>>,
+    /// Generation of the pooled connection `peer` came from, so a failure is attributed to that
+    /// connection and not to a newer one another session already opened.
+    shared_gen: u64,
 }
 
 impl Connection {
@@ -302,6 +311,10 @@ pub struct McpManager {
     /// logical server. Held across the whole reconnect attempt (including its `.await`s), so a
     /// `parking_lot::Mutex` (never held across an await elsewhere in this type) won't do.
     reconnect_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Where servers that [`shares_connection`](forge_config::McpServerConfig::shares_connection)
+    /// are connected once for every manager, instead of once per manager. `None` keeps every
+    /// connection private (the CLI's single session, tests).
+    pool: Option<Arc<McpPool>>,
 }
 
 impl McpManager {
@@ -316,6 +329,7 @@ impl McpManager {
             sampling: None,
             connect_done,
             reconnect_locks: Mutex::new(HashMap::new()),
+            pool: None,
         }
     }
 
@@ -350,7 +364,7 @@ impl McpManager {
         transport::HandlerDeps {
             roots: self.roots.clone(),
             sampling: self.sampling.clone(),
-            conns: Arc::downgrade(&self.conns),
+            conns: pool::CatalogLink::Manager(Arc::downgrade(&self.conns)),
         }
     }
 
@@ -395,6 +409,8 @@ impl McpManager {
                         resources: vec![],
                         prompts: vec![],
                         reconnect_attempts: 0,
+                        shared: None,
+                        shared_gen: 0,
                     },
                 );
             }
@@ -409,21 +425,11 @@ impl McpManager {
         let connect_timeout = self.connect_timeout;
         // Pair each server with its own handler dependencies (roots/sampling/catalog link) up front
         // so the connect futures own everything they need and reference nothing borrowed from self.
-        let jobs: Vec<_> = self
-            .config
-            .active_servers()
-            .cloned()
-            .map(|s| (s, self.handler_deps()))
-            .collect();
-        let results = futures::future::join_all(jobs.into_iter().map(|(s, deps)| async move {
+        let jobs: Vec<_> = self.config.active_servers().cloned().collect();
+        let results = futures::future::join_all(jobs.into_iter().map(|s| async move {
             let label = s.transport_label();
             let name = s.name.clone();
-            let result = tokio::time::timeout(connect_timeout, async {
-                let service = transport::serve(&s, deps).await?;
-                self.add_established(&name, label, service).await;
-                Ok::<(), String>(())
-            })
-            .await;
+            let result = tokio::time::timeout(connect_timeout, self.establish_server(&s)).await;
             match result {
                 Ok(Ok(())) => (name, label, Ok(())),
                 Ok(Err(reason)) => (name, label, Err(reason)),
@@ -467,6 +473,8 @@ impl McpManager {
                             resources: vec![],
                             prompts: vec![],
                             reconnect_attempts: 0,
+                            shared: None,
+                            shared_gen: 0,
                         },
                     );
                 }
@@ -490,28 +498,7 @@ impl McpManager {
             child_group,
         } = established;
         let peer = service.peer().clone();
-        let tools = discover_tools(&peer, name).await;
-        let resources = peer
-            .list_all_resources()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| DiscoveredResource {
-                uri: r.uri.clone(),
-                name: r.name.clone(),
-                mime: r.mime_type.clone(),
-            })
-            .collect();
-        let prompts = peer
-            .list_all_prompts()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|p| DiscoveredPrompt {
-                name: p.name.clone(),
-                description: p.description.clone().unwrap_or_default(),
-            })
-            .collect();
+        let (tools, resources, prompts) = pool::discover_all(&peer, name).await;
 
         self.conns.lock().insert(
             name.to_string(),
@@ -526,6 +513,8 @@ impl McpManager {
                 resources,
                 prompts,
                 reconnect_attempts: 0,
+                shared: None,
+                shared_gen: 0,
             },
         );
     }
@@ -544,6 +533,8 @@ impl McpManager {
                 resources: vec![],
                 prompts: vec![],
                 reconnect_attempts: 0,
+                shared: None,
+                shared_gen: 0,
             },
         );
     }
@@ -559,12 +550,8 @@ impl McpManager {
     pub async fn connect_one(&self, server: &forge_config::McpServerConfig) -> Result<(), String> {
         let name = server.name.clone();
         let label = server.transport_label();
-        let result = tokio::time::timeout(self.connect_timeout, async {
-            let service = transport::serve(server, self.handler_deps()).await?;
-            self.add_established(&name, label, service).await;
-            Ok::<(), String>(())
-        })
-        .await;
+        let result =
+            tokio::time::timeout(self.connect_timeout, self.establish_server(server)).await;
         match result {
             Ok(Ok(())) => Ok(()),
             Ok(Err(reason)) => {
@@ -923,11 +910,25 @@ impl McpManager {
         // ALSO drop the dead `RunningService`: it owns the stdio child process, and leaving it in the
         // map orphaned that child until a later reconnect replaced the entry — it could linger the
         // whole session. Taking + cancelling it now reaps the child (closes its pipes) immediately.
-        let dead = self.conns.lock().get_mut(server).and_then(|c| {
-            c.peer = None;
-            c.end_child_tree();
-            c.service.take()
-        });
+        // A pooled connection is not this manager's to tear down: it is withdrawn from the pool
+        // entry instead (every session using it then reconnects once, together).
+        let (dead, shared) = {
+            let mut conns = self.conns.lock();
+            match conns.get_mut(server) {
+                Some(c) => {
+                    c.peer = None;
+                    c.end_child_tree();
+                    (
+                        c.service.take(),
+                        c.shared.clone().map(|entry| (entry, c.shared_gen)),
+                    )
+                }
+                None => (None, None),
+            }
+        };
+        if let Some((entry, generation)) = shared {
+            entry.mark_dead(generation);
+        }
         if let Some(service) = dead {
             tokio::spawn(async move {
                 let _ = service.cancel().await;
@@ -984,11 +985,20 @@ impl McpManager {
             .map(|c| c.reconnect_attempts)
             .unwrap_or(0);
         tokio::time::sleep(Duration::from_millis(200 * (attempt as u64 + 1))).await;
-        let label = cfg.transport_label();
+        let shared = self
+            .conns
+            .lock()
+            .get(server)
+            .and_then(|c| c.shared.clone().map(|entry| (entry, c.shared_gen)));
         let established = tokio::time::timeout(self.connect_timeout, async {
-            let service = transport::serve(&cfg, self.handler_deps()).await?;
-            self.add_established(server, label, service).await;
-            Ok::<(), String>(())
+            match &shared {
+                Some((entry, dead_generation)) => {
+                    entry.refresh(*dead_generation).await?;
+                    self.install_shared(entry);
+                    Ok::<(), String>(())
+                }
+                None => self.establish_server(&cfg).await,
+            }
         })
         .await
         .is_ok_and(|result| result.is_ok());
@@ -1058,6 +1068,9 @@ impl McpManager {
             conns
                 .values_mut()
                 .filter_map(|c| {
+                    // A pooled connection outlives this manager while another one still uses it;
+                    // letting go of the lease closes it once the last user has.
+                    c.shared = None;
                     c.end_child_tree();
                     c.service.take()
                 })
@@ -1184,103 +1197,8 @@ fn meta_specs() -> Vec<McpToolSpec> {
     ]
 }
 
-/// Test/wiring support — not part of the stable API. A tiny in-process MCP server (two tools:
-/// `echo`, `boom`) served over a duplex stream, plus [`testsupport::manager_with_echo`] which
-/// returns an [`McpManager`] connected to it. Lets downstream crates (forge-core, forge-cli)
-/// exercise their MCP integration against a real connection without spawning a child process.
 #[doc(hidden)]
-pub mod testsupport {
-    use super::*;
-    use rmcp::model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
-    };
-    use rmcp::service::RequestContext;
-    use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
-    use std::sync::Arc;
-
-    #[derive(Clone)]
-    struct EchoServer;
-
-    impl ServerHandler for EchoServer {
-        fn get_info(&self) -> ServerInfo {
-            let mut info = ServerInfo::default();
-            info.capabilities = ServerCapabilities::builder().enable_tools().build();
-            info
-        }
-        async fn list_tools(
-            &self,
-            _req: Option<PaginatedRequestParams>,
-            _ctx: RequestContext<RoleServer>,
-        ) -> Result<ListToolsResult, McpError> {
-            let schema: rmcp::model::JsonObject = serde_json::from_value(serde_json::json!({
-                "type": "object",
-                "properties": { "msg": { "type": "string" } }
-            }))
-            .unwrap();
-            // `with_all_items` fills rmcp 3's new paginated-result fields with spec defaults.
-            Ok(ListToolsResult::with_all_items(vec![
-                Tool::new(
-                    "echo",
-                    "Echo back the msg argument",
-                    Arc::new(schema.clone()),
-                ),
-                Tool::new("boom", "Always fails", Arc::new(schema)),
-            ]))
-        }
-        async fn call_tool(
-            &self,
-            req: CallToolRequestParams,
-            _ctx: RequestContext<RoleServer>,
-        ) -> Result<CallToolResponse, McpError> {
-            // This mock always completes; `.into()` wraps it as CallToolResponse::Complete.
-            match req.name.as_ref() {
-                "echo" => {
-                    let msg = req
-                        .arguments
-                        .as_ref()
-                        .and_then(|a| a.get("msg"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    Ok(
-                        CallToolResult::success(vec![ContentBlock::text(format!("echo: {msg}"))])
-                            .into(),
-                    )
-                }
-                "boom" => Ok(CallToolResult::error(vec![ContentBlock::text("kaboom")]).into()),
-                other => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "unknown tool {other}"
-                ))])
-                .into()),
-            }
-        }
-    }
-
-    /// An [`McpManager`] connected (in-process) to a server named `test` exposing `echo`+`boom`.
-    pub async fn manager_with_echo(config: &McpConfig) -> McpManager {
-        let (client_io, server_io) = tokio::io::duplex(8 * 1024);
-        tokio::spawn(async move {
-            if let Ok(server) = EchoServer.serve(server_io).await {
-                let _ = server.waiting().await;
-            }
-        });
-        let client = ForgeClientHandler::passive("test")
-            .serve(client_io)
-            .await
-            .expect("client connects");
-        let mgr = McpManager::empty(config);
-        mgr.add_established(
-            "test",
-            "stdio",
-            transport::Established {
-                service: client,
-                child_group: None,
-            },
-        )
-        .await;
-        mgr
-    }
-}
+pub mod testsupport;
 
 #[cfg(test)]
 mod tests {
@@ -1420,6 +1338,7 @@ mod tests {
                 auth: None,
                 secret_env: vec![],
                 enabled: true,
+                shared: None,
             }],
             ..Default::default()
         };
@@ -1450,6 +1369,7 @@ mod tests {
                     auth: None,
                     secret_env: vec![],
                     enabled: true,
+                    shared: None,
                 },
                 forge_config::McpServerConfig {
                     name: "also-slow".into(),
@@ -1461,6 +1381,7 @@ mod tests {
                     auth: None,
                     secret_env: vec![],
                     enabled: true,
+                    shared: None,
                 },
             ],
             ..Default::default()
@@ -1559,6 +1480,7 @@ mod tests {
                 auth: None,
                 secret_env: vec![],
                 enabled: true,
+                shared: None,
             }],
             ..Default::default()
         };

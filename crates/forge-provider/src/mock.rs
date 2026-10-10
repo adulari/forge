@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use forge_types::{new_id, Message, Role, ToolCall, Usage};
 use serde_json::{json, Value};
 
+use crate::mock_long;
 use crate::{EventSink, ModelResponse, Provider, ProviderError, StreamEvent, ToolSpec};
 
 #[derive(Debug, Default)]
@@ -255,6 +256,12 @@ impl Provider for MockProvider {
                 30,
                 12,
             ));
+        }
+
+        // Long-answer turn → a big streamed markdown reply, for measuring TUI responsiveness.
+        if let Some(mode) = mock_long::mode_for(&lu) {
+            let content = mock_long::stream_long(mode, on_event).await;
+            return Ok(resp(&content, vec![], 42, 18));
         }
 
         // Code-block turn → a terminal answer containing a fenced block (for the /copy picker).

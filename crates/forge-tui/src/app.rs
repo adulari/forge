@@ -507,7 +507,7 @@ pub struct App {
     /// preview renders the partial reply as markdown (so it matches the finalized block instead of a
     /// raw unwrapped blob); re-parsing every frame would be O(reply) lag, so it's only rebuilt when
     /// new tokens arrive or the width changes.
-    stream_cache: std::cell::RefCell<StreamCache>,
+    stream_cache: std::cell::RefCell<crate::render::StreamCache>,
     /// Configurable keybinds loaded from config at startup. Synced into `Tui.keybinds` for
     /// `poll_event` matching; modified by the keybind configurator overlay.
     pub keybinds: forge_config::KeybindsConfig,
@@ -550,17 +550,6 @@ struct WrapCache {
 #[derive(Debug, Clone, Default)]
 struct ViewerWrapCache {
     key: Option<(usize, u16, u64)>,
-    rows: Vec<TextLine<'static>>,
-}
-
-/// Cached markdown render of the streaming reply edge. The rendered revision trails the source
-/// revision until enough bytes arrive or the short refresh interval elapses.
-#[derive(Debug, Clone, Default)]
-struct StreamCache {
-    rev: u64,
-    len: usize,
-    width: u16,
-    rendered_at: Option<std::time::Instant>,
     rows: Vec<TextLine<'static>>,
 }
 
@@ -1226,9 +1215,10 @@ impl App {
                 if self.streaming_active {
                     let rest = std::mem::take(&mut self.streaming);
                     self.streaming_rev = self.streaming_rev.wrapping_add(1);
+                    let cache = std::mem::take(&mut *self.stream_cache.borrow_mut());
                     self.tag_flush(LineOrigin::assistant(), |s| {
                         if !rest.is_empty() {
-                            s.flush.extend(crate::render::markdown_to_lines(&rest));
+                            s.flush.extend(cache.finish(&rest));
                         }
                         s.flush.push(TextLine::default());
                     });
@@ -2899,63 +2889,48 @@ impl App {
         }
     }
 
-    /// Rebuild the memoized markdown render of the in-flight reply at a bounded cadence. The
-    /// source revision catches same-length changes; a short interval/byte threshold avoids
-    /// re-parsing the entire growing reply for every token delta.
+    /// Bring the in-flight reply's rows up to date. Finished markdown blocks are rendered and
+    /// wrapped once; only the open block at the end is re-rendered as tokens arrive, so the cost
+    /// of a frame does not grow with the length of the reply.
     fn ensure_stream_cache(&self, width: u16) {
-        const STREAM_REPARSE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
-        const STREAM_REPARSE_BYTES: usize = 256;
-
-        let mut c = self.stream_cache.borrow_mut();
-        let changed = c.rev != self.streaming_rev;
-        let due = c
-            .rendered_at
-            .is_none_or(|at| at.elapsed() >= STREAM_REPARSE_INTERVAL)
-            || self.streaming.len().saturating_sub(c.len) >= STREAM_REPARSE_BYTES;
-        if c.width != width || (changed && due) {
-            let lines = if self.streaming.is_empty() {
-                Vec::new()
-            } else {
-                crate::render::markdown_to_lines(&self.streaming)
-            };
-            c.rows = crate::transcript::wrap_lines(&lines, width.saturating_sub(1) as usize);
-            c.rev = self.streaming_rev;
-            c.len = self.streaming.len();
-            c.width = width;
-            c.rendered_at = Some(std::time::Instant::now());
-        }
+        self.stream_cache
+            .borrow_mut()
+            .refresh(&self.streaming, self.streaming_rev, width);
     }
 
-    /// The in-flight reply edge, markdown-rendered and wrapped to `width`, with the orange cursor
-    /// block appended to the final visible row. Only the requested window is cloned.
+    /// The reply text past what the cached rows cover, wrapped as plain rows so a token that
+    /// arrived since the last refresh is still on screen.
     fn streaming_tail_rows(&self, width: u16, cached_len: usize) -> Vec<TextLine<'static>> {
         let tail = &self.streaming[cached_len.min(self.streaming.len())..];
         if tail.is_empty() {
             Vec::new()
         } else {
-            crate::transcript::wrap_lines(
-                &[TextLine::raw(tail.to_string())],
-                width.saturating_sub(1) as usize,
-            )
+            let lines: Vec<TextLine<'static>> = tail
+                .split('\n')
+                .map(|l| TextLine::raw(l.to_string()))
+                .collect();
+            crate::transcript::wrap_lines(&lines, width.saturating_sub(1) as usize)
         }
     }
 
+    /// The in-flight reply edge, markdown-rendered and wrapped to `width`, with the orange cursor
+    /// block appended to the final visible row. Only the requested window is cloned.
     fn streaming_edge(&self, width: u16, start: usize, len: usize) -> Vec<TextLine<'static>> {
         if !self.streaming_active {
             return Vec::new();
         }
         self.ensure_stream_cache(width);
         let cache = self.stream_cache.borrow();
-        let tail = self.streaming_tail_rows(width, cache.len);
-        let total = (cache.rows.len() + tail.len()).max(1);
+        let tail = self.streaming_tail_rows(width, cache.len());
+        let cached_rows = cache.row_count();
+        let total = (cached_rows + tail.len()).max(1);
         let end = start.saturating_add(len).min(total);
-        let cached_end = end.min(cache.rows.len());
-        let mut rows: Vec<_> = cache.rows[start.min(cache.rows.len())..cached_end].to_vec();
-        if end > cache.rows.len() {
+        let mut rows = cache.window(start, end.min(cached_rows));
+        if end > cached_rows {
             rows.extend(
                 tail.into_iter()
-                    .skip(start.saturating_sub(cache.rows.len()))
-                    .take(end - cache.rows.len()),
+                    .skip(start.saturating_sub(cached_rows))
+                    .take(end - cached_rows),
             );
         }
         if end == total {
@@ -2975,7 +2950,7 @@ impl App {
         }
         self.ensure_stream_cache(width);
         let cache = self.stream_cache.borrow();
-        (cache.rows.len() + self.streaming_tail_rows(width, cache.len).len()).max(1)
+        (cache.row_count() + self.streaming_tail_rows(width, cache.len()).len()).max(1)
     }
 
     /// Total wrapped rows of the full-screen transcript (memoized log + the streaming edge).
@@ -3056,7 +3031,7 @@ impl App {
             let line = if r < committed {
                 cache.rows.get(r)
             } else if self.streaming_active {
-                stream.rows.get(r - committed)
+                stream.row(r - committed)
             } else {
                 None
             }?;
@@ -3881,6 +3856,9 @@ pub use render::{
     render_voice_overlay,
 };
 pub(crate) use tool_cards::{CardStatus, ToolCard};
+
+#[cfg(test)]
+mod stream_perf_tests;
 
 #[cfg(test)]
 mod tests {

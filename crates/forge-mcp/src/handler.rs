@@ -23,7 +23,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use rmcp::model::{
     ClientCapabilities, ClientInfo, CreateMessageRequestMethod, CreateMessageRequestParams,
@@ -32,7 +32,7 @@ use rmcp::model::{
 use rmcp::service::{NotificationContext, RequestContext, RoleClient};
 use rmcp::{ClientHandler, ErrorData as McpError};
 
-use crate::Conns;
+use crate::pool::CatalogLink;
 
 /// A boxed, sendable future returned by [`SamplingHandler::create_message`].
 pub type SamplingFuture<'a> =
@@ -51,9 +51,10 @@ pub struct ForgeClientHandler {
     server_name: String,
     roots: Vec<Root>,
     sampling: Option<Arc<dyn SamplingHandler>>,
-    /// Weak handle to the manager's connection map — upgraded on a `tools/list_changed` to refresh
-    /// the live tool catalog in place. `Weak` so the handler never keeps the manager alive.
-    conns: Weak<Conns>,
+    /// Weak handle to the catalog this connection feeds — upgraded on a `tools/list_changed` to
+    /// refresh the live tool catalog in place. `Weak` so the handler never keeps the manager (or
+    /// pooled server) alive.
+    conns: CatalogLink,
 }
 
 impl ForgeClientHandler {
@@ -61,7 +62,7 @@ impl ForgeClientHandler {
         server_name: String,
         roots: Vec<Root>,
         sampling: Option<Arc<dyn SamplingHandler>>,
-        conns: Weak<Conns>,
+        conns: CatalogLink,
     ) -> Self {
         Self {
             server_name,
@@ -78,7 +79,7 @@ impl ForgeClientHandler {
             server_name: server_name.into(),
             roots: Vec::new(),
             sampling: None,
-            conns: Weak::new(),
+            conns: CatalogLink::None,
         }
     }
 }
@@ -126,21 +127,35 @@ impl ClientHandler for ForgeClientHandler {
         // deadlock (loop waits for handler, handler waits for loop). Spawning returns immediately and
         // lets the loop process the response. The lock is taken only after the await, never held
         // across it.
-        let Some(conns) = self.conns.upgrade() else {
-            return;
-        };
         let peer = ctx.peer.clone();
         let server = self.server_name.clone();
-        tokio::spawn(async move {
-            let tools = crate::discover_tools(&peer, &server).await;
-            let mut map = conns.lock();
-            if let Some(c) = map.get_mut(&server) {
-                tracing::debug!(
-                    "mcp: '{server}' sent tools/list_changed → refreshed to {} tool(s)",
-                    tools.len()
-                );
-                c.tools = tools;
+        match &self.conns {
+            CatalogLink::None => {}
+            CatalogLink::Manager(conns) => {
+                let Some(conns) = conns.upgrade() else { return };
+                tokio::spawn(async move {
+                    let tools = crate::discover_tools(&peer, &server).await;
+                    let mut map = conns.lock();
+                    if let Some(c) = map.get_mut(&server) {
+                        tracing::debug!(
+                            "mcp: '{server}' sent tools/list_changed → refreshed to {} tool(s)",
+                            tools.len()
+                        );
+                        c.tools = tools;
+                    }
+                });
             }
-        });
+            CatalogLink::Shared(entry) => {
+                let Some(entry) = entry.upgrade() else { return };
+                tokio::spawn(async move {
+                    let tools = crate::discover_tools(&peer, &server).await;
+                    tracing::debug!(
+                        "mcp: '{server}' sent tools/list_changed → refreshed to {} tool(s) for every session",
+                        tools.len()
+                    );
+                    entry.update_tools(tools);
+                });
+            }
+        }
     }
 }

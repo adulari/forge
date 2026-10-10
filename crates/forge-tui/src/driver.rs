@@ -345,7 +345,17 @@ impl Tui {
             let _ = self.terminal.clear();
             self.modal_surface_open = modal_surface_open;
         }
-        let _ = self.terminal.draw(|f| app::render_live(f, app));
+        if crate::perf::enabled() {
+            let started = std::time::Instant::now();
+            let _ = self.terminal.draw(|f| {
+                let render_started = std::time::Instant::now();
+                app::render_live(f, app);
+                crate::perf::record(crate::perf::Metric::Render, render_started.elapsed());
+            });
+            crate::perf::record(crate::perf::Metric::Draw, started.elapsed());
+        } else {
+            let _ = self.terminal.draw(|f| app::render_live(f, app));
+        }
     }
 
     /// Clear the visible screen (used by `/clear`). Native scrollback above is wiped from view;
@@ -354,6 +364,13 @@ impl Tui {
         use crossterm::terminal::{Clear, ClearType};
         let _ = crossterm::execute!(io::stdout(), Clear(ClearType::All));
         let _ = self.terminal.clear();
+    }
+
+    /// Wait up to `timeout`, returning as soon as a terminal event is waiting to be read. Replaces
+    /// a fixed sleep in the render loop so a keystroke is not left queued for the rest of a frame.
+    /// The event itself is left for [`Tui::poll_event`].
+    pub async fn wait_for_input(&self, timeout: Duration) {
+        let _ = tokio::task::spawn_blocking(move || event::poll(timeout)).await;
     }
 
     /// Non-blocking: returns the next input event (key or paste) if one is pending, else `None`.
@@ -497,6 +514,23 @@ impl Tui {
     }
 }
 
+/// How long the render loop waits before its next iteration, or `None` to go round again at once.
+///
+/// A keystroke is echoed on the very next iteration, even while a reply streams: streamed deltas
+/// are coalesced into one frame per iteration, so the model's frames never queue up in front of
+/// typing. Otherwise a busy turn paints at most ~60 fps (an idle one is just as calm), and a
+/// change made outside a turn is repainted after a short beat. Whatever the wait, it ends early
+/// when a terminal event arrives ([`Tui::wait_for_input`]).
+pub fn frame_wait(input_handled: bool, dirty: bool, busy: bool) -> Option<Duration> {
+    if input_handled {
+        None
+    } else if dirty && !busy {
+        Some(Duration::from_millis(3))
+    } else {
+        Some(Duration::from_millis(16))
+    }
+}
+
 /// The ratatui viewport for a given mode: an inline pinned region, or the whole alternate screen.
 fn viewport(fullscreen: bool) -> Viewport {
     if fullscreen {
@@ -533,6 +567,25 @@ mod tests {
     /// single-worker multi-thread runtime a bare `recv()` parks the only worker → the answering
     /// task can never run → deadlock (the real "frozen TUI, Ctrl-C dead"). `block_in_place` must
     /// hand the worker back so the answer is delivered and `ask` returns.
+    #[test]
+    fn typing_is_never_made_to_wait_out_a_frame() {
+        // Mid-stream is the case that mattered: the loop used to sleep a full 16 ms after a key.
+        assert_eq!(frame_wait(true, true, true), None);
+        assert_eq!(frame_wait(true, true, false), None);
+        assert_eq!(
+            frame_wait(false, true, true),
+            Some(Duration::from_millis(16))
+        );
+        assert_eq!(
+            frame_wait(false, true, false),
+            Some(Duration::from_millis(3))
+        );
+        assert_eq!(
+            frame_wait(false, false, false),
+            Some(Duration::from_millis(16))
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn ask_does_not_starve_the_single_worker_runtime() {
         let (tx, rx) = std::sync::mpsc::channel::<UiMsg>();

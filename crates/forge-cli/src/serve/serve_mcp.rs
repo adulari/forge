@@ -107,6 +107,7 @@ pub(super) async fn create_mcp_server(Json(request): Json<CreateMcpServerRequest
             auth,
             secret_env: Vec::new(),
             enabled: true,
+            shared: None,
         });
         forge_config::write_mcp_toml(&path, &config).map_err(|error| error.to_string())
     })

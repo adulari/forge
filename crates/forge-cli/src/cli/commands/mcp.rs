@@ -452,6 +452,7 @@ pub(crate) fn mcp_add(
         auth,
         secret_env: vec![],
         enabled: true,
+        shared: None,
     };
 
     let mut config = forge_config::load_mcp_toml(&path);

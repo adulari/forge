@@ -971,6 +971,7 @@ and keep going."
                             auth: None,
                             secret_env: vec![],
                             enabled: true,
+                            shared: None,
                         };
                         let mut s = session.lock().await;
                         match s.add_mcp_server(server).await {

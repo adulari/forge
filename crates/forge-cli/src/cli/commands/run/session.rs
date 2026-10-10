@@ -172,6 +172,7 @@ pub(crate) async fn build_session_with_self_mcp(
                 auth: None,
                 secret_env: vec![],
                 enabled: true,
+                shared: None,
             },
         );
     }
@@ -497,7 +498,11 @@ pub(crate) async fn build_session_with_self_mcp(
         // then a detached task connects them; each flips to connected/failed in the `/mcp` panel as
         // it resolves, and the first `mcp_call` lazily waits on its own server. No startup op should
         // gate the UI (cf. the 9p watcher hang).
-        let manager = std::sync::Arc::new(forge_mcp::McpManager::connecting(&mcp_config));
+        // Servers that allow it (HTTP/SSE by default) connect once per daemon, not once per
+        // session; the pool is process-wide, so a lone `forge chat` simply has a pool of one.
+        let manager = std::sync::Arc::new(
+            forge_mcp::McpManager::connecting(&mcp_config).with_pool(forge_mcp::McpPool::global()),
+        );
         let bg = std::sync::Arc::clone(&manager);
         tokio::spawn(async move {
             bg.connect_active().await;
@@ -605,6 +610,7 @@ mod tests {
             auth: None,
             secret_env: vec![],
             enabled: true,
+            shared: None,
         }
     }
 

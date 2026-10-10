@@ -963,6 +963,7 @@ pub(crate) async fn run_chat_tui(
     // Draw the first frame before the (possibly slow) auto-start below, so `[remote] auto =
     // "anywhere"` — which waits on a public tunnel to come up — doesn't leave the terminal blank.
     tui.draw(&app);
+    std::thread::spawn(forge_tui::prewarm_highlighter);
 
     // Default-on remote control: when `[remote] auto` is configured, start the server at chat
     // startup so the session is reachable from a phone/browser without typing `/remote` first.
@@ -1012,7 +1013,9 @@ pub(crate) async fn run_chat_tui(
         }
     }
 
+    let mut echo_pending: Option<std::time::Instant> = None;
     while !quit {
+        let iter_started = forge_tui::perf::enabled().then(std::time::Instant::now);
         if local_presence_last_busy != Some(busy)
             || local_presence_last_touch.elapsed() >= LOCAL_PRESENCE_HEARTBEAT
         {
@@ -1110,14 +1113,22 @@ pub(crate) async fn run_chat_tui(
             }
             tui.draw(&app);
             dirty = false;
+            if let Some(read_at) = echo_pending.take() {
+                forge_tui::perf::record(forge_tui::perf::Metric::Echo, read_at.elapsed());
+            }
         }
 
         // Drain *all* buffered keystrokes this iteration. Reading one per frame throttled
         // input. Remote-injected keys (queued by the remote drain below, processed here on the
         // next iteration) come FIRST so an overlay commit (cursor move + synthesized Enter)
         // can't be interleaved by local typing — then the terminal's own events.
+        let mut input_handled = false;
         while let Some(ev) = next_input_event(&mut remote_keys, &mut tui)? {
             dirty = true;
+            input_handled = true;
+            if iter_started.is_some() {
+                echo_pending.get_or_insert_with(std::time::Instant::now);
+            }
             // Any input counts as activity: hold the cursor solid and restart the idle timer, so
             // the blink only resumes once typing pauses.
             last_input_at = std::time::Instant::now();
@@ -3467,8 +3478,11 @@ pub(crate) async fn run_chat_tui(
             break;
         }
 
+        let apply_started = iter_started.map(|_| std::time::Instant::now());
+        let mut applied = false;
         while let Ok(msg) = rx.try_recv() {
             dirty = true;
+            applied = true;
             match msg {
                 UiMsg::Event(e) => {
                     // The running turn consumed a queued prompt: it must not run again as its own
@@ -3498,6 +3512,9 @@ pub(crate) async fn run_chat_tui(
                     prompt_seq += 1;
                 }
             }
+        }
+        if let Some(started) = apply_started.filter(|_| applied) {
+            forge_tui::perf::record(forge_tui::perf::Metric::Apply, started.elapsed());
         }
 
         // Keep the commit hook's model file current with whichever model ran the latest turn, so a
@@ -4818,13 +4835,15 @@ pub(crate) async fn run_chat_tui(
         if app.expire_esc_hint() {
             dirty = true;
         }
-        // Adaptive frame pacing. When the user is actively interacting (a key/paste was handled
-        // this iteration) and no turn is streaming, loop back quickly so typing/selection in the
-        // palette, picker, and approve prompts feels immediate instead of capped at ~60fps. Idle or
-        // mid-stream → a full ~16ms frame keeps CPU low and the spinner smooth.
-        let snappy = dirty && !busy;
-        tokio::time::sleep(Duration::from_millis(if snappy { 3 } else { 16 })).await;
+        if let Some(started) = iter_started {
+            forge_tui::perf::record(forge_tui::perf::Metric::Iter, started.elapsed());
+        }
+        match forge_tui::frame_wait(input_handled, dirty, busy) {
+            Some(wait) => tui.wait_for_input(wait).await,
+            None => tokio::task::yield_now().await,
+        }
     }
+    forge_tui::perf::flush();
     {
         let (hooks, sid, workspace) = {
             let s = session.lock().await;
