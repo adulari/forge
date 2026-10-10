@@ -47,7 +47,17 @@ pub(super) async fn execute_tool(
         // to the daemon process cwd: read-only children use the session repo, isolated writers use
         // their worktree, and shell receives an explicit cwd in both cases.
         let root = ctx.worktree_root.as_deref().unwrap_or(&ctx.repo_root);
-        let effective_args = rewrite_args_for_root(&call.args, root);
+        let mut effective_args = rewrite_args_for_root(&call.args, root);
+        // An isolated child's worktree must not be bypassed by absolute paths of the checkout it
+        // was branched from: those would edit the very tree the isolation protects.
+        if ctx.worktree_root.is_some() {
+            effective_args = forge_tools::remap_origin_paths(
+                &effective_args,
+                &ctx.repo_root,
+                root,
+                side_effect == SideEffect::ReadOnly,
+            );
+        }
         match tool.run(&effective_args).await {
             Ok(out) => (out, "ok"),
             Err(e) => (format!("error: {e}"), "error"),

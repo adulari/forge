@@ -104,6 +104,23 @@ fn resolve_target(path: &Path) -> PathBuf {
     }
 }
 
+/// `path` as the model should see it echoed back: relative to the session workspace when it lies
+/// inside it. Echoing the absolute path in every confirmation repeats a long prefix the model
+/// never wrote and has to wade through; relative paths are also what it passes to the next call.
+pub(super) fn shown(path: &str) -> String {
+    crate::SESSION_WORKSPACE
+        .try_with(Clone::clone)
+        .ok()
+        .and_then(|root| {
+            Path::new(path)
+                .strip_prefix(root)
+                .ok()
+                .filter(|rel| !rel.as_os_str().is_empty())
+                .map(|rel| rel.display().to_string())
+        })
+        .unwrap_or_else(|| path.to_string())
+}
+
 pub(crate) fn normalize_target(path: &Path) -> PathBuf {
     resolve_target(path)
 }
@@ -117,7 +134,11 @@ pub(crate) fn confine(path_str: &str) -> Result<PathBuf, ToolError> {
     } else {
         Err(ToolError::Failed(format!(
             "path '{path_str}' resolves outside the workspace and is refused \
-             (workspace-confinement safety net). Operate on paths inside the project directory."
+             (workspace-confinement safety net). Operate on paths inside the project directory{}.",
+            workspace_roots()
+                .first()
+                .map(|root| format!(" ({})", root.display()))
+                .unwrap_or_default()
         )))
     }
 }
@@ -194,8 +215,9 @@ impl Tool for ReadFileTool {
          `start_line`/`end_line` (both 1-indexed, inclusive). Very large files are truncated; pass \
          a line range to read a specific section. To read SEVERAL files at once, pass `paths` (an \
          array) instead of `path` — they come back in one response under `===== <path> =====` \
-         headers, which is far cheaper than one call per file when exploring. Always read a file \
-         before editing it."
+         headers, which is far cheaper than one call per file when exploring; an entry may carry a \
+         line range (`src/lib.rs:120-180`) to read just that span. Always read a file before \
+         editing it."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::ReadOnly
@@ -211,7 +233,8 @@ impl Tool for ReadFileTool {
                     "description": "Several files to read in ONE call (batch). Each is returned \
                                     whole under a `===== <path> =====` header; per-file and total \
                                     size caps apply. Prefer this over many read_file calls when \
-                                    gathering context. `start_line`/`end_line` are ignored here."
+                                    gathering context. An entry like `src/lib.rs:120-180` reads only those lines. \
+                                    `start_line`/`end_line` are ignored here."
                 },
                 "start_line": {
                     "type": "integer",
@@ -403,8 +426,11 @@ async fn read_many(paths: &[Value]) -> String {
     let mut out = String::new();
     let mut spent = 0usize;
     for (i, p) in paths.iter().enumerate() {
-        let Some(path) = p.as_str() else { continue };
-        out.push_str(&format!("===== {path} =====\n"));
+        let Some(requested) = p.as_str() else {
+            continue;
+        };
+        let (path, range) = split_line_range(requested);
+        out.push_str(&format!("===== {} =====\n", shown(requested)));
         if let Err(e) = confine(path) {
             out.push_str(&format!("[error: {e}]\n"));
             continue;
@@ -422,6 +448,10 @@ async fn read_many(paths: &[Value]) -> String {
         }
         match tokio::fs::read_to_string(path).await {
             Ok(content) => {
+                let content = match range {
+                    Some((start, end)) => slice_lines(&content, start, end),
+                    None => content,
+                };
                 let body = cap_bytes(content, BATCH_READ_PER_FILE_BYTES);
                 spent += body.len();
                 out.push_str(&body);
@@ -433,6 +463,31 @@ async fn read_many(paths: &[Value]) -> String {
         }
     }
     out
+}
+
+/// Split a batch entry like `src/lib.rs:120-180` (or `src/lib.rs:120` for one line) into the file
+/// and its 1-indexed inclusive line range. A name that exists as written is never split.
+fn split_line_range(entry: &str) -> (&str, Option<(usize, usize)>) {
+    if Path::new(entry).exists() {
+        return (entry, None);
+    }
+    let Some((path, spec)) = entry.rsplit_once(':') else {
+        return (entry, None);
+    };
+    let (start, end) = spec.split_once('-').unwrap_or((spec, spec));
+    match (start.parse::<usize>(), end.parse::<usize>()) {
+        (Ok(start), Ok(end)) if start >= 1 && end >= start => (path, Some((start, end))),
+        _ => (entry, None),
+    }
+}
+
+fn slice_lines(content: &str, start: usize, end: usize) -> String {
+    content
+        .lines()
+        .skip(start - 1)
+        .take(end - start + 1)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Truncate at a byte budget on a char boundary, appending a range hint when cut.
@@ -521,7 +576,7 @@ impl Tool for WriteFileTool {
         confine(path)?;
         create_parent_dirs(path).await?;
         tokio::fs::write(path, content).await?;
-        Ok(format!("wrote {} bytes to {path}", content.len()))
+        Ok(format!("wrote {} bytes to {}", content.len(), shown(path)))
     }
 
     async fn preview(&self, args: &Value) -> Option<FileDiff> {
@@ -597,7 +652,11 @@ impl Tool for AppendFileTool {
             .await?;
         file.write_all(content.as_bytes()).await?;
         file.flush().await?;
-        Ok(format!("appended {} bytes to {path}", content.len()))
+        Ok(format!(
+            "appended {} bytes to {}",
+            content.len(),
+            shown(path)
+        ))
     }
 
     async fn preview(&self, args: &Value) -> Option<FileDiff> {
@@ -680,7 +739,7 @@ impl Tool for EditFileTool {
         let (updated, note) = apply_edit_mode(&content, old, new, replace_all)
             .map_err(|e| ToolError::Failed(format!("{e} (in {path})")))?;
         tokio::fs::write(path, &updated).await?;
-        Ok(format!("edited {path} (1 replacement){note}"))
+        Ok(format!("edited {} (1 replacement){note}", shown(path)))
     }
 
     async fn preview(&self, args: &Value) -> Option<FileDiff> {
@@ -707,83 +766,14 @@ impl Tool for EditFileTool {
     }
 }
 
-/// Apply several `old → new` edits to ONE file in a single call. Mutates the workspace.
-pub struct MultiEditTool;
-
-#[async_trait]
-impl Tool for MultiEditTool {
-    fn name(&self) -> &str {
-        "multi_edit"
-    }
-    fn description(&self) -> &str {
-        "Apply several edits to ONE file in a single call, in order. Each edit is {old, new} with \
-         exactly edit_file's rules (each `old` exact + unique, with a whitespace-insensitive \
-         fallback, or set that edit's `replace_all: true` to change every occurrence). ATOMIC: \
-         applied in sequence to the in-memory file, and if ANY edit can't be applied the file is \
-         left untouched and the failing edit is reported by index — so partial edits never land. \
-         Prefer this over many edit_file calls when changing one file in several places."
-    }
-    fn side_effect(&self) -> SideEffect {
-        SideEffect::Write
-    }
-    fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "File to edit." },
-                "edits": {
-                    "type": "array",
-                    "description": "Edits applied in order; each is {old, new} (same rules as edit_file).",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "old": { "type": "string" },
-                            "new": { "type": "string" },
-                            "replace_all": {
-                                "type": "boolean",
-                                "description": "Replace every occurrence of this edit's `old` \
-                                 instead of requiring a unique match. Defaults to false."
-                            }
-                        },
-                        "required": ["old", "new"]
-                    }
-                }
-            },
-            "required": ["path", "edits"]
-        })
-    }
-    async fn run(&self, args: &Value) -> Result<String, ToolError> {
-        let path = str_arg(args, "path")?;
-        let edits = multi_edit_pairs(args)?;
-        confine(path)?;
-        check_readable_size(path).await?;
-        let original = tokio::fs::read_to_string(path).await?;
-        let updated = apply_edits(&original, &edits)
-            .map_err(|e| ToolError::Failed(format!("{e} (in {path}; no edits applied)")))?;
-        tokio::fs::write(path, &updated).await?;
-        Ok(format!("edited {path} ({} edits applied)", edits.len()))
-    }
-
-    async fn preview(&self, args: &Value) -> Option<FileDiff> {
-        let path = str_arg(args, "path").ok()?;
-        let edits = multi_edit_pairs(args).ok()?;
-        confine(path).ok()?;
-        check_readable_size(path).await.ok()?;
-        let original = tokio::fs::read_to_string(path).await.ok()?;
-        let updated = apply_edits(&original, &edits).ok()?;
-        Some(FileDiff {
-            path: path.to_string(),
-            kind: DiffKind::Modified,
-            old: Some(original),
-            new: Some(updated),
-            lang: lang_from_path(path),
-            binary: false,
-        })
-    }
-}
-
 mod edits;
-use edits::{apply_edit_mode, apply_edits, multi_edit_pairs};
+use edits::apply_edit_mode;
+
+mod multi_edit;
+pub use multi_edit::MultiEditTool;
+
+#[cfg(test)]
+mod read_batch_tests;
 
 mod codex_patch;
 
@@ -941,7 +931,7 @@ impl Tool for DeleteFileTool {
         let path = str_arg(args, "path")?;
         confine(path)?;
         tokio::fs::remove_file(path).await?;
-        Ok(format!("deleted {path}"))
+        Ok(format!("deleted {}", shown(path)))
     }
 }
 

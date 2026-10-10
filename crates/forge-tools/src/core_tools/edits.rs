@@ -7,10 +7,6 @@
 //! uniqueness-preserving fallbacks that decide where an edit lands, and the balance heuristics
 //! that decide it should not land at all. The tools themselves only do I/O.
 
-use serde_json::Value;
-
-use crate::ToolError;
-
 /// Whitespace-insensitive fallback for `edit_file`: when `old` doesn't match the file byte-for-byte
 /// (almost always a leading-indent / trailing-space difference), match it line-by-line ignoring each
 /// line's surrounding whitespace. Returns the edited content ONLY when exactly one contiguous block
@@ -443,37 +439,6 @@ pub(super) struct EditStep {
     pub old: String,
     pub new: String,
     pub replace_all: bool,
-}
-
-/// Extract the edit steps from a `multi_edit` call's `edits` array.
-pub(super) fn multi_edit_pairs(args: &Value) -> Result<Vec<EditStep>, ToolError> {
-    let arr = args
-        .get("edits")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ToolError::Failed("`edits` must be an array of {old, new}".to_string()))?;
-    if arr.is_empty() {
-        return Err(ToolError::Failed("`edits` is empty".to_string()));
-    }
-    arr.iter()
-        .map(|e| {
-            let old = e.get("old").and_then(Value::as_str);
-            let new = e.get("new").and_then(Value::as_str);
-            let replace_all = e
-                .get("replace_all")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            match (old, new) {
-                (Some(o), Some(n)) => Ok(EditStep {
-                    old: o.to_string(),
-                    new: n.to_string(),
-                    replace_all,
-                }),
-                _ => Err(ToolError::Failed(
-                    "each edit needs string `old` and `new`".to_string(),
-                )),
-            }
-        })
-        .collect()
 }
 
 /// Fold the edits over `content` in order (each on the running result), all-or-nothing: the first

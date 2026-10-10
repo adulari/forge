@@ -2036,17 +2036,31 @@ fn validate_workspace_args(
         let target = normalize_workspace_target(std::path::Path::new(value));
         if !is_allowed(&target) {
             return Err(CoreError::Workspace(format!(
-                "{key} escapes session workspace: {value}"
+                "{key} escapes session workspace: {value} (workspace root: {}; relative paths resolve there)",
+                workspace.root().display()
             )));
         }
     }
-    if let Some(paths) = args.get("paths").and_then(serde_json::Value::as_array) {
-        for value in paths.iter().filter_map(serde_json::Value::as_str) {
+    let listed = args.get("paths").and_then(serde_json::Value::as_array);
+    let edits = args.get("edits").and_then(serde_json::Value::as_array);
+    {
+        for value in listed
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .chain(
+                edits
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|edit| edit.get("path").and_then(serde_json::Value::as_str)),
+            )
+        {
             let target = normalize_workspace_target(std::path::Path::new(value));
             if !is_allowed(&target) {
                 return Err(CoreError::Workspace(format!(
-                    "path escapes session workspace: {}",
-                    target.display()
+                    "path escapes session workspace: {} (workspace root: {}; relative paths resolve there)",
+                    target.display(),
+                    workspace.root().display()
                 )));
             }
         }

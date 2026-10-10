@@ -666,6 +666,9 @@ fn maybe_install_sandbox(
     // Build the writable set in the parent (before fork) — PathBuf is Send + Clone.
     let cwd_path = PathBuf::from(cwd);
     let mut extra: Vec<PathBuf> = policy.writable.iter().map(PathBuf::from).collect();
+    // A linked worktree keeps its index, HEAD and refs in the main checkout's `.git`; without it
+    // writable, every `git add`/`commit` in the worktree fails under the sandbox.
+    extra.extend(crate::workspace::worktree_git_dirs(&cwd_path));
     if let Some(p) = extra_writable {
         extra.push(p.to_path_buf());
     }
