@@ -17,6 +17,7 @@ use forge_types::{new_id, Message, Role, ToolCall, Usage};
 use serde_json::{json, Value};
 
 use crate::mock_long;
+use crate::mock_soak;
 use crate::{EventSink, ModelResponse, Provider, ProviderError, StreamEvent, ToolSpec};
 
 #[derive(Debug, Default)]
@@ -256,6 +257,25 @@ impl Provider for MockProvider {
                 30,
                 12,
             ));
+        }
+
+        // Tool-heavy turn → many distinct reads, each with a reasoning item, then an answer.
+        if mock_soak::in_scenario(messages) {
+            mock_soak::emulate_wire(_model, messages);
+            return Ok(match mock_soak::next_call(messages) {
+                Some((call, items)) => {
+                    let content = "Reading the next slice.";
+                    stream_words(content, on_event).await;
+                    let mut r = resp(content, vec![call], 30, 12);
+                    r.reasoning_items = items;
+                    r
+                }
+                None => {
+                    let content = "Soak turn finished.";
+                    stream_words(content, on_event).await;
+                    resp(content, vec![], 42, 18)
+                }
+            });
         }
 
         // Long-answer turn → a big streamed markdown reply, for measuring TUI responsiveness.

@@ -446,6 +446,7 @@ impl DriverState {
         }
         self.busy = false;
         self.turn_handle = None;
+        crate::alloc_policy::release_free_memory();
         if let Some(json) = self.app.view_snapshot_json() {
             self.session.lock().await.save_view_snapshot(&json);
         }
