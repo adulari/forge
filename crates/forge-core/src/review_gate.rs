@@ -90,7 +90,7 @@ pub(crate) fn diff_is_large(root: &std::path::Path) -> bool {
 }
 
 /// The user's most recent request in the transcript.
-pub(crate) fn latest_request(transcript: &[Message]) -> &str {
+fn latest_request(transcript: &[Message]) -> &str {
     transcript
         .iter()
         .rev()
@@ -98,7 +98,19 @@ pub(crate) fn latest_request(transcript: &[Message]) -> &str {
         .map_or("", |m| m.content.as_str())
 }
 
-pub(crate) fn review_warranted(request: &str, answer: &str, root: &std::path::Path) -> bool {
+impl crate::Session {
+    /// Whether the bridge's completeness review is worth its extra round trip for this turn:
+    /// the request lists several requirements, the change is large, or the answer hedges.
+    pub(crate) fn review_warranted(&self, answer: &str) -> bool {
+        review_warranted(
+            latest_request(&self.transcript),
+            answer,
+            self.workspace_root(),
+        )
+    }
+}
+
+fn review_warranted(request: &str, answer: &str, root: &std::path::Path) -> bool {
     request_lists_multiple_requirements(request)
         || answer_looks_incomplete(answer)
         || diff_is_large(root)

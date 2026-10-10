@@ -481,19 +481,13 @@ impl Session {
                     // gated on a turn that ran real tools (so there's an actual change to review).
                     // Gated on a change actually made: a question or read-only turn has nothing
                     // to review, and the review's own wording replaced the real answer there.
-                    // Adaptive: a single small edit with a clean answer skips the review (it costs a
-                    // full extra bridged round trip); see `review_gate`.
                     if self.config.mesh.verify_completeness
                         && !completeness_checked
                         && mutations_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
                         && (turn_start_tree.is_none()
                             || crate::completeness::worktree_fingerprint(self.workspace_root())
                                 != turn_start_tree)
-                        && crate::review_gate::review_warranted(
-                            crate::review_gate::latest_request(&self.transcript),
-                            &resp.content,
-                            self.workspace_root(),
-                        )
+                        && self.review_warranted(&resp.content)
                     {
                         completeness_checked = true;
                         pre_review = Some((

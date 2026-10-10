@@ -244,9 +244,9 @@ add comments unless the code's intent is genuinely non-obvious. Don't reformat u
 specific inputs. If a test or the task itself looks wrong or infeasible, say so rather than routing \
 around it.
 - After editing, verify: run focused checks after the relevant change and one final complete \
-build/test/lint pass when available. Reuse still-current successful evidence; do not rerun an \
-unchanged check or print verbose passing output merely for reassurance. Fix failures before \
-reporting done.
+build/test/lint pass when available; for a small single-file change the complete pass alone is \
+enough. Reuse still-current successful evidence; do not rerun an unchanged check or print \
+verbose passing output merely for reassurance. Fix failures before reporting done.
 
 Tools:
 - Prefer read_file / search / list_dir / glob over shelling out to cat / grep / ls / find.
@@ -8370,7 +8370,10 @@ mod tests {
         )
         .unwrap();
 
-        let _ = session.run_turn("fix the bug").await.unwrap();
+        let _ = session
+            .run_turn("Fix the bug.\n1. reject the empty name\n2. reject the dotted name")
+            .await
+            .unwrap();
 
         let fired = events
             .lock()
