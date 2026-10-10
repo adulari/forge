@@ -10,8 +10,12 @@ impl Session {
     /// Refresh what the CLI bridge says its context holds after a model call, and return the live
     /// context fill for the gauge.
     pub(crate) fn note_context_fill(&mut self, model: &str, reported_input: u64) -> u64 {
-        if forge_provider::is_cli_bridge(model) {
-            self.bridge_context_tokens = self.provider.context_fill(model, &self.id).unwrap_or(0);
+        if !forge_provider::is_cli_bridge(model) {
+            self.bridge_context_tokens = 0;
+        } else if let Some(fill) = self.provider.context_fill(model, &self.id) {
+            // A missing reading (the slot was busy, the call ran one-shot) says nothing about the
+            // window shrinking — only a compaction or a respawn does, and those reset it.
+            self.bridge_context_tokens = fill;
         }
         context_fill_tokens(model, self.context_pressure_tokens(), reported_input)
     }

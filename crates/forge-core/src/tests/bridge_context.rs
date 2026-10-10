@@ -7,6 +7,9 @@
 
 use super::*;
 
+/// Stands in for "the provider has no reading right now" (slot busy, one-shot fallback).
+const NO_READING: u64 = u64::MAX;
+
 /// Answers every call with a short prose reply and reports `fill` as the bridge's live context.
 struct ReportingBridge {
     fill: Arc<std::sync::atomic::AtomicU64>,
@@ -33,7 +36,8 @@ impl Provider for ReportingBridge {
     }
 
     fn context_fill(&self, _model: &str, _owner: &str) -> Option<u64> {
-        Some(self.fill.load(std::sync::atomic::Ordering::SeqCst))
+        let fill = self.fill.load(std::sync::atomic::Ordering::SeqCst);
+        (fill != NO_READING).then_some(fill)
     }
 }
 
@@ -103,4 +107,21 @@ async fn the_gauge_reports_the_bridge_context_not_the_transcript_estimate() {
     let mut session = session(&fill);
     session.run_turn("a question").await.unwrap();
     assert_eq!(session.context_pressure_tokens(), 150_000);
+}
+
+#[tokio::test]
+async fn a_missing_reading_does_not_forget_how_full_the_bridge_is() {
+    let fill = Arc::new(std::sync::atomic::AtomicU64::new(150_000));
+    let mut session = session(&fill);
+    session.run_turn("a question").await.unwrap();
+    assert_eq!(session.context_pressure_tokens(), 150_000);
+
+    fill.store(NO_READING, std::sync::atomic::Ordering::SeqCst);
+    session.run_turn("another question").await.unwrap();
+
+    assert_eq!(
+        session.context_pressure_tokens(),
+        150_000,
+        "a turn with no reading reset the gauge and delayed compaction"
+    );
 }
