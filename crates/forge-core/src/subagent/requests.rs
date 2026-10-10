@@ -333,6 +333,17 @@ pub fn rewrite_args_for_root(args: &Value, root: &Path) -> Value {
         }
     }
 
+    // Multi-file edits carry a path per edit.
+    if let Some(Value::Array(edits)) = out.get_mut("edits") {
+        for edit in edits {
+            if let Some(Value::String(path)) = edit.get_mut("path") {
+                if Path::new(path.as_str()).is_relative() {
+                    *path = root.join(path.as_str()).display().to_string();
+                }
+            }
+        }
+    }
+
     // Rewrite "cwd" field (shell tool); inject worktree_root when absent.
     match out.get("cwd") {
         None => {

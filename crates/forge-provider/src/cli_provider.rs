@@ -1247,6 +1247,7 @@ fn bridge_mcp_env(
             env.push(("FORGE_CHECKPOINT_SESSION".to_string(), c.session.clone()));
             env.push(("FORGE_CHECKPOINT_SEQ".to_string(), c.seq.to_string()));
             env.push(("FORGE_CHECKPOINT_ROOT".to_string(), c.root.clone()));
+            env.push((crate::BRIDGE_WORKSPACE_ENV.to_string(), c.workspace.clone()));
             // Accept both canonical keys and the upstream/UI representation (Full, Ask, ...).
             // Invalid values fail closed to Ask instead of allowing the child to inherit a more
             // permissive on-disk mode.
@@ -4358,6 +4359,7 @@ mod tests {
         assert_eq!(get("FORGE_CHECKPOINT_SEQ"), Some("42"));
         assert_eq!(get("FORGE_CHECKPOINT_ROOT"), Some("/abs/checkpoints"));
         assert_eq!(get("FORGE_PERMISSION_MODE"), Some("accept-edits"));
+        assert_eq!(get("FORGE_BRIDGE_WORKSPACE"), Some("/abs/workspace"));
         assert_eq!(get("FORGE_SUBAGENT_SINK"), Some("/tmp/sink.jsonl"));
         assert!(env
             .iter()

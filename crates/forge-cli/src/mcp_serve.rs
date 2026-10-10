@@ -718,11 +718,25 @@ impl ForgeMcp {
     }
 }
 
+/// Bridge hosts (claude, codex) start this server in whatever cwd they were given, and a host that
+/// curates its MCP servers' environment may not preserve it. The parent names the session's
+/// workspace explicitly so the registry, config and Lattice root all follow the session even when
+/// it lives in a worktree outside the daemon's directory.
+fn enter_bridge_workspace() {
+    let Some(dir) = std::env::var_os(forge_provider::BRIDGE_WORKSPACE_ENV) else {
+        return;
+    };
+    if let Err(error) = std::env::set_current_dir(&dir) {
+        tracing::warn!(?dir, %error, "FORGE_BRIDGE_WORKSPACE is not enterable; keeping inherited cwd");
+    }
+}
+
 /// Run the Forge MCP server until the client disconnects. Loads config from the cwd (so it shares
 /// the project's permission rules) and serves the core tool registry. `http=false` serves on stdio
 /// (the CLI-bridge default); `http=true` serves the SAME tool surface over streamable-HTTP on
 /// `bind`, behind a bearer token (`FORGE_MCP_SERVE_TOKEN`) for remote/multi-machine orchestration.
 pub async fn run(http: bool, bind: String) -> Result<()> {
+    enter_bridge_workspace();
     forge_config::inject_provider_keys();
     let mut config = forge_config::load().unwrap_or_else(|_| Config::default());
     // The parent hands us its CURRENT runtime temper in OUR env, set explicitly on this child's

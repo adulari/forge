@@ -7,10 +7,6 @@
 //! uniqueness-preserving fallbacks that decide where an edit lands, and the balance heuristics
 //! that decide it should not land at all. The tools themselves only do I/O.
 
-use serde_json::Value;
-
-use crate::ToolError;
-
 /// Whitespace-insensitive fallback for `edit_file`: when `old` doesn't match the file byte-for-byte
 /// (almost always a leading-indent / trailing-space difference), match it line-by-line ignoring each
 /// line's surrounding whitespace. Returns the edited content ONLY when exactly one contiguous block
@@ -320,7 +316,15 @@ fn closest_candidate(content: &str, old: &str) -> Option<String> {
     ))
 }
 
-fn not_found_message(content: &str, old: &str) -> String {
+fn not_found_message(content: &str, old: &str, new: &str) -> String {
+    if !new.trim().is_empty() && new != old && content.contains(new) {
+        return format!(
+            "`old` ({} lines) is not in the file, but the `new` text already is — this edit \
+             was probably applied already (a repeated call?). read_file the lines to confirm \
+             rather than retrying",
+            old.lines().count()
+        );
+    }
     let n_lines = old.lines().count();
     let mut msg = format!(
         "`old` ({n_lines} lines) not found (also tried whitespace-insensitive and \
@@ -372,7 +376,7 @@ pub(super) fn apply_edit(
                          add surrounding context so it matches exactly once"
                     );
                 }
-                not_found_message(content, old)
+                not_found_message(content, old, new)
             }),
         n => Err(format!(
             "`old` is ambiguous: {n} occurrences — add surrounding context, or pass \
@@ -409,7 +413,7 @@ pub(super) fn apply_edit_all(
     }
     let count = content.matches(old).count();
     if count == 0 {
-        return Err(not_found_message(content, old));
+        return Err(not_found_message(content, old, new));
     }
     let updated = content.replace(old, new);
     if looks_bracket_truncated(content, &updated) {
@@ -445,35 +449,30 @@ pub(super) struct EditStep {
     pub replace_all: bool,
 }
 
-/// Extract the edit steps from a `multi_edit` call's `edits` array.
-pub(super) fn multi_edit_pairs(args: &Value) -> Result<Vec<EditStep>, ToolError> {
-    let arr = args
-        .get("edits")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ToolError::Failed("`edits` must be an array of {old, new}".to_string()))?;
-    if arr.is_empty() {
-        return Err(ToolError::Failed("`edits` is empty".to_string()));
+/// A few numbered lines around where `new` landed in `updated`, so the model can see the result of
+/// an edit without a follow-up read. Empty when `new` is blank or can't be located.
+pub(super) fn edit_snippet(updated: &str, new: &str) -> String {
+    const MAX_LINES: usize = 10;
+    const MAX_LINE_CHARS: usize = 160;
+    if new.trim().is_empty() {
+        return String::new();
     }
-    arr.iter()
-        .map(|e| {
-            let old = e.get("old").and_then(Value::as_str);
-            let new = e.get("new").and_then(Value::as_str);
-            let replace_all = e
-                .get("replace_all")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            match (old, new) {
-                (Some(o), Some(n)) => Ok(EditStep {
-                    old: o.to_string(),
-                    new: n.to_string(),
-                    replace_all,
-                }),
-                _ => Err(ToolError::Failed(
-                    "each edit needs string `old` and `new`".to_string(),
-                )),
-            }
+    let Some(pos) = updated.find(new) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = updated.lines().collect();
+    let first = updated[..pos].matches('\n').count();
+    let from = first.saturating_sub(1);
+    let to =
+        (first + new.lines().count().clamp(1, MAX_LINES - 2)).min(lines.len().saturating_sub(1));
+    let body = (from..=to)
+        .map(|n| {
+            let text: String = lines[n].chars().take(MAX_LINE_CHARS).collect();
+            format!("{}\t{text}", n + 1)
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\n{body}")
 }
 
 /// Fold the edits over `content` in order (each on the running result), all-or-nothing: the first
@@ -498,6 +497,17 @@ mod tests {
             new: new.to_string(),
             replace_all: false,
         }
+    }
+
+    #[test]
+    fn edit_snippet_numbers_the_lines_around_the_change() {
+        let updated = "a\nb\nNEW1\nNEW2\ne\nf\n";
+        assert_eq!(
+            edit_snippet(updated, "NEW1\nNEW2"),
+            "\n2\tb\n3\tNEW1\n4\tNEW2\n5\te"
+        );
+        assert_eq!(edit_snippet(updated, "  "), "");
+        assert_eq!(edit_snippet(updated, "absent"), "");
     }
 
     #[test]
@@ -638,6 +648,19 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains("if cond {"), "{out}");
+    }
+
+    #[test]
+    fn a_repeated_edit_is_recognised_as_already_applied() {
+        let applied = "let a = new_name();\n";
+        for result in [
+            apply_edit(applied, "old_name()", "new_name()"),
+            apply_edit_all(applied, "old_name()", "new_name()"),
+        ] {
+            let err = result.unwrap_err();
+            assert!(err.contains("already"), "{err}");
+            assert!(!err.contains("closest candidate"), "{err}");
+        }
     }
 
     #[test]

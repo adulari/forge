@@ -729,6 +729,9 @@ pub struct CheckpointContext {
     pub epoch: u64,
 }
 
+/// Env var naming the session workspace for a bridge's `forge mcp-serve` child.
+pub const BRIDGE_WORKSPACE_ENV: &str = "FORGE_BRIDGE_WORKSPACE";
+
 /// A provider-neutral structured-output request (OpenAI `response_format`). Backends that support
 /// it (currently the genai/API path) map it to their JSON-mode / JSON-schema knob; backends that
 /// don't (the CLI bridges) ignore it.

@@ -25,6 +25,29 @@ fn always_allow_patterns(tool: &str, args: &serde_json::Value) -> Vec<String> {
 }
 
 impl Session {
+    /// Steer main-checkout paths into a linked worktree session and compute the roots this call
+    /// may touch: the configured extras, plus the main checkout and temp dir for read-only tools.
+    fn scope_to_workspace(
+        &self,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (serde_json::Value, Vec<std::path::PathBuf>) {
+        let read_only = self
+            .tools
+            .get(tool)
+            .is_some_and(|t| t.side_effect() == forge_types::SideEffect::ReadOnly);
+        let root = self.workspace.root();
+        let args = match forge_tools::worktree_origin(root) {
+            Some(origin) => forge_tools::remap_origin_paths(&args, &origin, root, read_only),
+            None => args,
+        };
+        let mut roots = self.extra_tool_roots.clone();
+        if read_only {
+            roots.extend(forge_tools::read_only_roots(root));
+        }
+        (args, roots)
+    }
+
     /// Run a single tool call, applying the permission policy, and return its result text.
     /// Whether `name` is a side-effect-free registry tool that's safe to run concurrently in a
     /// batch: not a core-owned virtual tool (those mutate session state / prompt the user), not an
@@ -273,9 +296,11 @@ impl Session {
         effective_args = subagent::rewrite_args_for_root(&effective_args, self.workspace.root());
         effective_args =
             add_workspace_default_path(&call.name, effective_args, self.workspace.root());
+        let (scoped_args, readable_roots) = self.scope_to_workspace(&call.name, effective_args);
+        effective_args = scoped_args;
         let mut args_json = serde_json::to_string(&effective_args)?;
         if let Err(error) =
-            validate_workspace_args(&effective_args, &self.workspace, &self.extra_tool_roots)
+            validate_workspace_args(&effective_args, &self.workspace, &readable_roots)
         {
             let result = format!("error: {error}");
             self.presenter.emit(PresenterEvent::ToolStart {
@@ -399,12 +424,13 @@ impl Session {
                 effective_args = subagent::rewrite_args_for_root(&new_args, self.workspace.root());
                 effective_args =
                     add_workspace_default_path(&call.name, effective_args, self.workspace.root());
+                let (scoped_args, readable_roots) =
+                    self.scope_to_workspace(&call.name, effective_args);
+                effective_args = scoped_args;
                 args_json = serde_json::to_string(&effective_args).unwrap_or_default();
-                if let Err(error) = validate_workspace_args(
-                    &effective_args,
-                    &self.workspace,
-                    &self.extra_tool_roots,
-                ) {
+                if let Err(error) =
+                    validate_workspace_args(&effective_args, &self.workspace, &readable_roots)
+                {
                     let result = format!("error: {error}");
                     self.presenter.emit(PresenterEvent::ToolResult {
                         name: call.name.clone(),

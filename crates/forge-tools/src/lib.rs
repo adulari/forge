@@ -43,6 +43,7 @@ pub use web::{
     Bing, BraveKeyless, BraveSearch, DuckDuckGo, SearchBackend, SearchResult, SearxNg,
     WebFetchTool, WebSearchTool,
 };
+pub use workspace::{read_only_roots, remap_origin_paths, worktree_git_dirs, worktree_origin};
 
 /// Run a shell command without a sandbox (for use by the autofix loop and other internal
 /// callers that don't need filesystem confinement). Never returns `Err`.
@@ -299,6 +300,52 @@ mod tests {
             .unwrap()
             .contains("second.txt"));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_session_steers_main_checkout_paths_into_the_worktree() {
+        let base = tempfile::tempdir().unwrap();
+        let origin = base.path().join("repo");
+        let admin = origin.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        std::fs::create_dir_all(origin.join("node_modules")).unwrap();
+        std::fs::write(origin.join("node_modules/dep.js"), "dep").unwrap();
+        std::fs::write(origin.join("a.txt"), "main").unwrap();
+        let origin = origin.canonicalize().unwrap();
+        let wt = base.path().join("elsewhere/wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        std::fs::write(wt.join("a.txt"), "branch").unwrap();
+        let wt = wt.canonicalize().unwrap();
+
+        let registry = ToolRegistry::with_core_tools_in(&wt);
+        let read = registry.get("read_file").unwrap();
+        let by_main_path = serde_json::json!({ "path": origin.join("a.txt") });
+        assert_eq!(read.run(&by_main_path).await.unwrap(), "branch");
+        let ignored_only_in_main =
+            serde_json::json!({ "path": origin.join("node_modules/dep.js") });
+        assert_eq!(read.run(&ignored_only_in_main).await.unwrap(), "dep");
+
+        let edit = registry.get("edit_file").unwrap();
+        edit.run(
+            &serde_json::json!({ "path": origin.join("a.txt"), "old": "branch", "new": "edited" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "edited");
+        assert_eq!(
+            std::fs::read_to_string(origin.join("a.txt")).unwrap(),
+            "main"
+        );
+
+        let write = registry.get("write_file").unwrap();
+        assert!(write
+            .run(&serde_json::json!({ "path": origin.join("node_modules/new.js"), "content": "x" }))
+            .await
+            .is_ok());
+        assert!(!origin.join("node_modules/new.js").exists());
+        assert!(wt.join("node_modules/new.js").exists());
     }
 
     #[tokio::test]
