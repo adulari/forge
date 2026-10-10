@@ -604,6 +604,51 @@ pub(crate) fn adopt_redrive_text(final_text: &mut String, redrive_text: String) 
     }
 }
 
+/// One-shot review pushed before a changed turn ends. `git diff` alone never lists a NEW untracked
+/// file, so a turn that only created files saw an empty diff and reviewed from memory.
+pub(crate) const COMPLETENESS_NUDGE: &str = "Before finishing, do ONE final review (a \
+        single bounded pass — do NOT re-explore the codebase): run `git status --short` and \
+        `git diff HEAD` once to see your COMPLETE change (a new untracked file is absent from \
+        the diff, so read each one the status lists), re-read the original request and write the \
+        distinct requirements/cases it lists (issues routinely specify several, \
+        e.g. \"reject a dotted blueprint name AND a dotted endpoint\"), and for \
+        each confirm your change already handles it. Only if the change is MISSING a \
+        requirement, add that specific fix — otherwise finish. A change that \
+        handles only the first of several cases is INCOMPLETE.";
+
+impl crate::Session {
+    /// The turn's answer once any review or verification re-drive has finished. An unresolved
+    /// failed check means the re-drive's own words must stand.
+    pub(crate) fn settle_answer(
+        &self,
+        reply: String,
+        pre_review: Option<(String, Option<u64>)>,
+        checks_clean: bool,
+    ) -> String {
+        let pre = pre_review.filter(|_| checks_clean);
+        let tree_now = pre
+            .as_ref()
+            .and_then(|_| worktree_fingerprint(self.workspace_root()));
+        answer_after_review(reply, pre, tree_now)
+    }
+
+    /// Remember the turn's real answer before a verification re-drive. The re-drive's reply is
+    /// only "tests passed", and without this it replaced the summary the user was waiting for.
+    /// Keeps the earliest answer: a completeness review may already have armed it.
+    pub(crate) fn keep_answer_across_verification(
+        &self,
+        pre_review: &mut Option<(String, Option<u64>)>,
+        answer: &str,
+    ) {
+        if pre_review.is_none() && !answer.trim().is_empty() {
+            *pre_review = Some((
+                answer.to_string(),
+                worktree_fingerprint(self.workspace_root()),
+            ));
+        }
+    }
+}
+
 impl crate::Session {
     /// Inject the one-shot completeness-review nudge (see `mesh.verify_completeness`).
     pub(crate) fn start_completeness_review(&mut self) {
@@ -611,14 +656,6 @@ impl crate::Session {
             "completeness check — reviewing the change against every requirement before finishing"
                 .to_string(),
         ));
-        const COMPLETENESS_NUDGE: &str = "Before finishing, do ONE final review (a \
-                single bounded pass — do NOT re-explore the codebase): run `git diff` once \
-                to see your COMPLETE change, re-read the original request and write the \
-                distinct requirements/cases it lists (issues routinely specify several, \
-                e.g. \"reject a dotted blueprint name AND a dotted endpoint\"), and for \
-                each confirm your diff already handles it. Only if the diff is MISSING a \
-                requirement, add that specific fix — otherwise finish. A change that \
-                handles only the first of several cases is INCOMPLETE.";
         let nseq = self.next_seq();
         let _ = self
             .store
@@ -629,7 +666,13 @@ impl crate::Session {
 
 #[cfg(test)]
 mod review_answer_tests {
-    use super::answer_after_review;
+    use super::{answer_after_review, COMPLETENESS_NUDGE};
+
+    #[test]
+    fn review_nudge_points_at_untracked_files_not_just_the_tracked_diff() {
+        assert!(COMPLETENESS_NUDGE.contains("git status --short"));
+        assert!(COMPLETENESS_NUDGE.contains("untracked"));
+    }
 
     #[test]
     fn review_without_new_edits_keeps_the_real_answer() {

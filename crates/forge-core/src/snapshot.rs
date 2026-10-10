@@ -195,9 +195,20 @@ pub(crate) fn changed_files_this_turn(root: &Path, session: &str, seq: i64) -> V
         .collect()
 }
 
+/// Keep checkpoint blobs out of the user's `git status`. A `*` ignore file inside the directory
+/// ignores everything under it (itself included), so nothing the user owns is edited and the model
+/// stops reporting a stray untracked `.forge/` as if it were part of its change.
+fn ensure_git_ignored(root: &Path) {
+    let ignore = root.join(".gitignore");
+    if !ignore.exists() {
+        let _ = std::fs::write(ignore, "*\n");
+    }
+}
+
 fn save_manifest(root: &Path, session: &str, seq: i64, m: &Manifest) -> std::io::Result<()> {
     let dir = turn_dir(root, session, seq);
     std::fs::create_dir_all(&dir)?;
+    ensure_git_ignored(root);
     let json = serde_json::to_string_pretty(m).unwrap_or_default();
     std::fs::write(manifest_path(root, session, seq), json)
 }
@@ -235,6 +246,7 @@ pub fn snapshot_before_write(
         let blob = format!("{idx}.blob");
         let dir = turn_dir(root, session, seq);
         std::fs::create_dir_all(&dir)?;
+        ensure_git_ignored(root);
         std::fs::copy(&path, dir.join(&blob))?;
         FileEntry {
             path: key,
@@ -338,6 +350,36 @@ mod tests {
         assert_eq!(report.restored, vec![file.to_string_lossy().to_string()]);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn checkpoint_dir_ignores_itself_so_git_status_stays_clean() {
+        let repo = root();
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        let file = repo.join("a.txt");
+        std::fs::write(&file, "original").unwrap();
+
+        snapshot_before_write(&repo.join(".forge/checkpoints"), "sess", 1, &file).unwrap();
+        std::fs::write(&file, "edited").unwrap();
+
+        let status = String::from_utf8(git(&["status", "--porcelain", "-uall"]).stdout).unwrap();
+        assert!(
+            !status.contains(".forge"),
+            "checkpoint files leaked: {status}"
+        );
+        assert!(
+            status.contains("a.txt"),
+            "the user's own file still shows: {status}"
+        );
+        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]

@@ -83,6 +83,8 @@ fn answers_questions_offers_and_summaries_are_not_mid_intent() {
         "All set:\n\n```text\ncargo test: ok\n```",
         "Paste the login code here and I'll enter it right away.",
         "I'll wait for your approval before touching anything.",
+        "Nothing is missing, so I'm finishing with no further changes.",
+        "The diff covers every requirement.\n\nNo further changes are needed, so I'm finishing here.",
     ] {
         assert!(!ends_mid_intent(text), "false positive: {text}");
     }

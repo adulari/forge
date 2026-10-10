@@ -471,6 +471,19 @@ fn cap_read(s: String) -> String {
     )
 }
 
+/// Create the destination's missing parent directories before a write, as every editor-style
+/// write tool does. Without it a model creating `scripts/x.sh` hits a bare `No such file or
+/// directory` and burns a round trip on `mkdir -p`.
+async fn create_parent_dirs(path: &str) -> Result<(), ToolError> {
+    if let Some(parent) = Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    Ok(())
+}
+
 /// Write (create/overwrite) a text file. Mutates the workspace.
 pub struct WriteFileTool;
 
@@ -506,6 +519,7 @@ impl Tool for WriteFileTool {
         let path = str_arg(args, "path")?;
         let content = str_arg(args, "content")?;
         confine(path)?;
+        create_parent_dirs(path).await?;
         tokio::fs::write(path, content).await?;
         Ok(format!("wrote {} bytes to {path}", content.len()))
     }
@@ -575,6 +589,7 @@ impl Tool for AppendFileTool {
         let path = str_arg(args, "path")?;
         let content = str_arg(args, "content")?;
         confine(path)?;
+        create_parent_dirs(path).await?;
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1612,6 +1627,25 @@ mod tests {
             (true, true, true),
             "extra root allowed; unlisted sibling and blanket temp still refused"
         );
+    }
+
+    #[tokio::test]
+    async fn write_and_append_create_missing_parent_directories() {
+        let root = std::env::temp_dir().join(format!("forge-parents-{}", forge_types::new_id()));
+        let written = root.join("scripts/nested/tool.sh");
+        WriteFileTool
+            .run(&json!({ "path": written, "content": "#!/bin/sh\n" }))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&written).unwrap(), "#!/bin/sh\n");
+
+        let appended = root.join("logs/deep/out.txt");
+        AppendFileTool
+            .run(&json!({ "path": appended, "content": "a" }))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&appended).unwrap(), "a");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

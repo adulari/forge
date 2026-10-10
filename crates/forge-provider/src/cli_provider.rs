@@ -2305,11 +2305,7 @@ impl CliProvider {
             ));
         }
 
-        let text = if content.is_empty() {
-            final_text.unwrap_or_default()
-        } else {
-            content
-        };
+        let text = crate::bridge_answer::bridge_answer(content, final_text);
 
         if text.is_empty() {
             let code = status.and_then(|s| s.code());
@@ -2597,11 +2593,7 @@ fn finish_persistent_turn(binary: &str, turn: TurnData) -> Result<ModelResponse,
     if let Some(e) = turn.in_band_error {
         return Err(classify_in_band_error(binary, &e));
     }
-    let text = if turn.content.is_empty() {
-        turn.final_text.unwrap_or_default()
-    } else {
-        turn.content
-    };
+    let text = crate::bridge_answer::bridge_answer(turn.content, turn.final_text);
     let (tool_calls, content) = if !turn.tool_ran {
         let (recovered, cleaned) = crate::recover_text_tool_calls(&text);
         if recovered.is_empty() {
@@ -6426,7 +6418,8 @@ done
             .await
             .unwrap();
         assert!(a.content.starts_with("reply 1 from "));
-        assert!(b.content.starts_with("reply 1 from "), "{}", b.content);
+        // The fake replies once per transcript line; the answer is its last reply, from process 2.
+        assert!(b.content.ends_with(" from 2"), "{}", b.content);
         let spawns = read_log(dir.path(), "spawns.log");
         assert_eq!(spawns.len(), 2, "one process per ownerless call");
         assert!(spawns
