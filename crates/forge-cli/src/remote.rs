@@ -40,7 +40,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -707,102 +707,9 @@ pub struct RemoteUrl {
 /// posture. `temper` remains the human-facing label for older clients.
 pub const PROTOCOL_VERSION: u32 = 10;
 
-/// How many broadcast snapshots the per-server [`EventLog`] retains for reconnect replay. One
-/// entry per *changed* frame covers minutes of activity; a client that was away longer gets a
-/// full-snapshot resync instead (plus `GET /api/history` pagination for the scrollback it wants).
-pub const EVENT_LOG_CAP: usize = 512;
-
-/// A bounded ring of every broadcast snapshot keyed by its [`Snapshot::revision`], so a
-/// reconnecting client (`?rev=<last seen>` on the WS handshake) replays exactly the frames it
-/// missed instead of flickering through a from-scratch rebuild. Revisions are consecutive (one
-/// bump per actually-broadcast frame), so "everything after rev N" is answerable precisely — or
-/// not at all (evicted / unknown / foreign counter), which forces a full-snapshot resync.
-pub struct SnapshotFrame {
-    pub snapshot: Snapshot,
-    json: Arc<str>,
-    resync_json: OnceLock<Arc<str>>,
-}
-
-impl SnapshotFrame {
-    pub fn new(snapshot: Snapshot) -> Self {
-        let json = serde_json::to_string(&snapshot)
-            .unwrap_or_else(|_| "{}".into())
-            .into();
-        Self {
-            snapshot,
-            json,
-            resync_json: OnceLock::new(),
-        }
-    }
-
-    fn text(&self, resync: bool) -> Arc<str> {
-        if !resync {
-            return self.json.clone();
-        }
-        self.resync_json
-            .get_or_init(|| {
-                let mut snapshot = self.snapshot.clone();
-                snapshot.resync = true;
-                serde_json::to_string(&snapshot)
-                    .unwrap_or_else(|_| "{}".into())
-                    .into()
-            })
-            .clone()
-    }
-}
-
-pub struct EventLog {
-    ring: std::collections::VecDeque<(u64, Arc<SnapshotFrame>)>,
-    cap: usize,
-}
-
-fn lock_event_log(events: &Mutex<EventLog>) -> std::sync::MutexGuard<'_, EventLog> {
-    events
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-impl EventLog {
-    pub fn new(cap: usize) -> Self {
-        Self {
-            ring: std::collections::VecDeque::new(),
-            cap,
-        }
-    }
-
-    /// Record a broadcast frame, evicting the oldest beyond the cap (memory stays bounded no
-    /// matter how long the session runs).
-    pub fn push(&mut self, rev: u64, snap: Arc<SnapshotFrame>) {
-        self.ring.push_back((rev, snap));
-        while self.ring.len() > self.cap {
-            self.ring.pop_front();
-        }
-    }
-
-    /// Every retained snapshot with `revision > since`, oldest first — `Some(vec![])` when the
-    /// client is already current. `None` when the gap can't be filled faithfully (the log is
-    /// empty, `since` predates the oldest retained entry, or `since` is from a future/foreign
-    /// counter): the caller must then resync with one full snapshot instead of replaying a hole.
-    pub fn replay_after(&self, since: u64) -> Option<Vec<Arc<SnapshotFrame>>> {
-        let (front, _) = self.ring.front()?;
-        let (back, _) = self.ring.back()?;
-        if since.checked_add(1).is_none_or(|next| next < *front) || since > *back {
-            return None;
-        }
-        Some(
-            self.ring
-                .iter()
-                .filter(|(rev, _)| *rev > since)
-                .map(|(_, s)| s.clone())
-                .collect(),
-        )
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.ring.len()
-    }
-}
+mod event_log;
+use event_log::lock_event_log;
+pub use event_log::{EventLog, SnapshotFrame, EVENT_LOG_CAP};
 
 /// Hard cap on a single inbound WebSocket frame (a [`RemoteInput`]). Inputs are short prompts or
 /// answers; anything larger is dropped to bound memory + parse cost from a hostile/buggy client.

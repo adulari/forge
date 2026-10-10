@@ -50,6 +50,7 @@ pub(crate) use cli::commands::skill::{commands_cmd, skill_cmd};
 pub(crate) use cli::commands::tour::tour_cmd;
 pub(crate) use cli::commands::voice::voice_cmd;
 
+mod alloc_policy;
 mod anywhere;
 mod api_serve;
 mod apns;
@@ -149,8 +150,16 @@ fn init_tracing() {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    alloc_policy::init();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build the tokio runtime")
+        .block_on(run_cli());
+}
+
+async fn run_cli() {
     init_tracing();
 
     let cli = Cli::parse();
