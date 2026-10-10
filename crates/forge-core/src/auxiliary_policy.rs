@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::compaction_policy::record_model_failure_in;
+use crate::spend_guard::priced;
 
 fn report_auxiliary_persistence_failure(
     session_id: &str,
@@ -80,6 +81,7 @@ prompt text, nothing else.";
         let quota = readiness.quota;
         let provider = self.provider.clone();
         let store = self.store.clone();
+        let pricing = self.pricing.clone();
         let router = self.router.clone();
         let id = self.id.clone();
         let config = self.config.clone();
@@ -125,9 +127,12 @@ prompt text, nothing else.";
                     return;
                 }
             };
-            if let Err(error) =
-                store.record_side_call_usage_for(&id, "memory", Some(&model), &r.usage)
-            {
+            if let Err(error) = store.record_side_call_usage_for(
+                &id,
+                "memory",
+                Some(&model),
+                &priced(&pricing, &model, &r.usage),
+            ) {
                 report_auxiliary_persistence_failure(&id, "memory usage", &error, |warning| {
                     if let Some(sink) = warning_sink.as_mut() {
                         sink.emit(PresenterEvent::Warning(warning));
@@ -254,6 +259,7 @@ prompt text, nothing else.";
         // (headless / tests) have no sink, so it runs inline exactly as before.
         let provider = self.provider.clone();
         let store = self.store.clone();
+        let pricing = self.pricing.clone();
         let id = self.id.clone();
         let cooldown = std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
         match self.presenter.recap_sink() {
@@ -272,9 +278,12 @@ prompt text, nothing else.";
                         }
                     };
                     {
-                        if let Err(error) =
-                            store.record_side_call_usage_for(&id, "recap", Some(&model), &r.usage)
-                        {
+                        if let Err(error) = store.record_side_call_usage_for(
+                            &id,
+                            "recap",
+                            Some(&model),
+                            &priced(&pricing, &model, &r.usage),
+                        ) {
                             report_auxiliary_persistence_failure(
                                 &id,
                                 "recap usage",
@@ -302,9 +311,12 @@ prompt text, nothing else.";
                     }
                 };
                 {
-                    if let Err(error) =
-                        store.record_side_call_usage_for(&id, "recap", Some(&model), &r.usage)
-                    {
+                    if let Err(error) = store.record_side_call_usage_for(
+                        &id,
+                        "recap",
+                        Some(&model),
+                        &priced(&pricing, &model, &r.usage),
+                    ) {
                         report_auxiliary_persistence_failure(
                             &id,
                             "recap usage",
@@ -381,6 +393,7 @@ prompt text, nothing else.";
         // suggestion landing a moment later.
         let provider = self.provider.clone();
         let store = self.store.clone();
+        let pricing = self.pricing.clone();
         let id = self.id.clone();
         let cooldown = std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
         let prev_prompt = prompt.to_string();
@@ -400,9 +413,12 @@ prompt text, nothing else.";
                         }
                     };
                     {
-                        if let Err(error) =
-                            store.record_side_call_usage_for(&id, "suggest", Some(&model), &r.usage)
-                        {
+                        if let Err(error) = store.record_side_call_usage_for(
+                            &id,
+                            "suggest",
+                            Some(&model),
+                            &priced(&pricing, &model, &r.usage),
+                        ) {
                             report_auxiliary_persistence_failure(
                                 &id,
                                 "suggestion usage",
@@ -430,9 +446,12 @@ prompt text, nothing else.";
                     }
                 };
                 {
-                    if let Err(error) =
-                        store.record_side_call_usage_for(&id, "suggest", Some(&model), &r.usage)
-                    {
+                    if let Err(error) = store.record_side_call_usage_for(
+                        &id,
+                        "suggest",
+                        Some(&model),
+                        &priced(&pricing, &model, &r.usage),
+                    ) {
                         report_auxiliary_persistence_failure(
                             &id,
                             "suggestion usage",
@@ -545,7 +564,7 @@ prompt text, nothing else.";
                 &self.id,
                 "shell/diagnose",
                 Some(&model),
-                &r.usage,
+                &priced(&self.pricing, &model, &r.usage),
             ) {
                 report_auxiliary_persistence_failure(
                     &self.id,

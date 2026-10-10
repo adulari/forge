@@ -252,6 +252,7 @@ impl Session {
             turn_billable_input_tokens: 0,
             turn_output_tokens: 0,
             turn_hard_guard_abort: false,
+            spend: Default::default(),
             turn_unfinished_tasks: Vec::new(),
             expect_code_change: false,
             cli_bridge_notice_shown: false,

@@ -317,6 +317,25 @@ pub struct BudgetBehavior {
 (default 0.8), `budget: BudgetBehavior`. `daily_budget_usd` is retained as a deprecated alias
 mapped into `daily_cap_usd` at load time so existing configs/tests keep working.
 
+### 5.5.1 Per-turn and per-session spend guards
+
+The day/week/month caps are read once, when a turn starts, and are off by default, so a single
+runaway turn (hundreds of calls re-sending a 300k-token prompt) was never stopped. `spend_guard.rs`
+charges every recorded call, side calls included, against two more limits in `[mesh.budget]`
+(`0` disables each):
+
+```toml
+[mesh.budget]
+turn_warn_usd    = 5.0     # one warning per turn
+turn_cap_usd     = 25.0    # ends the turn; the next prompt or `continue` gets a fresh allowance
+session_warn_usd = 25.0    # one warning per process
+session_cap_usd  = 100.0   # refuses new turns until raised or FORGE_BUDGET_OVERRIDE=1
+```
+
+`hard_stop = false` downgrades both caps to warnings; `FORGE_BUDGET_OVERRIDE=1` bypasses them.
+Side calls (compaction, memory, recap, suggestion, shell diagnosis, refine) are priced from their
+token counts like any other call; they used to be recorded at $0.
+
 ### 5.6 Cost unknown until after streaming (estimate vs actual)
 
 Cost is computed *after* a call returns (`forge-core/src/lib.rs:229-233`). The gate therefore
