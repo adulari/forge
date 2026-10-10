@@ -58,6 +58,11 @@ pub(super) fn allowed(
         && st.epoch == checkpoint.map_or(0, |c| c.epoch)
 }
 
+/// What a live process is told when it is driven again with nothing new in the transcript. Its own
+/// history already holds everything, so the honest instruction is to carry on — not a re-render of
+/// the transcript, which it would take for a fresh request and answer with "nothing new".
+pub(super) const CONTINUE_PROMPT: &str = "Continue from where you left off. Nothing new has been added to the conversation since your last reply; finish the work, or give your final answer if you are done.";
+
 /// Render only the NEW User/System messages in `tail` (the slice of the transcript not yet sent to a
 /// resumed CLI session). Assistant + Tool messages are skipped: the resumed session already holds the
 /// model's own prior turn and the tool results it produced, so re-sending Forge's record of them

@@ -83,6 +83,9 @@ pub(crate) mod stall_guard;
 pub mod steer;
 mod stop_hook;
 pub mod subagent;
+mod system_context;
+mod working_tree;
+use working_tree::{working_tree_changed_since, working_tree_marker};
 pub(crate) mod task_staleness;
 mod text_policy;
 pub mod tokens;
@@ -846,17 +849,6 @@ fn snapshot_uncommitted_work(root: &std::path::Path) -> Option<String> {
         .current_dir(root)
         .output();
     Some(sha.chars().take(12).collect())
-}
-
-/// Whether the repository status changed during this turn. Comparing against the turn baseline
-/// matters for serve worktrees: Forge intentionally creates an untracked `.cargo/config.toml`
-/// before the turn starts, which is not task progress and must not suppress the empty-diff guard.
-/// Outside a git repository, conservatively report changed so code-change nudges never fire.
-fn working_tree_changed_since(root: Option<&std::path::Path>, baseline: Option<&[u8]>) -> bool {
-    match (baseline, working_tree_status(root)) {
-        (Some(before), Some(after)) => before != after,
-        _ => true,
-    }
 }
 
 fn uncommitted_work_message(root: &std::path::Path) -> String {
@@ -1720,6 +1712,10 @@ pub struct Session {
     /// picks "always", a mesh failover to a model that needs compaction proceeds silently for the
     /// rest of this session (reset next launch). `false` = ask each time.
     always_compact_on_switch: bool,
+    /// How full the CLI bridge's own process context is, as it reported at its last request.
+    /// The bridge's tool results never enter [`Session::transcript`], so on a long bridged
+    /// session the transcript estimate stays small while the real context keeps growing.
+    bridge_context_tokens: u64,
     /// Whether `.forge/AGENTS.md` (or `AGENTS.md`) has been injected as a standing system prompt.
     /// False for fresh sessions so it's injected on the first turn; true for resumed sessions
     /// (the content is already in the stored transcript) and after injection.
@@ -2629,7 +2625,7 @@ impl Session {
         // verbatim; current-turn tool results are added only after this boundary.
         let _ = prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT, 0);
         let recap_tasks_before = self.tasks.clone();
-        let working_tree_baseline = working_tree_status(Some(self.workspace.root()));
+        let working_tree_baseline = working_tree_marker(Some(self.workspace.root()));
         self.last_context_pack = context_pack::ContextPack::default();
         let mut context_pack = context_pack::ContextPack::default();
         // 1. Route the task (deterministic, no model call) and record why. The budget is
@@ -4878,6 +4874,9 @@ mod tests {
 
     #[path = "bridge_stall.rs"]
     mod bridge_stall_tests;
+
+    #[path = "bridge_context.rs"]
+    mod bridge_context_tests;
 
     #[path = "stream_idle_hint.rs"]
     mod stream_idle_hint_tests;
@@ -13403,7 +13402,7 @@ mod tests {
         let dir = clean_git_repo();
         std::fs::create_dir_all(dir.join(".cargo")).unwrap();
         std::fs::write(dir.join(".cargo/config.toml"), "[build]\n").unwrap();
-        let baseline = working_tree_status(Some(&dir)).unwrap();
+        let baseline = working_tree_marker(Some(&dir)).unwrap();
 
         assert!(String::from_utf8_lossy(&baseline).contains(".cargo/"));
         assert!(!working_tree_changed_since(Some(&dir), Some(&baseline)));

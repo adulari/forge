@@ -1805,6 +1805,18 @@ impl Provider for CliProvider {
         Some(self.timeout.saturating_add(Duration::from_secs(60)))
     }
 
+    /// Prompt size of the owner's live process at its last request. Read between turns; a slot
+    /// that is mid-turn simply reports nothing rather than blocking the caller.
+    fn context_fill(&self, _model: &str, owner: &str) -> Option<u64> {
+        let slot = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .peek(owner)?;
+        let guard = slot.try_lock().ok()?;
+        guard.session.as_ref()?.context_fill
+    }
+
     async fn complete(
         &self,
         model: &str,
@@ -2549,6 +2561,8 @@ struct TurnData {
     tool_ran: bool,
     /// claude's `session_id` as of this turn's last session-bearing line.
     session_id: Option<String>,
+    /// Prompt size of the turn's last model request (see [`live::claude_assistant_context`]).
+    context_fill: Option<u64>,
 }
 
 /// Why a persistent turn's read loop ended without a `result`.
@@ -2744,6 +2758,7 @@ impl CliProvider {
             tailer,
             turn_in_flight: false,
             parked_at: std::time::Instant::now(),
+            context_fill: None,
         })
     }
 
@@ -2864,7 +2879,7 @@ impl CliProvider {
             } else {
                 let delta = resume::render_resume_delta(&messages[sess.sent..]);
                 if delta.trim().is_empty() {
-                    apply_harness_preamble(self.harness, self.kind, render_prompt(messages))
+                    apply_resume_reminder(self.harness, self.kind, resume::CONTINUE_PROMPT.into())
                 } else {
                     apply_resume_reminder(self.harness, self.kind, delta)
                 }
@@ -2916,6 +2931,7 @@ impl CliProvider {
             match drive_result {
                 Ok(turn) => {
                     sess.sent = messages.len();
+                    sess.context_fill = turn.context_fill.or(sess.context_fill);
                     sess.turn_in_flight = false;
                     sess.parked_at = std::time::Instant::now();
                     if turn.session_id.is_some() {
@@ -6046,6 +6062,84 @@ esac
         assert_eq!(
             r2.content, "reply 2",
             "the same persistent process must serve turn 2 (a fresh spawn would say 'reply 1')"
+        );
+    }
+
+    #[test]
+    fn claude_assistant_usage_gives_the_prompt_size_of_that_one_request() {
+        let step = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":5,"cache_read_input_tokens":90000,"cache_creation_input_tokens":1200,"output_tokens":40}}}"#;
+        assert_eq!(live::claude_assistant_context(step), Some(91_205));
+        let no_usage = r#"{"type":"assistant","message":{"content":[]}}"#;
+        assert_eq!(live::claude_assistant_context(no_usage), None);
+        // `result.usage` sums every step of the turn; it must never be read as window fill.
+        let result =
+            r#"{"type":"result","usage":{"input_tokens":1,"cache_read_input_tokens":999999}}"#;
+        assert_eq!(live::claude_assistant_context(result), None);
+        let quoted =
+            r#"{"type":"user","message":{"content":"the text \"type\":\"assistant\" is data"}}"#;
+        assert_eq!(live::claude_assistant_context(quoted), None);
+    }
+
+    /// A fake persistent claude that records every stdin line it receives into `log`.
+    #[cfg(unix)]
+    fn make_recording_persistent_cli(log: &std::path::Path) -> String {
+        install_fake_cli(
+            "forge-fake-recording-live",
+            &format!(
+                r#"#!/bin/sh
+i=0
+while IFS= read -r line; do
+  i=$((i+1))
+  printf '%s\n' "$line" >> '{}'
+  printf '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"reply %d"}}]}}}}\n' "$i"
+  printf '{{"type":"result","is_error":false,"result":"reply %d","usage":{{"input_tokens":5,"output_tokens":3}}}}\n' "$i"
+done
+"#,
+                log.display()
+            ),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_process_with_nothing_new_to_say_is_not_sent_the_whole_transcript_again() {
+        // The harness re-drives a model after an end-of-turn nudge. When that nudge never reaches
+        // the request, the delta is empty — and re-rendering the entire transcript into a process
+        // that already holds it made claude answer "nothing new is requested" as the turn's final
+        // reply while billing the full history a second time.
+        let log = std::env::temp_dir().join(format!("forge-live-log-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        let fake = make_recording_persistent_cli(&log);
+        let provider = CliProvider::claude_code()
+            .with_harness(false)
+            .with_persistent(true)
+            .with_binary(&fake)
+            .with_timeout(Duration::from_secs(10));
+        let model = "claude-cli::sonnet";
+        let mut sink = |_e: StreamEvent| {};
+
+        let mut transcript = vec![
+            Message::system("be brief"),
+            Message::user("distinctive-request"),
+        ];
+        for expected in ["reply 1", "reply 2"] {
+            let reply = provider
+                .complete_owned(model, &transcript, &[], &mut sink)
+                .await
+                .expect("persistent turn");
+            assert_eq!(reply.content, expected);
+            transcript.push(Message::assistant(&reply.content));
+        }
+
+        let sent = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_file(&log);
+        let lines: Vec<&str> = sent.lines().collect();
+        assert_eq!(lines.len(), 2, "{sent}");
+        assert!(lines[0].contains("distinctive-request"));
+        assert!(
+            !lines[1].contains("distinctive-request"),
+            "the second call re-sent the transcript to a process that already holds it: {}",
+            lines[1]
         );
     }
 

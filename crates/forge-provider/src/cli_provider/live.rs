@@ -53,6 +53,26 @@ pub(super) struct LiveSession {
     /// When the session was last parked idle (spawn or turn completion). The idle reaper compares
     /// against this so a reuse between arm and wake-up cancels the older reaper's claim.
     pub(super) parked_at: std::time::Instant,
+    /// Tokens the process sent with its most recent model request — the real fill of claude's own
+    /// context window, which grows with every tool result it keeps and that Forge cannot see.
+    pub(super) context_fill: Option<u64>,
+}
+
+/// The input size of one claude model request, read from an `assistant` stream line's
+/// `message.usage`: uncached input plus both cache counters is the whole prompt that step sent.
+/// `result.usage` is the SUM over every step of the turn and says nothing about window fill.
+pub(super) fn claude_assistant_context(line: &str) -> Option<u64> {
+    if !line.contains(r#""type":"assistant""#) {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let usage = v.get("message")?.get("usage")?;
+    let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let total = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
+    (total > 0).then_some(total)
 }
 
 /// Default for how long a parked live bridge process may sit idle before being reaped. Each parked
@@ -94,6 +114,14 @@ pub(super) struct LiveMap {
 }
 
 impl LiveMap {
+    /// The slot for `owner` if one exists — unlike [`Self::slot_for`] never creates or evicts.
+    pub(super) fn peek(&self, owner: &str) -> Option<SlotRef> {
+        self.slots
+            .iter()
+            .find(|(o, _, _)| o.as_deref() == Some(owner))
+            .map(|(_, slot, _)| std::sync::Arc::clone(slot))
+    }
+
     pub(super) fn slot_for(&mut self, owner: Option<&str>) -> SlotRef {
         if let Some(entry) = self
             .slots
@@ -381,6 +409,11 @@ impl LiveSession {
             {
                 if let Some(id) = claude_session_id(&line) {
                     data.session_id = Some(id);
+                }
+            }
+            if kind == CliKind::ClaudeCode {
+                if let Some(fill) = claude_assistant_context(&line) {
+                    data.context_fill = Some(fill);
                 }
             }
             for item in parse_stream_line(kind, &line, &mut claude_stream) {

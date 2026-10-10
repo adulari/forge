@@ -3,6 +3,7 @@
 //! This owner keeps related session invariants together behind the Session program.
 
 use super::*;
+use crate::compaction_headroom::callable_summarizers;
 pub(crate) use crate::model_failure_record::record_model_failure_in;
 use crate::spend_guard::priced;
 
@@ -210,7 +211,7 @@ impl Session {
             .unwrap_or_else(|| compaction_cap(self.router.model_is_free(model), &self.config.mesh));
         let trigger = auto_compact_trigger_tokens(window, cap, AUTO_COMPACT_THRESHOLD);
         if needs_compaction(
-            self.estimated_transcript_tokens(),
+            self.context_pressure_tokens(),
             trigger,
             self.transcript_fits(model),
         ) {
@@ -225,7 +226,7 @@ impl Session {
                 self.emit_context_gauge(model);
             }
             if needs_compaction(
-                self.estimated_transcript_tokens(),
+                self.context_pressure_tokens(),
                 trigger,
                 self.transcript_fits(model),
             ) {
@@ -316,7 +317,7 @@ impl Session {
                 .session_cached_input_tokens(&self.id)
                 .unwrap_or(None),
             session_out,
-            context_tokens: self.estimated_transcript_tokens(),
+            context_tokens: self.context_pressure_tokens(),
             // The gauge denominator is the model's REAL window, not the transient overflow cap.
             context_limit: Some(self.base_context_window(model)),
         });
@@ -518,9 +519,17 @@ impl Session {
             routed.extend(decision.fallbacks.clone());
             routed
         };
+        let usable = |models: Vec<String>| {
+            callable_summarizers(
+                models,
+                &guaranteed,
+                &self.config.mesh.disabled,
+                forge_config::has_api_key,
+            )
+        };
         let candidates = compact_candidate_chain(
-            self.router.compact_candidates(),
-            routed,
+            usable(self.router.compact_candidates()),
+            usable(routed),
             &guaranteed,
             |m| health.is_benched(m),
             forge_mesh::catalog::is_subscription,
@@ -658,6 +667,9 @@ impl Session {
         )
         .await;
         self.history_epoch += 1;
+        // The bridge process is respawned from the compacted transcript, so what it last reported
+        // describes a context that no longer exists.
+        self.bridge_context_tokens = 0;
         // Every task still open just lost the part of the conversation that explains it. The
         // staleness tracker remembers that, so if one of them then stops moving the escalation can
         // say why the model cannot work out what it meant (task_staleness.rs).

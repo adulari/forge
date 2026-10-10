@@ -296,11 +296,7 @@ impl Session {
             // subscription CLI bridge reports cumulative internal usage, so [`context_fill_tokens`]
             // substitutes the transcript estimate there (else the gauge reads a bogus 337% and trips
             // the phantom "auto-compact imminent" hint).
-            context_tokens = context_fill_tokens(
-                &active_model,
-                self.estimated_transcript_tokens(),
-                resp.usage.input_tokens,
-            );
+            context_tokens = self.note_context_fill(&active_model, resp.usage.input_tokens);
 
             let (msg_id, bridge_tool_progress) = self.record_model_response(
                 step,

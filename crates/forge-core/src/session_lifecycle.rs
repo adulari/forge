@@ -243,6 +243,7 @@ impl Session {
             headroom_args_warned: false,
             auto_classifier_cache: Default::default(),
             always_compact_on_switch: false,
+            bridge_context_tokens: 0,
             project_prompt_injected,
             agents_md_fingerprint: None,
             pending_images: Vec::new(),

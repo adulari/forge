@@ -35,30 +35,8 @@ pub use cli_provider::{
     SUBAGENT_SINK_ENV,
 };
 
-/// Whether `provider` is a CLI bridge that is known to have no credentials right now, so routing
-/// can drop it instead of spawning it to be told. Non-bridge providers are never "known absent"
-/// here — their key check lives in `forge_config` — so this is a pure filter, not a policy about
-/// which providers exist.
-/// Whether ANY installed CLI bridge has POSITIVE evidence of a login. Distinct from
-/// [`CliKind::routable`], which deliberately treats `Unknown` as routable so an unproven bridge
-/// still gets a turn: for "does this machine have any way to reach a model at all", an unproven
-/// login is not a credential, and answering yes hides the setup guidance from the person who most
-/// needs it.
-pub fn any_bridge_logged_in() -> bool {
-    CliKind::all().into_iter().any(|kind| {
-        kind.available()
-            && cli_provider::credentials::credentials(kind)
-                == cli_provider::credentials::CliCredentials::Present
-    })
-}
-
-pub fn bridge_credentials_known_absent(provider: &str) -> bool {
-    CliKind::all().into_iter().any(|kind| {
-        kind.prefix() == provider
-            && cli_provider::credentials::credentials(kind)
-                == cli_provider::credentials::CliCredentials::Absent
-    })
-}
+mod bridge_login;
+pub use bridge_login::{any_bridge_logged_in, bridge_credentials_known_absent};
 
 pub use codex_oauth::{
     detected_plan as codex_oauth_detected_plan, exchange_code as exchange_codex_oauth_code,
@@ -860,6 +838,15 @@ pub trait Provider: Send + Sync {
         let _ = model;
         None
     }
+
+    /// The size, in tokens, of the context a CLI bridge's own process held at its last request for
+    /// conversation `owner`. A bridge runs the tool loop itself, so its history (every file read,
+    /// every build log) is invisible to Forge's transcript; this is the only honest measure of how
+    /// full that context is. `None` for providers that don't track it.
+    fn context_fill(&self, model: &str, owner: &str) -> Option<u64> {
+        let _ = (model, owner);
+        None
+    }
 }
 
 /// Routes each turn to a backend by the model id's `provider::` prefix: `claude-cli::…` /
@@ -950,6 +937,10 @@ impl Default for DispatchProvider {
 impl Provider for DispatchProvider {
     fn stream_idle_hint(&self, model: &str) -> Option<std::time::Duration> {
         self.cli_for(model)?.stream_idle_hint(model)
+    }
+
+    fn context_fill(&self, model: &str, owner: &str) -> Option<u64> {
+        self.cli_for(model)?.context_fill(model, owner)
     }
 
     async fn complete(

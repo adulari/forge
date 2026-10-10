@@ -95,6 +95,22 @@ claude has not seen, instead of the flattened transcript (which on big sessions 
 text blob with a cold cache). If the resumed process dies or stalls before any output and before
 any tool ran, the resume state is cleared and Forge respawns fresh with the full transcript.
 
+**Context size comes from claude, not from Forge's transcript.** The bridge runs the whole tool loop
+inside claude, so every file read and build log lives in claude's own window while Forge's transcript
+only records the replies. In a measured 40-turn session claude's window held ~650k tokens per request
+while Forge estimated 18k, so auto-compaction never fired. The live decoder now reads each `assistant`
+stream line's own `usage` (uncached + cache read + cache creation = that request's prompt size; the
+`result` usage is a per-turn SUM and is not used), `Provider::context_fill` exposes the latest value
+per conversation owner, and the session uses `max(transcript estimate, bridge fill)` for both the
+gauge and the auto-compaction trigger. A compaction bumps the history epoch, so the process is
+respawned from the compacted transcript.
+
+**Nothing new to send.** When a re-drive carries no new user/system message, a reused process is told
+to continue instead of being sent the whole transcript again (which it took for a fresh request and
+answered with "nothing new is requested"). Repeated end-of-turn nudges (the review pass, the "prove
+it" completion gate) are no longer deduplicated out of the request: a system message that directly
+follows an assistant message and is answered by the model is a reaction, not standing guidance.
+
 **Watchdogs.** The outer stream-idle guard (default 180s) used to undercut the bridge's own 300s
 window, so a silent claude (long thinking, auto-compaction) was killed and, with it, the process
 group of any running tool. `Provider::stream_idle_hint` lets a CLI bridge raise the outer budget to
