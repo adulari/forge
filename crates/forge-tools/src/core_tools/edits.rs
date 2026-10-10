@@ -316,7 +316,15 @@ fn closest_candidate(content: &str, old: &str) -> Option<String> {
     ))
 }
 
-fn not_found_message(content: &str, old: &str) -> String {
+fn not_found_message(content: &str, old: &str, new: &str) -> String {
+    if !new.trim().is_empty() && new != old && content.contains(new) {
+        return format!(
+            "`old` ({} lines) is not in the file, but the `new` text already is — this edit \
+             was probably applied already (a repeated call?). read_file the lines to confirm \
+             rather than retrying",
+            old.lines().count()
+        );
+    }
     let n_lines = old.lines().count();
     let mut msg = format!(
         "`old` ({n_lines} lines) not found (also tried whitespace-insensitive and \
@@ -368,7 +376,7 @@ pub(super) fn apply_edit(
                          add surrounding context so it matches exactly once"
                     );
                 }
-                not_found_message(content, old)
+                not_found_message(content, old, new)
             }),
         n => Err(format!(
             "`old` is ambiguous: {n} occurrences — add surrounding context, or pass \
@@ -405,7 +413,7 @@ pub(super) fn apply_edit_all(
     }
     let count = content.matches(old).count();
     if count == 0 {
-        return Err(not_found_message(content, old));
+        return Err(not_found_message(content, old, new));
     }
     let updated = content.replace(old, new);
     if looks_bracket_truncated(content, &updated) {
@@ -640,6 +648,19 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains("if cond {"), "{out}");
+    }
+
+    #[test]
+    fn a_repeated_edit_is_recognised_as_already_applied() {
+        let applied = "let a = new_name();\n";
+        for result in [
+            apply_edit(applied, "old_name()", "new_name()"),
+            apply_edit_all(applied, "old_name()", "new_name()"),
+        ] {
+            let err = result.unwrap_err();
+            assert!(err.contains("already"), "{err}");
+            assert!(!err.contains("closest candidate"), "{err}");
+        }
     }
 
     #[test]
