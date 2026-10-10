@@ -1840,11 +1840,11 @@ pub struct MeshConfig {
     /// gate; `text` runs the CLI as its own agent with its own tools.
     #[serde(default)]
     pub bridge_mode: BridgeMode,
-    /// Lean bridge tool surface: `forge mcp-serve` drops the rarely-used tools (web_fetch,
-    /// web_search, spawn_agents, send_to_agent, remember, present_plan) from the list advertised
-    /// to a bridged CLI, which re-ingests every schema on every turn of its own loop. Also
-    /// enabled by `FORGE_BRIDGE_LEAN=1`. Default false.
-    #[serde(default)]
+    /// Lean bridge tool surface: `forge mcp-serve` advertises only the core coding tools to a
+    /// bridged CLI, which re-ingests every schema on every request of its own loop. The rest
+    /// (device, browser, proxy, subagents, MCP meta-tools, ...) stay reachable through the
+    /// `tool_search`/`tool_call` pair. `FORGE_BRIDGE_LEAN=0` also opts out. Default true.
+    #[serde(default = "default_true")]
     pub bridge_lean: bool,
     /// Connect external project MCP servers (dual-graph/token-counter/helm/…) inside the CLI
     /// bridge. Default true: servers connect concurrently in the background, each under the
@@ -2765,7 +2765,7 @@ impl Default for Config {
                 classifier_model: default_classifier_model(),
                 classifier_activity_focused: false,
                 bridge_mode: BridgeMode::default(),
-                bridge_lean: false,
+                bridge_lean: true,
                 bridge_mcp_external: true,
                 min_tier: None,
                 daily_budget_usd: None,

@@ -76,6 +76,7 @@ fn append_sink_record(path: &str, record: &serde_json::Value) -> std::io::Result
 }
 
 mod bridge_budget;
+mod deferred;
 mod heartbeats;
 use bridge_budget::*;
 
@@ -114,8 +115,8 @@ struct ForgeMcp {
     /// be advertised to and loaded by the model. Mirrors `commands.trust_project`; false by
     /// default, matching the gate the interactive `/skill` path already applies.
     trust_project: bool,
-    /// Lean tool surface (`FORGE_BRIDGE_LEAN=1` / `mesh.bridge_lean`): drop the tools in
-    /// [`LEAN_DROPPED_TOOLS`] from the advertised list.
+    /// Lean tool surface (default; `FORGE_BRIDGE_LEAN=0` / `mesh.bridge_lean = false` opts out):
+    /// only [`deferred::CORE_TOOLS`] are advertised, the rest load through `tool_search`.
     lean: bool,
     /// `auto` temper: the classifier for Unknown shell commands (see `auto_classify.rs`).
     auto_classify: auto_classify::AutoClassify,
@@ -231,6 +232,30 @@ impl ForgeMcp {
     ) -> Result<CallToolResult, McpError> {
         let name = request.name.to_string();
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+
+        if name == deferred::TOOL_SEARCH {
+            let query = args
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let (_, hidden) = deferred::partition(self.all_tools());
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                deferred::search(&hidden, query),
+            )]));
+        }
+        if name == deferred::TOOL_CALL {
+            let inner = args.get("name").and_then(Value::as_str).unwrap_or_default();
+            if inner.is_empty() || inner == deferred::TOOL_CALL || inner == deferred::TOOL_SEARCH {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "error: tool_call needs the exact name of a tool found with tool_search",
+                )]));
+            }
+            let mut forwarded = CallToolRequestParams::new(inner.to_string());
+            if let Some(Value::Object(arguments)) = args.get("arguments") {
+                forwarded = forwarded.with_arguments(arguments.clone());
+            }
+            return Box::pin(self.call_tool_complete(forwarded, _ctx)).await;
+        }
 
         // The subagent virtual tool — fan out to mesh-routed children in this process.
         if name == subagent::SPAWN_AGENTS_TOOL {
@@ -585,6 +610,18 @@ impl ForgeMcp {
     /// The advertised tool list. Factored out of `list_tools` (which needs an rmcp
     /// `RequestContext`) so the lean-surface behavior is unit-testable.
     fn tool_list(&self) -> Vec<Tool> {
+        let tools = self.all_tools();
+        if !self.lean {
+            return tools;
+        }
+        let (core, deferred) = deferred::partition(tools);
+        let mut core: Vec<Tool> = core.into_iter().map(deferred::slim).collect();
+        core.extend(deferred::meta_tools(&deferred).into_iter().flatten());
+        core
+    }
+
+    /// Every tool this server can run, before the lean surface defers any of them.
+    fn all_tools(&self) -> Vec<Tool> {
         let mut tools: Vec<Tool> = self
             .registry
             .names()
@@ -676,9 +713,6 @@ impl ForgeMcp {
                 let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
                 tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
             }
-        }
-        if self.lean {
-            tools.retain(|t| !LEAN_DROPPED_TOOLS.contains(&t.name.as_ref()));
         }
         tools
     }
@@ -806,10 +840,7 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
             None
         };
     let skills = Arc::new(forge_skills::Catalog::load(&forge_config::command_sources()));
-    let lean = std::env::var(BRIDGE_LEAN_ENV)
-        .map(|v| v == "1")
-        .unwrap_or(false)
-        || config.mesh.bridge_lean;
+    let lean = bridge_budget::bridge_lean_enabled(config.mesh.bridge_lean);
     let workspace = std::env::current_dir()
         .and_then(|cwd| cwd.canonicalize())
         .context("resolving bridge workspace cwd")?;
@@ -1338,18 +1369,9 @@ mod tests {
     }
 
     #[test]
-    fn lean_surface_drops_heavy_tools_keeps_core() {
-        let names: Vec<String> = test_server(true)
-            .tool_list()
-            .into_iter()
-            .map(|t| t.name.to_string())
-            .collect();
-        for dropped in LEAN_DROPPED_TOOLS {
-            assert!(
-                !names.contains(&dropped.to_string()),
-                "{dropped} should be dropped"
-            );
-        }
+    fn lean_surface_defers_heavy_tools_but_keeps_them_reachable() {
+        let lean = test_server(true).tool_list();
+        let names: Vec<String> = lean.iter().map(|t| t.name.to_string()).collect();
         for kept in [
             "read_file",
             "write_file",
@@ -1358,9 +1380,37 @@ mod tests {
             "search",
             "list_dir",
             "update_tasks",
+            deferred::TOOL_SEARCH,
+            deferred::TOOL_CALL,
         ] {
             assert!(names.contains(&kept.to_string()), "{kept} should stay");
         }
+        let full = test_server(false).tool_list();
+        let deferred_names: Vec<String> = full
+            .iter()
+            .map(|t| t.name.to_string())
+            .filter(|n| !deferred::is_core(n))
+            .collect();
+        assert!(!deferred_names.is_empty());
+        let search = lean
+            .iter()
+            .find(|t| t.name == deferred::TOOL_SEARCH)
+            .and_then(|t| t.description.clone())
+            .unwrap();
+        for hidden in &deferred_names {
+            assert!(!names.contains(hidden), "{hidden} should be deferred");
+            assert!(
+                search.contains(hidden.as_str()),
+                "{hidden} not listed in tool_search"
+            );
+        }
+        let bytes = |tools: &[Tool]| serde_json::to_string(tools).unwrap().len();
+        assert!(
+            bytes(&lean) * 2 < bytes(&full),
+            "lean {} vs full {}",
+            bytes(&lean),
+            bytes(&full)
+        );
     }
 
     #[test]
