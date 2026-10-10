@@ -53,6 +53,7 @@ pub mod heartbeat;
 pub mod hooks;
 mod hooks_cc;
 pub mod job_wake;
+mod lean_context;
 pub mod llm_router;
 pub(crate) mod loop_progress;
 mod lsp_hints;
@@ -73,6 +74,7 @@ mod quality_gates;
 pub mod readiness;
 mod refinement;
 mod replay;
+mod review_gate;
 mod routing_policy;
 mod session_controls;
 mod session_history;
@@ -242,9 +244,9 @@ add comments unless the code's intent is genuinely non-obvious. Don't reformat u
 specific inputs. If a test or the task itself looks wrong or infeasible, say so rather than routing \
 around it.
 - After editing, verify: run focused checks after the relevant change and one final complete \
-build/test/lint pass when available. Reuse still-current successful evidence; do not rerun an \
-unchanged check or print verbose passing output merely for reassurance. Fix failures before \
-reporting done.
+build/test/lint pass when available; for a small single-file change the complete pass alone is \
+enough. Reuse still-current successful evidence; do not rerun an unchanged check or print \
+verbose passing output merely for reassurance. Fix failures before reporting done.
 
 Tools:
 - Prefer read_file / search / list_dir / glob over shelling out to cat / grep / ls / find.
@@ -2911,7 +2913,10 @@ impl Session {
         // so the abort lands on the parked read before persistence runs).
         if !self.project_prompt_injected {
             self.project_prompt_injected = true;
-            if let Some(body) = self.cached_agents_md.take() {
+            if let Some(body) = self.cached_agents_md.take().filter(|body| {
+                !(routed_model.starts_with("claude-cli::")
+                    && lean_context::claude_md_covers(self.workspace.root(), body))
+            }) {
                 self.inject_context(
                     &mut context_pack,
                     context_pack::ContextSource::ProjectInstructions,
@@ -2978,7 +2983,7 @@ impl Session {
 
             // Auto-orchestrate: inject the resource-routing framework once so the model surveys
             // all available tools on every turn without requiring the user to /orchestrate.
-            if self.config.mesh.auto_orchestrate {
+            if self.config.mesh.auto_orchestrate && !lean_context::prompt_is_simple(prompt) {
                 let guidance = forge_skills::orchestrate_system_guidance();
                 self.inject_context(
                     &mut context_pack,
@@ -3201,7 +3206,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // of that loop on top of their own reads.
         let injected = {
             if let Some(lat) = self.lattice.as_ref().filter(|_| {
-                self.config.lattice.inject && !forge_provider::is_cli_bridge(&routed_model)
+                self.config.lattice.inject
+                    && !forge_provider::is_cli_bridge(&routed_model)
+                    && !lean_context::prompt_names_workspace_file(prompt, self.workspace.root())
             }) {
                 let budget = inject_budget(self.config.lattice.inject_token_budget, status);
                 let emb = &self.config.lattice.embeddings;
@@ -8363,7 +8370,10 @@ mod tests {
         )
         .unwrap();
 
-        let _ = session.run_turn("fix the bug").await.unwrap();
+        let _ = session
+            .run_turn("Fix the bug.\n1. reject the empty name\n2. reject the dotted name")
+            .await
+            .unwrap();
 
         let fired = events
             .lock()

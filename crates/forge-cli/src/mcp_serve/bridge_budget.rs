@@ -101,7 +101,8 @@ pub(super) fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
-/// Env var enabling the lean bridge tool surface (same effect as `mesh.bridge_lean = true`).
+/// Env var overriding the lean bridge tool surface: `1` forces on, `0` forces off, unset defers to
+/// `mesh.bridge_lean` (on by default).
 pub(super) const BRIDGE_LEAN_ENV: &str = "FORGE_BRIDGE_LEAN";
 
 /// Env var overriding bridge external MCP loading. `1` forces on, `0` forces off, unset defers to
@@ -136,19 +137,18 @@ pub(super) fn bridge_external_mcp_enabled(config: &Config) -> bool {
     bridge_external_mcp_enabled_with(config.mesh.bridge_mcp_external, env_bridge_external_mcp())
 }
 
-/// Tools dropped from the advertised list in lean mode: every tool schema/description is
-/// re-ingested by the bridged CLI on every turn of ITS loop, so rarely-used surface is a
-/// per-instance token tax. The core coding surface (read/write/edit/shell/search/…) stays.
-pub(super) const LEAN_DROPPED_TOOLS: &[&str] = &[
-    "web_fetch",
-    "web_search",
-    "spawn_agents",
-    "send_to_agent",
-    "remember",
-    "present_plan",
-    "manage_heartbeats",
-    "schedule_wakeup",
-];
+/// Pure gate for the lean tool surface: the env override wins when present, else the config flag.
+pub(super) fn bridge_lean_with(config_flag: bool, env_override: Option<&str>) -> bool {
+    match env_override {
+        Some("1") => true,
+        Some("0") => false,
+        _ => config_flag,
+    }
+}
+
+pub(super) fn bridge_lean_enabled(config_flag: bool) -> bool {
+    bridge_lean_with(config_flag, std::env::var(BRIDGE_LEAN_ENV).ok().as_deref())
+}
 
 /// Hard cap (bytes) on the `use_skill` description advertised to a bridged CLI. The full skill
 /// catalog (name + description each) reaches several KiB on a skill-heavy machine and is resent
@@ -241,6 +241,15 @@ mod tests {
         // Env wins in both directions, over either config value.
         assert!(!bridge_external_mcp_enabled_with(true, Some(false)));
         assert!(bridge_external_mcp_enabled_with(false, Some(true)));
+    }
+
+    #[test]
+    fn lean_gate_defaults_to_config_and_env_overrides_both_ways() {
+        assert!(bridge_lean_with(true, None));
+        assert!(!bridge_lean_with(false, None));
+        assert!(!bridge_lean_with(true, Some("0")));
+        assert!(bridge_lean_with(false, Some("1")));
+        assert!(bridge_lean_with(true, Some("")));
     }
 
     #[test]

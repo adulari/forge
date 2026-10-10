@@ -193,3 +193,102 @@ async fn verification_redrive_does_not_replace_the_real_answer() {
         "Fixed a.txt: the typo is gone and the file now reads `fixed`."
     );
 }
+
+/// Writes `a.txt`, then gives `answer`.
+struct WriteThenAnswer {
+    calls: std::sync::atomic::AtomicUsize,
+    answer: &'static str,
+}
+
+#[async_trait::async_trait]
+impl Provider for WriteThenAnswer {
+    async fn complete(
+        &self,
+        _model: &str,
+        _messages: &[Message],
+        _tools: &[ToolSpec],
+        _on_event: &mut forge_provider::EventSink<'_>,
+    ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (content, tool_calls) = if n == 0 {
+            (
+                String::new(),
+                vec![forge_types::ToolCall {
+                    id: forge_types::new_id(),
+                    name: "write_file".into(),
+                    args: serde_json::json!({ "path": "a.txt", "content": "fixed" }),
+                }],
+            )
+        } else {
+            (self.answer.to_string(), Vec::new())
+        };
+        Ok(forge_provider::ModelResponse {
+            reasoning: String::new(),
+            reasoning_items: Vec::new(),
+            content,
+            tool_calls,
+            usage: forge_types::Usage::default(),
+            quotas: Vec::new(),
+        })
+    }
+}
+
+async fn review_fired_after_small_edit(request: &str, answer: &'static str) -> bool {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    git(&["init", "-q"]);
+    std::fs::write(dir.path().join("a.txt"), "typo").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "init"]);
+    let capture = CapturePresenter::default();
+    let events = capture.events.clone();
+    let mut config = Config {
+        permission_mode: forge_types::PermissionMode::Bypass,
+        ..Config::default()
+    };
+    config.mesh.verify_completeness = true;
+    let mut session = Session::start(
+        Arc::new(Store::open_in_memory().unwrap()),
+        Arc::new(WriteThenAnswer {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            answer,
+        }),
+        Arc::new(FixedRouter {
+            model: "claude-cli::opus".into(),
+            fallbacks: vec![],
+        }),
+        ToolRegistry::with_core_tools_in(dir.path()),
+        Box::new(capture),
+        config,
+        dir.path().to_str().unwrap(),
+    )
+    .unwrap();
+    session.run_turn(request).await.unwrap();
+    let fired = events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("completeness check")));
+    fired
+}
+
+#[tokio::test]
+async fn single_small_edit_skips_the_review() {
+    assert!(!review_fired_after_small_edit("fix the typo in a.txt", "Fixed the typo.").await);
+}
+
+#[tokio::test]
+async fn hedging_answer_after_a_small_edit_still_gets_reviewed() {
+    assert!(
+        review_fired_after_small_edit("fix the typo in a.txt", "Fixed it, docs are still TODO.")
+            .await
+    );
+}

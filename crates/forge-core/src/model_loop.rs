@@ -487,6 +487,7 @@ impl Session {
                         && (turn_start_tree.is_none()
                             || crate::completeness::worktree_fingerprint(self.workspace_root())
                                 != turn_start_tree)
+                        && self.review_warranted(&resp.content)
                     {
                         completeness_checked = true;
                         pre_review = Some((
