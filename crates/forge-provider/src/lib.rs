@@ -21,6 +21,7 @@ mod error;
 mod genai_provider;
 pub mod headroom;
 mod mock;
+mod mock_long;
 mod oauth_responses;
 mod refresh_lock;
 mod system_placement;

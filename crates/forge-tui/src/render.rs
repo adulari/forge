@@ -16,7 +16,10 @@ use similar::{ChangeTag, TextDiff};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
+mod stream;
 mod table;
+pub use stream::prewarm_highlighter;
+pub(crate) use stream::StreamCache;
 use table::{clip_spans, TableBuild, TABLE_CELL_MAX};
 
 use crate::copy_mark;
@@ -489,14 +492,17 @@ pub fn assay_report_plain(r: &forge_types::AssayReport) -> String {
 /// Render a markdown document to styled lines, indented to match the conversation body.
 pub fn markdown_to_lines(md: &str) -> Vec<Line<'static>> {
     let mut r = Renderer::default();
-    // Without ENABLE_TABLES a GFM table is just a paragraph: its rows are joined by soft breaks
-    // into one long line of pipes — the "broken table" every model-written comparison used to
-    // render as. Strikethrough is enabled so `~~x~~` does not leak tildes either.
-    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
-    for ev in Parser::new_ext(md, options) {
+    for ev in Parser::new_ext(md, markdown_options()) {
         r.event(ev);
     }
     r.finish()
+}
+
+// Without ENABLE_TABLES a GFM table is just a paragraph: its rows are joined by soft breaks into
+// one long line of pipes — the "broken table" every model-written comparison used to render as.
+// Strikethrough is enabled so `~~x~~` does not leak tildes either.
+fn markdown_options() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH
 }
 
 #[derive(Default)]

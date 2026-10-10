@@ -1120,6 +1120,7 @@ mod tests {
                 auth: None,
                 secret_env: Vec::new(),
                 enabled: true,
+                shared: None,
             }],
             ..Default::default()
         }

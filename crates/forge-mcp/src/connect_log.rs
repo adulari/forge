@@ -94,6 +94,7 @@ for line in sys.stdin:
             auth: None,
             secret_env: vec![],
             enabled: true,
+            shared: None,
         }
     }
 

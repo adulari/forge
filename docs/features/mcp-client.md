@@ -453,6 +453,18 @@ Exposed as meta-tools so they need no new Provider concepts:
 - **Auth expiry**: a 401/403 (HTTP) or an MCP auth error marks the server `Unauthorized` and
   surfaces an actionable message rather than retry-looping.
 - **Shutdown**: on session end, send `shutdown`/close transports; kill stdio children.
+- **Shared connections (daemon)**: `forge serve` builds one manager per session, and without
+  sharing every restored session opened its own connection to every server (three sessions, three
+  concurrent handshakes at boot, N idle connections afterwards). Managers built over the
+  process-wide `McpPool` share one connection per server definition instead: the handshake runs
+  once (concurrent callers wait for it, and a handshake that just failed is reported to the
+  others, not repeated), a dropped connection is repaired once for every session, `tools/list_changed`
+  reaches all of them, and the connection closes with the last session. Each session keeps its own
+  catalog mirror, status, tool allowlist and permission gating. Which servers share is the
+  `shared` key on the server: unset means HTTP/SSE shares and stdio does not, because a stdio server
+  is a child process whose cwd, environment and in-memory state belong to the session that started
+  it. `shared = true` on a stateless stdio server runs one child for all sessions; `shared = false`
+  on an HTTP server keeps it per session.
 
 ### 5.7 CLI / TUI surfacing
 

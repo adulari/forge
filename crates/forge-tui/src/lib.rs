@@ -40,6 +40,7 @@ mod json_result;
 mod keybind_configurator;
 pub mod keybinds;
 mod overlays;
+pub mod perf;
 mod refine_args;
 mod render;
 pub mod select;
@@ -69,7 +70,9 @@ pub use commands::{
     RefineAction, RemoteMode, SlashToken, StatuslineAction, WorkflowAction, COMMANDS,
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
-pub use driver::{install_panic_restore, ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg};
+pub use driver::{
+    frame_wait, install_panic_restore, ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg,
+};
 pub use headless::HeadlessPresenter;
 pub use help::{run_help, HelpTab};
 pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};
@@ -77,6 +80,7 @@ pub use keybind_configurator::run_keybind_configurator;
 /// A styled scrollback line, re-exported so binaries can route out-of-band output to the right
 /// sink (native scrollback inline, or the transcript log full-screen) without depending on ratatui.
 pub use ratatui::text::Line as ScrollbackLine;
+pub use render::prewarm_highlighter;
 pub use select::{select_multi, select_one, SelectItem};
 pub use transcript::{run_transcript_viewer, transcript_lines};
 pub use tui::TuiPresenter;

@@ -6,7 +6,7 @@
 //! so the manager treats stdio and HTTP servers identically once connected. The client handler
 //! Forge presents advertises `sampling`/`roots`/`elicitation` (see [`crate::ForgeClientHandler`]).
 
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use forge_config::{McpServerConfig, McpTransport};
 use rmcp::model::Root;
@@ -17,7 +17,8 @@ use rmcp::transport::streamable_http_client::{
 };
 use rmcp::ServiceExt;
 
-use crate::{Conns, ForgeClientHandler, SamplingHandler};
+use crate::pool::CatalogLink;
+use crate::{ForgeClientHandler, SamplingHandler};
 
 /// Per-connection dependencies the manager threads into [`serve`] so each [`ForgeClientHandler`]
 /// can advertise the host's roots, route sampling to the host hook, and refresh the live tool
@@ -25,7 +26,7 @@ use crate::{Conns, ForgeClientHandler, SamplingHandler};
 pub(crate) struct HandlerDeps {
     pub roots: Vec<Root>,
     pub sampling: Option<Arc<dyn SamplingHandler>>,
-    pub conns: Weak<Conns>,
+    pub conns: CatalogLink,
 }
 
 /// Connect to a server (spawn the stdio child / open the HTTP stream) and run `initialize`,

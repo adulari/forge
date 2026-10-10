@@ -106,6 +106,13 @@ pub struct McpServerConfig {
     pub secret_env: Vec<McpSecretEnv>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Whether every session in a daemon shares one connection to this server instead of opening
+    /// its own. Unset means "decide by transport": an HTTP/SSE server is shared (it is a remote
+    /// service that already serves many clients), a stdio server is not (it is a child process
+    /// whose working directory, environment and in-memory state belong to the session that
+    /// started it). Set `shared = true` on a stdio server that is stateless, to run one child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<bool>,
 }
 
 /// One extra secret env var for a stdio server: the child-env var name + the keyring slot the
@@ -144,6 +151,12 @@ impl McpServerConfig {
             .iter()
             .filter_map(|s| resolve_secret_env(s).map(|v| (s.env.clone(), v)))
             .collect()
+    }
+
+    /// Whether sessions share one connection to this server (see [`McpServerConfig::shared`]).
+    pub fn shares_connection(&self) -> bool {
+        self.shared
+            .unwrap_or(!matches!(self.transport, McpTransport::Stdio { .. }))
     }
 
     /// "stdio" / "http", for status display.
@@ -402,6 +415,7 @@ fn server_from_json(name: &str, spec: &serde_json::Value, out: &mut ParsedServer
         auth,
         secret_env,
         enabled: true,
+        shared: None,
     });
 }
 
@@ -699,6 +713,7 @@ mod tests {
                     auth: None,
                     secret_env: vec![],
                     enabled: true,
+                    shared: None,
                 },
                 McpServerConfig {
                     name: "a".into(),
@@ -706,6 +721,7 @@ mod tests {
                     auth: None,
                     secret_env: vec![],
                     enabled: true,
+                    shared: None,
                 },
             ],
             ..Default::default()
@@ -762,6 +778,65 @@ url = "https://mcp.example.com/mcp"
             _ => panic!("expected stdio"),
         }
         c.validate().unwrap();
+    }
+
+    #[test]
+    fn connection_sharing_defaults_by_transport_and_can_be_overridden() {
+        let toml = r#"
+[[servers]]
+name = "remote"
+[servers.transport]
+type = "http"
+url = "https://mcp.example.com/mcp"
+
+[[servers]]
+name = "legacy"
+[servers.transport]
+type = "sse"
+url = "https://mcp.example.com/sse"
+
+[[servers]]
+name = "local"
+[servers.transport]
+type = "stdio"
+command = "some-server"
+
+[[servers]]
+name = "local-stateless"
+shared = true
+[servers.transport]
+type = "stdio"
+command = "stateless-server"
+
+[[servers]]
+name = "remote-per-session"
+shared = false
+[servers.transport]
+type = "http"
+url = "https://mcp.example.com/private"
+"#;
+        let c: McpConfig = toml::from_str(toml).unwrap();
+        let shares: Vec<(&str, bool)> = c
+            .servers
+            .iter()
+            .map(|s| (s.name.as_str(), s.shares_connection()))
+            .collect();
+        assert_eq!(
+            shares,
+            [
+                ("remote", true),
+                ("legacy", true),
+                ("local", false),
+                ("local-stateless", true),
+                ("remote-per-session", false),
+            ]
+        );
+        // An unset field stays unset on disk: a config written back does not pin the default.
+        let written = toml::to_string(&c.servers[0]).unwrap();
+        assert!(!written.contains("shared"), "{written}");
+        assert!(toml::to_string(&c.servers[3])
+            .unwrap()
+            .contains("shared = true"));
     }
 
     #[test]
