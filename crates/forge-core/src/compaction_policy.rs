@@ -3,6 +3,7 @@
 //! This owner keeps related session invariants together behind the Session program.
 
 use super::*;
+use crate::compaction_headroom::callable_summarizers;
 pub(crate) use crate::model_failure_record::record_model_failure_in;
 use crate::spend_guard::priced;
 
@@ -518,9 +519,17 @@ impl Session {
             routed.extend(decision.fallbacks.clone());
             routed
         };
+        let usable = |models: Vec<String>| {
+            callable_summarizers(
+                models,
+                &guaranteed,
+                &self.config.mesh.disabled,
+                forge_config::has_api_key,
+            )
+        };
         let candidates = compact_candidate_chain(
-            self.router.compact_candidates(),
-            routed,
+            usable(self.router.compact_candidates()),
+            usable(routed),
             &guaranteed,
             |m| health.is_benched(m),
             forge_mesh::catalog::is_subscription,

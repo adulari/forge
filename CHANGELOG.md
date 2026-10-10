@@ -7,6 +7,9 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Compaction ignored `mesh.disabled`.** The summarizer chain skipped the disabled-model and
+  missing-key check the main loop applies, so a disabled provider still received the session's
+  transcript to summarize. The chain now honors both; the session's own model is always kept.
 - **Long Claude bridge sessions never compacted.** claude's own window held ~650k tokens per request
   while Forge counted ~18k, because the bridge's tool results never enter Forge's transcript. The
   bridge's real per-request context now drives the gauge and auto-compaction.

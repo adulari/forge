@@ -3,6 +3,27 @@
 use super::*;
 use crate::compaction_shape::{clip_tool_results_to_budget, compact_target_tokens};
 
+/// The summarizer candidates the user's configuration still allows. The main loop refuses a model
+/// that is in `mesh.disabled` or has no key before dispatching it; the compaction chain skipped
+/// that check, so a model the user had disabled still received the whole transcript to summarize
+/// (measured: 138k tokens of a session's code sent to a disabled provider). The session's own
+/// model is always kept — it is the one the user chose and the chain's guaranteed last resort.
+pub(crate) fn callable_summarizers(
+    models: Vec<String>,
+    guaranteed: &str,
+    disabled: &[String],
+    has_key: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    models
+        .into_iter()
+        .filter(|model| {
+            model == guaranteed
+                || (!forge_config::is_model_disabled(model, disabled)
+                    && has_key(forge_config::provider_of(model)))
+        })
+        .collect()
+}
+
 /// Above this share of the trigger after a compaction, headroom is forced by clipping tool output.
 const COMPACT_CLIP_ABOVE_PERCENT: u64 = 75;
 
@@ -46,5 +67,51 @@ impl Session {
                  (~{reclaimed} tokens) to leave headroom"
             )));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::callable_summarizers;
+
+    fn list(models: &[&str]) -> Vec<String> {
+        models.iter().map(|m| m.to_string()).collect()
+    }
+
+    #[test]
+    fn a_disabled_provider_or_model_never_receives_the_transcript() {
+        let out = callable_summarizers(
+            list(&[
+                "gemini::gemini-2.5-flash",
+                "groq::llama-3.1-8b",
+                "groq::big",
+            ]),
+            "claude-cli::haiku",
+            &list(&["gemini", "groq::big"]),
+            |_| true,
+        );
+        assert_eq!(out, list(&["groq::llama-3.1-8b"]));
+    }
+
+    #[test]
+    fn a_provider_without_a_key_is_skipped() {
+        let out = callable_summarizers(
+            list(&["groq::fast", "ollama::llama3.2"]),
+            "claude-cli::haiku",
+            &[],
+            |provider| provider == "ollama",
+        );
+        assert_eq!(out, list(&["ollama::llama3.2"]));
+    }
+
+    #[test]
+    fn the_sessions_own_model_is_kept_even_when_it_is_listed_as_disabled() {
+        let out = callable_summarizers(
+            list(&["claude-cli::haiku"]),
+            "claude-cli::haiku",
+            &list(&["claude-cli"]),
+            |_| false,
+        );
+        assert_eq!(out, list(&["claude-cli::haiku"]));
     }
 }
