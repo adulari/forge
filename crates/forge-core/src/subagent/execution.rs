@@ -7,7 +7,7 @@
 //! child's loop lives with the loop.
 
 use forge_tools::ToolRegistry;
-use forge_types::{PermissionDecision, Usage};
+use forge_types::{PermissionDecision, SideEffect, Usage};
 
 use super::{rewrite_args_for_root, AgentCtx};
 use crate::{permission, CoreError};

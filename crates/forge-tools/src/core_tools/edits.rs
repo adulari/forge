@@ -441,6 +441,32 @@ pub(super) struct EditStep {
     pub replace_all: bool,
 }
 
+/// A few numbered lines around where `new` landed in `updated`, so the model can see the result of
+/// an edit without a follow-up read. Empty when `new` is blank or can't be located.
+pub(super) fn edit_snippet(updated: &str, new: &str) -> String {
+    const MAX_LINES: usize = 10;
+    const MAX_LINE_CHARS: usize = 160;
+    if new.trim().is_empty() {
+        return String::new();
+    }
+    let Some(pos) = updated.find(new) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = updated.lines().collect();
+    let first = updated[..pos].matches('\n').count();
+    let from = first.saturating_sub(1);
+    let to =
+        (first + new.lines().count().clamp(1, MAX_LINES - 2)).min(lines.len().saturating_sub(1));
+    let body = (from..=to)
+        .map(|n| {
+            let text: String = lines[n].chars().take(MAX_LINE_CHARS).collect();
+            format!("{}\t{text}", n + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\n{body}")
+}
+
 /// Fold the edits over `content` in order (each on the running result), all-or-nothing: the first
 /// edit that can't apply aborts with `edit #k: <reason>` and the caller writes nothing.
 pub(super) fn apply_edits(content: &str, edits: &[EditStep]) -> Result<String, String> {
@@ -463,6 +489,17 @@ mod tests {
             new: new.to_string(),
             replace_all: false,
         }
+    }
+
+    #[test]
+    fn edit_snippet_numbers_the_lines_around_the_change() {
+        let updated = "a\nb\nNEW1\nNEW2\ne\nf\n";
+        assert_eq!(
+            edit_snippet(updated, "NEW1\nNEW2"),
+            "\n2\tb\n3\tNEW1\n4\tNEW2\n5\te"
+        );
+        assert_eq!(edit_snippet(updated, "  "), "");
+        assert_eq!(edit_snippet(updated, "absent"), "");
     }
 
     #[test]

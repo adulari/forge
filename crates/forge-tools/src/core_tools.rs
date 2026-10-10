@@ -739,7 +739,11 @@ impl Tool for EditFileTool {
         let (updated, note) = apply_edit_mode(&content, old, new, replace_all)
             .map_err(|e| ToolError::Failed(format!("{e} (in {path})")))?;
         tokio::fs::write(path, &updated).await?;
-        Ok(format!("edited {} (1 replacement){note}", shown(path)))
+        Ok(format!(
+            "edited {} (1 replacement){note}{}",
+            shown(path),
+            edit_snippet(&updated, new)
+        ))
     }
 
     async fn preview(&self, args: &Value) -> Option<FileDiff> {
@@ -767,7 +771,7 @@ impl Tool for EditFileTool {
 }
 
 mod edits;
-use edits::apply_edit_mode;
+use edits::{apply_edit_mode, edit_snippet};
 
 mod multi_edit;
 pub use multi_edit::MultiEditTool;

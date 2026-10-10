@@ -124,7 +124,9 @@ impl Tool for ShellTool {
          Windows) and return its exit code and combined output. No TTY by default (commands \
          that block on input fail fast); set `pty: true` to run under a pseudo-terminal so \
          tty-detecting programs see isatty=true — stdin is still closed so prompts get EOF. \
-         Prefer read_file/search/list_dir over cat/grep/ls. Args: command (required), cwd \
+         Prefer read_file/search/glob/list_dir over cat/grep/find/ls, and edit_file/multi_edit/ \
+         write_file over sed/awk/perl -i/heredoc redirects: they are cheaper, exact, and keep the \
+         change reviewable. Args: command (required), cwd \
          (default \".\"), timeout_secs (default 120, max 600), pty (default false). To WAIT for a \
          long external job (CI run / release build that takes minutes), set \
          poll_until_exit_zero:true — the call re-runs `command` every poll_interval_secs until it \

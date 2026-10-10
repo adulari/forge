@@ -4907,6 +4907,9 @@ mod tests {
     #[path = "plan_shell.rs"]
     mod plan_shell_tests;
 
+    #[path = "worktree_scope.rs"]
+    mod worktree_scope_tests;
+
     #[path = "auto_classifier.rs"]
     mod auto_classifier_tests;
 
