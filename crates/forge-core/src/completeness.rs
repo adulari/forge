@@ -617,6 +617,21 @@ pub(crate) const COMPLETENESS_NUDGE: &str = "Before finishing, do ONE final revi
         handles only the first of several cases is INCOMPLETE.";
 
 impl crate::Session {
+    /// The turn's answer once any review or verification re-drive has finished. An unresolved
+    /// failed check means the re-drive's own words must stand.
+    pub(crate) fn settle_answer(
+        &self,
+        reply: String,
+        pre_review: Option<(String, Option<u64>)>,
+        checks_clean: bool,
+    ) -> String {
+        let pre = pre_review.filter(|_| checks_clean);
+        let tree_now = pre
+            .as_ref()
+            .and_then(|_| worktree_fingerprint(self.workspace_root()));
+        answer_after_review(reply, pre, tree_now)
+    }
+
     /// Remember the turn's real answer before a verification re-drive. The re-drive's reply is
     /// only "tests passed", and without this it replaced the summary the user was waiting for.
     /// Keeps the earliest answer: a completeness review may already have armed it.

@@ -776,18 +776,15 @@ impl Session {
                         ));
                     }
                 }
-                let pre_answer = pre_review.take().filter(|_| {
+                final_text = self.settle_answer(
+                    resp.content,
+                    pre_review.take(),
                     verification_ledger
                         .lock()
                         .unwrap()
                         .unresolved_summary()
-                        .is_none()
-                });
-                let tree_now = pre_answer
-                    .as_ref()
-                    .and_then(|_| crate::completeness::worktree_fingerprint(self.workspace_root()));
-                final_text =
-                    crate::completeness::answer_after_review(resp.content, pre_answer, tree_now);
+                        .is_none(),
+                );
                 let accepted = final_text.clone();
                 self.publish_terminal_answer(&accepted)?;
                 hit_step_cap = false;
