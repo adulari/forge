@@ -22,6 +22,50 @@ All notable changes to Forge are documented here. The format follows
   turn's final reply. A live bridge process is also no longer re-sent the whole transcript when there
   is nothing new to say.
 
+## [2.18.0] - 2026-10-10
+
+### Added
+- **Multi-file `multi_edit` and batched ranged reads** (#1497). One `multi_edit` call edits several
+  files; `read_file` batches take line ranges (`src/a.rs:120-180`); `search` gains
+  `case_insensitive`, `output_mode`, `head_limit` and Claude Code aliases; edits return a numbered
+  snippet. On a 6-task tool benchmark Forge (haiku) now beats `claude -p` haiku: 34 vs 40 tool
+  calls, 0 vs 3 failed calls, 82s vs 108s, both 6/6.
+- **Spend guards** (#1489). Per-turn and per-session dollar limits in `[mesh.budget]`
+  (`turn_warn_usd` 5, `turn_cap_usd` 25, `session_warn_usd` 25, `session_cap_usd` 100; 0 disables,
+  `FORGE_BUDGET_OVERRIDE=1` bypasses). Side calls (compaction, memory, recap, suggest, diagnose,
+  refine) are now priced instead of recorded as free.
+- **Shared MCP connections in the daemon** (#1492). One connection per HTTP/SSE server definition
+  for all sessions; stdio servers stay per session unless `shared = true`.
+
+### Changed
+- **Lean bridge requests** (#1496). Core tools are advertised; the rest sit behind `tool_search`
+  (`FORGE_BRIDGE_LEAN=0` opts out). The completeness review runs only for multi-requirement
+  requests, large/multi-file diffs or hedging answers; no orchestration message on simple prompts,
+  no Lattice context when the prompt names the file, no duplicate AGENTS.md. On 8 everyday tasks
+  Forge claude-cli sonnet went from 1.79x to 1.08x `claude -p`'s tokens and 1.23x to 1.08x its
+  wall time, 8/8 passing.
+- **Responsive TUI while replies stream** (#1492). Finished blocks render once and only the open
+  block re-renders; keystrokes echo without the 16 ms sleep (echo p95 63 ms → 8 ms with a 38k-message
+  session open). `FORGE_TUI_PERF=<file>` writes a render/echo histogram.
+- **Daemon memory** (#1494). glibc arenas capped at 2 with `malloc_trim` after each turn
+  (`FORGE_ALLOC_POLICY=off` disables), and the remote replay ring is bounded to 8 MiB.
+
+### Fixed
+- **Tools in worktrees outside the session directory** (#1497). Absolute main-checkout paths are
+  remapped into the active worktree on the direct path, the bridge and isolated subagents; reads
+  fall back to the main checkout for files only it has; `git commit` works under the shell
+  sandbox; the bridge pins `mcp-serve` to the session workspace.
+- **Code-block copy** (#1488). Mouse selection copies only the code: borders, gutters, quote bars
+  and padding are excluded, wrapped lines rejoin, and code containing box characters survives.
+- **Long claude-cli sessions never compacted** (#1493). Forge now reads the bridge's own context
+  usage; a committed turn no longer triggers the false "you have not modified any files" nudge;
+  repeated end-of-turn nudges are no longer dropped (which caused "nothing new" replies and full
+  transcript re-sends); the compaction summarizer honours `mesh.disabled`.
+- **Real-prompt replay findings** (#1490). Mid-turn narration no longer glued onto the final answer;
+  a verification re-drive no longer replaces the summary; `write_file`/`append_file` create missing
+  parent directories; `.forge/` ignores itself so it no longer shows in `git status`; "nothing left"
+  answers are not re-driven; the review nudge sees new files.
+
 ## [2.17.2] - 2026-10-10
 
 ### Fixed
@@ -4638,7 +4682,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.17.2...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.18.0...HEAD
+[2.18.0]: https://github.com/Adulari/forge/compare/v2.17.2...v2.18.0
 [2.17.2]: https://github.com/Adulari/forge/compare/v2.17.1...v2.17.2
 [2.17.1]: https://github.com/Adulari/forge/compare/v2.17.0...v2.17.1
 [2.17.0]: https://github.com/Adulari/forge/compare/v2.16.2...v2.17.0
