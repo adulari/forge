@@ -12,6 +12,7 @@
 use forge_store::HarnessEntry;
 use forge_types::{Message, Role};
 
+use crate::system_context::normalize_system_context;
 use crate::tokens;
 
 /// Char length above which an OLD tool result is pruned from the model-facing transcript. Tool
@@ -107,48 +108,6 @@ pub(crate) fn to_llm(
     // rejects the whole request for one unpaired result (`tool_call_id … is not found`), seen live
     // on 2026-09-16 the first time a 246K-token Kimi turn crossed its window budget.
     normalize_tool_pairs(fit_messages_owned(elided, budget_tokens)).messages
-}
-
-const TURN_CONTRACT_PREFIX: &str = "Turn contract:";
-
-/// Derive the provider's system-context view without rewriting the persisted transcript. A turn
-/// contract is scoped to one turn, so only the newest contract may remain authoritative.
-///
-/// Exact repeated system guidance is standing context, not cumulative evidence, so only one full
-/// copy is sent — but WHICH copy matters more than it looks. Prompt caches key on a PREFIX, so
-/// keeping the newest copy deletes the previously-kept one from the middle of the prompt and
-/// discards every cached token after it. One live session showed 344 exact-duplicate system
-/// messages, mostly re-emitted `[lsp diagnostics]` blocks: 344 invalidations of a ~50k-token
-/// prompt, each to save ~380 chars. Keeping the FIRST copy is just as bounded and costs nothing,
-/// because whether a message is dropped then depends only on the messages before it — so a
-/// transcript that grows never rewrites what the provider has already cached.
-fn normalize_system_context(messages: Vec<Message>) -> Vec<Message> {
-    let newest_contract = messages.iter().rposition(|message| {
-        message.role == Role::System
-            && message
-                .content
-                .trim_start()
-                .starts_with(TURN_CONTRACT_PREFIX)
-    });
-
-    let mut seen = std::collections::HashSet::<String>::new();
-    messages
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, message)| {
-            if message.role != Role::System {
-                return Some(message);
-            }
-            if message
-                .content
-                .trim_start()
-                .starts_with(TURN_CONTRACT_PREFIX)
-            {
-                return (Some(index) == newest_contract).then_some(message);
-            }
-            seen.insert(message.content.clone()).then_some(message)
-        })
-        .collect()
 }
 
 const INTERRUPTED_TOOL_RESULT: &str = "error: tool call interrupted before a result was recorded";

@@ -7,6 +7,25 @@ use crate::compaction_shape::{clip_tool_results_to_budget, compact_target_tokens
 const COMPACT_CLIP_ABOVE_PERCENT: u64 = 75;
 
 impl Session {
+    /// Refresh what the CLI bridge says its context holds after a model call, and return the live
+    /// context fill for the gauge.
+    pub(crate) fn note_context_fill(&mut self, model: &str, reported_input: u64) -> u64 {
+        if forge_provider::is_cli_bridge(model) {
+            self.bridge_context_tokens = self.provider.context_fill(model, &self.id).unwrap_or(0);
+        }
+        context_fill_tokens(model, self.context_pressure_tokens(), reported_input)
+    }
+
+    /// The context size compaction and the gauge should act on: the transcript Forge manages, or
+    /// the CLI bridge's own context when that is larger. A bridged claude runs every tool inside
+    /// its own process, so file reads and build logs pile up there while the transcript Forge
+    /// estimates stays a fraction of the size — a measured session sat at ~12k estimated tokens
+    /// with 400k in claude's window, and never compacted.
+    pub(crate) fn context_pressure_tokens(&self) -> u64 {
+        self.estimated_transcript_tokens()
+            .max(self.bridge_context_tokens)
+    }
+
     /// Guarantee an auto-compaction leaves real headroom. A summary only replaces the older part;
     /// when the verbatim tail (or a failed summarization) leaves the transcript above
     /// [`COMPACT_CLIP_ABOVE_PERCENT`] of the trigger, the next tool result would trip another

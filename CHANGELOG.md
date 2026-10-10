@@ -6,6 +6,19 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Long Claude bridge sessions never compacted.** claude's own window held ~650k tokens per request
+  while Forge counted ~18k, because the bridge's tool results never enter Forge's transcript. The
+  bridge's real per-request context now drives the gauge and auto-compaction.
+- **A turn that committed its work was nudged "You have not modified any files".** Progress compared
+  `git status` only, which is identical before and after a commit; it now includes HEAD. One 40-turn
+  claude session was re-driven 23 times for work it had already done.
+- **Repeated end-of-turn nudges vanished from the request.** The review pass and the completion gate
+  use the same text every turn, and system-context deduplication dropped every copy after the first,
+  so the model was re-driven with nothing to act on and answered "nothing new is requested" as the
+  turn's final reply. A live bridge process is also no longer re-sent the whole transcript when there
+  is nothing new to say.
+
 ## [2.17.2] - 2026-10-10
 
 ### Fixed
