@@ -2334,9 +2334,17 @@ impl App {
         self.turn_diffs.clear();
         self.turn_diffs_skipped = 0;
         self.plan = None;
+        let peer = crate::peer_message::parse(line);
         self.tag_flush(LineOrigin::user(), |s| {
-            s.flush.push(header_line("you", USER));
-            for l in line.lines() {
+            match &peer {
+                Some((who, _)) => s.flush.push(header_line(
+                    &format!("peer message from {who}"),
+                    crate::surface::TOOLCYAN,
+                )),
+                None => s.flush.push(header_line("you", USER)),
+            }
+            let shown = peer.as_ref().map_or(line, |(_, body)| body.as_str());
+            for l in shown.lines() {
                 s.flush.push(body_line(l));
             }
             for img in std::mem::take(&mut s.last_submit_images) {

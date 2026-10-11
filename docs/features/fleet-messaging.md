@@ -4,7 +4,11 @@ Any two daemon-hosted (fleet) sessions can exchange messages, and a shell can me
 Before this, only a parent could message its own subagents inside one session tree; a session
 running in another window, or an agent working on a different repo, was unreachable.
 
-Shipped in #976.
+Shipped in #976. Discovery (`list_sessions`), sender identity, the rate and ping-pong guards,
+`forge chat` terminals and other machines over Forge Anywhere are in
+`docs/features/session-messaging.md`; where the two differ, that page is current (for example the
+message header now carries the sender's session id, and the pending cap is no longer the only
+limit).
 
 ## From a shell
 
@@ -59,7 +63,8 @@ been persisted either.
 | Limit | Value | Why |
 |---|---|---|
 | Message size | 16 KB (`FLEET_MESSAGE_MAX_BYTES`) | Keeps a fleet message the same order of magnitude as a prompt, rather than an accidental file dump routed through the wrong tool. |
-| Pending per sender→target | 8 (`FLEET_MESSAGE_PENDING_CAP`) | Stops one chatty sender accumulating unbounded backlog against an unresponsive target. Deliberately the only rate limit. |
+| Pending per sender→target | 8 (`FLEET_MESSAGE_PENDING_CAP`) | Stops one chatty sender accumulating unbounded backlog against an unresponsive target. |
+| Rate and depth | 10 per minute per pair; 6/12 consecutive agent messages | See `session-messaging.md`. |
 
 Both are checked against the same connection the insert runs on, so the decision and the write
 cannot disagree under concurrency. Exceeding either is a clear error to the sender, never a silent

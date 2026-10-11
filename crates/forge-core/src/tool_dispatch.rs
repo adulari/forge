@@ -61,6 +61,7 @@ impl Session {
             || name == USE_SKILL_TOOL
             || name == REMEMBER_TOOL
             || name == fleet::MESSAGE_SESSION_TOOL
+            || name == fleet::LIST_SESSIONS_TOOL
             || name == crate::dispatch::DISPATCH_SESSIONS_TOOL
             || name == heartbeat::MANAGE_HEARTBEATS_TOOL
             || name == wakeup::SCHEDULE_WAKEUP_TOOL
@@ -272,6 +273,9 @@ impl Session {
         // never called, unless this session is forge-serve-hosted.
         if call.name == fleet::MESSAGE_SESSION_TOOL {
             return self.message_session(msg_id, call).await;
+        }
+        if call.name == fleet::LIST_SESSIONS_TOOL {
+            return self.list_sessions(msg_id, call).await;
         }
         // Plan and dispatch: recorded through the host the daemon wires into coordinator sessions.
         if call.name == crate::dispatch::DISPATCH_SESSIONS_TOOL {

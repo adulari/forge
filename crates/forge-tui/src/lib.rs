@@ -40,6 +40,7 @@ mod json_result;
 mod keybind_configurator;
 pub mod keybinds;
 mod overlays;
+mod peer_message;
 pub mod perf;
 mod refine_args;
 mod render;

@@ -715,6 +715,8 @@ impl DurableCommandClient<'_> {
 mod command_journal;
 use command_journal::*;
 
+pub(super) mod controller;
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_relay_envelope<S>(
     store: &StateStore,

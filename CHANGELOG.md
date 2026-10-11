@@ -7,6 +7,18 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Sessions can find and message each other: `list_sessions` + `message_session`.** `list_sessions`
+  shows the live sessions on this machine (daemon-hosted and `forge chat` terminals) with id prefix,
+  name, directory, model, busy/idle/waiting and which one is you; with Forge Anywhere on it also
+  lists the account's other hosts by name (an unreachable host shows as offline with its last-seen
+  time). `message_session` now resolves names, id prefixes and `host/name`, works from a terminal
+  session and the claude/codex bridge, and can deliver into another machine over the end-to-end
+  encrypted relay (new typed `SessionMessage` bridge route; no plaintext at the hosted service). The
+  recipient sees a labelled peer message ahead of the text (never a user instruction, no permission
+  change); an idle one wakes to handle it. Guards: no self-send, 10 messages per minute per pair,
+  and a conversation-depth guard that tells the recipient not to auto-reply from the 6th consecutive
+  agent message and refuses past the 12th. `message_session` is refused in Plan mode, like
+  `push_notification`. `forge send` uses the same routes. See `docs/features/session-messaging.md`.
 - **The iPhone lock screen shows a `push_notification`'s real title and message, even with the app
   killed, without the relay or Apple being able to read it.** The app now ships a Notification
   Service Extension (`dev.adulari.forge.notification-service`). The phone generates a P-256 key kept
@@ -17,6 +29,7 @@ All notable changes to Forge are documented here. The format follows
   on leaves the generic alert. Needs a new native build (changes the OTA fingerprint); existing
   installs register their key on next open. On Android a fetched notice now raises a local
   notification (there is no remote push there). ADR-0012 gains an addendum.
+||||||| parent of 10cca831 (feat(fleet): list_sessions + message_session between sessions, terminals and hosts)
 - **`push_notification` tool: the agent can notify your phone and desktop.** Available on the direct
   path and the claude-cli/codex bridge (deferred behind `tool_search` on a lean bridge). Fans out to
   iOS native push, Forge Anywhere, web push and a desktop notification, reports which delivered,

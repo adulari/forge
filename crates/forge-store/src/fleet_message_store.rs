@@ -13,6 +13,17 @@ pub const FLEET_MESSAGE_MAX_BYTES: usize = 16 * 1024;
 /// deliberately no other rate limiting.
 pub const FLEET_MESSAGE_PENDING_CAP: i64 = 8;
 
+/// A run of session messages from one sender to one target is one "conversation" while each is
+/// within this many seconds of the previous one.
+pub const FLEET_CHAIN_GAP_SECS: i64 = 600;
+
+/// See [`Store::fleet_pair_activity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FleetPairActivity {
+    pub last_minute: i64,
+    pub chain: i64,
+}
+
 impl Store {
     /// Queue a fleet message for later (or immediate) delivery. Rejects (via
     /// [`StoreError::InvalidValue`]) a body over [`FLEET_MESSAGE_MAX_BYTES`], or a sender/target
@@ -79,6 +90,57 @@ impl Store {
         let rows = stmt.query_map([target_session_id], map_fleet_message)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    /// How busy one sender->target pair has been, for the peer-messaging guards. `last_minute` is
+    /// the number of messages the sender queued to the target in the 60s before `now` (the rate
+    /// limit); `chain` is the length of the unbroken run of session messages from this sender to
+    /// the target, where a run is broken by a gap longer than [`FLEET_CHAIN_GAP_SECS`] or by a
+    /// `cli` message to the target (a human stepping in). Derived from existing rows, so no
+    /// schema change: a ping-pong between two agents shows up as a long chain on both sides.
+    /// Both counts are as of `now`, so a delivery can recompute what an enqueue saw (pass the
+    /// message's own `created_at`). `sender_key` matches `sender_id`, so a remote sender is keyed `<host>/<session id>`.
+    pub fn fleet_pair_activity(
+        &self,
+        sender_key: &str,
+        target_session_id: &str,
+        now: i64,
+    ) -> Result<FleetPairActivity> {
+        let conn = self.lock()?;
+        let last_minute: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM fleet_message \
+             WHERE sender_id = ?1 AND target_session_id = ?2 \
+               AND created_at > ?3 AND created_at <= ?4",
+            (sender_key, target_session_id, now - 60, now),
+            |r| r.get(0),
+        )?;
+        let last_human: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(created_at), 0) FROM fleet_message \
+             WHERE sender_kind = 'cli' AND target_session_id = ?1",
+            [target_session_id],
+            |r| r.get(0),
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT created_at FROM fleet_message \
+             WHERE sender_id = ?1 AND target_session_id = ?2 \
+               AND created_at > ?3 AND created_at <= ?4 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 64",
+        )?;
+        let times = stmt
+            .query_map((sender_key, target_session_id, last_human, now), |r| {
+                r.get::<_, i64>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut chain = 0;
+        let mut newer = now;
+        for at in times {
+            if newer - at > FLEET_CHAIN_GAP_SECS {
+                break;
+            }
+            chain += 1;
+            newer = at;
+        }
+        Ok(FleetPairActivity { last_minute, chain })
     }
 
     /// Mark one message delivered. Returns `false` if it was already delivered (or doesn't
@@ -207,5 +269,54 @@ mod tests {
         store
             .enqueue_fleet_message("m-again", "cli", None, "cli", &target, "msg", "follow_up")
             .unwrap();
+    }
+
+    #[test]
+    fn pair_activity_counts_rate_and_chain_and_resets_on_a_human_message() {
+        let store = Store::open_in_memory().unwrap();
+        let target = store.create_session("/tmp/target", "Default").unwrap();
+        let set_time = |id: &str, at: i64| {
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE fleet_message SET created_at = ?1 WHERE id = ?2",
+                    (at, id),
+                )
+                .unwrap();
+        };
+        let now = 10_000;
+        for (id, at) in [
+            ("a", now - 1500),
+            ("b", now - 100),
+            ("c", now - 30),
+            ("d", now - 10),
+        ] {
+            store
+                .enqueue_fleet_message(id, "session", Some("s1"), "s1", &target, "m", "follow_up")
+                .unwrap();
+            set_time(id, at);
+        }
+        let activity = store.fleet_pair_activity("s1", &target, now).unwrap();
+        assert_eq!(activity.last_minute, 2);
+        // "a" is more than the chain gap before "b", so the run is b, c, d.
+        assert_eq!(activity.chain, 3);
+        assert_eq!(
+            store.fleet_pair_activity("other", &target, now).unwrap(),
+            FleetPairActivity {
+                last_minute: 0,
+                chain: 0
+            }
+        );
+
+        store
+            .enqueue_fleet_message("h", "cli", None, "cli", &target, "m", "follow_up")
+            .unwrap();
+        set_time("h", now - 20);
+        // A human message to the target after c: only d still counts.
+        assert_eq!(
+            store.fleet_pair_activity("s1", &target, now).unwrap().chain,
+            1
+        );
     }
 }

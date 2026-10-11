@@ -366,6 +366,9 @@ impl ForgeMcp {
         if name == forge_core::fleet::MESSAGE_SESSION_TOOL {
             return Ok(self.handle_message_session(&args).await);
         }
+        if name == forge_core::fleet::LIST_SESSIONS_TOOL {
+            return Ok(self.handle_list_sessions(&args).await);
+        }
         // Agent-created heartbeats — bridge parity with the direct path's Session::manage_heartbeats.
         // Scoped to the parent session (id from ENV_SESSION) and, like the direct path, can never
         // touch the user's own `/heartbeat` — every read/write here is owner = 'agent' only.
@@ -688,6 +691,7 @@ impl ForgeMcp {
         // Fleet agent-to-agent messaging — always advertised (unlike subagents, it needs no local
         // setup: a call simply fails with a clear error if no `forge serve` daemon is reachable).
         tools.push(self.message_session_tool());
+        tools.push(self.list_sessions_tool());
         // Advertise agent-created heartbeats — bridge parity with the direct path. Always on
         // (like update_tasks/remember): the parent session id is resolved lazily at call time.
         tools.extend(bridge_budget::heartbeat_tools());
@@ -1455,6 +1459,27 @@ mod tests {
             .find(|t| t.name == deferred::TOOL_SEARCH)
             .unwrap();
         assert!(search.description.as_deref().unwrap().contains(name));
+    }
+
+    #[test]
+    fn session_messaging_tools_are_listed_in_full_and_deferred_when_lean() {
+        let full = test_server(false).tool_list();
+        let lean = test_server(true).tool_list();
+        let search = lean
+            .iter()
+            .find(|t| t.name == deferred::TOOL_SEARCH)
+            .unwrap();
+        for name in [
+            forge_core::fleet::LIST_SESSIONS_TOOL,
+            forge_core::fleet::MESSAGE_SESSION_TOOL,
+        ] {
+            assert!(full.iter().any(|t| t.name == name), "{name} listed in full");
+            assert!(
+                !lean.iter().any(|t| t.name == name),
+                "{name} must not cost a lean slot"
+            );
+            assert!(search.description.as_deref().unwrap().contains(name));
+        }
     }
 
     #[tokio::test]

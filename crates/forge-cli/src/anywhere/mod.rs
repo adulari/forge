@@ -29,6 +29,7 @@ use crate::{AnywhereCmd, ShareExpiry};
 mod connector;
 mod handoff;
 mod jobs;
+pub(crate) mod peers;
 pub(crate) mod push;
 mod share;
 mod sync;

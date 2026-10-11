@@ -13,6 +13,10 @@ pub enum RouteId {
     ListSessions,
     CreateSession,
     SetSessionMode,
+    /// Deliver a message from a session on another of the account's hosts into this host's
+    /// session (`POST /api/sessions/{id}/message`). Session-to-session messaging only; it carries
+    /// text that arrives in the recipient's context as a labelled peer message.
+    SessionMessage,
     SessionSnapshot,
     SessionHistory,
     SessionInput,
