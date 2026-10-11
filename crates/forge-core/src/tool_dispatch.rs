@@ -64,6 +64,7 @@ impl Session {
             || name == crate::dispatch::DISPATCH_SESSIONS_TOOL
             || name == heartbeat::MANAGE_HEARTBEATS_TOOL
             || name == wakeup::SCHEDULE_WAKEUP_TOOL
+            || name == push_notify::PUSH_NOTIFICATION_TOOL
         {
             return false;
         }
@@ -280,6 +281,9 @@ impl Session {
         // from the user's own `/heartbeat`, which never goes through tool dispatch at all).
         if call.name == heartbeat::MANAGE_HEARTBEATS_TOOL {
             return self.manage_heartbeats(msg_id, call);
+        }
+        if call.name == push_notify::PUSH_NOTIFICATION_TOOL {
+            return self.push_notification(msg_id, call).await;
         }
         if call.name == wakeup::SCHEDULE_WAKEUP_TOOL {
             return self.schedule_wakeup(msg_id, call);

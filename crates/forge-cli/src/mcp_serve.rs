@@ -78,6 +78,7 @@ fn append_sink_record(path: &str, record: &serde_json::Value) -> std::io::Result
 mod bridge_budget;
 mod deferred;
 mod heartbeats;
+mod push_notification;
 use bridge_budget::*;
 
 mod auto_classify;
@@ -370,6 +371,9 @@ impl ForgeMcp {
         // touch the user's own `/heartbeat` — every read/write here is owner = 'agent' only.
         if name == forge_core::heartbeat::MANAGE_HEARTBEATS_TOOL {
             return Ok(self.handle_manage_heartbeats(&args));
+        }
+        if name == forge_core::push_notify::PUSH_NOTIFICATION_TOOL {
+            return Ok(self.handle_push_notification(&args).await);
         }
         if name == forge_core::wakeup::SCHEDULE_WAKEUP_TOOL {
             return Ok(bridge_budget::wakeup_result(&self.tasks_store, &args));
@@ -687,6 +691,7 @@ impl ForgeMcp {
         // Advertise agent-created heartbeats — bridge parity with the direct path. Always on
         // (like update_tasks/remember): the parent session id is resolved lazily at call time.
         tools.extend(bridge_budget::heartbeat_tools());
+        tools.push(push_notification::tool());
         // Advertise plan presentation so a bridge model can propose a plan in planning mode. The
         // bridge can't see the parent's runtime temper, so it's advertised unconditionally; the
         // parent honors the plan only when it is actually in Plan mode (gated in run_model_loop).
@@ -1425,6 +1430,49 @@ mod tests {
             bytes(&lean),
             bytes(&full)
         );
+    }
+
+    #[test]
+    fn push_notification_is_listed_in_full_and_deferred_when_lean() {
+        let name = forge_core::push_notify::PUSH_NOTIFICATION_TOOL;
+        let full = test_server(false).tool_list();
+        let tool = full
+            .iter()
+            .find(|t| t.name == name)
+            .expect("listed in full mode");
+        assert_eq!(
+            tool.input_schema["required"],
+            serde_json::json!(["message"])
+        );
+
+        let lean = test_server(true).tool_list();
+        assert!(
+            !lean.iter().any(|t| t.name == name),
+            "must not cost a lean slot"
+        );
+        let search = lean
+            .iter()
+            .find(|t| t.name == deferred::TOOL_SEARCH)
+            .unwrap();
+        assert!(search.description.as_deref().unwrap().contains(name));
+    }
+
+    #[tokio::test]
+    async fn push_notification_bridge_handler_gates_validates_and_degrades() {
+        let args = serde_json::json!({"message": "bridge-handler-test"});
+        let plan = test_server_with_mode(PermissionMode::Plan);
+        let denied = plan.handle_push_notification(&args).await;
+        assert_eq!(denied.is_error, Some(true));
+        assert!(format!("{denied:?}").contains("plan"));
+
+        let auto = test_server_with_mode(PermissionMode::Auto);
+        let bad = auto.handle_push_notification(&serde_json::json!({})).await;
+        assert_eq!(bad.is_error, Some(true));
+
+        // No sink in this process: reported as "no channel", never an error that fails the turn.
+        let none = auto.handle_push_notification(&args).await;
+        assert_ne!(none.is_error, Some(true));
+        assert!(format!("{none:?}").contains("no notification channel available"));
     }
 
     #[test]

@@ -70,6 +70,7 @@ mod nudge_policy;
 mod orchestration;
 pub mod permission;
 pub mod project_context;
+pub mod push_notify;
 mod quality_gates;
 pub mod readiness;
 mod refinement;
@@ -2352,6 +2353,13 @@ impl Session {
             .is_none_or(|scope| scope.permits_tool(heartbeat::MANAGE_HEARTBEATS_TOOL))
         {
             specs.extend(heartbeat::tool_specs());
+        }
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(push_notify::PUSH_NOTIFICATION_TOOL))
+        {
+            specs.push(push_notify::spec());
         }
         // The plan-presentation tool — offered ONLY in planning mode, so the model proposes a plan
         // (rendered as an interactive card) instead of editing. Gating it to Plan mode also makes

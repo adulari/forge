@@ -756,6 +756,7 @@ pub(crate) async fn serve_cmd(
         voice: crate::voice::VoiceState::new(),
         anywhere_enable,
     });
+    crate::push_tool::install_daemon_sink(crate::push_tool::channels_for(&state, true));
     let app = daemon_router(state.clone());
 
     // Restore the fleet this daemon was hosting when it last stopped. Without this a restart comes
@@ -995,6 +996,7 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
             get(crate::serve_git::session_diff),
         )
         .merge(crate::serve_dispatch::routes(&base))
+        .merge(crate::push_tool::routes(&base))
         .route(&format!("{base}/api/history"), get(history_page))
         .route(&format!("{base}/api/changelog"), get(changelog_page))
         // Git review dock (serve_git.rs) — every route is session-addressed and runs git only in

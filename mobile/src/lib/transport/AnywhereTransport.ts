@@ -56,6 +56,7 @@ export type BridgeRoute =
   | "resume_schedule"
   | "delete_schedule"
   | "changelog"
+  | "list_notices"
   | "identity";
 
 export interface AnywhereBridgeRequest {
@@ -283,6 +284,7 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/workflows": { GET: "list_workflows" },
     "/api/schedules": { GET: "list_schedules" },
     "/api/changelog": { GET: "changelog" },
+    "/api/notices": { GET: "list_notices" },
     "/api/identity": { GET: "identity" },
   };
   const route = exact[path]?.[method];

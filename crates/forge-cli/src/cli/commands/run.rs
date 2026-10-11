@@ -36,7 +36,7 @@ pub(crate) use one_shot::*;
 mod plain_chat;
 pub(crate) use plain_chat::*;
 mod natural_language;
-mod notify;
+pub(crate) mod notify;
 mod statusline_command;
 pub(crate) use natural_language::*;
 
