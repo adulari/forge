@@ -22,7 +22,7 @@ use std::time::Instant;
 use forge_tui::{handle_key, App, ChannelPresenter, ConfirmOutcome, InputOutcome, KeyKind, UiMsg};
 
 mod daemon_dispatch;
-mod daemon_fleet;
+pub(crate) mod daemon_fleet;
 mod input;
 mod submit;
 
@@ -242,7 +242,6 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
             daemon_fleet::DaemonFleetMessaging {
                 registry,
                 store: session.store.clone(),
-                self_id: session_id.clone(),
             },
         )));
     }

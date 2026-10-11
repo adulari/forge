@@ -165,7 +165,7 @@ mod heartbeat_cmd;
 mod mesh_overlay;
 mod refine_cmd;
 pub(crate) use dispatch::*;
-mod driver;
+pub(crate) mod driver;
 pub(crate) use driver::*;
 mod btw;
 mod effort;
@@ -535,6 +535,14 @@ pub(crate) async fn run_chat_tui(
             }
         };
         app.loading = None;
+        let mut session = session;
+        // A terminal session can list and message its peers through a running daemon; only offer
+        // the tools when one answers, so the model is never handed a tool that cannot work.
+        if !mock && crate::fleet_peers::HttpFleet::reachable().await {
+            session.set_fleet_messaging(Some(std::sync::Arc::new(
+                crate::fleet_peers::HttpFleet::local(),
+            )));
+        }
         session
     };
     // Grab the MCP connect-done receiver before moving the session into the Arc. When the

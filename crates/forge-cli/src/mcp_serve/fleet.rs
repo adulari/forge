@@ -1,121 +1,120 @@
-//! Bridge-side `message_session`: talks to a running `forge serve` daemon over HTTP exactly like
-//! `forge send` (`crate::attach`'s discovery/auth, `forge_core::fleet::resolve_target` for
-//! id/name resolution). A CLI-bridge process (claude/codex running `forge mcp-serve`) is never
-//! the same process as the daemon and so has no direct registry access — only `forge serve`'s own
-//! in-process driver gets the [`forge_core::fleet::FleetMessaging`] implementation (see
-//! `cli::commands::run::driver::daemon_fleet`); this is the "bridge-shaped half" `subagents.rs`'s
-//! module doc describes, reproducing the same semantics with no presenter and no registry.
+//! Bridge-side `list_sessions` / `message_session`: talks to a running `forge serve` daemon over
+//! HTTP (`crate::attach`'s discovery/auth), because a CLI-bridge process (claude/codex running
+//! `forge mcp-serve`) is never the same process as the daemon and has no registry access. The
+//! daemon does the resolving, guarding and delivery (`crate::fleet_peers`), so the bridge and
+//! the direct path cannot drift; this side only adds the sender identity from the parent session
+//! id (`ENV_SESSION`) and shares `forge_core::fleet::{run_list, run_send}` for validation,
+//! the Plan-mode gate and result formatting.
 
-use forge_core::fleet::{
-    describe_peers, message_session_spec, resolve_target, FleetPeer, MessageMode,
-};
+use forge_core::fleet::{list_sessions_spec, message_session_spec};
 use rmcp::model::{CallToolResult, ContentBlock, JsonObject, Tool};
 use serde_json::Value;
 use std::sync::Arc;
 
 use super::ForgeMcp;
+use crate::fleet_peers::HttpFleet;
+
+/// The parent session this bridge child works for (empty when unknown).
+fn me() -> String {
+    std::env::var(forge_core::snapshot::ENV_SESSION).unwrap_or_default()
+}
+
+fn tool_of(spec: forge_provider::ToolSpec) -> Tool {
+    let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
+    Tool::new(spec.name, spec.description, Arc::new(schema))
+}
+
+fn result(text: String, ok: bool) -> CallToolResult {
+    let content = vec![ContentBlock::text(text)];
+    if ok {
+        CallToolResult::success(content)
+    } else {
+        CallToolResult::error(content)
+    }
+}
 
 impl ForgeMcp {
     pub(super) fn message_session_tool(&self) -> Tool {
-        let spec = message_session_spec();
-        let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
-        Tool::new(spec.name, spec.description, Arc::new(schema))
+        tool_of(message_session_spec())
+    }
+
+    pub(super) fn list_sessions_tool(&self) -> Tool {
+        tool_of(list_sessions_spec())
     }
 
     pub(super) async fn handle_message_session(&self, args: &Value) -> CallToolResult {
-        let target = args
-            .get("target")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let message = args
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let mode_raw = args
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("follow_up");
-        let Some(mode) = MessageMode::parse(mode_raw) else {
-            return CallToolResult::error(vec![ContentBlock::text(format!(
-                "error: unknown mode '{mode_raw}' — use follow_up or steer"
-            ))]);
-        };
-        if target.is_empty() || message.is_empty() {
-            return CallToolResult::error(vec![ContentBlock::text(
-                "error: message_session needs both `target` and `message`",
-            )]);
-        }
-        if message.len() > 16 * 1024 {
-            return CallToolResult::error(vec![ContentBlock::text(format!(
-                "error: message is {} bytes, exceeds the 16KB limit",
-                message.len()
-            ))]);
-        }
+        let (text, ok) =
+            forge_core::fleet::run_send(&HttpFleet::local(), &me(), args, self.effective_mode())
+                .await;
+        result(text, ok)
+    }
 
-        let base = crate::attach::resolve_base_url(None);
-        let token = match crate::attach::resolve_token(None) {
-            Ok(t) => t,
-            Err(e) => {
-                return CallToolResult::error(vec![ContentBlock::text(format!("error: {e}"))])
-            }
-        };
-        let http = reqwest::Client::new();
-        let sessions = match crate::attach::fetch_sessions(&http, &base, &token).await {
-            Ok(s) => s,
-            Err(e) => {
-                return CallToolResult::error(vec![ContentBlock::text(format!("error: {e}"))])
-            }
-        };
-        let peers: Vec<FleetPeer> = sessions
-            .iter()
-            .map(|s| FleetPeer {
-                id: s.id.clone(),
-                title: (!s.title.is_empty()).then(|| s.title.clone()),
-            })
-            .collect();
-        let peer = match resolve_target(&peers, &target) {
-            Ok(p) => p,
-            Err(e) => {
-                return CallToolResult::error(vec![ContentBlock::text(format!(
-                    "error: {e} for '{target}'. Live fleet sessions: [{}]",
-                    describe_peers(&peers)
-                ))]);
-            }
-        };
-        let send_url = format!("{base}/{token}/api/sessions/{}/message", peer.id);
-        let resp = http
-            .post(&send_url)
-            .json(&serde_json::json!({
-                "text": message,
-                "mode": mode.as_str(),
-                "sender_kind": "cli",
-                "sender_label": "cli-bridge",
-            }))
-            .send()
-            .await;
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                CallToolResult::success(vec![ContentBlock::text(format!(
-                    "message sent to {} ({}) [{}]",
-                    peer.title.as_deref().unwrap_or("unnamed"),
-                    &peer.id[..peer.id.len().min(8)],
-                    mode.as_str()
-                ))])
-            }
-            Ok(r) => {
-                let status = r.status();
-                let body = r.text().await.unwrap_or_default();
-                CallToolResult::error(vec![ContentBlock::text(format!(
-                    "error: daemon rejected the message ({status}): {body}"
-                ))])
-            }
-            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
-                "error: could not reach the forge serve daemon at {base} — is it running? [{e}]"
-            ))]),
-        }
+    pub(super) async fn handle_list_sessions(&self, args: &Value) -> CallToolResult {
+        result(
+            forge_core::fleet::run_list(&HttpFleet::local(), &me(), args).await,
+            true,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fleet_peers::tests::{scratch, spawn, wait_for_prompt};
+    use crate::serve::tests::FORGE_DB_LOCK;
+    use crate::serve::{daemon_router, DaemonState, SessionRegistry};
+    use forge_types::PermissionMode;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bridge_child_lists_and_messages_through_the_daemon_api() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = scratch("bridge");
+        std::env::set_var("FORGE_DB", dir.join("fleet.db"));
+        let store = Arc::new(crate::open_store().unwrap());
+        let registry = Arc::new(SessionRegistry::new());
+        let parent = spawn(&registry, &store, "claude-parent").await;
+        let peer = spawn(&registry, &store, "peer").await;
+        let router = daemon_router(Arc::new(DaemonState {
+            registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let fleet = HttpFleet::at(format!("http://127.0.0.1:{port}"), "tok".into());
+        let me = parent.as_str();
+
+        let listing = forge_core::fleet::run_list(&fleet, me, &serde_json::json!({})).await;
+        assert!(listing.contains("claude-parent"), "{listing}");
+        assert!(listing.contains("<- you"), "{listing}");
+
+        let args = serde_json::json!({"target": "peer", "message": "hello from a bridge child"});
+        let (text, ok) = forge_core::fleet::run_send(&fleet, me, &args, PermissionMode::Auto).await;
+        assert!(ok, "{text}");
+        let seen = wait_for_prompt(&store, &peer, "hello from a bridge child").await;
+        assert!(
+            seen.contains("\"claude-parent\""),
+            "sender identity is the parent session: {seen}"
+        );
+
+        let (text, ok) = forge_core::fleet::run_send(&fleet, me, &args, PermissionMode::Plan).await;
+        assert!(!ok && text.contains("plan"), "{text}");
+        let own = serde_json::json!({"target": "claude-parent", "message": "me"});
+        let (text, ok) = forge_core::fleet::run_send(&fleet, me, &own, PermissionMode::Auto).await;
+        assert!(!ok && text.contains("own session"), "{text}");
+
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

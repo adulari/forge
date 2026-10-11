@@ -57,6 +57,7 @@ pub use detached_child_store::{DetachedChild, DetachedChildStatus};
 pub use dispatch_store::{
     dispatch_item_status, dispatch_status, DispatchItemRow, DispatchRow, NewDispatchItem,
 };
+pub use fleet_message_store::{FleetPairActivity, FLEET_CHAIN_GAP_SECS};
 pub use handoff_types::{
     HandoffCheckpoint, HandoffImportProvenance, HandoffMessage, HandoffSessionExport,
     HandoffSessionImport, ImportedSessionMetadata,

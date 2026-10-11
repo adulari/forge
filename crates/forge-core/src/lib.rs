@@ -2388,6 +2388,14 @@ impl Session {
         {
             specs.push(fleet::message_session_spec());
         }
+        if self.fleet.is_some()
+            && self
+                .task_scope
+                .as_ref()
+                .is_none_or(|scope| scope.permits_tool(fleet::LIST_SESSIONS_TOOL))
+        {
+            specs.push(fleet::list_sessions_spec());
+        }
         // Plan and dispatch — only a coordinator session has a dispatch host, so neither an ordinary
         // session nor a dispatched worker can start a dispatch of its own.
         if let Some(host) = &self.dispatch {

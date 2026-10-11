@@ -82,7 +82,8 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         | RouteId::ForkSession
         | RouteId::MergeSession
         | RouteId::DiscardSession
-        | RouteId::SetSessionMode => {
+        | RouteId::SetSessionMode
+        | RouteId::SessionMessage => {
             if request.parameters.is_empty() || request.parameters.len() > 2 {
                 bail!("session route requires one path parameter and an optional query");
             }
@@ -93,6 +94,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
                 RouteId::MergeSession => "merge",
                 RouteId::DiscardSession => "discard",
                 RouteId::SetSessionMode => "mode",
+                RouteId::SessionMessage => "message",
                 _ => unreachable!(),
             };
             Ok(RouteTarget {
@@ -204,6 +206,20 @@ mod tests {
         ))
         .is_err());
         assert!(route_target(&request(RouteId::RenameSession, "PATCH", &["unsafe/id"],)).is_err());
+    }
+
+    #[test]
+    fn session_message_route_is_a_typed_post_to_one_session() {
+        let message = request(RouteId::SessionMessage, "POST", &["session_7"]);
+        let target = route_target(&message).unwrap();
+        assert_eq!(target.method, Method::POST);
+        assert_eq!(target.path, "/api/sessions/session_7/message");
+        assert!(validate_command_request(&message).is_ok());
+        assert!(
+            validate_command_request(&request(RouteId::SessionMessage, "GET", &["s"])).is_err()
+        );
+        assert!(route_target(&request(RouteId::SessionMessage, "POST", &["../x"])).is_err());
+        assert!(route_target(&request(RouteId::SessionMessage, "POST", &[])).is_err());
     }
 
     /// The three git routes read; nothing else about git is reachable over the bridge. A relay

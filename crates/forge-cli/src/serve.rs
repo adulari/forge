@@ -278,6 +278,8 @@ pub(crate) struct SessionRegistry {
     sessions: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<SessionDriverHandle>>>>,
     fleet_tx: tokio::sync::watch::Sender<u64>,
     draining: std::sync::atomic::AtomicBool,
+    /// Other machines, while Forge Anywhere is on (`crate::fleet_peers`).
+    pub(crate) remote_hosts: std::sync::RwLock<Option<Arc<dyn crate::fleet_peers::RemoteHosts>>>,
 }
 
 impl SessionRegistry {
@@ -286,6 +288,7 @@ impl SessionRegistry {
             sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fleet_tx: tokio::sync::watch::channel(0).0,
             draining: std::sync::atomic::AtomicBool::new(false),
+            remote_hosts: std::sync::RwLock::new(None),
         }
     }
 
@@ -419,7 +422,7 @@ pub(crate) async fn deliver_pending_fleet_messages(
         return;
     };
     for msg in pending {
-        let text = format!("[message from {}] {}", msg.sender_label, msg.body);
+        let text = crate::fleet_peers::delivered_text(store, &msg);
         let input = if msg.mode == "steer" {
             remote::RemoteInput::Steer { text }
         } else {
@@ -445,82 +448,6 @@ pub(crate) async fn deliver_pending_fleet_messages(
             }
         }
     }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SendFleetMessageReq {
-    text: String,
-    #[serde(default)]
-    mode: Option<String>,
-    /// `"cli"` (a `forge send` invocation) or `"session"` (the CLI-bridge's `message_session`
-    /// mirror, on behalf of another fleet session). Defaults to `"cli"` — the only transport that
-    /// omits it today is `forge send` itself.
-    #[serde(default)]
-    sender_kind: Option<String>,
-    /// Display name for the delivered `"[message from <label>] ..."` turn. Defaults to the
-    /// sender_kind when absent.
-    #[serde(default)]
-    sender_label: Option<String>,
-    /// The sending session's id, when `sender_kind == "session"`.
-    #[serde(default)]
-    sender_id: Option<String>,
-}
-
-/// `POST /api/sessions/{id}/message` — the transport `forge send` and the CLI-bridge's
-/// `message_session` mirror both use to message a live fleet session (docs: fleet messaging).
-/// Persists the message first (survives a daemon restart before delivery — forge-store migration
-/// 25), then delivers immediately if `id` is already live.
-async fn send_fleet_message(
-    State(state): State<Arc<DaemonState>>,
-    AxumPath(id): AxumPath<String>,
-    axum::Json(req): axum::Json<SendFleetMessageReq>,
-) -> Response {
-    if state.registry.is_draining() {
-        return err_response(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "daemon is draining for shutdown",
-        );
-    }
-    if state.registry.get(&id).await.is_none() {
-        return err_response(
-            axum::http::StatusCode::NOT_FOUND,
-            "no live fleet session with that id — see GET /api/sessions",
-        );
-    }
-    let text = req.text.trim();
-    if text.is_empty() {
-        return err_response(
-            axum::http::StatusCode::BAD_REQUEST,
-            "message must not be empty",
-        );
-    }
-    let mode_raw = req.mode.as_deref().unwrap_or("follow_up");
-    let Some(mode) = forge_core::fleet::MessageMode::parse(mode_raw) else {
-        return err_response(
-            axum::http::StatusCode::BAD_REQUEST,
-            &format!("unknown mode '{mode_raw}' — use follow_up or steer"),
-        );
-    };
-    let sender_kind = req.sender_kind.as_deref().unwrap_or("cli");
-    let sender_label = req
-        .sender_label
-        .clone()
-        .unwrap_or_else(|| sender_kind.to_string());
-    let msg_id = forge_types::new_id();
-    if let Err(error) = state.store.enqueue_fleet_message(
-        &msg_id,
-        sender_kind,
-        req.sender_id.as_deref(),
-        &sender_label,
-        &id,
-        text,
-        mode.as_str(),
-    ) {
-        return err_response(axum::http::StatusCode::BAD_REQUEST, &error.to_string());
-    }
-    deliver_pending_fleet_messages(&state.store, &state.registry, &id).await;
-    json_response(&serde_json::json!({ "ok": true, "mode": mode.as_str() }))
 }
 
 /// Shared HTTP state for the daemon router.
@@ -689,6 +616,8 @@ pub(crate) async fn serve_cmd(
 
     let store = Arc::new(crate::open_store()?);
     let registry = Arc::new(SessionRegistry::new());
+    // Other machines for session messaging; answers nothing while Forge Anywhere is off.
+    registry.set_remote_hosts(Some(Arc::new(crate::anywhere::peers::AnywhereHosts)));
     let default_cwd = std::env::current_dir()
         .and_then(|cwd| cwd.canonicalize())
         .context("resolving daemon workspace cwd")?
@@ -985,7 +914,15 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
         )
         .route(
             &format!("{base}/api/sessions/{{id}}/message"),
-            post(send_fleet_message),
+            post(crate::fleet_peers::send_fleet_message),
+        )
+        .route(
+            &format!("{base}/api/peers/sessions"),
+            get(crate::fleet_peers::peers_sessions),
+        )
+        .route(
+            &format!("{base}/api/peers/message"),
+            post(crate::fleet_peers::peers_message),
         )
         .route(
             &format!("{base}/api/sessions/{{id}}/mode"),
