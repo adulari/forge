@@ -4,6 +4,34 @@ set -euo pipefail
 safe=true
 ota_changed=false
 unsafe=()
+dependency_files=()
+fingerprint_checked=false
+scratch_dirs=()
+
+cleanup() {
+  local dir
+  for dir in "${scratch_dirs[@]}"; do
+    git worktree remove --force "$dir/base" >/dev/null 2>&1 || true
+    rm -rf -- "$dir"
+  done
+}
+trap cleanup EXIT
+
+# Prints the iOS runtime fingerprint of the mobile app checked out under $1. OTA_FINGERPRINT_CMD
+# replaces the real computation in tests.
+fingerprint_of() {
+  local root=$1
+  if [[ -n ${OTA_FINGERPRINT_CMD:-} ]]; then
+    "$OTA_FINGERPRINT_CMD" "$root"
+    return
+  fi
+  (
+    cd "$root/mobile"
+    [[ -d node_modules ]] || npm ci --ignore-scripts --no-audit --no-fund >&2
+    npx --no-install @expo/fingerprint fingerprint:generate --platform ios |
+      node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).hash))'
+  )
+}
 
 classify_path() {
   local path=$1
@@ -23,6 +51,12 @@ classify_path() {
       #                  publishes `--platform ios`, so nothing here can reach the device.
       # Without these, a favicon edit reports as a native change and hides the real reason an OTA
       # was refused. Anything else under mobile/ still falls through to unsafe.
+      ;;
+    mobile/package.json|mobile/package-lock.json)
+      # Judged by the runtime fingerprint after the whole range is known (see below): a
+      # transitive lockfile bump or a non-native package.json edit leaves it unchanged and
+      # cannot make an installed binary incompatible with the bundle.
+      dependency_files+=("$path")
       ;;
     mobile/*)
       unsafe+=("$path")
@@ -64,7 +98,7 @@ else
     fi
 
     changed_paths=$(mktemp)
-    trap 'rm -f -- "$changed_paths"' EXIT
+    scratch_dirs+=("$changed_paths")
     if git diff --no-renames --name-only -z "$base_commit" "$head_commit" > "$changed_paths"; then
       while IFS= read -r -d '' path; do
         classify_path "$path"
@@ -73,6 +107,25 @@ else
       status=$?
       echo "Unable to inspect OTA push range" >&2
       exit "$status"
+    fi
+  fi
+fi
+
+if [[ $safe == true ]] && ((${#dependency_files[@]})); then
+  # Only a range diff has a baseline to compare against; positional paths cannot be verified.
+  if [[ -z ${base_commit:-} ]] || [[ $(git rev-parse HEAD) != "${head_commit:-}" ]]; then
+    unsafe+=("${dependency_files[@]}")
+  else
+    work=$(mktemp -d)
+    scratch_dirs+=("$work")
+    git worktree add -q --detach "$work/base" "$base_commit"
+    base_fp=$(fingerprint_of "$work/base" 2>/dev/null || true)
+    head_fp=$(fingerprint_of "$(git rev-parse --show-toplevel)" 2>/dev/null || true)
+    if [[ -n $base_fp && $base_fp == "$head_fp" ]]; then
+      printf 'Dependency files changed but the iOS runtime fingerprint is unchanged (%s).\n' "$base_fp"
+    else
+      printf 'Dependency files changed the iOS runtime fingerprint (base=%s head=%s).\n' "${base_fp:-unavailable}" "${head_fp:-unavailable}"
+      unsafe+=("${dependency_files[@]}")
     fi
   fi
 fi
