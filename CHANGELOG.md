@@ -14,6 +14,15 @@ All notable changes to Forge are documented here. The format follows
   alert; the real text is served end-to-end encrypted from the new `GET /api/notices`). Limited to 4
   per minute and 20 per hour per session with identical messages suppressed; refused in Plan mode.
   See `docs/features/push-notification-tool.md`.
+- **App: notices from `push_notification` show their real text.** The hosted push can only say
+  "Open Forge to view an update", so the app (iOS, Android, web, desktop) now reads the daemon's
+  `/api/notices` inbox over the direct or Anywhere transport on launch, on return to the foreground,
+  when a push arrives or is tapped, and every 30 s while a host is connected. New notices raise an
+  in-app banner (tap opens the session) and fill a per-host Notices list under Inbox; only a
+  per-host cursor and read marker are stored, never the text. Web and desktop raise an OS
+  notification with the text when the window is in the background; iOS raises a local one only if
+  the app is still running, and keeps the generic text off the lock screen while the app lock is on.
+  JS-only, ships over the air.
 - **`forge import claude-session <id|path>` moves a Claude Code session into Forge.** The active
   chain of the transcript (streamed, so multi-hundred-MB files import in seconds) becomes a new
   session with its tool calls and results; Claude Code's latest compact summary plus what followed

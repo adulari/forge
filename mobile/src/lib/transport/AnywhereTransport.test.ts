@@ -76,6 +76,25 @@ describe("AnywhereTransport", () => {
     ).rejects.toThrow("not allowlisted");
   });
 
+  it("maps the notices inbox read, keeping the cursor in the query and refusing writes", async () => {
+    const captured: AnywhereBridgeRequest[] = [];
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        captured.push(request);
+        return { status: 200, body: new TextEncoder().encode('{"notices":[],"latest":0}') };
+      },
+      openSessionSocket: socket,
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+
+    await transport.fetch("fany://host-1/api/notices?after=7");
+
+    expect(captured[0]).toMatchObject({ route: "list_notices", method: "GET", parameters: ["?after=7"] });
+    await expect(
+      transport.fetch("fany://host-1/api/notices", { method: "DELETE" }),
+    ).rejects.toThrow("not allowlisted");
+  });
+
   it("maps the MCP catalog read but never MCP server registration", async () => {
     // Registering a stdio server persists a command the host executes, so it is a local-only
     // action: the host has no bridge route for it and the phone must not emit one.
