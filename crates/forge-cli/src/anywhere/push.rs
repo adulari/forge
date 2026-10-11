@@ -50,6 +50,49 @@ pub(crate) async fn request_best_effort(
     }
 }
 
+/// Anywhere leg of the `push_notification` tool. The hosted service only accepts a closed set of
+/// content-free events, so the phone gets the generic `attention_required` alert and the real
+/// text stays on the host (`GET /api/notices`, read over the end-to-end encrypted bridge).
+/// `None` when this host is not enrolled and enabled.
+pub(crate) async fn tool_hint() -> Option<Result<(), String>> {
+    let config = forge_config::load().ok()?;
+    if !config.anywhere.enabled {
+        return None;
+    }
+    let store = super::StateStore::platform().ok()?;
+    let mut state = store.load().ok()?;
+    let outcome = async {
+        let token = super::ensure_access_token(&store, &mut state)
+            .await
+            .map_err(|e| format!("not signed in: {e}"))?;
+        let http = super::client().map_err(|e| e.to_string())?;
+        let response = http
+            .post(format!(
+                "{}/v1/push/notifications",
+                config.anywhere.service_url()
+            ))
+            .bearer_auth(token)
+            .header("Idempotency-Key", super::idempotency_key())
+            .json(&NotificationRequest {
+                event: GenericPushEvent::AttentionRequired,
+                target_device_id: None,
+            })
+            .send()
+            .await
+            .map_err(|_| "service unreachable".to_string())?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "service answered HTTP {}",
+                response.status().as_u16()
+            ))
+        }
+    }
+    .await;
+    Some(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

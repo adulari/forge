@@ -55,6 +55,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::ListWorkflows => exact(Method::GET, "/api/workflows"),
         RouteId::ListSchedules => exact(Method::GET, "/api/schedules"),
         RouteId::Changelog => exact(Method::GET, "/api/changelog"),
+        RouteId::ListNotices => exact(Method::GET, "/api/notices"),
         RouteId::Identity => exact(Method::GET, "/api/identity"),
         RouteId::SessionDiff => {
             let id = single_path_parameter(request)?;
@@ -238,7 +239,7 @@ mod tests {
 
     #[test]
     fn files_diff_and_schedule_routes_map_to_their_daemon_endpoints() {
-        let cases: [(RouteId, &str, &[&str], Method, &str); 12] = [
+        let cases: [(RouteId, &str, &[&str], Method, &str); 13] = [
             (
                 RouteId::WorkspaceEntries,
                 "GET",
@@ -289,6 +290,13 @@ mod tests {
                 "/api/changelog",
             ),
             (RouteId::Identity, "GET", &[], Method::GET, "/api/identity"),
+            (
+                RouteId::ListNotices,
+                "GET",
+                &["?after=3"],
+                Method::GET,
+                "/api/notices",
+            ),
             (
                 RouteId::SessionDiff,
                 "GET",

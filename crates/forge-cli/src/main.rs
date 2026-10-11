@@ -79,6 +79,7 @@ mod log_filter;
 mod mcp_agent;
 mod mcp_serve;
 mod push;
+mod push_tool;
 mod remote;
 mod replay;
 mod serve;
@@ -174,6 +175,7 @@ async fn run_cli() {
     if let Ok(config) = forge_config::load() {
         forge_tools::set_attach_endpoint(config.browser.endpoint());
     }
+    push_tool::install_local_sink();
     let telemetry_run = telemetry::start(&command);
     if telemetry_run.show_notice() && std::io::stdout().is_terminal() {
         println!(

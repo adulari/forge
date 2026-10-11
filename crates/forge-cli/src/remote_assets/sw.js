@@ -32,7 +32,7 @@ self.addEventListener("fetch", (e) => {
 // --- Actionable Web Push (forge serve) ------------------------------------------------------
 // The daemon encrypts every payload end-to-end (RFC 8291); by the time it reaches this handler
 // the browser has already decrypted it. Payload: { kind, session, title, body, seq } where kind
-// is "permission" | "question" | "done" | "failed". A permission push carries Allow/Deny
+// is "permission" | "question" | "done" | "failed" | "notify" (the push_notification tool). A permission push carries Allow/Deny
 // actions the notificationclick handler answers DIRECTLY over POST api/answer — no page needed,
 // so the agent can be unblocked from the lock screen.
 self.addEventListener("push", (e) => {
@@ -42,8 +42,9 @@ self.addEventListener("push", (e) => {
   const head = kind === "permission" ? "Forge needs permission"
     : kind === "question" ? "Forge has a question"
     : kind === "failed" ? "Forge — turn failed"
+    : kind === "notify" ? ""
     : "Forge — turn complete";
-  const title = d.title ? head + " · " + d.title : head;
+  const title = kind === "notify" ? (d.title || "Forge") : d.title ? head + " · " + d.title : head;
   const actions = kind === "permission"
     ? [{ action: "approve", title: "Allow" }, { action: "deny", title: "Deny" }]
     : [{ action: "open", title: "Open" }];
@@ -52,7 +53,7 @@ self.addEventListener("push", (e) => {
     icon: new URL("icon.svg", self.registration.scope).href,
     // One notification per pending decision: a replaced prompt overwrites the stale card
     // instead of stacking; completions collapse per session.
-    tag: "forge-push:" + (d.session || "") + ":" + (kind === "done" || kind === "failed" ? "turn" : "ask"),
+    tag: "forge-push:" + (d.session || "") + ":" + (kind === "done" || kind === "failed" ? "turn" : kind === "notify" ? "notify" : "ask"),
     data: d,
     actions,
   }));

@@ -7,6 +7,13 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`push_notification` tool: the agent can notify your phone and desktop.** Available on the direct
+  path and the claude-cli/codex bridge (deferred behind `tool_search` on a lean bridge). Fans out to
+  iOS native push, Forge Anywhere, web push and a desktop notification, reports which delivered,
+  and degrades to a "no channel available" result. Hosted channels never carry the text (generic
+  alert; the real text is served end-to-end encrypted from the new `GET /api/notices`). Limited to 4
+  per minute and 20 per hour per session with identical messages suppressed; refused in Plan mode.
+  See `docs/features/push-notification-tool.md`.
 - **`forge import claude-session <id|path>` moves a Claude Code session into Forge.** The active
   chain of the transcript (streamed, so multi-hundred-MB files import in seconds) becomes a new
   session with its tool calls and results; Claude Code's latest compact summary plus what followed

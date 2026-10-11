@@ -73,6 +73,9 @@ pub enum RouteId {
     ResumeSchedule,
     DeleteSchedule,
     Changelog,
+    /// Notifications the model sent with `push_notification`. Hosted push carries only a generic
+    /// alert, so the app reads the real text here, inside the end-to-end encrypted bridge.
+    ListNotices,
     Identity,
     WebSocket,
     TerminalWebSocket,

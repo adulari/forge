@@ -530,6 +530,18 @@ impl ApnsNotifier {
         }
     }
 
+    /// True when the backend rewrites every alert to a static generic one (the public relay), so
+    /// callers can tell the user the lock screen will not show the real text.
+    pub(crate) fn alerts_are_generic(&self) -> bool {
+        matches!(
+            self.backend,
+            ApnsBackend::Relay {
+                alert_policy: RelayAlertPolicy::Generic,
+                ..
+            }
+        )
+    }
+
     async fn send_one(
         &self,
         device_token: &str,
