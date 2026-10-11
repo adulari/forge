@@ -8,6 +8,7 @@
 // Types mirror the serde struct field names VERBATIM (snake_case) — do not camelCase the
 // wire (UI_RULES.md #4).
 
+import { parseNoticesResponse, type NoticesResponse } from "./notices/core";
 import { tFetch, TWebSocket } from "./transport";
 
 export class ApiError extends Error {
@@ -1080,6 +1081,13 @@ export function probeConnection(baseUrl: string): Promise<SessionRow[]> {
 
 export function getIdentity(baseUrl: string): Promise<HostIdentity> {
   return request(baseUrl, "/api/identity");
+}
+
+/** Notices the model sent with `push_notification` newer than `after` (a daemon sequence number).
+ * The same path serves both transports: direct HTTP, and the encrypted Anywhere bridge route
+ * `list_notices`. */
+export async function getNotices(baseUrl: string, after = 0): Promise<NoticesResponse> {
+  return parseNoticesResponse(await request<unknown>(baseUrl, `/api/notices?after=${Math.max(0, Math.floor(after))}`));
 }
 
 /** Bounded aggregate diagnostics; deliberately excludes secrets, paths, prompts, and logs. */

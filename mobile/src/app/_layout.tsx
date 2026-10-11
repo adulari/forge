@@ -25,6 +25,8 @@ import { DesktopWindowChrome, DESKTOP_WINDOW_CHROME_HEIGHT } from "../components
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { UpdateNotice } from "../components/UpdateNotice";
 import { OperationalNotice } from "../components/OperationalNotice";
+import { NoticeBannerHost } from "../components/notices/NoticeBannerHost";
+import { NoticesWatcher } from "../components/notices/NoticesWatcher";
 import { Screen } from "../components/ds/Screen";
 import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
@@ -229,6 +231,7 @@ function RootNavigator() {
         <Stack.Screen name="session-tree" />
 
         <Stack.Screen name="mcp" />
+        <Stack.Screen name="notices" />
         <Stack.Screen name="session" />
         <Stack.Screen
           name="new-session"
@@ -367,6 +370,7 @@ export default function RootLayout() {
                       <IncomingShareProvider>
                         <AnonymousTelemetry />
                         <FleetWatcher />
+                        <NoticesWatcher />
                         {/* Inside the query provider because it reads the daemon's changelog, and above
                             the navigator so it is not tied to whichever tab happens to be open. */}
                         <UpdateNotice />
@@ -378,6 +382,7 @@ export default function RootLayout() {
                             <WorkbenchProvider>
                               <AppLock>
                                 <RootNavigator />
+                                <NoticeBannerHost />
                               </AppLock>
                               {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
                               <DesktopWindowChrome />

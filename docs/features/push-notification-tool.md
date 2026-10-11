@@ -43,3 +43,21 @@ Auto, AcceptEdits and Bypass without a prompt. Guarded (`default`) would ask for
 a virtual tool has no prompt to show, so it proceeds there under the limiter.
 
 On a lean bridge it is deferred behind `tool_search`, so it costs no advertised schema.
+
+## In the app
+
+The app (`mobile/src/lib/notices/`) reads `GET /api/notices?after=<seq>` (Anywhere: bridge route
+`list_notices`) for every paired host: at launch, on foreground, when a hosted push is received or
+tapped, and every 30 s for the active host while the app is in front. It keeps the held list in
+memory and persists only two marks per host (last alerted, last seen) in AsyncStorage, so a
+relaunch neither replays banners nor forgets what was read. Marks compare `seq` and `at`, and a
+`latest` below the cursor means the daemon restarted (the log is in memory) so the log is re-read
+from the start. Notices older than 15 minutes when first fetched are listed but not announced.
+
+New notices raise a banner (inside the app lock) and fill **Inbox > Notices**; tapping opens the
+notice's session. On web and desktop an OS notification carries the text when the window is in the
+background. On iOS a local notification carries it only if the app process is running; a generic
+push that arrives while the app is suspended or killed is drawn by iOS from the APNs payload alone,
+so the lock screen keeps the generic text until the app next runs. Replacing it earlier needs a
+`remote-notification` background mode or a Notification Service Extension, both native. With the
+app lock on, OS surfaces stay generic.

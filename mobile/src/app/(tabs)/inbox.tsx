@@ -5,6 +5,7 @@
 // actions; DecisionPeek (T4.3) still answers a prompt inline via the peek sheet.
 import { TabPager } from "../../components/TabPager";
 import { CircleCheck } from "lucide-react-native";
+import { router } from "expo-router";
 import React, { useCallback, useMemo, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -22,17 +23,24 @@ import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 import { usePullRefresh } from "../../lib/usePullRefresh";
+import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
 
 const EVERYTHING_COPY = "That's everything — nothing else needs you.";
 
 function InboxHeader({ count }: { count: number }) {
   const tokens = useTokens();
+  const unseen = totalUnseen(useNoticesStore().hosts);
   return (
     <View style={styles.header}>
       <Text style={[typeScale.title, styles.titleText, { color: tokens.ink }]}>Inbox</Text>
       <Text style={[typeScale.sub, { color: count > 0 ? tokens.danger : tokens.ink3 }]}>
         {count > 0 ? `${count} decision${count === 1 ? "" : "s"} waiting` : EVERYTHING_COPY}
       </Text>
+      <Button
+        label={unseen > 0 ? `Notices (${unseen} new)` : "Notices"}
+        variant="secondary"
+        onPress={() => router.push("/notices")}
+      />
     </View>
   );
 }

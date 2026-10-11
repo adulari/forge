@@ -5,7 +5,7 @@
 // group, and a footer (usage-pace rings + Inbox/History/Settings + the collapse
 // control). Replaces `ExpandedFleetRail` (components/fleet/DesktopDrillDown.tsx).
 import { router, usePathname } from "expo-router";
-import { BellDot, History, PanelLeftClose, Plus, Search, Settings2 } from "lucide-react-native";
+import { Bell, BellDot, History, PanelLeftClose, Plus, Search, Settings2 } from "lucide-react-native";
 import React, { useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
@@ -14,6 +14,7 @@ import type { AnywhereHost } from "../../lib/anywhere/types";
 import { hostStateText } from "../../lib/anywhere/format";
 import type { SessionRow } from "../../lib/api";
 import { modKey } from "../../lib/platform";
+import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
 import { useSessions } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, type StatusDotState } from "../../theme/tokens";
@@ -135,6 +136,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
   const sessionsQuery = useSessions();
   const rows = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data]);
   const groups = useMemo(() => groupSessionsByProject(rows), [rows]);
+  const noticesUnseen = totalUnseen(useNoticesStore().hosts);
   const waitingCount = useMemo(() => rows.filter((r) => r.waiting).length, [rows]);
   const selectedSessionId = pathname.match(/^\/session\/([^/]+)/)?.[1];
 
@@ -221,6 +223,15 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
           >
             <BellDot size={15} strokeWidth={1.75} color={tokens.ink2} />
             {waitingCount > 0 ? <View style={[styles.footerBadge, { backgroundColor: tokens.danger, borderColor: tokens.bg1 }]} /> : null}
+          </Pressable>
+          <Pressable
+            onPress={() => router.push("/notices")}
+            accessibilityRole="button"
+            accessibilityLabel={noticesUnseen > 0 ? `Notices, ${noticesUnseen} new` : "Notices"}
+            style={styles.footerIconButton}
+          >
+            <Bell size={15} strokeWidth={1.75} color={tokens.ink2} />
+            {noticesUnseen > 0 ? <View style={[styles.footerBadge, { backgroundColor: tokens.accent, borderColor: tokens.bg1 }]} /> : null}
           </Pressable>
           <Pressable
             onPress={() => router.push("/history")}

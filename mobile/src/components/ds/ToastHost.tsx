@@ -26,6 +26,11 @@ function isBackgrounded(): boolean {
   return backgrounded;
 }
 
+/** Shared with the notices watcher so both agree on when to escalate to an OS notification. */
+export function isAppBackgrounded(): boolean {
+  return backgrounded;
+}
+
 let focusTrackingStarted = false;
 
 function startFocusTracking() {
