@@ -1,9 +1,11 @@
 pub(crate) mod assay;
 pub(crate) mod blame;
 pub(crate) mod browser;
+pub(crate) mod cc_transcript;
 pub(crate) mod dispatch;
 pub(crate) mod git;
 pub(crate) mod import;
+pub(crate) mod import_claude_session;
 pub(crate) mod lattice;
 pub(crate) mod local;
 pub(crate) mod marketplace;

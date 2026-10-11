@@ -41,6 +41,7 @@ mod provenance_store;
 mod quota_store;
 mod schema;
 mod session_catalog_store;
+mod session_import_store;
 mod session_route_store;
 mod session_usage_store;
 mod spending_store;
@@ -63,6 +64,7 @@ pub use handoff_types::{
 pub use harness_store::{AppliedHarnessEdit, HarnessEdit, HarnessEntry, HarnessRefinement};
 pub use maintenance::MaintenanceReport;
 pub use memory::Memory;
+pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`

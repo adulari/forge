@@ -6,6 +6,15 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`forge import claude-session <id|path>` moves a Claude Code session into Forge.** The active
+  chain of the transcript (streamed, so multi-hundred-MB files import in seconds) becomes a new
+  session with its tool calls and results; Claude Code's latest compact summary plus what followed
+  it is the model context, older turns stay in history and replay (`/uncompact` brings them back),
+  and the session is pinned to the transcript's model on the claude-cli bridge. Prints the new
+  session id on stdout; continue with `forge chat --resume <id>`. A resumed session now also
+  restores its stored model pin unless `--model` is given.
+
 ### Fixed
 - **Compaction ignored `mesh.disabled`.** The summarizer chain skipped the disabled-model and
   missing-key check the main loop applies, so a disabled provider still received the session's
