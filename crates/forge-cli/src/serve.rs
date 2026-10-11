@@ -2791,6 +2791,11 @@ enum SubscribeReq {
         device_token: String,
         #[serde(default)]
         environment: String,
+        /// The device's end-to-end notification key (P-256 public key + RFC 8291 auth secret).
+        /// Optional: an app build without the Notification Service Extension omits it and keeps
+        /// the generic lock-screen alert.
+        #[serde(default)]
+        keys: SubscribeKeys,
     },
     Webpush {
         endpoint: String,
@@ -2817,8 +2822,16 @@ fn validate_subscription(endpoint: &str, keys: &SubscribeKeys) -> Result<(), &'s
     if crate::push::endpoint_origin(endpoint).is_none() {
         return Err("endpoint is not an http(s) URL");
     }
+    validate_keys(keys)
+}
+
+/// The RFC 8291 key pair shape shared by Web Push subscriptions and an iOS device's end-to-end
+/// notification key. The point is checked to be on the curve, so an unusable key is refused at
+/// registration instead of silently downgrading every later alert to the generic text.
+fn validate_keys(keys: &SubscribeKeys) -> Result<(), &'static str> {
     match crate::push::b64url_decode(&keys.p256dh) {
-        Some(k) if k.len() == 65 && k[0] == 0x04 => {}
+        Some(k)
+            if k.len() == 65 && k[0] == 0x04 && p256::PublicKey::from_sec1_bytes(&k).is_ok() => {}
         _ => return Err("keys.p256dh must be a base64url 65-byte uncompressed P-256 point"),
     }
     match crate::push::b64url_decode(&keys.auth) {
@@ -2886,6 +2899,7 @@ async fn push_subscribe(
         SubscribeReq::Apns {
             device_token,
             environment,
+            keys,
         } => {
             if state.apns.is_none() {
                 return err_response(
@@ -2900,9 +2914,19 @@ async fn push_subscribe(
                 );
             }
             let environment = normalize_apns_environment(&environment).to_string();
+            let e2e = if keys.p256dh.is_empty() && keys.auth.is_empty() {
+                None
+            } else if let Err(msg) = validate_keys(&keys) {
+                return err_response(axum::http::StatusCode::BAD_REQUEST, msg);
+            } else {
+                Some(forge_store::ApnsE2eKey {
+                    p256dh: keys.p256dh,
+                    auth: keys.auth,
+                })
+            };
             let store = state.store.clone();
             let stored = tokio::task::spawn_blocking(move || {
-                store.upsert_apns_subscription(&device_token, &environment)
+                store.upsert_apns_subscription_with_key(&device_token, &environment, e2e.as_ref())
             })
             .await;
             match stored {
@@ -5866,6 +5890,48 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         assert!(store.list_apns_subscriptions().unwrap().is_empty());
+
+        // An end-to-end notification key rides along; a malformed one is refused, not downgraded.
+        let secret = p256::SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let point =
+            p256::elliptic_curve::sec1::ToSec1Point::to_sec1_point(&secret.public_key(), false);
+        let p256dh = crate::push::b64url(point.as_bytes());
+        let auth = crate::push::b64url(&[3u8; 16]);
+        for bad in [
+            serde_json::json!({ "p256dh": "AAAA", "auth": auth }),
+            serde_json::json!({ "p256dh": crate::push::b64url(&[4u8; 65]), "auth": auth }),
+            serde_json::json!({ "p256dh": p256dh, "auth": "AAAA" }),
+        ] {
+            let resp = router
+                .clone()
+                .oneshot(post_json(
+                    "/api/push/subscribe",
+                    serde_json::json!({ "device_token": device_token, "keys": bad }).to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        }
+        assert!(store.list_apns_subscriptions().unwrap().is_empty());
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/push/subscribe",
+                serde_json::json!({
+                    "device_token": device_token,
+                    "environment": "production",
+                    "keys": { "p256dh": p256dh, "auth": auth }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let stored = store.list_apns_subscriptions().unwrap();
+        assert_eq!(
+            stored[0].e2e,
+            Some(forge_store::ApnsE2eKey { p256dh, auth })
+        );
 
         // Live Activity token: subscribe stores it keyed by session, unsubscribe removes it.
         let activity_token = "b1".repeat(32);

@@ -150,3 +150,8 @@ export async function disablePush(baseUrl: string): Promise<PushSubscriptionStat
 
   return "unsubscribed";
 }
+
+// Sealed-alert key refresh exists only on iOS (push.ios.ts); same signature everywhere.
+export async function refreshPushRegistration(_activeBaseUrl: string | null): Promise<void> {
+  // nothing to refresh
+}

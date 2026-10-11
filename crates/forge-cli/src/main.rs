@@ -54,6 +54,7 @@ mod alloc_policy;
 mod anywhere;
 mod api_serve;
 mod apns;
+mod apns_e2e;
 mod assay_output;
 mod attach;
 mod balance;

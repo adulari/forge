@@ -63,13 +63,33 @@ impl Store {
         device_token: &str,
         environment: &str,
     ) -> Result<String> {
+        self.upsert_apns_subscription_with_key(device_token, environment, None)
+    }
+
+    /// [`Self::upsert_apns_subscription`] plus the device's end-to-end notification key. A
+    /// re-registration replaces the key (or clears it when `None`: an app build that no longer
+    /// holds the private half must not keep receiving ciphertext it cannot open).
+    pub fn upsert_apns_subscription_with_key(
+        &self,
+        device_token: &str,
+        environment: &str,
+        e2e: Option<&ApnsE2eKey>,
+    ) -> Result<String> {
         let conn = self.lock()?;
         let id = forge_types::new_id();
         let row_id = conn.query_row(
-            "INSERT INTO apns_subscription (id, device_token, environment) VALUES (?1, ?2, ?3)
-             ON CONFLICT(device_token) DO UPDATE SET environment = excluded.environment
+            "INSERT INTO apns_subscription (id, device_token, environment, e2e_p256dh, e2e_auth)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(device_token) DO UPDATE SET environment = excluded.environment,
+                 e2e_p256dh = excluded.e2e_p256dh, e2e_auth = excluded.e2e_auth
              RETURNING id",
-            (&id, device_token, environment),
+            (
+                &id,
+                device_token,
+                environment,
+                e2e.map(|k| k.p256dh.as_str()),
+                e2e.map(|k| k.auth.as_str()),
+            ),
             |row| row.get::<_, String>(0),
         )?;
         Ok(row_id)
@@ -89,7 +109,8 @@ impl Store {
     pub fn list_apns_subscriptions(&self) -> Result<Vec<ApnsSubscription>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, device_token, environment FROM apns_subscription ORDER BY created_at, id",
+            "SELECT id, device_token, environment, e2e_p256dh, e2e_auth FROM apns_subscription
+             ORDER BY created_at, id",
         )?;
         let rows = stmt
             .query_map([], |row| {
@@ -97,6 +118,13 @@ impl Store {
                     id: row.get(0)?,
                     device_token: row.get(1)?,
                     environment: row.get(2)?,
+                    e2e: match (
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ) {
+                        (Some(p256dh), Some(auth)) => Some(ApnsE2eKey { p256dh, auth }),
+                        _ => None,
+                    },
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

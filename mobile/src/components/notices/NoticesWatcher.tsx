@@ -20,6 +20,7 @@ import {
   syncNotices,
 } from "../../lib/notices/store";
 import { useAuth } from "../../lib/auth";
+import { refreshPushRegistration } from "../../lib/push";
 import { isTauri, isWeb } from "../../lib/platform";
 import { isAppBackgrounded } from "../ds/ToastHost";
 import { useOpenNotice } from "./useOpenNotice";
@@ -89,6 +90,12 @@ export function NoticesWatcher() {
     for (const id of Object.keys(getNoticesSnapshot().hosts)) if (!known.has(id)) forgetNoticeHost(id);
     void syncServers();
   }, [isLoading, serverKey, syncServers]);
+
+  const activeBaseUrl = servers.find((s) => s.id === activeServerId)?.baseUrl ?? null;
+  useEffect(() => {
+    if (isLoading) return;
+    void refreshPushRegistration(activeBaseUrl);
+  }, [isLoading, activeBaseUrl]);
 
   useEffect(() => {
     if (isLoading) return;

@@ -408,9 +408,15 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/lib/notices/localNotify.android.ts",
+    "platform": "android",
+    "reason": "Android has no remote push, so a fetched notice is shown as a local notification through expo-notifications (channel plus runtime permission); web/Tauri use notify()",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/lib/notices/localNotify.ios.ts",
     "platform": "ios",
-    "reason": "local notification with the notice text and generic-push dismissal use expo-notifications on iOS only; web/Tauri use notify(), Android has no local-notification path",
+    "reason": "local notification with the notice text and generic-push dismissal use expo-notifications on iOS; web/Tauri use notify(), Android has its own file",
     "category": "capability"
   },
   {

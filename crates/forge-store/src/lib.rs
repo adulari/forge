@@ -34,7 +34,7 @@ use migrations::{
 };
 #[cfg(test)]
 use migrations::{
-    migration_0001, migration_0020, ANYWHERE_PRERELEASE_MAX_VERSION,
+    migration_0001, migration_0020, migration_0039, ANYWHERE_PRERELEASE_MAX_VERSION,
     ANYWHERE_PRERELEASE_MIN_VERSION, MIGRATIONS,
 };
 mod provenance_store;
@@ -69,7 +69,7 @@ pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 38;
+const SCHEMA_VERSION: i64 = 39;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -535,6 +535,17 @@ pub struct ApnsSubscription {
     pub id: String,
     pub device_token: String,
     pub environment: String,
+    /// The device's end-to-end notification key (see migration #39); `None` for a device that
+    /// never registered one.
+    pub e2e: Option<ApnsE2eKey>,
+}
+
+/// An iOS device's notification-sealing key: a P-256 public key plus the RFC 8291 auth secret,
+/// both unpadded base64url, exactly as the Web Push `p256dh`/`auth` pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApnsE2eKey {
+    pub p256dh: String,
+    pub auth: String,
 }
 
 /// The Live Activity remote-update push token for one session's ActivityKit activity (see
@@ -6561,6 +6572,55 @@ mod tests {
             [],
         );
         assert!(duplicate.is_err());
+    }
+
+    #[test]
+    fn apns_subscription_stores_and_replaces_the_e2e_key() {
+        let store = Store::open_in_memory().unwrap();
+        let key = ApnsE2eKey {
+            p256dh: "pub".into(),
+            auth: "auth".into(),
+        };
+        store
+            .upsert_apns_subscription_with_key("tokenK", "production", Some(&key))
+            .unwrap();
+        assert_eq!(store.list_apns_subscriptions().unwrap()[0].e2e, Some(key));
+
+        let rotated = ApnsE2eKey {
+            p256dh: "pub2".into(),
+            auth: "auth2".into(),
+        };
+        store
+            .upsert_apns_subscription_with_key("tokenK", "production", Some(&rotated))
+            .unwrap();
+        let subs = store.list_apns_subscriptions().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].e2e, Some(rotated));
+
+        store
+            .upsert_apns_subscription("tokenK", "production")
+            .unwrap();
+        assert_eq!(store.list_apns_subscriptions().unwrap()[0].e2e, None);
+    }
+
+    #[test]
+    fn migration_0039_is_idempotent_on_an_existing_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE apns_subscription (
+                id TEXT PRIMARY KEY, device_token TEXT NOT NULL, environment TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT 0
+             );",
+        )
+        .unwrap();
+        migration_0039(&conn).unwrap();
+        migration_0039(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO apns_subscription (id, device_token, environment, e2e_p256dh, e2e_auth)
+             VALUES ('a', 't', 'sandbox', 'p', 'k')",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

@@ -7,6 +7,16 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **The iPhone lock screen shows a `push_notification`'s real title and message, even with the app
+  killed, without the relay or Apple being able to read it.** The app now ships a Notification
+  Service Extension (`dev.adulari.forge.notification-service`). The phone generates a P-256 key kept
+  in a keychain group shared with the extension and registers only the public half with its daemon
+  (store migration 39). The daemon seals the notice to that key (RFC 8291) and sends the ciphertext as
+  an opaque `enc` field beside the usual generic alert; the hosted relay validates its size and
+  shape, forwards it, and cannot open it. Any failure, a device without a key, or the app lock being
+  on leaves the generic alert. Needs a new native build (changes the OTA fingerprint); existing
+  installs register their key on next open. On Android a fetched notice now raises a local
+  notification (there is no remote push there). ADR-0012 gains an addendum.
 - **`push_notification` tool: the agent can notify your phone and desktop.** Available on the direct
   path and the claude-cli/codex bridge (deferred behind `tool_search` on a lean bridge). Fans out to
   iOS native push, Forge Anywhere, web push and a desktop notification, reports which delivered,

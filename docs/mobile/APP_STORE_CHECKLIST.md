@@ -65,7 +65,8 @@ Keep App Store Connect's App Privacy answers synchronized with the implementatio
   APNs relay. During the CLI upgrade window an older daemon can still transmit rich alert text, but
   the public relay does not log it and replaces it before forwarding to APNs.
 - The default hosted APNs relay receives an opaque APNs device or Live Activity token plus either
-  a static generic alert or the small Live Activity status object
+  a static generic alert (plus, for a device that registered a key, an opaque blob sealed to that
+  device that the relay cannot read) or the small Live Activity status object
   (`busy`/`waiting`/`cost_usd`/`context_tokens`/`context_limit`). It does not receive session titles,
   questions, permission prompts, response/error snippets, local session IDs, daemon tokens,
   transcripts, source files, paths, commands, or API credentials. An explicitly configured private

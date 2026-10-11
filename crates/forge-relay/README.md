@@ -10,7 +10,10 @@ centrally. Updated stock clients send only a static generic alert; the public de
 `FORGE_RELAY_GENERIC_ALERTS=true`, so every alert is replaced again at the server boundary before
 APNs. Live Activity payloads contain coarse activity/cost/context status. During the upgrade window,
 an older daemon can still transmit rich alert text to the relay process, but the public server does
-not log it and never forwards it to Apple. Private relays intentionally default to rich alerts. The
+not log it and never forwards it to Apple. An alert may also carry `enc`, an opaque base64url blob
+(at most 3072 characters) sealed end-to-end to the device by the daemon; the relay validates its
+shape, keeps it through the generic rewrite and cannot read it (ADR-0012, "End-to-end sealed
+alerts"). Private relays intentionally default to rich alerts. The
 daemon auth token, full transcript, and source files are not sent to the relay.
 
 This is a standalone deployable service, **not** part of `forge-cli`'s single-binary delivery
