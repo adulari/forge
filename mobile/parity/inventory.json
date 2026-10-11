@@ -216,6 +216,18 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/notices/NoticeBanner.tsx",
+    "platform": "tauri/web/native",
+    "reason": "banner clears the 36px Tauri window chrome; same content and actions on every platform",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/components/notices/NoticesWatcher.tsx",
+    "platform": "web/tauri/native",
+    "reason": "foreground detection and OS escalation differ: web/Tauri use window focus and notify(), native uses AppState; the sync triggers and notice rules are shared",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/components/overlay/CommandPalette.tsx",
     "platform": "web/native",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
@@ -393,6 +405,12 @@
     "file": "mobile/src/lib/incomingShare.tsx",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/notices/localNotify.ios.ts",
+    "platform": "ios",
+    "reason": "local notification with the notice text and generic-push dismissal use expo-notifications on iOS only; web/Tauri use notify(), Android has no local-notification path",
     "category": "capability"
   },
   {
