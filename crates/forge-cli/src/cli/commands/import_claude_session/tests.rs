@@ -54,7 +54,7 @@ fn the_imported_model_context_is_the_summary_plus_what_followed_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = fixture(dir.path());
     let store = Store::open_in_memory().unwrap();
-    let report = import_transcript(&store, &path, &args(&path)).unwrap();
+    let report = import_transcript(&store, &path, &args(&path), "Default").unwrap();
     let id = &report.session_id;
 
     let live = store.load_messages(id).unwrap();
@@ -93,7 +93,7 @@ fn uncompact_brings_the_whole_history_back_into_context() {
     let dir = tempfile::tempdir().unwrap();
     let path = fixture(dir.path());
     let store = Store::open_in_memory().unwrap();
-    let id = import_transcript(&store, &path, &args(&path))
+    let id = import_transcript(&store, &path, &args(&path), "Default")
         .unwrap()
         .session_id;
     assert!(store.uncompact_session_store(&id).unwrap());
@@ -111,7 +111,9 @@ fn flags_override_transcript_defaults() {
     a.model = Some("claude-cli::haiku".into());
     a.title = Some("  spaced\n title ".into());
     a.cwd = Some(PathBuf::from("/elsewhere"));
-    let id = import_transcript(&store, &path, &a).unwrap().session_id;
+    let id = import_transcript(&store, &path, &a, "Default")
+        .unwrap()
+        .session_id;
     assert_eq!(
         store.session_pinned_model(&id).unwrap().as_deref(),
         Some("claude-cli::haiku")
@@ -147,7 +149,7 @@ fn an_empty_transcript_is_refused_and_leaves_no_session() {
     let path = dir.path().join("empty.jsonl");
     std::fs::write(&path, "{\"type\":\"mode\"}\nnot json\n").unwrap();
     let store = Store::open_in_memory().unwrap();
-    assert!(import_transcript(&store, &path, &args(&path)).is_err());
+    assert!(import_transcript(&store, &path, &args(&path), "Default").is_err());
     assert!(store.list_sessions().unwrap().is_empty());
 }
 
@@ -178,4 +180,15 @@ fn the_subcommand_parses() {
             source: ImportSource::ClaudeSession { quiet: true, .. }
         })
     ));
+}
+
+#[test]
+fn the_imported_session_keeps_the_mode_it_was_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture(dir.path());
+    let store = Store::open_in_memory().unwrap();
+    let id = import_transcript(&store, &path, &args(&path), "Bypass")
+        .unwrap()
+        .session_id;
+    assert_eq!(store.session_mode(&id).unwrap(), "Bypass");
 }

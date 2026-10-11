@@ -27,7 +27,12 @@ pub(crate) fn import_claude_session_cmd(args: ClaudeSessionArgs) -> Result<()> {
     let store = open_store()?;
     let started = std::time::Instant::now();
     let path = locate_transcript(&args.session)?;
-    let report = import_transcript(&store, &path, &args)?;
+    // Store the mode in the same `{:?}` form `Session::start` uses: resume restores it verbatim, so
+    // Claude Code's own "default" would come back as Ask regardless of the user's configured mode.
+    let mode = forge_config::load()
+        .map(|c| c.permission_mode)
+        .unwrap_or(forge_types::PermissionMode::Default);
+    let report = import_transcript(&store, &path, &args, &format!("{mode:?}"))?;
     if !args.quiet {
         eprintln!(
             "imported {} ({} lines, {} compactions) in {:.1}s\n  {} messages stored, {} in the model context{}\n  model {}\n  open it with: forge chat --resume {}",
@@ -120,6 +125,7 @@ pub(crate) fn import_transcript(
     store: &Store,
     path: &Path,
     args: &ClaudeSessionArgs,
+    mode: &str,
 ) -> Result<ImportReport> {
     let transcript = Transcript::scan(path)?;
     if transcript.is_empty() {
@@ -155,7 +161,7 @@ pub(crate) fn import_transcript(
     let stored = store.import_session_with(
         &ImportedSessionMeta {
             cwd: &cwd,
-            mode: "default",
+            mode,
             title: title.as_deref(),
             pinned_model: model.as_deref(),
         },

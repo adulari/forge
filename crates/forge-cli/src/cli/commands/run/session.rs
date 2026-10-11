@@ -422,8 +422,14 @@ pub(crate) async fn build_session_with_self_mcp(
     let mut session = match resume {
         Some(ref prefix) => {
             let full = resolve_session(&store, prefix)?;
-            Session::resume(store, provider, router, tools, presenter, config, &full)
-                .with_context(|| format!("resuming session {full}"))?
+            let mut session =
+                Session::resume(store, provider, router, tools, presenter, config, &full)
+                    .with_context(|| format!("resuming session {full}"))?;
+            // Resume restores the session's stored mode; an explicit `--mode` must still win.
+            if let Some(m) = mode {
+                session.set_mode(m.into());
+            }
+            session
         }
         None => Session::start(
             store,
