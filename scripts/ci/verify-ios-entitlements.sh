@@ -27,11 +27,19 @@ nse_info=targets/notification-service/Info.plist
 push_key_group='$(AppIdentifierPrefix)dev.adulari.forge.pushkeys'
 own_key_group='$(AppIdentifierPrefix)dev.adulari.forge'
 
+plistbuddy_items() {
+  awk 'NR == 1 && $0 == "Array {" { array = 1; next }
+       array && $0 == "}" { next }
+       { sub(/^[ \t]+/, ""); print }'
+}
+
 read_key() {
   local file=$1
   local key=$2
   if [[ -x /usr/libexec/PlistBuddy ]]; then
-    /usr/libexec/PlistBuddy -c "Print :$key" "$file" 2>/dev/null || true
+    # PlistBuddy prints arrays as "Array {", one indented item per line, "}"; flatten that to one
+    # item per line so callers see the same shape as the node fallback below.
+    /usr/libexec/PlistBuddy -c "Print :$key" "$file" 2>/dev/null | plistbuddy_items || true
     return
   fi
   # Linux prebuild verification has no PlistBuddy. `plist` is an Expo transitive dependency
