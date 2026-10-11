@@ -136,3 +136,50 @@ keys. Public deployments must expose `"generic_alerts":true` from `/health`. The
 deployment templates and operator runbook live under
 [`crates/forge-relay/deploy/`](../../../crates/forge-relay/deploy/) and
 [`crates/forge-relay/README.md`](../../../crates/forge-relay/README.md).
+
+## Addendum: end-to-end sealed alerts (2026-10-12)
+
+The stock public relay still sees a static generic alert, but a generic lock screen is a poor
+product for the `push_notification` tool. This addendum lets the real title and message reach the
+lock screen of a device that opted in, **without the relay or Apple being able to read them**.
+
+**What changes on the wire.** An alert payload to the public relay may now also carry one extra
+field, `enc`: an opaque unpadded base64url blob, at most 3072 characters (about 2.2 KB for the
+longest notice the daemon seals). It is the notice (`title`, `message`, `session_id`, `seq`,
+`kind`, at most 1500 bytes of JSON) sealed with RFC 8291 `aes128gcm`, the construction Web Push
+already uses, to a P-256 key that the phone generated. The relay validates only that the field is a
+bounded base64url string, keeps it through its generic rewrite, and forwards it. It cannot open it:
+the private key never leaves the phone. The visible alert stays "Forge" / "Open Forge to view an
+update." with the fixed routing placeholders, so a device that cannot or does not open the blob
+behaves exactly as before.
+
+**Key custody.** The app generates the key pair and a 16-byte auth secret on first use and stores
+them in a keychain access group (`<team>.dev.adulari.forge.pushkeys`, accessible after first unlock,
+this device only) that only the app and its Notification Service Extension
+(`dev.adulari.forge.notification-service`) can read. It registers the public key and auth secret with
+its own daemon next to the APNs token, over the same authenticated, optionally end-to-end encrypted
+channel. The daemon stores them beside the token (store migration 39). Nothing is registered with, or
+visible to, the relay or Apple.
+
+**Delivery.** Alerts carry `mutable-content: 1`, so iOS runs the extension before drawing the alert.
+It decrypts and swaps in the title and body. Any failure (no key, wrong key, truncated or tampered
+blob, the keychain group missing in an unsigned build, running out of time) leaves the generic alert
+untouched, so the worst case is the behaviour ADR-0012 already described. With the in-app **app
+lock** on, the app registers no key, so the lock screen stays generic as before.
+
+**What the privacy statement becomes.** The relay and Apple still never receive a session title,
+prompt, response, command, path or any notice text **in a form they can read**. They now also carry a
+ciphertext, bounded in size, from which they can learn its length class and nothing else. Because
+the key is per device and chosen by the phone, a relay operator cannot add themselves as a
+recipient. The statements elsewhere that "no text crosses the relay" are read as "no readable text".
+Forge Anywhere's own hosted push (`attention_required`) is unchanged and stays a closed-vocabulary
+hint with no ciphertext, because its backend is not this relay.
+
+**Rejected alternatives.** A `remote-notification` background push that wakes the app to fetch the
+text is throttled by iOS and does nothing when the user has force-quit the app. Sending the text in
+the clear to the public relay was rejected for the reasons in the Decision above. Storing the key in
+the shared App Group's `UserDefaults` was rejected in favour of the keychain: it is backed up and
+readable as a plain file.
+
+**Operational note.** The extension is a new native target, so shipping it needs an Xcode Cloud
+build and changes the native fingerprint (the OTA runtime version must be refreshed afterwards).

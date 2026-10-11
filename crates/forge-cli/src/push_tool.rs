@@ -6,8 +6,9 @@
 //! back to a desktop notification when no daemon answers.
 //!
 //! Privacy follows ADR-0012 and docs/features/forge-anywhere.md: hosted services never see the
-//! message. The Anywhere leg is the closed-vocabulary `attention_required` hint, APNs through the
-//! public relay is rewritten to a generic alert, and the real text is kept on the host in the
+//! message in readable form. The Anywhere leg is the closed-vocabulary `attention_required` hint, APNs through the
+//! public relay is rewritten to a generic alert (carrying, per device that registered a key, the text
+//! sealed end-to-end so only its notification extension can open it), and the real text is kept on the host in the
 //! [`notices`] log, which the app reads over the end-to-end encrypted bridge. Web push is
 //! self-hosted (the subscription endpoint is the user's own browser vendor, payload encrypted per
 //! RFC 8291), so it carries the text.
@@ -46,10 +47,10 @@ pub(crate) struct Channels {
 
 impl Channels {
     pub(crate) async fn deliver(&self, request: &PushRequest) -> Vec<ChannelReport> {
-        notices::record(request);
+        let notice_seq = notices::record(request);
         let (web, apns, anywhere, desktop) = tokio::join!(
             self.web_push(request),
-            self.native_push(request),
+            self.native_push(request, notice_seq),
             self.anywhere(),
             self.desktop(request),
         );
@@ -92,25 +93,32 @@ impl Channels {
         })
     }
 
-    async fn native_push(&self, request: &PushRequest) -> Option<ChannelReport> {
+    async fn native_push(&self, request: &PushRequest, notice_seq: u64) -> Option<ChannelReport> {
         let notifier = self.apns.as_ref()?;
         let store = self.store.clone();
-        let devices = tokio::task::spawn_blocking(move || {
-            store
-                .list_apns_subscriptions()
-                .map(|s| s.len())
-                .unwrap_or(0)
+        let (devices, sealed) = tokio::task::spawn_blocking(move || {
+            let subs = store.list_apns_subscriptions().unwrap_or_default();
+            (subs.len(), subs.iter().filter(|s| s.e2e.is_some()).count())
         })
         .await
-        .unwrap_or(0);
+        .unwrap_or((0, 0));
         Some(if devices == 0 {
             ChannelReport::failed("phone-apns", "no iOS device has registered")
         } else {
-            notifier.dispatch_alert(Self::message(request, WEB_TTL));
-            let shown = if notifier.alerts_are_generic() {
-                "lock screen shows a generic alert; real text in the app"
+            let mut message = Self::message(request, WEB_TTL);
+            message.seq = notice_seq;
+            notifier.dispatch_alert(message);
+            let shown = if !notifier.alerts_are_generic() {
+                "queued".to_string()
+            } else if sealed == devices {
+                "lock screen shows the real text, sealed end-to-end to the device".to_string()
+            } else if sealed > 0 {
+                format!(
+                    "real text sealed end-to-end for {sealed} device(s); the rest show a generic alert (update the app)"
+                )
             } else {
-                "queued"
+                "lock screen shows a generic alert; real text in the app (update the app for sealed text)"
+                    .to_string()
             };
             ChannelReport::ok("phone-apns", &format!("{shown} ({devices} device(s))"))
         })

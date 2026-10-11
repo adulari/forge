@@ -208,7 +208,9 @@ Anywhere push means only that a host or job needs attention. Hosted notification
 prompt, response, command, repository, filename, session title/ID, diff, error text, or daemon
 credential. Opening the app authenticates and retrieves encrypted details. Push tokens are secrets,
 are never synced as history, and can be revoked per device. The existing APNs-only `forge-relay`
-remains isolated; it is not the Anywhere backend.
+remains isolated; it is not the Anywhere backend. That relay's alerts may additionally carry an
+opaque blob sealed to a key only the user's phone holds (ADR-0012, "End-to-end sealed alerts"):
+hosted services can carry it but cannot read it, and Anywhere's own push never carries one.
 
 ## Billing and retention lifecycle
 

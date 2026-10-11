@@ -219,8 +219,8 @@ pub(crate) fn alert_payload(msg: &crate::push::PushMessage) -> serde_json::Value
 /// Static alert sent through Forge's public relay. The placeholder routing fields retain wire
 /// compatibility with already-deployed relay validation, but disclose nothing about the session
 /// or event that triggered the push.
-fn generic_relay_alert_payload() -> serde_json::Value {
-    serde_json::json!({
+fn generic_relay_alert_payload(sealed: Option<&serde_json::Value>) -> serde_json::Value {
+    let mut payload = serde_json::json!({
         "aps": {
             "alert": {
                 "title": "Forge",
@@ -232,7 +232,13 @@ fn generic_relay_alert_payload() -> serde_json::Value {
         "session": "forge-notification",
         "kind": "done",
         "seq": 0,
-    })
+    });
+    // The opaque sealed blob is the one thing allowed through the generic rewrite: only the
+    // device's own Notification Service Extension can open it.
+    if let Some(sealed) = sealed {
+        payload[crate::apns_e2e::ENC_KEY] = sealed.clone();
+    }
+    payload
 }
 
 /// Content-state pushed to an active Live Activity — kept intentionally small and stable;
@@ -411,6 +417,7 @@ impl ApnsNotifier {
         .await
         .unwrap_or_default();
         let payload = alert_payload(&msg);
+        let sealing = self.alerts_are_generic();
         for sub in subs {
             if !is_valid_token(&sub.device_token) {
                 let store = self.store.clone();
@@ -419,6 +426,18 @@ impl ApnsNotifier {
                     .await;
                 tracing::warn!("pruned a malformed stored APNs device token");
                 continue;
+            }
+            let mut payload = payload.clone();
+            if sealing {
+                crate::apns_e2e::attach(
+                    &mut payload,
+                    sub.e2e.as_ref(),
+                    &msg.title,
+                    &msg.body,
+                    &msg.session,
+                    msg.seq,
+                    msg.kind,
+                );
             }
             match self
                 .send_one(
@@ -531,7 +550,7 @@ impl ApnsNotifier {
     }
 
     /// True when the backend rewrites every alert to a static generic one (the public relay), so
-    /// callers can tell the user the lock screen will not show the real text.
+    /// callers can tell the user the lock screen shows the generic text unless the device sealed a key.
     pub(crate) fn alerts_are_generic(&self) -> bool {
         matches!(
             self.backend,
@@ -554,7 +573,9 @@ impl ApnsNotifier {
             ApnsBackend::Relay {
                 alert_policy: RelayAlertPolicy::Generic,
                 ..
-            } if push_type == "alert" => Some(generic_relay_alert_payload()),
+            } if push_type == "alert" => Some(generic_relay_alert_payload(
+                payload.get(crate::apns_e2e::ENC_KEY),
+            )),
             _ => None,
         };
         let outbound_payload = generic_payload.as_ref().unwrap_or(payload);
@@ -997,7 +1018,65 @@ mod tests {
             .split_once("\r\n\r\n")
             .expect("captured HTTP request has a body");
         let body: serde_json::Value = serde_json::from_str(body).expect("valid JSON request body");
-        assert_eq!(body, generic_relay_alert_payload());
+        assert_eq!(body, generic_relay_alert_payload(None));
+    }
+
+    /// A device that registered a key gets the generic alert plus an opaque sealed blob; the
+    /// plaintext never appears on the wire, and the blob opens with the device key.
+    #[tokio::test]
+    async fn public_relay_carries_a_sealed_blob_for_a_keyed_device() {
+        let (base_url, mut rx) = mock_http_server(200).await;
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let secret = p256::SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let public =
+            p256::elliptic_curve::sec1::ToSec1Point::to_sec1_point(&secret.public_key(), false);
+        let key = forge_store::ApnsE2eKey {
+            p256dh: b64url(public.as_bytes()),
+            auth: b64url(&[3u8; 16]),
+        };
+        store
+            .upsert_apns_subscription_with_key(&"c".repeat(64), "production", Some(&key))
+            .unwrap();
+        let notifier = ApnsNotifier {
+            backend: ApnsBackend::Relay {
+                base_url,
+                relay_token: None,
+                alert_policy: RelayAlertPolicy::Generic,
+            },
+            store,
+            client: reqwest::Client::new(),
+        };
+        notifier
+            .send_alert_all(crate::push::PushMessage {
+                kind: "done",
+                session: "SESSION-ID-PRIVATE".into(),
+                title: "TITLE-PRIVATE".into(),
+                body: "BODY-PRIVATE".into(),
+                seq: 5,
+                ttl: 3600,
+            })
+            .await;
+        let captured = rx.try_recv().expect("mock server captured a request");
+        for marker in ["SESSION-ID-PRIVATE", "TITLE-PRIVATE", "BODY-PRIVATE"] {
+            assert!(!captured.contains(marker), "plaintext {marker} on the wire");
+        }
+        let (_, body) = captured.split_once("\r\n\r\n").unwrap();
+        let mut body: serde_json::Value = serde_json::from_str(body).unwrap();
+        let enc = body
+            .as_object_mut()
+            .unwrap()
+            .remove("enc")
+            .expect("sealed blob rides along");
+        assert_eq!(body, generic_relay_alert_payload(None));
+        let bytes = crate::push::b64url_decode(enc.as_str().unwrap()).unwrap();
+        let opened: serde_json::Value = serde_json::from_slice(
+            &crate::push::decrypt_payload(&secret, &[3u8; 16], &bytes).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(opened["title"], "TITLE-PRIVATE");
+        assert_eq!(opened["message"], "BODY-PRIVATE");
+        assert_eq!(opened["session_id"], "SESSION-ID-PRIVATE");
+        assert_eq!(opened["seq"], 5);
     }
 
     #[tokio::test]

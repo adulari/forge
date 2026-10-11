@@ -22,6 +22,10 @@ share_dir=ios/expo-sharing-extension
 share_entitlements=$share_dir/expo-sharing-extension.entitlements
 share_info=$share_dir/Info.plist
 app_group=group.dev.adulari.forge
+nse_entitlements=ios/.targets/ForgeNotificationService/generated.entitlements
+nse_info=targets/notification-service/Info.plist
+push_key_group='$(AppIdentifierPrefix)dev.adulari.forge.pushkeys'
+own_key_group='$(AppIdentifierPrefix)dev.adulari.forge'
 
 read_key() {
   local file=$1
@@ -43,7 +47,7 @@ else if (value !== undefined && value !== null) process.stdout.write(`${String(v
 NODE
 }
 
-for required in "$entitlements" "$app_info" "$project" "$share_entitlements" "$share_info"; do
+for required in "$entitlements" "$app_info" "$project" "$share_entitlements" "$share_info" "$nse_entitlements" "$nse_info"; do
   if [[ ! -f $required ]]; then
     echo "verify-ios-entitlements: $required is missing — did prebuild run, and from mobile/?" >&2
     exit 1
@@ -99,4 +103,28 @@ if ! grep -Fq 'INFOPLIST_KEY_CFBundleDisplayName = Forge;' "$project"; then
   exit 1
 fi
 
-echo "verify-ios-entitlements: production APNs and text/URL share-extension handoff are configured."
+# Sealed push alerts: the app writes the decryption key into a keychain group that the
+# Notification Service Extension reads. The app's OWN group must stay first: declaring any group
+# replaces the implicit one, and dropping it would orphan every secret expo-secure-store already
+# holds (Anywhere keys, pairing tokens) on the next update.
+app_key_groups=$(read_key "$entitlements" 'keychain-access-groups')
+if [[ $(printf '%s\n' "$app_key_groups" | sed -n 1p) != "$own_key_group" || $app_key_groups != *"$push_key_group"* ]]; then
+  echo "verify-ios-entitlements: keychain-access-groups in $entitlements must list '$own_key_group' first and '$push_key_group'; got: ${app_key_groups:-<absent>}." >&2
+  exit 1
+fi
+nse_key_groups=$(read_key "$nse_entitlements" 'keychain-access-groups')
+if [[ $nse_key_groups != *"$push_key_group"* ]]; then
+  echo "verify-ios-entitlements: notification extension lacks keychain group '$push_key_group' in $nse_entitlements." >&2
+  exit 1
+fi
+if ! grep -Fq 'PRODUCT_BUNDLE_IDENTIFIER = "dev.adulari.forge.notification-service";' "$project"; then
+  echo "verify-ios-entitlements: notification-service bundle id dev.adulari.forge.notification-service is missing from $project." >&2
+  exit 1
+fi
+nse_point=$(read_key "$nse_info" 'NSExtension:NSExtensionPointIdentifier')
+if [[ $nse_point != com.apple.usernotifications.service ]]; then
+  echo "verify-ios-entitlements: notification extension point is '${nse_point:-<absent>}', expected com.apple.usernotifications.service." >&2
+  exit 1
+fi
+
+echo "verify-ios-entitlements: production APNs, text/URL share handoff and the sealed-push notification extension are configured."

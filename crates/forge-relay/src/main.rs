@@ -161,6 +161,29 @@ fn require_only_keys(
     }
 }
 
+/// The opaque end-to-end sealed notification a device's Notification Service Extension opens
+/// (ADR-0012 addendum). The relay cannot read it and does not try: it only checks that the field
+/// is a bounded base64url string, so it cannot be used to smuggle readable text or an oversized
+/// body through to Apple.
+const ENC_KEY: &str = "enc";
+/// Larger than any blob the daemon seals (about 2.2 KB), well inside the 4 KiB APNs payload.
+const MAX_SEALED_BLOB_CHARS: usize = 3072;
+
+fn validate_sealed_blob(blob: Option<&serde_json::Value>) -> Result<(), &'static str> {
+    let Some(blob) = blob else { return Ok(()) };
+    let blob = blob.as_str().ok_or("sealed blob must be a string")?;
+    if blob.is_empty() || blob.len() > MAX_SEALED_BLOB_CHARS {
+        return Err("sealed blob has an invalid length");
+    }
+    if !blob
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("sealed blob must be unpadded base64url");
+    }
+    Ok(())
+}
+
 /// Accept only the two payload shapes Forge itself emits. Unknown fields are rejected so a public
 /// relay cannot be repurposed as a generic arbitrary-notification proxy.
 fn validate_payload(payload: &serde_json::Value, push_type: &str) -> Result<(), &'static str> {
@@ -171,7 +194,8 @@ fn validate_payload(payload: &serde_json::Value, push_type: &str) -> Result<(), 
         .ok_or("payload.aps must be a JSON object")?;
 
     if push_type == "alert" {
-        require_only_keys(root, &["aps", "session", "kind", "seq"])?;
+        require_only_keys(root, &["aps", "session", "kind", "seq", ENC_KEY])?;
+        validate_sealed_blob(root.get(ENC_KEY))?;
         require_only_keys(aps, &["alert", "sound", "mutable-content"])?;
         let alert = aps
             .get("alert")
@@ -287,7 +311,12 @@ fn outbound_payload<'a>(
     generic_alerts: bool,
 ) -> std::borrow::Cow<'a, serde_json::Value> {
     if generic_alerts && push_type == "alert" {
-        std::borrow::Cow::Owned(generic_alert_payload())
+        let mut generic = generic_alert_payload();
+        // Only the opaque sealed blob survives the rewrite; validate_payload already bounded it.
+        if let Some(sealed) = payload.get(ENC_KEY) {
+            generic[ENC_KEY] = sealed.clone();
+        }
+        std::borrow::Cow::Owned(generic)
     } else {
         std::borrow::Cow::Borrowed(payload)
     }
@@ -620,6 +649,93 @@ mod tests {
             &live_activity,
             "public mode must preserve the documented Live Activity state"
         );
+    }
+
+    #[test]
+    fn sealed_blob_is_validated_and_survives_the_public_rewrite() {
+        let sealed = "A".repeat(2200);
+        let alert = |enc: serde_json::Value| {
+            serde_json::json!({
+                "aps": {
+                    "alert": { "title": "Forge", "body": "Open Forge to view an update." },
+                    "sound": "default",
+                    "mutable-content": 1,
+                },
+                "session": "forge-notification", "kind": "done", "seq": 0,
+                "enc": enc,
+            })
+        };
+        let with_blob = alert(serde_json::json!(sealed));
+        assert!(validate_payload(&with_blob, "alert").is_ok());
+        let out = outbound_payload(&with_blob, "alert", true);
+        assert_eq!(out["enc"], serde_json::json!(sealed));
+        assert_eq!(out["aps"]["alert"]["body"], "Open Forge to view an update.");
+
+        let readable = alert(serde_json::json!("Build finished, tests pass"));
+        assert!(
+            validate_payload(&readable, "alert").is_err(),
+            "spaces are not base64url"
+        );
+        assert!(validate_payload(
+            &alert(serde_json::json!("A".repeat(MAX_SEALED_BLOB_CHARS + 1))),
+            "alert"
+        )
+        .is_err());
+        assert!(validate_payload(&alert(serde_json::json!("")), "alert").is_err());
+        assert!(validate_payload(&alert(serde_json::json!(5)), "alert").is_err());
+        assert!(validate_payload(&alert(serde_json::json!({"x": 1})), "alert").is_err());
+
+        let mut live = serde_json::json!({"aps": {"timestamp": 1u64, "event": "update",
+            "content-state": {"busy": true, "waiting": false, "cost_usd": 0.0,
+                              "context_tokens": 1, "context_limit": 2}}});
+        live["enc"] = serde_json::json!("AAAA");
+        assert!(
+            validate_payload(&live, "liveactivity").is_err(),
+            "only alerts may carry a blob"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_public_relay_forwards_the_sealed_blob_to_apns() {
+        let (upstream, rx) = mock_upstream().await;
+        let state = test_state_with_options(
+            &["dev.adulari.forge"],
+            None,
+            1_000_000,
+            true,
+            Some(upstream),
+        );
+        let sealed = "Zm9yZ2U".repeat(300);
+        let mut request = axum::http::Request::post("/3/device")
+            .header("content-type", "application/json")
+            .header("x-forge-device-token", "a".repeat(64))
+            .header("apns-topic", "dev.adulari.forge")
+            .header("apns-push-type", "alert")
+            .header("apns-environment", "production")
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "aps": {
+                        "alert": { "title": "private title", "body": "private body" },
+                        "sound": "default",
+                        "mutable-content": 1,
+                    },
+                    "session": "session-1", "kind": "done", "seq": 7, "enc": sealed,
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(peer()));
+        let resp = relay_app(state).oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let captured = rx.await.unwrap();
+        let (_, body) = captured.split_once("\r\n\r\n").unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["enc"], serde_json::json!(sealed));
+        assert!(
+            !captured.contains("private"),
+            "the readable alert is still rewritten"
+        );
+        assert!(captured.len() < APNS_MAX_PAYLOAD_BYTES + 1024);
     }
 
     /// Builds real `AppState` (a real `ApnsAuth` from a test scalar, same trick

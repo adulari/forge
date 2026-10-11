@@ -609,8 +609,10 @@ between them automatically:
 
 **What crosses the relay, precisely:** an opaque device token, an environment string
 (`sandbox`/`production`), and the notification payload itself. Updated stock clients send only a
-static alert ("Forge — Open Forge to view an update") with fixed routing placeholders. The public
-server independently replaces every alert again before APNs. An older daemon can still transmit a
+static alert ("Forge — Open Forge to view an update") with fixed routing placeholders, plus, for a
+device that registered a key, one opaque blob sealed to that device (a notification's text that only
+the phone's notification extension can open; ADR-0012 addendum). The public
+server independently replaces every alert again before APNs, keeping only that bounded, opaque blob. An older daemon can still transmit a
 rich alert to the relay during the upgrade window, but the public service does not log or forward
 that text. Live Activity payloads still contain the deliberately small
 `busy`/`waiting`/`cost_usd`/`context_tokens`/`context_limit` status object, but not the session ID

@@ -4,6 +4,11 @@ const BUNDLE_ID = "dev.adulari.forge";
 // Shared container for the app <-> widget/Live Activity extension (mobile/targets/widget) — the
 // convention @bacons/apple-targets' own docs recommend (`group.<bundle-id>`).
 const APP_GROUP = `group.${BUNDLE_ID}`;
+// Keychain access group shared with the Notification Service Extension (mobile/targets/
+// notification-service). It holds the key the extension uses to open a sealed push, so the lock
+// screen can show the real text while the relay and Apple only carry ciphertext (ADR-0012
+// addendum). Keychain sharing is entitlement-only: no capability to register on the portal.
+const PUSH_KEY_GROUP = `$(AppIdentifierPrefix)${BUNDLE_ID}.pushkeys`;
 
 const config: ExpoConfig = {
   name: "Forge",
@@ -49,6 +54,11 @@ const config: ExpoConfig = {
     appleTeamId: "95VXXPD28Y",
     entitlements: {
       "com.apple.security.application-groups": [APP_GROUP],
+      // The app's own default group MUST stay first and listed: declaring any keychain group
+      // replaces the implicit one, and without it every item already stored by expo-secure-store
+      // (Anywhere keys, pairing tokens) would become unreadable. New items without an explicit
+      // access group are written to the first entry, hence the order.
+      "keychain-access-groups": [`$(AppIdentifierPrefix)${BUNDLE_ID}`, PUSH_KEY_GROUP],
       // APNs environment. expo-notifications' plugin writes `development` here and EAS Build
       // rewrites it to `production` from the signing credentials — but Forge builds iOS on Xcode
       // Cloud, so nothing performed that rewrite and every distribution archive shipped a

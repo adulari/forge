@@ -1,0 +1,14 @@
+{
+  "auth": "AwMDAwMDAwMDAwMDAwMDAw",
+  "enc": "PxNN51haBDYHP6WmZJIHUQAAEABBBGXCJBt-4l93lUltXfk8fHNJhxZzwm9uz7RIzos2gHE4Uo07JeYgPS9FwLUc6nqcu7hasqluJ-Xn7sumTA9-qdy2MpDJy2OyBkpFDYFBRTGlXhqeLI4-rLKjFNfNiQNe8vpGz2NkWGc2rAcG1ITfxUhBi_FrhBjBUPHfIS55SvR3C7VkITKooqwKDU1cUYYopYJqNB9HqvDkfWDQPI-uK0nq7YavEy3too-6sK82BVrO-guRPw1-l6oCS63zMe_Y8fA",
+  "p256dh": "BB4YUy_UdUwC8wQdnHXOszuD_9gax85P6ILMscmLxYlupGwxHE4v9A3ZajZT5uRURdMt_khuztdcepDGoYiBwKM",
+  "plaintext": {
+    "kind": "done",
+    "message": "Tests pass ✅ on main",
+    "seq": 7,
+    "session_id": "sess-42",
+    "title": "Build finished",
+    "v": 1
+  },
+  "receiver_private_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+}

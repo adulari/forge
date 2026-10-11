@@ -551,6 +551,9 @@ export interface WebPushSubscribeRequest {
 export interface ApnsSubscribeRequest {
   device_token: string;
   environment: "sandbox" | "production";
+  /** The device's end-to-end notification key (see lib/push/pushE2e.ts): lets the daemon seal
+   * the real text so the lock screen can show it without the hosted relay ever reading it. */
+  keys?: PushSubscriptionKeys;
 }
 
 /** A Live Activity's own push token — distinct from the general APNs device token above,

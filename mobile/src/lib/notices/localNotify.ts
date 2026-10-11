@@ -1,6 +1,5 @@
 // Non-iOS OS surface for notices. The browser and Tauri desktop shell share `notify()`, which
-// feature-detects `Notification` vs the Tauri plugin; Android has no local-notification story in
-// this app yet (its push channel is not wired), so it stays silent.
+// feature-detects `Notification` vs the Tauri plugin. iOS and Android have their own files.
 import { notify } from "../notify";
 
 export interface LocalNotice {

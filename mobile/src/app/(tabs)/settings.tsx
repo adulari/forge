@@ -54,6 +54,7 @@ import {
   disablePush,
   getPushStatus,
   initPush,
+  refreshPushRegistration,
   isPushSupported,
   type PushSubscriptionState,
 } from "../../lib/push";
@@ -446,10 +447,12 @@ export function SettingsScreen() {
   const onAppLockChange = (value: boolean) => {
     const previous = appLock;
     setAppLock(value);
-    void AsyncStorage.setItem(APP_LOCK_KEY, value ? "true" : "false").catch(() => {
-      setAppLock(previous);
-      toast.show("couldn't save app lock preference.", { tone: "danger" });
-    });
+    void AsyncStorage.setItem(APP_LOCK_KEY, value ? "true" : "false")
+      .then(() => refreshPushRegistration(baseUrl))
+      .catch(() => {
+        setAppLock(previous);
+        toast.show("couldn't save app lock preference.", { tone: "danger" });
+      });
   };
 
   const onTabBadgeChange = (value: boolean) => {
