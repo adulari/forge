@@ -230,6 +230,71 @@ nul_head=$(git -C "$nul_repo" rev-parse HEAD)
 expect nul_path safe false
 expect nul_path ota_changed true
 
+# Dependency files are judged by the iOS runtime fingerprint. The stub derives it from the "fp"
+# key of mobile/package.json, standing in for @expo/fingerprint (a lockfile edit leaves it alone).
+stub="$scratch/fingerprint-stub.sh"
+cat > "$stub" <<'STUB'
+#!/usr/bin/env bash
+sed -n 's/.*"fp": *"\([^"]*\)".*/\1/p' "$1/mobile/package.json"
+STUB
+chmod +x "$stub"
+
+fp_repo="$scratch/fp-repo"
+git init -q "$fp_repo"
+git -C "$fp_repo" config user.name "EAS OTA safety test"
+git -C "$fp_repo" config user.email "eas-ota-safety@example.invalid"
+mkdir -p "$fp_repo/mobile/src"
+printf '{"fp": "aaa", "dependencies": {}}\n' > "$fp_repo/mobile/package.json"
+printf 'lock1\n' > "$fp_repo/mobile/package-lock.json"
+printf 'config1\n' > "$fp_repo/mobile/app.config.ts"
+git -C "$fp_repo" add mobile
+git -C "$fp_repo" commit -q -m base
+fp_base=$(git -C "$fp_repo" rev-parse HEAD)
+
+fp_case() {
+  local name=$1
+  (
+    cd "$fp_repo"
+    GITHUB_OUTPUT="$scratch/$name" OTA_FINGERPRINT_CMD="$stub" \
+      BASE_SHA="$fp_base" HEAD_SHA="$(git rev-parse HEAD)" "$classifier" >/dev/null
+  )
+}
+
+printf 'lock2\n' > "$fp_repo/mobile/package-lock.json"
+mkdir -p "$fp_repo/mobile/src"; printf 'app\n' > "$fp_repo/mobile/src/app.tsx"
+git -C "$fp_repo" add mobile
+git -C "$fp_repo" commit -q -m "lock only"
+fp_case fp_lock_only
+expect fp_lock_only safe true
+expect fp_lock_only ota_changed true
+
+git -C "$fp_repo" reset -q --hard "$fp_base"
+printf '{"fp": "bbb", "dependencies": {"native-thing": "1"}}\n' > "$fp_repo/mobile/package.json"
+mkdir -p "$fp_repo/mobile/src"; printf 'app\n' > "$fp_repo/mobile/src/app.tsx"
+git -C "$fp_repo" add mobile
+git -C "$fp_repo" commit -q -m "native dependency"
+fp_case fp_changed
+expect fp_changed safe false
+
+git -C "$fp_repo" reset -q --hard "$fp_base"
+printf '{"fp": "aaa", "dependencies": {"js-only": "1"}}\n' > "$fp_repo/mobile/package.json"
+printf 'config2\n' > "$fp_repo/mobile/app.config.ts"
+git -C "$fp_repo" add mobile
+git -C "$fp_repo" commit -q -m "same fingerprint but app config"
+fp_case fp_mixed_config
+expect fp_mixed_config safe false
+
+git -C "$fp_repo" reset -q --hard "$fp_base"
+printf 'lock2\n' > "$fp_repo/mobile/package-lock.json"
+git -C "$fp_repo" add mobile
+git -C "$fp_repo" commit -q -m "lock only, fingerprint unavailable"
+(
+  cd "$fp_repo"
+  GITHUB_OUTPUT="$scratch/fp_unavailable" OTA_FINGERPRINT_CMD=/nonexistent \
+    BASE_SHA="$fp_base" HEAD_SHA="$(git rev-parse HEAD)" "$classifier" >/dev/null
+)
+expect fp_unavailable safe false
+
 if ((failures)); then
   echo "EAS OTA safety classification failed with $failures assertion(s)" >&2
   exit 1

@@ -28,6 +28,16 @@ allowed_ids=(
   GHSA-w3rx-r6r6-pgpr
   # image-size: JXL and HEIF parser infinite loops. Same package, same path, same reasoning.
   GHSA-5p2g-fcmc-qvqq
+  # braces: stack exhaustion on deeply nested patterns. Affected range is '*' (3.0.3 is the newest
+  # published). Reached only via expo -> @expo/cli -> @expo/metro-file-map -> micromatch -> braces,
+  # i.e. the bundler/CLI globbing repository paths at build time. Not imported by app runtime code.
+  # Recheck 2027-01-11.
+  GHSA-vfj7-8cjw-p6xm
+  # node-forge: RSA PKCS#1 v1.5 signature verification flaw. Affected range is '*' (1.4.0 is the
+  # newest published). Reached only via expo-updates -> @expo/code-signing-certificates and
+  # @expo/cli, i.e. the build/publish-time code-signing CLI; the app bundle never imports it.
+  # Recheck 2027-01-11.
+  GHSA-86w9-cpqp-85rv
 )
 
 audit_json=$(npm audit --omit=dev --json 2>/dev/null || true)

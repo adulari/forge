@@ -68,6 +68,17 @@ new native build. Tests, docs, Android-only config, and the independent Tauri sh
 as compatible without rebuilding iOS. The fingerprint policy prevents an update from being offered
 to an incompatible binary, while the workflow guard prevents an unreviewed publication attempt.
 
+`mobile/package.json` and `mobile/package-lock.json` are the one exception to "any other file under
+`mobile/` is native". `scripts/ci/eas-ota-safety.sh` treats edits limited to those two files as
+OTA-safe only when the iOS runtime fingerprint (project-pinned `@expo/fingerprint`,
+`fingerprint:generate --platform ios`) of the installed baseline commit equals that of the commit
+being published, so transitive lockfile bumps and override changes do not force a native build. It
+computes both with the same tooling in CI rather than comparing against `IOS_OTA_RUNTIME_VERSION`,
+because a locally recomputed fingerprint can differ from the one embedded in the archive. If the
+fingerprint differs or cannot be computed, the files stay unsafe; any other non-source change under
+`mobile/` (for example `app.config.ts`) in the same range keeps the push unsafe regardless.
+`eas-update.yml` therefore sets up Node before the guard step.
+
 To verify a TestFlight binary without publishing an update, inspect its embedded `Expo.plist` for
 `EXUpdatesURL`, `EXUpdatesRequestHeaders` with `expo-channel-name=production`, and
 `EXUpdatesRuntimeVersion`; then launch it twice after a known compatible update exists and confirm
