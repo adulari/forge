@@ -23,6 +23,23 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
         ImportSource::Aider { scope, project } => {
             return import_aider(Scope::to_project(*scope, *project))
         }
+        ImportSource::ClaudeSession {
+            session,
+            model,
+            title,
+            cwd,
+            quiet,
+        } => {
+            return super::import_claude_session::import_claude_session_cmd(
+                super::import_claude_session::ClaudeSessionArgs {
+                    session: session.clone(),
+                    model: model.clone(),
+                    title: title.clone(),
+                    cwd: cwd.clone(),
+                    quiet: *quiet,
+                },
+            )
+        }
         _ => {}
     }
 
@@ -52,7 +69,9 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
             None,
             None,
         ),
-        ImportSource::Cursor { .. } | ImportSource::Aider { .. } => unreachable!(),
+        ImportSource::Cursor { .. }
+        | ImportSource::Aider { .. }
+        | ImportSource::ClaudeSession { .. } => unreachable!(),
     };
     if !(home.exists() || label == "claude" && project) {
         println!("nothing to import: {} does not exist", home.display());

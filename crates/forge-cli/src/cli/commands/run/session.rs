@@ -9,6 +9,15 @@ fn should_refresh_opencode_go_quota(mock: bool, pin: Option<&str>) -> bool {
     should_refresh_codex_quota(mock, pin)
 }
 
+/// The pin a session starts with: `--model` if given, else the pin stored on the session being
+/// resumed (`forge import claude-session` and daemon sessions store one).
+fn pin_or_stored(store: &Store, pin: Option<String>, resume: Option<&str>) -> Option<String> {
+    pin.or_else(|| {
+        let id = resolve_session(store, resume?).ok()?;
+        store.session_pinned_model(&id).ok().flatten()
+    })
+}
+
 /// The members of a `--model` value. `--model a,b` pins a SET — the flag documents this — so every
 /// step that inspects the pin must see the members rather than the joined string. Normalizing
 /// "a,b" as one id only ever fixed the FIRST member's provider prefix, and validating it looked up
@@ -181,6 +190,9 @@ pub(crate) async fn build_session_with_self_mcp(
     let config_lattice_watch = config.lattice.watch;
     let config_default_effort = config.mesh.default_effort.clone();
 
+    // A resumed session that carries a stored model pin (`forge import claude-session`, daemon
+    // sessions) keeps it; `--model` on the command line wins.
+    let pin = pin_or_stored(&store, pin, resume.as_deref());
     // Normalize before any provider-specific startup work so a pinned session only initializes
     // the provider it can actually use.
     let pin = pin.map(|p| pin_members(&p).join(","));
@@ -598,6 +610,28 @@ pub(crate) async fn build_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resumed_session_keeps_its_stored_pin_unless_model_is_given() {
+        let store = Store::open_in_memory().unwrap();
+        let id = store.create_session("/w", "default").unwrap();
+        let other = store.create_session("/w", "default").unwrap();
+        store
+            .set_session_pinned_model(&id, Some("claude-cli::claude-opus-5-5"))
+            .unwrap();
+        let prefix = &id[..8];
+        assert_eq!(
+            pin_or_stored(&store, None, Some(prefix)).as_deref(),
+            Some("claude-cli::claude-opus-5-5")
+        );
+        assert_eq!(
+            pin_or_stored(&store, Some("claude-cli::haiku".into()), Some(prefix)).as_deref(),
+            Some("claude-cli::haiku"),
+            "--model wins"
+        );
+        assert_eq!(pin_or_stored(&store, None, Some(&other[..8])), None);
+        assert_eq!(pin_or_stored(&store, None, None), None);
+    }
 
     fn stdio_server(name: &str, command: &str, args: &[&str]) -> forge_config::McpServerConfig {
         forge_config::McpServerConfig {
