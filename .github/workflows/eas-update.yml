@@ -68,6 +68,14 @@ jobs:
             echo "- runtime fingerprint variable: \`${{ vars.IOS_OTA_RUNTIME_VERSION || 'unset' }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The guard compares the iOS runtime fingerprint of the installed baseline with this commit
+      # when only package.json / package-lock.json changed, which needs node and mobile deps.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
       - name: Guard OTA-safe diff
         id: guard
         working-directory: .
@@ -101,13 +109,6 @@ jobs:
       - name: No OTA content to publish
         if: steps.guard.outputs.safe == 'true' && steps.guard.outputs.ota_changed != 'true'
         run: echo 'No OTA publication was needed because the push contains no mobile source or asset changes.' >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: steps.guard.outputs.safe == 'true' && steps.guard.outputs.ota_changed == 'true'
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: mobile/package-lock.json
 
       - name: Install dependencies
         if: steps.guard.outputs.safe == 'true' && steps.guard.outputs.ota_changed == 'true'

@@ -51,6 +51,17 @@ jobs:
             changed=true
           elif git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- mobile/package.json mobile/package-lock.json; then
             changed=false
+          elif node -e '
+            const { execFileSync } = require("child_process");
+            const declared = (sha) => {
+              const pkg = JSON.parse(execFileSync("git", ["show", `${sha}:mobile/package.json`]));
+              return JSON.stringify([pkg.dependencies, pkg.devDependencies]);
+            };
+            process.exit(declared(process.argv[1]) === declared(process.argv[2]) ? 0 : 1);
+          ' "$BASE_SHA" "$HEAD_SHA"; then
+            # Only overrides, scripts or the lockfile moved: the declared Expo packages are the
+            # same, so the SDK patch comparison is not something this PR can act on.
+            changed=false
           else
             changed=true
           fi
