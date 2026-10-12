@@ -55,6 +55,16 @@ All notable changes to Forge are documented here. The format follows
   restores its stored model pin unless `--model` is given.
 
 ### Fixed
+- **A headless `forge serve` could not see the `claude` CLI, and later runs warned about a valid pin.**
+  A `systemd --user` unit on a server has an empty environment, so the daemon's `PATH` lacked
+  `~/.local/bin`: the `claude` bridge counted as not installed, discovery cached a catalog with no
+  `claude-cli::` models, and `forge chat --model claude-cli::claude-opus-5-5` then warned "unknown
+  model". Also, agent shell tools in daemon sessions ran with that bare `PATH` (no `cargo`, `node`).
+  `forge serve` now merges the login shell's `PATH` in at startup (3 s timeout; skipped on a TTY or
+  with `FORGE_NO_LOGIN_PATH=1`); bridge CLIs are also looked up in `~/.local/bin`, `~/.claude/local`,
+  `~/.npm-global/bin`, `~/.bun/bin`, `/opt/homebrew/bin` and `/usr/local/bin`; and a pin on a
+  routable bridge is no longer judged by the cached catalog, which is refreshed when it lacks that
+  bridge. A typo'd bridge alias still warns.
 - **Compaction ignored `mesh.disabled`.** The summarizer chain skipped the disabled-model and
   missing-key check the main loop applies, so a disabled provider still received the session's
   transcript to summarize. The chain now honors both; the session's own model is always kept.

@@ -612,12 +612,38 @@ async fn probe_cli_version(binary: &str) -> Option<String> {
     (!version.is_empty()).then_some(version)
 }
 
-/// Resolve `bin` to an executable file on `PATH` (a lightweight `which`, no spawning). Windows-aware:
-/// there it also tries the `.exe`/`.cmd`/`.bat` suffixes, because the official CLIs are installed by
-/// npm as `.cmd` shims — a bare-name lookup (`claude`) misses `claude.cmd` and reports the bridge as
-/// absent. A `bin` that already contains a path separator is checked directly (still trying the
-/// Windows suffixes) instead of via `PATH`. Returns the matched path, or `None`.
+/// Directories a bridge CLI is commonly installed into that a non-login environment (a systemd
+/// user unit, cron, an IDE launcher) often leaves off `PATH`: `claude`'s native installer uses
+/// `~/.local/bin` (and `~/.claude/local`), npm/bun global installs use the others.
+fn well_known_bin_dirs(home: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(h) = home {
+        for sub in [".local/bin", ".claude/local", ".npm-global/bin", ".bun/bin"] {
+            dirs.push(h.join(sub));
+        }
+    }
+    dirs.push("/opt/homebrew/bin".into());
+    dirs.push("/usr/local/bin".into());
+    dirs
+}
+
+/// Resolve `bin` to an executable file: first on `PATH`, then (bare names only) in
+/// [`well_known_bin_dirs`]. A lightweight `which`, no spawning. Windows-aware: there it also tries
+/// the `.exe`/`.cmd`/`.bat` suffixes, because the official CLIs are installed by npm as `.cmd`
+/// shims — a bare-name lookup (`claude`) misses `claude.cmd` and reports the bridge as absent. A
+/// `bin` that already contains a path separator is checked directly (still trying the Windows
+/// suffixes) instead of via `PATH`. Returns the matched path, or `None`.
 fn resolve_on_path(bin: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH");
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    resolve_in(bin, path.as_deref(), &well_known_bin_dirs(home.as_deref()))
+}
+
+fn resolve_in(
+    bin: &str,
+    path: Option<&std::ffi::OsStr>,
+    fallback_dirs: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
     let exts: &[&str] = if cfg!(windows) {
         &["", ".exe", ".cmd", ".bat"]
     } else {
@@ -639,8 +665,13 @@ fn resolve_on_path(bin: &str) -> Option<std::path::PathBuf> {
     if p.components().count() > 1 {
         return try_base(p);
     }
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths).find_map(|dir| try_base(&dir.join(bin)))
+    let on_path = path
+        .and_then(|paths| std::env::split_paths(paths).find_map(|dir| try_base(&dir.join(bin))));
+    on_path.or_else(|| {
+        fallback_dirs
+            .iter()
+            .find_map(|dir| try_base(&dir.join(bin)))
+    })
 }
 
 /// Build the [`Command`] to launch a bridge CLI named/located at `binary` with `args`. On Windows the
@@ -673,7 +704,12 @@ fn bridge_command(binary: &str, args: &[String]) -> Command {
             }
         }
     }
-    let mut cmd = Command::new(binary);
+    // Launch the path the resolver found, not the bare name: a binary found only in a
+    // well-known install dir is not on this process's `PATH`, so a bare spawn would fail.
+    let mut cmd = match resolve_on_path(binary) {
+        Some(found) => Command::new(found),
+        None => Command::new(binary),
+    };
     cmd.args(args);
     cmd
 }
@@ -3360,6 +3396,35 @@ mod tests {
             Some(f.as_path())
         );
         assert!(resolve_on_path(dir.join("nope.txt").to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn resolve_in_falls_back_to_well_known_dirs_only_after_path() {
+        let root = std::env::temp_dir().join(format!("forge-resolve-fb-{}", std::process::id()));
+        let on_path = root.join("onpath");
+        let fallback = root.join("home/.local/bin");
+        std::fs::create_dir_all(&on_path).unwrap();
+        std::fs::create_dir_all(&fallback).unwrap();
+        std::fs::write(fallback.join("fakebridge"), b"x").unwrap();
+        std::fs::write(on_path.join("both"), b"x").unwrap();
+        std::fs::write(fallback.join("both"), b"x").unwrap();
+        let path = std::env::join_paths([&on_path]).unwrap();
+        let fb = well_known_bin_dirs(Some(&root.join("home")));
+        assert!(fb.contains(&fallback));
+        assert_eq!(
+            resolve_in("fakebridge", Some(path.as_os_str()), &fb),
+            Some(fallback.join("fakebridge"))
+        );
+        assert_eq!(
+            resolve_in("both", Some(path.as_os_str()), &fb),
+            Some(on_path.join("both"))
+        );
+        assert_eq!(resolve_in("absent-zzz", Some(path.as_os_str()), &fb), None);
+        assert_eq!(
+            resolve_in("fakebridge", None, &fb),
+            Some(fallback.join("fakebridge"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]
