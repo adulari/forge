@@ -1402,9 +1402,7 @@ impl GenAiProvider {
         let mut stream = res.stream;
         let mut content = String::new();
         let mut dsml_guard = crate::dsml_stream_guard::DsmlStreamGuard::default();
-        let mut tool_chunk_name = String::new();
-        let mut tool_chunk_chars = 0usize;
-        let mut tool_chunk_last = std::time::Instant::now();
+        let mut tool_chunks = crate::genai_tool_chunk_progress::ToolChunkProgress::new();
         let mut reasoning = String::new();
         let mut usage = Usage::default();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -1594,28 +1592,7 @@ impl GenAiProvider {
                 // complete JSON is decoded above. They still prove the connection is making
                 // progress; forward a content-free heartbeat so forge-core's independent idle
                 // watchdog does not mistake a long, healthy tool argument for a dead stream.
-                ChatStreamEvent::ToolCallChunk(chunk) => {
-                    let tc = &chunk.tool_call;
-                    if !tc.fn_name.is_empty() {
-                        tool_chunk_name.clone_from(&tc.fn_name);
-                    }
-                    tool_chunk_chars += match &tc.fn_arguments {
-                        serde_json::Value::String(s) => s.chars().count(),
-                        serde_json::Value::Null => 0,
-                        other => other.to_string().chars().count(),
-                    };
-                    if tool_chunk_last.elapsed() >= std::time::Duration::from_millis(250)
-                        && !tool_chunk_name.is_empty()
-                    {
-                        tool_chunk_last = std::time::Instant::now();
-                        on_event(StreamEvent::ProviderToolInput {
-                            name: tool_chunk_name.clone(),
-                            chars: tool_chunk_chars,
-                        });
-                    } else {
-                        on_event(StreamEvent::ProviderActivity);
-                    }
-                }
+                ChatStreamEvent::ToolCallChunk(c) => on_event(tool_chunks.observe(&c.tool_call)),
                 _ => on_event(StreamEvent::ProviderActivity),
             }
         }

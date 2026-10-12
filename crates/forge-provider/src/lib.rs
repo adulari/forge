@@ -19,6 +19,7 @@ mod dsml_stream_guard;
 mod embedder;
 mod error;
 mod genai_provider;
+mod genai_tool_chunk_progress;
 pub mod headroom;
 mod mock;
 mod mock_long;
