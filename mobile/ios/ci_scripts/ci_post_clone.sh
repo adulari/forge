@@ -8,8 +8,22 @@ set -e
 
 cd "$CI_PRIMARY_REPOSITORY_PATH/mobile"
 
-brew install node@20
-brew link --overwrite --force node@20
+# Official Node tarball, not Homebrew: Xcode 26.x workflows land on Intel hosts, where brew has no
+# node@20 bottle for that macOS and its source build fails ("C compiler cannot create executables",
+# builds 91/92). Homebrew also disables node@20 on 2026-10-28. The tarball works on either arch.
+NODE_VERSION=20.20.2
+case "$(uname -m)" in
+  arm64) NODE_ARCH=arm64 ;;
+  *) NODE_ARCH=x64 ;;
+esac
+NODE_DIST="node-v$NODE_VERSION-darwin-$NODE_ARCH"
+NODE_ROOT="$HOME/.forge-node"
+mkdir -p "$NODE_ROOT"
+curl -fsSLo "$NODE_ROOT/$NODE_DIST.tar.gz" "https://nodejs.org/dist/v$NODE_VERSION/$NODE_DIST.tar.gz"
+curl -fsSLo "$NODE_ROOT/SHASUMS256.txt" "https://nodejs.org/dist/v$NODE_VERSION/SHASUMS256.txt"
+(cd "$NODE_ROOT" && grep " $NODE_DIST.tar.gz\$" SHASUMS256.txt | shasum -a 256 -c -)
+tar -xzf "$NODE_ROOT/$NODE_DIST.tar.gz" -C "$NODE_ROOT"
+export PATH="$NODE_ROOT/$NODE_DIST/bin:$PATH"
 node -v
 
 # --prefer-offline/--no-audit/--no-fund skip npm's registry-freshness-check and audit/funding
@@ -29,6 +43,10 @@ npx expo prebuild -p ios --no-install
 bash "$CI_PRIMARY_REPOSITORY_PATH/scripts/ci/verify-ios-entitlements.sh"
 
 cd ios
+
+# The archive's "Bundle React Native code" phase runs in a fresh xcodebuild environment without this
+# PATH; .xcode.env.local is sourced after .xcode.env and pins the node it uses.
+echo "export NODE_BINARY=\"$NODE_ROOT/$NODE_DIST/bin/node\"" > .xcode.env.local
 
 # expo prebuild always regenerates project.pbxproj with CURRENT_PROJECT_VERSION = 1.
 # Xcode derives the archive's real CFBundleVersion from this build setting at build
