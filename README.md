@@ -998,6 +998,8 @@ forge assay run --scope diff --fail-on high   # headless code-quality gate for C
 forge commands               # list discovered commands + skills
 forge import claude          # migrate ~/.claude commands/skills/agents
 forge import codex           # migrate ~/.codex/prompts as commands
+forge import claude-session <id|path>   # bring a Claude Code session into Forge (stays linked for `forge switch`)
+forge switch                 # continue this directory's newest Claude Code / Forge conversation in the other tool
 forge skill export ./bundle  # export your commands/skills/agents (inverse of import)
 forge skill install owner/repo[@ref]   # install skills from a GitHub repo (branch/tag/SHA)
 forge skill normalize        # rewrite ~/.claude paths + claude/codex refs in imported skills

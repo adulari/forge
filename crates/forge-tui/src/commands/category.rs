@@ -8,7 +8,7 @@ pub fn command_category(name: &str) -> &'static str {
             "Model & usage"
         }
         "assay" | "lattice" | "pr" | "commit" => "Review & ship",
-        "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" => "Integrations",
+        "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" | "claude" => "Integrations",
         "config" | "statusline" | "keys" | "help" | "init" | "remember" | "memories" => {
             "Settings & help"
         }

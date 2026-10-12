@@ -96,10 +96,72 @@ impl ImportSink<'_> {
         Ok(())
     }
 
-    /// Messages pushed so far.
+    /// Messages pushed so far (for a fresh import; an append starts counting at its first seq).
     pub fn count(&self) -> i64 {
         self.seq
     }
+
+    /// The seq the next pushed row gets.
+    pub fn next_seq(&self) -> i64 {
+        self.seq
+    }
+
+    pub(crate) fn resume<'t>(
+        tx: &'t rusqlite::Transaction<'t>,
+        session_id: &'t str,
+        seq: i64,
+        journal: bool,
+    ) -> ImportSink<'t> {
+        ImportSink {
+            tx,
+            session_id,
+            seq,
+            journal,
+            first_ts: None,
+            last_ts: None,
+        }
+    }
+
+    pub(crate) fn last_timestamp(&self) -> Option<i64> {
+        self.last_ts
+    }
+}
+
+pub(crate) fn journal_enabled(tx: &rusqlite::Transaction<'_>) -> Result<bool> {
+    Ok(tx
+        .query_row(
+            "SELECT enabled FROM anywhere_sync_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// Store `summary` as the session's compaction summary (replacing any earlier one) and journal it.
+pub(crate) fn upsert_compaction_summary(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    summary: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO session_compaction (session_id, summary) VALUES (?1, ?2)
+         ON CONFLICT(session_id) DO UPDATE SET
+           summary = excluded.summary, created_at = strftime('%s','now')",
+        (session_id, summary),
+    )?;
+    let payload = sync_json(serde_json::json!({
+        "session_id": session_id,
+        "summary": summary,
+        "keep_count": 0,
+    }))?;
+    append_sync_revision(
+        tx,
+        "compaction",
+        session_id,
+        SyncJournalOperation::Upsert,
+        &payload,
+    )
 }
 
 impl Store {
@@ -107,6 +169,21 @@ impl Store {
     /// it is stored as the session's compaction summary (see the module docs). Returns the new
     /// session id. Nothing is written if `fill` fails.
     pub fn import_session_with<F>(&self, meta: &ImportedSessionMeta<'_>, fill: F) -> Result<String>
+    where
+        F: FnOnce(&mut ImportSink<'_>) -> Result<Option<String>>,
+    {
+        self.import_session_linked_with(meta, None, fill)
+    }
+
+    /// [`Self::import_session_with`] that also records the Claude Code link in the same
+    /// transaction, so a crash can never leave an imported session without its link (the next
+    /// switch would import it a second time).
+    pub fn import_session_linked_with<F>(
+        &self,
+        meta: &ImportedSessionMeta<'_>,
+        link: Option<&CcLinkUpdate<'_>>,
+        fill: F,
+    ) -> Result<String>
     where
         F: FnOnce(&mut ImportSink<'_>) -> Result<Option<String>>,
     {
@@ -119,46 +196,34 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, 0, ?5)",
                 rusqlite::params![id, meta.title, meta.cwd, meta.mode, meta.pinned_model],
             )?;
-            let journal = tx
-                .query_row(
-                    "SELECT enabled FROM anywhere_sync_state WHERE singleton = 1",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )
-                .optional()?
-                .unwrap_or(false);
-            let mut sink = ImportSink {
-                tx: &tx,
-                session_id: &id,
-                seq: 0,
-                journal,
-                first_ts: None,
-                last_ts: None,
-            };
+            let journal = journal_enabled(&tx)?;
+            let mut sink = ImportSink::resume(&tx, &id, 0, journal);
             let summary = fill(&mut sink)?;
-            let (first, last) = (sink.first_ts, sink.last_ts);
+            let (first, last, end_seq) = (sink.first_ts, sink.last_ts, sink.seq);
             if let (Some(first), Some(last)) = (first, last) {
                 tx.execute(
                     "UPDATE session SET created_at = ?2, updated_at = ?3 WHERE id = ?1",
                     (&id, first, last),
                 )?;
             }
-            if let Some(summary) = summary.filter(|s| !s.trim().is_empty()) {
-                tx.execute(
-                    "INSERT INTO session_compaction (session_id, summary) VALUES (?1, ?2)",
-                    (&id, &summary),
-                )?;
-                let payload = sync_json(serde_json::json!({
-                    "session_id": id,
-                    "summary": summary,
-                    "keep_count": 0,
-                }))?;
-                append_sync_revision(
+            let summary = summary.filter(|s| !s.trim().is_empty());
+            if let Some(summary) = &summary {
+                upsert_compaction_summary(&tx, &id, summary)?;
+            }
+            if let Some(link) = link {
+                cc_link_store::write_link_tx(
                     &tx,
-                    "compaction",
-                    &id,
-                    SyncJournalOperation::Upsert,
-                    &payload,
+                    &CcLink {
+                        forge_session_id: id.clone(),
+                        cc_session_id: link.cc_session_id.to_string(),
+                        cc_path: link.cc_path.to_string(),
+                        cc_synced_bytes: link.cc_synced_bytes,
+                        cc_last_uuid: link.cc_last_uuid.map(str::to_string),
+                        forge_synced_seq: end_seq - 1,
+                        forge_summary: summary,
+                        last_target: link.last_target.map(str::to_string),
+                        updated_at: 0,
+                    },
                 )?;
             }
             append_session_snapshot(&tx, &id)?;

@@ -52,6 +52,7 @@ pub(crate) mod git_hygiene;
 pub mod heartbeat;
 pub mod hooks;
 mod hooks_cc;
+pub use hooks_cc::forge_tool_to_cc;
 pub mod job_wake;
 mod lean_context;
 pub mod llm_router;
