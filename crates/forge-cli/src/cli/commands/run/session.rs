@@ -196,6 +196,7 @@ pub(crate) async fn build_session_with_self_mcp(
     // Normalize before any provider-specific startup work so a pinned session only initializes
     // the provider it can actually use.
     let pin = pin.map(|p| pin_members(&p).join(","));
+    let session_pin = pin.clone();
 
     clock.mark("store open + migrations");
     // Never construct a session router from an expired Codex pressure reading. The helper uses a
@@ -447,10 +448,18 @@ pub(crate) async fn build_session_with_self_mcp(
         session.set_lattice_update(Some(update_rx));
     }
     session.set_catalog(catalog);
-    // Seed the effort pin from config if set (`mesh.default_effort`).
-    if let Some(ref s) = config_default_effort {
-        if let Some(e) = forge_types::EffortLevel::parse(s) {
-            session.set_effort(Some(e));
+    // The router alone honoring the pin left the session itself unpinned: the statusline read
+    // "mesh auto", and since nothing was stored, the next resume really did drop it.
+    if let Some(pin) = session_pin {
+        session.pin_model(Some(pin));
+    }
+    // Seed the effort pin from config if set (`mesh.default_effort`), unless the resumed session
+    // already carries one: the default must not overwrite an effort the user chose.
+    if session.pinned_effort().is_none() {
+        if let Some(ref s) = config_default_effort {
+            if let Some(e) = forge_types::EffortLevel::parse(s) {
+                session.set_effort(Some(e));
+            }
         }
     }
     // Share the index with the session so turns auto-inject relevant code and agent edits reindex

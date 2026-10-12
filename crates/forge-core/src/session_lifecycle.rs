@@ -112,6 +112,7 @@ impl Session {
             .ok()
             .flatten()
             .and_then(|stored| EffortLevel::parse(&stored));
+        let pinned_model = store.session_pinned_model(session_id).ok().flatten();
         let subagent_pin_free = store.session_subagent_pin_free(session_id).ok().flatten();
         let mut session = Self::build(
             session_id.to_string(),
@@ -127,6 +128,9 @@ impl Session {
         );
         if let Some(level) = pinned_effort {
             session.set_effort(Some(level));
+        }
+        if pinned_model.is_some() {
+            session.pin_model(pinned_model);
         }
         // Same reasoning for `/subagents free`: a resumed goal run that had released its children
         // from the pin would otherwise quietly drag every child back onto the parent's model.
