@@ -20,6 +20,24 @@ impl ClaudeStreamState {
         out
     }
 
+    /// Progress items are throttled: one per ~250ms or per ~2k chars of growth. Everything in
+    /// between still yields `Parsed::Activity`, so liveness is unaffected. `size` is any
+    /// monotonically growing measure.
+    fn progress_due(&mut self, size: usize) -> bool {
+        let now = std::time::Instant::now();
+        let due = match self.last_progress {
+            None => true,
+            Some((at, last)) => {
+                now.duration_since(at) >= std::time::Duration::from_millis(250)
+                    || size.saturating_sub(last) >= 2_000
+            }
+        };
+        if due {
+            self.last_progress = Some((now, size));
+        }
+        due
+    }
+
     fn parse_line_inner(&mut self, line: &str) -> Vec<Parsed> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
@@ -35,11 +53,32 @@ impl ClaudeStreamState {
                         self.text.clear();
                         self.reasoning.clear();
                         self.tool_ids.clear();
+                        self.tool_inputs.clear();
+                        self.thinking_tokens = 0;
+                        self.last_progress = None;
                         self.stream_message_active = true;
                         return out;
                     }
                     Some("message_stop") => {
                         self.stream_message_active = false;
+                        return out;
+                    }
+                    Some("content_block_start") => {
+                        let block = event.get("content_block");
+                        if block.and_then(|b| b.get("type")).and_then(Value::as_str)
+                            == Some("tool_use")
+                        {
+                            let index =
+                                event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                            let name = block
+                                .and_then(|b| b.get("name"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("tool")
+                                .to_string();
+                            self.tool_inputs.insert(index, (name.clone(), 0));
+                            self.last_progress = Some((std::time::Instant::now(), 0));
+                            out.push(Parsed::ToolInputProgress { name, chars: 0 });
+                        }
                         return out;
                     }
                     Some("content_block_delta") => {}
@@ -66,7 +105,35 @@ impl ClaudeStreamState {
                             }
                         }
                     }
+                    Some("input_json_delta") => {
+                        let added = delta
+                            .get("partial_json")
+                            .and_then(Value::as_str)
+                            .map_or(0, |j| j.chars().count());
+                        if let Some((name, chars)) = self.tool_inputs.get_mut(&index) {
+                            *chars += added;
+                            let (name, chars) = (name.clone(), *chars);
+                            if self.progress_due(chars) {
+                                out.push(Parsed::ToolInputProgress { name, chars });
+                            }
+                        }
+                    }
                     _ => {}
+                }
+            }
+            // Hidden thinking (Opus 5.x streams no text): `estimated_tokens` is cumulative here and
+            // the per-delta `estimated_tokens` on empty `thinking_delta`s is deliberately ignored,
+            // so the two are never added together.
+            Some("system")
+                if v.get("subtype").and_then(Value::as_str) == Some("thinking_tokens") =>
+            {
+                if let Some(total) = v.get("estimated_tokens").and_then(Value::as_u64) {
+                    self.thinking_tokens = self.thinking_tokens.max(total);
+                    if self.progress_due(self.thinking_tokens as usize * 4) {
+                        out.push(Parsed::ThinkingProgress {
+                            tokens: self.thinking_tokens,
+                        });
+                    }
                 }
             }
             // Consolidated assistant message: emit only bytes that were not already streamed.

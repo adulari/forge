@@ -43,6 +43,15 @@ pub enum LiveEvent {
     AuxiliaryProgress {
         chars: usize,
     },
+    /// A tool call's arguments are streaming (`PresenterEvent::ProviderToolInput`). An older
+    /// client that doesn't know this frame skips it.
+    ProviderToolInput {
+        name: String,
+        chars: usize,
+    },
+    ProviderThinking {
+        tokens: u64,
+    },
     Cost {
         session_total_usd: f64,
         session_in: u64,
@@ -130,6 +139,13 @@ pub fn to_live_event(event: &PresenterEvent) -> Option<LiveEvent> {
         }),
         PresenterEvent::AuxiliaryProgress { chars } => {
             Some(LiveEvent::AuxiliaryProgress { chars: *chars })
+        }
+        PresenterEvent::ProviderToolInput { name, chars } => Some(LiveEvent::ProviderToolInput {
+            name: name.clone(),
+            chars: *chars,
+        }),
+        PresenterEvent::ProviderThinking { tokens } => {
+            Some(LiveEvent::ProviderThinking { tokens: *tokens })
         }
         PresenterEvent::Cost {
             session_total_usd,
@@ -226,6 +242,10 @@ pub fn live_event_to_presenter(event: LiveEvent) -> Option<PresenterEvent> {
             Some(PresenterEvent::AuxiliaryRequest { model, purpose })
         }
         LiveEvent::AuxiliaryProgress { chars } => Some(PresenterEvent::AuxiliaryProgress { chars }),
+        LiveEvent::ProviderToolInput { name, chars } => {
+            Some(PresenterEvent::ProviderToolInput { name, chars })
+        }
+        LiveEvent::ProviderThinking { tokens } => Some(PresenterEvent::ProviderThinking { tokens }),
         LiveEvent::Cost {
             session_total_usd,
             session_in,
@@ -302,6 +322,25 @@ mod tests {
         assert!(matches!(
             live_event_to_presenter(encoded),
             Some(PresenterEvent::AuxiliaryProgress { chars: 1_024 })
+        ));
+    }
+
+    #[test]
+    fn provider_stream_detail_survives_live_observer_round_trip() {
+        let tool = PresenterEvent::ProviderToolInput {
+            name: "write_file".into(),
+            chars: 12_300,
+        };
+        let encoded = to_live_event(&tool).expect("tool input is remotely observable");
+        assert!(matches!(
+            live_event_to_presenter(encoded),
+            Some(PresenterEvent::ProviderToolInput { name, chars: 12_300 }) if name == "write_file"
+        ));
+        let encoded = to_live_event(&PresenterEvent::ProviderThinking { tokens: 2_100 })
+            .expect("thinking is remotely observable");
+        assert!(matches!(
+            live_event_to_presenter(encoded),
+            Some(PresenterEvent::ProviderThinking { tokens: 2_100 })
         ));
     }
 }

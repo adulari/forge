@@ -163,6 +163,16 @@ pub enum PresenterEvent {
     /// function-call argument deltas). Surfaces use this as a live heartbeat only; no partial
     /// provider payload is exposed or persisted.
     ProviderProgress,
+    /// A tool call's arguments are being streamed (e.g. a long `write_file` body). Content-free:
+    /// name plus cumulative argument chars, so surfaces can say what the model is doing.
+    ProviderToolInput {
+        name: String,
+        chars: usize,
+    },
+    /// Hidden model thinking is in progress; cumulative estimated tokens.
+    ProviderThinking {
+        tokens: u64,
+    },
     /// A best-effort internal model call (for example shell-error diagnosis) has started. These
     /// calls happen inside a tool-result boundary, so exposing their purpose prevents the UI from
     /// appearing stuck on the completed tool while another model is genuinely working.
