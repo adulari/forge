@@ -27,6 +27,7 @@ pub(crate) use gates::*;
 mod setup;
 pub(crate) use setup::*;
 
+mod pin_check;
 mod session;
 pub(crate) use session::*;
 

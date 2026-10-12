@@ -265,7 +265,14 @@ pub(crate) async fn build_session_with_self_mcp(
         } else {
             "no catalog: built-in seed"
         });
-        if crate::cli::commands::models::startup_refresh_due(cached.as_ref().map(|c| c.age_secs)) {
+        let stale_for_bridge = cached.as_ref().is_some_and(|c| {
+            pin_check::catalog_missing_routable_bridge(c.catalog.models(), |k| k.routable())
+        });
+        if stale_for_bridge
+            || crate::cli::commands::models::startup_refresh_due(
+                cached.as_ref().map(|c| c.age_secs),
+            )
+        {
             spawn_catalog_refresh(&config);
         }
         cached.map(|cached| cached.catalog)
@@ -290,7 +297,10 @@ pub(crate) async fn build_session_with_self_mcp(
         // With a catalog, also flag a known-provider id that isn't in it (likely a typo). This
         // stays a soft warning: a brand-new model may simply not be discovered yet.
         if let Some(cat) = catalog.as_ref() {
-            if !cat.models().contains(&id.to_string()) {
+            let in_catalog = cat.models().contains(&id.to_string());
+            if pin_check::judge_pin(id, prefix, in_catalog, |k| k.routable())
+                == pin_check::PinVerdict::Unknown
+            {
                 let suggestions: Vec<&str> = cat
                     .models()
                     .iter()

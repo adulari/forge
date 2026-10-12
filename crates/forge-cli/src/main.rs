@@ -78,6 +78,7 @@ mod image_input;
 pub(crate) mod live_observer;
 mod local;
 mod log_filter;
+mod login_path;
 mod mcp_agent;
 mod mcp_serve;
 mod push;
@@ -154,16 +155,22 @@ fn init_tracing() {
 }
 
 fn main() {
+    // Before the runtime (and so before any second thread): `set_var` is only sound while this is
+    // the sole thread. Logged later, once tracing exists.
+    let login_path_added = login_path::hydrate_for_daemon();
     alloc_policy::init();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("build the tokio runtime")
-        .block_on(run_cli());
+        .block_on(run_cli(login_path_added));
 }
 
-async fn run_cli() {
+async fn run_cli(login_path_added: Vec<String>) {
     init_tracing();
+    if !login_path_added.is_empty() {
+        tracing::info!(added = ?login_path_added, "PATH extended from the login shell");
+    }
 
     let cli = Cli::parse();
     let Some(command) = cli.command else {
