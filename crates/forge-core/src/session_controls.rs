@@ -172,6 +172,12 @@ impl Session {
         self.pinned_model = model_id
             .map(|s| forge_mesh::parse_pin_set(&s))
             .filter(|set| !set.is_empty());
+        // Persisted for the same reason as the effort pin: a `/model` choice that lives only in
+        // memory is silently gone after a resume. Best-effort, like `set_effort`.
+        let stored = self.pinned_model.as_ref().map(|set| set.join(","));
+        let _ = self
+            .store
+            .set_session_pinned_model(&self.id, stored.as_deref());
     }
 
     /// The currently-pinned model set, if any (`/model <id>` was called this session).

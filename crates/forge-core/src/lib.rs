@@ -10744,6 +10744,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_restores_the_pinned_model() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let id = store.create_session(".", "default").unwrap();
+
+        let resumed = |store: Arc<Store>| {
+            Session::resume(
+                store,
+                Arc::new(MockProvider),
+                Arc::new(HeuristicRouter::new(Config::default())),
+                ToolRegistry::with_core_tools_in(test_workspace()),
+                Box::new(CapturePresenter::default()),
+                Config::default(),
+                &id,
+            )
+            .unwrap()
+        };
+
+        assert_eq!(resumed(Arc::clone(&store)).pinned_model(), None);
+
+        // A `/model` pin lived only in memory, so a resumed session fell back to mesh routing.
+        let mut session = resumed(Arc::clone(&store));
+        session.pin_model(Some("claude-cli::claude-opus-5-5".into()));
+        assert_eq!(
+            resumed(Arc::clone(&store)).pinned_model(),
+            Some(&["claude-cli::claude-opus-5-5".to_string()][..])
+        );
+
+        // A pinned set round-trips as a set.
+        let mut session = resumed(Arc::clone(&store));
+        session.pin_model(Some("ollama::a, ollama::b".into()));
+        assert_eq!(
+            resumed(Arc::clone(&store)).pinned_model(),
+            Some(&["ollama::a".to_string(), "ollama::b".to_string()][..])
+        );
+
+        let mut session = resumed(Arc::clone(&store));
+        session.pin_model(None);
+        assert_eq!(resumed(Arc::clone(&store)).pinned_model(), None);
+    }
+
+    #[tokio::test]
     async fn resume_restores_the_subagent_pin_release() {
         // `/subagents free` is what lets ONE pinned session fan out onto other models. It lived
         // only in the running session before, so a daemon restart mid-goal silently dragged every
