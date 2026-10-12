@@ -262,6 +262,14 @@ pub(crate) fn explicitly_requests_change(prompt: &str) -> bool {
         "create ",
         "write ",
         "change ",
+        "modify ",
+        "replace ",
+        "edit ",
+        "delete ",
+        "rewrite ",
+        "extend ",
+        "patch ",
+        "insert ",
     ]
     .iter()
     .any(|verb| prompt.starts_with(verb))

@@ -82,6 +82,13 @@ All notable changes to Forge are documented here. The format follows
   `~/.npm-global/bin`, `~/.bun/bin`, `/opt/homebrew/bin` and `/usr/local/bin`; and a pin on a
   routable bridge is no longer judged by the cached catalog, which is refreshed when it lacks that
   bridge. A typo'd bridge alias still warns.
+- **A toolless "Implemented ... / Added ..." summary was accepted as a finished edit (#1428).** The
+  phantom-edit gate only recognised first-person phrases, and "Modify ..." / "Replace ..." were not
+  treated as change directives, so a turn that made zero tool calls ended as success. Change
+  directives now include modify/replace/edit/delete/rewrite/extend/patch/insert, and a no-tool
+  reply that reports past-tense changes to a file or `identifier` is nudged (bounded) before the
+  task-completion gate, so stale all-Done tasks cannot mask it. Questions, plans, read-only and
+  explicit no-change answers are not nudged.
 - **Compaction ignored `mesh.disabled`.** The summarizer chain skipped the disabled-model and
   missing-key check the main loop applies, so a disabled provider still received the session's
   transcript to summarize. The chain now honors both; the session's own model is always kept.
