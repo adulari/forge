@@ -89,6 +89,13 @@ All notable changes to Forge are documented here. The format follows
   reply that reports past-tense changes to a file or `identifier` is nudged (bounded) before the
   task-completion gate, so stale all-Done tasks cannot mask it. Questions, plans, read-only and
   explicit no-change answers are not nudged.
+- **`forge import claude` is idempotent.** Re-running it appended a full second copy of every permission
+  rule whenever the importer's marker comments had been lost (any tool that re-serializes
+  `config.toml` drops them), and left the config rewritten each time. A rule an equivalent entry
+  already provides (same tool and allow/deny/ask pattern, any key order) is now skipped and reported
+  as "already present", and the file is untouched when nothing changes. MCP servers whose launch
+  command does not exist here (a missing absolute path, or a bare name not on `PATH`) are skipped
+  with the reason instead of being imported as servers that can never start.
 - **Compaction ignored `mesh.disabled`.** The summarizer chain skipped the disabled-model and
   missing-key check the main loop applies, so a disabled provider still received the session's
   transcript to summarize. The chain now honors both; the session's own model is always kept.

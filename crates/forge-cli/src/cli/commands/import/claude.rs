@@ -48,7 +48,8 @@ pub(super) fn import_claude_settings(
         (dir.join("settings.json"), dir.join("config.toml"))
     };
     let hooks_n = count_cc_hooks(&values);
-    let perms_n = transfer_permissions(&values, &config_dst)?;
+    let perms = transfer_permissions(&values, &config_dst)?;
+    let perms_n = perms.written;
     if hooks_n > 0 && hooks {
         write_cc_hooks(&values, &settings_dst)?;
         println!(
@@ -61,6 +62,13 @@ pub(super) fn import_claude_settings(
     if perms_n > 0 {
         println!(
             "✓ imported {perms_n} permission rule(s) from settings.json → {}",
+            config_dst.display()
+        );
+    }
+    if perms.already_present > 0 {
+        println!(
+            "• {} permission rule(s) already present in {} — left as is",
+            perms.already_present,
             config_dst.display()
         );
     }
@@ -148,14 +156,51 @@ fn write_cc_hooks(values: &[serde_json::Value], dst: &std::path::Path) -> Result
         .with_context(|| format!("writing {}", dst.display()))
 }
 
+/// Outcome of a permission import: rules written by this run vs. skipped because an equivalent
+/// rule already sits in the config outside the importer's own block.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct PermissionImport {
+    pub written: usize,
+    pub already_present: usize,
+}
+
+/// `(tool, decision, pattern)` for every `[[permissions.rules]]` entry in `config_text`. Compared
+/// semantically, so key order, comments and the `reason` text are irrelevant.
+fn existing_rule_keys(config_text: &str) -> std::collections::HashSet<(String, String, String)> {
+    let mut keys = std::collections::HashSet::new();
+    let Ok(root) = toml::from_str::<toml::Value>(config_text) else {
+        return keys;
+    };
+    let Some(rules) = root
+        .get("permissions")
+        .and_then(|p| p.get("rules"))
+        .and_then(|r| r.as_array())
+    else {
+        return keys;
+    };
+    for rule in rules {
+        let Some(tool) = rule.get("tool").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        for decision in ["deny", "ask", "allow"] {
+            if let Some(pat) = rule.get(decision).and_then(|p| p.as_str()) {
+                keys.insert((tool.to_string(), decision.to_string(), pat.to_string()));
+            }
+        }
+    }
+    keys
+}
+
 /// Translate CC `permissions.{allow,ask,deny}` entries into Forge `[[permissions.rules]]` blocks,
-/// appended to the target `config.toml`. Returns the number of rules written.
+/// kept in one importer-owned block of the target `config.toml`. A rule that an equivalent entry
+/// outside that block already provides is skipped (the block can be lost when something
+/// re-serializes the config and drops its comments, which used to make every re-import append a
+/// full second copy). The file is left untouched when nothing would change.
 pub(super) fn transfer_permissions(
     values: &[serde_json::Value],
     config_dst: &std::path::Path,
-) -> Result<usize> {
-    let mut blocks = String::new();
-    let mut count = 0usize;
+) -> Result<PermissionImport> {
+    let mut wanted: Vec<(String, String, String)> = Vec::new();
     for v in values {
         let Some(perms) = v.get("permissions").and_then(|p| p.as_object()) else {
             continue;
@@ -175,12 +220,10 @@ pub(super) fn transfer_permissions(
                 };
                 let pat = pattern.unwrap_or_else(|| "*".to_string());
                 for tool in tools {
-                    blocks.push_str(&format!(
-                        "\n[[permissions.rules]]\ntool = {}\n{decision} = {}\nreason = \"imported from Claude Code settings.json\"\n",
-                        toml_str(tool),
-                        toml_str(&pat),
-                    ));
-                    count += 1;
+                    let key = (tool.to_string(), decision.to_string(), pat.clone());
+                    if !wanted.contains(&key) {
+                        wanted.push(key);
+                    }
                 }
             }
         }
@@ -191,7 +234,8 @@ pub(super) fn transfer_permissions(
     }
     const START: &str = "# BEGIN Forge import: Claude Code permissions\n";
     const END: &str = "# END Forge import: Claude Code permissions\n";
-    let existing = if config_dst.exists() {
+    let file_existed = config_dst.exists();
+    let existing = if file_existed {
         std::fs::read_to_string(config_dst)
             .with_context(|| format!("reading {}", config_dst.display()))?
     } else {
@@ -211,16 +255,38 @@ pub(super) fn transfer_permissions(
             text.push_str(&existing[*end + END.len()..]);
             text
         }
-        ([], []) => existing,
+        ([], []) => existing.clone(),
         _ => anyhow::bail!(
             "malformed or duplicate imported permission block in {}",
             config_dst.display()
         ),
     };
-    let content = format!("{stripped}{START}{blocks}{END}");
-    std::fs::write(config_dst, content)
-        .with_context(|| format!("writing {}", config_dst.display()))?;
-    Ok(count)
+    let present = existing_rule_keys(&stripped);
+    let mut blocks = String::new();
+    let mut report = PermissionImport::default();
+    for key in &wanted {
+        if present.contains(key) {
+            report.already_present += 1;
+            continue;
+        }
+        let (tool, decision, pat) = key;
+        blocks.push_str(&format!(
+            "\n[[permissions.rules]]\ntool = {}\n{decision} = {}\nreason = \"imported from Claude Code settings.json\"\n",
+            toml_str(tool),
+            toml_str(pat),
+        ));
+        report.written += 1;
+    }
+    let content = if blocks.is_empty() {
+        stripped
+    } else {
+        format!("{stripped}{START}{blocks}{END}")
+    };
+    if (file_existed || !blocks.is_empty()) && content != existing {
+        std::fs::write(config_dst, content)
+            .with_context(|| format!("writing {}", config_dst.display()))?;
+    }
+    Ok(report)
 }
 
 /// Parse a CC permission string `Tool(pattern)` → `(tool, Some(pattern))`; a bare `Tool` →
@@ -264,6 +330,12 @@ pub(super) fn import_tool_mcp_servers(label: &str, project: bool) -> Result<()> 
             continue;
         }
         for srv in &s.servers {
+            if let Some(reason) = unlaunchable_reason(srv, std::env::var_os("PATH").as_deref()) {
+                if seen.insert(srv.name.clone()) {
+                    println!("  • skipped MCP server `{}`: {reason}", srv.name);
+                }
+                continue;
+            }
             if seen.insert(srv.name.clone()) {
                 for key in srv.keyring_keys() {
                     if let Some(val) = s.secrets.get(&key) {
@@ -286,6 +358,33 @@ pub(super) fn import_tool_mcp_servers(label: &str, project: bool) -> Result<()> 
     };
     crate::cli::commands::mcp::finish_import(&out, servers, secrets)
         .context("importing MCP servers")
+}
+
+/// Why a stdio server cannot be launched on this machine (its command is an absolute path that
+/// does not exist, or a bare name that is not on `path`); `None` for launchable and for HTTP/SSE
+/// servers, which have no local command.
+fn unlaunchable_reason(
+    srv: &forge_config::McpServerConfig,
+    path: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    let forge_config::McpTransport::Stdio { command, .. } = &srv.transport else {
+        return None;
+    };
+    let p = std::path::Path::new(command);
+    if p.components().count() > 1 {
+        return (!p.is_file()).then(|| format!("command {command} does not exist on this machine"));
+    }
+    let found = path.is_some_and(|paths| {
+        std::env::split_paths(paths).any(|dir| {
+            let cand = dir.join(command);
+            cand.is_file()
+                || (cfg!(windows)
+                    && ["exe", "cmd", "bat"]
+                        .iter()
+                        .any(|e| cand.with_extension(e).is_file()))
+        })
+    });
+    (!found).then(|| format!("command `{command}` is not on PATH"))
 }
 
 #[cfg(test)]
@@ -315,5 +414,45 @@ mod hook_import_tests {
         assert_eq!(loaded.len(), 1);
         assert!(loaded[0].cc_compat && loaded[0].matches("shell"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod mcp_launchable_tests {
+    use super::*;
+
+    fn stdio(command: &str) -> forge_config::McpServerConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": "s", "transport": {"type": "stdio", "command": command}
+        }))
+        .or_else(|_| {
+            toml::from_str(&format!(
+                "name = \"s\"\n[transport]\ntype = \"stdio\"\ncommand = {command:?}\n"
+            ))
+        })
+        .expect("server config parses")
+    }
+
+    #[test]
+    fn skips_missing_absolute_and_unresolvable_bare_commands() {
+        let dir = std::env::temp_dir().join(format!("forge-mcp-launch-{}", forge_types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("mytool");
+        std::fs::write(&tool, b"x").unwrap();
+        let path = std::env::join_paths([&dir]).unwrap();
+
+        assert!(
+            unlaunchable_reason(&stdio(tool.to_str().unwrap()), Some(path.as_os_str())).is_none()
+        );
+        assert!(unlaunchable_reason(&stdio("mytool"), Some(path.as_os_str())).is_none());
+        let abs = unlaunchable_reason(
+            &stdio("/home/deploy/.local/bin/uvx"),
+            Some(path.as_os_str()),
+        );
+        assert!(abs.unwrap().contains("does not exist"));
+        let bare = unlaunchable_reason(&stdio("chrome-devtools-mcp"), Some(path.as_os_str()));
+        assert!(bare.unwrap().contains("not on PATH"));
+        assert!(unlaunchable_reason(&stdio("mytool"), None).is_some());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

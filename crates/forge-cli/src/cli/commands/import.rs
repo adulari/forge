@@ -486,7 +486,7 @@ mod settings_import_tests {
         let dir = tmp("perms");
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = dir.join("config.toml");
-        let n = transfer_permissions(&[v], &cfg).unwrap();
+        let n = transfer_permissions(&[v], &cfg).unwrap().written;
         assert_eq!(n, 3, "two allows + one deny");
 
         // The written TOML parses, and its [[permissions.rules]] carry the translated tool names +
@@ -554,7 +554,7 @@ mod settings_import_tests {
         let dir = tmp("aliases");
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.join("config.toml");
-        assert_eq!(transfer_permissions(&[value], &config).unwrap(), 5);
+        assert_eq!(transfer_permissions(&[value], &config).unwrap().written, 5);
         let text = std::fs::read_to_string(&config).unwrap();
         for tool in [
             "edit_file",
@@ -568,6 +568,53 @@ mod settings_import_tests {
                 "missing {tool}"
             );
         }
+    }
+
+    #[test]
+    fn reimport_is_idempotent_even_when_the_marker_block_was_lost() {
+        let value = serde_json::json!({ "permissions": {
+            "allow": ["Bash(npm run lint)", "Read"], "deny": ["Bash(rm -rf *)"] } });
+        let dir = tmp("idem");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        let first = transfer_permissions(std::slice::from_ref(&value), &config).unwrap();
+        assert_eq!((first.written, first.already_present), (3, 0));
+
+        // Same run again: the importer's own block is regenerated, not duplicated.
+        let again = transfer_permissions(std::slice::from_ref(&value), &config).unwrap();
+        assert_eq!(again.written, 3);
+        let rules_in = |p: &std::path::Path| {
+            let root: toml::Value = toml::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+            root["permissions"]["rules"].as_array().unwrap().len()
+        };
+        assert_eq!(rules_in(&config), 3);
+
+        // Something re-serialized the config: markers gone, key order differs.
+        let root: toml::Value = toml::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        std::fs::write(&config, toml::to_string(&root).unwrap()).unwrap();
+        assert!(!std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("BEGIN Forge import"));
+        let before = std::fs::read_to_string(&config).unwrap();
+        let third = transfer_permissions(std::slice::from_ref(&value), &config).unwrap();
+        assert_eq!((third.written, third.already_present), (0, 3));
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            before,
+            "file untouched"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_config_stays_missing_when_there_is_nothing_to_import() {
+        let dir = tmp("nothing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        let r = transfer_permissions(&[serde_json::json!({})], &config).unwrap();
+        assert_eq!(r, super::claude::PermissionImport::default());
+        assert!(!config.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
