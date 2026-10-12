@@ -20,7 +20,7 @@ pub(crate) struct Cli {
 /// logical groups instead of one flat wall. Pure documentation — changes no behavior.
 const AFTER_HELP: &str = "\
 COMMAND GROUPS:
-  Run a task     run, chat, nl, sessions, replay, blame
+  Run a task     run, chat, nl, sessions, replay, blame, switch
   Models/mesh    models, mesh, benchmarks   (three views of routing — each --help cross-refs the others)
   Skills/plugins skill, plugin, commands, import   (plugin = canonical pack installer; skill = author/distil)
   Providers      auth, provider, local, setup/init, doctor
@@ -756,6 +756,15 @@ pub(crate) enum Command {
         #[command(subcommand)]
         op: LatticeOp,
     },
+    /// Continue ONE conversation in the other tool: Claude Code <-> Forge, in both directions,
+    /// repeatedly, without duplicating or losing history. Run in a project directory with no
+    /// arguments after leaving either tool, and the conversation reopens in the other.
+    ///
+    /// Examples:
+    ///   forge switch                      # the newest session here, opened in the other tool
+    ///   forge switch <id> --to claude     # a Forge session, resumed in Claude Code
+    ///   forge switch <id> --dry-run       # say what would happen, write nothing
+    Switch(SwitchArgs),
     /// Import commands + skills from another AI CLI into Forge's scopes.
     Import {
         #[command(subcommand)]
@@ -1392,6 +1401,10 @@ pub(crate) use mcp::{McpCmd, ServeTransportArg};
 #[path = "args/plugins.rs"]
 pub(crate) mod plugins;
 pub(crate) use plugins::PluginCmd;
+
+#[path = "args/switch.rs"]
+pub(crate) mod switch;
+pub(crate) use switch::SwitchArgs;
 
 /// Output format for `forge run`. `text` is the human line renderer; `stream-json` emits NDJSON
 /// events mirroring Claude Code's `--output-format stream-json` so tools can embed Forge.

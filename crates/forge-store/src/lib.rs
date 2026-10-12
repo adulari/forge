@@ -37,6 +37,7 @@ use migrations::{
     migration_0001, migration_0020, migration_0039, ANYWHERE_PRERELEASE_MAX_VERSION,
     ANYWHERE_PRERELEASE_MIN_VERSION, MIGRATIONS,
 };
+mod cc_link_store;
 mod provenance_store;
 mod quota_store;
 mod schema;
@@ -53,6 +54,7 @@ mod task_store;
 mod transcript_read_store;
 mod usage_store;
 
+pub use cc_link_store::{CcLink, CcLinkUpdate, ExportRow, SessionMeta};
 pub use detached_child_store::{DetachedChild, DetachedChildStatus};
 pub use dispatch_store::{
     dispatch_item_status, dispatch_status, DispatchItemRow, DispatchRow, NewDispatchItem,
@@ -70,7 +72,7 @@ pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 39;
+const SCHEMA_VERSION: i64 = 40;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);

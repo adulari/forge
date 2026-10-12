@@ -211,6 +211,14 @@ pub(crate) async fn dispatch_command(
             None => app.note("⌨ /help is host-only (a fullscreen reference viewer)"),
         },
         CommandAction::Quit => return Ok(DispatchOutcome::Quit),
+        CommandAction::Claude => {
+            // The switch itself runs after the TUI has restored the terminal (see `chat`).
+            let id = session.lock().await.session_id().to_string();
+            match super::super::switch::stage_claude_switch(&id, tui.is_some()) {
+                Ok(()) => return Ok(DispatchOutcome::Quit),
+                Err(note) => app.note(note),
+            }
+        }
         CommandAction::ClearScreen => {
             if let Some(tui) = tui.as_mut() {
                 tui.clear_screen();

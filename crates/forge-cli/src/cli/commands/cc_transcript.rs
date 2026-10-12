@@ -16,8 +16,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use forge_types::{Role, ToolCall};
-use serde::Deserialize;
 use serde_json::Value;
+
+use self::slim::Slim;
 
 /// How many chain entries past a call to look for its result when deciding a merged message is complete.
 const RESULT_LOOKAHEAD: usize = 64;
@@ -48,110 +49,6 @@ struct Node {
     results: Vec<String>,
 }
 
-#[derive(Deserialize, Default)]
-struct SlimMessage {
-    id: Option<String>,
-    model: Option<String>,
-    content: Option<ToolIds>,
-}
-
-#[derive(Deserialize)]
-struct SlimBlock {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    id: Option<String>,
-    tool_use_id: Option<String>,
-}
-
-/// The tool ids in a message's content, read without keeping the (possibly huge) bodies: a string
-/// content has none, a block list yields `(tool_use ids, tool_result ids)`.
-#[derive(Default)]
-struct ToolIds {
-    uses: Vec<String>,
-    results: Vec<String>,
-}
-
-impl<'de> Deserialize<'de> for ToolIds {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        struct V;
-        impl<'de> serde::de::Visitor<'de> for V {
-            type Value = ToolIds;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("message content")
-            }
-            fn visit_str<E>(self, _: &str) -> std::result::Result<ToolIds, E> {
-                Ok(ToolIds::default())
-            }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut seq: A,
-            ) -> std::result::Result<ToolIds, A::Error> {
-                let mut ids = ToolIds::default();
-                while let Some(b) = seq.next_element::<SlimBlock>()? {
-                    match (b.kind.as_deref(), b.id, b.tool_use_id) {
-                        (Some("tool_use"), Some(id), _) => ids.uses.push(id),
-                        (Some("tool_result"), _, Some(id)) => ids.results.push(id),
-                        _ => {}
-                    }
-                }
-                Ok(ids)
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> std::result::Result<ToolIds, A::Error> {
-                while map
-                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
-                    .is_some()
-                {}
-                Ok(ToolIds::default())
-            }
-            fn visit_unit<E>(self) -> std::result::Result<ToolIds, E> {
-                Ok(ToolIds::default())
-            }
-        }
-        d.deserialize_any(V)
-    }
-}
-
-#[derive(Deserialize)]
-struct SlimSegment {
-    #[serde(rename = "headUuid")]
-    head: Option<String>,
-    #[serde(rename = "tailUuid")]
-    tail: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SlimCompact {
-    #[serde(rename = "preservedSegment")]
-    segment: Option<SlimSegment>,
-}
-
-#[derive(Deserialize)]
-struct Slim {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    subtype: Option<String>,
-    uuid: Option<String>,
-    #[serde(rename = "parentUuid")]
-    parent: Option<String>,
-    #[serde(rename = "logicalParentUuid")]
-    logical_parent: Option<String>,
-    #[serde(rename = "isSidechain", default)]
-    sidechain: bool,
-    #[serde(rename = "isCompactSummary", default)]
-    compact_summary: bool,
-    cwd: Option<String>,
-    #[serde(rename = "customTitle")]
-    custom_title: Option<String>,
-    #[serde(rename = "aiTitle")]
-    ai_title: Option<String>,
-    message: Option<SlimMessage>,
-    #[serde(rename = "compactMetadata")]
-    compact: Option<SlimCompact>,
-}
-
 /// One message ready for the Forge store.
 #[derive(Debug, Clone)]
 pub(crate) struct Imported {
@@ -180,6 +77,13 @@ pub(crate) struct Transcript {
     pub(crate) model: Option<String>,
     pub(crate) lines: usize,
     pub(crate) skipped_lines: usize,
+    /// Offset just past the last complete line read: where the next incremental read starts.
+    pub(crate) bytes_end: u64,
+    /// The last chain entry of the file (the leaf Claude Code would continue from).
+    pub(crate) last_uuid: Option<String>,
+    /// What the first chain entry hangs off: `None` for a file read from its start, otherwise the
+    /// entry before the range, which an incremental read must find equal to its stored leaf.
+    pub(crate) root_parent: Option<String>,
 }
 
 /// What [`Transcript::for_each_message`] did, for the report the command prints.
@@ -227,13 +131,21 @@ fn answer_first(
 impl Transcript {
     /// Pass one: index every non-sidechain line and resolve the active chain.
     pub(crate) fn scan(path: &Path) -> Result<Self> {
+        Self::scan_from(path, 0)
+    }
+
+    /// [`Self::scan`] over the lines at and after byte `start` (a line boundary): the cheap read
+    /// of just what a linked session gained since it was last mirrored.
+    pub(crate) fn scan_from(path: &Path, start: u64) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
         let mut reader = BufReader::with_capacity(1 << 20, file.try_clone()?);
+        reader.seek(SeekFrom::Start(start))?;
         let mut nodes: Vec<Node> = Vec::new();
         let mut by_uuid: HashMap<String, usize> = HashMap::new();
         let (mut cwd, mut custom_title, mut ai_title) = (None, None, None);
         let (mut lines, mut skipped) = (0usize, 0usize);
-        let mut offset = 0u64;
+        let mut offset = start;
+        let mut bytes_end = start;
         let mut buf = Vec::new();
         loop {
             buf.clear();
@@ -243,15 +155,25 @@ impl Transcript {
             }
             let at = offset;
             offset += n as u64;
+            let complete = buf.ends_with(b"\n");
             let text = buf.trim_ascii();
             if text.is_empty() {
+                bytes_end = offset;
                 continue;
             }
+            let parsed = serde_json::from_slice::<Slim>(text);
+            // A last line without its newline that does not parse yet is a write in progress:
+            // leave it for the next read instead of counting it as damage.
+            if parsed.is_err() && !complete {
+                break;
+            }
+            bytes_end = offset;
             lines += 1;
-            let Ok(slim) = serde_json::from_slice::<Slim>(text) else {
+            let Ok(slim) = parsed else {
                 skipped += 1;
                 continue;
             };
+
             if slim.sidechain {
                 continue;
             }
@@ -311,6 +233,13 @@ impl Transcript {
                 .and_then(|u| by_uuid.get(u).copied());
         }
         chain.reverse();
+        let root_parent = chain.first().and_then(|&i| {
+            nodes[i]
+                .parent
+                .clone()
+                .or_else(|| nodes[i].logical_parent.clone())
+        });
+        let last_uuid = nodes.last().map(|n| n.uuid.clone());
         recover_parallel_results(&nodes, &mut chain);
 
         let boundary_pos = chain.iter().rposition(|&i| nodes[i].kind == Kind::Boundary);
@@ -345,7 +274,38 @@ impl Transcript {
             model,
             lines,
             skipped_lines: skipped,
+            bytes_end,
+            last_uuid,
+            root_parent,
         })
+    }
+
+    /// Roughly how many messages the active chain holds: what a person typed plus Claude's
+    /// replies. For the one-line summary `forge switch` prints.
+    pub(crate) fn message_count(&self) -> usize {
+        let mut seen = HashSet::new();
+        self.chain
+            .iter()
+            .map(|&i| &self.nodes[i])
+            .filter(|n| match n.kind {
+                Kind::User => !n.is_compact_summary && n.results.is_empty(),
+                Kind::Assistant => seen.insert(n.msg_id.clone().unwrap_or_else(|| n.uuid.clone())),
+                _ => false,
+            })
+            .count()
+    }
+
+    /// Whether a compaction on the chain keeps a verbatim segment this read could not resolve
+    /// (it points before the range read), so its model context cannot be rebuilt from this range.
+    pub(crate) fn has_unresolved_preserved_segment(&self) -> bool {
+        self.boundary_pos.is_some_and(|b| {
+            self.nodes[self.chain[b]].preserved.is_some() && self.preserved.is_none()
+        })
+    }
+
+    /// Whether the chain holds a compaction boundary.
+    pub(crate) fn has_boundary(&self) -> bool {
+        self.boundary_pos.is_some()
     }
 
     /// Whether the active chain carries no conversation at all.
@@ -755,5 +715,6 @@ impl Normalizer {
     }
 }
 
+mod slim;
 #[cfg(test)]
 mod tests;

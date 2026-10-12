@@ -41,6 +41,60 @@ pub(crate) fn forge_args_to_cc(forge_tool: &str, args: &Value) -> Value {
     Value::Object(out)
 }
 
+/// Claude Code's own tool names: a call already spelled this way (a session imported from Claude
+/// Code) goes back unchanged.
+const CC_NATIVE_TOOLS: &[&str] = &[
+    "Bash",
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep",
+    "WebFetch",
+    "WebSearch",
+    "LS",
+    "MultiEdit",
+    "NotebookEdit",
+    "Task",
+    "Agent",
+    "TodoWrite",
+    "BashOutput",
+    "KillShell",
+    "ExitPlanMode",
+    "AskUserQuestion",
+    "Skill",
+];
+
+/// A tool call as Claude Code's transcript spells it: `(tool name, input)`.
+///
+/// Forge's file/shell/web tools map to the Claude Code tool of the same job with its argument
+/// names; a call already in Claude Code's spelling (or an MCP tool) is kept; every other Forge tool
+/// becomes `mcp__forge__<name>`, the name the claude-cli bridge exposes it under. Unlike
+/// [`forge_args_to_cc`] only the Claude Code spelling of each argument is kept.
+pub fn forge_tool_to_cc(name: &str, args: &Value) -> (String, Value) {
+    if name.starts_with("mcp__") || CC_NATIVE_TOOLS.contains(&name) {
+        return (name.to_string(), args.clone());
+    }
+    match name {
+        "shell" | "edit_file" | "write_file" | "create_file" | "read_file" | "glob" | "search"
+        | "grep" | "web_fetch" | "web_search" => {
+            let mut input = forge_args_to_cc(name, args);
+            if let Some(map) = input.as_object_mut() {
+                for (cc, forge) in arg_renames(name) {
+                    if map.contains_key(*cc) {
+                        map.remove(*forge);
+                    }
+                }
+                if name == "shell" {
+                    map.remove("timeout_secs");
+                }
+            }
+            (forge_config::cc_tool_alias(name).to_string(), input)
+        }
+        other => (format!("mcp__forge__{other}"), args.clone()),
+    }
+}
+
 /// A hook's `updatedInput` (Claude-Code argument names) -> Forge tool args. A Claude-Code key wins
 /// over its Forge twin, because a hook that edits `tool_input` edits the CC spelling it was shown.
 pub(crate) fn cc_input_to_forge(forge_tool: &str, input: &Value) -> Value {
@@ -289,6 +343,27 @@ mod tests {
         edited["new_string"] = json!("z");
         let back = cc_input_to_forge("edit_file", &edited);
         assert_eq!(back, json!({"path":"a.rs","old":"x","new":"z"}));
+    }
+
+    #[test]
+    fn transcript_tool_names_and_inputs_use_only_the_cc_spelling() {
+        let (n, i) = forge_tool_to_cc("edit_file", &json!({"path":"a","old":"x","new":"y"}));
+        assert_eq!(n, "Edit");
+        assert_eq!(
+            i,
+            json!({"file_path":"a","old_string":"x","new_string":"y"})
+        );
+        let (n, i) = forge_tool_to_cc("shell", &json!({"command":"ls","timeout_secs":3}));
+        assert_eq!(
+            (n.as_str(), i),
+            ("Bash", json!({"command":"ls","timeout":3000}))
+        );
+        assert_eq!(forge_tool_to_cc("Bash", &json!({"command":"ls"})).0, "Bash");
+        assert_eq!(forge_tool_to_cc("mcp__x__y", &json!({})).0, "mcp__x__y");
+        assert_eq!(
+            forge_tool_to_cc("spawn_agents", &json!({})).0,
+            "mcp__forge__spawn_agents"
+        );
     }
 
     #[test]

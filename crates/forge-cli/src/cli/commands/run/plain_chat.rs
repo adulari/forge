@@ -17,7 +17,13 @@ pub(crate) async fn chat(
         // Update check happens in background inside run_chat_tui (via the UiMsg channel) so it
         // never delays TUI startup. The check has a 3s network timeout — blocking here would
         // freeze the terminal for up to 3s once per day.
-        return run_chat_tui(mock, mode, resume_mode, fullscreen, pin).await;
+        let ran = run_chat_tui(mock, mode, resume_mode, fullscreen, pin).await;
+        return match super::super::switch::take_requested() {
+            Some(id) if ran.is_ok() => {
+                super::super::switch::switch_forge_session_to_claude(&id).await
+            }
+            _ => ran,
+        };
     }
     // Plain path: blocking update check is fine (no TUI to corrupt).
     update_check::maybe_notify(&forge_config::load().unwrap_or_default()).await;

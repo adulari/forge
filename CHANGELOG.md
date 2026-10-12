@@ -7,6 +7,23 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`forge switch` moves one conversation between Claude Code and Forge, either way, as often as
+  you like, with nothing duplicated or lost.** Leave either tool, run `forge switch` in the same
+  directory, and the conversation reopens in the other (`claude --resume` or `forge chat --resume`
+  replace the shell's process): one line says what moves, e.g. `Claude Code "fix the parser" (412
+  messages, active 3m ago) → Forge`. `forge switch <id|path> [--to claude|forge] [--dry-run]` names a
+  session explicitly; `/claude` in the Forge TUI leaves it cleanly and switches the session you are
+  in. A link per conversation (store migration 40, `cc_session_link`) records how far each side has
+  been mirrored, so a later hop reads and writes only the new turns (a 400 MB transcript costs
+  milliseconds) and a second hop with nothing new changes nothing. Forge turns reach Claude Code as
+  real transcript entries (tool calls mapped to `Bash`/`Read`/`Edit`/..., Forge-only tools as
+  `mcp__forge__*`, one result per call, compaction as a `compact_boundary`); Claude Code turns reach
+  Forge through the `forge import claude-session` conversion, which now records the same link so an
+  imported session can switch back. The permission mode and Claude model carry over. If both sides
+  changed, or Claude Code rewound or compacted past what Forge holds, it says so in one line and
+  keeps every turn (a rewind re-imports as a new Forge session). Refuses (`--force` overrides) while
+  the session is busy in the daemon or open in a running `claude`. Forge's own claude-cli bridge
+  transcripts are never taken for your Claude Code session. See `docs/features/session-switch.md`.
 - **Sessions can find and message each other: `list_sessions` + `message_session`.** `list_sessions`
   shows the live sessions on this machine (daemon-hosted and `forge chat` terminals) with id prefix,
   name, directory, model, busy/idle/waiting and which one is you; with Forge Anywhere on it also

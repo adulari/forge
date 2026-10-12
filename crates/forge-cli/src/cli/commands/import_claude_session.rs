@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use forge_store::{ImportedRow, ImportedSessionMeta};
+use forge_store::{CcLinkUpdate, ImportedRow, ImportedSessionMeta};
 
 use super::cc_transcript::Transcript;
 use crate::*;
@@ -72,7 +72,7 @@ pub(crate) struct ImportReport {
 }
 
 /// A path to a `.jsonl`, or a Claude Code session id looked up under `~/.claude/projects`.
-fn locate_transcript(session: &str) -> Result<PathBuf> {
+pub(crate) fn locate_transcript(session: &str) -> Result<PathBuf> {
     let direct = Path::new(session);
     if direct.is_file() {
         return Ok(direct.to_path_buf());
@@ -80,25 +80,12 @@ fn locate_transcript(session: &str) -> Result<PathBuf> {
     if session.contains(['/', '\\']) || session.ends_with(".jsonl") {
         bail!("no such transcript file: {session}");
     }
-    let projects = forge_config::claude_dir()
-        .context("no home directory — cannot locate ~/.claude")?
-        .join("projects");
-    let wanted = format!("{session}.jsonl");
-    let mut found: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-    for dir in std::fs::read_dir(&projects)
-        .with_context(|| format!("reading {}", projects.display()))?
-        .flatten()
-    {
-        let candidate = dir.path().join(&wanted);
-        if let Ok(meta) = std::fs::metadata(&candidate) {
-            found.push((meta.modified().unwrap_or(std::time::UNIX_EPOCH), candidate));
-        }
-    }
-    found.sort();
-    found.pop().map(|(_, p)| p).with_context(|| {
+    super::switch::cc_fs::find_by_id(session).with_context(|| {
         format!(
             "no Claude Code session {session} under {}",
-            projects.display()
+            super::switch::cc_fs::projects_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
         )
     })
 }
@@ -158,13 +145,27 @@ pub(crate) fn import_transcript(
 
     let mut stats = Default::default();
     let mut failure: Option<anyhow::Error> = None;
-    let stored = store.import_session_with(
+    let cc_id = super::switch::cc_fs::session_id_of(path).unwrap_or_default();
+    let abs = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string();
+    let link = CcLinkUpdate {
+        cc_session_id: &cc_id,
+        cc_path: &abs,
+        cc_synced_bytes: transcript.bytes_end as i64,
+        cc_last_uuid: transcript.last_uuid.as_deref(),
+        last_target: None,
+    };
+    let stored = store.import_session_linked_with(
         &ImportedSessionMeta {
             cwd: &cwd,
             mode,
             title: title.as_deref(),
             pinned_model: model.as_deref(),
         },
+        // The link is what lets `forge switch` carry later turns back without a second import.
+        (!cc_id.is_empty()).then_some(&link),
         |sink| {
             let streamed = transcript.for_each_message(|m| {
                 sink.push(ImportedRow {

@@ -6,6 +6,7 @@
 mod btw_args;
 mod effort_args;
 mod subagent_args;
+mod workflow_args;
 
 /// One command's metadata, shown in the palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +251,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/quit",
     },
     Command {
+        name: "claude",
+        desc: "leave Forge and continue this conversation in Claude Code",
+        usage: "/claude",
+    },
+    Command {
         name: "statusline",
         desc: "customize the statusline layout — toggle widgets, show layout, reset to default",
         usage: "/statusline [layout|toggle <widget>|reset|edit]",
@@ -381,6 +387,8 @@ pub enum CommandAction {
     Export(Option<String>),
     /// Open the usage overlay showing API spend + token breakdown (`/usage`).
     Usage,
+    /// Exit the TUI and resume this conversation in Claude Code (`/claude`).
+    Claude,
     /// Open the mesh routing inspector; optional prompt to trace (`/mesh [task]`).
     Mesh(Option<String>),
     /// Toggle remote control on/off. When turning on, `mode` selects how the server is exposed.
@@ -732,6 +740,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "plan" => CommandAction::Plan(arg),
         "execute" | "approve" | "go" => CommandAction::Execute,
         "quit" | "exit" | "q" => CommandAction::Quit,
+        "claude" => CommandAction::Claude,
         "statusline" | "sl" => {
             let action = match arg.to_lowercase().trim() {
                 "layout" | "show" | "" => StatuslineAction::Layout,
@@ -748,23 +757,7 @@ pub fn parse_command(line: &str) -> CommandAction {
             };
             CommandAction::Statusline(action)
         }
-        "workflow" | "wf" => {
-            let trimmed = arg.trim();
-            let action = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("list") {
-                WorkflowAction::List
-            } else if let Some(rest) = trimmed
-                .strip_prefix("run ")
-                .or_else(|| trimmed.strip_prefix("run"))
-            {
-                let mut parts = rest.trim().splitn(2, char::is_whitespace);
-                let name = parts.next().unwrap_or("").trim().to_string();
-                let args = parts.next().unwrap_or("").trim().to_string();
-                WorkflowAction::RunSaved { name, args }
-            } else {
-                WorkflowAction::Run(trimmed.to_string())
-            };
-            CommandAction::Workflow(action)
-        }
+        "workflow" | "wf" => CommandAction::Workflow(workflow_args::workflow_action(&arg)),
         "heartbeat" | "hb" => crate::heartbeat_args::heartbeat_action(&arg),
         other => CommandAction::Unknown(other.to_string()),
     }
