@@ -99,6 +99,7 @@ pub(crate) use tool_output::tool_detail;
 mod spend_guard;
 pub mod turn_contract;
 mod turn_guards;
+mod unapplied_edit;
 pub mod workflow;
 mod workspace_context;
 pub mod worktree;

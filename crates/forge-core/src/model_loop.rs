@@ -711,6 +711,22 @@ impl Session {
                                 ));
                             }
                         }
+                    } else if mutations_ran.load(std::sync::atomic::Ordering::Relaxed)
+                        + self.mutations_this_turn
+                        == 0
+                        && self.edits_this_turn == 0
+                        && (completion_claims_file_change(&resp.content)
+                            || crate::unapplied_edit::unapplied_edit_suspected(
+                                &self.last_turn_contract,
+                                &resp.content,
+                                self.config.mesh.nudge_empty_diff,
+                            ))
+                    {
+                        // Evidence, not wording, decides: this runs BEFORE the task-completion gate
+                        // so stale all-Done tasks from an earlier turn cannot mask a toolless claim.
+                        if self.nudge_unapplied_edit(&mut phantom_edit_nudges) {
+                            continue;
+                        }
                     } else if !self.tasks.is_empty() {
                         // Every tracked task reported Done — same completion authority as the bridge:
                         // accept fresh evidence newer than the last mutation, otherwise request a
@@ -745,32 +761,6 @@ impl Session {
                             self.keep_answer_across_verification(&mut pre_review, &resp.content);
                             continue;
                         }
-                    } else if mutations_ran.load(std::sync::atomic::Ordering::Relaxed) == 0
-                        && completion_claims_file_change(&resp.content)
-                    {
-                        const MAX_PHANTOM_EDIT_NUDGES: usize = 2;
-                        if phantom_edit_nudges < MAX_PHANTOM_EDIT_NUDGES {
-                            phantom_edit_nudges += 1;
-                            self.presenter.emit(PresenterEvent::Warning(format!(
-                                "model described file changes but no mutating tool ran — asking it to apply them ({phantom_edit_nudges}/{MAX_PHANTOM_EDIT_NUDGES})"
-                            )));
-                            let nudge =
-                                "Your last message described edits as already applied, but they \
-                                         never happened: you did not call a write or shell \
-                                         tool. Perform those edits now with the available \
-                                         tools, then verify the result before giving a \
-                                         final answer.";
-                            let nseq = self.next_seq();
-                            let _ =
-                                self.store
-                                    .add_message(&self.id, nseq, Role::System, nudge, None);
-                            self.transcript.push(Message::system(nudge));
-                            continue;
-                        }
-                        self.presenter.emit(PresenterEvent::Warning(
-                            "the turn did NOT apply the file changes it described — no mutating tool ran"
-                                .to_string(),
-                        ));
                     }
                 }
                 final_text = self.settle_answer(
